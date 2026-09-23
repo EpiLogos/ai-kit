@@ -806,6 +806,19 @@ fn factory_read(factory: &Path, args: &[String]) -> Result<Value> {
         .map_err(|e| fail("now_context.factory_invalid", e.to_string()))
 }
 
+fn factory_revision_text(value: &Value, subject: &str) -> Result<String> {
+    match value {
+        Value::Number(number) if number.as_u64().is_some_and(|revision| revision > 0) => {
+            Ok(number.to_string())
+        }
+        Value::String(revision) if !revision.trim().is_empty() => Ok(revision.clone()),
+        _ => Err(fail(
+            "now_context.factory_invalid",
+            format!("{subject} omitted a valid revision"),
+        )),
+    }
+}
+
 fn factory_owner_basis(config: &FactoryPrepare) -> Result<(Value, Vec<Value>, String)> {
     let factory = config
         .factory_bin
@@ -818,9 +831,8 @@ fn factory_owner_basis(config: &FactoryPrepare) -> Result<(Value, Vec<Value>, St
     )?;
     let mut journeys = Vec::new();
     let mut basis = BTreeMap::new();
-    if let Some(revision) = run["revision"].as_str() {
-        basis.insert(format!("run:{}", config.run_ref), revision.to_owned());
-    }
+    let run_revision = factory_revision_text(&run["revision"], "Factory Run reading")?;
+    basis.insert(format!("run:{}", config.run_ref), run_revision);
     for journey_ref in run["owningJourneyRefs"]
         .as_array()
         .into_iter()
@@ -831,13 +843,9 @@ fn factory_owner_basis(config: &FactoryPrepare) -> Result<(Value, Vec<Value>, St
             &factory,
             &["journey".into(), state.clone(), journey_ref.to_owned()],
         )?;
-        let revision = journey["revision"].as_str().ok_or_else(|| {
-            fail(
-                "now_context.factory_invalid",
-                "Factory Journey reading omitted its revision",
-            )
-        })?;
-        basis.insert(format!("journey:{journey_ref}"), revision.to_owned());
+        let revision =
+            factory_revision_text(&journey["revision"], "Factory Journey reading")?;
+        basis.insert(format!("journey:{journey_ref}"), revision);
         journeys.push(journey);
     }
     let encoded = serde_json::to_vec(&basis)
@@ -1588,6 +1596,24 @@ mod tests {
             agent_visibility: AgentVisibility::Payload,
             external_egress: egress,
         }
+    }
+
+    #[test]
+    fn factory_owner_revisions_accept_native_numeric_revision_values() {
+        assert_eq!(
+            factory_revision_text(&json!(7), "Factory Run reading").unwrap(),
+            "7"
+        );
+        assert_eq!(
+            factory_revision_text(&json!("opaque-r7"), "Factory Run reading").unwrap(),
+            "opaque-r7"
+        );
+        assert_eq!(
+            factory_revision_text(&Value::Null, "Factory Run reading")
+                .unwrap_err()
+                .code(),
+            "now_context.factory_invalid"
+        );
     }
 
     #[test]
