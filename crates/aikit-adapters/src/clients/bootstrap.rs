@@ -37,8 +37,14 @@ pub fn render_managed_bootstrap(bootstrap: &ActorBootstrap) -> String {
     );
 
     body.push_str(&format!("- Bootstrap: `{}`\n", bootstrap.version));
+    // Named per composition, not as an ambient standing fact: this
+    // projection is a materialised file, not a live per-session render, so a
+    // reader must not take "Project" as "where I, the current session, now
+    // stand" — it is where this bootstrap was resolved *for*, as of whenever
+    // it was last composed from a working directory. Re-apply from a
+    // different directory to refresh it for that directory's Project.
     body.push_str(&format!(
-        "- Project: `{}`\n",
+        "- Project: `{}` (resolved per session from the working directory at composition; re-apply from a different directory to refresh it)\n",
         bootstrap.project.project.as_str()
     ));
     if let Some(run) = &bootstrap.run {
@@ -123,6 +129,28 @@ pub fn render_managed_bootstrap(bootstrap: &ActorBootstrap) -> String {
         for reference in &engineering_ground {
             body.push_str(&format!(
                 "- `{reference}` — distilled from Control governance engineering statements; retrieve on demand with `aikit context`. Named, not copied.\n"
+            ));
+        }
+    }
+
+    // Governance ground: every applicable governance ContextSource this
+    // context resolved — root `Control/agents/governance/**` under the
+    // enclosing Central root, and this Project's own
+    // `ProjectCentral/agents/governance/**` when one exists — named in full
+    // from `governance_sources` (never truncated the way `context_sources`'s
+    // sample is), minus whatever the Engineering ground section above
+    // already named. Never a read body: named refs, retrieved on demand.
+    let governance_ground: Vec<String> = bootstrap
+        .governance_sources
+        .iter()
+        .map(|reference| reference.to_string())
+        .filter(|reference| !engineering_ground.contains(reference))
+        .collect();
+    if !governance_ground.is_empty() {
+        body.push_str("\n## Governance ground\n\n");
+        for reference in &governance_ground {
+            body.push_str(&format!(
+                "- `{reference}` — human-authored governance applicable to this context; retrieve on demand with `aikit context`. Named, not copied.\n"
             ));
         }
     }
