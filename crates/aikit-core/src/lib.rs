@@ -486,3 +486,9 @@ pub use workcell_world::{
 };
 
 pub mod recurrence;
+pub mod schedule;
+
+pub use schedule::{
+    routine_event_ref, routine_source_revision, ScheduleRecord, ScheduleShape,
+    TIME_SCHEDULE_VERSION,
+};
