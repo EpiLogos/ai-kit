@@ -87,7 +87,7 @@ impl Server {
                 // O_NONBLOCK; read with the timeout, not a spurious WouldBlock.
                 socket.set_nonblocking(false).unwrap();
                 socket
-                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .set_read_timeout(Some(Duration::from_secs(10)))
                     .unwrap();
                 let (headers, body) = read_request(&mut socket);
                 assert!(headers.starts_with("POST /v1/systemone HTTP/1.1\r\n"));
@@ -128,9 +128,32 @@ impl Drop for Server {
 fn read_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 8192];
+    let deadline = Instant::now() + Duration::from_secs(30);
+    // Under workspace parallel load a macOS read timeout surfaces as WouldBlock;
+    // wait for the client instead of panicking inside the server thread.
+    fn read_available(
+        stream: &mut TcpStream,
+        buffer: &mut [u8],
+        deadline: Instant,
+    ) -> std::io::Result<Option<usize>> {
+        loop {
+            match stream.read(buffer) {
+                Ok(0) => return Ok(None),
+                Ok(n) => return Ok(Some(n)),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "client request never completed");
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    assert!(Instant::now() < deadline, "client request never completed");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
     let split = loop {
-        let n = stream.read(&mut buffer).unwrap();
-        assert_ne!(n, 0);
+        let n = read_available(stream, &mut buffer, deadline)
+            .unwrap()
+            .expect("client closed the connection before a full request");
         bytes.extend_from_slice(&buffer[..n]);
         if let Some(split) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
             break split + 4;
@@ -147,8 +170,9 @@ fn read_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
         })
         .unwrap();
     while bytes.len() - split < length {
-        let n = stream.read(&mut buffer).unwrap();
-        assert_ne!(n, 0);
+        let n = read_available(stream, &mut buffer, deadline)
+            .unwrap()
+            .expect("client closed the connection before a full body");
         bytes.extend_from_slice(&buffer[..n]);
     }
     (headers, bytes[split..].to_vec())
