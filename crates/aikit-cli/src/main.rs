@@ -887,6 +887,14 @@ fn cmd_now_context(cwd: &std::path::Path, command: NowContextCmd) -> Result<Repl
         NowContextSub::Publish(args) => aikit_cli::jev_now::now_publish(args)?,
         NowContextSub::AppendChange(args) => aikit_cli::jev_now::now_append_change(args)?,
         NowContextSub::Revoke(args) => aikit_cli::jev_now::now_revoke(args)?,
+        NowContextSub::Field(args) => aikit_cli::contemplation_field::now_field(cwd, *args)?,
+        NowContextSub::Contemplate(args) => aikit_cli::contemplation_intel::now_contemplate(args)?,
+        NowContextSub::TestSelection(args) => {
+            aikit_cli::contemplation_intel::now_test_selection(args)?
+        }
+        NowContextSub::PublishIntelligence(args) => {
+            aikit_cli::contemplation_intel::now_publish_intelligence(*args)?
+        }
     };
     data_reply(data)
 }
@@ -2834,9 +2842,20 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
     use aikit_core::resource::ResourceRef;
     use aikit_core::ForgetScope;
 
+    // The code lens is a direct, repo-scoped GitNexus call: it needs no
+    // discovered AIKit context (Project, Wiki, source pools), so it is
+    // dispatched before `Service::discover` rather than requiring one.
+    let command = match c.command {
+        KnowledgeSub::Code(code_cmd) => {
+            let data = aikit_cli::contemplation_field::knowledge_code(code_cmd.command)?;
+            return data_reply(data);
+        }
+        other => other,
+    };
+
     let mut service = Service::discover(cwd)?;
     let mut warnings = diagnostic_warnings(&service);
-    let data = match c.command {
+    let data = match command {
         KnowledgeSub::Search(a) => {
             let result = service.knowledge_search(&a.query, a.limit)?;
             warnings.extend(result.absences.clone());
@@ -2918,6 +2937,9 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
                 "forgot": scope,
                 "preserved": ["canonical-resource-identity", "provider-truth", "knowledge-operation-history"]
             })
+        }
+        KnowledgeSub::Code(_) => {
+            unreachable!("KnowledgeSub::Code is dispatched before Service::discover")
         }
     };
     Ok(reply(&service, data, warnings))
