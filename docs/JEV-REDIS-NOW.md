@@ -94,8 +94,8 @@ flush an existing database.
     "source_refs": ["source/example"]
   },
   "matrix": {
-    "manifest": "/resolved/ProjectCentral/user/capability-matrix.json",
-    "csv": "/resolved/ProjectCentral/user/capability-matrix.csv",
+    "manifest": "/resolved/ProjectCentral/user/telos/capability-matrix.json",
+    "csv": "/resolved/ProjectCentral/user/telos/capability-matrix.csv",
     "view_id": null,
     "capability_refs": [],
     "full_scope": true,
@@ -124,7 +124,7 @@ relevance threshold. Direct agent-formulated Jev questions remain available
 through `aikit jev invoke`; document/Wiki selection is one application of the
 same protocol.
 
-The optional `matrix` block reads the existing `ql-capability-matrix/1`
+The matrix carriers live in the project's telos folder (`ProjectCentral/user/telos/`, the integrated day/now/telos field placement); the optional `matrix` block reads the existing `ql-capability-matrix/1`
 manifest and CSV directly. Choose exactly one scope: `full_scope: true` or an
 explicit `capability_refs` list. Full scope enumerates every declared
 capability before relevance selection. The prepared candidate retains the

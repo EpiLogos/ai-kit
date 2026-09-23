@@ -860,8 +860,16 @@ def main():
         "return_change": change_receipt,
         "fresh_session": fresh,
         "stale_version_refused": True,
-        "source_change_during_jev_refused": source_conflict is not None,
-        "provider_malformed_refused": provider_failure is not None,
+        # The in-flight-source-change and malformed-answer episodes inject
+        # behaviour through the controlled loopback transport. They are proven
+        # by the controlled run; live mode has no injection point and must not
+        # report them as failures.
+        "source_change_during_jev_refused": (
+            source_conflict is not None if server is not None else None
+        ),
+        "provider_malformed_refused": (
+            provider_failure is not None if server is not None else None
+        ),
         "revocation": revoke,
         "revoked_read_refused": revoked_inspect["returncode"] != 0,
         "durable_return": durable_return,
