@@ -94,17 +94,37 @@ impl Output {
 /// each of those owns a runner.
 pub trait CommandRunner {
     fn run(&self, argv: &[String]) -> Result<Output>;
+
+    /// Run with a wall-clock budget. A command that has not finished inside the
+    /// budget is killed and answered as a runner error (`mux.command_timeout`):
+    /// there is no status data to hand back.
+    ///
+    /// The default delegates to [`CommandRunner::run`] unchanged — an
+    /// in-memory runner has nothing to kill — so only runners that spawn real
+    /// processes need to, and can, enforce the budget.
+    fn run_with_timeout(&self, argv: &[String], timeout: std::time::Duration) -> Result<Output> {
+        let _ = timeout;
+        self.run(argv)
+    }
 }
 
 impl<T: CommandRunner + ?Sized> CommandRunner for Box<T> {
     fn run(&self, argv: &[String]) -> Result<Output> {
         (**self).run(argv)
     }
+
+    fn run_with_timeout(&self, argv: &[String], timeout: std::time::Duration) -> Result<Output> {
+        (**self).run_with_timeout(argv, timeout)
+    }
 }
 
 impl<T: CommandRunner + ?Sized> CommandRunner for &T {
     fn run(&self, argv: &[String]) -> Result<Output> {
         (**self).run(argv)
+    }
+
+    fn run_with_timeout(&self, argv: &[String], timeout: std::time::Duration) -> Result<Output> {
+        (**self).run_with_timeout(argv, timeout)
     }
 }
 
@@ -114,6 +134,10 @@ impl<T: CommandRunner + ?Sized> CommandRunner for &T {
 impl<T: CommandRunner + ?Sized> CommandRunner for std::sync::Arc<T> {
     fn run(&self, argv: &[String]) -> Result<Output> {
         (**self).run(argv)
+    }
+
+    fn run_with_timeout(&self, argv: &[String], timeout: std::time::Duration) -> Result<Output> {
+        (**self).run_with_timeout(argv, timeout)
     }
 }
 
@@ -188,6 +212,7 @@ impl SystemRunner {
         &self,
         command: &mut std::process::Command,
         argv: &[String],
+        budget: Option<std::time::Duration>,
     ) -> Result<Output> {
         use std::io::Read;
         use std::process::Stdio;
@@ -221,8 +246,7 @@ impl SystemRunner {
             }
             buffer
         });
-        let deadline = self
-            .timeout
+        let deadline = budget
             .map(|budget| Instant::now() + budget)
             .unwrap_or_else(Instant::now);
         let status = loop {
@@ -254,7 +278,7 @@ impl SystemRunner {
                 format!(
                     "`{}` did not finish within {:?} and was killed",
                     argv.join(" "),
-                    self.timeout.unwrap_or_default()
+                    budget.unwrap_or_default()
                 ),
             )
             .with("command", argv.join(" ")));
@@ -291,7 +315,7 @@ impl CommandRunner for SystemRunner {
         }
 
         if self.timeout.is_some() {
-            return self.spawn_bounded(&mut command, argv);
+            return self.spawn_bounded(&mut command, argv, self.timeout);
         }
 
         let output = command.output().map_err(|e| {
@@ -310,6 +334,30 @@ impl CommandRunner for SystemRunner {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
+    }
+
+    fn run_with_timeout(&self, argv: &[String], timeout: std::time::Duration) -> Result<Output> {
+        let Some((program, args)) = argv.split_first() else {
+            return Err(AikitError::new(
+                "mux.empty_command",
+                "an empty command was submitted to the runner",
+            ));
+        };
+
+        let mut command = std::process::Command::new(program);
+        command.args(args);
+        if let Some(cwd) = &self.cwd {
+            command.current_dir(cwd);
+        }
+        for (key, value) in &self.env {
+            command.env(key, value);
+        }
+        for key in &self.env_removed {
+            command.env_remove(key);
+        }
+        // The caller's budget wins over the construction-time one: the request
+        // knows how expensive this particular command is expected to be.
+        self.spawn_bounded(&mut command, argv, Some(timeout))
     }
 }
 

@@ -71,6 +71,7 @@ pub mod telegram_gateway;
 pub mod tool_sources;
 pub mod wiki_document;
 pub mod wiki_graph;
+pub mod work_repos;
 pub mod workcell_instance_intake;
 pub mod working_environment;
 pub mod working_environment_control;
@@ -211,6 +212,9 @@ pub use telegram_gateway::{
 pub use tool_sources::{
     plan_tools_projection, ToolServerRecord, ToolSourceEntry, ToolSourceError,
     ToolsProjectionOutcome, ToolsProjectionPlan, TOOLS_PROJECTION_OWNERSHIP,
+};
+pub use work_repos::{
+    discover_work_projects, WorkProjectEntry, WorkRepoProject, WorkReposSourcePoolProvider,
 };
 pub use working_environment::{
     MuxSessionSpaceActivationDriver, MuxWorkingEnvironment, NativeBindingKind,

@@ -910,7 +910,12 @@ fn relative_path(project_root: &Path, path: &Path) -> Result<PathBuf> {
         })
 }
 
-fn path_agent_readable(project_root: &Path, relative: &Path) -> bool {
+/// Whether a project-relative path stays agent-readable under this Project:
+/// no symlink at the path itself, and no `.no-agent-retrieval` marker on the
+/// path or any directory between it and the project root. Crate-visible so
+/// the live Work-repos search pool enforces the very same withholding rule —
+/// one enforcement point, not a second reading.
+pub(crate) fn path_agent_readable(project_root: &Path, relative: &Path) -> bool {
     let absolute = project_root.join(relative);
     if is_symlink(&absolute) {
         return false;

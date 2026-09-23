@@ -108,6 +108,13 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
             .to_string())
     }
 
+    /// Why the CLI surface is unavailable, when it is. Absence means the
+    /// binary answered discovery, so the caller names the version-drift gap
+    /// instead.
+    pub fn unavailable_reason(&self) -> Option<String> {
+        self.cli.reason.clone()
+    }
+
     fn require_capability(&self, supported: bool, operation: &str) -> Result<()> {
         if !self.cli.available {
             return Err(AikitError::new(
@@ -432,13 +439,18 @@ fn discover_cli<R: CommandRunner>(runner: &R, binary: &str) -> GitNexusCliSurfac
     };
     let help = probe_help(runner, binary, &["--help"]);
     let impact_help = probe_help(runner, binary, &["impact", "--help"]);
+    // The index capability is the exact surface `index()` drives: a release
+    // without `analyze --index-only` cannot index, however its top-level help
+    // reads. Older installs (1.4.x) answer this probe empty and are reported
+    // unavailable with the version drift named, never invoked to fail.
+    let analyze_help = probe_help(runner, binary, &["analyze", "--help"]);
     GitNexusCliSurface {
         available: true,
         version: parse_version(&format!(
             "{} {}",
             version_output.stdout, version_output.stderr
         )),
-        index: help.contains("analyze"),
+        index: help.contains("analyze") && analyze_help.contains("--index-only"),
         search: help.contains("query"),
         context: help.contains("context"),
         impact: help.contains("impact"),
@@ -545,6 +557,7 @@ mod tests {
                     "gitnexus --help",
                     "analyze query context impact trace detect-changes check cypher\n",
                 )
+                .on("analyze --help", "--index-only --force --name <name>\n")
                 .on("gitnexus impact --help", "--mode <callgraph|pdg>\n")
                 .on("analyze /tmp/project", "Indexed\n")
                 .on("query auth", query)
