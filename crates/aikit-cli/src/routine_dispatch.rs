@@ -1647,6 +1647,9 @@ mod tests {
             method_revision: SourceRevision::parse("method-rev-1").unwrap(),
             prompt: "contemplate now".into(),
             observation_payload: None,
+            // Contemplation is an encounter (model) Routine, never a native body.
+            native: None,
+            authorised_actions: Vec::new(),
         }
     }
 
