@@ -264,7 +264,9 @@ pub fn create(
         context_scope_refs,
     )?;
 
-    // New Schedule automations default to the AIKit gateway dispatcher.
+    // New automations default to the AIKit gateway dispatcher: the binding
+    // names the material timer that will fire them, so a Manual or Event
+    // Routine the gateway dispatches carries the same honest provenance.
     let mut stored = match trigger_spec {
         TriggerSpec::Schedule(schedule) => {
             let mut record = StoredRoutine::new(routine, Some(schedule), None)?;
@@ -277,7 +279,17 @@ pub fn create(
                 })?;
             record
         }
-        _ => StoredRoutine::new(routine, None, None)?,
+        _ => {
+            let mut record = StoredRoutine::new(routine, None, None)?;
+            record
+                .routine
+                .set_scheduler_binding(RoutineSchedulerBinding {
+                    provider: ProviderRef::parse(AIKIT_GATEWAY_PROVIDER)?,
+                    provider_job_id: None,
+                    observed_state: RoutineSchedulerState::Planned,
+                })?;
+            record
+        }
     };
     stored.restamp_revision()?;
     store.put(stored)?;
@@ -681,6 +693,10 @@ pub fn import_foreign(
         None,
         vec![],
     )?;
+    // Imports are Disabled until the owner explicitly enables them with a
+    // fresh authority receipt — never Draft-into-service by accident.
+    let mut routine = routine;
+    routine.disable();
     let schedule_record = ScheduleRecord::new(
         ResourceRef::parse(format!("schedule/foreign-{}", slug(&job.job_id)))?,
         schedule,
