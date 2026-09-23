@@ -1838,7 +1838,7 @@ pub fn join(owners: &Owners<'_>, input: &JoinInput, reads: &AikitReads<'_>) -> J
                     prepared_source,
                     reads.prepared_absent_reason.clone().unwrap_or_else(|| {
                         format!(
-                        "no Redis NOW material configured (--redis-config or {REDIS_CONFIG_VAR})"
+                        "no Redis NOW material configured (--redis-config, {REDIS_CONFIG_VAR} or $AIKIT_HOME/{WORLD_REDIS_CONFIG_FILE})"
                     )
                     }),
                 )
@@ -2398,6 +2398,28 @@ pub fn publish(
         "basis_digest": projection.identity_digest,
     }))
 }
+
+/// Where the World projection's Redis NOW material is configured: the
+/// explicit path, else `AIKIT_WORLD_REDIS_CONFIG`, else `redis-now.json` in the
+/// AIKit home when that file exists. `None` means no projection is configured.
+pub fn world_redis_config_path(
+    explicit: Option<PathBuf>,
+    home: Option<&AikitHome>,
+) -> Option<PathBuf> {
+    explicit
+        .or_else(|| {
+            std::env::var_os(REDIS_CONFIG_VAR)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| {
+            home.map(|home| home.root().join(WORLD_REDIS_CONFIG_FILE))
+                .filter(|path| path.is_file())
+        })
+}
+
+/// The AIKit-home file naming the machine's Redis NOW material.
+pub const WORLD_REDIS_CONFIG_FILE: &str = "redis-now.json";
 
 /// Load the Redis NOW material configuration for the World projection.
 pub fn load_redis_config(path: &Path) -> Result<aikit_store::now_context::RedisNowConfig> {
@@ -3034,5 +3056,23 @@ pub(crate) mod tests {
         moved["candidates"][0]["node_ref"] = json!("github:EpiLogos/Factory#262");
         moved["candidates"][0]["work_ref"] = json!("github:EpiLogos/Factory#262");
         assert_ne!(current_work_digest(&reading), current_work_digest(&moved));
+    }
+    #[test]
+    fn the_world_redis_config_is_explicit_else_the_homes_file_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let explicit = PathBuf::from("/elsewhere/redis-now.json");
+        assert_eq!(
+            world_redis_config_path(Some(explicit.clone()), Some(&home)),
+            Some(explicit)
+        );
+        if std::env::var_os(REDIS_CONFIG_VAR).is_none() {
+            assert_eq!(world_redis_config_path(None, Some(&home)), None);
+            std::fs::write(dir.path().join(WORLD_REDIS_CONFIG_FILE), "{}").unwrap();
+            assert_eq!(
+                world_redis_config_path(None, Some(&home)),
+                Some(dir.path().join(WORLD_REDIS_CONFIG_FILE))
+            );
+        }
     }
 }

@@ -660,6 +660,9 @@ pub struct HookContext<'a> {
     pub runner: &'a (dyn CommandRunner + Sync),
     pub bins: OwnerBins,
     pub central_root: Option<PathBuf>,
+    /// The Redis NOW material for the hot World projection, when configured:
+    /// a fresh occupancy publishes its joined reading there.
+    pub world_redis: Option<PathBuf>,
 }
 
 /// What the hook path contributes to one dispatch.
@@ -839,6 +842,18 @@ pub fn hook_prepare(ctx: &HookContext<'_>, event: &HookEvent) -> HookInhabitatio
             reading,
             joined.trail.project_name.as_deref(),
         ));
+        // Keep the hot World projection current at occupancy, so readers
+        // (peers, UI, `aikit whoami --hot`) need not re-run the owner joins.
+        if let Some(path) = &ctx.world_redis {
+            if let Err(error) = inhabitation::open_world_store(path)
+                .and_then(|store| inhabitation::publish(&store, reading, &position))
+            {
+                out.warnings.push(format!(
+                    "World projection not published: {}",
+                    error.message()
+                ));
+            }
+        }
         let _ = ctx.store.save_pointer(&OccupantPointer {
             schema: OCCUPANT_SCHEMA.into(),
             agent_session: session.clone(),
@@ -960,6 +975,7 @@ pub fn hook_prepare_process(
         runner: &runner,
         bins: OwnerBins::from_env(),
         central_root: crate::temporal::central_root_enclosing(event.cwd.as_deref()),
+        world_redis: inhabitation::world_redis_config_path(None, Some(home)),
     };
     hook_prepare(&ctx, event)
 }
@@ -1010,6 +1026,7 @@ mod tests {
             runner,
             bins: OwnerBins::default(),
             central_root: Some(PathBuf::from("/w")),
+            world_redis: None,
         }
     }
 

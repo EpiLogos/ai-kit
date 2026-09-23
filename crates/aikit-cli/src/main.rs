@@ -456,10 +456,9 @@ fn cmd_whoami(cwd: &std::path::Path, args: WhoamiArgs, json_mode: bool) -> Resul
             .agent_sessions
             .insert(0, ("--agent-session".to_owned(), session.clone()));
     }
-    let redis_path = args
-        .redis_config
-        .clone()
-        .or_else(|| std::env::var_os(inh::REDIS_CONFIG_VAR).map(PathBuf::from));
+    let home_for_redis = AikitHome::discover().ok();
+    let redis_path =
+        inh::world_redis_config_path(args.redis_config.clone(), home_for_redis.as_ref());
     let store = redis_path.as_deref().map(inh::open_world_store);
     let publishing = args.publish || args.rebuild;
     if publishing && store.is_none() {
