@@ -156,6 +156,10 @@ fn native_acp_owner_shutdown_reaps_provider_and_preserves_history() {
             id: "native-shutdown".into(),
             label: "Actual installed ACP lifecycle".into(),
             argv,
+            from_profile: None,
+            argv_fallback: Vec::new(),
+            env: Default::default(),
+            cwd: None,
             required_context: None,
         },
     )

@@ -735,6 +735,13 @@ pub struct ToolServerRecord {
     pub cwd: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
+    /// HTTP headers for a URL-reached server, declared `name → reference`.
+    /// Each value must be exactly one environment-variable reference —
+    /// `$NAME` or `${NAME}` — resolved when the wire entry is built. A
+    /// literal value is refused at parse: header material is credential
+    /// material, and a capsule is a declaration, never a carrier of secrets.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
 }
 
 impl ToolProtocolSection {
@@ -758,6 +765,100 @@ impl ToolProtocolSection {
             )
             .with("id", id.to_string())),
             _ => Ok(()),
+        }?;
+        for (name, value) in &self.server.headers {
+            if name.trim().is_empty() {
+                return Err(AikitError::new(
+                    "manifest.invalid",
+                    format!(
+                        "`{id}` declares a server header with an empty name; name the header \
+                         the server reads (for example \"Authorization\")"
+                    ),
+                )
+                .with("id", id.to_string()));
+            }
+            if header_env_reference(value).is_none() {
+                return Err(AikitError::new(
+                    "manifest.invalid",
+                    format!(
+                        "`{id}` declares header {name:?} as a literal value; a header value \
+                         must be exactly one environment-variable reference ($NAME or \
+                         ${{NAME}}) so the secret is resolved from the environment when the \
+                         wire entry is built — never carried inside the capsule"
+                    ),
+                )
+                .with("id", id.to_string())
+                .with("header", name.clone()));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The one environment-variable reference a header value must be: the whole
+/// value is `$NAME` or `${NAME}`, with a lawful env-var name (starts with a
+/// letter or underscore, then letters, digits or underscores). Returns the
+/// named variable.
+fn header_env_reference(value: &str) -> Option<&str> {
+    let inner = if let Some(rest) = value.strip_prefix("${") {
+        rest.strip_suffix('}')
+    } else {
+        value.strip_prefix('$')
+    };
+    let variable = inner?;
+    let mut characters = variable.chars();
+    let first = characters.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    if !characters.all(|character| character.is_ascii_alphanumeric() || character == '_') {
+        return None;
+    }
+    Some(variable)
+}
+
+impl ToolServerRecord {
+    /// Resolve one declared header to its wire value by expanding its single
+    /// environment reference against `lookup`. An unset variable or an empty
+    /// resolution refuses, naming the header — a header is never silently
+    /// dropped or sent empty.
+    pub fn resolve_header_value(
+        name: &str,
+        value: &str,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<String> {
+        let Some(variable) = header_env_reference(value) else {
+            return Err(AikitError::new(
+                "tool_server.header_not_a_reference",
+                format!(
+                    "header {name:?} is not an environment-variable reference; a header \
+                     value must be exactly one $NAME or ${{NAME}} reference"
+                ),
+            )
+            .with("header", name.to_string()));
+        };
+        match lookup(variable) {
+            Some(resolved) if !resolved.is_empty() => Ok(resolved),
+            Some(_) => Err(AikitError::new(
+                "tool_server.header_resolved_empty",
+                format!(
+                    "header {name:?} references environment variable {variable:?}, which is \
+                     set but empty; bind the credential material so the server can \
+                     authenticate — the header is never sent empty"
+                ),
+            )
+            .with("header", name.to_string())
+            .with("variable", variable.to_string())),
+            None => Err(AikitError::new(
+                "tool_server.header_unresolved",
+                format!(
+                    "header {name:?} references environment variable {variable:?}, which is \
+                     not set; bind the credential material so the server can authenticate — \
+                     the header is never sent empty or dropped silently"
+                ),
+            )
+            .with("header", name.to_string())
+            .with("variable", variable.to_string())),
         }
     }
 }
@@ -1305,6 +1406,89 @@ cwd = "/Users/admin/Central/Work/epi"
             Some("/Users/admin/Central/Work/epi")
         );
         assert_eq!(section.server.url, None);
+    }
+
+    #[test]
+    fn a_header_declared_as_a_literal_value_is_refused_at_parse() {
+        let src = r#"
+schema = 1
+id = "tool-protocol/linear/remote"
+kind = "tool-protocol"
+name = "Linear"
+description = "Linear remote MCP server."
+
+[tool-protocol]
+export_name = "linear"
+
+[tool-protocol.server]
+url = "https://mcp.linear.app/mcp"
+
+[tool-protocol.server.headers]
+Authorization = "Bearer sk-hardcoded-secret"
+"#;
+        let err = Capsule::from_toml_str(src).unwrap_err();
+        assert_eq!(err.code(), "manifest.invalid");
+        assert!(
+            err.to_string().contains("environment-variable reference"),
+            "the refusal must name the reference law: {err}"
+        );
+    }
+
+    #[test]
+    fn a_header_declared_as_an_environment_reference_parses_and_resolves() {
+        let src = r#"
+schema = 1
+id = "tool-protocol/linear/remote"
+kind = "tool-protocol"
+name = "Linear"
+description = "Linear remote MCP server."
+
+[tool-protocol]
+export_name = "linear"
+
+[tool-protocol.server]
+url = "https://mcp.linear.app/mcp"
+
+[tool-protocol.server.headers]
+Authorization = "${LINEAR_MCP_TOKEN}"
+X-Trace = "$TRACE_ID"
+"#;
+        let c = Capsule::from_toml_str(src).unwrap();
+        let headers = &c.tool_protocol().unwrap().server.headers;
+        assert_eq!(headers["Authorization"], "${LINEAR_MCP_TOKEN}");
+        let environment = [("LINEAR_MCP_TOKEN", "sk-live-1"), ("TRACE_ID", "t-9")];
+        let lookup = |name: &str| {
+            environment
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, v)| v.to_string())
+        };
+        assert_eq!(
+            ToolServerRecord::resolve_header_value(
+                "Authorization",
+                &headers["Authorization"],
+                lookup
+            )
+            .unwrap(),
+            "sk-live-1"
+        );
+        assert_eq!(
+            ToolServerRecord::resolve_header_value("X-Trace", &headers["X-Trace"], lookup).unwrap(),
+            "t-9"
+        );
+    }
+
+    #[test]
+    fn an_unset_header_reference_refuses_naming_the_header_and_variable() {
+        let error =
+            ToolServerRecord::resolve_header_value("Authorization", "$MISSING_TOKEN", |_| None)
+                .unwrap_err();
+        assert_eq!(error.code(), "tool_server.header_unresolved");
+        assert!(
+            error.to_string().contains("MISSING_TOKEN")
+                && error.to_string().contains("Authorization"),
+            "the refusal must name the header and the variable: {error}"
+        );
     }
 
     #[test]

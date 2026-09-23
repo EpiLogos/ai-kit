@@ -279,8 +279,9 @@ fn native_binary_selected_context_duplicate_denial_and_reconnect() {
         json!({"action":"read","agent_session":"agent-session/one","after":0,"limit":200}),
     );
     assert!(
-        history.to_string().contains("FIXTURE_REPLAY_BEFORE_LOAD"),
-        "load replay must survive the response boundary: {history}"
+        !history.to_string().contains("FIXTURE_REPLAY_BEFORE_LOAD"),
+        "reconnect rides session/resume, which performs no history replay: the journal \
+         must not fabricate a replayed transcript: {history}"
     );
     assert_eq!(w.request(w.turn("one", "second", "continued"))["ok"], true);
     assert_eq!(w.returned("one", "second")["data"]["phase"], "returned");
@@ -418,11 +419,12 @@ fn native_provider_denial_and_disconnect_do_not_authorise_replay() {
     let held = w.request(json!({"action":"delivery","agent_session":"agent-session/one","delivery_ref":"delivery/unsafe-retry"}));
     assert_eq!(held["data"]["phase"], "queued", "{held}");
     assert_eq!(w.prompts("one").len(), 3);
-    // The controlled provider reconnects on restart (session/load): the
-    // genuinely-ready lane drains the queued message through the same
-    // preflight, prompt path and lifecycle as a live send. If the fixture
-    // kept the provider disconnected across the restart instead, the law this
-    // test pins is: prompts stay at 3 and the row stays queued.
+    // The controlled provider reconnects on restart (capability-gated
+    // session/resume): the genuinely-ready lane drains the queued message
+    // through the same preflight, prompt path and lifecycle as a live send.
+    // If the fixture kept the provider disconnected across the restart
+    // instead, the law this test pins is: prompts stay at 3 and the row
+    // stays queued.
     let reconnected = w.open("one", true);
     assert_eq!(reconnected["ok"], true, "{reconnected}");
     let delivered = reconnected["data"]["queued_drain"]["delivered"]

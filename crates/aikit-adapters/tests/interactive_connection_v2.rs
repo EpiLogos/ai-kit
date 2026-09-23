@@ -1,6 +1,6 @@
 use aikit_adapters::{
     AcpStableConnectionAdapter, AgentConnectionAdapter, CancelRequest,
-    InteractiveAgentConnectionAdapter, PermissionDecision, SessionOpenMode,
+    InteractiveAgentConnectionAdapter, PermissionDecision, SessionOpenMode, SessionOpenRequest,
 };
 use aikit_core::resource::ResourceRef;
 use serde_json::json;
@@ -166,6 +166,7 @@ fn resume_close_and_transport_disconnect_remain_distinct_lifecycle_operations() 
         .supports(SessionOpenMode::Resume));
     assert!(adapter.negotiated_session_capabilities().close);
     assert!(adapter.negotiated_session_capabilities().list);
+    assert!(adapter.negotiated_session_capabilities().resume);
 
     let close = adapter.close_native_session("native-42").unwrap();
     assert_eq!(close.operation, "session/close");
@@ -193,4 +194,60 @@ fn resume_close_and_transport_disconnect_remain_distinct_lifecycle_operations() 
 
     let reconnect = adapter.reconnect().unwrap_err();
     assert_eq!(reconnect.code(), "connection.reconnect_unsupported");
+}
+
+#[test]
+fn resume_performs_no_history_replay_and_late_updates_stay_live_events() {
+    // session/resume (stabilized 2026-04-23) replays nothing, unlike
+    // session/load; only a load in flight reclassifies session/update
+    // traffic as HistoryReplay.
+    let mut adapter = AcpStableConnectionAdapter::new(r("connection/acp/resume-live"), Vec::new());
+    negotiate(&mut adapter);
+
+    let command = adapter
+        .open_session(SessionOpenRequest {
+            mode: SessionOpenMode::Resume,
+            native_session_id: Some("native-resume".into()),
+            cwd: "/workspace/project".into(),
+            additional_directories: Vec::new(),
+            mcp_servers: Vec::new(),
+            agent_session: None,
+        })
+        .unwrap();
+    assert_eq!(command.operation, "session/resume");
+    let opened = adapter
+        .ingest(json!({
+            "jsonrpc": "2.0",
+            "id": command.payload["id"],
+            "result": {}
+        }))
+        .unwrap();
+    assert!(matches!(
+        &opened[0].kind,
+        aikit_adapters::ConnectionSignalKind::SessionOpened { binding }
+            if binding.opened_as == SessionOpenMode::Resume
+    ));
+
+    let update = adapter
+        .ingest(json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "native-resume",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": "live after resume" }
+                }
+            }
+        }))
+        .unwrap();
+    assert!(
+        matches!(
+            &update[0].kind,
+            aikit_adapters::ConnectionSignalKind::AgentMessageChunk { text }
+                if text == "live after resume"
+        ),
+        "a resumed session has no load in flight, so its updates are live events, never \
+         fabricated replay"
+    );
 }

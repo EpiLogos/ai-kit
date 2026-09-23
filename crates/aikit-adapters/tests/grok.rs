@@ -1,11 +1,13 @@
-//! Grokbot adapter: the harness-admission contract for xAI's Grok Bot
-//! (cli+service edition as cataloged by Actuation).
+//! Grok adapter: the harness-admission contract for xAI's Grok Build (`grok`),
+//! repurposed 2026-09-22 from the misidentified grok-bot adapter per the
+//! connection truth cards' roster correction.
 //!
 //! Focused on the admission census and identity law — the parts of the contract
-//! that are specific to Grok Bot — rather than re-testing the shared projection
-//! machinery already covered by the core harness-admission suite.
+//! that are specific to Grok Build — rather than re-testing the shared projection
+//! machinery already covered by the core harness-admission suite. The census is
+//! docs-level: Grok Build is not installed on this machine.
 
-use aikit_adapters::clients::grokbot::{GrokbotAdapter, CLIENT, PRODUCT};
+use aikit_adapters::clients::grok::{GrokAdapter, ADAPTER_REF, CLIENT, PRODUCT};
 use aikit_core::harness_admission::{
     verify_activation_truth, FacultySupport, HarnessActivationObservation, HarnessActivationState,
     HarnessAdmissionAdapter, HarnessEditionKind, HARNESS_ADAPTER_SDK_VERSION,
@@ -15,18 +17,21 @@ use aikit_core::projection::{ActivationEffect, ProjectionPlan, TargetAdapter};
 
 #[test]
 fn target_is_distinct_and_identity_non_collapsing() {
-    let adapter = GrokbotAdapter::new("/tmp/grokbot-projection");
+    let adapter = GrokAdapter::new("/tmp/grok-projection");
     assert_eq!(adapter.target().as_str(), CLIENT);
-    assert_eq!(CLIENT, "grok-bot");
+    assert_eq!(CLIENT, "grok");
+    assert_eq!(PRODUCT, "Grok Build");
+    assert_eq!(ADAPTER_REF, "aikit:grok-adapter");
     assert_ne!(adapter.target(), TargetId::codex());
     assert_ne!(adapter.target(), TargetId::claude_code());
 }
 
 #[test]
 fn capabilities_are_described_not_default() {
-    let adapter = GrokbotAdapter::new("/tmp/grokbot-projection");
+    let adapter = GrokAdapter::new("/tmp/grok-projection");
     let caps = adapter.capabilities();
-    // The daemon was not running at detection and exposes no projection tree.
+    // Docs-level census: no verified projection surface, so nothing claims a
+    // live faculty; the plan is brokered.
     assert!(!caps.live_reload);
     assert!(!caps.symlinks);
     assert!(!caps.isolated_per_context);
@@ -37,19 +42,17 @@ fn capabilities_are_described_not_default() {
 
 #[test]
 fn admission_is_evidence_backed_and_validates() {
-    let adapter = GrokbotAdapter::new("/tmp/grokbot-projection");
+    let adapter = GrokAdapter::new("/tmp/grok-projection");
     let admission = adapter.admission();
     assert_eq!(admission.schema, HARNESS_ADAPTER_SDK_VERSION);
     assert_eq!(admission.product, PRODUCT);
-    assert_eq!(admission.target.as_str(), "grok-bot");
-    // Catalog edition is "cli+service"; no enum variant covers it, so the
-    // admission records Custom and cites the catalog descriptor as evidence.
-    assert_eq!(admission.edition, HarnessEditionKind::Custom);
-    // The version probe is keychain-gated and fails headless; no honest
-    // native_version is claimed.
+    assert_eq!(admission.target.as_str(), "grok");
+    // The binary is a plain CLI per docs.
+    assert_eq!(admission.edition, HarnessEditionKind::Cli);
+    // Not installed on this machine: no honest native_version is claimed.
     assert!(admission.native_version.is_none());
-    // A Grok Bot is not the Agent identity; no actuation is claimed
-    // (Actuation declared no capability descriptor for grok-bot).
+    // Grok Build is not the Agent identity; no actuation is claimed (the
+    // Actuation catalog still describes the wrong product, grok-bot).
     assert!(admission.realised_actuation_ref.is_none());
 
     admission.validate().expect("admission must validate");
@@ -90,7 +93,8 @@ fn admission_is_evidence_backed_and_validates() {
         }
     }
 
-    // Daemon-dependent lifecycle faculties are honestly Unknown, not invented.
+    // Not installed: nothing is machine-observed, so lifecycle faculties are
+    // honestly Unknown, not invented.
     let live_reload = admission
         .faculty(aikit_core::harness_admission::HarnessFaculty::LiveReload)
         .unwrap();
@@ -98,11 +102,45 @@ fn admission_is_evidence_backed_and_validates() {
 }
 
 #[test]
+fn census_is_docs_level_end_to_end() {
+    // Every evidence ref must be a docs citation — the machine-observed
+    // prefixes (native:, npm:, actuation records) would overclaim for a
+    // harness this machine does not have installed.
+    let adapter = GrokAdapter::new("/tmp/grok-projection");
+    let admission = adapter.admission();
+    assert!(!admission.faculties.is_empty());
+    for faculty in &admission.faculties {
+        assert!(
+            !faculty.evidence_refs.is_empty(),
+            "{:?} must cite its evidence even at docs level",
+            faculty.faculty
+        );
+        for evidence in &faculty.evidence_refs {
+            assert!(
+                evidence.starts_with("docs:"),
+                "{:?} evidence must be a docs citation, got: {evidence}",
+                faculty.faculty
+            );
+        }
+    }
+    // The docs-declared MCP posture is degraded, never a verified seam.
+    let tool_protocol = admission
+        .faculty(aikit_core::harness_admission::HarnessFaculty::ToolProtocol)
+        .unwrap();
+    assert_eq!(tool_protocol.support, FacultySupport::Degraded);
+    // Resume flags are undocumented upstream: nothing declared.
+    let resume = admission
+        .faculty(aikit_core::harness_admission::HarnessFaculty::SessionResume)
+        .unwrap();
+    assert_eq!(resume.support, FacultySupport::Unknown);
+}
+
+#[test]
 fn loaded_activation_overclaims_a_brokered_plan() {
-    let adapter = GrokbotAdapter::new("/tmp/grokbot-projection");
+    let adapter = GrokAdapter::new("/tmp/grok-projection");
     let plan = ProjectionPlan::new(
         adapter.target(),
-        ActivationEffect::brokered("brokered projection through the gateway management API"),
+        ActivationEffect::brokered("brokered: no on-disk projection seam is documented"),
     );
     let observation = HarnessActivationObservation {
         schema: HARNESS_ADAPTER_SDK_VERSION.to_string(),
@@ -124,7 +162,9 @@ fn loaded_activation_overclaims_a_brokered_plan() {
         target: adapter.target(),
         projection_digest: plan.digest(),
         state: HarnessActivationState::Brokered,
-        evidence_refs: vec!["native:gbot bots update --instructions".to_string()],
+        evidence_refs: vec![
+            "docs:docs.x.ai/build/overview grok -p --output-format streaming-json".to_string(),
+        ],
         native_revision: None,
         note: None,
     };
