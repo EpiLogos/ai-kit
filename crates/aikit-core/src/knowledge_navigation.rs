@@ -101,6 +101,11 @@ pub struct KnowledgeProviderStatus {
     pub project_map: bool,
     #[serde(default)]
     pub absences: Vec<String>,
+    /// Informational per-project and per-pool disclosure lines (anchor state,
+    /// index freshness, pool posture). Notes are state, not failures: a
+    /// missing anchor that degrades searches belongs in `absences` instead.
+    #[serde(default)]
+    pub notes: Vec<String>,
     /// Per-project rollups of pending authored relations. Status is the only
     /// surface that carries every project; search/resolve/frame replies keep
     /// their own scope's rollup line only.
@@ -231,7 +236,9 @@ pub struct KnowledgeApplication<'a> {
     context: FamiliarityContext,
     wiki: Option<Box<dyn WikiProvider + 'a>>,
     sources: Vec<SourcePoolBinding<'a>>,
-    code: Option<&'a dyn CodeIndexProvider>,
+    /// One code-index provider per declared project; each answers only its
+    /// own references, so search and relations fan out across all of them.
+    code: Vec<&'a dyn CodeIndexProvider>,
     project_map: Option<&'a ProjectMap>,
 }
 
@@ -241,7 +248,7 @@ impl<'a> KnowledgeApplication<'a> {
             context,
             wiki: None,
             sources: Vec::new(),
-            code: None,
+            code: Vec::new(),
             project_map: None,
         }
     }
@@ -264,7 +271,7 @@ impl<'a> KnowledgeApplication<'a> {
 
     #[must_use]
     pub fn with_code(mut self, provider: &'a dyn CodeIndexProvider) -> Self {
-        self.code = Some(provider);
+        self.code.push(provider);
         self
     }
 
@@ -281,7 +288,7 @@ impl<'a> KnowledgeApplication<'a> {
             .iter()
             .map(|binding| binding.provider.status())
             .collect::<Vec<_>>();
-        let code = self.code.map(|provider| provider.status());
+        let code = self.code.first().map(|provider| provider.status());
         let mut absences = Vec::new();
         if wiki.is_none() {
             absences.push("SemanticWiki provider absent".into());
@@ -302,6 +309,7 @@ impl<'a> KnowledgeApplication<'a> {
             code,
             project_map: self.project_map.is_some(),
             absences,
+            notes: Vec::new(),
             authored_pending: Vec::new(),
         }
     }
@@ -563,7 +571,7 @@ impl<'a> KnowledgeApplication<'a> {
             }
         }
 
-        if let Some(code) = self.code {
+        for code in &self.code {
             let status = code.status();
             if status.available && status.indexed && status.capabilities.search {
                 match code.search(query, limit) {
@@ -589,7 +597,8 @@ impl<'a> KnowledgeApplication<'a> {
                 absences
                     .push("ProjectMap code search unavailable: index absent or degraded".into());
             }
-        } else {
+        }
+        if self.code.is_empty() {
             absences.push("ProjectMap code search unavailable: provider absent".into());
         }
 
@@ -639,57 +648,97 @@ impl<'a> KnowledgeApplication<'a> {
                 .ok_or_else(|| provider_absent("SemanticWiki"))?
                 .read(resource),
             KnowledgeAddress::Source(source) => {
-                let (binding, material) = self.source_material(source).ok_or_else(|| {
-                    // Search can hand back a source a curated node cites. If
-                    // this horizon cannot materialise it, say which citation
-                    // it came from rather than reporting it simply missing.
-                    let citing = self.wiki_citations(source);
-                    if citing.is_empty() {
-                        AikitError::new(
-                            "knowledge.source_missing",
-                            format!("Source {source} is not materialised in the project horizon"),
-                        )
-                    } else {
-                        Self::unmaterialised_cited_source(source, &citing)
+                if let Some((binding, material)) = self.source_material(source) {
+                    let live = binding.provider.read(source)?;
+                    let material = live.as_ref().unwrap_or(material);
+                    return Ok(KnowledgeReading {
+                        resource: ResourceRef::parse(source.as_str())?,
+                        provider: Some(binding.provider.status().provider),
+                        lens: Some("source-pool".into()),
+                        revision: Some(material.binding.revision.to_string()),
+                        freshness: None,
+                        authority: SourceAuthority::Observed,
+                        content: Some(material.body.clone()),
+                        evidence: vec![source.clone()],
+                        why_selected: "selected from the eligible project SourcePool".into(),
+                    });
+                }
+                // Search can surface a source no attachment roster declared:
+                // a live pool over a large owner ground cannot enumerate every
+                // file it might ever match. The SourcePoolProvider::read
+                // contract is the live owner read, so the owning pool is asked
+                // directly; a pool that declines the ref simply passes.
+                for binding in &self.sources {
+                    if let Some(material) = binding.provider.read(source).ok().flatten() {
+                        return Ok(KnowledgeReading {
+                            resource: ResourceRef::parse(source.as_str())?,
+                            provider: Some(binding.provider.status().provider),
+                            lens: Some("source-pool".into()),
+                            revision: Some(material.binding.revision.to_string()),
+                            freshness: None,
+                            authority: SourceAuthority::Observed,
+                            content: Some(material.body.clone()),
+                            evidence: vec![source.clone()],
+                            why_selected: "read live from the owning SourcePool".into(),
+                        });
                     }
-                })?;
-                let live = binding.provider.read(source)?;
-                let material = live.as_ref().unwrap_or(material);
-                Ok(KnowledgeReading {
-                    resource: ResourceRef::parse(source.as_str())?,
-                    provider: Some(binding.provider.status().provider),
-                    lens: Some("source-pool".into()),
-                    revision: Some(material.binding.revision.to_string()),
-                    freshness: None,
-                    authority: SourceAuthority::Observed,
-                    content: Some(material.body.clone()),
-                    evidence: vec![source.clone()],
-                    why_selected: "selected from the eligible project SourcePool".into(),
-                })
+                }
+                // This horizon cannot materialise it, say which citation
+                // it came from rather than reporting it simply missing.
+                let citing = self.wiki_citations(source);
+                if citing.is_empty() {
+                    return Err(AikitError::new(
+                        "knowledge.source_missing",
+                        format!("Source {source} is not materialised in the project horizon"),
+                    ));
+                }
+                Err(Self::unmaterialised_cited_source(source, &citing))
             }
             KnowledgeAddress::Code(reference) => {
-                let code = self
-                    .code
-                    .ok_or_else(|| provider_absent("ProjectMap CodeIndex"))?;
-                let context = code.context(reference)?;
-                Ok(KnowledgeReading {
-                    resource: reference.resource_ref(),
-                    provider: Some(context.provider),
-                    lens: Some("code-index".into()),
-                    revision: reference.revision.as_ref().map(ToString::to_string),
-                    freshness: None,
-                    authority: SourceAuthority::Derived,
-                    content: Some(serde_json::to_string_pretty(&context.detail).map_err(
-                        |error| {
-                            AikitError::new(
-                                "knowledge.code_context_serialization",
-                                format!("could not render code context: {error}"),
-                            )
-                        },
-                    )?),
-                    evidence: vec![reference.source.clone()],
-                    why_selected: "selected from derived ProjectMap code intelligence".into(),
-                })
+                if self.code.is_empty() {
+                    return Err(provider_absent("ProjectMap CodeIndex"));
+                }
+                // One provider per project: the owner of this reference
+                // answers; the others decline, and the last refusal is the
+                // honest error.
+                let mut last_error = None;
+                for code in &self.code {
+                    match code.context(reference) {
+                        Ok(context) => {
+                            return Ok(KnowledgeReading {
+                                resource: reference.resource_ref(),
+                                provider: Some(context.provider),
+                                lens: Some("code-index".into()),
+                                revision: reference.revision.as_ref().map(ToString::to_string),
+                                freshness: None,
+                                authority: SourceAuthority::Derived,
+                                content: Some(
+                                    serde_json::to_string_pretty(&context.detail).map_err(
+                                        |error| {
+                                            AikitError::new(
+                                                "knowledge.code_context_serialization",
+                                                format!("could not render code context: {error}"),
+                                            )
+                                        },
+                                    )?,
+                                ),
+                                evidence: vec![reference.source.clone()],
+                                why_selected: "selected from derived ProjectMap code intelligence"
+                                    .into(),
+                            });
+                        }
+                        Err(error) => last_error = Some(error),
+                    }
+                }
+                let error = last_error.expect("a non-empty provider list produced no answer");
+                Err(AikitError::new(
+                    "knowledge.code_context_unavailable",
+                    format!(
+                        "no code index in this horizon answers {}: {}",
+                        reference.resource_ref(),
+                        error.message()
+                    ),
+                ))
             }
             KnowledgeAddress::ProjectMap(resource) => {
                 let endpoint = self.project_map_endpoint(resource)?;
@@ -816,10 +865,19 @@ impl<'a> KnowledgeApplication<'a> {
                 })
             }
             KnowledgeAddress::Code(reference) => {
-                let code = self
-                    .code
-                    .ok_or_else(|| provider_absent("ProjectMap CodeIndex"))?;
-                let context = code.context(reference)?;
+                // The provider whose project indexed this reference answers;
+                // the others decline, and the last refusal is the honest
+                // error.
+                let mut context = None;
+                for code in &self.code {
+                    if let Ok(answer) = code.context(reference) {
+                        context = Some(answer);
+                        break;
+                    }
+                }
+                let Some(context) = context else {
+                    return Err(provider_absent("ProjectMap CodeIndex"));
+                };
                 Ok(KnowledgeExplanation {
                     address: address.clone(),
                     provider: Some(context.provider),
@@ -1243,10 +1301,33 @@ impl<'a> KnowledgeApplication<'a> {
         max_nodes: usize,
         max_edges: usize,
     ) -> Result<KnowledgeRelationView> {
-        let code = self
-            .code
-            .ok_or_else(|| provider_absent("ProjectMap CodeIndex"))?;
-        let context = code.context(reference)?;
+        if self.code.is_empty() {
+            return Err(provider_absent("ProjectMap CodeIndex"));
+        }
+        // The provider that indexed this reference's project owns the
+        // relation walk; the others decline and that is data, not failure.
+        let mut last_error = None;
+        let mut context = None;
+        for code in &self.code {
+            match code.context(reference) {
+                Ok(answer) => {
+                    context = Some(answer);
+                    break;
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        let Some(context) = context else {
+            let error = last_error.expect("a non-empty provider list produced no answer");
+            return Err(AikitError::new(
+                "knowledge.code_relations_unavailable",
+                format!(
+                    "no code index in this horizon answers {}: {}",
+                    reference.resource_ref(),
+                    error.message()
+                ),
+            ));
+        };
         let focus = reference.resource_ref();
         let query = RelationQuery {
             focus: focus.clone(),
@@ -1455,8 +1536,11 @@ impl<'a> KnowledgeApplication<'a> {
                 ))
             }
             KnowledgeAddress::Code(reference) => {
+                // The first provider's identity labels the address; the
+                // reference itself belongs to whichever project indexed it.
                 let code = self
                     .code
+                    .first()
                     .ok_or_else(|| provider_absent("ProjectMap CodeIndex"))?;
                 Ok((
                     Some(code.status().provider),
