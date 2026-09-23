@@ -247,7 +247,9 @@ def exercise(ctrl: Path, aikit: Path, evidence: Path | None = None) -> dict:
             assert refused["error"]["message"]=="ACP load/resume contradicted the requested native identity",refused
             held=events(session)
             rejection=[row["event"] for row in held if row.get("event",{}).get("kind")=="native-open-refused"][-1]
-            assert rejection=={"kind":"native-open-refused","continuation_requested":True,"error_code":"agent_session_host.open_failed","cleanup_confirmed":True,"binding_recorded":False,"turn_replayed":False},rejection
+            # Every journal event carries the owner's observation time (observed_at_ms, ms since epoch).
+            assert isinstance(rejection.get("observed_at_ms"),int) and rejection["observed_at_ms"]>0,rejection
+            assert {key:value for key,value in rejection.items() if key!="observed_at_ms"}=={"kind":"native-open-refused","continuation_requested":True,"error_code":"agent_session_host.open_failed","cleanup_confirmed":True,"binding_recorded":False,"turn_replayed":False},rejection
             bindings=[row["event"] for row in held if row.get("event",{}).get("kind")=="binding"]
             assert bindings and all(row["native_session_id"]==native for row in bindings),bindings
             checks.append("A provider returning a different load identity is refused and never counted as continuation")
