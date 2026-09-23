@@ -98,9 +98,10 @@ pub fn derive_provider(
         from_profile: Some(profile.slug.clone()),
         required_context: None,
         model_policy: None,
-            body_ref: None,
+        body_ref: None,
         body_revision: None,
-})
+        body_faculties: None,
+    })
 }
 
 /// Resolve a configured provider's connection facts at provider-load time.
@@ -386,6 +387,9 @@ cwd = "/opt/rooted"
             cwd: None,
             required_context: None,
             model_policy: None,
+            body_ref: None,
+            body_revision: None,
+            body_faculties: None,
         };
 
         let resolved = resolve_provider(configured).unwrap();
@@ -411,6 +415,9 @@ cwd = "/opt/rooted"
             cwd: None,
             required_context: None,
             model_policy: None,
+            body_ref: None,
+            body_revision: None,
+            body_faculties: None,
         };
 
         let error = resolve_provider(configured).unwrap_err();
@@ -436,6 +443,9 @@ cwd = "/opt/rooted"
             cwd: None,
             required_context: None,
             model_policy: None,
+            body_ref: None,
+            body_revision: None,
+            body_faculties: None,
         };
 
         let error = resolve_provider(configured).unwrap_err();
@@ -456,6 +466,9 @@ cwd = "/opt/rooted"
             cwd: None,
             required_context: None,
             model_policy: None,
+            body_ref: None,
+            body_revision: None,
+            body_faculties: None,
         };
         let snapshot = configured.clone();
 

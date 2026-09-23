@@ -72,6 +72,14 @@ pub struct EncounterProvider {
     /// Revision of the acting-body implementation when body_ref is supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_revision: Option<String>,
+    /// Resolved body composition disclosure for the Epi-Logos Prime-QL body:
+    /// the QL owner constitution readback (schema
+    /// `ql.epi-logos-agent-constitution/v1`) projected at configure time and
+    /// carried verbatim into open receipts and views. It discloses the #0–#5
+    /// faculties and which optional instruments are available versus degraded;
+    /// it never claims invocation. Configuration provenance, not Agent identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_faculties: Option<Value>,
     /// The embedded harness profile slug this provider's connection facts are
     /// derived from at load time (`crate::encounter_profile_provider`). A
     /// profile-derived provider carries an empty `argv` here; an explicit
@@ -396,6 +404,7 @@ struct Resident {
     required_context: Option<EncounterContextAdmission>,
     body_ref: Option<String>,
     body_revision: Option<String>,
+    body_faculties: Option<Value>,
     protocol: EncounterProtocol,
     generation: String,
     cwd: PathBuf,
@@ -470,6 +479,16 @@ impl EncounterService {
             return Err(error(
                 "Provider requires a safe id, explicit native argv, and either both body_ref/body_revision or neither",
             ));
+        }
+        if let Some(faculties) = &provider.body_faculties {
+            if faculties["schema"] != "ql.epi-logos-agent-constitution/v1"
+                || faculties["whole"]["coordinate"] != "#0/1"
+                || faculties["whole"]["distinct_from"] != "#0"
+            {
+                return Err(error(
+                    "body_faculties must be a ql.epi-logos-agent-constitution/v1 readback keeping #0/1 distinct from #0",
+                ));
+            }
         }
         if provider.from_profile.is_some() {
             // A profile-derived provider stores its slug and resolves its
@@ -948,28 +967,30 @@ impl EncounterService {
                     journal.clone(),
                     launch_environment.as_ref(),
                 ),
-                EncounterProtocol::PrimeRpc => AgentSessionHost::launch_with_journal_and_environment(
-                    {
-                        let adapter =
+                EncounterProtocol::PrimeRpc => {
+                    AgentSessionHost::launch_with_journal_and_environment(
+                        {
+                            let adapter =
                             aikit_adapters::prime_rpc_connection::PrimeRpcConnectionAdapter::new(
                                 connection.clone(),
                                 cwd.to_string_lossy().into_owned(),
                                 provenance.clone(),
                             );
-                        match &model {
-                            Some(model) => adapter.with_selected_model(
-                                &model.policy.native_provider,
-                                &model.policy.provider_native_id,
-                            )?,
-                            None => adapter,
-                        }
-                    },
-                    variant,
-                    Some(&cwd),
-                    AgentSessionHostLimits::default(),
-                    journal.clone(),
-                    launch_environment.as_ref(),
-                ),
+                            match &model {
+                                Some(model) => adapter.with_selected_model(
+                                    &model.policy.native_provider,
+                                    &model.policy.provider_native_id,
+                                )?,
+                                None => adapter,
+                            }
+                        },
+                        variant,
+                        Some(&cwd),
+                        AgentSessionHostLimits::default(),
+                        journal.clone(),
+                        launch_environment.as_ref(),
+                    )
+                }
             };
             let attempt_host = match attempt_host {
                 Ok(host) => host,
@@ -1188,10 +1209,11 @@ impl EncounterService {
         let model_reading = serde_json::to_value(&model).map_err(error)?;
         let body_ref = configured.body_ref.clone();
         let body_revision = configured.body_revision.clone();
+        let body_faculties = configured.body_faculties.clone();
         if let Some((dispatch, receipt)) = &selected_configuration {
             self.store.append(&agent_session,&json!({"kind":"selected-model-configured","agent_session":agent_session,"native_session_id":receipt.native_session_id,"provider":provider,"dispatch":dispatch,"previous_model_observation":receipt.previous,"model_observation":receipt.current,"standing":"provider-confirmed-session-configuration-under-the-durable-model-policy"}))?;
         }
-        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-resume"} else {"new-native-session"},"composed_tools_route":if mcp_native_fallback.is_some() {"harness-native-mcp-config-seam"} else {"session-wire-or-none"},"mcp_native_fallback_reason":mcp_native_fallback.as_ref().map(|(reason, _)| reason.clone())}))?;
+        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"body_faculties":body_faculties,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-resume"} else {"new-native-session"},"composed_tools_route":if mcp_native_fallback.is_some() {"harness-native-mcp-config-seam"} else {"session-wire-or-none"},"mcp_native_fallback_reason":mcp_native_fallback.as_ref().map(|(reason, _)| reason.clone())}))?;
         // The owner drains transport delivery; durable cursor readers are
         // independent views of the same canonical journal.
         let drain = lane.clone();
@@ -1208,6 +1230,7 @@ impl EncounterService {
                 required_context: configured.required_context,
                 body_ref: body_ref.clone(),
                 body_revision: body_revision.clone(),
+                body_faculties: body_faculties.clone(),
                 protocol: configured.protocol,
                 generation,
                 cwd,
@@ -1219,7 +1242,7 @@ impl EncounterService {
         drop(agency_lock);
         // The resident just became ready: this is the moment queued durable
         // deliveries wait for. Drain before answering the open.
-        let mut receipt = json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"body_ref":configured.body_ref,"body_revision":configured.body_revision,"resident":true,"inference_observed":false});
+        let mut receipt = json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"body_ref":configured.body_ref,"body_revision":configured.body_revision,"body_faculties":body_faculties,"resident":true,"inference_observed":false});
         if let Some((reason, projection)) = &mcp_native_fallback {
             // The composed tool surface does not ride this session's wire: the
             // open outcome names the harness's native MCP configuration seam
@@ -1541,7 +1564,7 @@ impl EncounterService {
                         let state = format!("{:?}", identity.state);
                         let ready = state == "Resident" && fault.is_none();
                         (
-                            json!({"resident":true,"native_session_id":identity.binding.native_session_id,"state":state,"error":fault,"provider":{"id":resident.provider,"label":resident.provider_label,"body_ref":resident.body_ref,"body_revision":resident.body_revision}}),
+                            json!({"resident":true,"native_session_id":identity.binding.native_session_id,"state":state,"error":fault,"provider":{"id":resident.provider,"label":resident.provider_label,"body_ref":resident.body_ref,"body_revision":resident.body_revision,"body_faculties":resident.body_faculties}}),
                             ready,
                         )
                     }
@@ -1986,6 +2009,9 @@ mod tests {
             env: BTreeMap::new(),
             cwd: None,
             required_context: None,
+            body_ref: None,
+            body_revision: None,
+            body_faculties: None,
             model_policy: None,
         }
     }

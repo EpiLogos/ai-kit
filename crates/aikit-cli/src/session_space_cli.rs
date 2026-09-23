@@ -474,6 +474,7 @@ fn run(cli: Cli) -> Result<()> {
                 })?,
                 "AIKit current executable",
             )?;
+            let body_faculties = epi_prime_body_faculties(&ql_bin)?;
             let mut argv = vec![
                 launcher.display().to_string(),
                 "--prime-bin".into(),
@@ -518,6 +519,7 @@ fn run(cli: Cli) -> Result<()> {
                     cwd: None,
                     body_ref: Some("agent-body/epi-prime-ql".into()),
                     body_revision: Some(body_revision.clone()),
+                    body_faculties: Some(body_faculties.clone()),
                     required_context: None,
                     model_policy: None,
                 },
@@ -528,6 +530,7 @@ fn run(cli: Cli) -> Result<()> {
                 "body_ref":"agent-body/epi-prime-ql",
                 "body_revision":body_revision,
                 "ql_revision":ql_revision,
+                "body_faculties":body_faculties,
                 "model_selection":"Prime native configured model unless an explicit AIKit model policy overrides it",
                 "standing":"configured-not-started"
             }))
@@ -781,6 +784,92 @@ fn space_ref(raw: &str) -> Result<SessionSpaceRef> {
     SessionSpaceRef::parse(raw)
 }
 
+const EPI_PRIME_CONSTITUTION_SCHEMA: &str = "ql.epi-logos-agent-constitution/v1";
+
+/// Validate a QL owner constitution readback and project the body's faculty
+/// disclosure. The readback must keep `#0/1` distinct from `#0` and carry all
+/// six faculties with the exact identities; anything else is an unavailable
+/// body — refused rather than silently relabelled as the Prime-QL composition.
+/// The projection discloses the #0–#5 faculties and which optional instruments
+/// are available versus degraded; it never claims invocation.
+fn epi_prime_constitution_projection(
+    constitution: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    if constitution["schema"] != EPI_PRIME_CONSTITUTION_SCHEMA
+        || constitution["whole"]["coordinate"] != "#0/1"
+        || constitution["whole"]["distinct_from"] != "#0"
+    {
+        return Err(AikitError::new(
+            "encounter.prime_body_unresolved",
+            "QL body constitution is incompatible; the Prime-QL body is unavailable rather than substituted",
+        ));
+    }
+    let faculties = constitution["faculties"].as_array().ok_or_else(|| {
+        AikitError::new(
+            "encounter.prime_body_unresolved",
+            "QL body constitution names no faculties",
+        )
+    })?;
+    if faculties.len() != 6
+        || faculties[4]["identity"] != "M4/M4′"
+        || faculties[5]["identity"] != "M5/M5′"
+        || faculties[4]["s_prime"] != "S4′ Anima"
+        || faculties[5]["s_prime"] != "S5′ Aletheia"
+    {
+        return Err(AikitError::new(
+            "encounter.prime_body_unresolved",
+            "QL body constitution is incompatible; the Prime-QL body is unavailable rather than substituted",
+        ));
+    }
+    Ok(serde_json::json!({
+        "schema":EPI_PRIME_CONSTITUTION_SCHEMA,
+        "whole":constitution["whole"],
+        "faculties":faculties,
+        "source":{
+            "revision":constitution["source"]["revision"],
+            "registry_revision":constitution["source"]["registry_revision"],
+            "syntax_rows":constitution["source"]["syntax_rows"],
+            "source_relations":constitution["source"]["source_relations"]
+        },
+        "instrument_resolution":constitution["instrument_resolution"],
+        "standing":constitution["standing"],
+        "canonical_mutation":constitution["canonical_mutation"],
+        "projection_standing":"configure-time constitution readback of the exact configured QL binary; resolution, not invocation"
+    }))
+}
+
+/// Read the configured QL binary's own constitution for the Epi-Logos Prime-QL
+/// body. A body whose owner cannot state its composition is an actionable
+/// unavailable state at configure time, not a generic fallback at open.
+fn epi_prime_body_faculties(ql_bin: &std::path::Path) -> Result<serde_json::Value> {
+    let output = std::process::Command::new(ql_bin)
+        .args(["epi-agent", "constitution", "--json"])
+        .output()
+        .map_err(|error| {
+            AikitError::new(
+                "encounter.prime_body_unresolved",
+                format!("QL body constitution readback failed to run: {error}"),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(AikitError::new(
+            "encounter.prime_body_unresolved",
+            format!(
+                "QL body constitution readback refused: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        ));
+    }
+    let constitution: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|error| {
+            AikitError::new(
+                "encounter.prime_body_unresolved",
+                format!("QL body constitution readback is not JSON: {error}"),
+            )
+        })?;
+    epi_prime_constitution_projection(&constitution)
+}
+
 fn parse_json_arg<T: DeserializeOwned>(raw: &str) -> Result<T> {
     let text = if let Some(path) = raw.strip_prefix('@') {
         std::fs::read_to_string(path).map_err(|error| {
@@ -857,5 +946,60 @@ mod epi_prime_cli_tests {
             "161b869740c54dc325ad1d6aef765dbf32920073"
         );
         assert_eq!(args.central_project.as_deref(), Some("O-I"));
+    }
+
+    fn fixture_constitution() -> serde_json::Value {
+        serde_json::json!({
+            "schema":"ql.epi-logos-agent-constitution/v1",
+            "whole":{"coordinate":"#0/1","distinct_from":"#0"},
+            "faculties":[
+                {"position":"#0","name":"Anuttara","operations":["anuttara.read","ananda.m1-2"],"optional_instruments":["jev","ebm"]},
+                {"position":"#1","name":"Paramaśiva","operations":["tda.vietoris-rips"]},
+                {"position":"#2","name":"Paraśakti","operations":["bimba.neighborhood"]},
+                {"position":"#3","name":"Mahāmāyā","operations":["representation.bind"]},
+                {"position":"#4","name":"Nara","identity":"M4/M4′","s_prime":"S4′ Anima"},
+                {"position":"#5","name":"Epii","identity":"M5/M5′","s_prime":"S5′ Aletheia"}
+            ],
+            "source":{"revision":"8eff719b235703c65911f2461e4a7dd5872a32ad","registry_revision":"r","syntax_rows":109,"source_relations":42},
+            "instrument_resolution":{"jev":{"availability":"degraded"},"ananda-m1-2":{"availability":"available"}},
+            "canonical_mutation":false
+        })
+    }
+
+    #[test]
+    fn body_faculties_projection_carries_faculties_and_degraded_instruments() {
+        let projected = epi_prime_constitution_projection(&fixture_constitution()).unwrap();
+        assert_eq!(projected["schema"], "ql.epi-logos-agent-constitution/v1");
+        assert_eq!(projected["faculties"].as_array().unwrap().len(), 6);
+        assert_eq!(projected["source"]["syntax_rows"], 109);
+        assert_eq!(
+            projected["instrument_resolution"]["jev"]["availability"],
+            "degraded"
+        );
+        assert_eq!(
+            projected["instrument_resolution"]["ananda-m1-2"]["availability"],
+            "available"
+        );
+        assert!(projected["projection_standing"]
+            .as_str()
+            .unwrap()
+            .contains("resolution, not invocation"));
+    }
+
+    #[test]
+    fn an_incompatible_constitution_is_an_unavailable_body_not_a_fallback() {
+        let mut collapsed = fixture_constitution();
+        collapsed["whole"]["distinct_from"] = serde_json::Value::Null;
+        let error = epi_prime_constitution_projection(&collapsed).unwrap_err();
+        assert_eq!(error.code(), "encounter.prime_body_unresolved");
+
+        let mut wrong_identity = fixture_constitution();
+        wrong_identity["faculties"][4]["s_prime"] = "S4′ Something Else".into();
+        assert_eq!(
+            epi_prime_constitution_projection(&wrong_identity)
+                .unwrap_err()
+                .code(),
+            "encounter.prime_body_unresolved"
+        );
     }
 }
