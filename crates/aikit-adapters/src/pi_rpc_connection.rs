@@ -7,7 +7,12 @@ use aikit_core::{AikitError, ResourceRef, Result};
 use serde_json::{json, Value};
 
 use crate::agent_connection::*;
-use crate::interactive_connection::{InteractiveAgentConnectionAdapter, PermissionDecision};
+use crate::interactive_connection::{
+    InteractiveAgentConnectionAdapter, NativeModeControls, PermissionDecision,
+};
+
+const PI_NO_PERMISSION_MODES: &str =
+    "Pi RPC publishes no in-session permission modes (no tool-permission gate to switch)";
 
 #[derive(Debug, Clone)]
 enum Pending {
@@ -380,6 +385,24 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
 }
 
 impl InteractiveAgentConnectionAdapter for PiRpcConnectionAdapter {
+    /// Pi RPC has queue-delivery modes (steering/follow-up) but no permission
+    /// modes: it publishes no tool-permission gate to switch. Stated, not
+    /// inherited, so a later Pi protocol change has one place to land.
+    fn session_mode_controls(&self, _native_session_id: &str) -> NativeModeControls {
+        NativeModeControls::unavailable(PI_NO_PERMISSION_MODES)
+    }
+
+    fn set_session_mode(
+        &mut self,
+        _native_session_id: &str,
+        _provider_mode_id: &str,
+    ) -> Result<ConnectionCommand> {
+        Err(error(
+            "connection.pi_rpc.mode_selection_unsupported",
+            PI_NO_PERMISSION_MODES,
+        ))
+    }
+
     fn set_session_model(
         &mut self,
         _native_session_id: &str,

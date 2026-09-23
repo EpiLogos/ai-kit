@@ -280,6 +280,21 @@ pub enum EncounterRequest {
         #[serde(default)]
         expected_native_session_id: Option<String>,
     },
+    /// Read the permission modes the resident native session advertises and
+    /// which one is current. Provider disclosure, not an AIKit policy.
+    ModeRead {
+        agent_session: ResourceRef,
+    },
+    /// Switch the resident native session to one provider-advertised
+    /// permission mode. The harness decides what the mode allows; it applies
+    /// to the next action.
+    ModeSelect {
+        agent_session: ResourceRef,
+        provider_mode_id: String,
+        /// Binds this write to the session the caller read.
+        #[serde(default)]
+        expected_native_session_id: Option<String>,
+    },
     Send {
         agent_session: ResourceRef,
         turn: EncounterAddressedTurn,
@@ -401,6 +416,17 @@ struct Resident {
     now_context: Option<EncounterNowContextConfig>,
 }
 impl Resident {
+    /// The resident provider as a view may describe it: identity, the owner's
+    /// label, the acting-body pin and the displayable launch facts.
+    fn provider_view(&self) -> Value {
+        let mut view = provider_launch_facts(self.protocol, &self.argv);
+        view["id"] = json!(self.provider);
+        view["label"] = json!(self.provider_label);
+        view["body_ref"] = json!(self.body_ref);
+        view["body_revision"] = json!(self.body_revision);
+        view
+    }
+
     fn prompt_payload(&self, text: &str) -> Value {
         match self.protocol {
             EncounterProtocol::Acp => json!([{"type":"text","text":text}]),
@@ -421,6 +447,69 @@ pub struct EncounterService {
     residents: Mutex<BTreeMap<ResourceRef, Arc<Resident>>>,
     permissions: PendingPermissions,
 }
+/// How a provider's harness is launched, reduced to what may be shown: the
+/// protocol, the program's file name and, for interpreters, the script's file
+/// name. Never another argv element, an environment value or a full path.
+///
+/// A definition that launches through macOS `sandbox-exec` declares its own
+/// confinement in argv (there is no separate field); it reads as
+/// `sandboxed: true` and names the confined program, not the wrapper.
+pub fn provider_launch_facts(protocol: EncounterProtocol, argv: &[String]) -> Value {
+    fn base(value: &str) -> Option<String> {
+        Path::new(value)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(ToOwned::to_owned)
+    }
+    let mut program = argv;
+    let mut sandboxed = false;
+    if argv
+        .first()
+        .and_then(|first| base(first))
+        .is_some_and(|name| name == "sandbox-exec")
+    {
+        // sandbox-exec [-f profile-file | -p profile | -n name] [-D key=value ...] command ...
+        let mut at = 1;
+        while at < argv.len() && argv[at].starts_with('-') {
+            at += if matches!(argv[at].as_str(), "-f" | "-p" | "-n" | "-D") {
+                2
+            } else {
+                1
+            };
+        }
+        if at < argv.len() {
+            program = &argv[at..];
+            sandboxed = true;
+        }
+    }
+    let command = program.first().and_then(|first| base(first));
+    let entry = program.iter().skip(1).find_map(|argument| {
+        [".js", ".mjs", ".cjs", ".ts", ".py"]
+            .iter()
+            .any(|suffix| argument.ends_with(suffix))
+            .then(|| base(argument))
+            .flatten()
+    });
+    json!({
+        "protocol": protocol,
+        "command": command,
+        "entry": entry,
+        "sandboxed": sandboxed,
+    })
+}
+
+const NATIVE_MODE_AUTHORITY: &str = "provider-advertised-session-mode; applies-to-the-next-action";
+
+fn observation_native(
+    host: &AgentSessionHost,
+    session: &ResourceRef,
+    lane: &SessionLane,
+) -> String {
+    host.identity(session)
+        .map(|identity| identity.binding.native_session_id)
+        .unwrap_or_else(|_| lane.binding().native_session_id.clone())
+}
+
 fn error(message: impl std::fmt::Display) -> AikitError {
     AikitError::new("encounter.runtime", message.to_string())
 }
@@ -684,6 +773,140 @@ impl EncounterService {
         let receipt = json!({"protocol":"aikit-encounter-v1","pid":std::process::id(),"shutdown":true,"stopped":stopped,"canonical_sessions_retained":true});
         *lifecycle = Lifecycle::Closed(receipt.clone());
         Ok(receipt)
+    }
+
+    /// Ask the resident harness for one advertised permission mode and keep
+    /// the owner's record of it: the request before any wire effect, the
+    /// provider's confirmation after. A confirmation that cannot be recorded
+    /// is uncertain, never silently resent.
+    fn configure_native_mode(
+        &self,
+        agent_session: &ResourceRef,
+        lane: &SessionLane,
+        provider: &str,
+        native_session_id: &str,
+        provider_mode_id: &str,
+        origin: Option<Value>,
+    ) -> Result<aikit_adapters::ModeConfigurationReceipt> {
+        let mut requested = json!({
+            "kind":"native-mode-configuration-requested",
+            "agent_session":agent_session,
+            "native_session_id":native_session_id,
+            "provider":provider,
+            "requested_provider_mode_id":provider_mode_id,
+            "authority":NATIVE_MODE_AUTHORITY
+        });
+        if let Some(origin) = &origin {
+            requested["origin"] = origin.clone();
+        }
+        self.store.append(agent_session, &requested)?;
+        let receipt = lane.set_mode(provider_mode_id)?;
+        let mut confirmed = json!({
+            "kind":"native-mode-configuration-confirmed",
+            "receipt":receipt,
+            "authority":NATIVE_MODE_AUTHORITY
+        });
+        if let Some(origin) = origin {
+            confirmed["origin"] = origin;
+        }
+        self.store.append(agent_session, &confirmed).map_err(|e| {
+            AikitError::new(
+                "encounter.mode_configuration_uncertain",
+                format!("Provider confirmed the mode change but receipt persistence failed; do not resend automatically: {e}"),
+            )
+        })?;
+        Ok(receipt)
+    }
+
+    /// The owner's configured default permission mode for a new native
+    /// session (`ai-kit:permissions:permissions.default-mode`). Applied only
+    /// when the harness advertises that mode; every outcome is recorded and
+    /// none of them fails the open.
+    fn apply_default_mode(
+        &self,
+        agent_session: &ResourceRef,
+        host: &AgentSessionHost,
+        lane: &SessionLane,
+        provider: &str,
+        argv: &[String],
+    ) {
+        let setting_ref = crate::permission_defaults::SETTING_REF;
+        let modes = match crate::permission_defaults::read(&self.home) {
+            Ok(modes) => modes,
+            Err(failure) => {
+                let _ = self.store.append(agent_session, &json!({
+                    "kind":"native-mode-default-not-applied",
+                    "setting_ref":setting_ref,
+                    "reason":format!("The configured default permission modes could not be read: {}", failure.message())
+                }));
+                return;
+            }
+        };
+        let Some((harness, mode)) = crate::permission_defaults::lookup(&modes, provider, argv)
+        else {
+            return;
+        };
+        let origin = json!({"setting_ref":setting_ref,"harness":harness});
+        let observation = match host.identity(agent_session) {
+            Ok(identity) => identity.binding.mode_observation,
+            Err(_) => None,
+        };
+        let not_applied = |reason: String| {
+            let _ = self.store.append(
+                agent_session,
+                &json!({
+                    "kind":"native-mode-default-not-applied",
+                    "setting_ref":setting_ref,
+                    "harness":harness,
+                    "requested_provider_mode_id":mode,
+                    "reason":reason
+                }),
+            );
+        };
+        let Some(observation) = observation else {
+            not_applied("The harness advertised no session permission modes".into());
+            return;
+        };
+        if observation.current_mode_id == mode {
+            let _ = self.store.append(
+                agent_session,
+                &json!({
+                    "kind":"native-mode-default-already-current",
+                    "setting_ref":setting_ref,
+                    "harness":harness,
+                    "mode_observation":observation
+                }),
+            );
+            return;
+        }
+        if !observation.advertises(&mode) {
+            not_applied(format!(
+                "The harness does not advertise mode {mode}; it offers {}",
+                observation
+                    .available_modes
+                    .iter()
+                    .map(|option| option.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            return;
+        }
+        let native = observation_native(host, agent_session, lane);
+        if let Err(failure) =
+            self.configure_native_mode(agent_session, lane, provider, &native, &mode, Some(origin))
+        {
+            let _ = self.store.append(
+                agent_session,
+                &json!({
+                    "kind":"native-mode-default-failed",
+                    "setting_ref":setting_ref,
+                    "harness":harness,
+                    "requested_provider_mode_id":mode,
+                    "error_code":failure.code(),
+                    "reason":failure.message()
+                }),
+            );
+        }
     }
 
     fn open_native(
@@ -1016,11 +1239,22 @@ impl EncounterService {
         if let Some((dispatch, receipt)) = &selected_configuration {
             self.store.append(&agent_session,&json!({"kind":"selected-model-configured","agent_session":agent_session,"native_session_id":receipt.native_session_id,"provider":provider,"dispatch":dispatch,"previous_model_observation":receipt.previous,"model_observation":receipt.current,"standing":"provider-confirmed-session-configuration-under-the-durable-model-policy"}))?;
         }
-        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"now_context_config_digest":blake3::hash(serde_json::to_vec(&configured.now_context).expect("NOW config JSON").as_slice()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-load"} else {"new-native-session"}}))?;
+        let opened_mode_observation = lane.binding().mode_observation.clone();
+        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"now_context_config_digest":blake3::hash(serde_json::to_vec(&configured.now_context).expect("NOW config JSON").as_slice()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"mode_observation":opened_mode_observation,"model_selection":model_reading,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-load"} else {"new-native-session"}}))?;
         // The owner drains transport delivery; durable cursor readers are
         // independent views of the same canonical journal.
         let drain = lane.clone();
         std::thread::spawn(move || while drain.recv().is_some() {});
+        // A new session starts in the owner's configured default permission
+        // mode when the harness advertises it. A continued (loaded) session
+        // keeps whatever mode it was left in: nothing is re-imposed on it.
+        if !reconnect {
+            self.apply_default_mode(&agent_session, &host, &lane, &provider, &configured.argv);
+        }
+        let mode_observation = host
+            .identity(&agent_session)
+            .ok()
+            .and_then(|identity| identity.binding.mode_observation);
         residents.insert(
             agent_session.clone(),
             Arc::new(Resident {
@@ -1045,7 +1279,7 @@ impl EncounterService {
         drop(agency_lock);
         // The resident just became ready: this is the moment queued durable
         // deliveries wait for. Drain before answering the open.
-        let receipt = json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"body_ref":configured.body_ref,"body_revision":configured.body_revision,"resident":true,"inference_observed":false});
+        let receipt = json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"mode_observation":mode_observation,"model_selection":model_reading,"body_ref":configured.body_ref,"body_revision":configured.body_revision,"resident":true,"inference_observed":false});
         self.open_receipt_with_drain(agent_session, receipt)
     }
 
@@ -1325,7 +1559,7 @@ impl EncounterService {
                         let state = format!("{:?}", identity.state);
                         let ready = state == "Resident" && fault.is_none();
                         (
-                            json!({"resident":true,"native_session_id":identity.binding.native_session_id,"state":state,"error":fault,"provider":{"id":resident.provider,"label":resident.provider_label,"body_ref":resident.body_ref,"body_revision":resident.body_revision}}),
+                            json!({"resident":true,"native_session_id":identity.binding.native_session_id,"state":state,"error":fault,"provider":resident.provider_view()}),
                             ready,
                         )
                     }
@@ -1356,14 +1590,20 @@ impl EncounterService {
                     {"ref":"aikit.encounter.prompt","enabled":ready,"reason":if ready{None}else{Some("A ready resident provider is required")}},
                     {"ref":"aikit.encounter.cancel","enabled":active,"reason":if active{None}else{Some("There is no active provider turn")}},
                     {"ref":"aikit.encounter.permission","enabled":!view["permissions"].as_array().is_none_or(|r|r.is_empty()),"reason":"Only an actual pending provider consent request can be answered; this does not confer Actuation authority"},
-                    {"ref":"aikit.encounter.model-read","enabled":ready,"reason":if ready{None}else{Some("A ready resident provider is required")}}
+                    {"ref":"aikit.encounter.model-read","enabled":ready,"reason":if ready{None}else{Some("A ready resident provider is required")}},
+                    {"ref":"aikit.encounter.mode-read","enabled":ready,"reason":if ready{None}else{Some("A ready resident provider is required")}}
                 ]);
                 Ok(view)
             }
             EncounterRequest::Providers => Ok(json!(self
                 .providers()?
                 .into_iter()
-                .map(|p| json!({"id":p.id,"label":p.label}))
+                .map(|p| {
+                    let mut row = provider_launch_facts(p.protocol, &p.argv);
+                    row["id"] = json!(p.id);
+                    row["label"] = json!(p.label);
+                    row
+                })
                 .collect::<Vec<_>>())),
             EncounterRequest::ClassifyLegacyLoadReplay { agent_session } => {
                 self.require_attached(&agent_session)?;
@@ -1465,6 +1705,84 @@ impl EncounterService {
                     "standing":"provider-confirmed-native-session-configuration; durable-model-policy-and-agency-unchanged"
                 }))
             }
+            EncounterRequest::ModeRead { agent_session } => {
+                self.require_attached(&agent_session)?;
+                let resident = self.resident(&agent_session)?;
+                let _operation = resident.operations.lock().map_err(error)?;
+                self.check_resident_context(&agent_session, &resident, "native-mode-read")?;
+                let identity = resident.host.identity(&agent_session)?;
+                Ok(json!({
+                    "agent_session":agent_session,
+                    "native_session_id":identity.binding.native_session_id,
+                    "mode_observation":identity.binding.mode_observation,
+                    "mode_controls":match resident.host.transport_error() {
+                        Some(reason) => aikit_adapters::interactive_connection::NativeModeControls::unavailable(reason),
+                        None => resident.lane.mode_controls()?,
+                    },
+                    "standing":"provider-reported-configuration-not-independent-selection-or-inference-proof"
+                }))
+            }
+            EncounterRequest::ModeSelect {
+                agent_session,
+                provider_mode_id,
+                expected_native_session_id,
+            } => {
+                self.require_attached(&agent_session)?;
+                if provider_mode_id.trim().is_empty() || provider_mode_id.len() > 128 {
+                    return Err(AikitError::new(
+                        "encounter.invalid_provider_mode_id",
+                        "Provider mode id must be a non-empty bounded native identifier",
+                    ));
+                }
+                let resident = self.resident(&agent_session)?;
+                let _operation = resident.operations.lock().map_err(error)?;
+                self.check_resident_context(&agent_session, &resident, "native-mode-select")?;
+                let observed = resident.host.identity(&agent_session)?;
+                if expected_native_session_id
+                    .as_ref()
+                    .is_some_and(|expected| expected != &observed.binding.native_session_id)
+                {
+                    return Err(AikitError::new("encounter.stale_native_session", "The native session changed after the mode read; read its modes again before selecting"));
+                }
+                // Refuse before anything is journaled or sent: only an idle
+                // session that advertised this exact mode can be asked.
+                let controls = resident.lane.mode_controls()?;
+                if !controls.mode_selection {
+                    return Err(AikitError::new(
+                        "encounter.mode_selection_unavailable",
+                        controls.reason.unwrap_or_else(|| {
+                            "This session offers no permission-mode selection".into()
+                        }),
+                    ));
+                }
+                if !observed
+                    .binding
+                    .mode_observation
+                    .as_ref()
+                    .is_some_and(|modes| modes.advertises(&provider_mode_id))
+                {
+                    return Err(AikitError::new(
+                        "encounter.mode_not_advertised",
+                        format!("The harness did not advertise mode {provider_mode_id} for this session; read its modes again"),
+                    ));
+                }
+                let receipt = self.configure_native_mode(
+                    &agent_session,
+                    &resident.lane,
+                    &resident.provider,
+                    &observed.binding.native_session_id,
+                    &provider_mode_id,
+                    None,
+                )?;
+                Ok(json!({
+                    "agent_session":receipt.agent_session,
+                    "native_session_id":receipt.native_session_id,
+                    "previous_mode_observation":receipt.previous,
+                    "mode_observation":receipt.current,
+                    "selected":true,
+                    "standing":"provider-confirmed-native-session-mode; applies-to-the-next-action"
+                }))
+            }
             EncounterRequest::Open {
                 space,
                 agent_session,
@@ -1538,7 +1856,7 @@ impl EncounterService {
                 let resident = self.resident(&agent_session)?;
                 let identity = resident.host.identity(&agent_session)?;
                 Ok(
-                    json!({"agent_session":agent_session,"native_session_id":identity.binding.native_session_id,"state":format!("{:?}",identity.state),"error":resident.host.transport_error(),"permissions":self.permissions.lock().map_err(error)?.get(&agent_session).map(|r|r.values().cloned().collect::<Vec<_>>()).unwrap_or_default(),"permission_authority":"native-provider-consent"}),
+                    json!({"agent_session":agent_session,"native_session_id":identity.binding.native_session_id,"state":format!("{:?}",identity.state),"error":resident.host.transport_error(),"provider":resident.provider_view(),"permissions":self.permissions.lock().map_err(error)?.get(&agent_session).map(|r|r.values().cloned().collect::<Vec<_>>()).unwrap_or_default(),"permission_authority":"native-provider-consent"}),
                 )
             }
         }

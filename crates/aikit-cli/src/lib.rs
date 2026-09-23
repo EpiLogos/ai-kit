@@ -42,6 +42,7 @@ pub mod model_roster;
 pub mod multicall;
 pub mod mux_install;
 pub mod orientation_packet;
+pub mod permission_defaults;
 pub mod pressure;
 pub mod profile_ops;
 pub mod project_binding;

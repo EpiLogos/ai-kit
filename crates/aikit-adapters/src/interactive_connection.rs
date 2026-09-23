@@ -16,8 +16,8 @@ use serde_json::{json, Value};
 use crate::agent_connection::{
     AcpV1ConnectionAdapter, AgentConnectionAdapter, CancelRequest, ClassicProcessConnectionAdapter,
     ConnectionCommand, ConnectionDegradation, ConnectionDescriptor, ConnectionSignal,
-    ConnectionSignalKind, NativeModelObservation, NativePermissionChoice, NativePermissionRequest,
-    PromptRequest, SessionOpenRequest,
+    ConnectionSignalKind, NativeModeObservation, NativeModelObservation, NativePermissionChoice,
+    NativePermissionRequest, PromptRequest, SessionOpenRequest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +52,32 @@ impl NativeModelControls {
     }
 }
 
+/// Non-mutating disclosure of the session permission-mode selector. Only a
+/// provider-advertised mode set on this exact native session is writable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeModeControls {
+    pub mode_selection: bool,
+    pub reason: Option<String>,
+}
+
+impl NativeModeControls {
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            mode_selection: false,
+            reason: Some(reason.into()),
+        }
+    }
+
+    pub fn available() -> Self {
+        Self {
+            mode_selection: true,
+            reason: None,
+        }
+    }
+}
+
+pub const NO_SESSION_MODES_REASON: &str = "This adapter has no in-session permission modes";
+
 /// The connection seam used by an interactive UI/controller. It is deliberately
 /// protocol-neutral: ACP can yield several wire commands for one semantic cancel
 /// (permission cancellation responses + session/cancel), while a classic process
@@ -61,6 +87,25 @@ pub trait InteractiveAgentConnectionAdapter: AgentConnectionAdapter {
     /// adapters without a confirmed configuration protocol read-only.
     fn session_model_controls(&self, _native_session_id: &str) -> NativeModelControls {
         NativeModelControls::unavailable("This adapter has no confirmed in-session model selector; use its native launch configuration")
+    }
+
+    /// Query the permission-mode selector of one exact native session. The
+    /// default keeps adapters without a mode protocol honestly read-only.
+    fn session_mode_controls(&self, _native_session_id: &str) -> NativeModeControls {
+        NativeModeControls::unavailable(NO_SESSION_MODES_REASON)
+    }
+
+    /// Switch an existing native session to one provider-advertised
+    /// permission mode. The provider decides what the mode allows.
+    fn set_session_mode(
+        &mut self,
+        _native_session_id: &str,
+        _provider_mode_id: &str,
+    ) -> Result<ConnectionCommand> {
+        Err(AikitError::new(
+            "connection.mode_selection_unsupported",
+            NO_SESSION_MODES_REASON,
+        ))
     }
 
     fn respond_permission(
@@ -106,6 +151,7 @@ struct PendingAcpControl {
     native_session_id: Option<String>,
     requested_model_id: Option<String>,
     requested_reasoning_effort: Option<String>,
+    requested_mode_id: Option<String>,
 }
 
 /// Stable-ACP wrapper over the base v1 encoder/decoder. The wrapper exists to
@@ -122,6 +168,8 @@ pub struct AcpStableConnectionAdapter {
     /// Current provider-advertised model selector per native session. The
     /// session id remains a transport routing fact; it is not canonical identity.
     model_options: BTreeMap<String, NativeModelObservation>,
+    /// Current provider-advertised permission modes per native session.
+    mode_options: BTreeMap<String, NativeModeObservation>,
     /// Exact native sessions with a session/load in flight. ACP v1 replays
     /// history before its response but offers no stable history item id.
     loading_native_sessions: std::collections::BTreeSet<String>,
@@ -138,6 +186,7 @@ impl AcpStableConnectionAdapter {
             pending_permission_session: BTreeMap::new(),
             pending_control: BTreeMap::new(),
             model_options: BTreeMap::new(),
+            mode_options: BTreeMap::new(),
             loading_native_sessions: std::collections::BTreeSet::new(),
             session_capabilities: AcpStableSessionCapabilities::default(),
         }
@@ -253,6 +302,70 @@ impl AcpStableConnectionAdapter {
         Ok(vec![signal])
     }
 
+    /// Keep the per-session mode set the base adapter parsed from the open
+    /// result, so later writes are validated against exactly what was offered.
+    fn remember_open_modes(&mut self, signals: &[ConnectionSignal]) {
+        for signal in signals {
+            if let ConnectionSignalKind::SessionOpened { binding } = &signal.kind {
+                match &binding.mode_observation {
+                    Some(observation) => {
+                        self.mode_options
+                            .insert(binding.native_session_id.clone(), observation.clone());
+                    }
+                    None => {
+                        self.mode_options.remove(&binding.native_session_id);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `current_mode_update`: the agent changed its own mode (or confirms a
+    /// change). Only an advertised mode on a known session becomes a mode
+    /// observation; anything else stays a plain status, never an invented mode.
+    fn project_current_mode_update(&mut self, message: &Value, signals: &mut [ConnectionSignal]) {
+        if message.get("method").and_then(Value::as_str) != Some("session/update") {
+            return;
+        }
+        let Some(update) = message.pointer("/params/update") else {
+            return;
+        };
+        if update.get("sessionUpdate").and_then(Value::as_str) != Some("current_mode_update") {
+            return;
+        }
+        let Some(native) = message.pointer("/params/sessionId").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(mode_id) = update
+            .get("currentModeId")
+            .or_else(|| update.get("modeId"))
+            .and_then(Value::as_str)
+        else {
+            return;
+        };
+        let Some(observation) = self
+            .mode_options
+            .get(native)
+            .and_then(|held| held.with_current(mode_id))
+        else {
+            for signal in signals.iter_mut() {
+                signal.kind = ConnectionSignalKind::Status {
+                    message: format!(
+                        "ACP session update: current_mode_update to {mode_id}, which this session never advertised"
+                    ),
+                };
+            }
+            return;
+        };
+        self.mode_options
+            .insert(native.to_owned(), observation.clone());
+        for signal in signals.iter_mut() {
+            signal.kind = ConnectionSignalKind::ModeConfigured {
+                mode_observation: observation.clone(),
+            };
+        }
+    }
+
     fn remember_open_model_options(
         &mut self,
         message: &Value,
@@ -331,6 +444,31 @@ impl AcpStableConnectionAdapter {
                     },
                 },
             }
+        } else if let Some(requested_mode_id) = pending.requested_mode_id {
+            // ACP answers session/set_mode with an empty result: a success
+            // response is the provider's confirmation of the requested mode.
+            let confirmed = native_session_id.as_ref().and_then(|native| {
+                self.mode_options
+                    .get(native)
+                    .and_then(|held| held.with_current(&requested_mode_id))
+                    .map(|observation| (native.clone(), observation))
+            });
+            match confirmed {
+                Some((native, observation)) => {
+                    self.mode_options.insert(native, observation.clone());
+                    ConnectionSignalKind::ModeConfigured {
+                        mode_observation: observation,
+                    }
+                }
+                None => ConnectionSignalKind::Degraded {
+                    degradation: ConnectionDegradation {
+                        reason: format!(
+                            "ACP session/set_mode acknowledged {requested_mode_id}, but the session no longer advertises it"
+                        ),
+                        unavailable: vec!["session/set_mode".into()],
+                    },
+                },
+            }
         } else if let Some(requested_effort) = pending.requested_reasoning_effort {
             let observed = NativeModelObservation::from_acp_model_config_options(
                 message
@@ -397,6 +535,7 @@ impl AcpStableConnectionAdapter {
                 native_session_id,
                 requested_model_id: None,
                 requested_reasoning_effort: None,
+                requested_mode_id: None,
             },
         );
         Ok(id)
@@ -455,6 +594,10 @@ impl AgentConnectionAdapter for AcpStableConnectionAdapter {
                 .is_some_and(|native| self.loading_native_sessions.contains(native));
         let mut signals = self.inner.ingest(message.clone())?;
         self.remember_open_model_options(&message, &mut signals)?;
+        self.remember_open_modes(&signals);
+        if !historic_load_replay {
+            self.project_current_mode_update(&message, &mut signals);
+        }
         for signal in &signals {
             if let ConnectionSignalKind::SessionOpened { binding } = &signal.kind {
                 if binding.opened_as == crate::agent_connection::SessionOpenMode::Load {
@@ -496,6 +639,56 @@ impl InteractiveAgentConnectionAdapter for AcpStableConnectionAdapter {
                 "ACP did not advertise a model config selector for this native session",
             ),
         }
+    }
+
+    fn session_mode_controls(&self, native_session_id: &str) -> NativeModeControls {
+        match self.mode_options.get(native_session_id) {
+            Some(_) => NativeModeControls::available(),
+            None => NativeModeControls::unavailable(
+                "ACP did not advertise session modes for this native session",
+            ),
+        }
+    }
+
+    fn set_session_mode(
+        &mut self,
+        native_session_id: &str,
+        provider_mode_id: &str,
+    ) -> Result<ConnectionCommand> {
+        let offered = self.mode_options.get(native_session_id).ok_or_else(|| {
+            AikitError::new(
+                "connection.acp.mode_selection_unsupported",
+                "ACP target did not advertise session modes for this resident native session",
+            )
+        })?;
+        if !offered.advertises(provider_mode_id) {
+            return Err(AikitError::new(
+                "connection.acp.mode_not_advertised",
+                format!(
+                    "mode {provider_mode_id} was not advertised by native session {native_session_id}"
+                ),
+            ));
+        }
+        let id = Value::String(format!("aikit-control-{}", self.next_control_id));
+        self.next_control_id += 1;
+        let token = request_id_token(&id)?;
+        self.pending_control.insert(
+            token,
+            PendingAcpControl {
+                operation: "session/set_mode".into(),
+                native_session_id: Some(native_session_id.to_owned()),
+                requested_model_id: None,
+                requested_reasoning_effort: None,
+                requested_mode_id: Some(provider_mode_id.to_owned()),
+            },
+        );
+        Ok(ConnectionCommand {
+            operation: "session/set_mode".into(),
+            payload: json!({
+                "jsonrpc":"2.0", "id":id, "method":"session/set_mode",
+                "params":{"sessionId":native_session_id,"modeId":provider_mode_id}
+            }),
+        })
     }
 
     fn respond_permission(
@@ -627,6 +820,7 @@ impl InteractiveAgentConnectionAdapter for AcpStableConnectionAdapter {
                 native_session_id: Some(native_session_id.to_owned()),
                 requested_model_id: Some(provider_model_id.to_owned()),
                 requested_reasoning_effort: None,
+                requested_mode_id: None,
             },
         );
         Ok(ConnectionCommand {
@@ -669,6 +863,7 @@ impl InteractiveAgentConnectionAdapter for AcpStableConnectionAdapter {
                 native_session_id: Some(native_session_id.to_owned()),
                 requested_model_id: None,
                 requested_reasoning_effort: Some(provider_reasoning_effort.to_owned()),
+                requested_mode_id: None,
             },
         );
         Ok(ConnectionCommand {

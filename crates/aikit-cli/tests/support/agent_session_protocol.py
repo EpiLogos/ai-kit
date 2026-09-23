@@ -7,6 +7,7 @@ import time
 native = "controlled-native"
 model = "test/a"
 effort = "low"
+permission_mode = "default"
 waiting = None
 mode = sys.argv[1] if len(sys.argv) > 1 else "normal"
 
@@ -29,6 +30,13 @@ def config():
          "options": [{"value": "low", "name": "Low"}, {"value": "high", "name": "High"}]},
     ]
 
+def modes():
+    return {"currentModeId": permission_mode, "availableModes": [
+        {"id": "default", "name": "Default", "description": "Ask before edits."},
+        {"id": "accept_edits", "name": "Accept Edits"},
+        {"id": "plan", "name": "Plan"},
+    ]}
+
 def update(value):
     emit({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": native, "update": value}})
 
@@ -43,7 +51,18 @@ for line in sys.stdin:
         result(ident, {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}})
     elif method in ("session/new", "session/load"):
         native = message.get("params", {}).get("sessionId", native)
-        result(ident, {"sessionId": native, "configOptions": config()})
+        result(ident, {"sessionId": native, "configOptions": config(), "modes": modes()})
+    elif method == "session/set_mode":
+        requested = message["params"]["modeId"]
+        if mode == "lost-mode-ack":
+            os._exit(0)
+        if requested not in [m["id"] for m in modes()["availableModes"]]:
+            emit({"jsonrpc": "2.0", "id": ident, "error": {"code": -32602, "message": "unknown mode"}})
+            continue
+        permission_mode = requested
+        # Like real agents, report the change as a session update, then answer.
+        update({"sessionUpdate": "current_mode_update", "currentModeId": permission_mode})
+        result(ident, {})
     elif method == "session/set_config_option":
         params = message["params"]
         if params["configId"] == "model":
@@ -67,6 +86,11 @@ for line in sys.stdin:
         elif prompt == "cancel":
             waiting = ident
             text("Started; waiting for cancellation.")
+        elif prompt == "plan-yourself":
+            permission_mode = "plan"
+            update({"sessionUpdate": "current_mode_update", "modeId": permission_mode})
+            text("Switched myself to plan.")
+            result(ident, {"stopReason": "end_turn"})
         elif prompt == "disconnect":
             text("Partial answer before disconnect.")
             os._exit(0)
