@@ -69,3 +69,93 @@ already follow the binding, so herdr becomes selectable end to end at the
 surface operators actually use). Treat S2 as its own ticket with the
 reconcile-semantics decision made by the owner, since "what reconcile means
 without a mux contract" is a design position, not a code move.
+
+## Settled 2026-09-23 — S1 and S2 built (feat/herdr-consumer-seams-20260923)
+
+Both seams were built by the herdr consumer-seam lane on top of main
+(597452a2). The owner directed building over deciding; the two semantic
+choices the note left open are settled here as built.
+
+### S1 as built — provider selection at binding creation
+
+The binding-creating verb is `aikit session-space stage --intent-json` with a
+`bind-working-surface` intent. It now takes
+`--provider <technology|provider-ref>`:
+
+- Accepted forms: a technology name (`herdr`) or a provider ref, canonical
+  (`provider/herdr/current`) or instance (`provider/herdr/w6`). A technology
+  name persists as the technology-canonical ref; a named ref persists exactly
+  as named, so an instance selection stays the instance.
+- Validation, against `PlaceTechnologyRegistry::builtin()`: the technology
+  must be registered, its real detection (`detect()`) must report it
+  installed, and the build must be able to drive it as a working environment
+  — `working_environment()` **or** `mux_adapter()`. This extends the note's
+  literal `working_environment()`-must-return-Some by one step: a mux-backed
+  provider (tmux, cmux) is a legitimate binding provider the working-surface
+  path already drives, so refusing it would be a dishonest refusal. herdr
+  passes exactly as the note intended.
+- Persistence: the validated ref is written to
+  `SessionSpaceWorkingSurfaceBinding.provider` with a provenance line naming
+  the flag. The working-surface verbs (`observe/open/focus/attach`) are
+  untouched — they already follow the binding.
+- One honesty guard the note did not name: a staged plan that already
+  declares a *different* place technology than `--provider` names is refused
+  (`session_space.provider_plan_conflict`) — one binding cannot name both,
+  and `session_stack` routing reads the plan, so a contradiction here would
+  resurface as a mux-shaped answer later.
+- Absent flag: the intent passes through exactly as staged. Zero change.
+- Error codes: `session_space.provider_unregistered`,
+  `provider_not_installed`, `provider_undrivable`,
+  `provider_selection_malformed`, `provider_flag_misplaced`,
+  `provider_plan_conflict`.
+
+### S2 as built — reconcile for provider-native technologies
+
+The semantic settled, in one sentence: **reconcile for a provider-native
+technology is the provider's own interface, answered or honestly silent —
+never the mux contract approximated.** Concretely, in
+`crates/aikit-cli/src/session_provider_reconcile.rs`, applied as a split at
+the top of `Service::session_reconcile`:
+
+- Routing is a registry question, answered without any probe: the plan's
+  declared technology must resolve to an entry with no mux adapter and a
+  working environment. No declared technology, a built-in mux, or an
+  unregistered name returns `None` and the mux path runs byte-for-byte as
+  before.
+- Non-destructive reconcile (`CreateOrAttach`) = the provider's own
+  `open()` — its create-or-attach primitive — followed by *reflecting* what
+  it reported: health, the provider-native place id, the binding count
+  (`standing: "reflected"`). A provider that answers but reports itself
+  degraded or unavailable is still an answer; it is reflected with a warning,
+  not laundered into failure.
+- The provider refusing or failing to answer (its `open()` errors — including
+  spawn failure when the binary is absent) degrades to the named honest state
+  `standing: "protocol-opacity"`, carrying the provider's refusal verbatim.
+  No crash, no exit-code failure, and above all no mux-shaped answer
+  fabricated around the gap. Routing deliberately runs no `detect()`: the
+  provider's own failure is the truth about reachability, and one probe less
+  is one fewer way to mistake absence for refusal.
+- Destructive reconcile (`--destructive`, `Exact`/kill) has no provider-native
+  inverse in this build and is declared unavailable without contacting the
+  provider (`standing: "declared-unavailable"`), naming the working-surface
+  verbs as the route that drives the place today. Growing provider-native
+  inverses remains the #114-sized follow-up.
+- Wire shape: the `session reconcile` reply gains a `provider_native` object
+  (`{technology, provider, standing}`) only on the provider-native path; the
+  mux path's reply is byte-identical to before.
+
+### Test doubles — herdr never spawned
+
+`PlaceTechnologyRegistry::from_entries` composes a registry from exactly the
+given entries (the composition the registry doc already promised), so tests
+supply herdr test doubles implementing `PlaceTechnologyAdapter` +
+`WorkingEnvironmentProvider` in test scope: canned observations, canned
+refusals, detection by construction. No test in this change spawns herdr or
+touches `~/.config/herdr/herdr.sock`; the destructive-routing test proves
+herdr routes through the *real* builtin registry with zero I/O.
+
+Pins for "unchanged": the mux reconcile path is untouched code behind the
+`None` return and remains covered by the existing
+`session_integration.rs` tmux tests (run in this lane's gates), plus unit
+tests asserting the router yields `None` for mux, unregistered, and
+undeclared plans.
