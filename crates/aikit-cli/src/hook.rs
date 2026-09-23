@@ -86,6 +86,9 @@ pub fn dispatch_with_entry(
     // the owner at each causal orientation event rather than caching a session
     // prompt. A missing/non-Central world remains a normal AIKit world.
     let central_root = crate::temporal::process_central_root(event.cwd.as_deref());
+    let floor_ledger = aikit_store::AikitHome::discover()
+        .ok()
+        .map(|home| crate::temporal::FloorLedger::in_state(&home.state()));
     crate::temporal::session_floor(
         &mut decision,
         event,
@@ -95,6 +98,8 @@ pub fn dispatch_with_entry(
         // costs the budget and becomes a warning — never a stalled prompt.
         &SystemRunner::probe(),
         lean_entry,
+        crate::temporal::process_is_occupied(),
+        floor_ledger.as_ref(),
     );
     // Gateway contact: Communiques for this body's Position ride its turn
     // boundary; staged here, marked delivered only once the document is written.

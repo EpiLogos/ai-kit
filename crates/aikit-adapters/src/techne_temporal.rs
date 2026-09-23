@@ -261,7 +261,7 @@ mod tests {
         CentralTemporalGround {
             project: "example".to_owned(),
             now,
-            flows: Vec::new(),
+            day: None,
         }
     }
 
