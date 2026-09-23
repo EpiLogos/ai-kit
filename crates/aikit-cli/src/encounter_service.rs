@@ -1744,8 +1744,15 @@ impl EncounterService {
             EncounterRequest::Status { agent_session } => {
                 let resident = self.resident(&agent_session)?;
                 let identity = resident.host.identity(&agent_session)?;
+                // The status reading names the acting body exactly as the open
+                // receipt did: the configured provider id/label, the pinned
+                // body_ref/body_revision (a body-less ordinary provider leaves
+                // them null) and the observed model facts. Consumers that must
+                // require an exact body read them from here, never from a
+                // persisted active flag.
+                let binding = resident.lane.binding();
                 Ok(
-                    json!({"agent_session":agent_session,"native_session_id":identity.binding.native_session_id,"state":format!("{:?}",identity.state),"error":resident.host.transport_error(),"permissions":self.permissions.lock().map_err(error)?.get(&agent_session).map(|r|r.values().cloned().collect::<Vec<_>>()).unwrap_or_default(),"permission_authority":"native-provider-consent"}),
+                    json!({"agent_session":agent_session,"native_session_id":identity.binding.native_session_id,"state":format!("{:?}",identity.state),"error":resident.host.transport_error(),"permissions":self.permissions.lock().map_err(error)?.get(&agent_session).map(|r|r.values().cloned().collect::<Vec<_>>()).unwrap_or_default(),"permission_authority":"native-provider-consent","provider":{"id":resident.provider,"label":resident.provider_label,"protocol":resident.protocol,"body_ref":resident.body_ref,"body_revision":resident.body_revision},"model_observation":binding.model_observation}),
                 )
             }
         }
