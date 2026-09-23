@@ -534,6 +534,7 @@ fn resolve_binding(
         "resolved_path": binding.resolved_path,
         "resolved_against": binding.resolved_against,
         "classification": classification,
+        "gap_owner": practice["gap_owner"].clone(),
         "note": binding.note,
     })
 }
