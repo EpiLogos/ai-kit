@@ -190,6 +190,34 @@ Checked against current public provider/owner sources on **22 September 2026**:
 
 The installed live-provider episode must record the actual provider-returned model, usage and effective local service versions again. These dated external checks establish the implementation basis; they are not a substitute for that live observation.
 
+## World projection (`world` family)
+
+Beside each participant's prepared view, the `world` family holds one
+`aikit.world-projection/v1` per Position (or per AgentSession when no Position
+resolved): the refs, revisions, cursors and digests of the joined
+`aikit whoami` reading — World, Project World, Position revision, occupant
+generation, Agent/Agency/AgentSession/SessionSpace, Workcell, root/child NOW
+revisions, current-work refs and digest, Return destination, prepared-view
+version and each peer's occupancy word — plus each facet's state and one-line
+summary. It never holds spec, Wiki or NOW bodies.
+
+Keys are `{prefix}:world:{blake3(subject)}` and `{prefix}:world-meta:{blake3(subject)}`.
+Publication is compare-and-swap exactly like the prepared view: the new
+version must be the stored version plus one, and a late writer is refused as
+stale. The projection's `identity_digest` must match its identity or it is
+refused on write and read.
+
+```sh
+aikit whoami --publish --redis-config redis-now.json   # live joins, then CAS publish
+aikit whoami --hot --redis-config redis-now.json       # projection first (age + basis), live fallback
+aikit whoami --rebuild --redis-config redis-now.json   # recompute from owners, republish
+```
+
+`AIKIT_WORLD_REDIS_CONFIG` may name the configuration instead of the flag; an
+encounter provider's `now_context` block is accepted as well. Losing the
+projection loses no identity: every value is recomputed from its owner, and
+the tests prove publish → delete → rebuild yields identical identity refs.
+
 ## Joined proof
 
 The reusable runner is:

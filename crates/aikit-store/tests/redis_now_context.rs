@@ -166,3 +166,74 @@ fn redis_preserves_versioned_participant_context_changes_revocation_and_delivery
         Some(second)
     );
 }
+
+fn world_projection(version: u64, subject: &str) -> aikit_store::now_context::WorldProjection {
+    use aikit_core::inhabitation::{FacetState, InhabitationIdentity};
+    let identity = InhabitationIdentity {
+        local_world_ref: Some("control:root".into()),
+        project_world_ref: Some("project:O-I".into()),
+        position_ref: Some(subject.into()),
+        occupant_generation: Some("actuation:generation:g1".into()),
+        root_now_ref: Some("central:now:control:root:r".into()),
+        root_now_revision: Some(format!("rev-{version}")),
+        ..InhabitationIdentity::default()
+    };
+    aikit_store::now_context::WorldProjection {
+        schema: aikit_store::now_context::WORLD_PROJECTION_SCHEMA.into(),
+        subject: subject.into(),
+        version,
+        identity_digest: identity.digest(),
+        identity,
+        facet_states: BTreeMap::from([("position".to_owned(), FacetState::Present)]),
+        facet_summaries: BTreeMap::from([("position".to_owned(), subject.to_owned())]),
+        published_at_unix_ms: 1,
+    }
+}
+
+#[test]
+fn redis_world_projection_is_cas_versioned_refs_only_and_survives_loss() {
+    let Ok(address) = std::env::var("AIKIT_TEST_REDIS_ADDR") else {
+        eprintln!("AIKIT_TEST_REDIS_ADDR absent; real Redis integration is exercised by the dedicated workflow");
+        return;
+    };
+    let store = RedisNowStore::new(config(address)).unwrap();
+    let subject = "central:position:project:O-I:aikit-guardian";
+    assert_eq!(store.world_version(subject, None).unwrap(), 0);
+    assert_eq!(store.read_world(subject, None).unwrap(), None);
+
+    let first = world_projection(1, subject);
+    assert_eq!(store.publish_world(&first, 0, None).unwrap(), 1);
+    assert_eq!(
+        store.read_world(subject, None).unwrap(),
+        Some(first.clone())
+    );
+    // A late writer holding the old version is refused, never last-wins.
+    assert_eq!(
+        store.publish_world(&first, 0, None).unwrap_err().code(),
+        "now_context.stale"
+    );
+    let second = world_projection(2, subject);
+    assert_eq!(store.publish_world(&second, 1, None).unwrap(), 2);
+    assert_eq!(store.world_version(subject, None).unwrap(), 2);
+
+    // A projection whose digest does not match its identity is refused.
+    let mut forged = world_projection(3, subject);
+    forged.identity.position_ref = Some("central:position:project:O-I:other".into());
+    assert_eq!(
+        store.publish_world(&forged, 2, None).unwrap_err().code(),
+        "world_projection.invalid"
+    );
+
+    // Loss: both keys go; the next publish starts again from version 1.
+    store.delete_world(subject, None).unwrap();
+    assert_eq!(store.world_version(subject, None).unwrap(), 0);
+    assert_eq!(store.read_world(subject, None).unwrap(), None);
+    let rebuilt = world_projection(1, subject);
+    assert_eq!(store.publish_world(&rebuilt, 0, None).unwrap(), 1);
+    assert_eq!(
+        store.read_world(subject, None).unwrap().unwrap().identity,
+        first.identity,
+        "semantic identity is recomputed, not remembered"
+    );
+    store.delete_world(subject, None).unwrap();
+}

@@ -2037,6 +2037,39 @@ impl Service {
         &self,
         event: &aikit_core::hooks::HookEvent,
     ) -> Result<aikit_core::hooks::HookDecision> {
+        self.dispatch_hook_inhabited(event)
+            .map(|(decision, _refocus)| decision)
+    }
+
+    /// [`Service::dispatch_hook`] plus World inhabitation: at SessionStart a
+    /// resolvable Position occupancy replaces the historical temporal floor
+    /// with the lean entry, and a due Refocus rides the decision. The Refocus
+    /// is returned uncommitted — the caller records it delivered only after
+    /// the harness output carrying it was written.
+    pub fn dispatch_hook_inhabited(
+        &self,
+        event: &aikit_core::hooks::HookEvent,
+    ) -> Result<(
+        aikit_core::hooks::HookDecision,
+        Option<crate::refocus::RefocusCommit>,
+    )> {
+        let inhabitation = crate::refocus::hook_prepare_process(&self.home, event);
+        let mut decision = self.dispatch_hook_chain(event, inhabitation.lean_entry.as_deref())?;
+        decision.warnings.extend(inhabitation.warnings);
+        let refocus = inhabitation.refocus;
+        if let Some(commit) = &refocus {
+            if decision.allowed {
+                decision.injected.push(commit.text.clone());
+            }
+        }
+        Ok((decision, refocus))
+    }
+
+    fn dispatch_hook_chain(
+        &self,
+        event: &aikit_core::hooks::HookEvent,
+        lean_entry: Option<&str>,
+    ) -> Result<aikit_core::hooks::HookDecision> {
         use aikit_core::hooks::{build_chains, HookChain};
         let chains = build_chains(&self.view, &self.catalog)?;
         let chain = match chains.get(event.kind.as_str()) {
@@ -2048,12 +2081,13 @@ impl Service {
             )?,
         };
         let roots = self.catalog.capsule_roots();
-        let mut decision = crate::hook::dispatch(
+        let mut decision = crate::hook::dispatch_with_entry(
             &self.index,
             &self.descriptor.context_id,
             &chain,
             event,
             &roots,
+            lean_entry,
         )?;
 
         // W1 reaction engine. The floor (Central's temporal reground) already
