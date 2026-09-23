@@ -530,8 +530,8 @@ pub fn current_work_refs(reading: &Value) -> std::collections::BTreeMap<String, 
         }
     }
     for candidate in array(reading, &["candidates"]) {
-        let resolved = pick(&candidate, &["resolution"]).is_none_or(|r| r == "resolved");
-        let same_node = match (&node, pick(&candidate, &["node_ref", "nodeRef"])) {
+        let resolved = pick(candidate, &["resolution"]).is_none_or(|r| r == "resolved");
+        let same_node = match (&node, pick(candidate, &["node_ref", "nodeRef"])) {
             (Some(node), Some(candidate_node)) => *node == candidate_node,
             _ => true,
         };
@@ -539,15 +539,15 @@ pub fn current_work_refs(reading: &Value) -> std::collections::BTreeMap<String, 
             continue;
         }
         for key in ["work_ref", "run_ref", "journey_ref", "workflow_unit_ref"] {
-            if let Some(value) = pick(&candidate, &[key, camel(key).as_str()]) {
+            if let Some(value) = pick(candidate, &[key, camel(key).as_str()]) {
                 refs.entry(key.to_owned()).or_insert(value);
             }
         }
-        if let Some(status) = pick(&candidate, &["status"]) {
+        if let Some(status) = pick(candidate, &["status"]) {
             refs.entry("state".to_owned()).or_insert(status);
         }
-        if pick(&candidate, &["source"]).as_deref() == Some("custody") {
-            if let Some(custody) = pick(&candidate, &["source_ref", "sourceRef"]) {
+        if pick(candidate, &["source"]).as_deref() == Some("custody") {
+            if let Some(custody) = pick(candidate, &["source_ref", "sourceRef"]) {
                 refs.entry("custody_ref".to_owned()).or_insert(custody);
             }
         }
