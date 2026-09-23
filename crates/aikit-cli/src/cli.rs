@@ -361,6 +361,97 @@ pub enum NowContextSub {
     AppendChange(NowAppendChangeArgs),
     /// Revoke one participant's cached material at the disclosure boundary.
     Revoke(NowRevokeArgs),
+    /// Assemble the native `aikit.contemplation-field/v1`: telos anchor, UX
+    /// spine (stories/practices/coverage), practice→Skill bindings, capability
+    /// matrix (with code/test refs and grid relations), changed subject,
+    /// GitNexus code lens and deterministic cross-lens joins — the native
+    /// continuation of `scripts/jev-redis/assemble_contemplation.py`.
+    Field(Box<NowFieldArgs>),
+}
+
+#[derive(Debug, Args)]
+pub struct NowFieldArgs {
+    /// A typed `aikit.contemplation-field-request/v1` JSON file. When given,
+    /// every other flag below is ignored (the request carries the same
+    /// fields under their schema names).
+    #[arg(long = "request-file", value_name = "PATH")]
+    pub request_file: Option<std::path::PathBuf>,
+    /// A project's ProjectCentral dir; matrix carriers are discovered telos-
+    /// first (`user/telos/`, then `user/`, then `telos/`), exactly as
+    /// `assemble_contemplation.py` does.
+    #[arg(long, value_name = "DIR")]
+    pub projectcentral: Option<std::path::PathBuf>,
+    #[arg(long = "matrix-manifest", value_name = "PATH")]
+    pub matrix_manifest: Option<std::path::PathBuf>,
+    #[arg(long = "matrix-csv", value_name = "PATH")]
+    pub matrix_csv: Option<std::path::PathBuf>,
+    /// `ql.ux-spine-trace/1` JSON.
+    #[arg(long = "spine-trace", value_name = "PATH")]
+    pub spine_trace: Option<std::path::PathBuf>,
+    /// The Git repository the spine trace is checked out in; `canonical_skill`
+    /// resolves relative to its root. Defaults to the spine trace file's own
+    /// containing Git repository.
+    #[arg(long = "spine-repo-root", value_name = "DIR")]
+    pub spine_repo_root: Option<std::path::PathBuf>,
+    /// The ai-kit repository root that `native_skill_ref` values prefixed
+    /// `ai-kit:` resolve against. Defaults to this invocation's own repo root.
+    #[arg(long = "ai-kit-repo-root", value_name = "DIR")]
+    pub ai_kit_repo_root: Option<std::path::PathBuf>,
+    /// A telos goal folder (`goal.md` + `tracks/`); anchors the field in the
+    /// long horizon.
+    #[arg(long = "telos-goal-dir", value_name = "DIR")]
+    pub telos_goal_dir: Option<std::path::PathBuf>,
+    #[arg(long = "serving-track", value_name = "TRACK")]
+    pub serving_track: Option<String>,
+    #[arg(long = "now-ref", value_name = "RESOURCE_REF")]
+    pub now_ref: Option<String>,
+    #[arg(long = "central-root", value_name = "DIR")]
+    pub central_root: Option<std::path::PathBuf>,
+    #[arg(long = "ctrl-bin", value_name = "PATH")]
+    pub ctrl_bin: Option<std::path::PathBuf>,
+    #[arg(long = "redis-config", value_name = "PATH")]
+    pub redis_config: Option<std::path::PathBuf>,
+    #[arg(long = "redis-participant-ref", value_name = "RESOURCE_REF")]
+    pub redis_participant_ref: Option<String>,
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
+    #[arg(long = "wiki-query", value_name = "QUERY")]
+    pub wiki_queries: Vec<String>,
+    /// Forward (planning/development) or returning (review/analysis) pass.
+    #[arg(
+        long,
+        value_name = "prospective|retrospective",
+        default_value = "prospective"
+    )]
+    pub pass: String,
+    /// A Return or evidence document for the retrospective pass.
+    #[arg(long = "return", value_name = "PATH")]
+    pub return_file: Option<std::path::PathBuf>,
+    /// The changed subject's repository.
+    #[arg(long, value_name = "DIR")]
+    pub repo: Option<std::path::PathBuf>,
+    /// A stable GitNexus registry alias for the repo. Defaults to the
+    /// directory's own name, which collides when a repo is checked out at
+    /// more than one path under the same basename (e.g. a lane worktree
+    /// beside the primary checkout) — name it explicitly in that case.
+    #[arg(long = "repo-name", value_name = "NAME")]
+    pub repo_name: Option<String>,
+    #[arg(long, value_name = "REVISION")]
+    pub base: Option<String>,
+    #[arg(long, default_value = "HEAD", value_name = "REVISION")]
+    pub head: String,
+    /// Bound on how many changed-file symbols get a GitNexus context/impact reading.
+    #[arg(long = "max-code-symbols", default_value_t = 8)]
+    pub max_code_symbols: usize,
+    /// `gitnexus` binary override (tests point this at a scripted double).
+    #[arg(long = "gitnexus-binary", value_name = "PATH")]
+    pub gitnexus_binary: Option<String>,
+    /// An `oi.experience.coverage-reading/v1` document (from
+    /// `python3 scripts/experience_map.py --output-dir` in O-I). Without it,
+    /// capability→story/practice relations are not fabricated as candidates —
+    /// only Jev may propose those, and this field assembler runs before Jev.
+    #[arg(long = "experience-reading", value_name = "PATH")]
+    pub experience_reading: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -1284,6 +1375,119 @@ pub enum KnowledgeSub {
     History(KnowledgeHistoryArgs),
     Status(KnowledgeStatusArgs),
     Forget(KnowledgeForgetCmd),
+    /// Call the GitNexus-backed code lens directly, with the same provenance
+    /// envelope (provider, version, tested version, drift, SourceRef, source
+    /// revision, CodeReference, operation, basis) the contemplation field uses.
+    Code(KnowledgeCodeCmd),
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeCodeCmd {
+    #[command(subcommand)]
+    pub command: KnowledgeCodeSub,
+}
+
+/// Shared repo/binding flags every `knowledge code` verb needs.
+#[derive(Debug, Args)]
+pub struct KnowledgeCodeRepoArgs {
+    /// The Git repository this code reference/index lives in.
+    #[arg(long, value_name = "DIR")]
+    pub repo: std::path::PathBuf,
+    /// A stable name for the index (defaults to the repo directory's name).
+    #[arg(long = "repo-name", value_name = "NAME")]
+    pub repo_name: Option<String>,
+    /// `gitnexus` binary override.
+    #[arg(long = "gitnexus-binary", value_name = "PATH")]
+    pub gitnexus_binary: Option<String>,
+    /// Exact source revision this reading is bound to (defaults to `git rev-parse HEAD`).
+    #[arg(long, value_name = "REVISION")]
+    pub revision: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum KnowledgeCodeSub {
+    /// Detection status: provider, installed/tested version, drift, indexed, capabilities.
+    Status(KnowledgeCodeRepoArgs),
+    /// Index (or re-index) the repository.
+    Index(KnowledgeCodeIndexArgs),
+    /// Symbol/path search.
+    Search(KnowledgeCodeSearchArgs),
+    /// Symbol context.
+    Context(KnowledgeCodeSymbolArgs),
+    /// Upstream/downstream impact of a symbol.
+    Impact(KnowledgeCodeImpactArgs),
+    /// Trace a path between two symbols.
+    Trace(KnowledgeCodeTraceArgs),
+    /// Detect changed symbols/affected processes.
+    Changes(KnowledgeCodeChangesArgs),
+    /// Structural check (e.g. import cycles).
+    Check(KnowledgeCodeRepoArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeCodeIndexArgs {
+    #[command(flatten)]
+    pub repo: KnowledgeCodeRepoArgs,
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeCodeSearchArgs {
+    #[command(flatten)]
+    pub repo: KnowledgeCodeRepoArgs,
+    #[arg(value_name = "QUERY")]
+    pub query: String,
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeCodeSymbolArgs {
+    #[command(flatten)]
+    pub repo: KnowledgeCodeRepoArgs,
+    #[arg(long, value_name = "SYMBOL")]
+    pub symbol: String,
+    #[arg(long, value_name = "PATH")]
+    pub file: String,
+    #[arg(long, value_name = "KIND")]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeCodeImpactArgs {
+    #[command(flatten)]
+    pub symbol: KnowledgeCodeSymbolArgs,
+    #[arg(long, default_value = "upstream", value_name = "upstream|downstream")]
+    pub direction: String,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeCodeTraceArgs {
+    #[command(flatten)]
+    pub repo: KnowledgeCodeRepoArgs,
+    #[arg(long = "from-symbol", value_name = "SYMBOL")]
+    pub from_symbol: String,
+    #[arg(long = "from-file", value_name = "PATH")]
+    pub from_file: String,
+    #[arg(long = "to-symbol", value_name = "SYMBOL")]
+    pub to_symbol: String,
+    #[arg(long = "to-file", value_name = "PATH")]
+    pub to_file: String,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeCodeChangesArgs {
+    #[command(flatten)]
+    pub repo: KnowledgeCodeRepoArgs,
+    #[arg(
+        long,
+        default_value = "unstaged",
+        value_name = "unstaged|staged|all|compare"
+    )]
+    pub scope: String,
+    #[arg(long = "base-ref", value_name = "REVISION")]
+    pub base_ref: Option<String>,
 }
 
 #[derive(Debug, Args)]

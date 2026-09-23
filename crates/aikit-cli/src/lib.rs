@@ -21,6 +21,7 @@ pub mod closeout;
 mod cmux_config;
 pub mod collate;
 pub mod config_plane;
+pub mod contemplation_field;
 pub mod continuity_disclosure;
 pub mod control_ground;
 pub mod credential;
