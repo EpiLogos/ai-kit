@@ -495,6 +495,69 @@ fn find_position_entry<'v>(value: &'v Value, position: &str) -> Option<&'v Value
     }
 }
 
+/// The refs of a single current work node, from Factory's
+/// `factory.current-work/v1` answer: the node itself (`current.node_ref`, its
+/// singleton `work_refs` / `journey_refs` / `custody_refs`) joined with the
+/// resolved candidates naming that node (which carry the Run, WorkflowUnit and
+/// status). Direct keys on `current` are honoured too.
+pub fn current_work_refs(reading: &Value) -> std::collections::BTreeMap<String, String> {
+    let mut refs = std::collections::BTreeMap::new();
+    let current = &reading["current"];
+    let node = pick(current, &["node_ref", "nodeRef"]);
+    for key in [
+        "custody_ref",
+        "work_ref",
+        "run_ref",
+        "journey_ref",
+        "workflow_unit_ref",
+        "state",
+    ] {
+        if let Some(value) = pick(current, &[key, camel(key).as_str()]) {
+            refs.insert(key.to_owned(), value);
+        }
+    }
+    for (plural, key) in [
+        ("work_refs", "work_ref"),
+        ("journey_refs", "journey_ref"),
+        ("custody_refs", "custody_ref"),
+    ] {
+        let values = array(current, &[plural, camel(plural).as_str()]);
+        if let [only] = values.as_slice() {
+            if let Some(value) = only.as_str() {
+                refs.entry(key.to_owned())
+                    .or_insert_with(|| value.to_owned());
+            }
+        }
+    }
+    for candidate in array(reading, &["candidates"]) {
+        let resolved = pick(&candidate, &["resolution"]).is_none_or(|r| r == "resolved");
+        let same_node = match (&node, pick(&candidate, &["node_ref", "nodeRef"])) {
+            (Some(node), Some(candidate_node)) => *node == candidate_node,
+            _ => true,
+        };
+        if !resolved || !same_node {
+            continue;
+        }
+        for key in ["work_ref", "run_ref", "journey_ref", "workflow_unit_ref"] {
+            if let Some(value) = pick(&candidate, &[key, camel(key).as_str()]) {
+                refs.entry(key.to_owned()).or_insert(value);
+            }
+        }
+        if let Some(status) = pick(&candidate, &["status"]) {
+            refs.entry("state".to_owned()).or_insert(status);
+        }
+        if pick(&candidate, &["source"]).as_deref() == Some("custody") {
+            if let Some(custody) = pick(&candidate, &["source_ref", "sourceRef"]) {
+                refs.entry("custody_ref".to_owned()).or_insert(custody);
+            }
+        }
+    }
+    if let Some(node) = node {
+        refs.entry("work_ref".to_owned()).or_insert(node);
+    }
+    refs
+}
+
 /// A digest of the current-work answer that changes exactly when the work
 /// the Position carries changes (outcome and the refs it names).
 pub fn current_work_digest(reading: &Value) -> Option<String> {
@@ -1371,18 +1434,7 @@ pub fn join(owners: &Owners<'_>, input: &JoinInput, reads: &AikitReads<'_>) -> J
                         match outcome.as_str() {
                             "one" => {
                                 let current = &data["current"];
-                                for key in [
-                                    "custody_ref",
-                                    "work_ref",
-                                    "run_ref",
-                                    "journey_ref",
-                                    "workflow_unit_ref",
-                                ] {
-                                    if let Some(value) = pick(current, &[key, camel(key).as_str()])
-                                    {
-                                        identity.current_work_refs.insert(key.to_owned(), value);
-                                    }
-                                }
+                                identity.current_work_refs = current_work_refs(data);
                                 let refs = &identity.current_work_refs;
                                 facets.current_work = Facet::present(
                                     work_source,
@@ -1392,7 +1444,9 @@ pub fn join(owners: &Owners<'_>, input: &JoinInput, reads: &AikitReads<'_>) -> J
                                             .or(refs.get("custody_ref"))
                                             .map(String::as_str)
                                             .unwrap_or("?"),
-                                        pick(current, &["state"])
+                                        refs.get("state")
+                                            .cloned()
+                                            .or_else(|| pick(current, &["state"]))
                                             .unwrap_or_else(|| "in-progress".into()),
                                         refs.get("run_ref").map(String::as_str).unwrap_or("-")
                                     ),
@@ -2935,5 +2989,41 @@ pub(crate) mod tests {
             serde_json::to_string(&projection).unwrap().len() < 16 * 1024,
             "refs only"
         );
+    }
+    #[test]
+    fn current_work_refs_read_factorys_real_current_work_shape() {
+        // Shape emitted by `factory development current-work` (EpiLogos/Factory#260).
+        let reading = json!({
+            "schema": "factory.current-work/v1",
+            "outcome": "one",
+            "current": {
+                "node_ref": "github:EpiLogos/Factory#261",
+                "kind": "work",
+                "work_refs": ["github:EpiLogos/Factory#261"],
+                "journey_refs": ["journey:01M38BNMZ0YVZ3DQ9VSDKYEZKY"],
+                "custody_refs": ["factory:custody:01a0d080"],
+                "attempt_refs": []
+            },
+            "candidates": [{
+                "source": "custody", "source_ref": "factory:custody:01a0d080",
+                "resolution": "resolved", "node_ref": "github:EpiLogos/Factory#261",
+                "work_ref": "github:EpiLogos/Factory#261", "run_ref": "run:01M38BNMZ05K9HV7TJZ5QEW5JZ",
+                "journey_ref": "journey:01M38BNMZ0YVZ3DQ9VSDKYEZKY", "status": "in-progress"
+            }],
+            "considered": 1
+        });
+        let refs = current_work_refs(&reading);
+        assert_eq!(refs["work_ref"], "github:EpiLogos/Factory#261");
+        assert_eq!(refs["run_ref"], "run:01M38BNMZ05K9HV7TJZ5QEW5JZ");
+        assert_eq!(refs["journey_ref"], "journey:01M38BNMZ0YVZ3DQ9VSDKYEZKY");
+        assert_eq!(refs["custody_ref"], "factory:custody:01a0d080");
+        assert_eq!(refs["state"], "in-progress");
+
+        // A different work node changes the digest the Refocus transition reads.
+        let mut moved = reading.clone();
+        moved["current"]["node_ref"] = json!("github:EpiLogos/Factory#262");
+        moved["candidates"][0]["node_ref"] = json!("github:EpiLogos/Factory#262");
+        moved["candidates"][0]["work_ref"] = json!("github:EpiLogos/Factory#262");
+        assert_ne!(current_work_digest(&reading), current_work_digest(&moved));
     }
 }

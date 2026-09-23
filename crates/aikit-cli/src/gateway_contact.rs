@@ -1443,11 +1443,22 @@ pub fn who(
         };
         row["current_work"] = match owners.current_work(&reference, &work_dir) {
             Ok(reading) => {
-                let current = reading.get("current").filter(|current| !current.is_null());
+                // One reading of Factory's answer for every consumer: the same
+                // refs `aikit whoami` and Refocus derive (node + resolved candidates).
+                let outcome = reading
+                    .get("outcome")
+                    .cloned()
+                    .unwrap_or(json!("unavailable"));
+                let refs = if outcome == json!("one") {
+                    crate::inhabitation::current_work_refs(&reading)
+                } else {
+                    Default::default()
+                };
                 json!({
-                    "outcome": reading.get("outcome").cloned().unwrap_or(json!("unavailable")),
-                    "work_ref": current.and_then(|c| c.get("work_ref").or_else(|| c.get("node_ref"))),
-                    "run_ref": current.and_then(|c| c.get("run_ref")),
+                    "outcome": outcome,
+                    "work_ref": refs.get("work_ref"),
+                    "run_ref": refs.get("run_ref"),
+                    "custody_ref": refs.get("custody_ref"),
                     "candidates": reading.get("candidates").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
                 })
             }
