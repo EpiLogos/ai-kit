@@ -25,6 +25,8 @@ EXPECTED_SKILLS = {
     "skill/aikit/meta-harness-craft",
     "skill/aikit/wiki-inhabitation",
     "skill/aikit/experience-campaign",
+    "skill/aikit/named-praxis",
+    "skill/aikit/session-continuity",
 }
 EXPECTED_GUIDANCE = {
     "guidance/aikit/living-project-collaboration",

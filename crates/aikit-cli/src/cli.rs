@@ -361,6 +361,193 @@ pub enum NowContextSub {
     AppendChange(NowAppendChangeArgs),
     /// Revoke one participant's cached material at the disclosure boundary.
     Revoke(NowRevokeArgs),
+    /// Assemble the native `aikit.contemplation-field/v1`: telos anchor, UX
+    /// spine (stories/practices/coverage), practice→Skill bindings, capability
+    /// matrix (with code/test refs and grid relations), changed subject,
+    /// GitNexus code lens and deterministic cross-lens joins — the native
+    /// continuation of `scripts/jev-redis/assemble_contemplation.py`.
+    Field(Box<NowFieldArgs>),
+    /// Build the typed `aikit.contemplation-questions/v1` set over an
+    /// assembled field and invoke Jev, returning `aikit.contemplation-
+    /// decision/v1`.
+    Contemplate(NowContemplateArgs),
+    /// Prepare `aikit.test-selection/v1` (JSON + Markdown) from a field and
+    /// an optional prior contemplation decision. A pure read/compose view —
+    /// no new store, no acceptance database.
+    TestSelection(NowTestSelectionArgs),
+    /// Publish the field, an optional decision and an optional test-selection
+    /// into the participant's prepared view through the existing CAS publish
+    /// path, and append one replayable change per published item.
+    PublishIntelligence(Box<NowPublishIntelligenceArgs>),
+}
+
+#[derive(Debug, Args)]
+pub struct NowContemplateArgs {
+    /// The assembled `aikit.contemplation-field/v1` document.
+    #[arg(long, value_name = "PATH")]
+    pub field: std::path::PathBuf,
+    /// Forward (planning/development) or returning (review/analysis) pass.
+    #[arg(
+        long,
+        value_name = "prospective|retrospective",
+        default_value = "prospective"
+    )]
+    pub pass: String,
+    #[arg(long = "limits-file", value_name = "PATH")]
+    pub limits_file: std::path::PathBuf,
+    /// Native secret reference (varlock://, pass://, keychain://, op://; env:// requires explicit opt-in).
+    #[arg(long = "credential-ref", value_name = "SECRET_REF")]
+    pub credential_ref: String,
+    /// Deterministic protocol proof only: explicit loopback endpoint. Omit for the official provider.
+    #[arg(long = "controlled-endpoint", value_name = "HOST:PORT")]
+    pub controlled_endpoint: Option<std::net::SocketAddr>,
+    #[arg(long = "curl", value_name = "PATH")]
+    pub curl: Option<std::path::PathBuf>,
+    /// Permit a deliberately supplied env:// secret reference for this invocation only.
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
+    /// Minimum Noul score for a candidate to be treated as selected.
+    #[arg(long = "relevance-threshold", default_value_t = 0.5)]
+    pub relevance_threshold: f64,
+    #[arg(long = "invocation-ref", value_name = "RESOURCE_REF")]
+    pub invocation_ref: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct NowTestSelectionArgs {
+    /// The assembled `aikit.contemplation-field/v1` document.
+    #[arg(long, value_name = "PATH")]
+    pub field: std::path::PathBuf,
+    /// An `aikit.contemplation-decision/v1` from `now-context contemplate`.
+    #[arg(long, value_name = "PATH")]
+    pub decision: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct NowPublishIntelligenceArgs {
+    #[arg(long = "config-file", value_name = "PATH")]
+    pub config_file: std::path::PathBuf,
+    #[arg(long = "participant-ref", value_name = "RESOURCE_REF")]
+    pub participant_ref: String,
+    #[arg(long = "project-ref", value_name = "RESOURCE_REF")]
+    pub project_ref: String,
+    #[arg(long = "now-ref", value_name = "RESOURCE_REF")]
+    pub now_ref: String,
+    #[arg(long = "agent-session", value_name = "RESOURCE_REF")]
+    pub agent_session: String,
+    #[arg(long, value_name = "TEXT")]
+    pub concern: String,
+    #[arg(long = "disclosure-revision", value_name = "REVISION")]
+    pub disclosure_revision: String,
+    #[arg(long = "expected-version", value_name = "N")]
+    pub expected_version: u64,
+    /// The assembled `aikit.contemplation-field/v1` document.
+    #[arg(long = "field-file", value_name = "PATH")]
+    pub field_file: std::path::PathBuf,
+    /// An `aikit.contemplation-decision/v1` from `now-context contemplate`.
+    #[arg(long = "decision-file", value_name = "PATH")]
+    pub decision_file: Option<std::path::PathBuf>,
+    /// An `aikit.test-selection/v1` from `now-context test-selection`.
+    #[arg(long = "test-selection-file", value_name = "PATH")]
+    pub test_selection_file: Option<std::path::PathBuf>,
+    /// Central root to read `central.day.read` from, folding the Day ref/
+    /// revision into the prepared basis. Omit to leave the Day basis absent.
+    #[arg(long = "central-root", value_name = "DIR")]
+    pub central_root: Option<std::path::PathBuf>,
+    #[arg(long = "ctrl-bin", value_name = "PATH")]
+    pub ctrl_bin: Option<std::path::PathBuf>,
+    /// A `REF=REVISION` pair (repeatable) folded into the prepared basis —
+    /// e.g. a Workcell root/child NOW ref, supplied by the caller rather
+    /// than fetched.
+    #[arg(long = "now-basis-ref", value_name = "REF=REVISION")]
+    pub now_basis_refs: Vec<String>,
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NowFieldArgs {
+    /// A typed `aikit.contemplation-field-request/v1` JSON file. When given,
+    /// every other flag below is ignored (the request carries the same
+    /// fields under their schema names).
+    #[arg(long = "request-file", value_name = "PATH")]
+    pub request_file: Option<std::path::PathBuf>,
+    /// A project's ProjectCentral dir; matrix carriers are discovered telos-
+    /// first (`user/telos/`, then `user/`, then `telos/`), exactly as
+    /// `assemble_contemplation.py` does.
+    #[arg(long, value_name = "DIR")]
+    pub projectcentral: Option<std::path::PathBuf>,
+    #[arg(long = "matrix-manifest", value_name = "PATH")]
+    pub matrix_manifest: Option<std::path::PathBuf>,
+    #[arg(long = "matrix-csv", value_name = "PATH")]
+    pub matrix_csv: Option<std::path::PathBuf>,
+    /// `ql.ux-spine-trace/1` JSON.
+    #[arg(long = "spine-trace", value_name = "PATH")]
+    pub spine_trace: Option<std::path::PathBuf>,
+    /// The Git repository the spine trace is checked out in; `canonical_skill`
+    /// resolves relative to its root. Defaults to the spine trace file's own
+    /// containing Git repository.
+    #[arg(long = "spine-repo-root", value_name = "DIR")]
+    pub spine_repo_root: Option<std::path::PathBuf>,
+    /// The ai-kit repository root that `native_skill_ref` values prefixed
+    /// `ai-kit:` resolve against. Defaults to this invocation's own repo root.
+    #[arg(long = "ai-kit-repo-root", value_name = "DIR")]
+    pub ai_kit_repo_root: Option<std::path::PathBuf>,
+    /// A telos goal folder (`goal.md` + `tracks/`); anchors the field in the
+    /// long horizon.
+    #[arg(long = "telos-goal-dir", value_name = "DIR")]
+    pub telos_goal_dir: Option<std::path::PathBuf>,
+    #[arg(long = "serving-track", value_name = "TRACK")]
+    pub serving_track: Option<String>,
+    #[arg(long = "now-ref", value_name = "RESOURCE_REF")]
+    pub now_ref: Option<String>,
+    #[arg(long = "central-root", value_name = "DIR")]
+    pub central_root: Option<std::path::PathBuf>,
+    #[arg(long = "ctrl-bin", value_name = "PATH")]
+    pub ctrl_bin: Option<std::path::PathBuf>,
+    #[arg(long = "redis-config", value_name = "PATH")]
+    pub redis_config: Option<std::path::PathBuf>,
+    #[arg(long = "redis-participant-ref", value_name = "RESOURCE_REF")]
+    pub redis_participant_ref: Option<String>,
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
+    #[arg(long = "wiki-query", value_name = "QUERY")]
+    pub wiki_queries: Vec<String>,
+    /// Forward (planning/development) or returning (review/analysis) pass.
+    #[arg(
+        long,
+        value_name = "prospective|retrospective",
+        default_value = "prospective"
+    )]
+    pub pass: String,
+    /// A Return or evidence document for the retrospective pass.
+    #[arg(long = "return", value_name = "PATH")]
+    pub return_file: Option<std::path::PathBuf>,
+    /// The changed subject's repository.
+    #[arg(long, value_name = "DIR")]
+    pub repo: Option<std::path::PathBuf>,
+    /// A stable GitNexus registry alias for the repo. Defaults to the
+    /// directory's own name, which collides when a repo is checked out at
+    /// more than one path under the same basename (e.g. a lane worktree
+    /// beside the primary checkout) — name it explicitly in that case.
+    #[arg(long = "repo-name", value_name = "NAME")]
+    pub repo_name: Option<String>,
+    #[arg(long, value_name = "REVISION")]
+    pub base: Option<String>,
+    #[arg(long, default_value = "HEAD", value_name = "REVISION")]
+    pub head: String,
+    /// Bound on how many changed-file symbols get a GitNexus context/impact reading.
+    #[arg(long = "max-code-symbols", default_value_t = 8)]
+    pub max_code_symbols: usize,
+    /// `gitnexus` binary override (tests point this at a scripted double).
+    #[arg(long = "gitnexus-binary", value_name = "PATH")]
+    pub gitnexus_binary: Option<String>,
+    /// An `oi.experience.coverage-reading/v1` document (from
+    /// `python3 scripts/experience_map.py --output-dir` in O-I). Without it,
+    /// capability→story/practice relations are not fabricated as candidates —
+    /// only Jev may propose those, and this field assembler runs before Jev.
+    #[arg(long = "experience-reading", value_name = "PATH")]
+    pub experience_reading: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -469,12 +656,116 @@ pub enum RoutineSub {
     },
     /// List all admitted invocation envelopes in stable identity order.
     Invocations,
+    /// List stored Routines (and, read-only, the foreign harness timers that
+    /// no Routine claims).
+    List {
+        /// Only show Routines in this state: draft | enabled | disabled | stale-proof.
+        #[arg(long = "state", value_name = "STATE")]
+        state: Option<String>,
+    },
+    /// Show one stored Routine in full: proof, trigger, authority, binding.
+    Show {
+        #[arg(value_name = "ROUTINE_REF")]
+        routine_ref: String,
+    },
+    /// Create a Routine from a proven basis. The Routine sits in Draft until
+    /// explicitly enabled.
+    Create {
+        #[arg(long, value_name = "NAME")]
+        name: String,
+        #[arg(default_value = "", long, value_name = "TEXT")]
+        description: Option<String>,
+        #[arg(long, value_name = "REF")]
+        method: String,
+        /// ProvenMethodBasis JSON from `aikit method prove`. Prefix with @ for a file.
+        #[arg(long = "proof-json", value_name = "JSON|@FILE")]
+        proof_json: String,
+        /// Trigger JSON: an aikit.time-schedule/v1 record, or
+        /// {"kind":"manual"|"event"|"external", ...}. Prefix with @ for a file.
+        #[arg(long = "trigger-json", value_name = "JSON|@FILE")]
+        trigger_json: String,
+        /// RoutineAuthority JSON: authority_ref, revision, action_refs, granted,
+        /// unattended. Prefix with @ for a file.
+        #[arg(long = "authority-json", value_name = "JSON|@FILE")]
+        authority_json: String,
+        /// Opaque Central AgentProfile source relation.
+        #[arg(long = "agent-profile", value_name = "REF")]
+        agent_profile: Option<String>,
+        /// Context scope refs the run resolves inside.
+        #[arg(long = "context-scope", value_name = "REF")]
+        context_scope: Vec<String>,
+    },
+    /// Enable a stored Routine with a fresh authority receipt at the current
+    /// revision. Schedule and event triggers additionally require unattended
+    /// authority.
+    Enable {
+        #[arg(value_name = "ROUTINE_REF")]
+        routine_ref: String,
+        #[arg(long = "authority-json", value_name = "JSON|@FILE")]
+        authority_json: String,
+    },
+    /// Disable a stored Routine. Disabled Routines observe nothing.
+    Disable {
+        #[arg(value_name = "ROUTINE_REF")]
+        routine_ref: String,
+    },
+    /// Run a stored Routine now through the same authorisation gate.
+    RunNow {
+        #[arg(value_name = "ROUTINE_REF")]
+        routine_ref: String,
+    },
+    /// Replace a Routine's proof after a Method change. The Routine returns to
+    /// Disabled and must be explicitly enabled again.
+    Reprove {
+        #[arg(value_name = "ROUTINE_REF")]
+        routine_ref: String,
+        #[arg(long = "proof-json", value_name = "JSON|@FILE")]
+        proof_json: String,
+    },
+    /// Delete a stored Routine. Refuses while the Routine is Enabled.
+    Delete {
+        #[arg(value_name = "ROUTINE_REF")]
+        routine_ref: String,
+    },
+    /// Reconcile one foreign harness cron job (read-only over the harness
+    /// store) into a Routine. `--report` only reads and reports.
+    ImportForeign {
+        /// Foreign provider: openclaw-cron | hermes-cron.
+        #[arg(long, value_name = "PROVIDER")]
+        provider: String,
+        /// The job's id in the harness store.
+        #[arg(long = "job-id", value_name = "ID")]
+        job_id: String,
+        /// The Method this job's payload runs. Inferred when omitted.
+        #[arg(long, value_name = "REF")]
+        method: Option<String>,
+        /// ProvenMethodBasis JSON from `aikit method prove`. Prefix with @ for a file.
+        #[arg(long = "proof-json", value_name = "JSON|@FILE")]
+        proof_json: Option<String>,
+        /// Declare the Routine's intent to take over this timer; the harness
+        /// timer itself is retired by you, in the harness, after the Routine's
+        /// first admitted scheduled run.
+        #[arg(long = "adopt", conflicts_with = "report")]
+        adopt: bool,
+        /// Read-only reconciliation report; nothing is created.
+        #[arg(long = "report", conflicts_with = "adopt")]
+        report: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum GatewaySub {
-    /// Run the persistent gateway service until a `shutdown` command.
+    /// Run the persistent gateway service until a `shutdown` command. The
+    /// Routine dispatcher ticks every 30 seconds while the service runs.
     Serve(GatewayServeArgs),
+    /// Run exactly one dispatcher pass: resolve occurrences, admit due items,
+    /// dispatch, record outcomes, exit. No gateway required.
+    Tick,
+    /// Install the macOS user LaunchAgent that keeps the gateway (and the
+    /// dispatcher tick) alive across restart, sleep and reboot.
+    InstallService,
+    /// Remove the LaunchAgent.
+    UninstallService,
     /// Negotiate protocol versions with a running gateway.
     Protocol(GatewayQueryArgs),
     /// Discover the connectors and bindings of a running gateway.
@@ -1180,6 +1471,119 @@ pub enum KnowledgeSub {
     History(KnowledgeHistoryArgs),
     Status(KnowledgeStatusArgs),
     Forget(KnowledgeForgetCmd),
+    /// Call the GitNexus-backed code lens directly, with the same provenance
+    /// envelope (provider, version, tested version, drift, SourceRef, source
+    /// revision, CodeReference, operation, basis) the contemplation field uses.
+    Code(KnowledgeCodeCmd),
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeCodeCmd {
+    #[command(subcommand)]
+    pub command: KnowledgeCodeSub,
+}
+
+/// Shared repo/binding flags every `knowledge code` verb needs.
+#[derive(Debug, Args)]
+pub struct KnowledgeCodeRepoArgs {
+    /// The Git repository this code reference/index lives in.
+    #[arg(long, value_name = "DIR")]
+    pub repo: std::path::PathBuf,
+    /// A stable name for the index (defaults to the repo directory's name).
+    #[arg(long = "repo-name", value_name = "NAME")]
+    pub repo_name: Option<String>,
+    /// `gitnexus` binary override.
+    #[arg(long = "gitnexus-binary", value_name = "PATH")]
+    pub gitnexus_binary: Option<String>,
+    /// Exact source revision this reading is bound to (defaults to `git rev-parse HEAD`).
+    #[arg(long, value_name = "REVISION")]
+    pub revision: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum KnowledgeCodeSub {
+    /// Detection status: provider, installed/tested version, drift, indexed, capabilities.
+    Status(KnowledgeCodeRepoArgs),
+    /// Index (or re-index) the repository.
+    Index(KnowledgeCodeIndexArgs),
+    /// Symbol/path search.
+    Search(KnowledgeCodeSearchArgs),
+    /// Symbol context.
+    Context(KnowledgeCodeSymbolArgs),
+    /// Upstream/downstream impact of a symbol.
+    Impact(KnowledgeCodeImpactArgs),
+    /// Trace a path between two symbols.
+    Trace(KnowledgeCodeTraceArgs),
+    /// Detect changed symbols/affected processes.
+    Changes(KnowledgeCodeChangesArgs),
+    /// Structural check (e.g. import cycles).
+    Check(KnowledgeCodeRepoArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeCodeIndexArgs {
+    #[command(flatten)]
+    pub repo: KnowledgeCodeRepoArgs,
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeCodeSearchArgs {
+    #[command(flatten)]
+    pub repo: KnowledgeCodeRepoArgs,
+    #[arg(value_name = "QUERY")]
+    pub query: String,
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeCodeSymbolArgs {
+    #[command(flatten)]
+    pub repo: KnowledgeCodeRepoArgs,
+    #[arg(long, value_name = "SYMBOL")]
+    pub symbol: String,
+    #[arg(long, value_name = "PATH")]
+    pub file: String,
+    #[arg(long, value_name = "KIND")]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeCodeImpactArgs {
+    #[command(flatten)]
+    pub symbol: KnowledgeCodeSymbolArgs,
+    #[arg(long, default_value = "upstream", value_name = "upstream|downstream")]
+    pub direction: String,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeCodeTraceArgs {
+    #[command(flatten)]
+    pub repo: KnowledgeCodeRepoArgs,
+    #[arg(long = "from-symbol", value_name = "SYMBOL")]
+    pub from_symbol: String,
+    #[arg(long = "from-file", value_name = "PATH")]
+    pub from_file: String,
+    #[arg(long = "to-symbol", value_name = "SYMBOL")]
+    pub to_symbol: String,
+    #[arg(long = "to-file", value_name = "PATH")]
+    pub to_file: String,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeCodeChangesArgs {
+    #[command(flatten)]
+    pub repo: KnowledgeCodeRepoArgs,
+    #[arg(
+        long,
+        default_value = "unstaged",
+        value_name = "unstaged|staged|all|compare"
+    )]
+    pub scope: String,
+    #[arg(long = "base-ref", value_name = "REVISION")]
+    pub base_ref: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -2014,6 +2418,20 @@ pub enum MethodCommand {
     List {
         /// Only show methods whose name or payload contains this substring.
         filter: Option<String>,
+    },
+    /// Promote one proven Method run into a ProvenMethodBasis for Routine use.
+    ///
+    /// The Method must be catalogue-resolved at an exact revision; the proof
+    /// JSON carries the run's Activity/Return/Evidence/verification refs and
+    /// the invocation_succeeded/verification_passed facts. No proof, no
+    /// Routine — this is the gate, unchanged.
+    Prove {
+        /// The Method ref (`aikit method list` shows the ids).
+        #[arg(long, value_name = "REF")]
+        method: String,
+        /// MethodProofInput JSON. Prefix a path with @ to read a file.
+        #[arg(long = "proof-json", value_name = "JSON|@FILE")]
+        proof_json: String,
     },
 }
 

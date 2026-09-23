@@ -71,6 +71,7 @@ pub mod telegram_gateway;
 pub mod tool_sources;
 pub mod wiki_document;
 pub mod wiki_graph;
+pub mod work_repos;
 pub mod workcell_instance_intake;
 pub mod working_environment;
 pub mod working_environment_control;
@@ -158,7 +159,8 @@ pub use gateway_runtime::{
     GATEWAY_ECOLOGY_AUTHORITY_LAW, GATEWAY_INVOCATION_MODES,
 };
 pub use gateway_service::{
-    persist_gateway_state, restore_gateway_state, run_gateway_service, GatewayServiceConfig,
+    persist_gateway_state, restore_gateway_state, run_gateway_service,
+    run_gateway_service_with_ticks, GatewayServiceConfig, GatewayTick, GatewayTickLoop,
     DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION,
 };
 pub use harness_disclosure::{
@@ -211,6 +213,9 @@ pub use telegram_gateway::{
 pub use tool_sources::{
     plan_tools_projection, ToolServerRecord, ToolSourceEntry, ToolSourceError,
     ToolsProjectionOutcome, ToolsProjectionPlan, TOOLS_PROJECTION_OWNERSHIP,
+};
+pub use work_repos::{
+    discover_work_projects, WorkProjectEntry, WorkRepoProject, WorkReposSourcePoolProvider,
 };
 pub use working_environment::{
     MuxSessionSpaceActivationDriver, MuxWorkingEnvironment, NativeBindingKind,

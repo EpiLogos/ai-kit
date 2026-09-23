@@ -259,6 +259,23 @@ impl Routine {
                 "Routine proof must match the exact Method identity and revision",
             ));
         }
+        self.validate_stored()?;
+        self.authority.validate_for_method(method)?;
+        Ok(())
+    }
+
+    /// Validate everything about a stored Routine that does not require the
+    /// Method body: names, trigger, authority shape, proof shape and the
+    /// scheduler binding. The Method-relative checks run at the point of use
+    /// (`authorised_invocation_evidence`), where the exact Method body is
+    /// supplied.
+    pub fn validate_stored(&self) -> Result<()> {
+        if self.name.trim().is_empty() {
+            return Err(AikitError::new(
+                "routine.name_empty",
+                "Routine name must be non-empty",
+            ));
+        }
         if self.proof.version != METHOD_PROOF_VERSION {
             return Err(AikitError::new(
                 "routine.unsupported_proof_version",
@@ -280,7 +297,12 @@ impl Routine {
         ensure_unique_refs(&self.proof.evidence_refs, "proof Evidence")?;
         ensure_unique_refs(&self.proof.verification_refs, "proof verification")?;
         self.trigger.validate()?;
-        self.authority.validate_for_method(method)?;
+        if self.authority.action_refs.is_empty() {
+            return Err(AikitError::new(
+                "routine.action_authority_required",
+                "Routine authority must name at least one canonical Method Action",
+            ));
+        }
         ensure_unique_refs(&self.authority.action_refs, "authority Action")?;
         ensure_unique_refs(&self.context_scope_refs, "context scope")?;
         if let Some(binding) = &self.scheduler {

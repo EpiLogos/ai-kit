@@ -339,10 +339,28 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
     // The Agency Gateway at its well-known endpoint. Three honest states:
     // answering, present-but-degraded, or simply not running. Absence is not
     // an error — the gateway is optional — but bootstrap truth means the
-    // default endpoint is always accounted for, never silently absent.
+    // default endpoint is always accounted for, never silently absent — and
+    // when Enabled schedule Routines exist, a down gateway is exactly the
+    // reason scheduled automations will not fire.
     #[cfg(unix)]
     {
         let socket = home.gateway_socket();
+        let enabled_schedule_routines = aikit_store::RoutineStore::new(home.clone())
+            .list()
+            .map(|records| {
+                records
+                    .iter()
+                    .filter(|record| {
+                        record.routine.state == aikit_core::resource::routine::RoutineState::Enabled
+                            && matches!(
+                                record.routine.trigger,
+                                aikit_core::resource::routine::RoutineTrigger::Schedule { .. }
+                            )
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        let automations_at_stake = enabled_schedule_routines > 0;
         if socket.exists() {
             let target = aikit_adapters::GatewayCarrierTarget::UnixSocket(socket.clone());
             match aikit_adapters::gateway_command(
@@ -360,7 +378,16 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
                                 "gateway.service",
                                 Severity::Note,
                                 format!(
-                                    "agency gateway answers at the default endpoint ({gateway_version})"
+                                    "gateway installed and running: the agency gateway answers \
+                                     at the default endpoint ({gateway_version}){}",
+                                    if automations_at_stake {
+                                        format!(
+                                            "; {enabled_schedule_routines} enabled schedule \
+                                             routine(s) will fire"
+                                        )
+                                    } else {
+                                        String::new()
+                                    }
                                 ),
                             )
                             .with_detail(socket.display().to_string()),
@@ -374,7 +401,17 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
                             Severity::Warning,
                             "the default agency gateway socket is present but not answering",
                         )
-                        .with_detail(format!("{error}; restart it with `aikit gateway serve`")),
+                        .with_detail(format!("{error}; restart it with `aikit gateway serve`"))
+                        .with_detail(if automations_at_stake {
+                            format!(
+                                "scheduled automations will not fire: \
+                                 {enabled_schedule_routines} enabled schedule routine(s) have \
+                                 no dispatcher"
+                            )
+                        } else {
+                            "no enabled schedule routines exist, so nothing scheduled depends on it"
+                                .to_string()
+                        }),
                     );
                 }
             }
@@ -382,10 +419,26 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
             findings.push(
                 Finding::new(
                     "gateway.service",
-                    Severity::Note,
-                    "no agency gateway is running at the default endpoint",
+                    if automations_at_stake {
+                        Severity::Warning
+                    } else {
+                        Severity::Note
+                    },
+                    if automations_at_stake {
+                        format!(
+                            "scheduled automations will not fire: no agency gateway is running, \
+                             and {enabled_schedule_routines} enabled schedule routine(s) depend \
+                             on its dispatcher"
+                        )
+                    } else {
+                        "no agency gateway is running at the default endpoint".to_string()
+                    },
                 )
-                .with_detail("optional; start one with `aikit gateway serve`".to_string()),
+                .with_detail(
+                    "install the persistent service with `aikit gateway install-service`, or \
+                     start one ad hoc with `aikit gateway serve`"
+                        .to_string(),
+                ),
             );
         }
     }

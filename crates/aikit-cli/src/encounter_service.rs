@@ -1142,9 +1142,30 @@ impl EncounterService {
         } else {
             configured.argv.clone()
         };
-        if configured.protocol == EncounterProtocol::PrimeRpc {
+        // The bounded child-to-parent message channel: a session-scoped
+        // directory the adapter hands the launcher and drains into this
+        // journal. It carries words, never effects; each file is one bounded
+        // record the child wrote through its inherited skill, correlated to
+        // the child's locus digest like every faculty receipt.
+        let child_message_dir = if configured.protocol == EncounterProtocol::PrimeRpc {
             launch_argv.extend(["--agent-session".into(), agent_session.to_string()]);
-        }
+            let dir = self.home.state().join("encounter-child-messages").join(
+                blake3::hash(agent_session.as_str().as_bytes())
+                    .to_hex()
+                    .to_string(),
+            );
+            std::fs::create_dir_all(&dir).map_err(error)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                    .map_err(error)?;
+            }
+            launch_argv.extend(["--child-message-dir".into(), dir.display().to_string()]);
+            Some(dir)
+        } else {
+            None
+        };
         // Profile-declared key delivery rides the direct provider launch: the
         // child is the real harness, so the declared key is injected into the
         // scrubbed final-child environment here. The re-exec launchers
@@ -1458,6 +1479,73 @@ impl EncounterService {
         // independent views of the same canonical journal.
         let drain = lane.clone();
         std::thread::spawn(move || while drain.recv().is_some() {});
+        // Drain the bounded child-to-parent message channel into the same
+        // journal: one file is one record the child wrote through its
+        // inherited skill, removed only after it is journalled. A file that
+        // cannot be journalled is renamed aside and named, never silently
+        // dropped. The channel carries words, never effects.
+        if let Some(dir) = child_message_dir {
+            let store = Arc::clone(&self.store);
+            let session = agent_session.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    return;
+                };
+                let mut files: Vec<std::path::PathBuf> = entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.path())
+                    .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+                    .collect();
+                files.sort();
+                for path in files {
+                    let journaled = (|| -> std::result::Result<(), AikitError> {
+                        let bytes = std::fs::read(&path).map_err(error)?;
+                        if bytes.len() > 64 * 1024 {
+                            return Err(error("child message exceeds the 64 KiB channel bound"));
+                        }
+                        let value: serde_json::Value =
+                            serde_json::from_slice(&bytes).map_err(error)?;
+                        if value.get("schema").and_then(|s| s.as_str())
+                            != Some("actuation.child-message/v1")
+                        {
+                            return Err(error("unrecognised child message schema"));
+                        }
+                        let cursor = store
+                            .append(
+                                &session,
+                                &json!({
+                                    "kind":"child-message",
+                                    "from":value.get("from").cloned().unwrap_or(serde_json::Value::Null),
+                                    "receiver_role":value.get("receiver_role").cloned().unwrap_or(serde_json::Value::Null),
+                                    "text":value.get("text").cloned().unwrap_or(serde_json::Value::Null),
+                                    "text_sha256":value.get("text_sha256").cloned().unwrap_or(serde_json::Value::Null),
+                                    "file":path.file_name().map(|name| name.to_string_lossy().to_string()),
+                                }),
+                            )
+                            .map_err(|e| error(e.to_string()))?;
+                        let _ = cursor;
+                        Ok(())
+                    })();
+                    match journaled {
+                        Ok(()) => {
+                            let _ = std::fs::remove_file(&path);
+                        }
+                        Err(failure) => {
+                            let _ = std::fs::rename(&path, path.with_extension("json.rejected"));
+                            let _ = store.append(
+                                &session,
+                                &json!({
+                                    "kind":"child-message-rejected",
+                                    "file":path.file_name().map(|name| name.to_string_lossy().to_string()),
+                                    "reason":failure.to_string(),
+                                }),
+                            );
+                        }
+                    }
+                }
+            });
+        }
         // A new session starts in the owner's configured default permission
         // mode when the harness advertises it. A continued (loaded) session
         // keeps whatever mode it was left in: nothing is re-imposed on it.

@@ -184,11 +184,65 @@ pub fn persist_gateway_state(gateway: &AgencyGateway, state_file: Option<&Path>)
 
 /// Run every configured service carrier against one shared gateway state.
 pub fn run_gateway_service(gateway: AgencyGateway, config: GatewayServiceConfig) -> Result<()> {
+    run_gateway_service_with_ticks(gateway, config, None)
+}
+
+/// A periodic hook the service runs beside its carriers: the Routine
+/// dispatcher's tick. The hook never touches gateway state and its failures
+/// are remembered, never fatal — a failed scheduling pass must not take the
+/// carrier down.
+pub trait GatewayTick: Send + 'static {
+    fn tick(&self) -> Result<serde_json::Value>;
+}
+
+/// The tick loop's configuration.
+pub struct GatewayTickLoop {
+    pub interval: std::time::Duration,
+    pub hook: Box<dyn GatewayTick>,
+}
+
+/// Run every configured service carrier against one shared gateway state,
+/// with an optional periodic tick loop.
+pub fn run_gateway_service_with_ticks(
+    gateway: AgencyGateway,
+    config: GatewayServiceConfig,
+    ticks: Option<GatewayTickLoop>,
+) -> Result<()> {
     config.validate()?;
     let gateway = restore_gateway_state(gateway, config.state_file.as_deref())?;
     let gateway = Arc::new(Mutex::new(gateway));
     let shutdown = Arc::new(AtomicBool::new(false));
     let mut workers = Vec::new();
+
+    let tick_loop: Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)> =
+        ticks.map(|loop_config| {
+            let tick_shutdown = Arc::new(AtomicBool::new(false));
+            let handle = {
+                let shutdown = Arc::clone(&shutdown);
+                let tick_shutdown = Arc::clone(&tick_shutdown);
+                thread::spawn(move || {
+                    let GatewayTickLoop { interval, hook } = loop_config;
+                    let mut last_error = None;
+                    // Sleep in small steps so a carrier shutdown stops the loop
+                    // promptly instead of waiting out the whole interval.
+                    let step = Duration::from_millis(100).min(interval);
+                    let mut until_next_tick = interval;
+                    while !shutdown.load(Ordering::SeqCst) {
+                        if until_next_tick == Duration::ZERO {
+                            if let Err(error) = hook.tick() {
+                                last_error = Some(error);
+                            }
+                            until_next_tick = interval;
+                        }
+                        thread::sleep(step);
+                        until_next_tick = until_next_tick.saturating_sub(step);
+                    }
+                    let _ = last_error;
+                    tick_shutdown.store(true, Ordering::SeqCst);
+                })
+            };
+            (tick_shutdown, handle)
+        });
 
     if let Some(bind) = config.websocket_bind.clone() {
         let token = config
@@ -261,6 +315,11 @@ pub fn run_gateway_service(gateway: AgencyGateway, config: GatewayServiceConfig)
                 }
             }
         }
+    }
+    // Stop the tick loop and wait for it before persisting state.
+    if let Some((tick_shutdown, handle)) = tick_loop {
+        tick_shutdown.store(true, Ordering::SeqCst);
+        let _ = handle.join();
     }
     if let Some(error) = first_error {
         return Err(error);

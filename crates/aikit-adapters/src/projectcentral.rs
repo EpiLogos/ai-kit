@@ -13,14 +13,16 @@ use std::time::UNIX_EPOCH;
 use aikit_core::{
     parse_wiki_objects, AbsenceKind, AgentWikiMaintenancePlan, AikitError, ContextSourceOperation,
     ContextSourceProvider, ContextSourceProviderCapabilities, ContextSourceProviderStatus,
-    ContextSourceReadRequest, ProjectCentralBinding, ProjectCentralProvenance,
+    ContextSourceReadRequest, Eligibility, ProjectCentralBinding, ProjectCentralProvenance,
     ProjectCentralSourceDescriptor, ProjectCentralSourceKind, ProjectCentralStanding,
     ProjectCentralTreatment, ProjectCentralTruthStanding, ProviderReadResult, ProviderRef,
-    ResourceRef, ResourceSource, Result, SourceRef, SourceRevision, SourceState, StructuredAbsence,
-    CENTRAL_GROUND_RELATIONS_SCHEMA, CENTRAL_PROJECT_SCHEMA, CENTRAL_ROOT_WIKI_SOURCE,
-    CENTRAL_WIKI_PROFILE, NO_AGENT_RETRIEVAL_MARKER, PROJECTCENTRAL_BINDING_VERSION,
-    PROJECTCENTRAL_FILESYSTEM_PROVIDER, PROJECTCENTRAL_GOVERNANCE_ROOT,
-    PROJECTCENTRAL_GROUND_RELATIONS_SOURCE, PROJECTCENTRAL_HUMAN_ROOT, PROJECTCENTRAL_WIKI_SOURCE,
+    ResourceDescriptor, ResourceKind, ResourceLocator, ResourceRecord, ResourceRef, ResourceSource,
+    Result, SourceAuthority, SourceRef, SourceRevision, SourceState, StructuredAbsence,
+    CENTRAL_GROUND_RELATIONS_SCHEMA, CENTRAL_PROJECT_SCHEMA, CENTRAL_ROOT_GOVERNANCE_ROOT,
+    CENTRAL_ROOT_SOURCE_REF_PREFIX, CENTRAL_ROOT_WIKI_SOURCE, CENTRAL_WIKI_PROFILE,
+    NO_AGENT_RETRIEVAL_MARKER, PROJECTCENTRAL_BINDING_VERSION, PROJECTCENTRAL_FILESYSTEM_PROVIDER,
+    PROJECTCENTRAL_GOVERNANCE_ROOT, PROJECTCENTRAL_GROUND_RELATIONS_SOURCE,
+    PROJECTCENTRAL_HUMAN_ROOT, PROJECTCENTRAL_WIKI_SOURCE,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -849,6 +851,97 @@ fn scan_governance_tree(
     Ok(())
 }
 
+/// Central's own root governance tree (`Control/agents/governance/**`) as
+/// ContextSource ResourceRecords, named with the canonical
+/// `central:source:control:root:<relative-path>` ref grammar — the same
+/// grammar `now_field`, `central_entities` and `actor_composition` already
+/// use for root Control material. This is the root-scope counterpart to
+/// [`ProjectCentralBinding::context_sources`]'s `GovernanceMaterial` entries,
+/// which only ever cover a Project's own `ProjectCentral/agents/governance`.
+///
+/// Bodies are never read here — only named, with a filesystem revision for
+/// cache-busting, exactly like the Project scanner. `.no-agent-retrieval`
+/// prunes a subtree before any descendant is disclosed, and a symlinked
+/// governance file is skipped rather than followed, matching
+/// `scan_governance_tree`'s own withholding rule. Absence of the tree (no
+/// `Control/agents/governance` under this root) is a valid empty reading,
+/// never an error.
+pub fn root_governance_context_source_records(central_root: &Path) -> Result<Vec<ResourceRecord>> {
+    let governance_path = central_root.join(CENTRAL_ROOT_GOVERNANCE_ROOT);
+    let mut records = Vec::new();
+    if !governance_path.is_dir() || is_symlink(&governance_path) {
+        return Ok(records);
+    }
+    scan_root_governance_tree(central_root, &governance_path, &mut records)?;
+    Ok(records)
+}
+
+fn scan_root_governance_tree(
+    central_root: &Path,
+    directory: &Path,
+    records: &mut Vec<ResourceRecord>,
+) -> Result<()> {
+    if directory.join(NO_AGENT_RETRIEVAL_MARKER).exists() {
+        return Ok(());
+    }
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| io_error("projectcentral.directory_read", directory, error))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| io_error("projectcentral.directory_entry", directory, error))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let file_type = entry
+            .file_type()
+            .map_err(|error| io_error("projectcentral.file_type", &entry.path(), error))?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if entry.file_name() == NO_AGENT_RETRIEVAL_MARKER {
+            continue;
+        }
+        if file_type.is_dir() {
+            scan_root_governance_tree(central_root, &path, records)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let relative = relative_path(central_root, &path)?;
+        let source_ref = source(&format!(
+            "{CENTRAL_ROOT_SOURCE_REF_PREFIX}{}",
+            relative.display()
+        ))?;
+        let id = ResourceRef::parse(source_ref.as_str())?;
+        let mut descriptor = ResourceDescriptor::new(
+            id,
+            ResourceKind::ContextSource,
+            relative.display().to_string(),
+            "Central root governance source known to exist; payload is retrieved only on explicit read",
+        );
+        descriptor
+            .annotations
+            .insert("central.standing".into(), "human-governance".into());
+        descriptor
+            .annotations
+            .insert("central.provenance".into(), "human-authored".into());
+        descriptor
+            .annotations
+            .insert("central.path".into(), relative.display().to_string());
+        descriptor.sources.push(ResourceSource {
+            source: source_ref,
+            authority: Some(SourceAuthority::Authored),
+            revision: revision_for(&path),
+            locator: Some(ResourceLocator::Path(relative.clone())),
+            state: SourceState::Available,
+        });
+        let mut record = ResourceRecord::new(descriptor);
+        record.eligibility = Eligibility::Eligible;
+        records.push(record);
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_source(
     sources: &mut Vec<ProjectCentralSourceDescriptor>,
@@ -910,7 +1003,12 @@ fn relative_path(project_root: &Path, path: &Path) -> Result<PathBuf> {
         })
 }
 
-fn path_agent_readable(project_root: &Path, relative: &Path) -> bool {
+/// Whether a project-relative path stays agent-readable under this Project:
+/// no symlink at the path itself, and no `.no-agent-retrieval` marker on the
+/// path or any directory between it and the project root. Crate-visible so
+/// the live Work-repos search pool enforces the very same withholding rule —
+/// one enforcement point, not a second reading.
+pub(crate) fn path_agent_readable(project_root: &Path, relative: &Path) -> bool {
     let absolute = project_root.join(relative);
     if is_symlink(&absolute) {
         return false;
@@ -1607,5 +1705,88 @@ mod tests {
             .iter()
             .any(|capability| capability.as_str() == "skill:structured-account-authoring"));
         assert!(!project.join("ProjectCentral/user/ACCOUNT.md").exists());
+    }
+
+    // -----------------------------------------------------------------------
+    // root_governance_context_source_records: Central's own root
+    // `Control/agents/governance/**`, the counterpart to `scan_governance_tree`
+    // above for a Project's `ProjectCentral/agents/governance`. This is the
+    // read that was entirely missing before the O:I #65 native-owner repair —
+    // root governance had no scanner at all, so it could never surface as a
+    // ContextSource regardless of where a session stood.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn root_governance_tree_names_every_file_with_the_canonical_root_ref_grammar() {
+        let temp = TempDir::new().unwrap();
+        let central = temp.path().join("Central");
+        write(
+            &central.join("Control/agents/governance/authorship-and-return/responsibility.md"),
+            "own the gaps",
+        );
+        write(
+            &central.join("Control/agents/governance/attention/consult-authored-ground.md"),
+            "consult authored ground",
+        );
+        let records = root_governance_context_source_records(&central).unwrap();
+        let ids: Vec<String> = records
+            .iter()
+            .map(|record| record.descriptor.id.to_string())
+            .collect();
+        assert!(ids.contains(
+            &"central:source:control:root:Control/agents/governance/authorship-and-return/responsibility.md".to_string()
+        ));
+        assert!(ids.contains(
+            &"central:source:control:root:Control/agents/governance/attention/consult-authored-ground.md".to_string()
+        ));
+        assert_eq!(ids.len(), 2);
+        for record in &records {
+            assert_eq!(record.descriptor.kind, ResourceKind::ContextSource);
+            assert_eq!(
+                record
+                    .descriptor
+                    .annotations
+                    .get("central.standing")
+                    .map(String::as_str),
+                Some("human-governance")
+            );
+            // Named, never read: no payload rides the descriptor or its
+            // sources, only a locator and a filesystem revision.
+            assert!(record.descriptor.sources[0].revision.is_some());
+        }
+    }
+
+    #[test]
+    fn root_governance_tree_respects_no_agent_retrieval() {
+        let temp = TempDir::new().unwrap();
+        let central = temp.path().join("Central");
+        write(
+            &central.join("Control/agents/governance/withheld/.no-agent-retrieval"),
+            "",
+        );
+        write(
+            &central.join("Control/agents/governance/withheld/secret.md"),
+            "not for agents",
+        );
+        write(
+            &central.join("Control/agents/governance/open/notice.md"),
+            "fine to name",
+        );
+        let records = root_governance_context_source_records(&central).unwrap();
+        let ids: Vec<String> = records
+            .iter()
+            .map(|record| record.descriptor.id.to_string())
+            .collect();
+        assert!(!ids.iter().any(|id| id.contains("secret")));
+        assert!(ids.iter().any(|id| id.contains("open/notice.md")));
+    }
+
+    #[test]
+    fn root_governance_tree_is_a_valid_empty_reading_when_the_tree_is_absent() {
+        let temp = TempDir::new().unwrap();
+        let central = temp.path().join("Central");
+        fs::create_dir_all(&central).unwrap();
+        let records = root_governance_context_source_records(&central).unwrap();
+        assert!(records.is_empty());
     }
 }

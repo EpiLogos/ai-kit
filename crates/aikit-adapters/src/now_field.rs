@@ -544,6 +544,9 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
         let request = SearchRequest {
             pattern: pattern.to_string(),
             regex,
+            // The NOW field answers for exact ground: case-sensitive, like
+            // the records themselves.
+            ignore_case: false,
             // The runner is pinned to the central root (see default_runner);
             // a relative search root is what makes root-relative globs match.
             roots: vec![PathBuf::from(".")],
@@ -668,8 +671,11 @@ impl<R: CommandRunner> SourcePoolProvider for NowFieldSourcePoolProvider<R> {
         SourceProviderStatus {
             available: capabilities.fulltext || capabilities.semantic || capabilities.hybrid,
             version: capabilities.version.clone(),
-            tested_version: None,
-            version_drift: false,
+            tested_version: Some(crate::ripgrep::RIPGREP_TESTED_VERSION.into()),
+            version_drift: capabilities
+                .version
+                .as_deref()
+                .is_some_and(|value| !value.contains(crate::ripgrep::RIPGREP_TESTED_VERSION)),
             capabilities,
             detail: format!(
                 "live ripgrep content search over the root NOW field; {} include families; \
