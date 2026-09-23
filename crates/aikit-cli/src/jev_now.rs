@@ -843,8 +843,7 @@ fn factory_owner_basis(config: &FactoryPrepare) -> Result<(Value, Vec<Value>, St
             &factory,
             &["journey".into(), state.clone(), journey_ref.to_owned()],
         )?;
-        let revision =
-            factory_revision_text(&journey["revision"], "Factory Journey reading")?;
+        let revision = factory_revision_text(&journey["revision"], "Factory Journey reading")?;
         basis.insert(format!("journey:{journey_ref}"), revision);
         journeys.push(journey);
     }
