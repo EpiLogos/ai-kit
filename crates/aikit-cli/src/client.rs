@@ -23,6 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use aikit_core::capsule::Kind;
+use aikit_core::credential::CredentialRef;
 use aikit_core::harness_admission::{
     unsupported_harness_gap, HarnessAdmissionAdapter, HarnessAdmissionDescriptor,
     HarnessEditionKind,
@@ -45,13 +46,14 @@ use aikit_adapters::clients::{
     opencode::OpencodeAdapter, pi::PiAdapter, qoder::QoderAdapter, zcode::ZcodeAdapter,
     ClientAdapter,
 };
-use aikit_adapters::runner::SystemRunner;
 use aikit_adapters::tool_sources::{
     plan_tools_projection, ToolSourceEntry, ToolsProjectionOutcome,
 };
-use aikit_store::AikitHome;
+use aikit_core::probe::ProbeOutcome;
+use aikit_store::{AikitHome, CredentialBindingStore};
 
 use crate::app::Service;
+use crate::probe::ProbeTracker;
 
 /// The Actuation binary every intake asks. Resolved at spawn time; a missing
 /// or refusing binary is an intake outcome, never a build-time fact.
@@ -799,7 +801,9 @@ fn adapter_for(
         None => (broker_reach(), None),
         Some(overlay) => {
             let capability = match intake_actuation_capability(
-                &SystemRunner::new(),
+                // Install and launch reach through this intake: bounded, so a
+                // hanging `actuation` refuses instead of stalling the command.
+                &crate::probe::probe_runner(),
                 ACTUATION_BIN,
                 overlay.catalog_slug,
             ) {
@@ -1452,7 +1456,17 @@ pub fn launch_command(service: &Service, client: &str) -> Result<Vec<String>> {
 pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::Value>> {
     let rc = service.projection_context()?;
     let dirs = client_dirs(service);
-    let detection = intake_actuation_detection(&SystemRunner::new(), ACTUATION_BIN);
+    // The detection intake is a probe-shaped spawn: bounded by the shared
+    // budget, and its outcome rides every row whose leg could not be read, so
+    // a hanging or missing `actuation` is named (`timed-out` / `unreachable`)
+    // instead of silently stalling the whole surface.
+    let detection_probe = ProbeTracker::shared();
+    let detection = intake_actuation_detection(&detection_probe, ACTUATION_BIN);
+    let surface_probe = detection_probe
+        .first()
+        .unwrap_or(ProbeOutcome::Unsupported {
+            reason: "no detection spawn was performed".to_string(),
+        });
     let members = roster_members(&detection);
     let mut rows = Vec::new();
     for member in &members {
@@ -1461,7 +1475,14 @@ pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::V
                 continue;
             }
         }
-        rows.push(client_row(member, &rc, &dirs, &detection)?);
+        rows.push(client_row(
+            member,
+            &rc,
+            &dirs,
+            &detection,
+            &surface_probe,
+            service.home(),
+        )?);
     }
     Ok(rows)
 }
@@ -1472,14 +1493,18 @@ fn client_row(
     rc: &ResolvedContext,
     dirs: &ClientDirs,
     detection: &DetectionOutcome,
+    surface_probe: &ProbeOutcome,
+    home: &aikit_store::AikitHome,
 ) -> Result<serde_json::Value> {
     match member {
         RosterMember::Broker => broker_row(rc, dirs),
         RosterMember::Descriptor { entry, overlay } => match overlay {
-            Some(overlay) => overlaid_row(overlay, rc, dirs, detection),
-            None => generic_row(entry, rc, dirs, detection),
+            Some(overlay) => overlaid_row(overlay, rc, dirs, detection, surface_probe, home),
+            None => generic_row(entry, rc, dirs, detection, surface_probe, home),
         },
-        RosterMember::Unrecorded { overlay } => overlaid_row(overlay, rc, dirs, detection),
+        RosterMember::Unrecorded { overlay } => {
+            overlaid_row(overlay, rc, dirs, detection, surface_probe, home)
+        }
     }
 }
 
@@ -1501,6 +1526,10 @@ fn broker_row(rc: &ResolvedContext, dirs: &ClientDirs) -> Result<serde_json::Val
         "actor_bootstrap": rc.actor_bootstrap.is_some(),
         "capability": "self",
         "capability_reason": null,
+        "probe": "self",
+        "probe_reason": null,
+        "credential": "self",
+        "credential_reason": null,
         "detection": "self",
         "detection_reason": null,
         "gap": null,
@@ -1516,13 +1545,29 @@ fn overlaid_row(
     rc: &ResolvedContext,
     dirs: &ClientDirs,
     detection: &DetectionOutcome,
+    surface_probe: &ProbeOutcome,
+    home: &aikit_store::AikitHome,
 ) -> Result<serde_json::Value> {
     let leg = detection_leg(detection, overlay.catalog_slug);
+    // The capability intake is this row's own probe-shaped spawn: bounded, and
+    // classified into the shared vocabulary so a hanging or missing
+    // `actuation` names itself on the row instead of stalling the surface.
+    let capability_probe = ProbeTracker::shared();
     let capability = Some(intake_actuation_capability(
-        &SystemRunner::new(),
+        &capability_probe,
         ACTUATION_BIN,
         overlay.catalog_slug,
     ));
+    let probe = match &leg {
+        DetectionLeg::RunUnavailable { .. } => {
+            // The row's unreadable detection leg rode the shared detection
+            // spawn; that spawn's outcome is this row's probe outcome.
+            surface_probe.clone()
+        }
+        _ => capability_probe
+            .first()
+            .unwrap_or_else(|| unsupported_probe("the capability intake spawned nothing")),
+    };
     let kind = derive_surface_kind(capability.as_ref(), &leg);
 
     // The adapter for planning, and the config home the row reports. The
@@ -1609,6 +1654,9 @@ fn overlaid_row(
         Reach::Client { .. } => "client",
         Reach::AdapterOnly { .. } => "adapter-only",
     };
+    // The credential pre-check: presence facts only (binding records, ambient
+    // env-var presence, the harness's own login store), never secret values.
+    let credential = credential_outcome(Some(home), dirs, Some(overlay));
 
     Ok(serde_json::json!({
         "client": overlay.name,
@@ -1623,6 +1671,10 @@ fn overlaid_row(
         "actor_bootstrap": rc.actor_bootstrap.is_some(),
         "capability": capability_name,
         "capability_reason": capability_reason,
+        "probe": probe.as_str(),
+        "probe_reason": probe_reason(&probe),
+        "credential": credential.as_str(),
+        "credential_reason": probe_reason(&credential),
         "detection": detection_name,
         "detection_reason": detection_reason,
         "admission": {
@@ -1645,9 +1697,18 @@ fn generic_row(
     rc: &ResolvedContext,
     dirs: &ClientDirs,
     detection: &DetectionOutcome,
+    surface_probe: &ProbeOutcome,
+    home: &aikit_store::AikitHome,
 ) -> Result<serde_json::Value> {
     let leg = detection_leg(detection, &entry.slug);
-    let capability = intake_actuation_capability(&SystemRunner::new(), ACTUATION_BIN, &entry.slug);
+    let capability_probe = ProbeTracker::shared();
+    let capability = intake_actuation_capability(&capability_probe, ACTUATION_BIN, &entry.slug);
+    let probe = match &leg {
+        DetectionLeg::RunUnavailable { .. } => surface_probe.clone(),
+        _ => capability_probe
+            .first()
+            .unwrap_or_else(|| unsupported_probe("the capability intake spawned nothing")),
+    };
     let kind = derive_generic_kind(&leg);
 
     let (state, gap) = match kind {
@@ -1666,6 +1727,9 @@ fn generic_row(
     let config_dir = leg
         .detected_config_dir()
         .map(|spec| expand_seam(&spec, &dirs.home, &dirs.tree));
+    // No overlay means no AIKit profile: there are no credential facts to
+    // pre-check, and the row says so instead of inventing a gate.
+    let credential = credential_outcome(Some(home), dirs, None);
 
     Ok(serde_json::json!({
         "client": entry.slug,
@@ -1680,6 +1744,10 @@ fn generic_row(
         "actor_bootstrap": rc.actor_bootstrap.is_some(),
         "capability": capability_name,
         "capability_reason": capability_reason,
+        "probe": probe.as_str(),
+        "probe_reason": probe_reason(&probe),
+        "credential": credential.as_str(),
+        "credential_reason": probe_reason(&credential),
         "detection": detection_name,
         "detection_reason": detection_reason,
         "gap": gap,
@@ -1757,6 +1825,149 @@ fn generic_gap_disclosure(entry: &DetectionEntry) -> Option<serde_json::Value> {
     serde_json::to_value(&gap).ok()
 }
 
+/// The credential pre-check for one row: cheap presence facts only — binding
+/// records in the credential store, ambient env-var presence, and the
+/// harness's own login store on disk. Secret values are never read or
+/// rendered; the point is to answer "would a model call have anything to
+/// authenticate with" *before* one is attempted, so the surface reports
+/// `credential-gated` naming what is missing instead of letting the live call
+/// hang or fail opaquely (the expired-OAuth class). A row AIKit has no
+/// credential facts for is `unsupported`, never silently "ok".
+fn credential_outcome(
+    home: Option<&aikit_store::AikitHome>,
+    dirs: &ClientDirs,
+    overlay: Option<&'static ClientOverlay>,
+) -> ProbeOutcome {
+    let Some(overlay) = overlay else {
+        return ProbeOutcome::Unsupported {
+            reason: "no AIKit adapter carries this catalog slug; its credential \
+                     path cannot be pre-checked"
+                .to_string(),
+        };
+    };
+    let Some(profile) = aikit_adapters::profiles::for_slug(overlay.catalog_slug) else {
+        return ProbeOutcome::Unsupported {
+            reason: format!(
+                "no harness profile carries {}; AIKit has no credential facts to pre-check",
+                overlay.catalog_slug
+            ),
+        };
+    };
+    let Some(delivery) = profile
+        .models
+        .as_ref()
+        .and_then(|models| models.key_delivery.as_ref())
+        .filter(|delivery| !delivery.env_var.is_empty() || !delivery.own_login.is_empty())
+    else {
+        return ProbeOutcome::Unsupported {
+            reason: format!(
+                "the {} profile declares no key-delivery facts; the harness's own \
+                 credential store stands unverified",
+                overlay.name
+            ),
+        };
+    };
+
+    let store = home.map(CredentialBindingStore::new);
+    // Whether `credential:<provider>` has a binding record. `None` means the
+    // store could not be read — an unreadable store is not evidence of
+    // absence, so the whole leg discloses instead of gating.
+    let bound = |provider_ref: &str| -> Option<bool> {
+        let slug = provider_ref
+            .strip_prefix("provider:")
+            .unwrap_or(provider_ref);
+        let credential_ref = CredentialRef::new(format!("credential:{slug}")).ok()?;
+        match store.as_ref().map(|store| store.load(&credential_ref)) {
+            None => Some(false),
+            Some(Ok(binding)) => Some(binding.is_some()),
+            Some(Err(_)) => None,
+        }
+    };
+    let store_unreadable = || ProbeOutcome::Unsupported {
+        reason: "the credential binding store could not be read; credential \
+                 presence cannot be checked"
+            .to_string(),
+    };
+
+    let mut missing: Vec<String> = Vec::new();
+    for entry in &delivery.env_var {
+        match bound(&entry.provider_ref) {
+            Some(true) => continue,
+            Some(false) => {}
+            None => return store_unreadable(),
+        }
+        // Presence only: the variable's value is never read into anything.
+        let ambient = std::env::var_os(&entry.env_var).is_some_and(|value| !value.is_empty());
+        if ambient {
+            continue;
+        }
+        let slug = entry
+            .provider_ref
+            .strip_prefix("provider:")
+            .unwrap_or(&entry.provider_ref);
+        missing.push(format!(
+            "credential:{slug} is unbound and {} is absent from the environment; \
+             bind it with `aikit credential setup credential:{slug}`",
+            entry.env_var
+        ));
+    }
+    for entry in &delivery.own_login {
+        match bound(&entry.provider_ref) {
+            Some(true) => continue,
+            Some(false) => {}
+            None => return store_unreadable(),
+        }
+        let own_store = profile
+            .presence
+            .as_ref()
+            .and_then(|presence| presence.config_dir.as_deref())
+            .map(|spec| expand_seam(spec, &dirs.home, &dirs.tree).exists())
+            .unwrap_or(false);
+        if own_store {
+            continue;
+        }
+        let slug = entry
+            .provider_ref
+            .strip_prefix("provider:")
+            .unwrap_or(&entry.provider_ref);
+        let store_path = profile
+            .presence
+            .as_ref()
+            .and_then(|presence| presence.config_dir.as_deref())
+            .unwrap_or("its config directory");
+        missing.push(format!(
+            "credential:{slug} is unbound and the harness's own login store at \
+             {store_path} is absent — {}",
+            entry.note
+        ));
+    }
+
+    if missing.is_empty() {
+        ProbeOutcome::Ok
+    } else {
+        ProbeOutcome::CredentialGated {
+            missing: missing.join("; "),
+        }
+    }
+}
+
+/// The human line riding a probe or credential outcome on a row. `Ok` carries
+/// no reason; a timeout names the bound it violated.
+fn probe_reason(outcome: &ProbeOutcome) -> Option<String> {
+    match outcome {
+        ProbeOutcome::TimedOut { bound_secs } => Some(format!(
+            "no answer within {bound_secs}s; the probe was killed at its bound"
+        )),
+        other => other.detail().map(str::to_string),
+    }
+}
+
+fn unsupported_probe(reason: &str) -> ProbeOutcome {
+    ProbeOutcome::Unsupported {
+        reason: reason.to_string(),
+    }
+}
+
 impl DetectionLeg {
     fn detected_config_dir(&self) -> Option<String> {
         match self {
@@ -1784,7 +1995,7 @@ fn plan_carrier_install(
     // capability intake asks for.
     let overlay = client_overlay(client).ok_or_else(|| unknown_client_error(client))?;
     let capability = match intake_actuation_capability(
-        &SystemRunner::new(),
+        &crate::probe::probe_runner(),
         ACTUATION_BIN,
         overlay.catalog_slug,
     ) {

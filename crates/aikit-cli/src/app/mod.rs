@@ -944,7 +944,7 @@ impl Service {
         // hosted provider can have short of calling its API with a key.
         let capabilities =
             aikit_adapters::actuation_harness_detection::intake_actuation_capabilities(
-                &SystemRunner::new(),
+                &SystemRunner::probe(),
                 "actuation",
             );
         let (reachable, reach_notes) =
@@ -1133,7 +1133,7 @@ impl Service {
         let (provider_ref, outcome) = match provider {
             "openrouter" => (
                 OPENROUTER_PROVIDER,
-                fetch_openrouter_catalog(&SystemRunner::new(), &observed_at),
+                fetch_openrouter_catalog(&SystemRunner::probe(), &observed_at),
             ),
             "z-ai" => (
                 ZAI_PROVIDER,
@@ -1252,7 +1252,7 @@ impl Service {
             )
         })?;
         Ok(fetch_zai_coding_catalog(
-            &SystemRunner::new(),
+            &SystemRunner::probe(),
             secret.expose(),
             observed_at,
         ))
@@ -1339,7 +1339,7 @@ impl Service {
                     .clone()
                     .or_else(|| process_central_root(Some(root)))
                     .and_then(|central| {
-                        let runner = SystemRunner::new();
+                        let runner = SystemRunner::probe();
                         compose_live_actor_inputs(&runner, &central, root)
                             .ok()
                             .flatten()
@@ -1368,7 +1368,7 @@ impl Service {
             // candidates as ephemeral resources; a failed run is disclosed
             // unavailability riding on the resolution, never absence.
             let detection = aikit_adapters::actuation_harness_detection::intake_actuation_detection(
-                &SystemRunner::new(),
+                &SystemRunner::probe(),
                 "actuation",
             );
             resolution.harness_detection =
@@ -1487,7 +1487,7 @@ impl Service {
             .as_ref()
             .map(|central| {
                 aikit_adapters::actor_composition::compose_selected_actor_inputs(
-                    &SystemRunner::new(),
+                    &SystemRunner::probe(),
                     central,
                     project_root,
                     admission.map(|a| &a.agent_ref),
@@ -1601,7 +1601,7 @@ impl Service {
         // index); a failed run is disclosed unavailability, never an empty
         // set read as absence.
         let detection = aikit_adapters::actuation_harness_detection::intake_actuation_detection(
-            &SystemRunner::new(),
+            &SystemRunner::probe(),
             "actuation",
         );
         let mut detection_notes: Vec<String> = Vec::new();
@@ -1667,7 +1667,7 @@ impl Service {
         // candidate carries a `self` annotation so surfaces can show it
         // without treating it as chosen.
         let self_outcome = aikit_adapters::actuation_harness_detection::intake_actuation_self(
-            &SystemRunner::new(),
+            &SystemRunner::probe(),
             "actuation",
         );
         match &self_outcome {
@@ -3118,7 +3118,7 @@ impl PaletteBackend for Service {
             .clone()
             .or_else(|| process_central_root(Some(project)))
         {
-            match compose_live_actor_inputs(&SystemRunner::new(), &central, project) {
+            match compose_live_actor_inputs(&SystemRunner::probe(), &central, project) {
                 Ok(composed) => composed
                     .map(|inputs| inputs.source_resources)
                     .unwrap_or_default(),
@@ -3149,8 +3149,9 @@ impl PaletteBackend for Service {
                     state.clone(),
                     project_ref.clone(),
                 )?;
-                records
-                    .extend(read_factory_developmental(&SystemRunner::new(), &binding)?.resources);
+                records.extend(
+                    read_factory_developmental(&SystemRunner::probe(), &binding)?.resources,
+                );
             }
             // A configured start-work request may legitimately point at a new
             // state path. Until the owner accepts the Commission, this is a
@@ -3428,7 +3429,7 @@ impl PaletteBackend for Service {
             return Ok(Some(cached.clone()));
         }
 
-        let disclosure = match intake_workcell_instances(&SystemRunner::new(), "workcell", None) {
+        let disclosure = match intake_workcell_instances(&SystemRunner::probe(), "workcell", None) {
             InstancesOutcome::Records(records) => WorkcellDisclosure::observed(
                 records
                     .into_iter()

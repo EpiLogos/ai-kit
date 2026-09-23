@@ -247,7 +247,9 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
     // says what AIKit's wiring actually landed in it. A leg that cannot be
     // read is named as the missing leg — never flattened into "not installed".
     let detection = aikit_adapters::actuation_harness_detection::intake_actuation_detection(
-        &aikit_adapters::runner::SystemRunner::new(),
+        // A doctor check is a probe: bounded, so a hanging or missing
+        // `actuation` is a finding within the budget, never a stalled doctor.
+        &aikit_adapters::runner::SystemRunner::probe(),
         "actuation",
     );
     for (slug, marker) in [
@@ -273,7 +275,7 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
         };
         let capability_leg =
             match aikit_adapters::actuation_harness_capability::intake_actuation_capability(
-                &aikit_adapters::runner::SystemRunner::new(),
+                &aikit_adapters::runner::SystemRunner::probe(),
                 "actuation",
                 slug,
             ) {

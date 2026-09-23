@@ -26,7 +26,7 @@ use aikit_adapters::actuation_model_routes::{
 };
 use aikit_adapters::connection_process::ModelEnvironment;
 use aikit_adapters::profiles;
-use aikit_adapters::runner::{CommandRunner, SystemRunner};
+use aikit_adapters::runner::CommandRunner;
 use aikit_core::harness_profile::{ModelDispatchPosture, ModelsLayer};
 use aikit_core::model_harness_binding::HarnessProviderGate;
 use aikit_core::resource::{
@@ -165,13 +165,38 @@ fn route_for_launch<'a>(
                 .collect::<Vec<_>>()
                 .join(", ")
         ))),
-        RouteSelection::NoneUsable(reasons) | RouteSelection::NoneViable(reasons) => {
+        RouteSelection::NoneUsable(reasons) => {
+            // When the blocker is an unbound credential, the refusal carries
+            // the shared vocabulary outcome: `credential-gated`, naming the
+            // missing credential and the bind remediation — never an opaque
+            // failure and never a live call that hangs on authentication.
+            let gated = set.routes.iter().any(|route| {
+                pin.is_none_or(|p| route.provider == *p)
+                    && matches!(route.usability(), RouteUsability::NeedsCredential { .. })
+            });
+            if gated {
+                return Err(AikitError::new(
+                    "route_launch.credential_gated",
+                    format!(
+                        "credential-gated: no observed+usable route reaches {} today:\n  - {}",
+                        set.model,
+                        reasons.join("\n  - ")
+                    ),
+                )
+                .with("outcome", "credential-gated"));
+            }
             Err(error(format!(
                 "no observed+usable route reaches {} today:\n  - {}",
                 set.model,
                 reasons.join("\n  - ")
             )))
         }
+        // No viable route at all (nothing observed).
+        RouteSelection::NoneViable(reasons) => Err(error(format!(
+            "no observed+usable route reaches {} today:\n  - {}",
+            set.model,
+            reasons.join("\n  - ")
+        ))),
     }
 }
 
@@ -331,7 +356,10 @@ pub fn plan_route_launch(
     passthrough: &[String],
 ) -> Result<RouteLaunchPlan> {
     plan_route_launch_with_runner(
-        &SystemRunner::new(),
+        // The route join is a probe-shaped spawn of `actuation`: bounded, so a
+        // hanging or missing binary refuses inside the shared budget instead
+        // of silently stalling the launch.
+        &crate::probe::probe_runner(),
         home,
         harness,
         model_ref,
@@ -445,9 +473,10 @@ pub(crate) fn plan_route_launch_with_runner(
         }
         CredentialCondition::Required { .. } => {
             return Err(error(
-                "the selected route reports an unbound credential; refusing to launch a body \
-                 that cannot authenticate",
-            ))
+                "credential-gated: the selected route reports an unbound credential; \
+                 refusing to launch a body that cannot authenticate",
+            )
+            .with("outcome", "credential-gated"))
         }
     };
 
@@ -495,11 +524,28 @@ fn delivered_nothing_declared(models: &ModelsLayer, provider_ref: &str) -> bool 
 /// Run the composed launch in the foreground: the harness owns the terminal
 /// exactly as if the operator had typed it, with the delivered keys present
 /// only in its scrubbed environment. Returns the child's exit code.
+///
+/// This is the one spawn this surface performs, and it is the model path: the
+/// pre-checks refuse before it. A program that is not on PATH is
+/// `unreachable`; the plan stage has already refused `credential-gated` when
+/// the route's credential was unbound, so an unauthenticated launch never
+/// starts and cannot hang on a login it cannot complete.
 pub fn run_plan(plan: &RouteLaunchPlan) -> Result<i32> {
     let (program, args) = plan
         .argv
         .split_first()
         .ok_or_else(|| error("empty launch argv"))?;
+    if crate::probe::which(program).is_none() {
+        return Err(AikitError::new(
+            "route_launch.harness_unreachable",
+            format!(
+                "`{program}` is not on PATH (unreachable); install the harness or adjust PATH \
+                 and retry the launch"
+            ),
+        )
+        .with("outcome", "unreachable")
+        .with("program", program.clone()));
+    }
     let mut command = Command::new(program);
     command.args(args);
     if let Some(environment) = plan.environment.as_ref() {
@@ -934,6 +980,42 @@ mod tests {
         assert!(
             message.contains("aikit credential setup credential:deepseek"),
             "the refusal names the bind remediation: {message}"
+        );
+        // The shared vocabulary: the refusal is the credential-gated outcome,
+        // named on the error, and it fires before any model-path work — no
+        // key delivery, no launch, nothing that could hang on a login.
+        assert_eq!(
+            error.details().get("outcome").map(String::as_str),
+            Some("credential-gated"),
+            "the refusal carries the vocabulary outcome: {message}"
+        );
+    }
+
+    #[test]
+    fn a_launch_program_off_path_is_unreachable_before_any_spawn() {
+        // Probe discipline at the spawn gate: a plan can compose (planning
+        // spawns nothing), but `run_plan` refuses with the named outcome when
+        // the launch program cannot be found — never an opaque exec error
+        // after the fact.
+        let plan = RouteLaunchPlan {
+            harness: "fixture".to_string(),
+            program: "aikit-run-plan-missing-binary-xyz".to_string(),
+            model: aikit_core::resource::canonical_model_ref("model:fixture").unwrap(),
+            provider: ProviderRef::parse("provider:fixture").unwrap(),
+            provider_native_id: "fixture-native".to_string(),
+            route_kind: "provider-native",
+            credential_disclosure: "not required by this route".to_string(),
+            delivered_env_vars: vec![],
+            argv: vec!["aikit-run-plan-missing-binary-xyz".to_string()],
+            environment: None,
+            notes: vec![],
+        };
+        let error = run_plan(&plan).unwrap_err();
+        assert_eq!(error.code(), "route_launch.harness_unreachable");
+        assert_eq!(
+            error.details().get("outcome").map(String::as_str),
+            Some("unreachable"),
+            "the refusal carries the vocabulary outcome"
         );
     }
 

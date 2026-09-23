@@ -45,6 +45,7 @@ pub mod mux_install;
 pub mod orientation_packet;
 pub mod permission_defaults;
 pub mod pressure;
+pub mod probe;
 pub mod profile_ops;
 pub mod project_binding;
 pub mod project_recency;
