@@ -10,6 +10,16 @@ hand-authored per question.
 Forward pass  (prospective): planning/development — what binds, what next.
 Returning pass (retrospective): review/analysis — what changed, what returns.
 
+THIN CALLER, not a second arithmetic path: the matrix/spine/practice-binding
+numbers below are read straight out of the native `aikit now-context field`
+assembly (`aikit.contemplation-field/v1`), never recomputed here. This
+script's own job is unchanged — build the same `jev_request` shape this
+loop has always emitted, from source documents that are registered once,
+native and revision-bound — but the counting now lives in one place: AIKit's
+`contemplation_field.rs`, which also understands `native_skill_ref`
+(`ai-kit:...`) and carries `classification`, which this script's own CSV/JSON
+parsing never did.
+
 Usage:
   python3 assemble_contemplation.py \
     --matrix-manifest ProjectCentral/user/capability-matrix.json \
@@ -23,23 +33,52 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import pathlib
+import subprocess
 from collections import Counter
 
 
-def load_matrix_rows(csv_path: pathlib.Path) -> list[dict]:
-    with csv_path.open(newline="") as handle:
-        return list(csv.DictReader(handle))
+def run_native_field(args) -> dict:
+    """Delegate the whole document read + arithmetic to `aikit now-context
+    field`. Returns the `aikit.contemplation-field/v1` payload (the `data`
+    member of the CLI's JSON envelope)."""
+    argv = [args.aikit_bin, "--json", "now-context", "field",
+            "--spine-trace", args.spine_trace]
+    if args.projectcentral:
+        argv += ["--projectcentral", args.projectcentral]
+    else:
+        argv += ["--matrix-manifest", args.matrix_manifest, "--matrix-csv", args.matrix_csv]
+    if args.spine_repo_root:
+        argv += ["--spine-repo-root", args.spine_repo_root]
+    if args.ai_kit_repo_root:
+        argv += ["--ai-kit-repo-root", args.ai_kit_repo_root]
+    if args.telos_goal_dir:
+        argv += ["--telos-goal-dir", args.telos_goal_dir]
+    if args.serving_track:
+        argv += ["--serving-track", args.serving_track]
+    argv += ["--pass", "retrospective" if args.retrospective else "prospective"]
+
+    completed = subprocess.run(argv, capture_output=True, text=True)
+    if completed.returncode != 0:
+        raise SystemExit(
+            f"`{' '.join(argv)}` failed (exit {completed.returncode}):\n"
+            f"{completed.stderr.strip() or completed.stdout.strip()}"
+        )
+    try:
+        envelope = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"`{' '.join(argv)}` did not return JSON: {error}\n{completed.stdout[:2000]}")
+    if not envelope.get("ok", True) and "data" not in envelope:
+        raise SystemExit(f"`{' '.join(argv)}` refused: {envelope}")
+    return envelope.get("data", envelope)
 
 
-def implemented_field(rows: list[dict]) -> dict:
-    caps = [r for r in rows if r.get("record_type") == "capability"]
-    implemented = [c for c in caps if (c.get("implementation_status") or "").startswith("Implemented")]
-    open_rows = [c for c in caps if c not in implemented]
+def implemented_field_from_capabilities(capabilities: list[dict]) -> dict:
+    implemented = [c for c in capabilities if (c.get("implementation_status") or "").startswith("Implemented")]
+    open_rows = [c for c in capabilities if c not in implemented]
     return {
-        "capability_rows": len(caps),
+        "capability_rows": len(capabilities),
         "implemented": len(implemented),
         "open_rows": [
             {"id": c["id"], "status": c.get("implementation_status")} for c in open_rows
@@ -47,75 +86,82 @@ def implemented_field(rows: list[dict]) -> dict:
     }
 
 
-def grid_relations(rows: list[dict]) -> dict:
-    relations = Counter(
-        r.get("relation") for r in rows if r.get("record_type") == "relation"
-        and r.get("relation") and ":" in r["relation"]
-    )
+def grid_relations_summary(grid_relations: list[dict]) -> dict:
+    relations = Counter(r.get("relation") for r in grid_relations if r.get("relation"))
     return {"relation_records": sum(relations.values()), "types": dict(relations)}
 
 
-def spine_practices(trace: dict) -> list[dict]:
-    stories = {s["id"]: s for s in trace.get("stories", [])}
-    coverage = trace.get("m_capability_coverage", [])
+def spine_practices_from_field(practices: list[dict]) -> list[dict]:
+    """Reshape the native field's practice entries into this script's
+    long-standing per-practice record. `canonical_skill` here means "the
+    resolved skill path if this practice is actually bound" — bound now
+    covers both `canonical_skill` and `native_skill_ref` (the native field
+    resolves both); `binding_status`/`classification` are new, additive
+    fields the native field carries that this script's old CSV/JSON reads
+    never could."""
     out = []
-    for practice in trace.get("practices", []):
-        pid = practice["id"]
-        served = sorted(sid for sid, s in stories.items() if pid in (s.get("practices") or []))
-        cells = [
-            {"capability_ref": c.get("capability_ref"), "stories": c.get("stories")}
-            for c in coverage
-            if set(c.get("stories") or []) & set(served)
-        ]
+    for practice in practices:
+        binding = practice.get("binding") or {}
         out.append({
-            "id": pid,
+            "id": practice["id"],
             "purpose": practice.get("purpose"),
-            "stories_served": served,
+            "stories_served": practice.get("stories_served") or [],
             "implementation_owner": practice.get("implementation_owner"),
-            "canonical_skill": practice.get("canonical_skill"),
-            "capability_coverage_cells": cells,
+            "canonical_skill": binding.get("skill_ref") if binding.get("status") == "bound" else None,
+            "capability_coverage_cells": practice.get("capability_coverage_cells") or [],
+            "binding_status": binding.get("status"),
+            "binding_kind": binding.get("kind"),
+            "classification": binding.get("classification"),
         })
     return out
 
 
-def contemplation_request(args, matrix_rows: list[dict], trace: dict) -> dict:
-    field = implemented_field(matrix_rows)
-    relations = grid_relations(matrix_rows)
-    practices = spine_practices(trace)
-    skill_less = [p for p in practices if not p.get("canonical_skill")]
+def contemplation_request(args, field: dict) -> dict:
+    matrix = field.get("matrix") or {}
+    capabilities = matrix.get("capabilities") or []
+    matrix_field = implemented_field_from_capabilities(capabilities)
+    relations = grid_relations_summary(matrix.get("grid_relations") or [])
+    practices = spine_practices_from_field(field.get("spine", {}).get("practices") or [])
+    # "Skill-less" now means genuinely unresolved — neither a canonical_skill
+    # nor a native_skill_ref actually bound to a real file — not merely
+    # "canonical_skill is null", since a practice can be bound entirely
+    # through native_skill_ref (e.g. an AIKit-owned capsule).
+    skill_less = [p for p in practices if p.get("binding_status") != "bound"]
     served_by = {p["id"]: p["stories_served"] for p in practices}
 
     def criterion(practice: dict) -> dict:
-        body = {
+        return {
             "purpose": practice["purpose"],
             "stories_served": practice["stories_served"],
             "implementation_owner": practice["implementation_owner"],
             "canonical_skill": practice["canonical_skill"],
             "capability_coverage_cells": practice["capability_coverage_cells"],
+            "binding_status": practice["binding_status"],
+            "classification": practice["classification"],
         }
-        return body
 
+    spine = field.get("spine") or {}
     state = {
         "matrix_field": (
-            f"ql-capability-matrix/1: {field['capability_rows']} capability rows, "
-            f"{field['implemented']} implemented with linked evidence; open rows: "
-            f"{json.dumps(field['open_rows'])}"
+            f"ql-capability-matrix/1: {matrix_field['capability_rows']} capability rows, "
+            f"{matrix_field['implemented']} implemented with linked evidence; open rows: "
+            f"{json.dumps(matrix_field['open_rows'])}"
         ),
         "grid_relations": (
             f"{relations['relation_records']} relation records across "
             f"{json.dumps(relations['types'])}"
         ),
         "ux_spine": (
-            f"ql.ux-spine-trace/1: {len(trace.get('stories', []))} stories, "
-            f"{len(practices)} practices, {len(trace.get('m_capability_coverage', []))} "
+            f"ql.ux-spine-trace/1: {len(spine.get('stories') or [])} stories, "
+            f"{len(practices)} practices, {len(spine.get('coverage_cells') or [])} "
             "capability-coverage cells. Skill-less practices are the open frontier; "
-            "AIKit owns discovery/projection on the practices with canonical skills."
+            "AIKit owns discovery/projection on the practices with a bound Skill."
         ),
         "coverage_note": (
             "Each choice criterion carries the capability-coverage cells touching its "
             "stories, so the contemplation traverses practice -> stories -> capabilities "
-            "across both documents. Assembled automatically from registered sources by "
-            "scripts/jev-redis/assemble_contemplation.py."
+            "across both documents. Assembled by the native `aikit now-context field` "
+            "(scripts/jev-redis/assemble_contemplation.py is now a thin caller)."
         ),
     }
     request = {
@@ -154,44 +200,7 @@ def contemplation_request(args, matrix_rows: list[dict], trace: dict) -> dict:
             "improved field most need a fresh participant?"
         )
     request["questions"]["_served_by"] = served_by  # verification aid, stripped by caller if undesired
-    return request
-
-
-def discover_matrix_carriers(projectcentral: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path] | None:
-    """Find capability-matrix carriers under a ProjectCentral, telos folder first.
-
-    The integrated-field spec places documents and capability matrices in the
-    telos folder at ProjectCentral level; until a lane lands them there they
-    live directly under user/. Either location wires identically.
-    """
-    for base in (projectcentral / "user" / "telos", projectcentral / "user", projectcentral / "telos"):
-        manifest = base / "capability-matrix.json"
-        csv_carrier = base / "capability-matrix.csv"
-        if manifest.is_file() and csv_carrier.is_file():
-            return manifest, csv_carrier
-    return None
-
-
-def telos_anchor(goal_dir: pathlib.Path, serving_track: str | None) -> dict | None:
-    """Read the long-horizon anchor: goal + tracks from a telos goal folder."""
-    goal_md = goal_dir / "goal.md"
-    if not goal_md.is_file():
-        return None
-    title = None
-    for line in goal_md.read_text().splitlines():
-        if line.startswith("# "):
-            title = line[2:].strip()
-            break
-    tracks = sorted(
-        p.stem for p in (goal_dir / "tracks").glob("*.md")
-    ) if (goal_dir / "tracks").is_dir() else []
-    anchor = {"goal": title, "tracks": tracks, "source": str(goal_dir)}
-    if serving_track:
-        anchor["serving_track"] = serving_track
-        track_file = goal_dir / "tracks" / f"{serving_track}.md"
-        if track_file.is_file():
-            anchor["serving_track_excerpt"] = track_file.read_text()[:600]
-    return anchor
+    return request, practices
 
 
 def main() -> None:
@@ -200,8 +209,15 @@ def main() -> None:
     ap.add_argument("--matrix-csv", required=False)
     ap.add_argument("--projectcentral", required=False,
                     help="ProjectCentral dir; discovers capability-matrix carriers "
-                         "(telos folder first, then user/)")
+                         "(telos folder first, then user/) — same discovery the native "
+                         "field verb performs")
     ap.add_argument("--spine-trace", required=True)
+    ap.add_argument("--spine-repo-root", default=None,
+                    help="Git repo root canonical_skill resolves against; defaults to the "
+                         "spine trace's own containing Git repository")
+    ap.add_argument("--ai-kit-repo-root", default=None,
+                    help="Git repo root native_skill_ref `ai-kit:` refs resolve against; "
+                         "defaults to this invocation's own repo root")
     ap.add_argument("--telos-goal-dir", required=False,
                     help="telos goal folder (goal.md + tracks/); anchors the state "
                          "in the long horizon per the integrated-field chain of custody")
@@ -213,35 +229,34 @@ def main() -> None:
     ap.add_argument("--jev-model", default="jev-latest")
     ap.add_argument("--retrospective", action="store_true",
                     help="Assemble the returning (retrospective) pass instead of the forward pass")
+    ap.add_argument("--aikit-bin", default="aikit",
+                    help="aikit executable that answers `now-context field` "
+                         "(default: aikit on PATH)")
     ap.add_argument("--out-request", required=True)
     args = ap.parse_args()
 
-    if args.projectcentral:
-        found = discover_matrix_carriers(pathlib.Path(args.projectcentral))
-        if not found:
-            raise SystemExit(
-                f"no capability-matrix.json+csv under {args.projectcentral} "
-                "(searched user/telos/, user/, telos/)")
-        args.matrix_manifest, args.matrix_csv = str(found[0]), str(found[1])
-    if not args.matrix_manifest or not args.matrix_csv:
+    if not args.projectcentral and not (args.matrix_manifest and args.matrix_csv):
         raise SystemExit("provide --matrix-manifest/--matrix-csv or --projectcentral")
 
-    matrix_rows = load_matrix_rows(pathlib.Path(args.matrix_csv))
-    trace = json.loads(pathlib.Path(args.spine_trace).read_text())
-    request = contemplation_request(args, matrix_rows, trace)
+    field = run_native_field(args)
+    request, practices = contemplation_request(args, field)
 
     served_by = request["questions"].pop("_served_by")
+    matrix = field.get("matrix") or {}
     out = {"schema": "aikit.contemplation-assembly/v1", "now_ref": args.now_ref,
            "pass": "retrospective" if args.retrospective else "prospective",
            "participant_ref": args.participant_ref,
            "stories_served_by_practice": served_by,
-           "matrix_carriers": {"manifest": args.matrix_manifest, "csv": args.matrix_csv},
+           "matrix_carriers": {
+               "manifest": matrix.get("source_manifest"),
+               "csv": matrix.get("source_csv"),
+           },
            "jev_request": request}
-    if args.telos_goal_dir:
-        out["telos"] = telos_anchor(pathlib.Path(args.telos_goal_dir), args.serving_track)
+    if field.get("telos"):
+        out["telos"] = field["telos"]
         request["state"]["telos_anchor"] = (
-            f"Long horizon: goal '{out['telos']['goal']}' with tracks "
-            f"{out['telos']['tracks']}"
+            f"Long horizon: goal '{out['telos'].get('goal')}' with tracks "
+            f"{out['telos'].get('tracks')}"
             + (f"; this contemplation serves the '{args.serving_track}' track"
                if args.serving_track else "")
             + ". Recognitions returned from this contemplation must name the "
@@ -249,13 +264,16 @@ def main() -> None:
               "telos -> task -> now -> sessions)."
         )
     if args.redis_config:
+        # This script's own carried config, not the native field's live
+        # (optional, participant-scoped) Redis read: preserves the existing
+        # flag's behaviour exactly rather than silently changing it.
         out["redis"] = json.loads(pathlib.Path(args.redis_config).read_text())
     pathlib.Path(args.out_request).write_text(json.dumps(out, indent=1))
-    skill_less = [p["id"] for p in spine_practices(trace) if not p.get("canonical_skill")]
+    skill_less = [p["id"] for p in practices if p.get("binding_status") != "bound"]
     print(f"assembled {out['pass']} contemplation: "
           f"{len(skill_less)} skill-less practices {skill_less}, "
-          f"matrix from {args.matrix_csv}"
-          + (f", telos anchor: {out['telos']['goal']}" if args.telos_goal_dir else ""))
+          f"matrix from {out['matrix_carriers']['csv']}"
+          + (f", telos anchor: {out['telos'].get('goal')}" if field.get("telos") else ""))
 
 
 if __name__ == "__main__":
