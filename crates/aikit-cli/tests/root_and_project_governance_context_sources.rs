@@ -22,9 +22,10 @@ use std::process::{Command, Output};
 use serde_json::{json, Value};
 
 /// A Central-shaped fixture: root governance under `Control/agents/governance`,
-/// and one Work member with its own `ProjectCentral/agents/governance`. Neither
-/// tree needs a real `ctrl` binary or a real Central — `compose`'s governance
-/// reading is pure filesystem scanning against `CENTRAL_ROOT`.
+/// and one Work member with its own `ProjectCentral/agents/governance`. The
+/// governance reading itself is filesystem scanning against `CENTRAL_ROOT`,
+/// but `compose` also lists agent profiles through the native `ctrl` owner, so
+/// these end-to-end tests need the real `ctrl` on PATH (see `native_ctrl`).
 struct Fixture {
     _temp: tempfile::TempDir,
     central: PathBuf,
@@ -93,6 +94,26 @@ fn fixture() -> Fixture {
     }
 }
 
+/// `compose` asks the native Central owner (`ctrl … agent-profile.list`), so
+/// this end-to-end test runs against the real `ctrl` or not at all — never a
+/// stand-in. Without it the test skips with a reason, unless
+/// `AIKIT_REQUIRE_NATIVE_CTRL` is set, in which case absence fails loudly.
+fn native_ctrl() -> bool {
+    let present = Command::new("ctrl")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !present {
+        assert!(
+            std::env::var_os("AIKIT_REQUIRE_NATIVE_CTRL").is_none(),
+            "AIKIT_REQUIRE_NATIVE_CTRL is set but no native `ctrl` is on PATH"
+        );
+        eprintln!("skip: native `ctrl` is not on PATH; compose cannot list agent profiles");
+    }
+    present
+}
+
 fn compose(central: &Path, home: &Path, cwd: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_aikit"))
         .env("AIKIT_HOME", home)
@@ -121,6 +142,9 @@ fn succeeded(output: &Output) -> Value {
 
 #[test]
 fn a_project_context_names_both_root_and_project_governance_including_responsibility() {
+    if !native_ctrl() {
+        return;
+    }
     let fixture = fixture();
     let home = tempfile::tempdir().unwrap();
     let value = succeeded(&compose(&fixture.central, home.path(), &fixture.project));
@@ -170,6 +194,9 @@ fn a_project_context_names_both_root_and_project_governance_including_responsibi
 
 #[test]
 fn a_root_context_names_root_governance_and_claims_the_root_project_not_a_leftover() {
+    if !native_ctrl() {
+        return;
+    }
     let fixture = fixture();
     let home = tempfile::tempdir().unwrap();
     let value = succeeded(&compose(&fixture.central, home.path(), &fixture.central));
