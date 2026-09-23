@@ -484,6 +484,13 @@ fn cmd_now_context(cwd: &std::path::Path, command: NowContextCmd) -> Result<Repl
         NowContextSub::AppendChange(args) => aikit_cli::jev_now::now_append_change(args)?,
         NowContextSub::Revoke(args) => aikit_cli::jev_now::now_revoke(args)?,
         NowContextSub::Field(args) => aikit_cli::contemplation_field::now_field(cwd, *args)?,
+        NowContextSub::Contemplate(args) => aikit_cli::contemplation_intel::now_contemplate(args)?,
+        NowContextSub::TestSelection(args) => {
+            aikit_cli::contemplation_intel::now_test_selection(args)?
+        }
+        NowContextSub::PublishIntelligence(args) => {
+            aikit_cli::contemplation_intel::now_publish_intelligence(*args)?
+        }
     };
     data_reply(data)
 }
