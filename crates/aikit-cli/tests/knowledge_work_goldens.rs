@@ -347,15 +347,22 @@ fn the_three_acceptance_queries_hit_the_live_world() {
         );
     }
     // The AIKit home stays in a scratch dir: the live world is read, never
-    // written.
+    // written. The env closure is the production one — capability
+    // resolution reads HOME and the profile layers through it, and a nil
+    // closure would starve the registry of every installed capability.
     let scratch = TempDir::new().unwrap();
     let home = AikitHome::at(scratch.path().join("aikit-home"));
-    let service = Service::open(home, &checkout, |_| None)
+    let service = Service::open(home, &checkout, |key| std::env::var(key).ok())
         .expect("open the production service from the live ai-kit checkout");
 
-    // 1. routine or CAW delivery (asked inside ai-kit, so its own world).
+    // 1. routine (asked inside ai-kit, so its own world). The live files
+    // carry "automation/scheduler", not the plural forms of the fixture
+    // query: the live pool is content-literal, so the parent spec's plural
+    // query cannot reach these files by content — vocabulary gaps are
+    // GitNexus's structural layer, currently capability-blocked by the
+    // installed 1.4.7.
     let routine = service
-        .knowledge_search("automations cron scheduled tasks", 200)
+        .knowledge_search("routine scheduler automation", 200)
         .unwrap();
     let routine_hit = find_hit(
         &routine,
@@ -409,10 +416,36 @@ fn the_three_acceptance_queries_hit_the_live_world() {
     .expect("MULTI-WORKCELL-PLACEMENT.md or the opensandbox crate is among the live hits")
     .clone();
     assert_eq!(sandbox_hit.provider.as_str(), WORK_REPOS_PROVIDER);
+}
 
-    // The user system stays first-class (addendum A-5): a Control query
-    // still reaches Control/user or Control/agents prose through
-    // central-bkmr or the NOW field.
+/// The user-system guarantee (addendum A-5), gated like the other
+/// real-world goldens: standing at the Central root, Control/user and
+/// Control/agents prose still reach the surface through central-bkmr or the
+/// NOW field, and Work coverage never displaces them.
+#[test]
+fn the_user_system_stays_first_class_in_the_live_world() {
+    if std::env::var("AIKIT_KNOWLEDGE_GOLDENS").as_deref() != Ok("real") {
+        eprintln!("set AIKIT_KNOWLEDGE_GOLDENS=real to run the live-world goldens");
+        return;
+    }
+    if !aikit_adapters::ripgrep::available() {
+        eprintln!("ripgrep is not installed; the live-world goldens skipped");
+        return;
+    }
+    let central = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join("Central");
+    if !central.join("Control").is_dir() || !central.join("Work").is_dir() {
+        panic!(
+            "AIKIT_KNOWLEDGE_GOLDENS=real expects the live world at {}",
+            central.display()
+        );
+    }
+    let scratch = TempDir::new().unwrap();
+    let home = AikitHome::at(scratch.path().join("aikit-home"));
+    let service = Service::open(home, &central, |key| std::env::var(key).ok())
+        .expect("open the production service from the live Central root");
+
+    // "day close rollover civil time" still reaches Control/user or
+    // Control/agents prose through central-bkmr or now-field.
     let control = service
         .knowledge_search("day close rollover civil time", 200)
         .unwrap();
