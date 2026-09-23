@@ -692,6 +692,62 @@ mod tests {
         assert_eq!(count, 2048);
         assert!(reopened.draft(&other).unwrap().text.is_empty());
     }
+    #[test]
+    fn latest_native_open_generation_retains_only_unresolved_recovery_truth() {
+        let root = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(root.path());
+        let session = ResourceRef::parse("agent-session/open-recovery").unwrap();
+        let store = EncounterStore::open(&home).unwrap();
+        store
+            .append(
+                &session,
+                &serde_json::json!({"kind":"native-open-reserved","connection_generation":"old","owner_pid":1}),
+            )
+            .unwrap();
+        store
+            .append(
+                &session,
+                &serde_json::json!({"kind":"native-open-refused","connection_generation":"old","cleanup_confirmed":true}),
+            )
+            .unwrap();
+        store
+            .append(
+                &session,
+                &serde_json::json!({"kind":"native-open-reserved","connection_generation":"current","owner_pid":2}),
+            )
+            .unwrap();
+        // A late terminal from an older generation cannot clear the current one.
+        store
+            .append(
+                &session,
+                &serde_json::json!({"kind":"binding","connection_generation":"old"}),
+            )
+            .unwrap();
+        let recovery = store.native_open_recovery(&session).unwrap().unwrap();
+        assert_eq!(recovery["state"], "RecoveryRequired");
+        assert_eq!(
+            recovery.pointer("/opening/connection_generation").unwrap(),
+            "current"
+        );
+        store
+            .append(
+                &session,
+                &serde_json::json!({"kind":"native-open-refused","connection_generation":"current","reason":"child ownership unknown","cleanup_confirmed":false}),
+            )
+            .unwrap();
+        drop(store);
+        let reopened = EncounterStore::open(&home).unwrap();
+        let recovery = reopened.native_open_recovery(&session).unwrap().unwrap();
+        assert_eq!(recovery["state"], "CleanupUncertain");
+        assert_eq!(recovery["error"], "child ownership unknown");
+        reopened
+            .append(
+                &session,
+                &serde_json::json!({"kind":"native-open-reconciled","connection_generation":"current","standing":"explicit-native-evidence"}),
+            )
+            .unwrap();
+        assert!(reopened.native_open_recovery(&session).unwrap().is_none());
+    }
     fn legacy_event(native: &str, generation: &str, kind: &str, text: Option<&str>) -> Value {
         let mut signal =
             serde_json::json!({"native_session_id":native,"sequence":1,"kind":{"kind":kind}});

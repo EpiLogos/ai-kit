@@ -40,6 +40,8 @@ for line in sys.stdin:
     method = message.get("method")
     ident = message.get("id")
     if method == "initialize":
+        if mode == "slow-initialize":
+            time.sleep(0.5)
         result(ident, {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}})
     elif method in ("session/new", "session/load"):
         native = message.get("params", {}).get("sessionId", native)

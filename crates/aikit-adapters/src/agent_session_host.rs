@@ -396,14 +396,26 @@ impl AgentSessionHost {
     /// Negotiate the protocol. Blocks until the provider answers; the returned
     /// descriptor carries the capabilities the rest of the host will honour.
     pub fn initialize(&self) -> Result<ConnectionDescriptor> {
+        self.initialize_inner(None)
+    }
+
+    /// Negotiate the protocol before one caller-owned cumulative startup
+    /// deadline. The deadline belongs to the whole native open, rather than
+    /// granting a fresh timeout to each handshake step.
+    pub fn initialize_before(&self, deadline: Instant) -> Result<ConnectionDescriptor> {
+        self.initialize_inner(Some(deadline))
+    }
+
+    fn initialize_inner(&self, deadline: Option<Instant>) -> Result<ConnectionDescriptor> {
         let _gate = self.shared.gate()?;
+        self.shared.ensure_control_deadline(deadline)?;
         let command = {
             let mut adapter = self.shared.adapter()?;
             adapter.initialize()?
         };
         let receiver = self.shared.register_control(&command, None)?;
         self.shared.dispatch(&command)?;
-        match self.shared.await_control(receiver)? {
+        match self.shared.await_control(receiver, deadline)? {
             ControlDelivery::Signals(_) => {}
             ControlDelivery::Failed(reason) => {
                 return Err(AikitError::new(
@@ -422,6 +434,23 @@ impl AgentSessionHost {
     /// identity on one host, and one native id may not be bound to two
     /// identities.
     pub fn open_session(&self, request: SessionOpenRequest) -> Result<SessionLane> {
+        self.open_session_inner(request, None)
+    }
+
+    /// Open one native session before the caller's cumulative startup deadline.
+    pub fn open_session_before(
+        &self,
+        request: SessionOpenRequest,
+        deadline: Instant,
+    ) -> Result<SessionLane> {
+        self.open_session_inner(request, Some(deadline))
+    }
+
+    fn open_session_inner(
+        &self,
+        request: SessionOpenRequest,
+        deadline: Option<Instant>,
+    ) -> Result<SessionLane> {
         let canonical = request.agent_session.clone().ok_or_else(|| {
             AikitError::new(
                 "agent_session_host.canonical_identity_required",
@@ -430,6 +459,7 @@ impl AgentSessionHost {
             )
         })?;
         let _gate = self.shared.gate()?;
+        self.shared.ensure_control_deadline(deadline)?;
         {
             let state = self.shared.state()?;
             if state.sessions.contains_key(&canonical) {
@@ -458,7 +488,7 @@ impl AgentSessionHost {
             .shared
             .register_control(&command, Some(Arc::clone(&lane)))?;
         self.shared.dispatch(&command)?;
-        let signals = match self.shared.await_control(control_receiver)? {
+        let signals = match self.shared.await_control(control_receiver, deadline)? {
             ControlDelivery::Signals(signals) => signals,
             ControlDelivery::Failed(reason) => {
                 return Err(AikitError::new("agent_session_host.open_failed", reason));
@@ -613,8 +643,16 @@ impl AgentSessionHost {
     fn stop_reader(&mut self) -> Result<Option<ExitStatus>> {
         state_stop_bridge(&self.shared.state, DELIBERATE_STOP_REASON, true);
         let status = self.shared.control.terminate();
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
+        let reader = self.reader.take();
+        if status.is_ok() {
+            if let Some(reader) = reader {
+                let _ = reader.join();
+            }
+        } else {
+            // A failed process-group teardown is explicitly uncertain. Do not
+            // turn that error into an unbounded wait for stdout to close; drop
+            // only our JoinHandle while the shared state retains the failure.
+            drop(reader);
         }
         status
     }
@@ -734,7 +772,25 @@ impl SessionLane {
     /// session. This is an ephemeral native configuration operation; it does
     /// not open/fork a session or alter a durable model policy.
     pub fn set_model(&self, provider_model_id: &str) -> Result<ModelConfigurationReceipt> {
+        self.set_model_inner(provider_model_id, None)
+    }
+
+    /// Select a provider model before the caller's cumulative startup deadline.
+    pub fn set_model_before(
+        &self,
+        provider_model_id: &str,
+        deadline: Instant,
+    ) -> Result<ModelConfigurationReceipt> {
+        self.set_model_inner(provider_model_id, Some(deadline))
+    }
+
+    fn set_model_inner(
+        &self,
+        provider_model_id: &str,
+        deadline: Option<Instant>,
+    ) -> Result<ModelConfigurationReceipt> {
         let _gate = self.shared.gate()?;
+        self.shared.ensure_control_deadline(deadline)?;
         let (native_session_id, previous) = {
             let state = self.shared.state()?;
             let record = state
@@ -779,7 +835,7 @@ impl SessionLane {
             &native_session_id,
         )?;
         self.shared.dispatch(&command)?;
-        match self.shared.await_control(receiver)? {
+        match self.shared.await_control(receiver, deadline)? {
             ControlDelivery::Signals(_) => {}
             ControlDelivery::Failed(reason) => {
                 return Err(AikitError::new(
@@ -871,7 +927,7 @@ impl SessionLane {
             &native_session_id,
         )?;
         self.shared.dispatch(&command)?;
-        match self.shared.await_control(receiver)? {
+        match self.shared.await_control(receiver, None)? {
             ControlDelivery::Signals(_) => {}
             ControlDelivery::Failed(reason) => {
                 return Err(AikitError::new(
@@ -1062,6 +1118,29 @@ impl TurnHandle {
 }
 
 impl HostShared {
+    fn ensure_control_deadline(&self, deadline: Option<Instant>) -> Result<()> {
+        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+            Err(self.control_timeout())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn control_timeout(&self) -> AikitError {
+        let reason = "native provider startup exceeded its cumulative control deadline";
+        state_stop_bridge(&self.state, reason, false);
+        match self.control.terminate() {
+            Ok(_) => AikitError::new("agent_session_host.control_timeout", reason)
+                .with("cleanup_confirmed", "true"),
+            Err(cleanup) => AikitError::new(
+                "agent_session_host.control_timeout_cleanup_uncertain",
+                reason,
+            )
+            .with("cleanup_confirmed", "false")
+            .with("cleanup_error", cleanup.to_string()),
+        }
+    }
+
     // ---------------------------------------------------------------- reading
 
     fn serve(self: &Arc<Self>, mut reader: ConnectionReader) {
@@ -1451,24 +1530,39 @@ impl HostShared {
         })
     }
 
-    fn await_control(&self, receiver: Receiver<ControlDelivery>) -> Result<ControlDelivery> {
-        match receiver.recv() {
-            Ok(delivery) => Ok(delivery),
-            Err(_) => {
-                let mut state = lock(&self.state)?;
-                match state.transport_error.clone() {
-                    Some(reason) => Err(AikitError::new(
-                        "agent_session_host.transport_closed",
-                        reason,
-                    )),
-                    None => {
-                        state.closed = true;
-                        Err(AikitError::new(
-                            "agent_session_host.control_abandoned",
-                            "the host stopped before the control response arrived",
-                        ))
-                    }
+    fn await_control(
+        &self,
+        receiver: Receiver<ControlDelivery>,
+        deadline: Option<Instant>,
+    ) -> Result<ControlDelivery> {
+        match deadline {
+            Some(deadline) => {
+                match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(delivery) => Ok(delivery),
+                    Err(RecvTimeoutError::Disconnected) => self.control_disconnected(),
+                    Err(RecvTimeoutError::Timeout) => Err(self.control_timeout()),
                 }
+            }
+            None => match receiver.recv() {
+                Ok(delivery) => Ok(delivery),
+                Err(_) => self.control_disconnected(),
+            },
+        }
+    }
+
+    fn control_disconnected(&self) -> Result<ControlDelivery> {
+        let mut state = lock(&self.state)?;
+        match state.transport_error.clone() {
+            Some(reason) => Err(AikitError::new(
+                "agent_session_host.transport_closed",
+                reason,
+            )),
+            None => {
+                state.closed = true;
+                Err(AikitError::new(
+                    "agent_session_host.control_abandoned",
+                    "the host stopped before the control response arrived",
+                ))
             }
         }
     }
