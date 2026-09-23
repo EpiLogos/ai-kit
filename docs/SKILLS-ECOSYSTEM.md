@@ -105,10 +105,18 @@ Agents whose skills dir *is* `.agents/skills` (Codex, Cursor, Gemini CLI,
 Copilot, Cline, Zed, Warp, Amp…) are "universal": for them the canonical
 store *is* the install location, no symlink needed. Everyone else gets a link.
 
-OpenCode is not universal: since 1.x it canonically ingests
-`$XDG_CONFIG_HOME/opencode/skill(s)/<name>/` (global) and `.opencode/skill(s)/`
-(project), and scans `.claude`/`.agents` only as deliberate external sources.
-Projected skills must land in OpenCode's own directories to be first-class.
+OpenCode counts as universal too. An earlier revision of this document said
+opencode scans `.claude`/`.agents` only as deliberate external sources and that
+projected skills must land in its own directories to be first-class; probed
+directly against opencode 1.18.30 (2026-09-22), that is falsified. After a
+skill was placed in the project `.agents/skills/` tree, `opencode debug skill`
+listed it with `location: <project>/.agents/skills/<name>/SKILL.md`; after the
+tree was retracted, the same probe reported zero matches — so the pickup is
+causal, not a docs reading. OpenCode's own dirs
+(`$XDG_CONFIG_HOME/opencode/skill(s)/`, `.opencode/skill(s)/`) also work, but
+project `.agents/skills/` needs neither a link nor a copy. AIKit's opencode
+projection is brokered into the project on exactly this basis and never writes
+OpenCode's config dirs.
 
 This is exactly what is on disk here: `~/.claude/skills` contains 14 relative
 symlinks into `~/.agents/skills` interleaved with 25 hand-made real directories

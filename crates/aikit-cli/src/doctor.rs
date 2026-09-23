@@ -7,10 +7,15 @@
 //! other world mutation — `doctor --fix` is a front-end over the one engine, not a
 //! second safety story.
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
 use aikit_adapters::NativeSecureStoreProvider;
 use aikit_core::credential::{CredentialRef, SecretProvider};
+use aikit_core::id::CapsuleId;
 use aikit_core::procedure::{Inverse, Plan, Procedure, ProcedureKind, WorldEdit};
 use aikit_core::{AikitError, Result};
+use aikit_store::edit::ProfileDocument;
 use aikit_store::CredentialBindingStore;
 
 use crate::app::Service;
@@ -41,6 +46,12 @@ impl Severity {
 pub enum Fix {
     /// Create a missing directory AIKit owns.
     CreateDir { path: std::path::PathBuf },
+    /// Drop every declaration for a capsule from one scope's profile file —
+    /// the repair for an enablement whose source was removed under it.
+    ClearEnableEntry {
+        path: std::path::PathBuf,
+        capsule: CapsuleId,
+    },
 }
 
 /// One thing `doctor` noticed.
@@ -99,16 +110,30 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
     }
 
     // Declared-but-unavailable: the user asked for something and did not get it.
+    // When the declaration lives in a scope's profile file, the stale enablement
+    // is repairable: a forced `source remove` legitimately leaves these behind,
+    // and the honest exit is a named finding with a named fix, not a wedged
+    // context.
     for (id, reason) in &view.unavailable {
         if view.is_declared_enabled(id) {
-            findings.push(
-                Finding::new(
-                    "resolution.unavailable",
-                    Severity::Warning,
-                    format!("{id} is enabled here but cannot activate"),
-                )
-                .with_detail(reason.describe()),
-            );
+            let mut finding = Finding::new(
+                "resolution.unavailable",
+                Severity::Warning,
+                format!("{id} is enabled here but cannot activate"),
+            )
+            .with_detail(reason.describe());
+            if let Some(path) = view
+                .declared
+                .get(id)
+                .map(|state| std::path::PathBuf::from(&state.origin.label))
+                .filter(|path| path.is_file())
+            {
+                finding = finding.fixable(Fix::ClearEnableEntry {
+                    path,
+                    capsule: id.clone(),
+                });
+            }
+            findings.push(finding);
         }
     }
 
@@ -373,12 +398,17 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
 /// correct case, because most findings are decisions rather than chores.
 pub fn plan_fixes(service: &Service, findings: &[Finding]) -> Result<Option<Procedure>> {
     let mut plan = Plan::new();
-    let mut any = false;
+    let mut planned = false;
+
+    // Several stale enablements can live in one declaration file. Clearing them
+    // is one edit per file, computed once from the bytes on disk, so the second
+    // edit cannot resurrect what the first removed.
+    let mut stale: BTreeMap<PathBuf, Vec<CapsuleId>> = BTreeMap::new();
 
     for finding in findings {
         match &finding.fix {
             Some(Fix::CreateDir { path }) => {
-                any = true;
+                planned = true;
                 plan = plan
                     .with_note(format!("create {}", path.display()))
                     // A directory AIKit owns, created with a marker file so the
@@ -389,11 +419,50 @@ pub fn plan_fixes(service: &Service, findings: &[Finding]) -> Result<Option<Proc
                         inverse: Inverse::Remove,
                     });
             }
+            Some(Fix::ClearEnableEntry { path, capsule }) => {
+                stale.entry(path.clone()).or_default().push(capsule.clone());
+            }
             None => {}
         }
     }
 
-    if !any {
+    for (path, capsules) in &stale {
+        let text = std::fs::read_to_string(path).map_err(|error| {
+            AikitError::new(
+                "doctor.unreadable_profile",
+                format!("could not read {}: {error}", path.display()),
+            )
+            .with("path", path.display().to_string())
+        })?;
+        let mut document = ProfileDocument::parse(&text)?;
+        for capsule in capsules {
+            document.clear(capsule);
+        }
+        let contents = document.to_string();
+        if contents == text {
+            continue;
+        }
+        planned = true;
+        plan = plan
+            .with_note(format!(
+                "remove the stale enablement of {} from {}",
+                capsules
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                path.display()
+            ))
+            .with_edit(WorldEdit::WriteFile {
+                path: path.clone(),
+                contents: contents.into_bytes(),
+                inverse: Inverse::Restore {
+                    blob: aikit_core::procedure::BlobId::deferred(),
+                },
+            });
+    }
+
+    if !planned {
         return Ok(None);
     }
     aikit_store::procedure::plan_procedure(

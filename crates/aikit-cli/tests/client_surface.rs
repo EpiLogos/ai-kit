@@ -29,6 +29,7 @@ const OVERLAY_NAMES: &[&str] = &[
     "claude",
     "codex",
     "zcode",
+    "opencode",
     "gemini-cli",
     "pi",
     "gemini-antigravity",
@@ -443,6 +444,97 @@ fn with_actuation_absent_every_row_discloses_instead_of_vanishing() {
     assert_eq!(pi_rows.len(), 1);
     assert_eq!(pi_rows[0]["client"], "pi");
     assert_eq!(pi_rows[0]["state"], "unavailable");
+}
+
+/// Issue #394 K2: the embedded adapter registry carries opencode, so the
+/// client surface must answer for it by name — a roster row with its honest
+/// state, and an install refusal that names the harness as known-but-undispatchable,
+/// never `client.unknown` against a roster that omits it.
+#[test]
+fn client_status_opencode_answers_in_an_isolated_scope_and_install_is_a_named_refusal() {
+    let home = scenario_with_partial_intake();
+
+    // This scenario's detection record names no opencode entry and its
+    // descriptor is refused — the row still answers, with the absence named.
+    let rows = rows_with_fixtures_env(&home, &["client", "status", "opencode"]);
+    assert_eq!(
+        rows.len(),
+        1,
+        "opencode must be a first-class row: {rows:?}"
+    );
+    assert_eq!(rows[0]["client"], "opencode");
+    assert_eq!(rows[0]["state"], "absent");
+    assert_eq!(rows[0]["detection"], "absent-from-record");
+    assert_eq!(rows[0]["dispatch"], "adapter-only");
+    assert_eq!(rows[0]["admission"]["source_revision"], "v1.18.29");
+
+    let mut command = Command::cargo_bin("aikit").unwrap();
+    command
+        .env("AIKIT_HOME", home.path().join("aikit-home"))
+        .env("HOME", home.path().join("user-home"))
+        .env(
+            "PATH",
+            format!(
+                "{}:/usr/bin:/bin",
+                home.path().join("actuation-bin").display()
+            ),
+        )
+        .env("FIXTURES", home.path().join("actuation-fixtures"))
+        .arg("--json")
+        .args(["client", "install", "opencode"])
+        .current_dir(home.path().join("project"));
+    let output = command.output().unwrap();
+    assert!(!output.status.success(), "no dispatch seam, so no install");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("client.not_dispatchable"), "{stdout}");
+    assert!(
+        !stdout.contains("client.unknown"),
+        "a carried harness must never be unknown: {stdout}"
+    );
+}
+
+/// Issue #394 K4: the admission descriptor declares the edition its evidence
+/// was gathered on; when the installed product reports a different edition,
+/// the read model surfaces both and names the divergence — the designed
+/// honesty law (facts surfaced, never normalised away) with no invented gate.
+#[test]
+fn the_admission_read_model_surfaces_a_stale_edition_instead_of_passing_silently() {
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(home.path().join("project/.aikit")).unwrap();
+    fs::write(
+        home.path().join("project/.aikit/profile.toml"),
+        "schema = 1\n",
+    )
+    .unwrap();
+    let fixtures = stage_actuation(home.path());
+    write_detection_fixture(
+        &fixtures,
+        r#"{"slug": "opencode", "harness_ref": "harness/opencode", "state": "detected",
+            "version": "1.18.30",
+            "probes": [{"kind": "config-dir", "result": "pass", "spec": "~/.config/opencode"}]}"#,
+    );
+
+    let rows = rows_with_fixtures_env(&home, &["client", "status", "opencode"]);
+    assert_eq!(
+        rows.len(),
+        1,
+        "the filter must select exactly opencode: {rows:?}"
+    );
+    let row = &rows[0];
+    // The declared edition facts ride the row, with what the installed
+    // product reports beside them.
+    assert_eq!(row["admission"]["source_revision"], "v1.18.29");
+    assert_eq!(row["admission"]["native_version"], Value::Null);
+    assert_eq!(row["detected_version"], "1.18.30");
+    let notes = row["notes"].as_array().unwrap();
+    assert!(
+        notes.iter().any(|note| {
+            note.as_str().is_some_and(|text| {
+                text.contains("pinned to edition v1.18.29") && text.contains("reports 1.18.30")
+            })
+        }),
+        "the stale-edition mismatch must be disclosed: {notes:?}"
+    );
 }
 
 #[test]

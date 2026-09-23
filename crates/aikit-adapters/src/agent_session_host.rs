@@ -46,14 +46,14 @@ use serde_json::Value;
 
 use crate::agent_connection::{
     CancelRequest, ConnectionCommand, ConnectionDescriptor, ConnectionSignal, ConnectionSignalKind,
-    NativeModelObservation, NativePermissionRequest, NativeSessionBinding, PromptRequest,
-    SessionOpenRequest,
+    NativeModeObservation, NativeModelObservation, NativePermissionRequest, NativeSessionBinding,
+    PromptRequest, SessionOpenRequest,
 };
 use crate::connection_process::{
     ConnectionControl, ConnectionProcess, ConnectionReader, ConnectionWriter, ModelEnvironment,
 };
 use crate::interactive_connection::{
-    InteractiveAgentConnectionAdapter, NativeModelControls, PermissionDecision,
+    InteractiveAgentConnectionAdapter, NativeModeControls, NativeModelControls, PermissionDecision,
 };
 
 pub const AGENT_SESSION_HOST_VERSION: &str = "aikit.agent-session-host/v1";
@@ -183,6 +183,18 @@ pub struct ModelConfigurationReceipt {
     pub current: NativeModelObservation,
 }
 
+/// A provider-confirmed change of one native session's permission mode.
+/// `previous` is what the host held before the request (absent only when the
+/// provider never advertised modes, which the adapter refuses before any
+/// wire command). AgentSession identity is carried through unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModeConfigurationReceipt {
+    pub agent_session: ResourceRef,
+    pub native_session_id: String,
+    pub previous: Option<NativeModeObservation>,
+    pub current: NativeModeObservation,
+}
+
 /// Outcome of a bounded wait for a turn to finish.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WaitOutcome {
@@ -304,16 +316,30 @@ enum ControlWaiter {
         agent_session: ResourceRef,
         native_session_id: String,
     },
+    /// A provider session/set_mode response for one existing canonical lane.
+    Mode {
+        sender: Sender<ControlDelivery>,
+        agent_session: ResourceRef,
+        native_session_id: String,
+    },
 }
 
 impl ControlWaiter {
     fn send(self, delivery: ControlDelivery) {
         let sender = match self {
             ControlWaiter::Handshake(sender) => sender,
-            ControlWaiter::Open { sender, .. } | ControlWaiter::Model { sender, .. } => sender,
+            ControlWaiter::Open { sender, .. }
+            | ControlWaiter::Model { sender, .. }
+            | ControlWaiter::Mode { sender, .. } => sender,
         };
         let _ = sender.send(delivery);
     }
+}
+
+#[derive(Clone, Copy)]
+enum SessionControlKind {
+    Model,
+    Mode,
 }
 
 enum ControlDelivery {
@@ -825,6 +851,142 @@ impl SessionLane {
         })
     }
 
+    /// Ask the real adapter whether this exact resident native session has a
+    /// writable permission-mode selector. No command is sent.
+    pub fn mode_controls(&self) -> Result<NativeModeControls> {
+        let _gate = self.shared.gate()?;
+        let state = self.shared.state()?;
+        let record = state
+            .sessions
+            .get(&self.agent_session)
+            .ok_or_else(|| session_not_open(&self.agent_session))?;
+        if record.binding.native_session_id != self.binding.native_session_id {
+            return Err(AikitError::new(
+                "agent_session_host.stale_lane",
+                "Mode controls belong to a different native session",
+            ));
+        }
+        if !matches!(
+            state.lane_state(&record.binding.native_session_id),
+            SessionLaneState::Resident
+        ) {
+            return Ok(NativeModeControls::unavailable(
+                "Mode changes require an idle resident session",
+            ));
+        }
+        let native_session_id = record.binding.native_session_id.clone();
+        drop(state);
+        Ok(self
+            .shared
+            .adapter()?
+            .session_mode_controls(&native_session_id))
+    }
+
+    /// Switch this exact resident native session to one provider-advertised
+    /// permission mode and wait for the provider's confirmation. What the mode
+    /// allows stays the provider's decision; it applies to the next action.
+    pub fn set_mode(&self, provider_mode_id: &str) -> Result<ModeConfigurationReceipt> {
+        let _gate = self.shared.gate()?;
+        let (native_session_id, previous) = {
+            let state = self.shared.state()?;
+            let record = state
+                .sessions
+                .get(&self.agent_session)
+                .ok_or_else(|| session_not_open(&self.agent_session))?;
+            if record.binding.native_session_id != self.binding.native_session_id {
+                return Err(AikitError::new(
+                    "agent_session_host.stale_lane",
+                    format!(
+                        "this lane was taken from native session {} but the host now binds native session {} for {}",
+                        self.binding.native_session_id,
+                        record.binding.native_session_id,
+                        self.agent_session
+                    ),
+                ));
+            }
+            if !matches!(
+                state.lane_state(&record.binding.native_session_id),
+                SessionLaneState::Resident
+            ) {
+                return Err(AikitError::new(
+                    "agent_session_host.mode_configuration_busy",
+                    "provider permission-mode changes require an idle resident session",
+                ));
+            }
+            (
+                record.binding.native_session_id.clone(),
+                record.binding.mode_observation.clone(),
+            )
+        };
+        let command = {
+            let mut adapter = self.shared.adapter()?;
+            adapter.set_session_mode(&native_session_id, provider_mode_id)?
+        };
+        let receiver = self.shared.register_session_control(
+            &command,
+            &self.agent_session,
+            &native_session_id,
+            SessionControlKind::Mode,
+        )?;
+        self.shared.dispatch(&command)?;
+        match self.shared.await_control(receiver)? {
+            ControlDelivery::Signals(signals) => {
+                if let Some(reason) = signals.iter().find_map(|signal| match &signal.kind {
+                    ConnectionSignalKind::Degraded { degradation } => {
+                        Some(degradation.reason.clone())
+                    }
+                    _ => None,
+                }) {
+                    return Err(AikitError::new(
+                        "agent_session_host.mode_configuration_failed",
+                        reason,
+                    ));
+                }
+            }
+            ControlDelivery::Failed(reason) => {
+                return Err(AikitError::new(
+                    "agent_session_host.mode_configuration_failed",
+                    reason,
+                ));
+            }
+        }
+        let identity = {
+            let state = self.shared.state()?;
+            let record = state
+                .sessions
+                .get(&self.agent_session)
+                .ok_or_else(|| session_not_open(&self.agent_session))?;
+            if record.binding.native_session_id != native_session_id {
+                return Err(AikitError::new(
+                    "agent_session_host.stale_lane",
+                    "provider mode response was not applied because the native binding changed",
+                ));
+            }
+            record.binding.clone()
+        };
+        let current = identity.mode_observation.ok_or_else(|| {
+            AikitError::new(
+                "agent_session_host.mode_configuration_unconfirmed",
+                "provider did not confirm a session mode",
+            )
+        })?;
+        if current.current_mode_id != provider_mode_id {
+            return Err(AikitError::new(
+                "agent_session_host.mode_configuration_unconfirmed",
+                format!(
+                    "provider reports mode {} instead of requested {provider_mode_id}",
+                    current.current_mode_id
+                ),
+            ));
+        }
+        Ok(ModeConfigurationReceipt {
+            agent_session: self.agent_session.clone(),
+            native_session_id,
+            previous,
+            current,
+        })
+    }
+
     /// Select an exact provider-advertised execution budget on this resident session.
     /// This is native configuration only; it does not alter durable policy or Agency.
     pub fn set_reasoning_effort(
@@ -1143,7 +1305,37 @@ impl HostShared {
                 );
                 let _ = sender.send(ControlDelivery::Signals(signals));
             }
-            None => self.route(signals),
+            Some(ControlWaiter::Mode {
+                sender,
+                agent_session,
+                native_session_id,
+            }) => {
+                state_apply_mode_configuration(
+                    &self.state,
+                    Some(&agent_session),
+                    &native_session_id,
+                    &signals,
+                );
+                let _ = sender.send(ControlDelivery::Signals(signals));
+            }
+            None => {
+                // An agent may change its own permission mode at any time
+                // (`current_mode_update`); keep the resident binding current
+                // before the signal reaches the lane and its journal.
+                for signal in &signals {
+                    if let (ConnectionSignalKind::ModeConfigured { .. }, Some(native)) =
+                        (&signal.kind, signal.native_session_id.as_deref())
+                    {
+                        state_apply_mode_configuration(
+                            &self.state,
+                            None,
+                            native,
+                            std::slice::from_ref(signal),
+                        );
+                    }
+                }
+                self.route(signals)
+            }
         }
         true
     }
@@ -1296,6 +1488,21 @@ impl HostShared {
         agent_session: &ResourceRef,
         native_session_id: &str,
     ) -> Result<Receiver<ControlDelivery>> {
+        self.register_session_control(
+            command,
+            agent_session,
+            native_session_id,
+            SessionControlKind::Model,
+        )
+    }
+
+    fn register_session_control(
+        &self,
+        command: &ConnectionCommand,
+        agent_session: &ResourceRef,
+        native_session_id: &str,
+        kind: SessionControlKind,
+    ) -> Result<Receiver<ControlDelivery>> {
         let token = control_token(&command.payload)?;
         let (sender, receiver) = mpsc::channel();
         let mut state = lock(&self.state)?;
@@ -1311,12 +1518,21 @@ impl HostShared {
                 "provider control request id is already pending",
             ));
         }
+        let agent_session = agent_session.clone();
+        let native_session_id = native_session_id.to_owned();
         state.control.insert(
             token,
-            ControlWaiter::Model {
-                sender,
-                agent_session: agent_session.clone(),
-                native_session_id: native_session_id.to_owned(),
+            match kind {
+                SessionControlKind::Model => ControlWaiter::Model {
+                    sender,
+                    agent_session,
+                    native_session_id,
+                },
+                SessionControlKind::Mode => ControlWaiter::Mode {
+                    sender,
+                    agent_session,
+                    native_session_id,
+                },
             },
         );
         Ok(receiver)
@@ -1562,6 +1778,39 @@ fn state_apply_model_configuration(
     };
     if record.binding.native_session_id == native_session_id {
         record.binding.model_observation = Some(observation);
+    }
+}
+
+/// Apply a provider mode observation to the resident binding of the exact
+/// native session. With `agent_session` supplied (an awaited set_mode) only
+/// that canonical lane may change; an unsolicited `current_mode_update` is
+/// applied to whichever canonical session the host binds to that native id.
+fn state_apply_mode_configuration(
+    state: &Mutex<HostState>,
+    agent_session: Option<&ResourceRef>,
+    native_session_id: &str,
+    signals: &[ConnectionSignal],
+) {
+    let Some(observation) = signals.iter().find_map(|signal| match &signal.kind {
+        ConnectionSignalKind::ModeConfigured { mode_observation }
+            if signal.native_session_id.as_deref() == Some(native_session_id) =>
+        {
+            Some(mode_observation.clone())
+        }
+        _ => None,
+    }) else {
+        return;
+    };
+    let Ok(mut state) = state.lock() else {
+        return;
+    };
+    for (canonical, record) in state.sessions.iter_mut() {
+        if agent_session.is_some_and(|expected| expected != canonical) {
+            continue;
+        }
+        if record.binding.native_session_id == native_session_id {
+            record.binding.mode_observation = Some(observation.clone());
+        }
     }
 }
 

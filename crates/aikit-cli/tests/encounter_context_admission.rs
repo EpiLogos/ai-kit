@@ -93,13 +93,14 @@ fn missing_and_stale_required_source_refuse_before_real_provider_process_effect(
         // touch is an actual OS effect, not a pretend ACP implementation. It
         // must never execute in either denied case. It cannot pass ACP setup.
         argv: vec!["/usr/bin/touch".into(), marker.display().to_string()],
-body_ref: None,
-body_revision: None,
-from_profile: None,
-argv_fallback: Vec::new(),
-env: Default::default(),
-cwd: None,
+        body_ref: None,
+        body_revision: None,
+        from_profile: None,
+        argv_fallback: Vec::new(),
+        env: Default::default(),
+        cwd: None,
         required_context: Some(context(source.clone(), b"admitted source\n")),
+        now_context: None,
     };
     EncounterService::configure(&home, provider.clone()).unwrap();
     let open = || EncounterRequest::Open {

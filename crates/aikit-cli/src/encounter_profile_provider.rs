@@ -98,9 +98,12 @@ pub fn derive_provider(
         from_profile: Some(profile.slug.clone()),
         required_context: None,
         model_policy: None,
-            body_ref: None,
+        body_ref: None,
         body_revision: None,
-})
+        // A profile-derived provider carries no NOW-context wiring of its
+        // own; now-context belongs to the owner's explicit configuration.
+        now_context: None,
+    })
 }
 
 /// Resolve a configured provider's connection facts at provider-load time.
@@ -386,6 +389,9 @@ cwd = "/opt/rooted"
             cwd: None,
             required_context: None,
             model_policy: None,
+            body_ref: None,
+            body_revision: None,
+            now_context: None,
         };
 
         let resolved = resolve_provider(configured).unwrap();
@@ -411,6 +417,9 @@ cwd = "/opt/rooted"
             cwd: None,
             required_context: None,
             model_policy: None,
+            body_ref: None,
+            body_revision: None,
+            now_context: None,
         };
 
         let error = resolve_provider(configured).unwrap_err();
@@ -436,6 +445,9 @@ cwd = "/opt/rooted"
             cwd: None,
             required_context: None,
             model_policy: None,
+            body_ref: None,
+            body_revision: None,
+            now_context: None,
         };
 
         let error = resolve_provider(configured).unwrap_err();
@@ -456,6 +468,9 @@ cwd = "/opt/rooted"
             cwd: None,
             required_context: None,
             model_policy: None,
+            body_ref: None,
+            body_revision: None,
+            now_context: None,
         };
         let snapshot = configured.clone();
 

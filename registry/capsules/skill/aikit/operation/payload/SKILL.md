@@ -31,3 +31,18 @@ A Skill teaches procedure. It does not grant a Capability or authorise an Action
 ## Verification
 
 Use the repository acceptance/set/projection tests and inspect source provenance in the effective view. For SkillSet behaviour, `aikit set show` must expose withheld members and reasons rather than treating membership as activation. For Explain/History, verify that CLI, TUI and agent operation consume the same application evidence model, that no TUI-local history state becomes authoritative, and that recovery paths preserve the owning domain's preview/basis/apply law.
+
+
+## Prepared NOW context and Jev
+
+When an undertaking selects Redis-backed NOW preparation, treat it as AIKit's operative-context delivery path, not as a separate memory product.
+
+1. Inspect the selected store with `aikit now-context status --config-file <redis-config>`. A selected required store must be available; an optional selected store degrades explicitly and leaves the ordinary encounter path intact.
+2. Prepare through `aikit now-context prepare --request-file <request>`. The request names the existing participant, NOW, Project, disclosure revision, Central source routes, optional Factory Run/workflow scope, Wiki queries and either `all` or general Jev selection. Do not reconstruct those identities from Redis keys.
+3. Use `aikit now-context inspect --participant-ref <ref> --config-file <redis-config>` to read the prepared version, independent participant change cursor and last delivery receipt. A warm eligible view is reusable without another Jev call.
+4. Material source, dependency, Factory Return or disclosure changes are appended as typed participant changes. Heartbeats and ordinary cache reads are not semantic changes and do not justify provider inference.
+5. Configured encounter entry, addressed delivery, queued re-entry and continuation attach the participant-specific prepared envelope **before the provider turn**. The acting model does not need to remember a context-planning tool call. The durable receipt records the exact prepared version/digest and change cursor that crossed the boundary.
+6. Revocation is an access decision, not key deletion. `aikit now-context revoke` makes a cached view unreadable at the native store boundary; delivery rechecks disclosure and Project/session identity.
+7. General `aikit jev` remains available for caller-authored typed questions. Reusable document, matrix, Wiki and development questions should be expressed through the relevant Skill/Method, but no Skill turns Jev into an authority or requires an extra LLM approval step.
+
+Canonical sources, Wiki knowledge, Factory evidence, Central continuations and Actuation authority remain with their owners. Redis is a hot participant-specific projection over those relations. Do not inspect raw Redis keys as a substitute for the native commands.

@@ -7,7 +7,12 @@ use aikit_core::{AikitError, ResourceRef, Result};
 use serde_json::{json, Value};
 
 use crate::agent_connection::*;
-use crate::interactive_connection::{InteractiveAgentConnectionAdapter, PermissionDecision};
+use crate::interactive_connection::{
+    InteractiveAgentConnectionAdapter, NativeModeControls, PermissionDecision,
+};
+
+const PI_NO_PERMISSION_MODES: &str =
+    "Pi RPC publishes no in-session permission modes (no tool-permission gate to switch)";
 
 #[derive(Debug, Clone)]
 enum Pending {
@@ -31,6 +36,9 @@ pub struct PiRpcConnectionAdapter {
     expected_model: Option<(String, String)>,
     model_observation: Option<crate::agent_connection::NativeModelObservation>,
     abort_acknowledged: bool,
+    /// The person asked for this turn to stop (an `abort` was sent). Pi may
+    /// acknowledge it only after the turn has already settled.
+    abort_requested: bool,
 }
 
 impl PiRpcConnectionAdapter {
@@ -48,6 +56,7 @@ impl PiRpcConnectionAdapter {
             expected_model: None,
             model_observation: None,
             abort_acknowledged: false,
+            abort_requested: false,
         }
     }
 
@@ -249,11 +258,13 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
             })?;
         self.stop = None;
         self.abort_acknowledged = false;
+        self.abort_requested = false;
         Ok(self.request("prompt", json!({"message": text}), Pending::Prompt))
     }
 
     fn cancel(&mut self, request: CancelRequest) -> Result<ConnectionCommand> {
         self.require_session(&request.native_session_id)?;
+        self.abort_requested = true;
         Ok(self.request("abort", json!({}), Pending::Control))
     }
 
@@ -339,6 +350,19 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
                 Some(match reason.as_str() {
                     "aborted" => ConnectionSignalKind::Cancelled,
                     "unknown" if self.abort_acknowledged => ConnectionSignalKind::Cancelled,
+                    // After the person's abort, the in-flight tool or request
+                    // ends with Pi's own "operation was aborted" error: that is
+                    // the stop, not a provider failure. Pi may acknowledge the
+                    // abort only after this settles, so the request counts.
+                    "error"
+                        if self.abort_acknowledged
+                            || (self.abort_requested
+                                && detail
+                                    .as_deref()
+                                    .is_some_and(|text| text.contains("aborted"))) =>
+                    {
+                        ConnectionSignalKind::Cancelled
+                    }
                     "unknown" => ConnectionSignalKind::Failed {
                         reason: "Pi settled without a terminal assistant result".into(),
                     },
@@ -380,6 +404,24 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
 }
 
 impl InteractiveAgentConnectionAdapter for PiRpcConnectionAdapter {
+    /// Pi RPC has queue-delivery modes (steering/follow-up) but no permission
+    /// modes: it publishes no tool-permission gate to switch. Stated, not
+    /// inherited, so a later Pi protocol change has one place to land.
+    fn session_mode_controls(&self, _native_session_id: &str) -> NativeModeControls {
+        NativeModeControls::unavailable(PI_NO_PERMISSION_MODES)
+    }
+
+    fn set_session_mode(
+        &mut self,
+        _native_session_id: &str,
+        _provider_mode_id: &str,
+    ) -> Result<ConnectionCommand> {
+        Err(error(
+            "connection.pi_rpc.mode_selection_unsupported",
+            PI_NO_PERMISSION_MODES,
+        ))
+    }
+
     fn set_session_model(
         &mut self,
         _native_session_id: &str,

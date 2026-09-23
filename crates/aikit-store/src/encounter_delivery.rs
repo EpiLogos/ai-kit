@@ -1,6 +1,6 @@
 //! Durable machine delivery in the existing encounter journal. This is transport
 //! state, never human authorship, completed work, or a Factory Recognition.
-use super::{failure, validate, EncounterStore};
+use super::{failure, stamp_observed_at, validate, EncounterStore};
 use aikit_core::{AikitError, ResourceRef, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -147,7 +147,9 @@ impl EncounterStore {
         if pending {
             return Err(AikitError::new("encounter.delivery_pending", "This session has a queued, submitted or uncertain machine delivery; resolve or drain it before another effect"));
         }
-        let event = json!({"kind":"agent-message","sender":sender,"delivery_ref":delivery,"request":request,"standing":"machine-request-not-human-authorship"});
+        let event = stamp_observed_at(
+            json!({"kind":"agent-message","sender":sender,"delivery_ref":delivery,"request":request,"standing":"machine-request-not-human-authorship"}),
+        );
         tx.execute(
             "INSERT INTO encounter_events(session,event) VALUES(?1,?2)",
             params![session.as_str(), event.to_string()],
@@ -208,7 +210,7 @@ impl EncounterStore {
                 "The queued delivery is no longer waiting; reread it before dispatch",
             ));
         }
-        tx.execute("INSERT INTO encounter_events(session,event) VALUES(?1,?2)",params![session.as_str(),json!({"kind":"queued-delivery-dispatched","delivery_ref":delivery,"connection_generation":connection_generation}).to_string()]).map_err(failure)?;
+        tx.execute("INSERT INTO encounter_events(session,event) VALUES(?1,?2)",params![session.as_str(),stamp_observed_at(json!({"kind":"queued-delivery-dispatched","delivery_ref":delivery,"connection_generation":connection_generation})).to_string()]).map_err(failure)?;
         let held =
             get(&tx, session, delivery)?.ok_or_else(|| failure("Queued delivery disappeared"))?;
         tx.commit().map_err(failure)?;
@@ -240,7 +242,7 @@ impl EncounterStore {
                 "The queued delivery is no longer waiting; reread it",
             ));
         }
-        tx.execute("INSERT INTO encounter_events(session,event) VALUES(?1,?2)",params![session.as_str(),json!({"kind":"queued-delivery-refused","delivery_ref":delivery,"code":code,"reason":reason,"standing":"admission-refused-at-drain-never-delivered"}).to_string()]).map_err(failure)?;
+        tx.execute("INSERT INTO encounter_events(session,event) VALUES(?1,?2)",params![session.as_str(),stamp_observed_at(json!({"kind":"queued-delivery-refused","delivery_ref":delivery,"code":code,"reason":reason,"standing":"admission-refused-at-drain-never-delivered"})).to_string()]).map_err(failure)?;
         let cursor = tx.last_insert_rowid() as u64;
         tx.execute("UPDATE encounter_deliveries SET phase='failed',terminal_cursor=?3,detail=?4 WHERE session=?1 AND delivery=?2 AND phase='queued'", params![session.as_str(),delivery.as_str(),cursor,format!("refused at drain: {code}")]).map_err(failure)?;
         let held =
@@ -305,7 +307,7 @@ impl EncounterStore {
                 "Reread the current delivery before reconciling",
             ));
         }
-        tx.execute("INSERT INTO encounter_events(session,event) VALUES(?1,?2)",params![session.as_str(),json!({"kind":"delivery-reconciled","delivery_ref":delivery,"evidence_ref":evidence,"standing":"operator-native-evidence-correlation-not-success"}).to_string()]).map_err(failure)?;
+        tx.execute("INSERT INTO encounter_events(session,event) VALUES(?1,?2)",params![session.as_str(),stamp_observed_at(json!({"kind":"delivery-reconciled","delivery_ref":delivery,"evidence_ref":evidence,"standing":"operator-native-evidence-correlation-not-success"})).to_string()]).map_err(failure)?;
         let result = get(&tx, session, delivery)?.ok_or_else(|| failure("No such delivery"))?;
         tx.commit().map_err(failure)?;
         Ok(result)

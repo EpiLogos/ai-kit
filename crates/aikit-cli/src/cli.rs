@@ -52,6 +52,11 @@ pub enum Command {
     Procedure(ProcedureCmd),
     /// Create and inspect project-specific profile lenses.
     Profile(ProfileCmd),
+    /// Validate an externally authored harness-profile document against the
+    /// `aikit.harness-profile/v1` schema and admission grammar — the outside
+    /// author's intake check. Validation only; nothing is registered, applied
+    /// or projected.
+    HarnessProfile(HarnessProfileCmd),
     /// Jump to what you meant: act if unambiguous, else offer the candidates.
     Z(ZArgs),
     /// Create, inspect and point harnesses at skill-sets.
@@ -168,6 +173,11 @@ pub enum Command {
     Method(MethodArgs),
     /// Authorise and read versioned Routine invocation evidence.
     Routine(RoutineCmd),
+    /// Invoke or validate the general typed Jev decision capability.
+    Jev(JevCmd),
+    /// Prepare, inspect and mutate Redis-backed participant NOW context.
+    #[command(name = "now-context")]
+    NowContext(NowContextCmd),
     /// Start developmental work through Factory's native Commission boundary.
     Factory(FactoryCmd),
     /// Record review decisions for catalogued capsule revisions.
@@ -286,6 +296,134 @@ pub struct GatewayQueryArgs {
 pub struct GatewayCmd {
     #[command(subcommand)]
     pub command: GatewaySub,
+}
+
+#[derive(Debug, Args)]
+pub struct JevCmd {
+    #[command(subcommand)]
+    pub command: JevSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum JevSub {
+    /// Validate a captured provider answer against the exact typed request.
+    Validate(JevValidateArgs),
+    /// Invoke the official Jev provider with explicit native credential and spend bounds.
+    Invoke(JevInvokeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct JevValidateArgs {
+    #[arg(long = "request-file", value_name = "PATH")]
+    pub request_file: std::path::PathBuf,
+    #[arg(long = "response-file", value_name = "PATH")]
+    pub response_file: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct JevInvokeArgs {
+    #[arg(long = "request-file", value_name = "PATH")]
+    pub request_file: std::path::PathBuf,
+    #[arg(long = "limits-file", value_name = "PATH")]
+    pub limits_file: std::path::PathBuf,
+    /// Native secret reference (varlock://, pass://, keychain://, op://; env:// requires explicit opt-in).
+    #[arg(long = "credential-ref", value_name = "SECRET_REF")]
+    pub credential_ref: String,
+    #[arg(long = "invocation-ref", value_name = "RESOURCE_REF")]
+    pub invocation_ref: Option<String>,
+    #[arg(long = "curl", value_name = "PATH")]
+    pub curl: Option<std::path::PathBuf>,
+    /// Deterministic protocol proof only: explicit loopback endpoint. Omit for the official provider.
+    #[arg(long = "controlled-endpoint", value_name = "HOST:PORT")]
+    pub controlled_endpoint: Option<std::net::SocketAddr>,
+    /// Permit a deliberately supplied env:// secret reference for this invocation only.
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NowContextCmd {
+    #[command(subcommand)]
+    pub command: NowContextSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NowContextSub {
+    /// Check the selected Redis material service and report its actual version.
+    Status(NowStatusArgs),
+    /// Resolve Central/BKMR + Wiki + Factory relations and atomically prepare one participant view.
+    Prepare(NowPrepareArgs),
+    /// Inspect one participant's current prepared version, delivery and cursor state.
+    Inspect(NowInspectArgs),
+    /// Publish an already owner-resolved prepared view through the same CAS boundary.
+    Publish(NowPublishArgs),
+    /// Append one replayable semantic source/dependency/Return change for a participant.
+    AppendChange(NowAppendChangeArgs),
+    /// Revoke one participant's cached material at the disclosure boundary.
+    Revoke(NowRevokeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct NowStatusArgs {
+    #[arg(long = "config-file", value_name = "PATH")]
+    pub config_file: std::path::PathBuf,
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NowPrepareArgs {
+    #[arg(long = "request-file", value_name = "PATH")]
+    pub request_file: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct NowInspectArgs {
+    #[arg(long = "config-file", value_name = "PATH")]
+    pub config_file: std::path::PathBuf,
+    #[arg(long = "participant-ref", value_name = "RESOURCE_REF")]
+    pub participant_ref: String,
+    /// Validate the cached payload for external-provider disclosure before returning it.
+    #[arg(long = "external-provider")]
+    pub external_provider: bool,
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NowPublishArgs {
+    #[arg(long = "config-file", value_name = "PATH")]
+    pub config_file: std::path::PathBuf,
+    #[arg(long = "view-file", value_name = "PATH")]
+    pub view_file: std::path::PathBuf,
+    #[arg(long = "expected-version", value_name = "N")]
+    pub expected_version: u64,
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NowAppendChangeArgs {
+    #[arg(long = "config-file", value_name = "PATH")]
+    pub config_file: std::path::PathBuf,
+    #[arg(long = "participant-ref", value_name = "RESOURCE_REF")]
+    pub participant_ref: String,
+    #[arg(long = "change-file", value_name = "PATH")]
+    pub change_file: std::path::PathBuf,
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NowRevokeArgs {
+    #[arg(long = "config-file", value_name = "PATH")]
+    pub config_file: std::path::PathBuf,
+    #[arg(long = "participant-ref", value_name = "RESOURCE_REF")]
+    pub participant_ref: String,
+    #[arg(long = "disclosure-revision", value_name = "REVISION")]
+    pub disclosure_revision: String,
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
 }
 
 #[derive(Debug, Args)]
@@ -798,6 +936,27 @@ pub struct ProfileForkArgs {
 pub struct ProfileDiffArgs {
     #[arg(value_name = "PROFILE")]
     pub profile: String,
+}
+
+#[derive(Debug, Args)]
+pub struct HarnessProfileCmd {
+    #[command(subcommand)]
+    pub command: HarnessProfileSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HarnessProfileSub {
+    /// Validate a harness-profile TOML document against the exact schema and
+    /// admission grammar the registry applies. The reply carries the decision
+    /// (`admit` or `refuse`) and named diagnostics; refusal exits non-zero.
+    Validate(HarnessProfileValidateArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct HarnessProfileValidateArgs {
+    /// Path to the `aikit.harness-profile/v1` TOML document to check.
+    #[arg(value_name = "FILE")]
+    pub file: std::path::PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -1702,8 +1861,14 @@ pub struct CredentialSetupArgs {
     pub headless: bool,
     /// Declare where the material already lives (op://, varlock://, pass://,
     /// keychain://) instead of binding material. No secret is read or stored.
-    #[arg(long = "ref", value_name = "SECRET_REF")]
+    #[arg(long = "ref", value_name = "SECRET_REF", conflicts_with_all = ["stdin", "from_env"])]
     pub declared_ref: Option<String>,
+    /// Read the key from standard input (one line) and bind it into the OS
+    /// secure store — for a caller that hands material over a pipe (the
+    /// desktop's write-only key field). Refused when stdin is a terminal;
+    /// the material never enters argv, the environment or any output.
+    #[arg(long, conflicts_with = "from_env")]
+    pub stdin: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1722,8 +1887,12 @@ pub struct CredentialRotateArgs {
     #[arg(long, requires = "env_var")]
     pub from_env: bool,
     /// Declare a new external location for the material (op://, varlock://…).
-    #[arg(long = "ref", value_name = "SECRET_REF")]
+    #[arg(long = "ref", value_name = "SECRET_REF", conflicts_with_all = ["stdin", "from_env"])]
     pub declared_ref: Option<String>,
+    /// Read fresh material from standard input (one line) into the OS secure
+    /// store. Refused when stdin is a terminal.
+    #[arg(long, conflicts_with = "from_env")]
+    pub stdin: bool,
 }
 
 #[derive(Debug, Args)]

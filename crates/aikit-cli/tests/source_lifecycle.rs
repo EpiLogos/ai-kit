@@ -94,6 +94,11 @@ fn rollback_remains_available_when_a_promoted_source_removed_an_enabled_skill() 
     fs::remove_dir_all(source.join("required")).unwrap();
     aikit(&home, &cwd, &["source", "sync", "recovery"]);
     aikit(&home, &cwd, &["source", "promote", "recovery", "--trust"]);
+    // The removed-but-enabled skill is a loud, named state, not a wedge:
+    // status still answers and names the capability as unavailable, because
+    // an enabled declaration whose source lost the capsule must stay
+    // recoverable (issue #394 K1) — `doctor` reports and repairs it, and
+    // native recovery below stays reachable.
     let broken = Command::cargo_bin("aikit")
         .unwrap()
         .env("AIKIT_HOME", &home)
@@ -101,8 +106,20 @@ fn rollback_remains_available_when_a_promoted_source_removed_an_enabled_skill() 
         .args(["--json", "status", "--all"])
         .output()
         .unwrap();
-    assert!(!broken.status.success());
-    assert!(String::from_utf8_lossy(&broken.stdout).contains("skill/recovery/required"));
+    assert!(
+        broken.status.success(),
+        "status must not wedge on the stale enablement: {}",
+        String::from_utf8_lossy(&broken.stdout)
+    );
+    let broken_view = String::from_utf8_lossy(&broken.stdout);
+    assert!(
+        broken_view.contains("skill/recovery/required"),
+        "the absent capability must be named: {broken_view}"
+    );
+    assert!(
+        broken_view.contains("not present in any registry"),
+        "the absence must carry its honest reason: {broken_view}"
+    );
     // Inspection and native recovery cannot depend on the broken view.
     aikit(&home, &cwd, &["source", "show", "recovery"]);
     let restored = aikit(&home, &cwd, &["source", "rollback", "recovery"]);

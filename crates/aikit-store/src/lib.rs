@@ -66,6 +66,7 @@ pub mod knowledge_application;
 pub mod knowledge_wiki;
 pub mod locks;
 pub mod model_catalogue;
+pub mod now_context;
 pub mod procedure;
 pub mod procedure_history;
 pub mod registry;
@@ -114,6 +115,11 @@ pub use knowledge_application::{
 };
 pub use knowledge_wiki::SqliteWikiProvider;
 pub use locks::{ContextLock, LockOptions};
+pub use now_context::{
+    CursorChange, NowContextBasis, NowContextChange, NowContextItem, NowDeliveryReceipt,
+    NowNeighbour, PreparedNowContext, RedisNowConfig, RedisNowStatus, RedisNowStore,
+    NOW_DELIVERY_SCHEMA, NOW_PREPARED_SCHEMA, NOW_REDIS_CONFIG_SCHEMA,
+};
 pub use procedure::{plan_procedure, EditDiff, ProcedureDiff, ProcedureOutcome, ProcedureRunner};
 pub use procedure_history::procedure_history_evidence;
 pub use registry::{load_project_local, load_registry, RegistryLoad, RegistryProblem, Snapshot};

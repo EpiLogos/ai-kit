@@ -333,6 +333,85 @@ impl NativeModelObservation {
     }
 }
 
+/// Session permission modes disclosed by the native ACP provider (`modes` on
+/// session/new|load|resume, `current_mode_update` afterwards). The provider
+/// decides what each mode allows; AIKit carries the advertised ids exactly and
+/// never invents, renames or orders them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeModeObservation {
+    pub current_mode_id: String,
+    pub available_modes: Vec<NativeModeOption>,
+    pub standing: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeModeOption {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+pub const NATIVE_MODE_STANDING: &str =
+    "provider-reported-configuration-not-independent-selection-or-inference-proof";
+
+impl NativeModeObservation {
+    /// Read an ACP `modes` block. A malformed block yields `None`: the agent
+    /// advertised nothing AIKit can offer exactly, so no control is invented.
+    pub fn from_acp(value: &Value) -> Option<Self> {
+        let current = value
+            .get("currentModeId")
+            .or_else(|| value.get("modeId"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())?;
+        let modes = value
+            .get("availableModes")
+            .and_then(Value::as_array)?
+            .iter()
+            .map(|mode| {
+                let id = mode
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.trim().is_empty())?;
+                let name = mode
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.trim().is_empty())?;
+                Some(NativeModeOption {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                    description: mode
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if modes.is_empty() || !modes.iter().any(|mode| mode.id == current) {
+            return None;
+        }
+        Some(Self {
+            current_mode_id: current.to_owned(),
+            available_modes: modes,
+            standing: NATIVE_MODE_STANDING.into(),
+        })
+    }
+
+    /// The same advertised set with another advertised mode current. `None`
+    /// when the mode was never advertised.
+    pub fn with_current(&self, mode_id: &str) -> Option<Self> {
+        self.advertises(mode_id).then(|| Self {
+            current_mode_id: mode_id.to_owned(),
+            ..self.clone()
+        })
+    }
+
+    pub fn advertises(&self, mode_id: &str) -> bool {
+        self.available_modes.iter().any(|mode| mode.id == mode_id)
+    }
+}
+
 /// Explicit bridge between a transport-native session and canonical AIKit
 /// identity. `agent_session` is intentionally optional: transport session ids are
 /// not promoted automatically.
@@ -346,6 +425,9 @@ pub struct NativeSessionBinding {
     pub opened_as: SessionOpenMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_observation: Option<NativeModelObservation>,
+    /// Provider-advertised session permission modes, when the agent has any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_observation: Option<NativeModeObservation>,
     #[serde(default)]
     pub provenance: Vec<String>,
 }
@@ -358,6 +440,7 @@ impl NativeSessionBinding {
             agent: None,
             opened_as,
             model_observation: None,
+            mode_observation: None,
             provenance: Vec::new(),
         }
     }
@@ -481,6 +564,12 @@ pub enum ConnectionSignalKind {
     /// explicit request. It changes no canonical AgentSession identity.
     ModelConfigured {
         model_observation: NativeModelObservation,
+    },
+    /// The provider's current session permission mode, either confirmed after
+    /// an explicit `session/set_mode` or reported by the agent itself
+    /// (`current_mode_update`). It changes no canonical AgentSession identity.
+    ModeConfigured {
+        mode_observation: NativeModeObservation,
     },
     /// Provider history emitted while an explicit native session load is still
     /// pending. It is preserved as source evidence, separately from new live
@@ -768,6 +857,10 @@ impl AcpV1ConnectionAdapter {
                     .filter(|v| !v.is_null())
                     .map(NativeModelObservation::from_acp)
                     .transpose()?;
+                binding.mode_observation = result
+                    .get("modes")
+                    .filter(|v| !v.is_null())
+                    .and_then(NativeModeObservation::from_acp);
                 Ok(vec![self.signal(
                     Some(native_session_id),
                     ConnectionSignalKind::SessionOpened { binding },
