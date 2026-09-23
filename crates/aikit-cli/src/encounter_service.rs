@@ -384,6 +384,7 @@ struct Resident {
 struct Opening {
     generation: String,
     owner_pid: u32,
+    continuation_requested: bool,
     space: SessionSpaceRef,
     provider: String,
     cwd: PathBuf,
@@ -526,6 +527,7 @@ impl EncounterService {
                 "kind":"native-open-reserved",
                 "connection_generation":opening.generation,
                 "owner_pid":opening.owner_pid,
+                "continuation_requested":opening.continuation_requested,
                 "space":opening.space,
                 "provider":opening.provider,
                 "cwd":opening.cwd,
@@ -550,7 +552,7 @@ impl EncounterService {
     fn refuse_opening(
         &self,
         session: &ResourceRef,
-        generation: &str,
+        opening: &Opening,
         mut failure: AikitError,
         phase: &str,
         outcome: OpeningFailureState,
@@ -560,12 +562,14 @@ impl EncounterService {
             cleanup_confirmed,
             binding_recorded,
         } = outcome;
+        let generation = &opening.generation;
         if let Err(receipt_failure) = self.store.append(
             session,
             &json!({
                 "kind":"native-open-refused",
                 "connection_generation":generation,
-                "owner_pid":std::process::id(),
+                "owner_pid":opening.owner_pid,
+                "continuation_requested":opening.continuation_requested,
                 "phase":phase,
                 "process_started":process_started,
                 "error_code":failure.code(),
@@ -603,7 +607,7 @@ impl EncounterService {
     fn cleanup_open_failure(
         &self,
         session: &ResourceRef,
-        generation: &str,
+        opening: &Opening,
         phase: &str,
         host: AgentSessionHost,
         failure: AikitError,
@@ -617,7 +621,7 @@ impl EncounterService {
         };
         self.refuse_opening(
             session,
-            generation,
+            opening,
             failure,
             phase,
             OpeningFailureState {
@@ -905,17 +909,16 @@ impl EncounterService {
             return self.open_receipt_with_drain(agent_session, receipt);
         }
         let generation = ulid::Ulid::generate().to_string();
-        self.reserve_opening(
-            &agent_session,
-            Opening {
-                generation: generation.clone(),
-                owner_pid: std::process::id(),
-                space: space.clone(),
-                provider: provider.clone(),
-                cwd: cwd.clone(),
-                cleanup_uncertain: None,
-            },
-        )?;
+        let opening = Opening {
+            generation: generation.clone(),
+            owner_pid: std::process::id(),
+            continuation_requested: reconnect,
+            space: space.clone(),
+            provider: provider.clone(),
+            cwd: cwd.clone(),
+            cleanup_uncertain: None,
+        };
+        self.reserve_opening(&agent_session, opening.clone())?;
         let attempt = (|| -> Result<Value> {
             // The durable per-session Agency lock remains the authority/effect
             // serialization boundary. The process-local opening reservation makes
@@ -1189,7 +1192,7 @@ impl EncounterService {
                     let cleanup_confirmed = failure.code() == "connection.process.spawn_failed";
                     return Err(self.refuse_opening(
                         &agent_session,
-                        &generation,
+                        &opening,
                         failure,
                         "process-spawn",
                         OpeningFailureState {
@@ -1205,7 +1208,7 @@ impl EncounterService {
                 Err(failure) => {
                     return Err(self.cleanup_open_failure(
                         &agent_session,
-                        &generation,
+                        &opening,
                         "initialize",
                         host,
                         failure,
@@ -1245,7 +1248,7 @@ impl EncounterService {
                     // cleanup without inventing a successful native continuation.
                     return Err(self.cleanup_open_failure(
                         &agent_session,
-                        &generation,
+                        &opening,
                         "session-open",
                         host,
                         failure,
@@ -1266,7 +1269,7 @@ impl EncounterService {
             );
                 return Err(self.cleanup_open_failure(
                     &agent_session,
-                    &generation,
+                    &opening,
                     "session-identity",
                     host,
                     failure,
@@ -1291,7 +1294,7 @@ impl EncounterService {
                             drop(lane);
                             return Err(self.cleanup_open_failure(
                                 &agent_session,
-                                &generation,
+                                &opening,
                                 "model-selection",
                                 host,
                                 failure,
@@ -1310,7 +1313,7 @@ impl EncounterService {
                     drop(lane);
                     return Err(self.cleanup_open_failure(
                         &agent_session,
-                        &generation,
+                        &opening,
                         "model-reading",
                         host,
                         failure,
@@ -1323,7 +1326,7 @@ impl EncounterService {
                 drop(lane);
                 return Err(self.cleanup_open_failure(
                     &agent_session,
-                    &generation,
+                    &opening,
                     "selected-model-receipt",
                     host,
                     failure,
@@ -1391,7 +1394,7 @@ impl EncounterService {
                 drop(lane);
                 return Err(self.cleanup_open_failure(
                     &agent_session,
-                    &generation,
+                    &opening,
                     "pre-binding-revalidation",
                     host,
                     failure,
@@ -1402,7 +1405,7 @@ impl EncounterService {
             drop(lane);
             return Err(self.cleanup_open_failure(
                 &agent_session,
-                &generation,
+                &opening,
                 "binding-receipt",
                 host,
                 failure,
@@ -1421,7 +1424,7 @@ impl EncounterService {
                     drop(lane);
                     return Err(self.cleanup_open_failure(
                         &agent_session,
-                        &generation,
+                        &opening,
                         "resident-insertion",
                         host,
                         error(failure),
@@ -1479,7 +1482,7 @@ impl EncounterService {
             }
             Err(failure) => Err(self.refuse_opening(
                 &agent_session,
-                &generation,
+                &opening,
                 failure,
                 "admission-before-spawn",
                 OpeningFailureState {

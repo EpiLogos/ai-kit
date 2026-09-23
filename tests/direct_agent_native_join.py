@@ -247,7 +247,11 @@ def exercise(ctrl: Path, aikit: Path, evidence: Path | None = None) -> dict:
             assert refused["error"]["message"]=="ACP load/resume contradicted the requested native identity",refused
             held=events(session)
             rejection=[row["event"] for row in held if row.get("event",{}).get("kind")=="native-open-refused"][-1]
-            assert rejection=={"kind":"native-open-refused","continuation_requested":True,"error_code":"agent_session_host.open_failed","cleanup_confirmed":True,"binding_recorded":False,"turn_replayed":False},rejection
+            generation=rejection["connection_generation"]
+            assert isinstance(generation,str) and generation,rejection
+            reservation=[row["event"] for row in held if row.get("event",{}).get("kind")=="native-open-reserved" and row["event"].get("connection_generation")==generation]
+            assert len(reservation)==1 and reservation[0]["continuation_requested"] is True,reservation
+            assert rejection=={"kind":"native-open-refused","continuation_requested":True,"error_code":"agent_session_host.open_failed","cleanup_confirmed":True,"binding_recorded":False,"turn_replayed":False,"connection_generation":generation,"owner_pid":pid,"phase":"session-open","process_started":True,"inference_observed":False,"reason":"ACP load/resume contradicted the requested native identity"},rejection
             bindings=[row["event"] for row in held if row.get("event",{}).get("kind")=="binding"]
             assert bindings and all(row["native_session_id"]==native for row in bindings),bindings
             checks.append("A provider returning a different load identity is refused and never counted as continuation")
