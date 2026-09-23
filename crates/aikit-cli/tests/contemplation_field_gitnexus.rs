@@ -192,6 +192,22 @@ export function logout(): boolean {
     // A real symbol-level reading with provenance: provider, source_ref,
     // CodeReference (never a bare provider node id), and basis derived(gitnexus).
     let readings = code_lens["readings"].as_array().unwrap();
+    // The structural change reading must compare against the requested base,
+    // not the head (a head-vs-head compare silently reports "no changes").
+    let base_revision = field["changed_subject"]["base_revision"]
+        .as_str()
+        .unwrap()
+        .trim_start_matches("git:")
+        .to_string();
+    let change_reading = readings
+        .iter()
+        .find(|r| r["kind"] == "detect_changes")
+        .expect("a detect_changes reading");
+    assert_eq!(
+        change_reading["base_ref"].as_str(),
+        Some(base_revision.as_str()),
+        "detect_changes must compare against the changed subject's base: {change_reading}"
+    );
     let symbol_readings: Vec<_> = readings
         .iter()
         .filter(|r| r["kind"] == "symbol" && r["reference"]["path"] == "src/auth.ts")
