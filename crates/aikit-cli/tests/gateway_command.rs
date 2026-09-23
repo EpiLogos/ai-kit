@@ -194,3 +194,131 @@ fn restart_restores_semantic_state_from_the_default_location() {
     shutdown(home.path());
     serve.wait().unwrap();
 }
+
+// -- The Routine dispatcher surface ----------------------------------------
+
+/// `aikit gateway tick` is one deterministic dispatcher pass (addendum A-4):
+/// on a home with no Routines it succeeds having considered nothing, and it
+/// needs no running gateway.
+#[test]
+fn gateway_tick_is_one_deterministic_pass_even_with_no_routines() {
+    let home = TempDir::new().unwrap();
+    let (ok, envelope, _) = run(home.path(), &["gateway", "tick"]);
+    assert!(ok, "{envelope}");
+    assert_eq!(envelope["data"]["considered"].as_array().unwrap().len(), 0);
+    assert_eq!(envelope["data"]["dispatched"].as_array().unwrap().len(), 0);
+    assert_eq!(envelope["data"]["clock_moved_back"], Value::Bool(false));
+}
+
+/// While any Enabled schedule Routine exists, a down gateway is exactly the
+/// reason scheduled automations will not fire — doctor says so as a warning,
+/// not a note.
+#[test]
+fn doctor_warns_that_scheduled_automations_will_not_fire_without_a_gateway() {
+    use aikit_core::method::Method;
+    use aikit_core::resource::routine::{
+        ProvenMethodBasis, Routine, RoutineAuthority, RoutineSchedulerBinding,
+        RoutineSchedulerState, RoutineTrigger, METHOD_PROOF_VERSION,
+    };
+    use aikit_core::resource::{ProviderRef, ResourceRef, SourceRef, SourceRevision};
+    use aikit_core::schedule::{ScheduleRecord, ScheduleShape};
+    use aikit_store::{AikitHome, RoutineStore, StoredRoutine};
+
+    let temp = TempDir::new().unwrap();
+    let home = AikitHome::at(temp.path());
+    let r = |raw: &str| ResourceRef::parse(raw).unwrap();
+    let rev = |raw: &str| SourceRevision::parse(raw).unwrap();
+    let method = Method {
+        id: r("method:fixture"),
+        source: SourceRef::parse("source:fixture").unwrap(),
+        revision: Some(rev("method-rev-1")),
+        name: "Fixture Method".into(),
+        description: String::new(),
+        focus: vec![],
+        project_domain: vec![],
+        skills: vec![],
+        actions: vec![r("action/capability/run")],
+        capabilities: vec![],
+        context_sources: vec![],
+        verification: vec![r("verification:fixture")],
+        expected_resolve: None,
+        expected_return_forms: vec![],
+    };
+    let proof = ProvenMethodBasis {
+        version: METHOD_PROOF_VERSION.into(),
+        method: method.id.clone(),
+        method_revision: rev("method-rev-1"),
+        proof_ref: r("proof:fixture"),
+        context_resolution_ref: r("context-resolution:fixture"),
+        activity_refs: vec![r("activity:fixture:1")],
+        return_refs: vec![r("return:fixture:1")],
+        evidence_refs: vec![r("evidence:fixture:1")],
+        verification_refs: vec![r("verification:fixture:1")],
+    };
+    let routine = Routine::new(
+        r("routine/doctor-demo"),
+        SourceRef::parse("source:aikit:routines/routine/doctor-demo").unwrap(),
+        None,
+        "Doctor demo",
+        "",
+        &method,
+        proof,
+        RoutineTrigger::Schedule {
+            schedule_ref: "schedule/doctor-demo".into(),
+        },
+        RoutineAuthority {
+            authority_ref: r("authority:fixture"),
+            revision: Some(rev("authority-rev-1")),
+            action_refs: vec![r("action/capability/run")],
+            granted: true,
+            unattended: true,
+        },
+        None,
+        vec![],
+    )
+    .unwrap();
+    let mut record = StoredRoutine::new(
+        routine,
+        Some(
+            ScheduleRecord::new(
+                r("schedule/doctor-demo"),
+                ScheduleShape::Daily {
+                    time: "06:00".into(),
+                },
+                None,
+            )
+            .unwrap(),
+        ),
+        None,
+    )
+    .unwrap();
+    record
+        .routine
+        .set_scheduler_binding(RoutineSchedulerBinding {
+            provider: ProviderRef::parse("provider:aikit-gateway").unwrap(),
+            provider_job_id: None,
+            observed_state: RoutineSchedulerState::Planned,
+        })
+        .unwrap();
+    record.routine.enable(&method).unwrap();
+    RoutineStore::new(home).put(record).unwrap();
+
+    // AIKIT_HOME carries the routine; the gateway socket lives under it too
+    // and does not exist, so nothing can fire.
+    let (ok, doctor, _) = run(temp.path(), &["doctor"]);
+    assert!(ok, "{doctor}");
+    let finding = doctor["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["check"] == "gateway.service")
+        .expect("doctor must account for the gateway");
+    assert_eq!(finding["severity"], Value::from("warning"), "{finding}");
+    assert!(
+        finding["summary"]
+            .as_str()
+            .unwrap()
+            .contains("scheduled automations will not fire"),
+        "{finding}"
+    );
+}

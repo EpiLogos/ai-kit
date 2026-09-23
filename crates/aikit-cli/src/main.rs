@@ -371,8 +371,9 @@ fn cmd_worktree(cwd: &std::path::Path, cmd: WorktreeCmd) -> Result<Reply> {
 }
 
 fn cmd_routine(command: RoutineCmd) -> Result<Reply> {
+    use aikit_cli::routine_cli;
     let home = AikitHome::discover()?;
-    let store = aikit_store::RoutineInvocationStore::new(home);
+    let store = aikit_store::RoutineInvocationStore::new(home.clone());
     let data = match command.command {
         RoutineSub::AuthoriseInvocation { request_json } => {
             let request: aikit_core::resource::routine::RoutineInvocationAuthorisationRequest =
@@ -399,6 +400,55 @@ fn cmd_routine(command: RoutineCmd) -> Result<Reply> {
                 format!("could not encode Routine invocation evidence: {error}"),
             )
         })?,
+        RoutineSub::List { state } => routine_cli::list(&home, state.as_deref())?,
+        RoutineSub::Show { routine_ref } => routine_cli::show(&home, &routine_ref)?,
+        RoutineSub::Create {
+            name,
+            description,
+            method,
+            proof_json,
+            trigger_json,
+            authority_json,
+            agent_profile,
+            context_scope,
+        } => routine_cli::create(
+            &home,
+            &name,
+            description.as_deref().unwrap_or(""),
+            &method,
+            &proof_json,
+            &trigger_json,
+            &authority_json,
+            agent_profile.as_deref(),
+            &context_scope,
+        )?,
+        RoutineSub::Enable {
+            routine_ref,
+            authority_json,
+        } => routine_cli::enable(&home, &routine_ref, &authority_json)?,
+        RoutineSub::Disable { routine_ref } => routine_cli::disable(&home, &routine_ref)?,
+        RoutineSub::RunNow { routine_ref } => routine_cli::run_now(&home, &routine_ref)?,
+        RoutineSub::Reprove {
+            routine_ref,
+            proof_json,
+        } => routine_cli::reprove(&home, &routine_ref, &proof_json)?,
+        RoutineSub::Delete { routine_ref } => routine_cli::delete(&home, &routine_ref)?,
+        RoutineSub::ImportForeign {
+            provider,
+            job_id,
+            method,
+            proof_json,
+            adopt,
+            report,
+        } => routine_cli::import_foreign(
+            &home,
+            &provider,
+            &job_id,
+            method.as_deref(),
+            proof_json.as_deref(),
+            adopt,
+            report,
+        )?,
     };
     Ok(Reply::Data {
         context: EnvelopeContext::default(),
@@ -435,6 +485,18 @@ fn cmd_now_context(cwd: &std::path::Path, command: NowContextCmd) -> Result<Repl
         NowContextSub::Revoke(args) => aikit_cli::jev_now::now_revoke(args)?,
     };
     data_reply(data)
+}
+
+/// The LaunchAgent tree lives under the real home directory, not AIKIT_HOME:
+/// launchd owns `~/Library/LaunchAgents`, and the agent runs against whatever
+/// AIKIT_HOME the environment carries at load time.
+fn launch_agent_home() -> Result<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        AikitError::new(
+            "gateway.service_install_home_unresolved",
+            "no HOME is set; the LaunchAgent path cannot be resolved",
+        )
+    })
 }
 
 fn cmd_factory(command: FactoryCmd) -> Result<Reply> {
@@ -488,6 +550,8 @@ fn parse_structured_json<T: serde::de::DeserializeOwned>(raw: &str, label: &str)
 /// context — the envelope context stays empty rather than pretending a scope.
 /// Carriers default to the well-known home endpoint (`gateway_ops`).
 fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
+    use aikit_adapters::GatewayTickLoop;
+    use aikit_cli::routine_cli::{gateway_tick, production_dispatcher, GatewayDispatcherTick};
     let home = AikitHome::discover()?;
     match command.command {
         GatewaySub::Serve(a) => {
@@ -503,11 +567,59 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                         format!("parse gateway ref {gateway_ref}: {error}"),
                     )
                 })?;
-            aikit_adapters::run_gateway_service(
+            // The Routine dispatcher ticks beside the carriers. A dispatcher
+            // that cannot be built (no Central root to resolve time against)
+            // degrades the service to carriers-only, said in plain words.
+            let ticks = match production_dispatcher(home.clone()) {
+                Ok(dispatcher) => Some(GatewayTickLoop {
+                    interval: std::time::Duration::from_millis(
+                        aikit_cli::routine_dispatch::TICK_INTERVAL_MS as u64,
+                    ),
+                    hook: Box::new(GatewayDispatcherTick { dispatcher }),
+                }),
+                Err(error) => {
+                    eprintln!(
+                        "warning: the Routine dispatcher is not running with this gateway: \
+                         {error}; scheduled automations will not fire"
+                    );
+                    None
+                }
+            };
+            aikit_adapters::run_gateway_service_with_ticks(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
+                ticks,
             )?;
             Ok(Reply::Text("gateway service stopped cleanly".into()))
+        }
+        GatewaySub::Tick => {
+            let data = gateway_tick(&home)?;
+            Ok(Reply::Data {
+                context: EnvelopeContext::default(),
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
+        GatewaySub::InstallService => {
+            let home_dir = launch_agent_home()?;
+            let data = aikit_cli::gateway_install::install(&home_dir, &home)?;
+            Ok(Reply::Data {
+                context: EnvelopeContext::default(),
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
+        GatewaySub::UninstallService => {
+            let home_dir = launch_agent_home()?;
+            let data = aikit_cli::gateway_install::uninstall(&home_dir)?;
+            Ok(Reply::Data {
+                context: EnvelopeContext::default(),
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
         }
         query => {
             let command = match query {
@@ -516,7 +628,10 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 GatewaySub::Status(_) => aikit_adapters::GatewayCommand::Status,
                 GatewaySub::Ecology(_) => aikit_adapters::GatewayCommand::Ecology,
                 GatewaySub::Snapshot(_) => aikit_adapters::GatewayCommand::Snapshot,
-                GatewaySub::Serve(_) => unreachable!("serve handled above"),
+                GatewaySub::Serve(_)
+                | GatewaySub::Tick
+                | GatewaySub::InstallService
+                | GatewaySub::UninstallService => unreachable!("handled above"),
             };
             let args = match query {
                 GatewaySub::Protocol(a)
@@ -524,7 +639,10 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Status(a)
                 | GatewaySub::Ecology(a)
                 | GatewaySub::Snapshot(a) => a,
-                GatewaySub::Serve(_) => unreachable!("serve handled above"),
+                GatewaySub::Serve(_)
+                | GatewaySub::Tick
+                | GatewaySub::InstallService
+                | GatewaySub::UninstallService => unreachable!("handled above"),
             };
             let target = aikit_cli::gateway_ops::carrier_target(&home, &args)?;
             let response =
@@ -2473,7 +2591,13 @@ fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
 /// state in the current context.
 fn cmd_method(cwd: &std::path::Path, a: MethodArgs) -> Result<Reply> {
     let service = Service::discover(cwd)?;
-    let MethodCommand::List { filter } = a.command;
+    if let MethodCommand::Prove { method, proof_json } = &a.command {
+        let data = aikit_cli::routine_cli::method_prove(service.home(), method, proof_json)?;
+        return Ok(reply(&service, data, vec![]));
+    }
+    let MethodCommand::List { filter } = a.command else {
+        unreachable!("method prove is handled above");
+    };
     let view = service.resolved();
     let filter = filter.as_deref().map(str::to_lowercase);
     let mut methods: Vec<Value> = view
@@ -3568,6 +3692,52 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd, json_mode: bool) -> Result<Reply>
     let event: HookEvent = hook::normalize(&a.client, &a.event, payload);
     let decision = service.dispatch_hook(&event)?;
 
+    // The event-trigger pass (parent §5): Enabled Event Routines whose
+    // event_ref matches this (client, kind) observe the event and pass through
+    // the same authorisation gate as any scheduled fire. Hook-contract safe:
+    // a failure here becomes a warning, never a verdict change — the harness
+    // protocol is decided by the hook chain alone.
+    let now_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as i64)
+        .unwrap_or(0);
+    let mut routine_warnings: Vec<String> = Vec::new();
+    let routine_dispatches =
+        match aikit_cli::routine_cli::production_dispatcher(service.home().clone()) {
+            Ok(dispatcher) => match dispatcher.event_pass(
+                &a.client,
+                a.event.as_str(),
+                &event.payload,
+                now_unix_ms,
+            ) {
+                Ok(dispatched) => {
+                    let encoded = dispatched
+                        .iter()
+                        .map(|record| {
+                            jval!({
+                                "routine": record.routine,
+                                "invocation_ref": record.invocation_ref,
+                                "admission": record.admission,
+                                "outcome": record.outcome.as_ref().map(|outcome| jval!({
+                                    "status": outcome.status,
+                                    "detail": outcome.detail,
+                                })),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    encoded
+                }
+                Err(error) => {
+                    routine_warnings.push(format!("routine event trigger failed: {error}"));
+                    vec![]
+                }
+            },
+            Err(error) => {
+                routine_warnings.push(format!("routine event trigger unavailable: {error}"));
+                vec![]
+            }
+        };
+
     let tuning = service.continuity_tuning();
     let steps: Vec<Value> = decision
         .steps
@@ -3589,6 +3759,7 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd, json_mode: bool) -> Result<Reply>
         "injected": decision.injected_text(),
         "bypassed": decision.was_bypassed(),
         "warnings": decision.warnings,
+        "routine_dispatches": routine_dispatches,
         "continuity": tuning.describe(),
         // The chain, as dispatched: every planned step with its outcome.
         // Guidance delivery is visible here as an `injected` step, so a
