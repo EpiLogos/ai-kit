@@ -26,7 +26,8 @@ use serde::{Deserialize, Serialize};
 
 use aikit_core::harness_admission::HarnessEditionKind;
 use aikit_core::harness_profile::{
-    ActivationEffectName, HarnessProfile, HooksLayer, LayerPosture, ToolsLayer,
+    ActivationEffectName, HarnessProfile, HooksLayer, LayerPosture, SessionCapabilityFlags,
+    SessionConnect, SessionProtocol, SessionsLayer, ToolsLayer,
 };
 
 use crate::tool_sources::{ToolSourceEntry, TOOLS_PROJECTION_OWNERSHIP};
@@ -67,6 +68,39 @@ pub struct DriftEntry {
     pub note: String,
 }
 
+/// The declared connect facts of a sessions layer: the binary the primary
+/// argv names, how many fallback argv variants are declared, and whether a
+/// working directory or launch environment is declared. Values are not
+/// disclosed — only the shape of the door. `not-declared` renders as "no
+/// connection facts declared": on a `process` profile that is the ordinary
+/// state (the face is the harness's own command surface), while on an
+/// `acp`/`rpc` profile it discloses a protocol claim with no door.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ConnectFactsDisclosure {
+    Declared {
+        binary: String,
+        fallback_variants: usize,
+        cwd: Option<String>,
+        env: bool,
+    },
+    NotDeclared,
+}
+
+/// The sessions layer's connection truth, joined from the profile: the
+/// declared protocol, the open modes, the capability flags, and the declared
+/// connect facts. This is disclosure of what the profile declares — the
+/// connection builder, not this read model, validates and materialises a
+/// launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionConnectionDisclosure {
+    pub protocol: SessionProtocol,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_modes: Vec<String>,
+    pub capabilities: SessionCapabilityFlags,
+    pub connect: ConnectFactsDisclosure,
+}
+
 /// One layer of the disclosure: the posture, what the harness natively
 /// carries there, what AIKit has composed, and — managed tools layers only —
 /// the drift between the two.
@@ -82,6 +116,10 @@ pub struct LayerDisclosure {
     pub activation: Option<ActivationEffectName>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub drift: Vec<DriftEntry>,
+    /// The sessions layer's connection truth. Present only on the sessions
+    /// layer — the other layers carry no connection concept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<SessionConnectionDisclosure>,
 }
 
 /// The whole-harness read model: one entry per layer the profile declares,
@@ -138,6 +176,7 @@ pub fn disclose(
             composed: Vec::new(),
             activation: None,
             drift: Vec::new(),
+            connection: None,
         });
     }
     if let Some(guidance) = &profile.guidance {
@@ -155,6 +194,7 @@ pub fn disclose(
             composed: Vec::new(),
             activation: None,
             drift: Vec::new(),
+            connection: None,
         });
     }
     if let Some(hooks) = &profile.hooks {
@@ -165,6 +205,7 @@ pub fn disclose(
             composed: Vec::new(),
             activation: hooks.activation,
             drift: Vec::new(),
+            connection: None,
         });
     }
     if let Some(tools) = &profile.tools {
@@ -178,6 +219,7 @@ pub fn disclose(
             composed: Vec::new(),
             activation: None,
             drift: Vec::new(),
+            connection: None,
         });
     }
     if let Some(sessions) = &profile.sessions {
@@ -188,6 +230,7 @@ pub fn disclose(
             composed: Vec::new(),
             activation: None,
             drift: Vec::new(),
+            connection: Some(sessions_connection_disclosure(sessions)),
         });
     }
     if let Some(settings) = &profile.settings {
@@ -205,6 +248,7 @@ pub fn disclose(
             composed: Vec::new(),
             activation: None,
             drift: Vec::new(),
+            connection: None,
         });
     }
     HarnessDisclosure {
@@ -315,6 +359,36 @@ fn tools_disclosure(
         },
         activation: tools.activation,
         drift,
+        connection: None,
+    }
+}
+
+/// The sessions layer's connection disclosure: the declared protocol, open
+/// modes and capability flags verbatim, and the connect facts reduced to
+/// their shape — the binary the primary argv names, the fallback variant
+/// count, and cwd/env presence. An absent `connect` discloses as
+/// `not-declared` ("no connection facts declared"): ordinary for a `process`
+/// profile, a doorless protocol claim for `acp`/`rpc`.
+fn sessions_connection_disclosure(sessions: &SessionsLayer) -> SessionConnectionDisclosure {
+    let connect = match &sessions.connect {
+        Some(SessionConnect {
+            argv,
+            argv_fallback,
+            env,
+            cwd,
+        }) => ConnectFactsDisclosure::Declared {
+            binary: argv.first().cloned().unwrap_or_default(),
+            fallback_variants: argv_fallback.len(),
+            cwd: cwd.clone(),
+            env: !env.is_empty(),
+        },
+        None => ConnectFactsDisclosure::NotDeclared,
+    };
+    SessionConnectionDisclosure {
+        protocol: sessions.protocol,
+        open_modes: sessions.open_modes.clone(),
+        capabilities: sessions.capabilities,
+        connect,
     }
 }
 
@@ -339,6 +413,7 @@ mod tests {
                 env: BTreeMap::new(),
                 cwd: None,
                 url: None,
+                headers: BTreeMap::new(),
             },
         }
     }
@@ -355,6 +430,7 @@ mod tests {
                 env: BTreeMap::new(),
                 cwd: None,
                 url: None,
+                headers: BTreeMap::new(),
             },
         }
     }
@@ -686,6 +762,121 @@ mod tests {
             hooks.activation,
             Some(ActivationEffectName::NextSessionOnly),
             "pi reads extensions at session start; a running TUI can /reload"
+        );
+    }
+
+    fn acp_sessions_profile() -> HarnessProfile {
+        let mut profile = for_slug("pi")
+            .expect("pi carries an embedded profile")
+            .clone();
+        profile.sessions = Some(SessionsLayer {
+            posture: LayerPosture::Observed,
+            protocol: SessionProtocol::Acp,
+            open_modes: vec!["create".into(), "resume".into()],
+            capabilities: SessionCapabilityFlags {
+                ordered_streaming: true,
+                cancellation: true,
+                permission_requests: true,
+                reconnect: false,
+                additional_directories: false,
+                mcp_servers: true,
+            },
+            connect: Some(SessionConnect {
+                argv: vec!["gemini".into(), "--acp".into()],
+                argv_fallback: vec![vec!["gemini".into(), "--experimental-acp".into()]],
+                env: BTreeMap::new(),
+                cwd: Some("/workspace".into()),
+            }),
+        });
+        profile
+    }
+
+    #[test]
+    fn the_sessions_layer_discloses_protocol_open_modes_capabilities_and_declared_connect_facts() {
+        let profile = acp_sessions_profile();
+
+        let disclosure = disclose(&profile, &NativeObservation::default(), &[]);
+
+        let sessions = disclosure
+            .layers
+            .iter()
+            .find(|layer| layer.layer == "sessions")
+            .expect("the profile declares a sessions layer");
+        let connection = sessions
+            .connection
+            .as_ref()
+            .expect("the sessions layer discloses its connection truth");
+        assert_eq!(connection.protocol, SessionProtocol::Acp);
+        assert_eq!(
+            connection.open_modes,
+            vec!["create".to_string(), "resume".to_string()],
+            "the declared open modes render verbatim, resume included"
+        );
+        assert!(
+            connection.capabilities.mcp_servers && connection.capabilities.ordered_streaming,
+            "the declared capability flags render verbatim"
+        );
+        assert_eq!(
+            connection.connect,
+            ConnectFactsDisclosure::Declared {
+                binary: "gemini".to_string(),
+                fallback_variants: 1,
+                cwd: Some("/workspace".to_string()),
+                env: false,
+            },
+            "connect facts render their shape: the primary binary, the fallback count and \
+             cwd/env presence — never argv bodies or values"
+        );
+        assert!(
+            tools_layer(&disclosure).connection.is_none(),
+            "no layer other than sessions carries a connection concept"
+        );
+    }
+
+    #[test]
+    fn the_sessions_connection_truth_serializes_with_the_disclosure() {
+        let profile = acp_sessions_profile();
+
+        let disclosure = disclose(&profile, &NativeObservation::default(), &[]);
+        let json = serde_json::to_value(&disclosure).expect("the disclosure serializes");
+        let parsed: HarnessDisclosure =
+            serde_json::from_value(json.clone()).expect("the serialized disclosure reparses");
+        assert_eq!(parsed, disclosure, "the connection truth round-trips");
+
+        let sessions = json["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|layer| layer["layer"] == "sessions")
+            .expect("the sessions layer serializes");
+        let connection = &sessions["connection"];
+        assert_eq!(connection["protocol"], "acp");
+        assert_eq!(connection["connect"]["kind"], "declared");
+        assert_eq!(connection["connect"]["binary"], "gemini");
+        assert_eq!(connection["connect"]["fallback_variants"], 1);
+        assert_eq!(connection["connect"]["cwd"], "/workspace");
+        assert_eq!(connection["connect"]["env"], false);
+    }
+
+    #[test]
+    fn an_acp_or_rpc_sessions_layer_without_connect_discloses_no_connection_facts_declared() {
+        let mut profile = acp_sessions_profile();
+        profile.sessions.as_mut().unwrap().connect = None;
+
+        let disclosure = disclose(&profile, &NativeObservation::default(), &[]);
+
+        let sessions = disclosure
+            .layers
+            .iter()
+            .find(|layer| layer.layer == "sessions")
+            .expect("the profile declares a sessions layer");
+        let connection = sessions.connection.as_ref().unwrap();
+        assert_eq!(connection.protocol, SessionProtocol::Acp);
+        assert_eq!(
+            connection.connect,
+            ConnectFactsDisclosure::NotDeclared,
+            "a protocol claim with no door renders as no connection facts declared — the \
+             renderer flags the gap from the acp protocol beside it"
         );
     }
 }

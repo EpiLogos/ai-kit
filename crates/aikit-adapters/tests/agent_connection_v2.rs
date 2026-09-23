@@ -334,3 +334,131 @@ fn load_and_resume_retain_requested_identity_and_reject_contradictions() {
         }
     }
 }
+
+fn resume_advertised_adapter(connection: &str) -> AcpV1ConnectionAdapter {
+    let mut adapter = AcpV1ConnectionAdapter::new(r(connection), vec![]);
+    adapter.initialize().unwrap();
+    adapter
+        .ingest(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": 1,
+                "agentCapabilities": { "sessionCapabilities": { "resume": {}, "close": {} } }
+            }
+        }))
+        .unwrap();
+    adapter
+}
+
+#[test]
+fn session_resume_advertised_sends_the_stabilized_session_resume_request_with_no_replay() {
+    let mut adapter = resume_advertised_adapter("connection/acp/resume");
+    let capabilities = adapter.negotiated_session_capabilities();
+    assert!(capabilities.resume, "the negotiated resume fact is exposed");
+    assert!(capabilities.close, "the negotiated close fact is exposed");
+
+    let command = adapter
+        .session_resume(
+            "native-resume-9",
+            "/workspace/project",
+            vec![json!({ "name": "bimba", "command": "bimba-mcp", "args": [], "env": [] })],
+        )
+        .unwrap();
+    assert_eq!(
+        command.operation, "session/resume",
+        "the stabilized resume operation rides the wire, not session/load with its replay"
+    );
+    assert_eq!(command.payload["params"]["sessionId"], "native-resume-9");
+    assert_eq!(command.payload["params"]["cwd"], "/workspace/project");
+    assert_eq!(
+        command.payload["params"]["mcpServers"],
+        json!([{ "name": "bimba", "command": "bimba-mcp", "args": [], "env": [] }]),
+        "the request mirrors the session/new shape with the session id added"
+    );
+
+    // No replay events are fabricated: the response resolves through the same
+    // SessionOpened binding path as session/new, and nothing else is emitted.
+    let opened = adapter
+        .ingest(json!({"jsonrpc":"2.0","id":command.payload["id"],"result":{}}))
+        .unwrap();
+    assert_eq!(opened.len(), 1);
+    let ConnectionSignalKind::SessionOpened { binding } = &opened[0].kind else {
+        panic!("expected opened binding");
+    };
+    assert_eq!(binding.native_session_id, "native-resume-9");
+    assert_eq!(binding.opened_as, SessionOpenMode::Resume);
+}
+
+#[test]
+fn resume_or_attach_without_the_advertised_capability_refuses_naming_sessioncapabilities_resume() {
+    for mode in [SessionOpenMode::Resume, SessionOpenMode::Attach] {
+        let mut adapter = AcpV1ConnectionAdapter::new(r("connection/acp/no-resume"), vec![]);
+        adapter.initialize().unwrap();
+        adapter
+            .ingest(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "protocolVersion": 1, "agentCapabilities": {} }
+            }))
+            .unwrap();
+        assert!(!adapter.negotiated_session_capabilities().resume);
+        assert!(!adapter.negotiated_session_capabilities().close);
+
+        let error = adapter
+            .open_session(SessionOpenRequest {
+                mode,
+                native_session_id: Some("native-1".into()),
+                ..create_request()
+            })
+            .unwrap_err();
+        assert_eq!(error.code(), "connection.session_operation_unsupported");
+        assert!(
+            error.to_string().contains("sessionCapabilities.resume"),
+            "the refusal names the missing capability, not a stale protocol claim: {error}"
+        );
+    }
+
+    let mut adapter = AcpV1ConnectionAdapter::new(r("connection/acp/no-resume-typed"), vec![]);
+    adapter.initialize().unwrap();
+    adapter
+        .ingest(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "protocolVersion": 1, "agentCapabilities": {} }
+        }))
+        .unwrap();
+    let error = adapter
+        .session_resume("native-1", "/workspace/project", Vec::new())
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("sessionCapabilities.resume"),
+        "the typed resume route refuses before any wire message: {error}"
+    );
+}
+
+#[test]
+fn attach_rides_the_stabilized_resume_operation_where_it_is_advertised() {
+    let mut adapter = resume_advertised_adapter("connection/acp/attach-resume");
+
+    let command = adapter
+        .open_session(SessionOpenRequest {
+            mode: SessionOpenMode::Attach,
+            native_session_id: Some("native-live".into()),
+            ..create_request()
+        })
+        .unwrap();
+    assert_eq!(
+        command.operation, "session/resume",
+        "attach has no dedicated ACP method; the advertised resume operation is the route"
+    );
+    assert_eq!(command.payload["params"]["sessionId"], "native-live");
+    let opened = adapter
+        .ingest(json!({"jsonrpc":"2.0","id":command.payload["id"],"result":{}}))
+        .unwrap();
+    let ConnectionSignalKind::SessionOpened { binding } = &opened[0].kind else {
+        panic!("expected opened binding");
+    };
+    assert_eq!(binding.opened_as, SessionOpenMode::Attach);
+    assert_eq!(binding.native_session_id, "native-live");
+}

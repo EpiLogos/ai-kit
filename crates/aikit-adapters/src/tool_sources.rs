@@ -306,6 +306,7 @@ mod tests {
                 env: BTreeMap::from([("BIMBA_TOKEN".to_string(), "sk-test-value".to_string())]),
                 cwd: Some("/Users/admin/Central/Work/epi".to_string()),
                 url: None,
+                headers: BTreeMap::new(),
             },
         }
     }
@@ -323,6 +324,7 @@ mod tests {
                 env: BTreeMap::new(),
                 cwd: None,
                 url: None,
+                headers: BTreeMap::new(),
             },
         }
     }

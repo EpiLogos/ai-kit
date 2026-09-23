@@ -335,6 +335,38 @@ pub enum SessionProtocol {
     Process,
 }
 
+/// The connection endpoint facts of the declared session protocol: the exact
+/// argv that puts the harness into its protocol mode (never its interactive
+/// UI), plus the launch environment and working directory the connection
+/// requires. This is the profile's answer to "how does a client actually
+/// reach this harness" — without it a protocol declaration is a claim with
+/// no door. Carried as declaration data: the connection builder validates
+/// and materialises it; nothing at runtime invents a launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct SessionConnect {
+    /// The primary launch template. The first element names the binary (an
+    /// absolute path or a PATH name); the rest are the flags that enter the
+    /// protocol mode, carried verbatim from the harness's own command
+    /// surface.
+    pub argv: Vec<String>,
+    /// Older-release argv variants that put the same harness into the same
+    /// protocol mode, tried in declared order when the primary argv is not
+    /// the installed build's surface (gemini renamed `--experimental-acp` to
+    /// `--acp` in the 0.30 line). Declared, never discovered at runtime.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argv_fallback: Vec<Vec<String>>,
+    /// Extra launch environment the connection requires. Values are plain
+    /// literals — secret material never rides a profile; credentials go
+    /// through the models layer's declared key delivery.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// The working directory the connection launches in, where the
+    /// harness's protocol mode demands one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
 /// The harness's session faculties as plain flags, mirroring the shape of
 /// aikit-adapters' `ConnectionCapabilities`. These are profile declarations
 /// used for read models and refusal boundaries, not a negotiated capability
@@ -368,6 +400,13 @@ pub struct SessionsLayer {
     pub open_modes: Vec<String>,
     #[serde(default)]
     pub capabilities: SessionCapabilityFlags,
+    /// How a client reaches this harness in the declared protocol. Required
+    /// for `acp` and `rpc` — a protocol declaration without a door is
+    /// refused at validation. Optional for `process`, whose face is the
+    /// harness's own command surface; where a declared headless face exists
+    /// it may be recorded here too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect: Option<SessionConnect>,
 }
 
 /// Install/config seams of the harness itself. Carried by the layers above;
@@ -656,7 +695,73 @@ impl HarnessProfile {
                 })?;
             }
         }
+        if let Some(sessions) = &self.sessions {
+            validate_sessions_connect(sessions)?;
+        }
         Ok(())
+    }
+}
+
+/// Posture truth for the connection declaration: a harness that declares a
+/// client-reaching protocol (`acp`, `rpc`) must declare the door — the exact
+/// argv that opens a protocol session. A `process` protocol may carry one
+/// too (a declared headless face); its absence is honest there, because the
+/// harness's own command surface is the face.
+fn validate_sessions_connect(sessions: &SessionsLayer) -> Result<(), HarnessProfileError> {
+    let connect = match (&sessions.protocol, sessions.connect.as_ref()) {
+        (SessionProtocol::Process, None) => return Ok(()),
+        (_, None) => {
+            return Err(HarnessProfileError::new(
+                "harness_profile.sessions_connect_required",
+                format!(
+                    "the sessions layer declares the {} protocol but no connection facts; \
+                     add [sessions.connect] with the exact argv that puts this harness into \
+                     its protocol mode (and argv-fallback variants for older releases)",
+                    session_protocol_word(sessions.protocol)
+                ),
+            )
+            .with("field", "sessions.connect"));
+        }
+        (_, Some(connect)) => connect,
+    };
+    for (index, variant) in std::iter::once(&connect.argv)
+        .chain(connect.argv_fallback.iter())
+        .enumerate()
+    {
+        let field = if index == 0 {
+            "sessions.connect.argv".to_string()
+        } else {
+            format!("sessions.connect.argv-fallback[{}]", index - 1)
+        };
+        if variant.is_empty() || variant[0].trim().is_empty() {
+            return Err(HarnessProfileError::new(
+                "harness_profile.invalid_connect_argv",
+                format!(
+                    "the connection declaration at {field} declares no binary; its first \
+                     element must name the harness binary (an absolute path or a PATH name)"
+                ),
+            )
+            .with("field", field));
+        }
+        if let Some(position) = variant.iter().position(|part| part.trim().is_empty()) {
+            return Err(HarnessProfileError::new(
+                "harness_profile.invalid_connect_argv",
+                format!(
+                    "the connection declaration at {field} has an empty argument at offset \
+                     {position}; carry the harness's flags verbatim, never as blank padding"
+                ),
+            )
+            .with("field", field));
+        }
+    }
+    Ok(())
+}
+
+fn session_protocol_word(protocol: SessionProtocol) -> &'static str {
+    match protocol {
+        SessionProtocol::Acp => "acp",
+        SessionProtocol::Rpc => "rpc",
+        SessionProtocol::Process => "process",
     }
 }
 
@@ -1348,5 +1453,83 @@ mcp-servers = false
         profile.settings = Some(layer);
         let error = profile.validate().unwrap_err();
         assert_eq!(error.code, "harness_profile.trust_setting_scopes");
+    }
+
+    fn gemini_acp_profile_without_connect() -> HarnessProfile {
+        toml::from_str(
+            r#"
+schema = "aikit.harness-profile/v1"
+slug = "gemini"
+edition = "cli"
+
+[sessions]
+posture = "observed"
+protocol = "acp"
+capabilities = { ordered-streaming = true, cancellation = true }
+"#,
+        )
+        .expect("acp profile parses")
+    }
+
+    #[test]
+    fn an_acp_protocol_without_connection_facts_is_refused() {
+        let profile = gemini_acp_profile_without_connect();
+        let error = profile.validate().unwrap_err();
+        assert_eq!(error.code, "harness_profile.sessions_connect_required");
+        assert!(
+            error.to_string().contains("[sessions.connect]"),
+            "the refusal must name the fix: {error}"
+        );
+    }
+
+    #[test]
+    fn an_acp_protocol_with_connection_facts_validates_and_keeps_declared_fallbacks() {
+        let mut profile = gemini_acp_profile_without_connect();
+        profile.sessions.as_mut().unwrap().connect = Some(SessionConnect {
+            argv: vec!["gemini".into(), "--acp".into()],
+            argv_fallback: vec![vec!["gemini".into(), "--experimental-acp".into()]],
+            env: BTreeMap::new(),
+            cwd: None,
+        });
+        profile.validate().expect("declared door validates");
+        let sessions = profile.sessions.as_ref().unwrap();
+        assert_eq!(
+            sessions.connect.as_ref().unwrap().argv_fallback.len(),
+            1,
+            "declared fallback variants survive the round trip"
+        );
+    }
+
+    #[test]
+    fn an_rpc_protocol_without_connection_facts_is_refused() {
+        let mut profile = openclaw_profile();
+        let sessions = profile.sessions.as_mut().unwrap();
+        sessions.protocol = SessionProtocol::Rpc;
+        let error = profile.validate().unwrap_err();
+        assert_eq!(error.code, "harness_profile.sessions_connect_required");
+    }
+
+    #[test]
+    fn a_process_protocol_without_connection_facts_stays_honest() {
+        let profile = openclaw_profile();
+        profile.validate().expect("process needs no declared door");
+    }
+
+    #[test]
+    fn a_connection_argv_without_a_binary_is_refused() {
+        let mut profile = gemini_acp_profile_without_connect();
+        let sessions = profile.sessions.as_mut().unwrap();
+        sessions.connect = Some(SessionConnect {
+            argv: vec!["--acp".into()],
+            argv_fallback: vec![vec![String::new()]],
+            env: BTreeMap::new(),
+            cwd: None,
+        });
+        let error = profile.validate().unwrap_err();
+        assert_eq!(error.code, "harness_profile.invalid_connect_argv");
+        assert!(
+            error.to_string().contains("argv-fallback[0]"),
+            "the refusal must name the offending variant: {error}"
+        );
     }
 }

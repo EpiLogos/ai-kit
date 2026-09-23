@@ -1,7 +1,9 @@
 //! Resident, provider-neutral ACP encounters. The UI reads cursor pages and
 //! submits owner actions; disconnecting an IPC client never drops a provider.
 use aikit_adapters::{
-    agent_connection::{ConnectionSignalKind, NativePermissionRequest, SessionOpenMode},
+    agent_connection::{
+        ConnectionDescriptor, ConnectionSignalKind, NativePermissionRequest, SessionOpenMode,
+    },
     agent_session_host::{
         AgentSessionHost, AgentSessionHostLimits, HostEvent, SessionEventJournal, SessionLane,
     },
@@ -57,6 +59,11 @@ pub struct EncounterProvider {
     pub protocol: EncounterProtocol,
     pub id: String,
     pub label: String,
+    /// Explicit argv of a freeform provider. A profile-derived provider
+    /// (`from_profile`) omits it — the profile's `[sessions.connect]` argv is
+    /// the one source; an explicit argv alongside `from_profile` is a
+    /// contradiction refused at configuration and resolution.
+    #[serde(default)]
     pub argv: Vec<String>,
     /// Optional resolved acting-body identity. This is provider configuration
     /// provenance, not Agent identity; consumers may require an exact body.
@@ -65,6 +72,26 @@ pub struct EncounterProvider {
     /// Revision of the acting-body implementation when body_ref is supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_revision: Option<String>,
+    /// The embedded harness profile slug this provider's connection facts are
+    /// derived from at load time (`crate::encounter_profile_provider`). A
+    /// profile-derived provider carries an empty `argv` here; an explicit
+    /// argv alongside `from_profile` is a contradiction and refuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_profile: Option<String>,
+    /// Older-release argv variants that put the same harness into the same
+    /// protocol mode, tried in declared order when the primary argv fails
+    /// before any ACP initialize response. Declared, never discovered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argv_fallback: Vec<Vec<String>>,
+    /// Launch environment facts. Nothing can carry them to the child yet (the
+    /// scrubbed final-child environment is credential-only); a provider that
+    /// declares any refuses at open rather than being accepted and dropped.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// Working-directory fact. The encounter open supplies the project-bound
+    /// working directory; a provider-declared cwd refuses at open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     /// Explicit owner-configured admission basis. Absence preserves optional context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_context: Option<EncounterContextAdmission>,
@@ -399,6 +426,20 @@ pub struct EncounterService {
 fn error(message: impl std::fmt::Display) -> AikitError {
     AikitError::new("encounter.runtime", message.to_string())
 }
+
+/// One failed launch attempt, journaled verbatim: which declared variant was
+/// tried, why it failed, whether a provider process existed and its cleanup
+/// is confirmed, and whether another declared variant follows.
+struct FailedLaunchAttempt<'a> {
+    reconnect: bool,
+    index: usize,
+    variant: &'a [String],
+    failure: &'a AikitError,
+    /// `None`: spawn failed, no process existed. `Some(ok)`: a process existed
+    /// and shutdown was attempted with the given confirmation.
+    cleanup: Option<bool>,
+    more_variants: bool,
+}
 impl EncounterService {
     pub fn new(home: AikitHome) -> Result<Self> {
         Ok(Self {
@@ -417,8 +458,6 @@ impl EncounterService {
                 .id
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-            || provider.argv.is_empty()
-            || provider.argv[0].is_empty()
             || provider.body_ref.as_ref().is_some_and(|value| {
                 value.trim().is_empty() || aikit_core::ResourceRef::parse(value).is_err()
             })
@@ -431,6 +470,22 @@ impl EncounterService {
             return Err(error(
                 "Provider requires a safe id, explicit native argv, and either both body_ref/body_revision or neither",
             ));
+        }
+        if provider.from_profile.is_some() {
+            // A profile-derived provider stores its slug and resolves its
+            // connection facts at load time; fail fast here when the profile
+            // cannot derive (unknown slug, contradiction, unreachable facts)
+            // instead of storing a provider no open can launch.
+            crate::encounter_profile_provider::resolve_provider(provider.clone())?;
+        } else if provider.argv.is_empty() || provider.argv[0].is_empty() {
+            return Err(error(
+                "Provider requires a safe id and explicit native argv",
+            ));
+        } else {
+            // Freeform providers get the same honesty gate: connection env/cwd
+            // facts that cannot reach the child are refused at configuration,
+            // never stored to be accepted and dropped at open.
+            crate::encounter_profile_provider::ensure_connection_facts_reachable(&provider)?;
         }
         let root = home.state().join("encounter-providers");
         std::fs::create_dir_all(&root).map_err(error)?;
@@ -466,8 +521,21 @@ impl EncounterService {
         for entry in std::fs::read_dir(root).map_err(error)? {
             let path = entry.map_err(error)?.path();
             if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                let bytes = std::fs::read(&path).map_err(error)?;
+                let provider: EncounterProvider = serde_json::from_slice(&bytes).map_err(error)?;
+                // Profile-derived providers resolve their connection facts
+                // here, at load, from the embedded profile — never a
+                // hand-copied snapshot. A provider that cannot resolve
+                // refuses naming its file.
                 rows.push(
-                    serde_json::from_slice(&std::fs::read(path).map_err(error)?).map_err(error)?,
+                    crate::encounter_profile_provider::resolve_provider(provider).map_err(
+                        |failure| {
+                            AikitError::new(
+                                failure.code(),
+                                format!("{}: {failure}", path.display()),
+                            )
+                        },
+                    )?,
                 );
             }
         }
@@ -736,6 +804,10 @@ impl EncounterService {
             .into_iter()
             .find(|p| p.id == provider)
             .ok_or_else(|| error("ACP provider is not configured in AIKit"))?;
+        // A declared connection env/cwd cannot reach the provider child today;
+        // launching anyway would accept and silently drop them. Refuse naming
+        // the facts instead.
+        crate::encounter_profile_provider::ensure_connection_facts_reachable(&configured)?;
         if reconnect
             && previous.as_ref().is_some_and(|p| {
                 p["cwd"] != json!(cwd)
@@ -773,7 +845,7 @@ impl EncounterService {
         if reconnect && configured.protocol != EncounterProtocol::Acp {
             return Err(AikitError::new(
                 "encounter.reconnect_unsupported",
-                "This native provider does not publish a supported load/resume operation; no replacement session was created",
+                "This native provider does not publish a supported resume operation; ACP reconnect rides the capability-gated session/resume, and this protocol has no reconnect route through the encounter service; no replacement session was created",
             ));
         }
         // Resolve the composed tool surface before any provider process exists,
@@ -825,73 +897,212 @@ impl EncounterService {
             None
         };
         let provenance = vec![format!("native encounter provider {provider}")];
-        let host = match configured.protocol {
-            EncounterProtocol::Acp => AgentSessionHost::launch_with_journal_and_environment(
-                AcpStableConnectionAdapter::new(connection, provenance),
-                &launch_argv,
-                Some(&cwd),
-                AgentSessionHostLimits::default(),
-                journal,
-                launch_environment.as_ref(),
-            ),
-            EncounterProtocol::PiRpc => AgentSessionHost::launch_with_journal_and_environment(
-                {
-                    let adapter = aikit_adapters::pi_rpc_connection::PiRpcConnectionAdapter::new(
-                        connection,
-                        cwd.to_string_lossy().into_owned(),
-                        provenance,
-                    );
-                    match &model {
-                        Some(model) => adapter.with_selected_model(
-                            &model.policy.native_provider,
-                            &model.policy.provider_native_id,
-                        )?,
-                        None => adapter,
+        // Launch the primary argv, then the declared fallback variants. A
+        // variant is only retried when its failure happened before any ACP
+        // initialize response — a spawn failure, or a connection that closed
+        // before the handshake completed (`agent_session_host.handshake_failed`).
+        // A semantic refusal (an initialize response arrived) is the protocol
+        // speaking, not a wrong argv variant, and is never retried: there is
+        // no silent retry loop here. The model direct-launcher resolves the
+        // declared variants by the same rule at its own final exec
+        // (journaled as `native-model-launch-variant-selected`), so a
+        // model-policy-bound open falls back on an unresolvable primary too.
+        let direct_provider_launch = model.is_none() || task_bound;
+        let mut launch_variants = vec![launch_argv.clone()];
+        if direct_provider_launch {
+            launch_variants.extend(configured.argv_fallback.clone());
+        }
+        let single_variant = launch_variants.len() == 1;
+        let mut launched: Option<(AgentSessionHost, ConnectionDescriptor)> = None;
+        let mut failed_attempts: Vec<String> = Vec::new();
+        for (index, variant) in launch_variants.iter().enumerate() {
+            let last_variant = index + 1 == launch_variants.len();
+            let attempt_host = match configured.protocol {
+                EncounterProtocol::Acp => AgentSessionHost::launch_with_journal_and_environment(
+                    AcpStableConnectionAdapter::new(connection.clone(), provenance.clone()),
+                    variant,
+                    Some(&cwd),
+                    AgentSessionHostLimits::default(),
+                    journal.clone(),
+                    launch_environment.as_ref(),
+                ),
+                EncounterProtocol::PiRpc => AgentSessionHost::launch_with_journal_and_environment(
+                    {
+                        let adapter =
+                            aikit_adapters::pi_rpc_connection::PiRpcConnectionAdapter::new(
+                                connection.clone(),
+                                cwd.to_string_lossy().into_owned(),
+                                provenance.clone(),
+                            );
+                        match &model {
+                            Some(model) => adapter.with_selected_model(
+                                &model.policy.native_provider,
+                                &model.policy.provider_native_id,
+                            )?,
+                            None => adapter,
+                        }
+                    },
+                    variant,
+                    Some(&cwd),
+                    AgentSessionHostLimits::default(),
+                    journal.clone(),
+                    launch_environment.as_ref(),
+                ),
+                EncounterProtocol::PrimeRpc => AgentSessionHost::launch_with_journal_and_environment(
+                    {
+                        let adapter =
+                            aikit_adapters::prime_rpc_connection::PrimeRpcConnectionAdapter::new(
+                                connection.clone(),
+                                cwd.to_string_lossy().into_owned(),
+                                provenance.clone(),
+                            );
+                        match &model {
+                            Some(model) => adapter.with_selected_model(
+                                &model.policy.native_provider,
+                                &model.policy.provider_native_id,
+                            )?,
+                            None => adapter,
+                        }
+                    },
+                    variant,
+                    Some(&cwd),
+                    AgentSessionHostLimits::default(),
+                    journal.clone(),
+                    launch_environment.as_ref(),
+                ),
+            };
+            let attempt_host = match attempt_host {
+                Ok(host) => host,
+                Err(failure) => {
+                    // Spawn failure: no provider process of ours to clean up.
+                    self.record_failed_launch_attempt(
+                        &agent_session,
+                        FailedLaunchAttempt {
+                            reconnect,
+                            index,
+                            variant,
+                            failure: &failure,
+                            cleanup: None,
+                            more_variants: !last_variant,
+                        },
+                    )?;
+                    failed_attempts.push(format!(
+                        "`{}` failed to spawn: {}",
+                        variant.join(" "),
+                        failure.message()
+                    ));
+                    if single_variant {
+                        return Err(failure);
                     }
-                },
-                &launch_argv,
-                Some(&cwd),
-                AgentSessionHostLimits::default(),
-                journal,
-                launch_environment.as_ref(),
-            ),
-            EncounterProtocol::PrimeRpc => AgentSessionHost::launch_with_journal_and_environment(
-                {
-                    let adapter =
-                        aikit_adapters::prime_rpc_connection::PrimeRpcConnectionAdapter::new(
-                            connection,
-                            cwd.to_string_lossy().into_owned(),
-                            provenance,
-                        );
-                    match &model {
-                        Some(model) => adapter.with_selected_model(
-                            &model.policy.native_provider,
-                            &model.policy.provider_native_id,
-                        )?,
-                        None => adapter,
+                    if last_variant {
+                        return Err(self.launch_variants_exhausted(&failed_attempts));
                     }
-                },
-                &launch_argv,
-                Some(&cwd),
-                AgentSessionHostLimits::default(),
-                journal,
-                launch_environment.as_ref(),
-            ),
-        }?;
-        let negotiated = host.initialize()?;
+                    continue;
+                }
+            };
+            match attempt_host.initialize() {
+                Ok(descriptor) => {
+                    launched = Some((attempt_host, descriptor));
+                    break;
+                }
+                Err(failure) => {
+                    let cleanup = attempt_host.shutdown();
+                    if cleanup.is_err() {
+                        // Refuse later effects if this body may still be live.
+                        self.shutdown_requested
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    self.record_failed_launch_attempt(
+                        &agent_session,
+                        FailedLaunchAttempt {
+                            reconnect,
+                            index,
+                            variant,
+                            failure: &failure,
+                            cleanup: Some(cleanup.is_ok()),
+                            more_variants: !last_variant,
+                        },
+                    )?;
+                    failed_attempts.push(format!(
+                        "`{}` failed before a usable initialize response: {}",
+                        variant.join(" "),
+                        failure.message()
+                    ));
+                    if single_variant {
+                        return Err(failure);
+                    }
+                    // A non-handshake failure means the harness spoke: the
+                    // refusal is semantic, never a wrong argv variant.
+                    let fallback_eligible = failure.code() == "agent_session_host.handshake_failed";
+                    if !fallback_eligible || last_variant {
+                        return Err(self.launch_variants_exhausted(&failed_attempts));
+                    }
+                }
+            }
+        }
+        let (host, negotiated) = launched.expect("a launch variant succeeded or returned");
         let protocol_name = match configured.protocol {
             EncounterProtocol::Acp => "acp",
             EncounterProtocol::PiRpc => "pi-rpc",
             EncounterProtocol::PrimeRpc => "prime-rpc",
         };
-        let mcp = crate::encounter_mcp::session_mcp_resolution(
+        let mcp_resolution = crate::encounter_mcp::session_mcp_resolution(
             protocol_name,
             negotiated.capabilities.mcp_servers,
-            mcp_entries,
-        );
+            mcp_entries.clone(),
+        )?;
+        // The wire carries none of the composed tool surface only when the
+        // resolution says so; record the honest route (the harness's own
+        // native MCP configuration seam) in the journal and in the open
+        // outcome below, so a composed tool set is never silently dropped.
+        let mcp_native_fallback = match &mcp_resolution {
+            crate::encounter_mcp::SessionMcpResolution::NativeProjectionFallback { reason } => {
+                self.store.append(
+                    &agent_session,
+                    &json!({
+                        "kind":"native-mcp-native-projection-fallback",
+                        "provider":provider,
+                        "reason":reason,
+                        "composed_tools_route":"harness-native-mcp-config-seam-not-the-session-wire"
+                    }),
+                )?;
+                // Execute the route the record names: project the composed
+                // capsules into the harness's own managed tools seam when its
+                // profile declares one — through the same WorldEdit + Inverse
+                // + Procedure pipeline `aikit apply` uses, never a bare file
+                // write. The write is a projection, never a session
+                // precondition: a failure journals its error event and the
+                // open proceeds; a harness without a declared seam records
+                // the boundary instead of writing anything.
+                let machine_home = std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("."));
+                let projection =
+                    crate::encounter_native_projection::project_composed_tools_to_native_seam(
+                        &self.home,
+                        &cwd,
+                        &machine_home,
+                        configured.from_profile.as_deref(),
+                        &mcp_entries,
+                    );
+                self.store.append(
+                    &agent_session,
+                    &projection.journal_event(&provider, configured.from_profile.as_deref()),
+                )?;
+                Some((reason.clone(), projection))
+            }
+            _ => None,
+        };
+        let mcp = mcp_resolution;
+        // ACP reconnect rides the capability-gated `session/resume` (stabilized
+        // 2026-04-23, no history replay): the adapter routes Resume there and
+        // refuses naming `agentCapabilities.sessionCapabilities.resume` when
+        // the target did not advertise it — the stale "ACP has no generic
+        // attach" refusal is gone. The refusal surfaces through the
+        // native-open-refused journal event below.
         let lane = match host.open_session(crate::encounter_mcp::build_session_open_request(
             if reconnect {
-                SessionOpenMode::Load
+                SessionOpenMode::Resume
             } else if matches!(
                 configured.protocol,
                 EncounterProtocol::PiRpc | EncounterProtocol::PrimeRpc
@@ -917,7 +1128,7 @@ impl EncounterService {
         )) {
             Ok(lane) => lane,
             Err(failure) => {
-                // The adapter can reject session/load before a SessionOpened
+                // The adapter can reject session/resume before a SessionOpened
                 // binding exists. Retain that actual failure and confirmed
                 // cleanup without inventing a successful native continuation.
                 let cleanup = host.shutdown();
@@ -955,7 +1166,7 @@ impl EncounterService {
             self.store.append(&agent_session, &json!({"kind":"native-reconnect-identity-refused", "cleanup_confirmed":cleanup.is_ok(), "turn_replayed":false}))?;
             return Err(AikitError::new(
                 "encounter.native_identity_changed",
-                "The harness returned another native identity to session/load; no binding or successful continuation was recorded",
+                "The harness returned another native identity to session/resume; no binding or successful continuation was recorded",
             ));
         }
         // A bound policy is delivered, never assumed. Pi RPC carried its
@@ -980,7 +1191,7 @@ impl EncounterService {
         if let Some((dispatch, receipt)) = &selected_configuration {
             self.store.append(&agent_session,&json!({"kind":"selected-model-configured","agent_session":agent_session,"native_session_id":receipt.native_session_id,"provider":provider,"dispatch":dispatch,"previous_model_observation":receipt.previous,"model_observation":receipt.current,"standing":"provider-confirmed-session-configuration-under-the-durable-model-policy"}))?;
         }
-        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-load"} else {"new-native-session"}}))?;
+        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-resume"} else {"new-native-session"},"composed_tools_route":if mcp_native_fallback.is_some() {"harness-native-mcp-config-seam"} else {"session-wire-or-none"},"mcp_native_fallback_reason":mcp_native_fallback.as_ref().map(|(reason, _)| reason.clone())}))?;
         // The owner drains transport delivery; durable cursor readers are
         // independent views of the same canonical journal.
         let drain = lane.clone();
@@ -1008,8 +1219,61 @@ impl EncounterService {
         drop(agency_lock);
         // The resident just became ready: this is the moment queued durable
         // deliveries wait for. Drain before answering the open.
-        let receipt = json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"body_ref":configured.body_ref,"body_revision":configured.body_revision,"resident":true,"inference_observed":false});
+        let mut receipt = json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"body_ref":configured.body_ref,"body_revision":configured.body_revision,"resident":true,"inference_observed":false});
+        if let Some((reason, projection)) = &mcp_native_fallback {
+            // The composed tool surface does not ride this session's wire: the
+            // open outcome names the harness's native MCP configuration seam
+            // as the route that carries it, and records what that route
+            // actually did — the executed write receipt, the named boundary
+            // when the harness declares no managed seam, or the failure.
+            // Never silent, never a promise the write did not keep.
+            receipt["composed_tools"] = json!({
+                "carried_on_wire":false,
+                "route":"harness-native-mcp-config-seam",
+                "reason":reason,
+                "execution":projection.execution_receipt(configured.from_profile.as_deref()),
+            });
+        }
         self.open_receipt_with_drain(agent_session, receipt)
+    }
+
+    /// Journal one failed launch attempt, following the native-open-refused
+    /// event pattern: what was attempted, why it failed, whether a process
+    /// existed and its cleanup is confirmed, and whether another declared
+    /// variant follows. Never silent, never a bare retry.
+    fn record_failed_launch_attempt(
+        &self,
+        agent_session: &ResourceRef,
+        attempt: FailedLaunchAttempt<'_>,
+    ) -> Result<()> {
+        self.store
+            .append(
+                agent_session,
+                &json!({
+                    "kind":"native-launch-attempt-failed",
+                    "continuation_requested":attempt.reconnect,
+                    "attempt":attempt.index,
+                    "argv":attempt.variant,
+                    "error_code":attempt.failure.code(),
+                    "reason":attempt.failure.message(),
+                    "process_started":attempt.cleanup.is_some(),
+                    "cleanup_confirmed":attempt.cleanup,
+                    "fallback":if attempt.more_variants {"next-declared-variant"} else {"none"}
+                }),
+            )
+            .map(|_| ())
+    }
+
+    /// The error for a launch whose variants are done being tried: it names
+    /// every variant attempted and each one's failure reason.
+    fn launch_variants_exhausted(&self, failed_attempts: &[String]) -> AikitError {
+        AikitError::new(
+            "encounter.launch_variants_exhausted",
+            format!(
+                "every declared launch variant failed: {}",
+                failed_attempts.join("; ")
+            ),
+        )
     }
 
     /// An open/reconnect makes the resident ready — the moment queued durable
@@ -1077,14 +1341,14 @@ impl EncounterService {
                 .host
                 .descriptor()?
                 .capabilities
-                .supports(SessionOpenMode::Load)
+                .supports(SessionOpenMode::Resume)
             {
                 return Err(AikitError::new(
-                    "encounter.load_unsupported",
-                    "This harness did not advertise native load; the failed session remains inspectable",
+                    "encounter.resume_unsupported",
+                    "This harness did not advertise agentCapabilities.sessionCapabilities.resume; ACP reconnect rides the capability-gated session/resume, and without it the failed session remains inspectable but cannot be resumed",
                 ));
             }
-            self.store.append(&agent_session, &json!({"kind":"native-reconnect-requested", "native_session_id":held.lane.binding().native_session_id, "previous_turn_outcome":"unknown; not-replayed"}))?;
+            self.store.append(&agent_session, &json!({"kind":"native-reconnect-requested", "native_session_id":held.lane.binding().native_session_id, "operation":"session/resume", "previous_turn_outcome":"unknown; not-replayed"}))?;
             let removed = residents.remove(&agent_session).expect("held resident");
             let removed = match Arc::try_unwrap(removed) {
                 Ok(resident) => resident,
@@ -1194,13 +1458,10 @@ impl EncounterService {
             request @ (EncounterRequest::Send { .. }
             | EncounterRequest::SendGroup { .. }
             | EncounterRequest::Delivery { .. }) => self.agency_request(request),
-            EncounterRequest::Reconnect {
-                space,
-                agent_session,
-                provider,
-                cwd,
-            } => self.open_native(space, agent_session, provider, cwd, true, None),
-            EncounterRequest::Shutdown { .. } => {
+            // Reconnect never reaches this match: apply() routes it through
+            // reconnect_native before the read lease is taken, so the
+            // lifecycle guard always holds for reconnects.
+            EncounterRequest::Reconnect { .. } | EncounterRequest::Shutdown { .. } => {
                 unreachable!("handled before acquiring read lease")
             }
             EncounterRequest::Permission {
@@ -1696,5 +1957,113 @@ pub fn start(home: &AikitHome, cwd: &Path) -> Result<Value> {
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn test_home() -> AikitHome {
+        let temp = TempDir::new().unwrap();
+        let home = AikitHome::at(temp.path().join("home"));
+        home.ensure_layout().unwrap();
+        // Keep the tempdir alive for the whole test by leaking it; each test
+        // needs exactly one home.
+        std::mem::forget(temp);
+        home
+    }
+
+    fn profile_provider(id: &str, slug: &str) -> EncounterProvider {
+        EncounterProvider {
+            protocol: EncounterProtocol::Acp,
+            id: id.to_owned(),
+            label: format!("{id} via profile"),
+            argv: Vec::new(),
+            from_profile: Some(slug.to_owned()),
+            argv_fallback: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: None,
+            required_context: None,
+            model_policy: None,
+        }
+    }
+
+    #[test]
+    fn a_configured_from_profile_provider_resolves_its_connection_facts_at_load_time() {
+        let home = test_home();
+        EncounterService::configure(&home, profile_provider("gemini-acp", "gemini")).unwrap();
+        let service = EncounterService::new(home).unwrap();
+
+        let providers = service.providers().unwrap();
+        let provider = providers
+            .iter()
+            .find(|p| p.id == "gemini-acp")
+            .expect("configured provider resolves");
+
+        assert_eq!(provider.argv, ["gemini", "--acp"]);
+        assert_eq!(
+            provider.argv_fallback,
+            [["gemini", "--experimental-acp"]],
+            "the derived fallback variants ride the resolved provider into every open"
+        );
+        assert_eq!(provider.from_profile.as_deref(), Some("gemini"));
+    }
+
+    #[test]
+    fn a_from_profile_provider_with_an_explicit_argv_refuses_at_configuration() {
+        let home = test_home();
+        let mut provider = profile_provider("gemini-acp", "gemini");
+        provider.argv = vec![
+            "/opt/homebrew/bin/gemini".into(),
+            "--experimental-acp".into(),
+        ];
+
+        let failure = EncounterService::configure(&home, provider).unwrap_err();
+
+        assert_eq!(failure.code(), "encounter.from_profile_argv_conflict");
+    }
+
+    #[test]
+    fn an_unknown_from_profile_slug_refuses_at_configuration_not_at_first_open() {
+        let home = test_home();
+
+        let failure =
+            EncounterService::configure(&home, profile_provider("ghost", "ghost")).unwrap_err();
+
+        assert_eq!(failure.code(), "encounter.from_profile_unknown");
+    }
+
+    #[test]
+    fn a_plain_provider_without_argv_still_refuses_configuration() {
+        let home = test_home();
+        let mut provider = profile_provider("hand", "gemini");
+        provider.from_profile = None;
+
+        let failure = EncounterService::configure(&home, provider).unwrap_err();
+
+        assert_eq!(failure.code(), "encounter.runtime");
+        assert!(
+            failure.to_string().contains("explicit native argv"),
+            "freeform providers still need their own argv: {failure}"
+        );
+    }
+
+    #[test]
+    fn a_provider_declaring_unreachable_env_or_cwd_refuses_before_any_launch() {
+        let home = test_home();
+        let mut provider = profile_provider("hand", "gemini");
+        provider.from_profile = None;
+        provider.argv = vec!["gemini".into(), "--acp".into()];
+        provider
+            .env
+            .insert("GEMINI_API_BASE".into(), "https://api.example".into());
+
+        let failure = EncounterService::configure(&home, provider).unwrap_err();
+
+        // The refusal happens at configuration, before any open can accept
+        // and silently drop the declared facts.
+        assert_eq!(failure.code(), "encounter.connect_facts_unreachable");
     }
 }

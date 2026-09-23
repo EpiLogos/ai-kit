@@ -2,12 +2,15 @@
 //! carry as `mcpServers`, decided in one place.
 //!
 //! The invariant this module owns is *a session's tool surface is disclosed,
-//! never silently dropped*. Exactly three outcomes exist for an open: the
+//! never silently dropped*. Exactly four outcomes exist for an open: the
 //! composed wire values ride on the open request, the connection protocol
-//! refuses per-session MCP servers and says so naming the protocol, or nothing
-//! is composed. There is no fourth state in which tool capsules exist but
-//! quietly never reach the session — a caller that cannot tell "nothing to
-//! carry" from "carried nothing by mistake" cannot disclose what it did.
+//! refuses per-session MCP servers and says so naming the protocol while the
+//! harness's native MCP configuration seam is named as the honest fallback
+//! path for the composed capsules, the protocol refuses per-session MCP
+//! servers with nothing composed (nothing to carry), or nothing is composed.
+//! There is no fifth state in which tool capsules exist but quietly never
+//! reach the session — a caller that cannot tell "nothing to carry" from
+//! "carried nothing by mistake" cannot disclose what it did.
 //!
 //! The ACP v1 wire shapes here are taken from the stable `schema/v1`
 //! (`agent-client-protocol`), which the [`crate::aikit_adapters`] passthrough
@@ -15,13 +18,17 @@
 //! and `env` required even when empty and `env` an array of `{name, value}`
 //! pairs — notably *without* a `type` discriminator; a remote entry is
 //! `{type: "http", name, url, headers}`. A record's `cwd` has no ACP stdio
-//! field and is not carried on the wire.
+//! field and is not carried on the wire. A header value is credential
+//! material: the capsule declares one environment reference per header, and
+//! the reference is resolved when the wire entry is built — an unset or empty
+//! resolution refuses the whole resolution, never an empty or dropped header.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use aikit_adapters::agent_connection::{SessionOpenMode, SessionOpenRequest};
 use aikit_adapters::tool_sources::ToolSourceEntry;
+use aikit_core::capsule::ToolServerRecord;
 use aikit_core::{AikitError, ResourceRef, Result};
 use aikit_store::AikitHome;
 use serde_json::{json, Value};
@@ -36,33 +43,49 @@ use serde_json::{json, Value};
 /// no entry, which is why the only production caller
 /// ([`active_tool_source_entries`]) re-checks the record and refuses before
 /// shaping is ever reached.
-pub fn session_mcp_wire_values(entries: impl IntoIterator<Item = ToolSourceEntry>) -> Vec<Value> {
-    entries
-        .into_iter()
-        .filter_map(|entry| {
-            let server = entry.server;
-            if let Some(command) = server.command {
-                return Some(json!({
-                    "name": entry.export_name,
-                    "command": command,
-                    "args": server.args,
-                    "env": server
-                        .env
-                        .iter()
-                        .map(|(name, value)| json!({"name": name, "value": value}))
-                        .collect::<Vec<_>>(),
-                }));
-            }
-            server.url.map(|url| {
-                json!({
-                    "type": "http",
-                    "name": entry.export_name,
-                    "url": url,
-                    "headers": [],
-                })
-            })
-        })
-        .collect()
+///
+/// An http entry's headers are resolved from the record's declared
+/// environment references through
+/// [`ToolServerRecord::resolve_header_value`]; any unresolved header refuses
+/// the whole shaping with that error — a header is never sent empty, dropped,
+/// or left as its `$NAME` declaration.
+pub fn session_mcp_wire_values(
+    entries: impl IntoIterator<Item = ToolSourceEntry>,
+) -> Result<Vec<Value>> {
+    let mut values = Vec::new();
+    for entry in entries {
+        let server = entry.server;
+        if let Some(command) = server.command {
+            values.push(json!({
+                "name": entry.export_name,
+                "command": command,
+                "args": server.args,
+                "env": server
+                    .env
+                    .iter()
+                    .map(|(name, value)| json!({"name": name, "value": value}))
+                    .collect::<Vec<_>>(),
+            }));
+            continue;
+        }
+        let Some(url) = server.url else {
+            continue;
+        };
+        let mut headers = Vec::new();
+        for (name, value) in &server.headers {
+            let resolved = ToolServerRecord::resolve_header_value(name, value, |variable| {
+                std::env::var(variable).ok()
+            })?;
+            headers.push(json!({"name": name, "value": resolved}));
+        }
+        values.push(json!({
+            "type": "http",
+            "name": entry.export_name,
+            "url": url,
+            "headers": headers,
+        }));
+    }
+    Ok(values)
 }
 
 /// What an open native session may carry as `mcpServers`.
@@ -70,10 +93,17 @@ pub fn session_mcp_wire_values(entries: impl IntoIterator<Item = ToolSourceEntry
 pub enum SessionMcpResolution {
     /// The composed wire values to send.
     Supplied(Vec<Value>),
-    /// The connection protocol accepts no per-session MCP servers. `reason`
-    /// names the protocol; the open proceeds without servers rather than
-    /// pretending to supply them.
+    /// The connection protocol accepts no per-session MCP servers and no
+    /// tool-protocol capsules are composed: there is nothing to carry and
+    /// nothing was dropped. `reason` names the protocol.
     UnsupportedByProtocol { reason: String },
+    /// The connection protocol accepts no per-session MCP servers *and*
+    /// trusted tool capsules ARE composed: the session wire carries none, and
+    /// the harness's native MCP configuration seam is the honest fallback
+    /// path for reaching those servers (project them there instead). This
+    /// names both facts so the fallback is a disclosed route, never a silent
+    /// drop of a composed tool surface.
+    NativeProjectionFallback { reason: String },
     /// The protocol supports MCP servers but no `tool-protocol` capsules are
     /// composed into this context.
     NotComposed,
@@ -82,34 +112,56 @@ pub enum SessionMcpResolution {
 /// Gate the composed tool surface on the negotiated connection capability.
 ///
 /// A protocol whose capabilities advertise no MCP-server support (pi-rpc, or an
-/// ACP agent without `agentCapabilities.mcpCapabilities`) yields
-/// [`SessionMcpResolution::UnsupportedByProtocol`] naming the protocol — never
-/// an empty pretend-supply.
+/// ACP agent without `agentCapabilities.mcpCapabilities`) refuses with
+/// [`SessionMcpResolution::UnsupportedByProtocol`] naming the protocol when
+/// nothing is composed, or [`SessionMcpResolution::NativeProjectionFallback`]
+/// naming the wire absence and the harness's native MCP configuration seam
+/// when trusted capsules ARE composed — never an empty pretend-supply, and
+/// never a silent drop of a composed tool surface.
+///
+/// An error refuses the whole resolution: a capsule header whose environment
+/// reference cannot be resolved is never shaped into a half-carried entry.
 pub fn session_mcp_resolution(
     protocol: &str,
     protocol_supports_mcp: bool,
     entries: impl IntoIterator<Item = ToolSourceEntry>,
-) -> SessionMcpResolution {
+) -> Result<SessionMcpResolution> {
+    let entries = entries.into_iter().collect::<Vec<_>>();
     if !protocol_supports_mcp {
-        return SessionMcpResolution::UnsupportedByProtocol {
-            reason: format!(
-                "the {protocol} connection protocol accepts no per-session MCP servers; \
-                 the composed tool capsules are not carried into this session"
-            ),
-        };
+        return Ok(if entries.is_empty() {
+            SessionMcpResolution::UnsupportedByProtocol {
+                reason: format!(
+                    "the {protocol} connection protocol accepts no per-session MCP servers; \
+                     the composed tool capsules are not carried into this session"
+                ),
+            }
+        } else {
+            SessionMcpResolution::NativeProjectionFallback {
+                reason: format!(
+                    "the {protocol} connection protocol accepts no per-session MCP servers, so \
+                     the {} composed trusted tool capsule(s) cannot ride the session wire; the \
+                     harness's native MCP configuration seam is the honest fallback path — \
+                     project the capsules into the harness's own configuration instead",
+                    entries.len()
+                ),
+            }
+        });
     }
-    let values = session_mcp_wire_values(entries);
+    let values = session_mcp_wire_values(entries)?;
     if values.is_empty() {
-        return SessionMcpResolution::NotComposed;
+        return Ok(SessionMcpResolution::NotComposed);
     }
-    SessionMcpResolution::Supplied(values)
+    Ok(SessionMcpResolution::Supplied(values))
 }
 
 /// Build the `SessionOpenRequest` an encounter opens with.
 ///
-/// An [`SessionMcpResolution::UnsupportedByProtocol`] or
-/// [`SessionMcpResolution::NotComposed`] resolution leaves `mcp_servers` empty,
-/// which is the honest wire form for both.
+/// An [`SessionMcpResolution::UnsupportedByProtocol`],
+/// [`SessionMcpResolution::NativeProjectionFallback`] or
+/// [`SessionMcpResolution::NotComposed`] resolution leaves `mcp_servers`
+/// empty, which is the honest wire form for all three: the fallback route
+/// reaches the servers through the harness's own configuration seam, not
+/// through this request.
 pub fn build_session_open_request(
     mode: SessionOpenMode,
     native_session_id: Option<String>,
@@ -125,6 +177,7 @@ pub fn build_session_open_request(
         mcp_servers: match mcp {
             SessionMcpResolution::Supplied(values) => values,
             SessionMcpResolution::UnsupportedByProtocol { .. }
+            | SessionMcpResolution::NativeProjectionFallback { .. }
             | SessionMcpResolution::NotComposed => Vec::new(),
         },
         agent_session,
@@ -239,6 +292,7 @@ mod tests {
                 env: BTreeMap::from([("BIMBA_TOKEN".to_string(), "sk-test".to_string())]),
                 cwd: Some("/opt/bimba".to_string()),
                 url: None,
+                headers: BTreeMap::new(),
             },
         }
     }
@@ -252,6 +306,7 @@ mod tests {
                 env: BTreeMap::new(),
                 cwd: None,
                 url: None,
+                headers: BTreeMap::new(),
             },
         }
     }
@@ -265,19 +320,34 @@ mod tests {
                 env: BTreeMap::new(),
                 cwd: None,
                 url: Some("https://mcp.example/sse".to_string()),
+                headers: BTreeMap::new(),
+            },
+        }
+    }
+
+    fn url_entry_with_header(header: &str, reference: &str) -> ToolSourceEntry {
+        ToolSourceEntry {
+            export_name: "linear".to_string(),
+            server: ToolServerRecord {
+                command: None,
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                cwd: None,
+                url: Some("https://mcp.example/sse".to_string()),
+                headers: BTreeMap::from([(header.to_string(), reference.to_string())]),
             },
         }
     }
 
     fn unsupported(protocol: &str) -> SessionMcpResolution {
-        session_mcp_resolution(protocol, false, Vec::new())
+        session_mcp_resolution(protocol, false, Vec::new()).unwrap()
     }
 
     // -- wire shaping -------------------------------------------------------
 
     #[test]
     fn a_stdio_record_shapes_into_the_acp_stdio_entry_with_env_as_name_value_pairs() {
-        let values = session_mcp_wire_values([stdio_entry()]);
+        let values = session_mcp_wire_values([stdio_entry()]).unwrap();
 
         assert_eq!(
             values,
@@ -293,7 +363,7 @@ mod tests {
 
     #[test]
     fn a_stdio_record_without_env_still_carries_the_required_empty_env_array() {
-        let values = session_mcp_wire_values([bare_stdio_entry()]);
+        let values = session_mcp_wire_values([bare_stdio_entry()]).unwrap();
 
         assert_eq!(
             values,
@@ -309,7 +379,7 @@ mod tests {
 
     #[test]
     fn a_url_record_shapes_into_the_acp_http_entry_with_its_type_discriminator() {
-        let values = session_mcp_wire_values([url_entry()]);
+        let values = session_mcp_wire_values([url_entry()]).unwrap();
 
         assert_eq!(
             values,
@@ -324,29 +394,96 @@ mod tests {
     }
 
     #[test]
+    fn an_http_entry_resolves_its_declared_header_references_into_wire_headers() {
+        const VARIABLE: &str = "AIKIT_ENCOUNTER_MCP_TEST_LINEAR_TOKEN";
+        std::env::set_var(VARIABLE, "lin_sk_live_test");
+        let values = session_mcp_wire_values([url_entry_with_header(
+            "Authorization",
+            &format!("${{{VARIABLE}}}"),
+        )])
+        .unwrap();
+        std::env::remove_var(VARIABLE);
+
+        assert_eq!(
+            values,
+            vec![json!({
+                "type": "http",
+                "name": "linear",
+                "url": "https://mcp.example/sse",
+                "headers": [{"name": "Authorization", "value": "lin_sk_live_test"}],
+            })],
+            "the declared ${{VAR}} reference resolves into the wire header; the capsule never \
+             carries the credential material itself"
+        );
+    }
+
+    #[test]
+    fn an_http_entry_whose_header_variable_is_unset_refuses_naming_header_and_variable() {
+        const VARIABLE: &str = "AIKIT_ENCOUNTER_MCP_TEST_ABSENT_TOKEN";
+
+        let error = session_mcp_wire_values([url_entry_with_header(
+            "Authorization",
+            &format!("${VARIABLE}"),
+        )])
+        .unwrap_err();
+
+        assert_eq!(error.code(), "tool_server.header_unresolved");
+        let message = error.to_string();
+        assert!(
+            message.contains("Authorization") && message.contains(VARIABLE),
+            "the refusal names the header and the unset variable: {message}"
+        );
+    }
+
+    #[test]
+    fn a_header_resolution_failure_refuses_the_whole_resolution_not_a_partial_wire() {
+        const VARIABLE: &str = "AIKIT_ENCOUNTER_MCP_TEST_MISSING_TOKEN";
+        let error = session_mcp_resolution(
+            "acp",
+            true,
+            [
+                stdio_entry(),
+                url_entry_with_header("Authorization", &format!("${VARIABLE}")),
+            ],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "tool_server.header_unresolved");
+        assert!(
+            error.to_string().contains("Authorization"),
+            "the refused resolution never yields a wire missing the authenticated server \
+             silently: {error}"
+        );
+    }
+
+    #[test]
     fn an_empty_entry_set_shapes_an_empty_wire_array() {
-        assert_eq!(session_mcp_wire_values(Vec::new()), Vec::<Value>::new());
+        assert_eq!(
+            session_mcp_wire_values(Vec::new()).unwrap(),
+            Vec::<Value>::new()
+        );
     }
 
     // -- capability gating --------------------------------------------------
 
     #[test]
     fn a_capability_bearing_protocol_supplies_the_shaped_wire_values() {
-        let resolution = session_mcp_resolution("acp", true, [stdio_entry(), url_entry()]);
+        let resolution = session_mcp_resolution("acp", true, [stdio_entry(), url_entry()]).unwrap();
 
         assert_eq!(
             resolution,
-            SessionMcpResolution::Supplied(session_mcp_wire_values([stdio_entry(), url_entry()])),
+            SessionMcpResolution::Supplied(
+                session_mcp_wire_values([stdio_entry(), url_entry()]).unwrap()
+            ),
         );
     }
 
     #[test]
-    fn a_protocol_without_mcp_capability_yields_unsupported_naming_the_protocol_and_never_a_supply()
-    {
-        let resolution = session_mcp_resolution("pi-rpc", false, [stdio_entry()]);
+    fn a_protocol_without_mcp_capability_and_nothing_composed_is_unsupported_naming_the_protocol() {
+        let resolution = session_mcp_resolution("pi-rpc", false, Vec::new()).unwrap();
 
         let SessionMcpResolution::UnsupportedByProtocol { reason } = &resolution else {
-            panic!("a protocol without MCP capability must not pretend to supply: {resolution:?}");
+            panic!("nothing composed means nothing to fall back: {resolution:?}");
         };
         assert!(
             reason.contains("pi-rpc"),
@@ -355,8 +492,29 @@ mod tests {
     }
 
     #[test]
+    fn a_protocol_without_mcp_capability_with_composed_capsules_names_the_native_seam_fallback() {
+        let resolution = session_mcp_resolution("pi-rpc", false, [stdio_entry()]).unwrap();
+
+        let SessionMcpResolution::NativeProjectionFallback { reason } = &resolution else {
+            panic!(
+                "a composed tool surface must not be silently dropped nor pretended supplied: \
+                 {resolution:?}"
+            );
+        };
+        assert!(
+            reason.contains("pi-rpc"),
+            "the fallback names the wire absence, protocol first: {reason}"
+        );
+        assert!(
+            reason.contains("native MCP configuration seam"),
+            "the fallback names the harness's native MCP configuration seam as the honest \
+             path: {reason}"
+        );
+    }
+
+    #[test]
     fn a_supporting_protocol_with_nothing_composed_is_reported_as_not_composed() {
-        let resolution = session_mcp_resolution("acp", true, Vec::new());
+        let resolution = session_mcp_resolution("acp", true, Vec::new()).unwrap();
 
         assert_eq!(resolution, SessionMcpResolution::NotComposed);
     }
@@ -365,7 +523,7 @@ mod tests {
 
     #[test]
     fn a_supplied_resolution_carries_mcp_servers_onto_the_session_open_request() {
-        let supplied = session_mcp_wire_values([stdio_entry()]);
+        let supplied = session_mcp_wire_values([stdio_entry()]).unwrap();
         let request = build_session_open_request(
             SessionOpenMode::Create,
             None,
@@ -384,19 +542,25 @@ mod tests {
     }
 
     #[test]
-    fn an_unsupported_or_uncomposed_resolution_leaves_the_session_open_request_without_servers() {
-        for mcp in [unsupported("pi-rpc"), SessionMcpResolution::NotComposed] {
+    fn an_unsupported_fallback_or_uncomposed_resolution_leaves_the_open_request_without_servers() {
+        let fallback = session_mcp_resolution("pi-rpc", false, [stdio_entry()]).unwrap();
+        for mcp in [
+            unsupported("pi-rpc"),
+            fallback,
+            SessionMcpResolution::NotComposed,
+        ] {
             let request = build_session_open_request(
                 SessionOpenMode::Create,
                 None,
                 "/workspace/project",
-                mcp,
+                mcp.clone(),
                 None,
             );
 
             assert!(
                 request.mcp_servers.is_empty(),
-                "no resolution other than Supplied may put servers on the request"
+                "only Supplied may put servers on the request; the fallback route is the \
+                 harness's own configuration seam, not this request: {mcp:?}"
             );
             assert_eq!(
                 serde_json::to_value(&request).unwrap()["mcp_servers"],
@@ -421,7 +585,7 @@ mod tests {
             }))
             .unwrap();
 
-        let supplied = session_mcp_wire_values([stdio_entry()]);
+        let supplied = session_mcp_wire_values([stdio_entry()]).unwrap();
         let command = adapter
             .open_session(build_session_open_request(
                 SessionOpenMode::Create,
@@ -555,6 +719,7 @@ mod tests {
                         env: BTreeMap::from([("BIMBA_TOKEN".to_string(), "sk-test".to_string())]),
                         cwd: None,
                         url: None,
+                        headers: BTreeMap::new(),
                     },
                 },
                 ToolSourceEntry {
@@ -565,12 +730,13 @@ mod tests {
                         env: BTreeMap::new(),
                         cwd: None,
                         url: Some("https://mcp.example/sse".to_string()),
+                        headers: BTreeMap::new(),
                     },
                 },
             ],
             "entries come out ordered by capsule id, wire-ready"
         );
-        let values = session_mcp_wire_values(entries);
+        let values = session_mcp_wire_values(entries).unwrap();
         assert_eq!(values.len(), 2, "every resolved entry reaches the wire");
     }
 
