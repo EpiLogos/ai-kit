@@ -52,6 +52,11 @@ pub enum Command {
     Procedure(ProcedureCmd),
     /// Create and inspect project-specific profile lenses.
     Profile(ProfileCmd),
+    /// Validate an externally authored harness-profile document against the
+    /// `aikit.harness-profile/v1` schema and admission grammar — the outside
+    /// author's intake check. Validation only; nothing is registered, applied
+    /// or projected.
+    HarnessProfile(HarnessProfileCmd),
     /// Jump to what you meant: act if unambiguous, else offer the candidates.
     Z(ZArgs),
     /// Create, inspect and point harnesses at skill-sets.
@@ -931,6 +936,27 @@ pub struct ProfileForkArgs {
 pub struct ProfileDiffArgs {
     #[arg(value_name = "PROFILE")]
     pub profile: String,
+}
+
+#[derive(Debug, Args)]
+pub struct HarnessProfileCmd {
+    #[command(subcommand)]
+    pub command: HarnessProfileSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HarnessProfileSub {
+    /// Validate a harness-profile TOML document against the exact schema and
+    /// admission grammar the registry applies. The reply carries the decision
+    /// (`admit` or `refuse`) and named diagnostics; refusal exits non-zero.
+    Validate(HarnessProfileValidateArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct HarnessProfileValidateArgs {
+    /// Path to the `aikit.harness-profile/v1` TOML document to check.
+    #[arg(value_name = "FILE")]
+    pub file: std::path::PathBuf,
 }
 
 #[derive(Debug, Args)]

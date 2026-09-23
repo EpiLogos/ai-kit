@@ -200,6 +200,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Adopt(a)) => cmd_adopt(cwd, a),
         Some(Command::Procedure(c)) => cmd_procedure(cwd, c),
         Some(Command::Profile(c)) => cmd_profile(cwd, c),
+        Some(Command::HarnessProfile(c)) => cmd_harness_profile(cwd, c),
         Some(Command::Z(a)) => cmd_z(cwd, a, json_mode),
         Some(Command::Set(c)) => cmd_set(cwd, c),
         Some(Command::Tree(a)) => cmd_tree(cwd, a, json_mode),
@@ -1030,9 +1031,10 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
             Ok(source_reply(
                 jval!({
                     "id": removed.id,
-                    "removed": true,
+                    "removed": !removed.already_absent,
                     "forced": removed.forced,
                     "removed_snapshots": removed.removed_snapshots,
+                    "already_absent": removed.already_absent,
                 }),
                 vec![],
             ))
@@ -1114,6 +1116,83 @@ fn cmd_profile(cwd: &std::path::Path, c: ProfileCmd) -> Result<Reply> {
             Ok(reply(&service, data, vec![]))
         }
     }
+}
+
+/// `aikit harness-profile validate <file>` — the external intake's validation
+/// leg.
+///
+/// #367's public intake landed as the embedded profiles and adapters; an
+/// outside author still had no way to check an authored
+/// `aikit.harness-profile/v1` document against the exact contract the
+/// registry applies. This verb runs the same two gates — the typed schema
+/// parse (unknown fields refused) and [`aikit_core::harness_profile::
+/// HarnessProfile::validate`] (posture truth, the admission grammar) — and
+/// answers admit/refuse with named diagnostics. Validation only: nothing is
+/// registered, applied or projected, and no registry is consulted, so an
+/// author needs no AIKit state beyond a readable working directory.
+fn cmd_harness_profile(cwd: &std::path::Path, c: HarnessProfileCmd) -> Result<Reply> {
+    use aikit_core::harness_profile::{HarnessProfile, HARNESS_PROFILE_SCHEMA};
+
+    let service = Service::discover(cwd)?;
+    let HarnessProfileSub::Validate(a) = c.command;
+    let text = std::fs::read_to_string(&a.file).map_err(|error| {
+        AikitError::new(
+            "harness_profile.unreadable",
+            format!("could not read {}: {error}", a.file.display()),
+        )
+        .with("path", a.file.display().to_string())
+    })?;
+
+    let summary = |profile: &HarnessProfile| {
+        jval!({
+            "slug": profile.slug,
+            "edition": profile.edition,
+        })
+    };
+    let (decision, profile, diagnostics) = match toml::from_str::<HarnessProfile>(&text) {
+        Ok(profile) => match profile.validate() {
+            Ok(()) => ("admit", Some(summary(&profile)), Vec::new()),
+            Err(error) => (
+                "refuse",
+                Some(summary(&profile)),
+                vec![jval!({
+                    "code": error.code(),
+                    "message": error.message(),
+                    "details": error.details(),
+                })],
+            ),
+        },
+        Err(error) => (
+            "refuse",
+            None,
+            vec![jval!({
+                "code": "harness_profile.schema_violation",
+                "message": error.to_string(),
+            })],
+        ),
+    };
+
+    let admitted = decision == "admit";
+    let data = jval!({
+        "path": a.file.display().to_string(),
+        "schema": HARNESS_PROFILE_SCHEMA,
+        "decision": decision,
+        "profile": profile,
+        "diagnostics": diagnostics,
+    });
+    // A refusal is the verb succeeding at its job and the document failing
+    // its check: the envelope stays `ok`, the decision carries the verdict,
+    // and the non-zero process exit lets a shell author gate on it.
+    Ok(Reply::Data {
+        context: EnvelopeContext::from_descriptor(service.descriptor()),
+        data,
+        warnings: vec![],
+        exit_code: if admitted {
+            aikit_cli::json::EXIT_OK
+        } else {
+            1
+        },
+    })
 }
 
 /// `aikit adopt` — move a foreign Agent Skills tree into AIKit ownership.
@@ -3003,6 +3082,17 @@ fn cmd_toggle(cwd: &std::path::Path, a: ToggleArgs, enable: bool) -> Result<Repl
     use aikit_tui::backend::Toggle;
     let mut service = Service::discover(cwd)?;
     let id = CapsuleId::parse(&a.capability)?;
+    // Typos surface here, where they are typed, rather than as a stale
+    // declaration that shadows every later command. A capability that was
+    // catalogued once and lost its source since is a doctor repair, not an
+    // enable error — this check only refuses what no registry carries now.
+    if aikit_core::catalog::Catalog::get(service.snapshot(), &id).is_none() {
+        return Err(AikitError::new(
+            "resolution.unknown_capability",
+            format!("{id} is not present in any registry"),
+        )
+        .with("capability", id.to_string()));
+    }
     let scope = resolve_scope(&service, a.scope.as_deref())?;
     let applied = service.apply(ApplyRequest {
         scope,
