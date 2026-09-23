@@ -954,10 +954,23 @@ pub fn now_test_selection(args: NowTestSelectionArgs) -> Result<Value> {
             "earned_grade": Value::Null,
             "earned_basis": "no execution receipt is part of the field; declared tests existing at head earn nothing",
             "automation_ceiling": "D (C only with a receipt carrying live/native standing)",
-            "declared_tests_exist_at_head": any_exists,
+            // The field checks existence only for explicit/derived capabilities;
+            // for a candidate it was never assessed, which is not "missing".
+            "declared_tests_exist_at_head": if known_tests.is_empty() && !declared_test_refs.is_empty() { Value::Null } else { json!(any_exists) },
             "declared_test_refs": declared_test_refs,
             "known_tests_at_head": known_tests,
         }));
+        if known_tests.is_empty() {
+            for test_ref in declared_test_refs.iter().filter_map(Value::as_str) {
+                required_tests.push(json!({
+                    "capability_id": id,
+                    "test_ref": test_ref,
+                    "invocation": test_invocation(test_ref),
+                    "exists_at_head": Value::Null,
+                    "reason": format!("{label} capability: declared test, existence at head not assessed by the field"),
+                }));
+            }
+        }
         for test in &known_tests {
             required_tests.push(json!({
                 "capability_id": id,
@@ -1197,10 +1210,10 @@ fn render_markdown(field: &Value, reading: &SelectionReading<'_>) -> String {
                     test["test_ref"].as_str().unwrap_or("?")
                 ),
             },
-            if test["exists_at_head"] == true {
-                ""
-            } else {
-                " — **missing at head**"
+            match test["exists_at_head"].as_bool() {
+                Some(true) => "",
+                Some(false) => " — **missing at head**",
+                None => " — existence not assessed (candidate capability)",
             },
         ));
     }
@@ -1213,7 +1226,11 @@ unrelated subject). A control you cannot run is reported as blocked with the rea
         out.push_str(&format!(
             "- `{}`: none yet (declared tests at head: {})\n",
             grade["capability_id"].as_str().unwrap_or("?"),
-            grade["declared_tests_exist_at_head"],
+            match grade["declared_tests_exist_at_head"].as_bool() {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => "not assessed",
+            },
         ));
     }
     out.push_str(&format!("\n{EVIDENCE_GRADE_LAW}\n\n"));
@@ -1867,6 +1884,54 @@ mod tests {
         assert!(
             !law.contains("peer"),
             "P is not 'peer' in the O:I grade law"
+        );
+    }
+
+    #[test]
+    fn a_selected_candidate_capabilitys_declared_tests_are_required_and_unassessed() {
+        let mut field = fixture_field();
+        field["matrix"]["capabilities"][2]["test_refs"] =
+            json!(["crates/demo/tests/candidate_b.rs"]);
+        let dir = tempfile::tempdir().unwrap();
+        let field_path = dir.path().join("field.json");
+        std::fs::write(&field_path, serde_json::to_vec(&field).unwrap()).unwrap();
+        let (_, digest) = file_digest(&field_path, "field", MAX_FIELD_BYTES).unwrap();
+        let decision_path = dir.path().join("decision.json");
+        std::fs::write(
+            &decision_path,
+            serde_json::to_vec(&json!({
+                "field_basis_digest": digest,
+                "selected": {"capability-implicated": [{"capability_id": "cap.candidate.b"}]},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let out = now_test_selection(NowTestSelectionArgs {
+            field: field_path,
+            decision: Some(decision_path),
+        })
+        .unwrap();
+        let required: Vec<&Value> = out["tests_now_required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["capability_id"] == "cap.candidate.b")
+            .collect();
+        assert_eq!(required.len(), 1, "{out}");
+        assert!(required[0]["exists_at_head"].is_null());
+        assert_eq!(
+            required[0]["invocation"]["command"],
+            "cargo test -p demo --test candidate_b"
+        );
+        let grade = out["missing_evidence_grades"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["capability_id"] == "cap.candidate.b")
+            .unwrap();
+        assert!(
+            grade["declared_tests_exist_at_head"].is_null(),
+            "not assessed is not missing"
         );
     }
 
