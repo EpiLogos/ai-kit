@@ -3724,13 +3724,23 @@ fn cmd_session(cwd: &std::path::Path, c: SessionCmd) -> Result<Reply> {
         }
         SessionSub::Reconcile(a) => {
             let outcome = service.session_reconcile(a.spec.as_deref(), a.destructive)?;
-            let data = jval!({
+            let mut data = jval!({
                 "session": outcome.session,
                 "mux": outcome.mux,
                 "destructive": a.destructive,
                 "actions": outcome.actions,
                 "preserved": outcome.preserved,
             });
+            // Present only for a provider-native place technology; the mux
+            // path's reply stays byte-identical without it.
+            if let Some(native) = &outcome.provider_native {
+                data["provider_native"] = serde_json::to_value(native).map_err(|error| {
+                    AikitError::new(
+                        "session.provider_native_encoding",
+                        format!("could not encode the provider-native reconcile standing: {error}"),
+                    )
+                })?;
+            }
             Ok(reply(&service, data, outcome.warnings))
         }
         SessionSub::Down(a) => {

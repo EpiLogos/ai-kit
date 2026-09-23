@@ -206,6 +206,11 @@ pub struct SessionReconcileOutcome {
     /// work, not drift to be corrected.
     pub preserved: Vec<String>,
     pub warnings: Vec<String>,
+    /// Present only when the plan's declared place technology is
+    /// provider-native — driven through its provider's own interface instead
+    /// of the mux contract. The mux path never sets it, so mux consumers read
+    /// byte-identical replies.
+    pub provider_native: Option<crate::session_provider_reconcile::ProviderNativeReconcile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -481,9 +486,28 @@ impl Service {
         destructive: bool,
     ) -> Result<SessionReconcileOutcome> {
         use aikit_adapters::mux::ReconcileMode;
+        use aikit_adapters::place_technology::PlaceTechnologyRegistry;
         let plan = self.diff_or_reconcile_plan(requested)?;
         let name = plan.name.clone();
-        let (stack, _) = self.session_stack(&plan)?;
+        // The split before the stack: a plan whose declared place technology
+        // is provider-native is reconciled through the provider's own
+        // interface, in the provider's own vocabulary. Any other plan — no
+        // declared technology, a built-in mux, an unregistered name — takes
+        // the mux path below, byte-for-byte as before.
+        if let Some(native) = crate::session_provider_reconcile::reconcile_provider_native(
+            &PlaceTechnologyRegistry::builtin(),
+            &plan,
+            destructive,
+        )? {
+            return Ok(SessionReconcileOutcome {
+                session: name,
+                mux: native.technology.clone(),
+                actions: native.actions(),
+                preserved: Vec::new(),
+                warnings: native.warnings(),
+                provider_native: Some(native),
+            });
+        }
         // Non-destructive unless asked: the default may only ever ADD, so a
         // reconcile can never close the pane somebody is working in.
         let mode = if destructive {
@@ -491,6 +515,7 @@ impl Service {
         } else {
             ReconcileMode::CreateOrAttach
         };
+        let (stack, _) = self.session_stack(&plan)?;
         let binding = stack.ensure_session(&plan, mode)?;
         Ok(SessionReconcileOutcome {
             session: name,
@@ -498,6 +523,7 @@ impl Service {
             actions: binding.actions,
             preserved: binding.preserved,
             warnings: binding.warnings,
+            provider_native: None,
         })
     }
 
