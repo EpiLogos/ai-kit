@@ -389,6 +389,11 @@ struct Opening {
     cwd: PathBuf,
     cleanup_uncertain: Option<String>,
 }
+struct OpeningFailureState {
+    process_started: bool,
+    cleanup_confirmed: bool,
+    binding_recorded: bool,
+}
 impl Resident {
     fn prompt_payload(&self, text: &str) -> Value {
         match self.protocol {
@@ -548,10 +553,13 @@ impl EncounterService {
         generation: &str,
         mut failure: AikitError,
         phase: &str,
-        process_started: bool,
-        cleanup_confirmed: bool,
-        binding_recorded: bool,
+        outcome: OpeningFailureState,
     ) -> AikitError {
+        let OpeningFailureState {
+            process_started,
+            cleanup_confirmed,
+            binding_recorded,
+        } = outcome;
         if let Err(receipt_failure) = self.store.append(
             session,
             &json!({
@@ -612,9 +620,11 @@ impl EncounterService {
             generation,
             failure,
             phase,
-            true,
-            cleanup_confirmed,
-            binding_recorded,
+            OpeningFailureState {
+                process_started: true,
+                cleanup_confirmed,
+                binding_recorded,
+            },
         )
     }
     fn require_attached(&self, session: &ResourceRef) -> Result<()> {
@@ -1182,9 +1192,11 @@ impl EncounterService {
                         &generation,
                         failure,
                         "process-spawn",
-                        false,
-                        cleanup_confirmed,
-                        false,
+                        OpeningFailureState {
+                            process_started: false,
+                            cleanup_confirmed,
+                            binding_recorded: false,
+                        },
                     ));
                 }
             };
@@ -1470,9 +1482,11 @@ impl EncounterService {
                 &generation,
                 failure,
                 "admission-before-spawn",
-                false,
-                true,
-                false,
+                OpeningFailureState {
+                    process_started: false,
+                    cleanup_confirmed: true,
+                    binding_recorded: false,
+                },
             )),
         }
     }

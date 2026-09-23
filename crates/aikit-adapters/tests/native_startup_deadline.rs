@@ -148,8 +148,7 @@ fn actual_pi_session_open_does_not_renew_an_elapsed_startup_deadline() {
             },
             deadline,
         )
-        .err()
-        .expect("an elapsed startup deadline must not open a session");
+        .expect_err("an elapsed startup deadline must not open a session");
     assert_eq!(failure.code(), "agent_session_host.control_timeout");
     assert!(started.elapsed() < Duration::from_secs(5));
     assert!(
