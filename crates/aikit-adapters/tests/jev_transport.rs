@@ -83,6 +83,9 @@ impl Server {
                         Err(e) => panic!("server accept: {e}"),
                     }
                 };
+                // On macOS/BSD an accepted socket inherits the listener's
+                // O_NONBLOCK; read with the timeout, not a spurious WouldBlock.
+                socket.set_nonblocking(false).unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();

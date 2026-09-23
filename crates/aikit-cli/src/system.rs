@@ -643,6 +643,16 @@ pub fn disclose(service: &Service) -> Result<Value> {
         Err(error) => return Ok(degraded_disclosure(service, observed_at, &error)),
     };
     let world = world.with_credential_world(credential_world(service)?);
+    // The per-harness default permission mode is authored in AIKit's own
+    // state; its effect lands at each new session open, so there is no
+    // materialised (active) reading to report here.
+    let permission_modes_declared = crate::permission_defaults::declared(service.home())?
+        .map(|modes| json!(modes))
+        .unwrap_or(Value::Null);
+    let permission_modes_effective = match &permission_modes_declared {
+        Value::Null => json!({}),
+        declared => declared.clone(),
+    };
 
     // SessionSpaces authored for this project (read-only; no spawn).
     let session_spaces =
@@ -924,6 +934,23 @@ pub fn disclose(service: &Service) -> Result<Value> {
                     Value::Null, "none",
                     "presence and refs only: the owner's authored model-catalogue entries and which authored facts each carries; never a secret and never the observed half",
                     "aikit model-catalogue show", "ai-kit:models:authored", observed_at,
+                    materialisation_ref.clone(),
+                ),
+            ],
+        }),
+        json!({
+            "id": "permissions",
+            "title": "Permissions / session permission modes",
+            "settings": [
+                setting(
+                    "permissions.default-mode", "Default permission mode per harness", "table",
+                    permission_modes_declared.clone(), "ai-kit:permissions:default-mode:authored",
+                    permission_modes_effective,
+                    Value::Null,
+                    Value::Null, "none",
+                    "applies when a new encounter session opens, and only to a mode the harness advertises; open sessions keep their mode",
+                    "aikit config plan --setting ai-kit:permissions:permissions.default-mode",
+                    "ai-kit:permissions:default-mode", observed_at,
                     materialisation_ref.clone(),
                 ),
             ],

@@ -84,14 +84,15 @@ pub use agent_connection::{
     AcpV1ConnectionAdapter, AgentConnectionAdapter, CancelRequest, ClassicProcessConnectionAdapter,
     ConnectionCapabilities, ConnectionCommand, ConnectionDegradation, ConnectionDescriptor,
     ConnectionProtocol, ConnectionProtocolFamily, ConnectionSignal, ConnectionSignalKind,
-    ConnectionState, NativePermissionChoice, NativePermissionRequest, NativeSessionBinding,
-    PromptRequest, SessionOpenMode, SessionOpenRequest, ACP_STABLE_PROTOCOL_VERSION,
-    AGENT_CONNECTION_ADAPTER_VERSION,
+    ConnectionState, NativeModeObservation, NativeModeOption, NativePermissionChoice,
+    NativePermissionRequest, NativeSessionBinding, PromptRequest, SessionOpenMode,
+    SessionOpenRequest, ACP_STABLE_PROTOCOL_VERSION, AGENT_CONNECTION_ADAPTER_VERSION,
 };
 pub use agent_session_host::{
     AgentSessionHost, AgentSessionHostLimits, HostEvent, InterruptOrigin, InterruptReceipt,
-    SessionIdentity, SessionLane, SessionLaneState, TurnHandle, TurnInterruption, TurnRecord,
-    TurnStop, WaitOutcome, AGENT_SESSION_HOST_VERSION, DEFAULT_MAX_SIGNALS_PER_TURN,
+    ModeConfigurationReceipt, SessionIdentity, SessionLane, SessionLaneState, TurnHandle,
+    TurnInterruption, TurnRecord, TurnStop, WaitOutcome, AGENT_SESSION_HOST_VERSION,
+    DEFAULT_MAX_SIGNALS_PER_TURN,
 };
 pub use authored_wiki_living::{authored_wiki_knowledge_impact, AUTHORED_WIKI_LIVING_VERSION};
 pub use authored_wiki_read::{

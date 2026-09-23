@@ -215,6 +215,13 @@ fn portable_signal(signal: &ConnectionSignal) -> (&'static str, Option<String>, 
                 json!({ "event": "native-model-configured", "model_observation": model_observation }),
             ),
         ),
+        ConnectionSignalKind::ModeConfigured { mode_observation } => (
+            "harness-event",
+            None,
+            Some(
+                json!({ "event": "native-mode-configured", "mode_observation": mode_observation }),
+            ),
+        ),
         ConnectionSignalKind::HistoryReplay { update } => (
             "harness-history-replay",
             None,
