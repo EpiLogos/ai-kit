@@ -125,11 +125,11 @@ pub use now_context::{
 pub use procedure::{plan_procedure, EditDiff, ProcedureDiff, ProcedureOutcome, ProcedureRunner};
 pub use procedure_history::procedure_history_evidence;
 pub use registry::{load_project_local, load_registry, RegistryLoad, RegistryProblem, Snapshot};
+pub use routine_credentials::{RoutineCredentialStore, ROUTINE_CREDENTIALS_VERSION};
 pub use routine_invocation::{
     RoutineInvocationAdmission, RoutineInvocationAdmissionStatus, RoutineInvocationStore,
     ROUTINE_INVOCATION_ADMISSION_VERSION, ROUTINE_INVOCATION_LEDGER_VERSION,
 };
-pub use routine_credentials::{RoutineCredentialStore, ROUTINE_CREDENTIALS_VERSION};
 pub use routine_store::{ForeignAdoption, RoutineStore, StoredRoutine, ROUTINE_STORE_VERSION};
 pub use scan::{Finding, Scanner};
 pub use session_lifecycle::{SessionLifecycleStore, SESSION_LIFECYCLE_STORE_VERSION};
