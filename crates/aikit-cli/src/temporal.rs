@@ -48,6 +48,26 @@ pub fn reground<R: CommandRunner>(
     }
 }
 
+/// The SessionStart floor. With a lean World-inhabitation entry (a Position
+/// occupancy resolved for this body) the entry replaces the historical NOW/Flow
+/// dump and names where to read it on demand; every other event, and every
+/// SessionStart without an occupancy, re-grounds exactly as before.
+pub fn session_floor<R: CommandRunner>(
+    decision: &mut HookDecision,
+    event: &HookEvent,
+    project_root: Option<&Path>,
+    central_root: Option<&Path>,
+    runner: &R,
+    lean_entry: Option<&str>,
+) {
+    match lean_entry {
+        Some(entry) if event.kind == HookEventKind::SessionStart => {
+            decision.injected.insert(0, entry.to_owned())
+        }
+        _ => reground(decision, event, project_root, central_root, runner),
+    }
+}
+
 /// Resolve the Central root without teaching AIKit Central's internal file
 /// layout. `CENTRAL_ROOT` is authoritative when present; otherwise the standard
 /// Central home is considered only when the current Project is physically inside
@@ -161,6 +181,78 @@ mod tests {
         assert!(second.injected_text().contains("rev-b"));
         assert!(second.injected_text().contains("state B"));
         assert!(!second.injected_text().contains("state A"));
+    }
+
+    fn handoff_runner() -> ScriptedRunner {
+        let now = success(json!({
+            "exists": true,
+            "active_items": [{"id": "h1", "kind": "handoff", "actor": "agent", "status": "active",
+                              "subject": "historical handoff", "result": "a long historical NOW dump"}],
+            "human_scratch": [], "day_records": []
+        }));
+        let list = success(json!({"flows": [], "automatic_agent_or_model_invocation": false}));
+        ScriptedRunner::new()
+            .on("projectcentral.now.inspect", &now)
+            .on("projectcentral.flow.list", &list)
+    }
+
+    #[test]
+    fn a_lean_entry_replaces_the_historical_floor_at_session_start_only() {
+        let central = Path::new("/home/me/Central");
+        let project = Path::new("/home/me/Central/Work/example");
+        let start = HookEvent::new("claude", HookEventKind::SessionStart, json!({}));
+
+        let runner = handoff_runner();
+        let mut lean = decision(HookEventKind::SessionStart);
+        session_floor(
+            &mut lean,
+            &start,
+            Some(project),
+            Some(central),
+            &runner,
+            Some("[O:I World inhabitation — lean entry]"),
+        );
+        assert_eq!(
+            lean.injected,
+            vec!["[O:I World inhabitation — lean entry]".to_owned()]
+        );
+        assert!(!lean.injected_text().contains("historical handoff"));
+        assert!(runner.calls().is_empty(), "the dump is not even read");
+
+        // Without an occupancy the floor is byte-identical to the re-ground.
+        let runner = handoff_runner();
+        let mut unchanged = decision(HookEventKind::SessionStart);
+        session_floor(
+            &mut unchanged,
+            &start,
+            Some(project),
+            Some(central),
+            &runner,
+            None,
+        );
+        let mut direct = decision(HookEventKind::SessionStart);
+        reground(
+            &mut direct,
+            &start,
+            Some(project),
+            Some(central),
+            &handoff_runner(),
+        );
+        assert_eq!(unchanged.injected, direct.injected);
+        assert!(unchanged.injected_text().contains("historical handoff"));
+
+        // A lean entry never displaces a prompt-turn re-ground.
+        let prompt = HookEvent::new("claude", HookEventKind::UserPromptSubmit, json!({}));
+        let mut turn = decision(HookEventKind::UserPromptSubmit);
+        session_floor(
+            &mut turn,
+            &prompt,
+            Some(project),
+            Some(central),
+            &handoff_runner(),
+            Some("lean"),
+        );
+        assert!(turn.injected_text().contains("historical handoff"));
     }
 
     #[test]

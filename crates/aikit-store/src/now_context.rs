@@ -16,6 +16,9 @@ use std::time::Duration;
 pub const NOW_REDIS_CONFIG_SCHEMA: &str = "aikit.redis-now-config/v1";
 pub const NOW_PREPARED_SCHEMA: &str = "aikit.prepared-now-context/v1";
 pub const NOW_DELIVERY_SCHEMA: &str = "aikit.now-context-delivery/v1";
+pub const WORLD_PROJECTION_SCHEMA: &str = "aikit.world-projection/v1";
+const MAX_WORLD_STRING: usize = 1024;
+const MAX_WORLD_ENTRIES: usize = 512;
 const MAX_JSON: usize = 1024 * 1024;
 const MAX_ITEMS: usize = 64;
 const MAX_NEIGHBOURS: usize = 64;
@@ -497,6 +500,58 @@ impl NowDeliveryReceipt {
     }
 }
 
+/// The hot World projection: refs, revisions, cursors and digests of one
+/// joined inhabitation reading — never spec, Wiki or NOW bodies. Every value is
+/// recomputable from its owner, so deleting the projection loses no identity;
+/// `aikit whoami --rebuild` republishes it from the owners.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorldProjection {
+    pub schema: String,
+    /// The key subject: the Position ref, or the AgentSession when no Position
+    /// resolved. The Redis key holds only its blake3 digest.
+    pub subject: String,
+    pub version: u64,
+    pub identity: aikit_core::inhabitation::InhabitationIdentity,
+    pub identity_digest: String,
+    /// Facet name → state word of the reading that was published.
+    pub facet_states: BTreeMap<String, aikit_core::inhabitation::FacetState>,
+    /// Facet name → one-line summary (a ref or label, bounded).
+    #[serde(default)]
+    pub facet_summaries: BTreeMap<String, String>,
+    pub published_at_unix_ms: u64,
+}
+impl WorldProjection {
+    pub fn validate(&self) -> Result<()> {
+        if self.schema != WORLD_PROJECTION_SCHEMA || self.version == 0 {
+            return Err(fail(
+                "world_projection.schema",
+                "Unsupported or unversioned World projection",
+            ));
+        }
+        let strings = self.identity.strings();
+        if !bounded(&self.subject, MAX_WORLD_STRING)
+            || self.identity_digest != self.identity.digest()
+            || strings.len() > MAX_WORLD_ENTRIES
+            || strings
+                .iter()
+                .any(|v| v.len() > MAX_WORLD_STRING || v.contains('\0'))
+            || self.facet_states.len() > 64
+            || self.facet_summaries.len() > 64
+            || self
+                .facet_summaries
+                .iter()
+                .any(|(k, v)| !bounded(k, 64) || v.len() > MAX_WORLD_STRING || v.contains('\0'))
+        {
+            return Err(fail(
+                "world_projection.invalid",
+                "World projection failed its identity digest or bounds; it may hold refs only",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedisNowStatus {
     pub available: bool,
@@ -911,6 +966,140 @@ impl RedisNowStore {
                     .map_err(|e| fail("now_context.redis_corrupt", e.to_string()))?;
                 receipt.validate()?;
                 Ok(Some(receipt))
+            }
+        }
+    }
+}
+
+impl RedisNowStore {
+    fn world_key(&self, family: &str, subject: &str) -> String {
+        format!(
+            "{}:{}:{}",
+            self.config.key_prefix,
+            family,
+            blake3::hash(subject.as_bytes()).to_hex()
+        )
+    }
+    /// The `world` family keys for one subject: the projection and its CAS
+    /// version meta.
+    pub fn world_keys(&self, subject: &str) -> [String; 2] {
+        [
+            self.world_key("world", subject),
+            self.world_key("world-meta", subject),
+        ]
+    }
+    /// Current published World projection version for `subject` (0 = none).
+    pub fn world_version(&self, subject: &str, secret: Option<&SecretValue>) -> Result<u64> {
+        let meta = self.world_key("world-meta", subject);
+        match self.command(secret, vec![b"GET".to_vec(), meta.into_bytes()])? {
+            Resp::Bulk(None) => Ok(0),
+            value => {
+                let raw = bulk_utf8(value)?;
+                let v: serde_json::Value = serde_json::from_str(&raw)
+                    .map_err(|e| fail("now_context.redis_corrupt", e.to_string()))?;
+                v.get("version").and_then(|v| v.as_u64()).ok_or_else(|| {
+                    fail(
+                        "now_context.redis_corrupt",
+                        "World projection metadata has no version",
+                    )
+                })
+            }
+        }
+    }
+    /// Compare-and-swap publish: `projection.version` must be exactly
+    /// `expected_version + 1`, and the stored version must still be
+    /// `expected_version`, or the publish is refused as stale.
+    pub fn publish_world(
+        &self,
+        projection: &WorldProjection,
+        expected_version: u64,
+        secret: Option<&SecretValue>,
+    ) -> Result<u64> {
+        projection.validate()?;
+        if projection.version
+            != expected_version.checked_add(1).ok_or_else(|| {
+                fail(
+                    "now_context.version_exhausted",
+                    "World projection version exhausted",
+                )
+            })?
+        {
+            return Err(fail(
+                "now_context.version_invalid",
+                "Published World projection version must be exactly expected + 1",
+            ));
+        }
+        let [world, meta] = self.world_keys(&projection.subject);
+        let body = serde_json::to_vec(projection)
+            .map_err(|e| fail("now_context.encode", e.to_string()))?;
+        let meta_body = serde_json::to_vec(&serde_json::json!({
+            "version": projection.version,
+            "identity_digest": projection.identity_digest,
+        }))
+        .map_err(|e| fail("now_context.encode", e.to_string()))?;
+        let script = r#"local m=redis.call('GET',KEYS[1]); local v=0; if m then local ok,o=pcall(cjson.decode,m); if not ok or not o.version then return redis.error_reply('CORRUPT') end; v=tonumber(o.version) end; if v~=tonumber(ARGV[1]) then return redis.error_reply('STALE') end; redis.call('SET',KEYS[2],ARGV[2],'EX',ARGV[3]); redis.call('SET',KEYS[1],ARGV[4],'EX',ARGV[3]); return tonumber(ARGV[5])"#;
+        map_eval_version(self.command(
+            secret,
+            vec![
+                b"EVAL".to_vec(),
+                script.as_bytes().to_vec(),
+                b"2".to_vec(),
+                meta.into_bytes(),
+                world.into_bytes(),
+                expected_version.to_string().into_bytes(),
+                body,
+                self.config.prepared_ttl_seconds.to_string().into_bytes(),
+                meta_body,
+                projection.version.to_string().into_bytes(),
+            ],
+        ))
+    }
+    pub fn read_world(
+        &self,
+        subject: &str,
+        secret: Option<&SecretValue>,
+    ) -> Result<Option<WorldProjection>> {
+        let world = self.world_key("world", subject);
+        let raw = match self.command(secret, vec![b"GET".to_vec(), world.into_bytes()])? {
+            Resp::Bulk(None) => return Ok(None),
+            v => bulk_utf8(v)?,
+        };
+        let projection: WorldProjection = serde_json::from_str(&raw)
+            .map_err(|e| fail("now_context.redis_corrupt", e.to_string()))?;
+        projection.validate()?;
+        if projection.subject != subject {
+            return Err(fail(
+                "now_context.redis_corrupt",
+                "World projection subject key and payload disagree",
+            ));
+        }
+        Ok(Some(projection))
+    }
+    /// Remove one subject's World projection (both keys). Loss is safe by
+    /// construction: every value is recomputed from its owner on rebuild.
+    pub fn delete_world(&self, subject: &str, secret: Option<&SecretValue>) -> Result<()> {
+        let [world, meta] = self.world_keys(subject);
+        let _ = self.command(
+            secret,
+            vec![b"DEL".to_vec(), world.into_bytes(), meta.into_bytes()],
+        )?;
+        Ok(())
+    }
+    /// Version and digests of one participant's prepared NOW view, without the
+    /// view itself (`None` when nothing is prepared).
+    pub fn prepared_meta(
+        &self,
+        participant: &ResourceRef,
+        secret: Option<&SecretValue>,
+    ) -> Result<Option<serde_json::Value>> {
+        let meta = self.key("meta", participant);
+        match self.command(secret, vec![b"GET".to_vec(), meta.into_bytes()])? {
+            Resp::Bulk(None) => Ok(None),
+            value => {
+                let raw = bulk_utf8(value)?;
+                serde_json::from_str(&raw)
+                    .map(Some)
+                    .map_err(|e| fail("now_context.redis_corrupt", e.to_string()))
             }
         }
     }

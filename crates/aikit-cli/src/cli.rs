@@ -198,6 +198,105 @@ pub enum Command {
     Bypasses(BypassesArgs),
     /// Run, inspect and query the Agency Gateway service.
     Gateway(GatewayCmd),
+    /// Who and where am I: the joined World inhabitation reading
+    /// (`aikit.inhabitation-reading/v1`) over Central, Actuation, Factory and
+    /// AIKit's own SessionSpace/Redis projections.
+    Whoami(WhoamiArgs),
+    /// Trace the current operation back to ProjectCentral ground
+    /// (`aikit.refocus-reading/v1`): work, Position, NOW, body, nearby work,
+    /// changed sources and the Return target.
+    Refocus(RefocusArgs),
+    /// Occupy a World Position and launch a body into it: claim the tenure
+    /// through Actuation, then exec the harness with `OI_POSITION_REF` and
+    /// `OI_OCCUPANT_GENERATION` stamped. Leaving is explicit (`--release`).
+    Inhabit(InhabitArgs),
+}
+
+/// `aikit inhabit`.
+#[derive(Debug, Args)]
+pub struct InhabitArgs {
+    /// The Position: a `central:position:…` ref or an `@handle`.
+    #[arg(long, value_name = "REF|@HANDLE")]
+    pub position: String,
+    /// The Agent to occupy it (defaults to the Position's single eligible Agent).
+    #[arg(long, value_name = "AGENT_REF")]
+    pub agent: Option<String>,
+    /// The Agency (defaults to the Agent's single admitted AIKit agency).
+    #[arg(long, value_name = "AGENCY_REF")]
+    pub agency: Option<String>,
+    /// Take over from the current occupant (continuity handover).
+    #[arg(long, conflicts_with_all = ["fresh", "release"])]
+    pub handover: bool,
+    /// Replace any current occupant with a fresh one.
+    #[arg(long, conflicts_with = "release")]
+    pub fresh: bool,
+    /// Why this tenure opens (or ends, with --release).
+    #[arg(long)]
+    pub reason: Option<String>,
+    /// End the tenure this body holds instead of claiming one.
+    #[arg(long, conflicts_with_all = ["agent", "agency"])]
+    pub release: bool,
+    /// With --release: the generation to end (defaults to `OI_OCCUPANT_GENERATION`).
+    #[arg(long, requires = "release", value_name = "GENERATION_REF")]
+    pub generation: Option<String>,
+    #[arg(long = "agent-session", value_name = "REF")]
+    pub agent_session: Option<String>,
+    #[arg(long = "session-space", value_name = "REF")]
+    pub session_space: Option<String>,
+    #[arg(long = "harness-composition", value_name = "REF")]
+    pub harness_composition: Option<String>,
+    #[arg(long, value_name = "REF")]
+    pub model: Option<String>,
+    /// The harness argv to exec after the claim (after `--`). Without one the
+    /// claim is printed with the variables to export.
+    #[arg(last = true, value_name = "HARNESS_ARGV")]
+    pub command: Vec<String>,
+}
+
+/// `aikit whoami`.
+#[derive(Debug, Args)]
+pub struct WhoamiArgs {
+    /// Read this Position instead of resolving one (`OI_POSITION_REF`, then an
+    /// occupancy naming the current AgentSession).
+    #[arg(long, value_name = "POSITION_REF")]
+    pub position: Option<String>,
+    /// The current AgentSession, for resolving the occupancy that names it
+    /// (defaults to `AIKIT_SESSION_ID`).
+    #[arg(long = "agent-session", value_name = "REF")]
+    pub agent_session: Option<String>,
+    /// Every facet with the owner's full answer, the ActorBootstrap
+    /// composition and the owner calls that were made.
+    #[arg(long)]
+    pub full: bool,
+    /// Read the Redis World projection first (reporting its age and basis),
+    /// falling back to live owner joins.
+    #[arg(long, conflicts_with_all = ["publish", "rebuild"])]
+    pub hot: bool,
+    /// Publish the live reading's refs/revisions to the Redis World projection
+    /// (compare-and-swap on its version).
+    #[arg(long)]
+    pub publish: bool,
+    /// Recompute the reading from its owners and republish the projection.
+    #[arg(long)]
+    pub rebuild: bool,
+    /// `aikit.redis-now-config/v1` document (defaults to `AIKIT_WORLD_REDIS_CONFIG`).
+    #[arg(long = "redis-config", value_name = "PATH")]
+    pub redis_config: Option<std::path::PathBuf>,
+}
+
+/// `aikit refocus`.
+#[derive(Debug, Args)]
+pub struct RefocusArgs {
+    /// Why this Refocus is read.
+    #[arg(long, default_value = "explicit", value_parser = ["explicit", "fresh", "compaction", "transition", "sustained"])]
+    pub trigger: String,
+    /// Refocus as this Position instead of resolving one.
+    #[arg(long, value_name = "POSITION_REF")]
+    pub position: Option<String>,
+    /// The current AgentSession; also names which hook delivery state to
+    /// compare changed sources against (read only — never recorded).
+    #[arg(long = "agent-session", value_name = "REF")]
+    pub agent_session: Option<String>,
 }
 
 /// `aikit worktree` — project repository checkouts onto their canonical target.

@@ -44,6 +44,21 @@ pub fn dispatch(
     event: &HookEvent,
     roots: &BTreeMap<CapsuleId, PathBuf>,
 ) -> Result<HookDecision> {
+    dispatch_with_entry(index, context, chain, event, roots, None)
+}
+
+/// [`dispatch`], with an optional lean World-inhabitation entry. When a
+/// Position occupancy resolved at SessionStart, the entry stands where the
+/// historical temporal floor would have been and points at it instead of
+/// preloading it; without one the floor is unchanged.
+pub fn dispatch_with_entry(
+    index: &Index,
+    context: &ContextId,
+    chain: &HookChain,
+    event: &HookEvent,
+    roots: &BTreeMap<CapsuleId, PathBuf>,
+    lean_entry: Option<&str>,
+) -> Result<HookDecision> {
     let open = index.open_bypasses(context)?;
     let active = open.into_iter().next();
 
@@ -71,7 +86,7 @@ pub fn dispatch(
     // the owner at each causal orientation event rather than caching a session
     // prompt. A missing/non-Central world remains a normal AIKit world.
     let central_root = crate::temporal::process_central_root(event.cwd.as_deref());
-    crate::temporal::reground(
+    crate::temporal::session_floor(
         &mut decision,
         event,
         event.cwd.as_deref(),
@@ -79,6 +94,7 @@ pub fn dispatch(
         // A hook re-ground read is a probe: bounded, so a hanging owner read
         // costs the budget and becomes a warning — never a stalled prompt.
         &SystemRunner::probe(),
+        lean_entry,
     );
     // Gateway contact: Communiques for this body's Position ride its turn
     // boundary; staged here, marked delivered only once the document is written.
