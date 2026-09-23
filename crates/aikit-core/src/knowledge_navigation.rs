@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -384,6 +384,24 @@ impl<'a> KnowledgeApplication<'a> {
         });
         let mut seen = HashSet::new();
         hits.retain(|hit| seen.insert(hit.resource.to_string()));
+        // No single pool may fill the surfaced limit. A provider whose corpus
+        // is vast (a code index over every Work repo, a live pool over the
+        // whole ground) would otherwise rank every other pool out of the
+        // surface on its own scale, and Work coverage would displace the
+        // Control prose it must not displace (addendum A-5). Each provider
+        // keeps its best half; the global ranking decides the rest.
+        let per_provider_cap = (limit / 2).max(1);
+        let mut provider_counts: HashMap<String, usize> = HashMap::new();
+        hits.retain(|hit| {
+            let count = provider_counts
+                .entry(hit.provider.as_str().to_owned())
+                .or_default();
+            let keep = *count < per_provider_cap;
+            if keep {
+                *count += 1;
+            }
+            keep
+        });
         hits.truncate(limit);
         // A relation evaluates each side against the same provider field, so a
         // shared absence is one absence, reported once.
@@ -1613,7 +1631,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::knowledge_source_pool::{
-        NativeSourcePoolProvider, SourceBinding, SourcePoolProvider, SourceVisibility,
+        NativeSourcePoolProvider, SourceBinding, SourceHit, SourcePoolProvider,
+        SourceProviderCapabilities, SourceSearchMode, SourceVisibility,
     };
     use crate::knowledge_wiki::{parse_wiki_objects, WikiObject};
     use crate::knowledge_wiki_index::SemanticWikiIndex;
@@ -1642,6 +1661,56 @@ mod tests {
 
     fn spec() -> SourceRef {
         SourceRef::parse("source:spec").unwrap()
+    }
+
+    /// A scripted pool that answers every query with many high-scored hits
+    /// under one provider ref — the shape of a vast indexed pool whose
+    /// native scores sit above the shared default.
+    struct FloodProvider {
+        provider: ProviderRef,
+        count: usize,
+        score: f64,
+    }
+
+    impl SourcePoolProvider for FloodProvider {
+        fn capabilities(&self) -> SourceProviderCapabilities {
+            SourceProviderCapabilities {
+                provider: self.provider.clone(),
+                version: None,
+                fulltext: true,
+                fuzzy_interactive: false,
+                semantic: false,
+                hybrid: false,
+                tags: true,
+                structured_output: false,
+                reasons: BTreeMap::new(),
+            }
+        }
+
+        fn rebuild(&mut self, _material: &[SourceMaterial]) -> Result<()> {
+            Ok(())
+        }
+
+        fn search(
+            &self,
+            _query: &str,
+            _mode: SourceSearchMode,
+            _tags: &[String],
+            _limit: usize,
+        ) -> Result<Vec<SourceHit>> {
+            Ok((0..self.count)
+                .map(|index| SourceHit {
+                    source: SourceRef::parse(format!("source:flood:{index}")).unwrap(),
+                    provider: self.provider.clone(),
+                    score: Some(self.score),
+                    title: format!("flood {index}"),
+                    snippet: String::new(),
+                    tags: Vec::new(),
+                    provider_binding: None,
+                    retrieval_mode: SourceSearchMode::Fulltext,
+                })
+                .collect())
+        }
     }
 
     fn material() -> SourceMaterial {
@@ -1731,6 +1800,56 @@ mod tests {
             .hits
             .iter()
             .any(|hit| hit.resource.as_str() == "source:spec"));
+    }
+
+    /// No single pool may fill the surfaced limit. The live gate proved the
+    /// failure shape: a pool whose native scores sit above the shared 0.5
+    /// default (a code index over every Work repo) ranked every other pool
+    /// out of the surface entirely, displacing the Control material the
+    /// faculty must keep first-class (addendum A-5).
+    #[test]
+    fn no_single_pool_fills_the_surfaced_limit() {
+        let flood = FloodProvider {
+            provider: ProviderRef::parse("provider/source-pool/flood").unwrap(),
+            count: 40,
+            score: 0.9,
+        };
+        let material = vec![material()];
+        let mut native = NativeSourcePoolProvider::new();
+        native.rebuild(&material).unwrap();
+        let app = KnowledgeApplication::new(FamiliarityContext {
+            project: None,
+            actor: None,
+            agency: None,
+            focus: None,
+        })
+        .with_source_pool(&flood, &[])
+        .with_source_pool(&native, &material);
+
+        let matched = app.search("Authentication", 10);
+        let flood_hits = matched
+            .hits
+            .iter()
+            .filter(|hit| hit.provider.as_str() == "provider/source-pool/flood")
+            .count();
+        assert!(
+            flood_hits <= 5,
+            "one provider is capped at half the limit, its best hits first: \
+             {flood_hits} of {} surfaced",
+            matched.hits.len()
+        );
+        assert!(
+            matched
+                .hits
+                .iter()
+                .any(|hit| hit.resource.as_str() == "source:spec"),
+            "the shared-floor native hit surfaces beside the flood: {:#?}",
+            matched
+                .hits
+                .iter()
+                .map(|hit| (hit.resource.as_str(), hit.provider.as_str()))
+                .collect::<Vec<_>>()
+        );
     }
 
     /// Law 3, one query path: the raw-string front is a front, not a second
