@@ -91,3 +91,12 @@ fn the_same_error_without_an_abort_stays_a_failure() {
         ConnectionSignalKind::Failed { reason } if reason == "This operation was aborted"
     ));
 }
+
+#[test]
+fn an_abort_acknowledged_only_after_settling_still_ends_as_the_stop() {
+    let mut adapter = attached();
+    assert_eq!(
+        settle_after(&mut adapter, true, false),
+        ConnectionSignalKind::Cancelled
+    );
+}
