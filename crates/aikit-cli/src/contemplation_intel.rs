@@ -1175,6 +1175,88 @@ fn parse_basis_pair(raw: &str) -> Result<(String, String)> {
     Ok((key.to_owned(), value.to_owned()))
 }
 
+/// Bound on each prepared-view excerpt: the hot view is a situating reading,
+/// not a copy of the documents it points at.
+const COMPACT_EXCERPT_BYTES: usize = 12 * 1024;
+
+fn ids(values: &Value, key: &str) -> Vec<Value> {
+    values
+        .as_array()
+        .map(|items| items.iter().map(|i| i[key].clone()).collect())
+        .unwrap_or_default()
+}
+
+/// A compact, source-qualified reading of one contemplation document for the
+/// prepared view. Explicit relations are named in full; bulk material
+/// (joins, readings, answers) is counted and left at the route.
+fn compact_projection(kind: &str, doc: &Value) -> String {
+    let compact = match kind {
+        "field" => {
+            let mut caps: Vec<Value> = doc["joins"]
+                .as_array()
+                .map(|j| {
+                    j.iter()
+                        .filter(|j| j["basis"] == "explicit")
+                        .map(|j| j["to"].clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            caps.sort_by_key(|v| v.to_string());
+            caps.dedup();
+            let change_reading = doc["code_lens"]["readings"]
+                .as_array()
+                .and_then(|r| r.iter().find(|r| r["kind"] == "detect_changes"))
+                .and_then(|r| r["detail"].as_str())
+                .map(|d| d.lines().take(3).collect::<Vec<_>>().join(" / "));
+            json!({
+                "schema": doc["schema"],
+                "pass": doc["pass"],
+                "subject": {
+                    "repo": doc["changed_subject"]["repo"],
+                    "base_revision": doc["changed_subject"]["base_revision"],
+                    "head_revision": doc["changed_subject"]["head_revision"],
+                    "changed_paths": doc["changed_subject"]["changed_paths"].as_array().map(|a| a.len()),
+                },
+                "telos_serving_track": doc["telos"]["serving_track"],
+                "practice_bindings": doc["practice_binding_summary"],
+                "capabilities_in_matrix": doc["matrix"]["capabilities"].as_array().map(|a| a.len()),
+                "explicitly_implicated_capabilities": caps,
+                "code_lens": {
+                    "provider": doc["code_lens"]["provider"],
+                    "version": doc["code_lens"]["version"],
+                    "indexed": doc["code_lens"]["indexed"],
+                    "detect_changes": change_reading,
+                    "readings": doc["code_lens"]["readings"].as_array().map(|a| a.len()),
+                },
+                "tests_evidence_rows": doc["tests_evidence"].as_array().map(|a| a.len()),
+            })
+        }
+        "decision" => json!({
+            "schema": doc["schema"],
+            "pass": doc["pass"],
+            "standing": doc["standing"],
+            "returned_model": doc["returned_model"],
+            "usage": doc["usage"],
+            "tariff_cost_microusd": doc["tariff_cost_microusd"],
+            "question_set": [doc["question_set_schema"].clone(), doc["question_set_version"].clone()],
+            "mandatory_capabilities": ids(&doc["mandatory"]["capability-implicated"], "capability_id"),
+            "selected_practices": ids(&doc["selected"]["practice-applies"], "practice_id"),
+            "selected_capability_candidates": ids(&doc["selected"]["capability-implicated"], "capability_id"),
+            "evidence_sufficiency_flagged": ids(&doc["selected"]["evidence-sufficiency"], "capability_id"),
+            "proposed_coverage_bindings": doc["proposed_coverage_bindings"].as_array().map(|a| a.len()),
+            "proposed_coverage_bindings_standing": doc["proposed_coverage_bindings_standing"],
+        }),
+        "test-selection" => {
+            return doc["markdown"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| doc.to_string());
+        }
+        _ => doc.clone(),
+    };
+    serde_json::to_string_pretty(&compact).unwrap_or_default()
+}
+
 fn item_for_document(
     kind: &str,
     path: &Path,
@@ -1200,8 +1282,15 @@ fn item_for_document(
         source_ref: source_ref.clone(),
         source_revision: digest.clone(),
         title: format!("Contemplation {kind}"),
-        excerpt: bounded_text(&String::from_utf8_lossy(&bytes), 256 * 1024),
-        route: Some(format!("aikit://contemplation/{kind}")),
+        // The hot view carries a compact reading; the full document is fetched
+        // on demand from `route` at the stated revision, never inlined.
+        excerpt: bounded_text(&compact_projection(kind, &doc), COMPACT_EXCERPT_BYTES),
+        route: Some(
+            std::fs::canonicalize(path)
+                .unwrap_or_else(|_| path.to_path_buf())
+                .display()
+                .to_string(),
+        ),
         agent_visibility: AgentVisibility::Payload,
         external_egress: ExternalEgress::Denied,
     };
@@ -1654,6 +1743,35 @@ mod tests {
             out["unavailable_practice_boundaries"][0]["gap_owner"],
             "#132 K8.1"
         );
+    }
+
+    #[test]
+    fn prepared_items_are_compact_and_route_to_the_real_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut field = fixture_field();
+        // Bulk that must not be inlined into the hot view.
+        field["bulk"] = json!("x".repeat(300 * 1024));
+        let path = dir.path().join("field.json");
+        std::fs::write(&path, serde_json::to_vec(&field).unwrap()).unwrap();
+        let (item, digest) = item_for_document(
+            "field",
+            &path,
+            Some(crate::contemplation_field::FIELD_SCHEMA),
+        )
+        .unwrap();
+        assert!(
+            item.excerpt.len() <= COMPACT_EXCERPT_BYTES,
+            "{}",
+            item.excerpt.len()
+        );
+        assert!(!item.excerpt.contains("xxxxxxxx"));
+        let route = std::path::PathBuf::from(item.route.as_deref().unwrap());
+        let (_, routed_digest) = file_digest(&route, "field", MAX_FIELD_BYTES).unwrap();
+        assert_eq!(
+            routed_digest, digest,
+            "the route must open the exact document at the stated revision"
+        );
+        assert_eq!(item.source_revision, digest);
     }
 
     #[test]
