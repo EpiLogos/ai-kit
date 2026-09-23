@@ -145,6 +145,24 @@ def request(action: str, **fields):
     return reply["data"]
 
 
+def prompt_when_idle(session: str, draft_revision, *, timeout: int = 300):
+    """Dispatch a prompt once the resident stops processing the previous turn.
+
+    Prime 0.9.4 refuses a concurrent prompt instead of queueing it; polling
+    for the idle window is pacing, never a skipped assertion.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return request(
+                "prompt", agent_session=session, draft_revision=draft_revision
+            )
+        except RuntimeError as error:
+            if "already processing" not in str(error) or time.monotonic() >= deadline:
+                raise
+            time.sleep(3.0)
+
+
 def paced_admission(session, text, cursor, expected_marker, *, timeout: int = 1500):
     """Draft, prompt and observe one admission turn, waiting out parent busyness.
 
