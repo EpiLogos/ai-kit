@@ -21,6 +21,9 @@ jiff = { workspace = true }
 blake3 = { workspace = true }
 keyring = { workspace = true }
 sha2 = { workspace = true }
+# The gateway service holds an advisory lock on its state file for its whole
+# lifetime so an offline writer can never interleave with a running service.
+fs4 = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 argon2 = { workspace = true }

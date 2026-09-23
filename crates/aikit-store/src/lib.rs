@@ -70,6 +70,7 @@ pub mod now_context;
 pub mod procedure;
 pub mod procedure_history;
 pub mod registry;
+pub mod routine_credentials;
 pub mod routine_invocation;
 pub mod routine_store;
 pub mod scan;
@@ -128,6 +129,7 @@ pub use routine_invocation::{
     RoutineInvocationAdmission, RoutineInvocationAdmissionStatus, RoutineInvocationStore,
     ROUTINE_INVOCATION_ADMISSION_VERSION, ROUTINE_INVOCATION_LEDGER_VERSION,
 };
+pub use routine_credentials::{RoutineCredentialStore, ROUTINE_CREDENTIALS_VERSION};
 pub use routine_store::{ForeignAdoption, RoutineStore, StoredRoutine, ROUTINE_STORE_VERSION};
 pub use scan::{Finding, Scanner};
 pub use session_lifecycle::{SessionLifecycleStore, SESSION_LIFECYCLE_STORE_VERSION};

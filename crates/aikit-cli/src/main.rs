@@ -433,6 +433,17 @@ fn cmd_routine(command: RoutineCmd) -> Result<Reply> {
             proof_json,
         } => routine_cli::reprove(&home, &routine_ref, &proof_json)?,
         RoutineSub::Delete { routine_ref } => routine_cli::delete(&home, &routine_ref)?,
+        RoutineSub::Credential {
+            routine_ref,
+            env,
+            location,
+            clear,
+        } => routine_cli::credential(
+            &home,
+            &routine_ref,
+            &env,
+            if clear { None } else { location.as_deref() },
+        )?,
         RoutineSub::ImportForeign {
             provider,
             job_id,
@@ -545,6 +556,55 @@ fn parse_structured_json<T: serde::de::DeserializeOwned>(raw: &str, label: &str)
     })
 }
 
+/// The seams every gateway-contact verb composes: the real owner CLIs, this
+/// home's gateway (its carrier, or its state file when no service runs), and
+/// the working directory Central reads World placement from.
+fn contact_seams(
+    home: &AikitHome,
+    carrier: &GatewayQueryArgs,
+) -> Result<(
+    aikit_cli::gateway_owners::ProcessOwners,
+    aikit_cli::gateway_contact::LocalGateway,
+    PathBuf,
+)> {
+    let target = aikit_cli::gateway_ops::carrier_target(home, carrier)?;
+    let cwd = std::env::current_dir()
+        .map_err(|error| AikitError::new("cli.cwd_unavailable", format!("no cwd: {error}")))?;
+    Ok((
+        aikit_cli::gateway_owners::ProcessOwners::from_env(),
+        aikit_cli::gateway_contact::LocalGateway::for_home(home, target),
+        cwd,
+    ))
+}
+
+fn gateway_data(data: Value) -> Result<Reply> {
+    Ok(Reply::Data {
+        context: EnvelopeContext::default(),
+        data,
+        warnings: vec![],
+        exit_code: json::EXIT_OK,
+    })
+}
+
+fn read_body_file(path: &std::path::Path) -> Result<String> {
+    use std::io::Read as _;
+    let mut body = String::new();
+    let read = if path.as_os_str() == "-" {
+        std::io::stdin().read_to_string(&mut body).map(|_| ())
+    } else {
+        std::fs::read_to_string(path).map(|text| body = text)
+    };
+    read.map_err(|error| {
+        aikit_cli::gateway_contact::three_part(
+            "gateway.body_unreadable",
+            format!("The body file {} cannot be read: {error}.", path.display()),
+            "Nothing was sent; no Communique was recorded.",
+            "Pass a readable file with --body-file PATH, or the words with --body TEXT.",
+        )
+    })?;
+    Ok(body)
+}
+
 /// The Agency Gateway front door: run the service, or query a running one.
 /// Gateway commands address an external service, so they carry no resolved
 /// context — the envelope context stays empty rather than pretending a scope.
@@ -570,21 +630,45 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
             // The Routine dispatcher ticks beside the carriers. A dispatcher
             // that cannot be built (no Central root to resolve time against)
             // degrades the service to carriers-only, said in plain words.
-            let ticks = match production_dispatcher(home.clone()) {
-                Ok(dispatcher) => Some(GatewayTickLoop {
-                    interval: std::time::Duration::from_millis(
-                        aikit_cli::routine_dispatch::TICK_INTERVAL_MS as u64,
-                    ),
-                    hook: Box::new(GatewayDispatcherTick { dispatcher }),
-                }),
-                Err(error) => {
-                    eprintln!(
-                        "warning: the Routine dispatcher is not running with this gateway: \
-                         {error}; scheduled automations will not fire"
-                    );
-                    None
-                }
+            let dispatcher: Option<Box<dyn aikit_adapters::GatewayTick>> =
+                match production_dispatcher(home.clone()) {
+                    Ok(dispatcher) => Some(Box::new(GatewayDispatcherTick { dispatcher })),
+                    Err(error) => {
+                        eprintln!(
+                            "warning: the Routine dispatcher is not running with this gateway: \
+                             {error}; scheduled automations will not fire"
+                        );
+                        None
+                    }
+                };
+            // The relay pass reaches this very service through the carrier it
+            // exposes, exactly as any other client would.
+            #[cfg(unix)]
+            let own_carrier = match (&config.unix_socket, &config.websocket_bind) {
+                (Some(path), _) => aikit_adapters::GatewayCarrierTarget::UnixSocket(path.clone()),
+                (None, Some(bind)) => aikit_adapters::GatewayCarrierTarget::websocket(
+                    bind.clone(),
+                    config.websocket_bearer_token.clone().unwrap_or_default(),
+                ),
+                (None, None) => unreachable!("serve_config validated a carrier"),
             };
+            #[cfg(not(unix))]
+            let own_carrier = aikit_adapters::GatewayCarrierTarget::websocket(
+                config.websocket_bind.clone().unwrap_or_default(),
+                config.websocket_bearer_token.clone().unwrap_or_default(),
+            );
+            let ticks = Some(GatewayTickLoop {
+                interval: std::time::Duration::from_millis(
+                    aikit_cli::routine_dispatch::TICK_INTERVAL_MS as u64,
+                ),
+                hook: Box::new(aikit_cli::gateway_contact::GatewayServiceTick {
+                    dispatcher,
+                    relay: aikit_cli::gateway_contact::CommuniqueRelayTick {
+                        home: home.clone(),
+                        target: own_carrier,
+                    },
+                }),
+            });
             aikit_adapters::run_gateway_service_with_ticks(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
@@ -621,6 +705,103 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 exit_code: json::EXIT_OK,
             })
         }
+        GatewaySub::Who(a) => {
+            let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
+            gateway_data(aikit_cli::gateway_contact::who(
+                &owners,
+                &gateway,
+                &cwd,
+                a.project_world.as_deref(),
+            )?)
+        }
+        GatewaySub::Send(a) => {
+            let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
+            let body = match (a.body, a.body_file) {
+                (Some(body), _) => body,
+                (None, Some(path)) => read_body_file(&path)?,
+                (None, None) => {
+                    return Err(aikit_cli::gateway_contact::three_part(
+                        "gateway.empty_body",
+                        "Neither --body nor --body-file was provided.",
+                        "Nothing was sent; no Communique was recorded.",
+                        "Pass the words with --body TEXT or --body-file PATH (- for stdin).",
+                    ))
+                }
+            };
+            gateway_data(aikit_cli::gateway_contact::send(
+                &home,
+                &owners,
+                &gateway,
+                &cwd,
+                aikit_cli::gateway_contact::SendRequest {
+                    to: &a.to,
+                    body,
+                    reply_to: a.reply_to,
+                    from_position: a.from_position.as_deref(),
+                    project_world: a.project_world.as_deref(),
+                },
+            )?)
+        }
+        GatewaySub::Inbox(a) => {
+            let (owners, gateway, _) = contact_seams(&home, &a.carrier)?;
+            gateway_data(aikit_cli::gateway_contact::inbox(
+                &owners,
+                &gateway,
+                a.position.as_deref(),
+                a.ack,
+            )?)
+        }
+        GatewaySub::Conversation(a) => {
+            let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
+            gateway_data(aikit_cli::gateway_contact::conversation(
+                &owners,
+                &gateway,
+                &cwd,
+                a.position.as_deref(),
+                &a.with,
+                a.project_world.as_deref(),
+            )?)
+        }
+        GatewaySub::Delegate(a) => {
+            let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
+            gateway_data(aikit_cli::gateway_contact::delegate(
+                &owners,
+                &gateway,
+                &cwd,
+                aikit_cli::gateway_contact::DelegateRequest {
+                    communique_ref: &a.communique,
+                    work_ref: &a.work,
+                    run_ref: a.run,
+                    journey_ref: a.journey,
+                    workflow_unit_ref: a.workflow_unit,
+                    reason: &a.reason,
+                },
+            )?)
+        }
+        GatewaySub::Forward(a) => {
+            let (owners, gateway, cwd) = contact_seams(&home, &a)?;
+            gateway_data(aikit_cli::gateway_contact::forward_pass(
+                &home, &owners, &gateway, &cwd,
+            )?)
+        }
+        GatewaySub::Remote(remote) => gateway_data(match remote.command {
+            GatewayRemoteSub::Add {
+                workcell,
+                websocket_bind,
+                websocket_path,
+                token_location,
+            } => aikit_cli::gateway_contact::remote_add(
+                &home,
+                &workcell,
+                &websocket_bind,
+                &websocket_path,
+                &token_location,
+            )?,
+            GatewayRemoteSub::List => aikit_cli::gateway_contact::remote_list(&home)?,
+            GatewayRemoteSub::Remove { workcell } => {
+                aikit_cli::gateway_contact::remote_remove(&home, &workcell)?
+            }
+        }),
         query => {
             let command = match query {
                 GatewaySub::Protocol(_) => aikit_adapters::GatewayCommand::Protocol,
@@ -631,7 +812,14 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 GatewaySub::Serve(_)
                 | GatewaySub::Tick
                 | GatewaySub::InstallService
-                | GatewaySub::UninstallService => unreachable!("handled above"),
+                | GatewaySub::UninstallService
+                | GatewaySub::Who(_)
+                | GatewaySub::Send(_)
+                | GatewaySub::Inbox(_)
+                | GatewaySub::Conversation(_)
+                | GatewaySub::Delegate(_)
+                | GatewaySub::Forward(_)
+                | GatewaySub::Remote(_) => unreachable!("handled above"),
             };
             let args = match query {
                 GatewaySub::Protocol(a)
@@ -642,7 +830,14 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 GatewaySub::Serve(_)
                 | GatewaySub::Tick
                 | GatewaySub::InstallService
-                | GatewaySub::UninstallService => unreachable!("handled above"),
+                | GatewaySub::UninstallService
+                | GatewaySub::Who(_)
+                | GatewaySub::Send(_)
+                | GatewaySub::Inbox(_)
+                | GatewaySub::Conversation(_)
+                | GatewaySub::Delegate(_)
+                | GatewaySub::Forward(_)
+                | GatewaySub::Remote(_) => unreachable!("handled above"),
             };
             let target = aikit_cli::gateway_ops::carrier_target(&home, &args)?;
             let response =
@@ -3776,6 +3971,8 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd, json_mode: bool) -> Result<Reply>
     // verdict in its exit status; plain mode speaks the harness protocol
     // itself (see `hook::translate_verdict`).
     let verdict = hook::translate_decision(&a.client, &a.event, a.decision_json, &decision);
+    // A `--json` inspection is not a turn: staged Communiques stay undelivered.
+    let staged_communiques = aikit_cli::communique_turn::take_staged_delivery();
 
     if json_mode {
         Ok(Reply::Data {
@@ -3789,11 +3986,44 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd, json_mode: bool) -> Result<Reply>
             eprintln!("{message}");
         }
         if let Some(document) = verdict.stdout {
+            if let Some(delivery) = staged_communiques {
+                return write_then_acknowledge(service.home(), &document, &delivery);
+            }
             Ok(Reply::Text(document))
         } else {
             Ok(Reply::Status(verdict.exit_code))
         }
     }
+}
+
+/// Write the harness document, then mark the Communiques it carried
+/// delivered: delivery is recorded only after the turn actually received it.
+fn write_then_acknowledge(
+    home: &AikitHome,
+    document: &str,
+    delivery: &aikit_cli::communique_turn::TurnDelivery,
+) -> Result<Reply> {
+    use std::io::Write as _;
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(document.as_bytes())
+        .and_then(|()| stdout.write_all(b"\n"))
+        .and_then(|()| stdout.flush())
+        .map_err(|error| {
+            AikitError::new(
+                "cli.hook_output_write_failed",
+                format!("the hook document could not be written ({error}); no Communique was marked delivered"),
+            )
+        })?;
+    let gateway = aikit_cli::gateway_contact::LocalGateway::default_for(home);
+    if let Err(error) =
+        aikit_cli::communique_turn::commit_staged_delivery(delivery, document, &gateway)
+    {
+        eprintln!(
+            "warning: Communiques were shown this turn but could not be marked delivered: {error}"
+        );
+    }
+    Ok(Reply::Status(json::EXIT_OK))
 }
 
 fn cmd_capabilities(cwd: &std::path::Path, c: CapabilitiesCmd) -> Result<Reply> {

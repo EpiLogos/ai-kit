@@ -31,6 +31,7 @@ pub mod factory_developmental;
 pub mod factory_run_thought_authored_wiki;
 pub mod flow_authored_wiki;
 pub mod gateway_client;
+pub mod gateway_communique;
 pub mod gateway_connector;
 #[allow(unused_imports)]
 pub mod gateway_runtime;
@@ -139,6 +140,11 @@ pub use flow_authored_wiki::{standing_flow_authored_wiki_source, FLOW_AUTHORED_W
 pub use gateway_client::{
     gateway_command, gateway_request, GatewayCarrierTarget, GATEWAY_CLIENT_VERSION,
 };
+pub use gateway_communique::{
+    Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForward, CommuniqueForwardOutcome,
+    CommuniqueJournal, CommuniqueState, CommuniqueTransition, SenderAttribution,
+    COMMUNIQUE_REF_PREFIX, COMMUNIQUE_SCHEMA, MAX_COMMUNIQUE_BODY_BYTES,
+};
 pub use gateway_connector::{
     verify_connector_descriptor, ConnectorCapabilities, ConnectorConformance,
     ConnectorConnectionState, ConnectorDescriptor, ConnectorFuture, ConnectorHealth,
@@ -159,8 +165,9 @@ pub use gateway_runtime::{
     GATEWAY_ECOLOGY_AUTHORITY_LAW, GATEWAY_INVOCATION_MODES,
 };
 pub use gateway_service::{
-    persist_gateway_state, restore_gateway_state, run_gateway_service,
-    run_gateway_service_with_ticks, GatewayServiceConfig, GatewayTick, GatewayTickLoop,
+    acquire_gateway_state_lock, execute_against_state_file, persist_gateway_state,
+    restore_gateway_state, run_gateway_service, run_gateway_service_with_ticks,
+    GatewayServiceConfig, GatewayStateLock, GatewayTick, GatewayTickLoop,
     DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION,
 };
 pub use harness_disclosure::{

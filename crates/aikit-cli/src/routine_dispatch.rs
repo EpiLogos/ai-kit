@@ -69,6 +69,16 @@ pub const DISPATCHER_STATE_VERSION: &str = "aikit.routine-dispatcher-state/v1";
 /// changed revision is what flips a Routine to StaleProof.
 pub trait MethodResolver {
     fn resolve(&self, method_ref: &ResourceRef) -> Result<Method>;
+
+    /// The Method's native body, when it declares one. A native body runs
+    /// owner Actions instead of a model (see `routine_native`); the default
+    /// is "no native body", so every existing resolver keeps its behaviour.
+    fn native_method(
+        &self,
+        _method_ref: &ResourceRef,
+    ) -> Result<Option<crate::routine_native::NativeMethod>> {
+        Ok(None)
+    }
 }
 
 /// One owner-resolved occurrence from Central's civil-time policy.
@@ -121,6 +131,19 @@ pub struct RoutineRunRequest {
     pub method_revision: SourceRevision,
     pub prompt: String,
     pub observation_payload: Option<Value>,
+    /// The Method's native body; `Some` selects the native runner.
+    pub native: Option<crate::routine_native::NativeMethod>,
+    /// The Actions the admitted invocation's authority grants — the only
+    /// Actions a native body may call.
+    pub authorised_actions: Vec<ResourceRef>,
+}
+
+/// Which body a Method selected for its run.
+fn method_body(native: &Option<crate::routine_native::NativeMethod>) -> String {
+    match native {
+        Some(method) => format!("native:{}", method.body.as_str()),
+        None => "encounter".into(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -143,7 +166,26 @@ pub struct CatalogMethodResolver {
 }
 
 impl CatalogMethodResolver {
-    /// Build the Method face of one catalogue capsule.
+    fn capsule(&self, method_ref: &ResourceRef) -> Result<aikit_core::Capsule> {
+        use aikit_core::catalog::Catalog;
+        let id = aikit_core::CapsuleId::parse(method_ref.as_str())?;
+        let load = crate::app::load_catalog(&self.home, None)?;
+        load.catalog
+            .capsules()
+            .into_iter()
+            .find(|capsule| capsule.id == id)
+            .cloned()
+            .ok_or_else(|| {
+                AikitError::new(
+                    "routine.method_not_found",
+                    format!("no capsule {method_ref} is catalogued in this AIKit home"),
+                )
+            })
+    }
+
+    /// Build the Method face of one catalogue capsule. A native body's
+    /// declared owner Actions are the Method's Actions; every other Method
+    /// runs through the generic capability-run Action.
     pub fn method_from_capsule(capsule: &aikit_core::Capsule) -> Result<Method> {
         let payload = method_payload(&capsule.description).ok_or_else(|| {
             AikitError::new(
@@ -168,9 +210,12 @@ impl CatalogMethodResolver {
             focus: vec![],
             project_domain: vec![],
             skills: vec![],
-            actions: vec![ResourceRef::parse(
-                crate::scoped_invocation::NATIVE_CAPABILITY_RUN_ACTION,
-            )?],
+            actions: match crate::routine_native::NativeMethod::from_capsule(capsule)? {
+                Some(native) => native.actions,
+                None => vec![ResourceRef::parse(
+                    crate::scoped_invocation::NATIVE_CAPABILITY_RUN_ACTION,
+                )?],
+            },
             capabilities: vec![],
             context_sources: vec![],
             verification: vec![],
@@ -182,21 +227,14 @@ impl CatalogMethodResolver {
 
 impl MethodResolver for CatalogMethodResolver {
     fn resolve(&self, method_ref: &ResourceRef) -> Result<Method> {
-        use aikit_core::catalog::Catalog;
-        let id = aikit_core::CapsuleId::parse(method_ref.as_str())?;
-        let load = crate::app::load_catalog(&self.home, None)?;
-        let capsule = load
-            .catalog
-            .capsules()
-            .into_iter()
-            .find(|capsule| capsule.id == id)
-            .ok_or_else(|| {
-                AikitError::new(
-                    "routine.method_not_found",
-                    format!("no capsule {method_ref} is catalogued in this AIKit home"),
-                )
-            })?;
-        Self::method_from_capsule(capsule)
+        Self::method_from_capsule(&self.capsule(method_ref)?)
+    }
+
+    fn native_method(
+        &self,
+        method_ref: &ResourceRef,
+    ) -> Result<Option<crate::routine_native::NativeMethod>> {
+        crate::routine_native::NativeMethod::from_capsule(&self.capsule(method_ref)?)
     }
 }
 
@@ -508,6 +546,10 @@ pub struct DispatchRecord {
     pub invocation_ref: String,
     pub due_unix_ms: i64,
     pub admission: String,
+    /// The body the Method selected: `encounter` or `native:<body>`. Empty
+    /// when nothing ran in this pass (an earlier admission).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub method_body: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<RoutineRunOutcome>,
 }
@@ -745,6 +787,7 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
         let invocation_ref = invocation_ref_for(&record.routine.id, &delivery.delivery_ref)?;
         let observed_at = rfc3339(observed_at_unix_ms)?;
         let method = self.methods.resolve(&record.routine.method)?;
+        let native = self.methods.native_method(&record.routine.method)?;
         let prompt = schedule_prompt(record, &method, &observation_ref);
         let request = RoutineInvocationAuthorisationRequest {
             routine: record.routine.clone(),
@@ -778,6 +821,8 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
                     "time_policy_ref": reading.time_policy_ref.to_string(),
                     "time_policy_revision": reading.time_policy_revision.to_string(),
                 })),
+                native: native.clone(),
+                authorised_actions: admission.evidence.action_refs.clone(),
             });
             self.record_outcome(&admission.evidence, &outcome, &delivery)?;
             dispatched.push(DispatchRecord {
@@ -786,6 +831,7 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
                 invocation_ref: invocation_ref.to_string(),
                 due_unix_ms: occurrence.due_unix_ms,
                 admission: "applied".into(),
+                method_body: method_body(&native),
                 outcome: Some(outcome),
             });
         } else {
@@ -796,6 +842,7 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
                 invocation_ref: invocation_ref.to_string(),
                 due_unix_ms: occurrence.due_unix_ms,
                 admission: "already-admitted".into(),
+                method_body: String::new(),
                 outcome: None,
             });
         }
@@ -900,6 +947,7 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
             ),
         )?;
         let method = self.methods.resolve(&record.routine.method)?;
+        let native = self.methods.native_method(&record.routine.method)?;
         let invocation_ref = hashed_ref(
             "aikit.routine-invocation/v1",
             "routine-invocation",
@@ -940,6 +988,8 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
             method_revision: record.routine.method_revision.clone(),
             prompt,
             observation_payload: None,
+            native: native.clone(),
+            authorised_actions: admission.evidence.action_refs.clone(),
         });
         self.record_outcome(
             &admission.evidence,
@@ -952,6 +1002,7 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
             invocation_ref: invocation_ref.to_string(),
             due_unix_ms: now_unix_ms,
             admission: "applied".into(),
+            method_body: method_body(&native),
             outcome: Some(outcome),
         })
     }
@@ -1014,12 +1065,14 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
                     invocation_ref: invocation_ref.to_string(),
                     due_unix_ms: now_unix_ms,
                     admission: "already-admitted".into(),
+                    method_body: String::new(),
                     outcome: None,
                 });
                 continue;
             }
             let result = (|| -> Result<DispatchRecord> {
                 let method = self.methods.resolve(&record.routine.method)?;
+                let native = self.methods.native_method(&record.routine.method)?;
                 let prompt = event_prompt(&record, &method, &packet);
                 let request = RoutineInvocationAuthorisationRequest {
                     routine: record.routine.clone(),
@@ -1042,6 +1095,7 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
                         invocation_ref: invocation_ref.to_string(),
                         due_unix_ms: now_unix_ms,
                         admission: "already-admitted".into(),
+                        method_body: String::new(),
                         outcome: None,
                     });
                 }
@@ -1053,6 +1107,8 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
                     method_revision: record.routine.method_revision.clone(),
                     prompt,
                     observation_payload: Some(packet.clone()),
+                    native: native.clone(),
+                    authorised_actions: admission.evidence.action_refs.clone(),
                 });
                 self.record_outcome(
                     &admission.evidence,
@@ -1065,6 +1121,7 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
                     invocation_ref: invocation_ref.to_string(),
                     due_unix_ms: now_unix_ms,
                     admission: "applied".into(),
+                    method_body: method_body(&native),
                     outcome: Some(outcome),
                 })
             })();

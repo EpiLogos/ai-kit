@@ -24,6 +24,7 @@ use crate::routine_dispatch::{
     CatalogMethodResolver, CtrlOccurrenceSource, MethodResolver, OccurrenceSource,
     ResidentEncounterRunner, RoutineDispatcher, AIKIT_GATEWAY_PROVIDER,
 };
+use crate::routine_native::{MethodSelectedRunner, NativeActionRunner};
 
 /// The trigger a create call declares: either a full `aikit.time-schedule/v1`
 /// record or a plain RoutineTrigger.
@@ -431,6 +432,29 @@ pub fn show(home: &aikit_store::AikitHome, routine_ref: &str) -> Result<Value> {
                 serde_json::to_value(schedule).unwrap_or(Value::Null),
             );
         }
+        // Which body the Method selects, and where a native body's declared
+        // credentials are bound (locations only).
+        let native = CatalogMethodResolver { home: home.clone() }
+            .native_method(&record.routine.method)
+            .ok()
+            .flatten();
+        object.insert(
+            "method_body".into(),
+            match &native {
+                Some(native) => json!(format!("native:{}", native.body.as_str())),
+                None => json!("encounter"),
+            },
+        );
+        if native.is_some() {
+            object.insert(
+                "credential_bindings".into(),
+                serde_json::to_value(
+                    aikit_store::RoutineCredentialStore::new(home.clone())
+                        .bindings(&record.routine.id)?,
+                )
+                .unwrap_or(Value::Null),
+            );
+        }
     }
     // Next occurrences are best-effort: a Central that cannot be reached is an
     // honest error field, never an invented schedule.
@@ -783,20 +807,41 @@ fn infer_method(
 }
 
 /// The production dispatcher: Central resolves time, the catalogue resolves
-/// Methods, the resident encounter owner executes runs.
-pub type ProductionDispatcher =
-    RoutineDispatcher<CtrlOccurrenceSource, CatalogMethodResolver, ResidentEncounterRunner>;
+/// Methods, and the Method selects its body — a native body runs owner
+/// Actions through `ctrl`, every other Method opens a resident encounter.
+pub type ProductionDispatcher = RoutineDispatcher<
+    CtrlOccurrenceSource,
+    CatalogMethodResolver,
+    MethodSelectedRunner<ResidentEncounterRunner, NativeActionRunner>,
+>;
 
 pub fn production_dispatcher(home: aikit_store::AikitHome) -> Result<ProductionDispatcher> {
     let central_root = CtrlOccurrenceSource::discover()?;
     let resolver = CatalogMethodResolver { home: home.clone() };
-    let runner = ResidentEncounterRunner { home: home.clone() };
+    let runner = MethodSelectedRunner {
+        encounter: ResidentEncounterRunner { home: home.clone() },
+        native: NativeActionRunner::from_env(home.clone(), central_root.clone()),
+    };
     Ok(RoutineDispatcher::new(
         home,
         CtrlOccurrenceSource { central_root },
         resolver,
         runner,
     ))
+}
+
+/// `aikit routine credential <ROUTINE> --env ENV (--location LOC | --clear)`.
+pub fn credential(
+    home: &aikit_store::AikitHome,
+    routine_ref: &str,
+    env: &str,
+    location: Option<&str>,
+) -> Result<Value> {
+    let reference = ResourceRef::parse(routine_ref)?;
+    let record = RoutineStore::new(home.clone()).get(&reference)?;
+    let resolver = CatalogMethodResolver { home: home.clone() };
+    let native = resolver.native_method(&record.routine.method)?;
+    crate::routine_native::bind_credential(home, native.as_ref(), &reference, env, location)
 }
 
 /// The gateway serve loop's tick hook: one deterministic dispatcher pass every
