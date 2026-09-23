@@ -785,8 +785,10 @@ pub fn now_contemplate(args: NowContemplateArgs) -> Result<Value> {
 
 fn describe_answer(answer: &Answer, threshold: f64) -> (bool, f64, Value) {
     match answer {
+        // Strictly above: a Noul exactly at the threshold is a coin flip, not
+        // a determination.
         Answer::Noul { noul } => (
-            *noul >= threshold,
+            *noul > threshold,
             *noul,
             json!({"type": "noul", "noul": noul}),
         ),
@@ -967,7 +969,28 @@ pub fn now_test_selection(args: NowTestSelectionArgs) -> Result<Value> {
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let required_skills: Vec<Value> = practices
+    // Affected practices are the ones the determination actually selected
+    // (Jev candidates above threshold); without a decision none is claimed.
+    // The whole spine is never "affected" by default.
+    let selected_practice_ids: BTreeSet<String> = decision
+        .as_ref()
+        .and_then(|d| d["selected"]["practice-applies"].as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|i| i["practice_id"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let affected: Vec<&Value> = practices
+        .iter()
+        .filter(|p| {
+            p["id"]
+                .as_str()
+                .is_some_and(|id| selected_practice_ids.contains(id))
+        })
+        .collect();
+    let required_skills: Vec<Value> = affected
         .iter()
         .map(|p| {
             json!({
@@ -978,10 +1001,22 @@ pub fn now_test_selection(args: NowTestSelectionArgs) -> Result<Value> {
             })
         })
         .collect();
-    let unbound_practices = practices
+    // A legitimately-unavailable practice is a named boundary (its owner
+    // capability does not exist yet), not a developmental gap a commission can
+    // close; only affected practices whose binding is actually missing count.
+    let legitimately_unavailable = |p: &Value| {
+        p["binding"]["classification"] == "legitimately-unavailable"
+            || p["classification"] == "legitimately-unavailable"
+    };
+    let unbound_practices = affected
         .iter()
-        .filter(|p| p["binding"]["status"] != "bound")
+        .filter(|p| p["binding"]["status"] != "bound" && !legitimately_unavailable(p))
         .count();
+    let unavailable_boundaries: Vec<Value> = affected
+        .iter()
+        .filter(|p| legitimately_unavailable(p))
+        .map(|p| json!({"practice_id": p["id"], "gap_owner": p["binding"]["gap_owner"].clone(), "standing": "legitimately-unavailable: named boundary, not a commissionable gap"}))
+        .collect();
 
     // Disposition: a disclosed, deterministic heuristic — never a silent guess.
     let (disposition, disposition_rule) = if unbound_practices > 0 {
@@ -1057,6 +1092,8 @@ pub fn now_test_selection(args: NowTestSelectionArgs) -> Result<Value> {
         "source_refs": source_refs,
         "telos_ux_concern": telos_concern,
         "affected_practices": required_skills,
+        "practice_selection_basis": if decision.is_some() { json!("practices selected by the contemplation decision (Jev, strictly above threshold)") } else { json!("no decision supplied: no practice is claimed affected") },
+        "unavailable_practice_boundaries": unavailable_boundaries,
         "required_skills": required_skills,
         "affected_capabilities": affected_capabilities,
         "gitnexus_structural_findings": gitnexus_structural,
@@ -1533,16 +1570,98 @@ mod tests {
         );
     }
 
+    /// Drive the real `now_test_selection` over a field written to disk and an
+    /// optional decision bound to that field's digest.
+    fn run_selection(field: &Value, selected_practices: Option<&[&str]>) -> Value {
+        let dir = tempfile::tempdir().unwrap();
+        let field_path = dir.path().join("field.json");
+        std::fs::write(&field_path, serde_json::to_vec(field).unwrap()).unwrap();
+        let decision = selected_practices.map(|ids| {
+            let (_, digest) = file_digest(&field_path, "field", MAX_FIELD_BYTES).unwrap();
+            let path = dir.path().join("decision.json");
+            let practices: Vec<Value> = ids.iter().map(|id| json!({"practice_id": id})).collect();
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&json!({
+                    "field_basis_digest": digest,
+                    "selected": {"practice-applies": practices},
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            path
+        });
+        now_test_selection(NowTestSelectionArgs {
+            field: field_path,
+            decision,
+        })
+        .unwrap()
+    }
+
     #[test]
-    fn disposition_is_factory_when_a_practice_is_unbound() {
-        // fixture_field has XP02 unbound, so the disposition rule must fire.
-        let field = fixture_field();
-        let practices = field["spine"]["practices"].as_array().cloned().unwrap();
-        let unbound = practices
-            .iter()
-            .filter(|p| p["binding"]["status"] != "bound")
-            .count();
-        assert_eq!(unbound, 1);
+    fn without_a_decision_no_practice_is_claimed_affected() {
+        let out = run_selection(&fixture_field(), None);
+        assert_eq!(out["affected_practices"], json!([]));
+        assert_ne!(
+            out["disposition_rule"].as_str().unwrap_or_default(),
+            "",
+            "{out}"
+        );
+        assert!(
+            !out["disposition_rule"]
+                .as_str()
+                .unwrap()
+                .contains("no bound Skill"),
+            "an unbound practice nobody selected must not drive the disposition: {out}"
+        );
+    }
+
+    #[test]
+    fn a_selected_unbound_practice_makes_the_disposition_factory() {
+        // fixture_field has XP02 unbound.
+        let out = run_selection(&fixture_field(), Some(&["XP02"]));
+        assert_eq!(out["recommended_disposition"], "Factory", "{out}");
+        assert!(out["disposition_rule"]
+            .as_str()
+            .unwrap()
+            .contains("no bound Skill"));
+    }
+
+    #[test]
+    fn a_legitimately_unavailable_practice_is_a_boundary_not_a_commission() {
+        let mut field = fixture_field();
+        let xp02 = field["spine"]["practices"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|p| p["id"] == "XP02")
+            .unwrap();
+        xp02["binding"]["classification"] = json!("legitimately-unavailable");
+        xp02["binding"]["gap_owner"] = json!("#132 K8.1");
+        let out = run_selection(&field, Some(&["XP02"]));
+        assert!(
+            !out["disposition_rule"]
+                .as_str()
+                .unwrap()
+                .contains("no bound Skill"),
+            "{out}"
+        );
+        assert_eq!(
+            out["unavailable_practice_boundaries"][0]["practice_id"],
+            "XP02"
+        );
+        assert_eq!(
+            out["unavailable_practice_boundaries"][0]["gap_owner"],
+            "#132 K8.1"
+        );
+    }
+
+    #[test]
+    fn a_noul_exactly_at_the_threshold_is_not_selected() {
+        let (selected, _, _) = describe_answer(&Answer::Noul { noul: 0.5 }, 0.5);
+        assert!(!selected);
+        let (selected, _, _) = describe_answer(&Answer::Noul { noul: 0.51 }, 0.5);
+        assert!(selected);
     }
 
     #[test]
