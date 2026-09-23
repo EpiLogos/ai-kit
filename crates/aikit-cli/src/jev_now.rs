@@ -222,7 +222,7 @@ enum SelectionMode {
     All,
     Jev {
         credential_ref: String,
-        limits: JevLimits,
+        limits: Box<JevLimits>,
         state: Value,
         #[serde(default = "default_threshold")]
         relevance_threshold: f64,
@@ -434,7 +434,7 @@ fn csv_header_index(headers: &[String], name: &str) -> Result<usize> {
         })
 }
 
-fn csv_field<'a>(row: &'a [String], index: usize) -> &'a str {
+fn csv_field(row: &[String], index: usize) -> &str {
     row.get(index).map(String::as_str).unwrap_or("")
 }
 
@@ -703,8 +703,8 @@ fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>, MatrixEvi
             route: Some(format!(
                 "matrix:{matrix_id};view:{view_id};capability:{id};account:{account_ref}"
             )),
-            agent_visibility: config.agent_visibility.clone(),
-            external_egress: config.external_egress.clone(),
+            agent_visibility: config.agent_visibility,
+            external_egress: config.external_egress,
         });
     }
 
