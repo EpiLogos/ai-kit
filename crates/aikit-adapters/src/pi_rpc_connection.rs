@@ -344,6 +344,10 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
                 Some(match reason.as_str() {
                     "aborted" => ConnectionSignalKind::Cancelled,
                     "unknown" if self.abort_acknowledged => ConnectionSignalKind::Cancelled,
+                    // After Pi acknowledged the person's abort, the in-flight tool
+                    // or request ends with Pi's own "operation was aborted"
+                    // error: that is the stop, not a provider failure.
+                    "error" if self.abort_acknowledged => ConnectionSignalKind::Cancelled,
                     "unknown" => ConnectionSignalKind::Failed {
                         reason: "Pi settled without a terminal assistant result".into(),
                     },
