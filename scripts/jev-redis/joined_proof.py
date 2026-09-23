@@ -52,7 +52,12 @@ def aikit_json(aikit, args, env, cwd, *, ok=True):
     p, ms = run([aikit, "--json", "-C", cwd, *args], env=env, ok=ok)
     if not ok:
         return {"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr}, ms
-    return parse_json(p), ms
+    value = parse_json(p)
+    # Normal AIKit commands publish their native result inside the common
+    # success envelope. Raw configuration/system documents remain bare.
+    if isinstance(value, dict) and value.get("ok") is True and "data" in value:
+        value = value["data"]
+    return value, ms
 
 def actuation_json(actuation, args, payload, env, *, ok=True):
     p, ms = run([actuation, *args, "--json"], env=env, ok=ok,
