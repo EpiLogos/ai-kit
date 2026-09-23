@@ -11,10 +11,14 @@
 //! the process via `exec()` and never return.
 
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use crate::app::Service;
 use crate::SessionSpaceServiceOps;
+use aikit_adapters::place_technology::PlaceTechnologyRegistry;
+use aikit_core::platform::PlaceTechnology;
 use aikit_core::project::ProjectRef;
+use aikit_core::resource::ResourceRef;
 use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::session_space_application::{
     ContextResolutionEvidence, SessionSpaceMutation, SessionSpacePreview,
@@ -243,6 +247,14 @@ enum Command {
         operation: Option<String>,
         #[arg(long = "intent-json", value_name = "JSON|@FILE")]
         intent_json: Option<String>,
+        /// With a bind-working-surface intent: select the provider the
+        /// binding is created against — a place-technology name (`herdr`) or
+        /// a provider ref (`provider/herdr/current`, or an instance ref like
+        /// `provider/herdr/w6`). Validated against the place-technology
+        /// registry (registered, detected installed, drivable) before it is
+        /// persisted. Without it the staged binding's own provider stands.
+        #[arg(long, value_name = "PROVIDER_REF|TECHNOLOGY")]
+        provider: Option<String>,
     },
     /// Apply exactly a previously reviewed preview. Prefix with @ to read a file.
     Apply {
@@ -695,6 +707,7 @@ fn run(cli: Cli) -> Result<()> {
             print_schema,
             operation,
             intent_json,
+            provider,
         } => {
             if print_schema {
                 return match operation.as_deref() {
@@ -721,6 +734,19 @@ fn run(cli: Cli) -> Result<()> {
                 ));
             };
             let intent: SessionSpaceMutation = parse_json_arg(intent_json)?;
+            // Provider selection happens at the binding-authoring boundary:
+            // validated against the place-technology registry here, persisted
+            // on the binding, so every working-surface verb that follows the
+            // binding needs no change of its own. Absent, the intent is
+            // exactly what was staged.
+            let intent = match provider.as_deref() {
+                Some(raw) => select_binding_provider(
+                    &aikit_adapters::place_technology::PlaceTechnologyRegistry::builtin(),
+                    intent,
+                    raw,
+                )?,
+                None => intent,
+            };
             let space = space.as_deref().map(space_ref).transpose()?;
             emit(&service.session_space_stage(space.as_ref(), intent)?)
         }
@@ -780,6 +806,134 @@ fn attach_terminal_client(_argv: Vec<String>) -> Result<()> {
 
 fn space_ref(raw: &str) -> Result<SessionSpaceRef> {
     SessionSpaceRef::parse(raw)
+}
+
+/// One `--provider` selection after validation: the technology it names, and
+/// the ref persisted on the binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderSelection {
+    technology: PlaceTechnology,
+    provider: ResourceRef,
+}
+
+/// Parse a `--provider <provider-ref|technology>` value and validate it
+/// against `registry`: the technology must be registered, its real detection
+/// must report it installed on this host, and this build must be able to
+/// drive it as a working environment (through a mux adapter or a
+/// provider-native one). A technology name (`herdr`) persists as the
+/// technology-canonical ref; a provider ref persists exactly as named, so an
+/// instance ref (`provider/herdr/w6`) stays the instance the operator named.
+fn resolve_provider_selection(
+    registry: &PlaceTechnologyRegistry,
+    raw: &str,
+    plan: &aikit_core::session::SessionPlan,
+) -> Result<ProviderSelection> {
+    let (technology, provider) = if let Ok(technology) = PlaceTechnology::from_str(raw) {
+        (
+            technology,
+            ResourceRef::parse(format!("provider/{raw}/current"))?,
+        )
+    } else {
+        let Some((technology, _instance)) = raw
+            .strip_prefix("provider/")
+            .and_then(|rest| rest.split_once('/'))
+        else {
+            return Err(AikitError::new(
+                "session_space.provider_selection_malformed",
+                format!(
+                    "`{raw}` is neither a place-technology name nor a provider ref \
+                     (`provider/<technology>/<instance>`), so no binding provider can be \
+                     selected from it"
+                ),
+            ));
+        };
+        (
+            PlaceTechnology::from_str(technology)?,
+            ResourceRef::parse(raw)?,
+        )
+    };
+    let Some(entry) = registry.resolve(&technology) else {
+        return Err(AikitError::new(
+            "session_space.provider_unregistered",
+            format!(
+                "no place technology `{technology}` is registered in this build, so \
+                 --provider {raw} cannot select a working-environment provider"
+            ),
+        ));
+    };
+    let reading = entry.detect()?;
+    if !reading.installed {
+        return Err(AikitError::new(
+            "session_space.provider_not_installed",
+            format!(
+                "{provider} cannot be selected: {}",
+                reading
+                    .detail
+                    .unwrap_or_else(|| format!("`{technology}` is not installed on this host"))
+            ),
+        ));
+    }
+    let drivable = entry.mux_adapter().is_some()
+        || entry
+            .working_environment(plan, &provider, &[], None)
+            .is_some();
+    if !drivable {
+        return Err(AikitError::new(
+            "session_space.provider_undrivable",
+            format!(
+                "`{technology}` is registered and installed, but this build cannot drive it \
+                 as a working environment, so a working-surface binding cannot be created \
+                 against it"
+            ),
+        ));
+    }
+    Ok(ProviderSelection {
+        technology,
+        provider,
+    })
+}
+
+/// Apply a `--provider` value to a staged SessionSpace intent.
+///
+/// The only intent it applies to is `bind-working-surface`: the selection is
+/// validated against the registry and persisted on the binding, so every
+/// working-surface verb that follows the binding needs no change of its own.
+/// A staged plan that already declares a different place technology is a
+/// contradiction and is refused. Without the flag the intent passes through
+/// exactly as staged — zero change when absent.
+fn select_binding_provider(
+    registry: &PlaceTechnologyRegistry,
+    intent: SessionSpaceMutation,
+    raw: &str,
+) -> Result<SessionSpaceMutation> {
+    let SessionSpaceMutation::BindWorkingSurface { binding } = intent else {
+        return Err(AikitError::new(
+            "session_space.provider_flag_misplaced",
+            "--provider selects the provider a working-surface binding is created against; \
+             this staged intent has no working-surface binding to select one for",
+        ));
+    };
+    let mut binding = *binding;
+    let selection = resolve_provider_selection(registry, raw, &binding.plan)?;
+    if let Some(declared) = &binding.plan.mux {
+        if *declared != selection.technology {
+            return Err(AikitError::new(
+                "session_space.provider_plan_conflict",
+                format!(
+                    "the staged plan declares place technology `{declared}`, but --provider \
+                     {raw} selects `{}`; one binding cannot name both",
+                    selection.technology
+                ),
+            ));
+        }
+    }
+    binding.provider = selection.provider;
+    binding.provenance.push(format!(
+        "provider selected at stage time with --provider {raw}"
+    ));
+    Ok(SessionSpaceMutation::BindWorkingSurface {
+        binding: Box::new(binding),
+    })
 }
 
 fn parse_json_arg<T: DeserializeOwned>(raw: &str) -> Result<T> {
@@ -858,5 +1012,237 @@ mod epi_prime_cli_tests {
             "161b869740c54dc325ad1d6aef765dbf32920073"
         );
         assert_eq!(args.central_project.as_deref(), Some("O-I"));
+    }
+}
+
+#[cfg(test)]
+mod provider_selection_tests {
+    use super::*;
+    use aikit_adapters::place_technology::{
+        MuxAdapterHandle, PlaceTechnologyAdapter, PlaceTechnologyReading,
+    };
+    use aikit_adapters::working_environment::{
+        WorkingEnvironmentCapabilities, WorkingEnvironmentObservation, WorkingEnvironmentProvider,
+    };
+    use aikit_core::session::SessionSpec;
+    use aikit_core::session_space_application::SessionSpaceWorkingSurfaceBinding;
+
+    /// A herdr stand-in: detected by construction, never spawned. The
+    /// `installed`/`drivable` switches let each refusal state be produced on
+    /// demand, which no live herdr could promise.
+    struct FakeHerdrTechnology {
+        installed: bool,
+        drivable: bool,
+    }
+
+    impl PlaceTechnologyAdapter for FakeHerdrTechnology {
+        fn technology(&self) -> PlaceTechnology {
+            PlaceTechnology::herdr()
+        }
+
+        fn detect(&self) -> Result<PlaceTechnologyReading> {
+            Ok(PlaceTechnologyReading {
+                technology: PlaceTechnology::herdr(),
+                installed: self.installed,
+                version: self.installed.then(|| "herdr fake 1".to_string()),
+                server_running: self.installed,
+                inside: false,
+                detail: (!self.installed).then(|| "herdr fake is not installed".to_string()),
+            })
+        }
+
+        fn mux_adapter(&self) -> Option<MuxAdapterHandle> {
+            None
+        }
+
+        fn working_environment(
+            &self,
+            _plan: &aikit_core::session::SessionPlan,
+            provider: &ResourceRef,
+            _surfaces: &[(ResourceRef, String)],
+            _subject: Option<&ResourceRef>,
+        ) -> Option<Box<dyn WorkingEnvironmentProvider>> {
+            if !self.drivable {
+                return None;
+            }
+            Some(Box::new(UnDrivenEnvironment(provider.clone())))
+        }
+    }
+
+    /// The environment handed back by selection validation is never driven:
+    /// selection asks only whether the build *can* drive the technology.
+    struct UnDrivenEnvironment(ResourceRef);
+
+    impl WorkingEnvironmentProvider for UnDrivenEnvironment {
+        fn provider_ref(&self) -> &ResourceRef {
+            &self.0
+        }
+
+        fn capabilities(&self) -> WorkingEnvironmentCapabilities {
+            WorkingEnvironmentCapabilities::default()
+        }
+
+        fn observe(&mut self) -> Result<WorkingEnvironmentObservation> {
+            unreachable!("selection validates drivability; it never drives the provider")
+        }
+
+        fn open(&mut self) -> Result<WorkingEnvironmentObservation> {
+            unreachable!("selection validates drivability; it never drives the provider")
+        }
+
+        fn focus_surface(&mut self, _surface: &ResourceRef) -> Result<()> {
+            unreachable!("selection validates drivability; it never drives the provider")
+        }
+
+        fn detach_surface(&mut self, _surface: &ResourceRef) -> Result<()> {
+            unreachable!("selection validates drivability; it never drives the provider")
+        }
+    }
+
+    fn fake_registry(installed: bool, drivable: bool) -> PlaceTechnologyRegistry {
+        PlaceTechnologyRegistry::from_entries(vec![Box::new(FakeHerdrTechnology {
+            installed,
+            drivable,
+        })])
+    }
+
+    fn plan(backend: &str) -> aikit_core::session::SessionPlan {
+        SessionSpec::from_toml_str(&format!(
+            "schema = 1\nid = \"p\"\nname = \"p\"\nbackend = \"{backend}\"\n\n[[views]]\nid = \"main\"\n[[views.panes]]\nid = \"shell\"\ncommand = [\"sh\"]\n"
+        ))
+        .expect("spec parses")
+        .compile()
+        .expect("spec compiles")
+    }
+
+    fn binding_intent(backend: &str) -> SessionSpaceMutation {
+        SessionSpaceMutation::BindWorkingSurface {
+            binding: Box::new(SessionSpaceWorkingSurfaceBinding {
+                binding: ResourceRef::parse("working-surface/w1").expect("ref parses"),
+                surface: ResourceRef::parse("surface/terminal/main/shell").expect("ref parses"),
+                agent_session: ResourceRef::parse("agent-session/a1").expect("ref parses"),
+                provider: ResourceRef::parse("provider/tmux/current").expect("ref parses"),
+                plan: plan(backend),
+                plan_key: "main/shell".into(),
+                provenance: Vec::new(),
+            }),
+        }
+    }
+
+    #[test]
+    fn stage_parses_the_provider_flag_and_defaults_to_absent() {
+        let cli = Cli::try_parse_from([
+            "aikit-session-space",
+            "stage",
+            "--space",
+            "session-space/s1",
+            "--intent-json",
+            "{}",
+            "--provider",
+            "herdr",
+        ])
+        .expect("stage grammar parses with --provider");
+        let Command::Stage {
+            space, provider, ..
+        } = cli.command
+        else {
+            panic!("expected a stage command");
+        };
+        assert_eq!(provider.as_deref(), Some("herdr"));
+        assert_eq!(space.as_deref(), Some("session-space/s1"));
+
+        let cli = Cli::try_parse_from(["aikit-session-space", "stage", "--intent-json", "{}"])
+            .expect("stage grammar parses without --provider");
+        let Command::Stage { provider, .. } = cli.command else {
+            panic!("expected a stage command");
+        };
+        assert!(provider.is_none(), "absent flag must stay absent");
+    }
+
+    #[test]
+    fn selection_accepts_technology_and_provider_ref_forms() {
+        let selection =
+            resolve_provider_selection(&fake_registry(true, true), "herdr", &plan("herdr"))
+                .expect("a technology name selects");
+        assert_eq!(selection.technology, PlaceTechnology::herdr());
+        assert_eq!(selection.provider.as_str(), "provider/herdr/current");
+
+        let selection = resolve_provider_selection(
+            &fake_registry(true, true),
+            "provider/herdr/w6",
+            &plan("herdr"),
+        )
+        .expect("an instance provider ref selects");
+        assert_eq!(selection.technology, PlaceTechnology::herdr());
+        assert_eq!(selection.provider.as_str(), "provider/herdr/w6");
+    }
+
+    #[test]
+    fn selection_refuses_unregistered_absent_undrivable_and_malformed() {
+        let error = resolve_provider_selection(
+            &PlaceTechnologyRegistry::from_entries(vec![]),
+            "herdr",
+            &plan("herdr"),
+        )
+        .expect_err("an unregistered technology cannot select");
+        assert_eq!(error.code(), "session_space.provider_unregistered");
+
+        let error =
+            resolve_provider_selection(&fake_registry(false, true), "herdr", &plan("herdr"))
+                .expect_err("an absent technology cannot select");
+        assert_eq!(error.code(), "session_space.provider_not_installed");
+        assert!(error.message().contains("not installed"));
+
+        let error =
+            resolve_provider_selection(&fake_registry(true, false), "herdr", &plan("herdr"))
+                .expect_err("an undrivable technology cannot select");
+        assert_eq!(error.code(), "session_space.provider_undrivable");
+
+        let error = resolve_provider_selection(
+            &fake_registry(true, true),
+            "provider/herdr",
+            &plan("herdr"),
+        )
+        .expect_err("a provider ref without its instance segment cannot select");
+        assert_eq!(error.code(), "session_space.provider_selection_malformed");
+
+        let error =
+            resolve_provider_selection(&fake_registry(true, true), "Bad_Name", &plan("herdr"))
+                .expect_err("a value in neither form cannot select");
+        assert_eq!(error.code(), "session_space.provider_selection_malformed");
+    }
+
+    #[test]
+    fn selection_is_persisted_on_the_binding_with_provenance() {
+        let intent =
+            select_binding_provider(&fake_registry(true, true), binding_intent("herdr"), "herdr")
+                .expect("selection applies to a bind-working-surface intent");
+        let SessionSpaceMutation::BindWorkingSurface { binding } = intent else {
+            panic!("expected a bind-working-surface intent");
+        };
+        assert_eq!(binding.provider.as_str(), "provider/herdr/current");
+        assert!(binding
+            .provenance
+            .iter()
+            .any(|line| line.contains("--provider herdr")));
+    }
+
+    #[test]
+    fn selection_refuses_a_contradicting_plan_and_a_misplaced_flag() {
+        let error =
+            select_binding_provider(&fake_registry(true, true), binding_intent("tmux"), "herdr")
+                .expect_err("a plan declaring another technology contradicts the selection");
+        assert_eq!(error.code(), "session_space.provider_plan_conflict");
+
+        let error = select_binding_provider(
+            &fake_registry(true, true),
+            SessionSpaceMutation::Create {
+                id: SessionSpaceRef::parse("session-space/s1").expect("space parses"),
+                label: None,
+            },
+            "herdr",
+        )
+        .expect_err("a create intent has no provider to select");
+        assert_eq!(error.code(), "session_space.provider_flag_misplaced");
     }
 }

@@ -215,6 +215,13 @@ fn operations() -> Vec<StageSchemaOperation> {
                     "required; `<view>/<pane>` naming one pane step of the plan",
                 ),
                 ("binding.provenance", "optional; defaults to empty"),
+                (
+                    "--provider (stage verb flag, not part of the intent)",
+                    "with this operation the stage verb accepts --provider \
+                     <technology|provider-ref> (e.g. `--provider herdr`) to select and \
+                     validate the binding's provider against the place-technology registry \
+                     at creation time; without it the staged `provider` field stands",
+                ),
             ],
         },
         StageSchemaOperation {
