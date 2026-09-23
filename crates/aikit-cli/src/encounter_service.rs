@@ -1125,6 +1125,24 @@ impl EncounterService {
         )));
         let model = agency::model::prepare(&self.home, &agent_session, &configured)?;
         let task_bound = self.is_task_bound(&agent_session)?;
+        // A launch preference never changes an explicit governed policy or
+        // a resumed session. Task execution consumes this same pinned choice.
+        let default_provider = self.model_default_provider(&agent_session, &configured)?;
+        let launch_default =
+            crate::model_defaults::for_open(&self.home, &default_provider, reconnect)?;
+        if !reconnect {
+            crate::model_defaults::bind_session(
+                &self.home,
+                &agent_session,
+                &default_provider,
+                launch_default.as_ref(),
+            )?;
+        }
+        // Validate before spawning even when the final argv belongs to the
+        // task boundary. No duplicate flags or unresolved RPC provider.
+        let default_argv =
+            crate::model_defaults::launch_argv(&default_provider, launch_default.as_ref())?;
+
         if configured.protocol == EncounterProtocol::PrimeRpc
             && (configured.body_ref.is_none() || configured.body_revision.is_none())
         {
@@ -1139,8 +1157,10 @@ impl EncounterService {
             } else {
                 agency::model::direct_launcher(&agent_session, &configured, model)?
             }
-        } else {
+        } else if task_bound {
             configured.argv.clone()
+        } else {
+            default_argv
         };
         // The bounded child-to-parent message channel: a session-scoped
         // directory the adapter hands the launcher and drains into this
@@ -1190,7 +1210,18 @@ impl EncounterService {
         let direct_provider_launch = model.is_none() || task_bound;
         let mut launch_variants = vec![launch_argv.clone()];
         if direct_provider_launch {
-            launch_variants.extend(configured.argv_fallback.clone());
+            for argv in &configured.argv_fallback {
+                let mut variant = configured.clone();
+                variant.argv = argv.clone();
+                launch_variants.push(crate::model_defaults::launch_argv(
+                    &variant,
+                    if task_bound {
+                        None
+                    } else {
+                        launch_default.as_ref()
+                    },
+                )?);
+            }
         }
         let single_variant = launch_variants.len() == 1;
         let mut launched: Option<(AgentSessionHost, ConnectionDescriptor)> = None;
@@ -1219,7 +1250,16 @@ impl EncounterService {
                                 &model.policy.native_provider,
                                 &model.policy.provider_native_id,
                             )?,
-                            None => adapter,
+                            None => match &launch_default {
+                                Some(default) => adapter.with_selected_model(
+                                    default
+                                        .native_provider
+                                        .as_deref()
+                                        .ok_or_else(|| error("Native model provider is missing"))?,
+                                    &default.model_id,
+                                )?,
+                                None => adapter,
+                            },
                         }
                     },
                     variant,
@@ -1242,7 +1282,15 @@ impl EncounterService {
                                     &model.policy.native_provider,
                                     &model.policy.provider_native_id,
                                 )?,
-                                None => adapter,
+                                None => match &launch_default {
+                                    Some(default) => adapter.with_selected_model(
+                                        default.native_provider.as_deref().ok_or_else(|| {
+                                            error("Native model provider is missing")
+                                        })?,
+                                        &default.model_id,
+                                    )?,
+                                    None => adapter,
+                                },
                             }
                         },
                         variant,
@@ -1466,7 +1514,21 @@ impl EncounterService {
             }
             _ => None,
         };
-        let model_observation = lane.binding().model_observation.clone();
+        if let Some(default) = &launch_default {
+            if configured.protocol == EncounterProtocol::Acp {
+                if let Err(failure) = lane.set_model(&default.model_id) {
+                    let cleanup = host.shutdown();
+                    if cleanup.is_err() {
+                        self.shutdown_requested
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    self.store.append(&agent_session,&json!({"kind":"native-model-default-refused","setting_ref":crate::model_defaults::SETTING_REF,"cleanup_confirmed":cleanup.is_ok(),"reason":failure.message()}))?;
+                    return Err(failure);
+                }
+            }
+            self.store.append(&agent_session,&json!({"kind":"native-model-default-confirmed","setting_ref":crate::model_defaults::SETTING_REF,"provider":default_provider.id,"requested":default,"model_observation":host.identity(&agent_session)?.binding.model_observation}))?;
+        }
+        let model_observation = host.identity(&agent_session)?.binding.model_observation;
         let model_reading = serde_json::to_value(&model).map_err(error)?;
         let body_ref = configured.body_ref.clone();
         let body_revision = configured.body_revision.clone();
@@ -1474,7 +1536,7 @@ impl EncounterService {
             self.store.append(&agent_session,&json!({"kind":"selected-model-configured","agent_session":agent_session,"native_session_id":receipt.native_session_id,"provider":provider,"dispatch":dispatch,"previous_model_observation":receipt.previous,"model_observation":receipt.current,"standing":"provider-confirmed-session-configuration-under-the-durable-model-policy"}))?;
         }
         let opened_mode_observation = lane.binding().mode_observation.clone();
-        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"now_context_config_digest":blake3::hash(serde_json::to_vec(&configured.now_context).expect("NOW config JSON").as_slice()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"mode_observation":opened_mode_observation,"model_selection":model_reading,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-resume"} else {"new-native-session"},"composed_tools_route":if mcp_native_fallback.is_some() {"harness-native-mcp-config-seam"} else {"session-wire-or-none"},"mcp_native_fallback_reason":mcp_native_fallback.as_ref().map(|(reason, _)| reason.clone())}))?;
+        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"now_context_config_digest":blake3::hash(serde_json::to_vec(&configured.now_context).expect("NOW config JSON").as_slice()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"mode_observation":opened_mode_observation,"model_selection":model_reading,"launch_model_default":launch_default,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-resume"} else {"new-native-session"},"composed_tools_route":if mcp_native_fallback.is_some() {"harness-native-mcp-config-seam"} else {"session-wire-or-none"},"mcp_native_fallback_reason":mcp_native_fallback.as_ref().map(|(reason, _)| reason.clone())}))?;
         // The owner drains transport delivery; durable cursor readers are
         // independent views of the same canonical journal.
         let drain = lane.clone();

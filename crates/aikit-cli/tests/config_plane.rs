@@ -1140,3 +1140,132 @@ fn default_permission_mode_round_trips_and_reads_back() {
     assert!(reading["axes"]["declared"]["value"].is_null());
     assert_eq!(reading["axes"]["effective"]["value"], json!({}));
 }
+
+#[test]
+fn default_model_round_trips_and_reads_back() {
+    let (home, project) = scene();
+    let setting = "ai-kit:models:models.default";
+    let value = r#"{"pi":{"model_id":"glm-5","native_provider":"zai","model_name":"GLM 5"},"claude-code":{"model_id":"opus","model_name":"Opus"}}"#;
+
+    let (_, contribution) = run(
+        home.path(),
+        project.path(),
+        &["config-contribution", "--json"],
+    );
+    let spec = contribution["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|s| s["settings"].as_array().unwrap().iter().cloned())
+        .find(|s| s["setting_ref"] == setting)
+        .expect("default permission mode is contributed");
+    assert_eq!(spec["writable"], true);
+    assert_eq!(spec["effect"]["kind"], "session-restart-required");
+    assert!(spec["effect"]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("native selector"));
+    assert_eq!(
+        spec["allowed_scopes"],
+        json!([{ "scope_kind": "machine", "scope_ref": null }])
+    );
+
+    let (code, invalid) = run(
+        home.path(),
+        project.path(),
+        &[
+            "config",
+            "validate",
+            "--json",
+            "--setting",
+            setting,
+            "--scope",
+            "machine",
+            "--value",
+            r#"{"hermes acp":"accept edits"}"#,
+        ],
+    );
+    assert_eq!(code, 0);
+    assert_eq!(invalid["valid"], false);
+
+    let (code, plan) = run(
+        home.path(),
+        project.path(),
+        &[
+            "config",
+            "plan",
+            "--json",
+            "--setting",
+            setting,
+            "--scope",
+            "machine",
+            "--value",
+            value,
+        ],
+    );
+    assert_eq!(code, 0, "{plan}");
+    assert_eq!(plan["value"], serde_json::from_str::<Value>(value).unwrap());
+    let plan_path = project.path().join("modes-plan.json");
+    fs::write(&plan_path, serde_json::to_string(&plan).unwrap()).unwrap();
+    let (code, receipt) = run(
+        home.path(),
+        project.path(),
+        &[
+            "config",
+            "apply",
+            "--json",
+            "--plan-file",
+            plan_path.to_str().unwrap(),
+            "--changeset",
+            "cs-modes-1",
+        ],
+    );
+    assert_eq!(code, 0, "{receipt}");
+    assert_eq!(receipt["outcome"], "applied");
+
+    let disclosed = |home: &Path| -> Value {
+        let (_, system) = run(home, project.path(), &["system", "--json"]);
+        system["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|section| section["id"] == "models")
+            .expect("models section disclosed")["settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["key"] == "models.default")
+            .unwrap()
+            .clone()
+    };
+    let reading = disclosed(home.path());
+    assert_eq!(reading["key"], "models.default");
+    assert_eq!(
+        reading["axes"]["declared"]["value"],
+        serde_json::from_str::<Value>(value).unwrap()
+    );
+    assert_eq!(
+        reading["axes"]["effective"]["value"],
+        serde_json::from_str::<Value>(value).unwrap()
+    );
+
+    let (code, reset) = run(
+        home.path(),
+        project.path(),
+        &[
+            "config",
+            "reset",
+            "--json",
+            "--setting",
+            setting,
+            "--scope",
+            "machine",
+            "--changeset",
+            "cs-modes-reset-1",
+        ],
+    );
+    assert_eq!(code, 0, "{reset}");
+    let reading = disclosed(home.path());
+    assert!(reading["axes"]["declared"]["value"].is_null());
+    assert_eq!(reading["axes"]["effective"]["value"], json!({}));
+}

@@ -48,6 +48,7 @@ pub mod multicall;
 pub mod mux_install;
 pub mod orientation_packet;
 pub mod permission_defaults;
+pub mod model_defaults;
 pub mod pressure;
 pub mod probe;
 pub mod profile_ops;

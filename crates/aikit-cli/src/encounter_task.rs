@@ -470,6 +470,15 @@ impl EncounterService {
         }
         Ok(())
     }
+    pub(crate) fn model_default_provider(
+        &self,
+        session: &ResourceRef,
+        provider: &EncounterProvider,
+    ) -> Result<EncounterProvider> {
+        Ok(read(&self.home, session)?
+            .map(|record| record.request.provider)
+            .unwrap_or_else(|| provider.clone()))
+    }
     pub(crate) fn is_task_bound(&self, session: &ResourceRef) -> Result<bool> {
         Ok(read(&self.home, session)?.is_some())
     }
@@ -511,8 +520,14 @@ impl EncounterService {
             .requirements
             .as_ref()
             .expect("validated requirements");
-        let (model_argv, model_environment) =
+        let (mut model_argv, model_environment) =
             super::model::execution(home, session, &record.request.provider)?;
+        if record.request.provider.model_policy.is_none() {
+            let default =
+                crate::model_defaults::for_session(home, session, &record.request.provider)?;
+            model_argv =
+                crate::model_defaults::launch_argv(&record.request.provider, default.as_ref())?;
+        }
         let mut command = Command::new(&record.request.workcell_boundary_bin);
         command
             .args([

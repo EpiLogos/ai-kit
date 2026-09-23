@@ -159,6 +159,10 @@ impl PiRpcConnectionAdapter {
             .as_str()
             .filter(|model| !model.trim().is_empty())
             .map(|model| NativeModelObservation {
+                native_provider: data["model"]["provider"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(str::to_owned),
                 current_model_id: model.into(),
                 available_models: vec![NativeAdvertisedModel {
                     model_id: model.into(),

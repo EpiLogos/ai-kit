@@ -646,6 +646,14 @@ pub fn disclose(service: &Service) -> Result<Value> {
     // The per-harness default permission mode is authored in AIKit's own
     // state; its effect lands at each new session open, so there is no
     // materialised (active) reading to report here.
+    let model_defaults_declared = crate::model_defaults::declared(service.home())?
+        .map(|models| json!(models))
+        .unwrap_or(Value::Null);
+    let model_defaults_effective = if model_defaults_declared.is_null() {
+        json!({})
+    } else {
+        model_defaults_declared.clone()
+    };
     let permission_modes_declared = crate::permission_defaults::declared(service.home())?
         .map(|modes| json!(modes))
         .unwrap_or(Value::Null);
@@ -925,6 +933,14 @@ pub fn disclose(service: &Service) -> Result<Value> {
                     "one row per binding: provider, declared location, added and last-rotated timestamps; never a value",
                     "aikit credential list", "ai-kit:credential:inventory", observed_at,
                     materialisation_ref.clone(),
+                ),
+                setting(
+                    "models.default", "Default model per harness", "table",
+                    model_defaults_declared, "ai-kit:models:default:authored",
+                    model_defaults_effective, Value::Null, Value::Null, "none",
+                    "applies to new chats with native confirmation; explicit model policies and existing chats keep their selection",
+                    "aikit config plan --setting ai-kit:models:models.default",
+                    "ai-kit:models:default", observed_at, materialisation_ref.clone(),
                 ),
                 setting(
                     "models.authored", "Owner model book entries", "presence",

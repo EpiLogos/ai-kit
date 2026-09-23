@@ -92,6 +92,9 @@ pub struct ConnectionDescriptor {
 /// provider report, not AIKit catalog availability or proof of inference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeModelObservation {
+    /// Native provider identity when the harness discloses it (RPC launch selection).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_provider: Option<String>,
     pub current_model_id: String,
     pub available_models: Vec<NativeAdvertisedModel>,
     /// Provider-advertised execution-budget selector, if exposed by ACP.
@@ -168,6 +171,7 @@ impl NativeModelObservation {
             ));
         }
         Ok(Self {
+            native_provider: None,
             current_model_id: current.into(),
             available_models: unique_advertised_models(models),
             reasoning_effort: None,
@@ -254,6 +258,7 @@ impl NativeModelObservation {
         }
         let reasoning_effort = Self::select_config(value, "reasoning_effort")?;
         Ok(Some(Self {
+            native_provider: None,
             current_model_id,
             available_models: unique_advertised_models(available_models),
             reasoning_effort,

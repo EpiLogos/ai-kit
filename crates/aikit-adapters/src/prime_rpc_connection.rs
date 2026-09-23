@@ -172,6 +172,7 @@ impl PrimeRpcConnectionAdapter {
             }
         }
         self.model_observation = Some(NativeModelObservation {
+                native_provider: Some(observed_provider.to_owned()),
             current_model_id: observed_model.into(),
             available_models: vec![NativeAdvertisedModel {
                 model_id: observed_model.into(),
