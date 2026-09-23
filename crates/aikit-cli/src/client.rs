@@ -86,6 +86,53 @@ fn client_home(seam_path: &str, tree: &Path) -> Result<PathBuf> {
 /// Expand one seam path: `~/` against the given home, absolute as-is,
 /// relative against the working tree.
 fn expand_seam(seam_path: &str, home: &Path, tree: &Path) -> PathBuf {
+    expand_seam_with(seam_path, home, tree, |name| std::env::var_os(name))
+}
+
+/// The documented default homes of the harness config variables a catalog
+/// seam may lead with (`$CODEX_HOME/hooks.json`). Each harness reads the
+/// variable when set and this `~/` default otherwise, so the seam must too —
+/// joining the literal `$CODEX_HOME` onto the project would write a folder of
+/// that name instead of the harness's real config.
+const SEAM_HOME_DEFAULTS: &[(&str, &str)] = &[
+    ("CODEX_HOME", "~/.codex"),
+    ("CLAUDE_CONFIG_DIR", "~/.claude"),
+    ("DSH_HOME", "~/.dsh"),
+];
+
+/// `expand_seam` with the environment passed in (tests never mutate the
+/// process environment). A leading `$NAME` or `${NAME}` resolves to the
+/// variable's non-empty value, else to its documented default; an unknown,
+/// unset variable is left as written.
+fn expand_seam_with(
+    seam_path: &str,
+    home: &Path,
+    tree: &Path,
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> PathBuf {
+    if let Some((name, rest)) = leading_seam_variable(seam_path) {
+        let base = env(name)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                SEAM_HOME_DEFAULTS
+                    .iter()
+                    .find(|(known, _)| *known == name)
+                    .map(|(_, default)| home.join(default.trim_start_matches("~/")))
+            });
+        if let Some(base) = base {
+            let joined = if rest.is_empty() {
+                base
+            } else {
+                base.join(rest)
+            };
+            return if joined.is_absolute() {
+                joined
+            } else {
+                tree.join(joined)
+            };
+        }
+    }
     let expanded = if let Some(rest) = seam_path.strip_prefix("~/") {
         home.join(rest)
     } else {
@@ -96,6 +143,24 @@ fn expand_seam(seam_path: &str, home: &Path, tree: &Path) -> PathBuf {
     } else {
         tree.join(expanded)
     }
+}
+
+/// `$NAME/rest` or `${NAME}/rest` → (NAME, rest); `rest` may be empty.
+fn leading_seam_variable(seam_path: &str) -> Option<(&str, &str)> {
+    let body = seam_path.strip_prefix('$')?;
+    let (name, rest) = if let Some(braced) = body.strip_prefix('{') {
+        let end = braced.find('}')?;
+        (&braced[..end], &braced[end + 1..])
+    } else {
+        let end = body
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(body.len());
+        (&body[..end], &body[end..])
+    };
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, rest.strip_prefix('/').unwrap_or(rest)))
 }
 
 /// Config-home overrides the harnesses themselves document and honour. When
@@ -1944,6 +2009,55 @@ fn declared_home_relative(path: &Path, home: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_seam_led_by_a_harness_home_variable_follows_the_variable_or_its_default() {
+        let home = Path::new("/Users/walker");
+        let tree = Path::new("/work/project");
+        let set = |name: &str| {
+            (name == "CODEX_HOME").then(|| std::ffi::OsString::from("/opt/codex-home"))
+        };
+        let unset = |_: &str| None;
+        assert_eq!(
+            expand_seam_with("$CODEX_HOME/hooks.json", home, tree, set),
+            PathBuf::from("/opt/codex-home/hooks.json")
+        );
+        assert_eq!(
+            expand_seam_with("${CODEX_HOME}/hooks.json", home, tree, set),
+            PathBuf::from("/opt/codex-home/hooks.json")
+        );
+        assert_eq!(
+            expand_seam_with("$CODEX_HOME/hooks.json", home, tree, unset),
+            PathBuf::from("/Users/walker/.codex/hooks.json")
+        );
+        assert_eq!(
+            expand_seam_with("$CLAUDE_CONFIG_DIR/settings.json", home, tree, unset),
+            PathBuf::from("/Users/walker/.claude/settings.json")
+        );
+        // An empty value is unset, never the project folder.
+        let empty = |_: &str| Some(std::ffi::OsString::new());
+        assert_eq!(
+            expand_seam_with("$CODEX_HOME/hooks.json", home, tree, empty),
+            PathBuf::from("/Users/walker/.codex/hooks.json")
+        );
+        // Unchanged: `~/`, relative and absolute seams; unknown unset variables stay as written.
+        assert_eq!(
+            expand_seam_with("~/.codex/config.toml", home, tree, unset),
+            PathBuf::from("/Users/walker/.codex/config.toml")
+        );
+        assert_eq!(
+            expand_seam_with(".codex/hooks.json", home, tree, unset),
+            PathBuf::from("/work/project/.codex/hooks.json")
+        );
+        assert_eq!(
+            expand_seam_with("/etc/x.json", home, tree, unset),
+            PathBuf::from("/etc/x.json")
+        );
+        assert_eq!(
+            expand_seam_with("$NOT_A_HOME/x.json", home, tree, unset),
+            PathBuf::from("/work/project/$NOT_A_HOME/x.json")
+        );
+    }
     use super::*;
     use aikit_adapters::actuation_harness_detection::ActuationDetectionRecord;
 
