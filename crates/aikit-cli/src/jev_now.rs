@@ -39,11 +39,11 @@ const MAX_SOURCE_BYTES: usize = 256 * 1024;
 const MAX_CANDIDATES: usize = 64;
 const MAX_WORKFLOW_UNITS: usize = 64;
 
-fn fail(code: &'static str, message: impl Into<String>) -> AikitError {
+pub(crate) fn fail(code: &'static str, message: impl Into<String>) -> AikitError {
     AikitError::new(code, message)
 }
 
-fn read_bytes(path: &Path, label: &str, max: usize) -> Result<Vec<u8>> {
+pub(crate) fn read_bytes(path: &Path, label: &str, max: usize) -> Result<Vec<u8>> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|e| fail("jev_now.file_unavailable", format!("{label}: {e}")))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() as usize > max {
@@ -55,7 +55,11 @@ fn read_bytes(path: &Path, label: &str, max: usize) -> Result<Vec<u8>> {
     std::fs::read(path).map_err(|e| fail("jev_now.file_unavailable", format!("{label}: {e}")))
 }
 
-fn read_json<T: for<'de> Deserialize<'de>>(path: &Path, label: &str, max: usize) -> Result<T> {
+pub(crate) fn read_json<T: for<'de> Deserialize<'de>>(
+    path: &Path,
+    label: &str,
+    max: usize,
+) -> Result<T> {
     serde_json::from_slice(&read_bytes(path, label, max)?)
         .map_err(|e| fail("jev_now.invalid_json", format!("{label}: {e}")))
 }
@@ -68,7 +72,7 @@ fn now_ms() -> Result<u64> {
         .min(u64::MAX as u128) as u64)
 }
 
-fn resolve_secret(
+pub(crate) fn resolve_secret(
     config: &RedisNowConfig,
     allow_env_import: bool,
 ) -> Result<Option<aikit_core::SecretValue>> {
@@ -186,34 +190,62 @@ struct FactoryPrepare {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MatrixPrepare {
-    manifest: PathBuf,
-    csv: PathBuf,
+pub(crate) struct MatrixPrepare {
+    pub(crate) manifest: PathBuf,
+    pub(crate) csv: PathBuf,
     #[serde(default)]
-    view_id: Option<String>,
+    pub(crate) view_id: Option<String>,
     #[serde(default)]
-    capability_refs: Vec<String>,
+    pub(crate) capability_refs: Vec<String>,
     #[serde(default)]
-    full_scope: bool,
-    agent_visibility: AgentVisibility,
-    external_egress: ExternalEgress,
+    pub(crate) full_scope: bool,
+    pub(crate) agent_visibility: AgentVisibility,
+    pub(crate) external_egress: ExternalEgress,
+}
+
+/// One capability row, structured — the same fields the excerpt JSON below
+/// carries, kept typed so a consumer (e.g. the contemplation field) never
+/// re-parses the CSV or the excerpt string to get code/test relations.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MatrixCapabilityRow {
+    pub(crate) id: String,
+    pub(crate) need: String,
+    pub(crate) operation: String,
+    pub(crate) outcome: String,
+    pub(crate) implementation_status: String,
+    pub(crate) standing: String,
+    pub(crate) source_refs: Vec<String>,
+    pub(crate) code_refs: Vec<String>,
+    pub(crate) test_refs: Vec<String>,
+    pub(crate) account_ref: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MatrixEvidence {
-    matrix_id: String,
-    whole_account_ref: String,
-    view_id: String,
-    view_title: String,
-    view_semantics: String,
-    row_axis: Value,
-    column_axis: Value,
-    declared_capability_refs: Vec<String>,
-    expanded_account_refs: Vec<String>,
-    questions: Vec<String>,
-    manifest_digest: String,
-    csv_digest: String,
+pub(crate) struct MatrixEvidence {
+    pub(crate) matrix_id: String,
+    pub(crate) whole_account_ref: String,
+    pub(crate) view_id: String,
+    pub(crate) view_title: String,
+    pub(crate) view_semantics: String,
+    pub(crate) row_axis: Value,
+    pub(crate) column_axis: Value,
+    pub(crate) declared_capability_refs: Vec<String>,
+    pub(crate) expanded_account_refs: Vec<String>,
+    pub(crate) questions: Vec<String>,
+    pub(crate) manifest_digest: String,
+    pub(crate) csv_digest: String,
+    /// Structured per-capability rows (additive: existing callers that only
+    /// read the named fields above are unaffected). Carries code_refs/
+    /// test_refs, which the excerpt string above also embeds textually.
+    #[serde(default)]
+    pub(crate) capability_rows: Vec<MatrixCapabilityRow>,
+    /// Every relation record in the selected view, regardless of which
+    /// capability it ties to — the grid relations the contemplation field
+    /// needs, not just the ones touching the selection.
+    #[serde(default)]
+    pub(crate) grid_relations: Vec<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -366,7 +398,7 @@ fn prepared_factory_unit(unit: &Value) -> Result<PreparedFactoryUnit> {
     })
 }
 
-fn file_digest(path: &Path, label: &str, max: usize) -> Result<(Vec<u8>, String)> {
+pub(crate) fn file_digest(path: &Path, label: &str, max: usize) -> Result<(Vec<u8>, String)> {
     let bytes = read_bytes(path, label, max)?;
     let digest = format!("blake3:{}", blake3::hash(&bytes).to_hex());
     Ok((bytes, digest))
@@ -470,7 +502,7 @@ fn matrix_axis(view: &Value, key: &str) -> Result<Value> {
     Ok(Value::Object(axis.clone()))
 }
 
-fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>, MatrixEvidence)> {
+pub(crate) fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>, MatrixEvidence)> {
     if config.full_scope == !config.capability_refs.is_empty() {
         return Err(fail(
             "now_context.matrix_scope",
@@ -577,6 +609,8 @@ fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>, MatrixEvi
     let status_i = csv_header_index(headers, "implementation_status")?;
     let standing_i = csv_header_index(headers, "standing")?;
     let sources_i = csv_header_index(headers, "source_refs")?;
+    let code_refs_i = csv_header_index(headers, "code_refs")?;
+    let test_refs_i = csv_header_index(headers, "test_refs")?;
     let account_i = csv_header_index(headers, "account_ref")?;
     let relation_i = csv_header_index(headers, "relation")?;
     let coverage_i = csv_header_index(headers, "coverage")?;
@@ -644,6 +678,7 @@ fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>, MatrixEvi
     let mut account_refs = BTreeSet::new();
     let mut questions = BTreeSet::new();
     let mut items = Vec::new();
+    let mut capability_rows = Vec::new();
 
     for id in &selected_ids {
         let row = capabilities[id];
@@ -651,6 +686,8 @@ fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>, MatrixEvi
         if !account_ref.is_empty() {
             account_refs.insert(account_ref.clone());
         }
+        let code_refs = matrix_ref_list(csv_field(row, code_refs_i));
+        let test_refs = matrix_ref_list(csv_field(row, test_refs_i));
         let relations = relation_rows
             .iter()
             .filter(|relation| matrix_ref_list(csv_field(relation, refs_i)).contains(id))
@@ -686,6 +723,8 @@ fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>, MatrixEvi
                 "implementation_status": csv_field(row, status_i),
                 "standing": csv_field(row, standing_i),
                 "source_refs": matrix_ref_list(csv_field(row, sources_i)),
+                "code_refs": code_refs,
+                "test_refs": test_refs,
                 "account_ref": account_ref,
             },
             "relations": relations,
@@ -706,7 +745,33 @@ fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>, MatrixEvi
             agent_visibility: config.agent_visibility,
             external_egress: config.external_egress,
         });
+        capability_rows.push(MatrixCapabilityRow {
+            id: id.clone(),
+            need: csv_field(row, need_i).to_owned(),
+            operation: csv_field(row, operation_i).to_owned(),
+            outcome: csv_field(row, outcome_i).to_owned(),
+            implementation_status: csv_field(row, status_i).to_owned(),
+            standing: csv_field(row, standing_i).to_owned(),
+            source_refs: matrix_ref_list(csv_field(row, sources_i)),
+            code_refs,
+            test_refs,
+            account_ref,
+        });
     }
+
+    let grid_relations = relation_rows
+        .iter()
+        .map(|relation| {
+            json!({
+                "row_id": csv_field(relation, row_i),
+                "column_id": csv_field(relation, col_i),
+                "relation": csv_field(relation, relation_i),
+                "coverage": csv_field(relation, coverage_i),
+                "question": csv_field(relation, question_i),
+                "capability_refs": matrix_ref_list(csv_field(relation, refs_i)),
+            })
+        })
+        .collect::<Vec<_>>();
 
     Ok((
         items,
@@ -722,12 +787,14 @@ fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>, MatrixEvi
             expanded_account_refs: account_refs.into_iter().collect(),
             questions: questions.into_iter().collect(),
             manifest_digest,
+            capability_rows,
+            grid_relations,
             csv_digest,
         },
     ))
 }
 
-fn revalidate_matrix(config: &MatrixPrepare, evidence: &MatrixEvidence) -> Result<()> {
+pub(crate) fn revalidate_matrix(config: &MatrixPrepare, evidence: &MatrixEvidence) -> Result<()> {
     let (_, manifest_digest) = file_digest(
         &config.manifest,
         "capability matrix manifest",
@@ -743,7 +810,7 @@ fn revalidate_matrix(config: &MatrixPrepare, evidence: &MatrixEvidence) -> Resul
     Ok(())
 }
 
-fn bounded_text(value: &str, max: usize) -> String {
+pub(crate) fn bounded_text(value: &str, max: usize) -> String {
     if value.len() <= max {
         return value.to_owned();
     }
@@ -754,7 +821,7 @@ fn bounded_text(value: &str, max: usize) -> String {
     value[..end].to_owned()
 }
 
-fn central_action(
+pub(crate) fn central_action(
     runner: &SystemRunner,
     ctrl: &Path,
     root: &Path,
@@ -998,7 +1065,7 @@ fn factory_evidence(config: &FactoryPrepare) -> Result<FactoryEvidence> {
     })
 }
 
-fn extract_now_source_refs(data: &Value) -> Vec<String> {
+pub(crate) fn extract_now_source_refs(data: &Value) -> Vec<String> {
     data["record"]["source_refs"]
         .as_array()
         .into_iter()

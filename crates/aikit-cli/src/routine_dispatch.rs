@@ -1301,6 +1301,252 @@ pub fn binding_observed_state(record: &StoredRoutine) -> RoutineSchedulerState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Contemplation revalidation (owner item 6): a Routine occurrence whose
+// Method is the contemplation Method recomputes the field basis digest and
+// only contemplates (a model call) when the basis changed or a new
+// participant change-stream entry arrived since the last occurrence.
+// Otherwise it emits a no-op occurrence receipt and makes no model call.
+// ---------------------------------------------------------------------------
+
+/// The Method ref a Routine names when its work is `aikit now-context
+/// contemplate`. A dispatcher gate compares against this to decide whether
+/// revalidation applies at all; every other Routine passes straight through.
+pub const CONTEMPLATION_METHOD_REF: &str = "method:aikit/now-context-contemplate";
+pub const CONTEMPLATION_OCCURRENCE_STATE_SCHEMA: &str = "aikit.contemplation-occurrence-state/v1";
+
+/// What the gate needs from the world at the point of an occurrence: the
+/// current field basis digest and the participant's current change-stream
+/// cursor. Production reads the real field assembly and Redis change cursor;
+/// fixtures answer from a cell the test mutates between calls.
+pub trait ContemplationBasis {
+    fn current_digest(&self) -> Result<String>;
+    fn current_change_cursor(&self) -> Result<u64>;
+}
+
+/// The one persisted fact the gate needs between occurrences, per Routine.
+/// Retains METHOD basis, recurrence condition, occurrence identity, source
+/// applicability (digest), authority, eligible body/Workcell and child-NOW/
+/// Return routing exactly as named in the owner brief — never just a digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ContemplationOccurrenceRecord {
+    #[serde(default)]
+    pub schema: String,
+    #[serde(default)]
+    pub method_ref: String,
+    #[serde(default)]
+    pub recurrence_condition: String,
+    #[serde(default)]
+    pub occurrence_ref: String,
+    #[serde(default)]
+    pub source_basis_digest: String,
+    #[serde(default)]
+    pub authority_ref: String,
+    #[serde(default)]
+    pub eligible_body_ref: String,
+    #[serde(default)]
+    pub child_now_destination: String,
+    #[serde(default)]
+    pub return_route: String,
+    #[serde(default)]
+    pub last_change_cursor: u64,
+    #[serde(default)]
+    pub last_result: String,
+    #[serde(default)]
+    pub updated_at_unix_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ContemplationOccurrenceState {
+    #[serde(default)]
+    records: std::collections::BTreeMap<String, ContemplationOccurrenceRecord>,
+}
+
+fn load_occurrence_state(path: &Path) -> ContemplationOccurrenceState {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn store_occurrence_state(path: &Path, state: &ContemplationOccurrenceState) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            AikitError::new(
+                "routine.contemplation_state_write_failed",
+                format!("{}: {error}", parent.display()),
+            )
+        })?;
+    }
+    let bytes = serde_json::to_vec_pretty(state).map_err(|error| {
+        AikitError::new(
+            "routine.contemplation_state_write_failed",
+            error.to_string(),
+        )
+    })?;
+    std::fs::write(path, bytes).map_err(|error| {
+        AikitError::new(
+            "routine.contemplation_state_write_failed",
+            format!("{}: {error}", path.display()),
+        )
+    })
+}
+
+fn occurrence_state_now_ms() -> i64 {
+    jiff::Timestamp::now().as_millisecond()
+}
+
+/// Static context the gate stamps into every occurrence record, carried
+/// alongside the digest/cursor comparison the gate actually decides on.
+#[derive(Debug, Clone, Default)]
+pub struct ContemplationOccurrenceContext {
+    pub authority_ref: Option<String>,
+    pub eligible_body_ref: Option<String>,
+    pub child_now_destination: Option<String>,
+    pub return_route: Option<String>,
+}
+
+/// Wraps an inner [`RoutineRunner`] with the contemplation revalidation gate.
+/// A Routine whose Method is not [`CONTEMPLATION_METHOD_REF`] passes straight
+/// through to the inner runner unchanged; every other Routine's occurrence is
+/// revalidated here first. The inner runner is what actually contemplates
+/// (calls Jev) — this wrapper decides only whether that call happens.
+pub struct ContemplationGatingRunner<B: ContemplationBasis, Inner: RoutineRunner> {
+    pub method_ref: ResourceRef,
+    pub state_path: PathBuf,
+    pub context: ContemplationOccurrenceContext,
+    pub basis: B,
+    pub inner: Inner,
+}
+
+impl<B: ContemplationBasis, Inner: RoutineRunner> ContemplationGatingRunner<B, Inner> {
+    pub fn new(
+        state_path: PathBuf,
+        context: ContemplationOccurrenceContext,
+        basis: B,
+        inner: Inner,
+    ) -> Self {
+        Self {
+            method_ref: ResourceRef::parse(CONTEMPLATION_METHOD_REF)
+                .expect("CONTEMPLATION_METHOD_REF is a valid ResourceRef"),
+            state_path,
+            context,
+            basis,
+            inner,
+        }
+    }
+
+    fn stamp(
+        &self,
+        mut record: ContemplationOccurrenceRecord,
+        request: &RoutineRunRequest,
+        digest: &str,
+        cursor: u64,
+        result: &str,
+    ) -> ContemplationOccurrenceRecord {
+        record.schema = CONTEMPLATION_OCCURRENCE_STATE_SCHEMA.into();
+        record.method_ref = self.method_ref.to_string();
+        record.occurrence_ref = request.trigger_observation_ref.to_string();
+        record.source_basis_digest = digest.to_owned();
+        record.authority_ref = self.context.authority_ref.clone().unwrap_or_default();
+        record.eligible_body_ref = self.context.eligible_body_ref.clone().unwrap_or_default();
+        record.child_now_destination = self
+            .context
+            .child_now_destination
+            .clone()
+            .unwrap_or_default();
+        record.return_route = self.context.return_route.clone().unwrap_or_default();
+        record.last_change_cursor = cursor;
+        record.last_result = result.to_owned();
+        record.updated_at_unix_ms = occurrence_state_now_ms();
+        record
+    }
+}
+
+impl<B: ContemplationBasis, Inner: RoutineRunner> RoutineRunner
+    for ContemplationGatingRunner<B, Inner>
+{
+    fn run(&self, request: RoutineRunRequest) -> RoutineRunOutcome {
+        if request.method_ref != self.method_ref {
+            return self.inner.run(request);
+        }
+        let mut state = load_occurrence_state(&self.state_path);
+        let key = request.routine_ref.to_string();
+        let prior = state.records.get(&key).cloned();
+
+        let digest = match self.basis.current_digest() {
+            Ok(digest) => digest,
+            Err(error) => {
+                return RoutineRunOutcome {
+                    status: RunStatus::Failed,
+                    detail: format!(
+                        "contemplation revalidation could not read the field basis digest: {error}"
+                    ),
+                }
+            }
+        };
+        let cursor = match self.basis.current_change_cursor() {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                return RoutineRunOutcome {
+                    status: RunStatus::Failed,
+                    detail: format!(
+                    "contemplation revalidation could not read the change-stream cursor: {error}"
+                ),
+                }
+            }
+        };
+
+        let basis_unchanged = prior
+            .as_ref()
+            .is_some_and(|record| record.source_basis_digest == digest);
+        let no_new_change = prior
+            .as_ref()
+            .is_some_and(|record| cursor <= record.last_change_cursor);
+        if basis_unchanged && no_new_change {
+            let record = self.stamp(
+                prior.unwrap_or_default(),
+                &request,
+                &digest,
+                cursor,
+                "no-op",
+            );
+            let receipt = json!({
+                "schema": CONTEMPLATION_OCCURRENCE_STATE_SCHEMA,
+                "result": "no-op",
+                "reason": "field basis digest unchanged since the last occurrence and no new participant \
+                           change-stream entry; no model call made",
+                "routine_ref": key,
+                "record": record,
+            });
+            state.records.insert(key, record);
+            let _ = store_occurrence_state(&self.state_path, &state);
+            return RoutineRunOutcome {
+                status: RunStatus::Completed,
+                detail: receipt.to_string(),
+            };
+        }
+
+        let outcome = self.inner.run(request.clone());
+        // Only a successfully completed contemplation advances the retained
+        // basis: a failed attempt must be retried at the next occurrence
+        // rather than being silently gated away by a digest it never acted on.
+        if outcome.status == RunStatus::Completed {
+            let record = self.stamp(
+                prior.unwrap_or_default(),
+                &request,
+                &digest,
+                cursor,
+                "contemplated",
+            );
+            state.records.insert(key, record);
+            let _ = store_occurrence_state(&self.state_path, &state);
+        }
+        outcome
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1346,5 +1592,223 @@ mod tests {
         assert_eq!(request.mcp_servers.len(), 1);
         assert_eq!(request.mcp_servers[0]["name"], "bimba");
         assert_eq!(request.cwd, "/tmp/run-ground");
+    }
+
+    // -- contemplation revalidation gate ------------------------------------
+
+    fn r(s: &str) -> ResourceRef {
+        ResourceRef::parse(s).unwrap()
+    }
+
+    #[derive(Clone, Default)]
+    struct CountingRunner {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl RoutineRunner for CountingRunner {
+        fn run(&self, _request: RoutineRunRequest) -> RoutineRunOutcome {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            RoutineRunOutcome {
+                status: RunStatus::Completed,
+                detail: "contemplated".into(),
+            }
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FailingRunner;
+    impl RoutineRunner for FailingRunner {
+        fn run(&self, _request: RoutineRunRequest) -> RoutineRunOutcome {
+            RoutineRunOutcome {
+                status: RunStatus::Failed,
+                detail: "fixture contemplation failure".into(),
+            }
+        }
+    }
+
+    struct FixtureBasis {
+        digest: std::cell::RefCell<String>,
+        cursor: std::cell::RefCell<u64>,
+    }
+    impl ContemplationBasis for FixtureBasis {
+        fn current_digest(&self) -> Result<String> {
+            Ok(self.digest.borrow().clone())
+        }
+        fn current_change_cursor(&self) -> Result<u64> {
+            Ok(*self.cursor.borrow())
+        }
+    }
+
+    fn contemplation_request(routine_ref: &str, occurrence: &str) -> RoutineRunRequest {
+        RoutineRunRequest {
+            routine_ref: r(routine_ref),
+            invocation_ref: r(&format!("routine-invocation/{occurrence}")),
+            trigger_observation_ref: r(&format!("trigger-observation/{occurrence}")),
+            method_ref: r(CONTEMPLATION_METHOD_REF),
+            method_revision: SourceRevision::parse("method-rev-1").unwrap(),
+            prompt: "contemplate now".into(),
+            observation_payload: None,
+            // Contemplation is an encounter (model) Routine, never a native body.
+            native: None,
+            authorised_actions: Vec::new(),
+        }
+    }
+
+    /// "midnight with no change → zero Jev calls": once a first occurrence
+    /// has contemplated and recorded its basis, a later occurrence over an
+    /// unchanged field basis with no new participant change-stream entry
+    /// emits a no-op receipt and never calls the inner (Jev-calling) runner.
+    #[test]
+    fn unchanged_basis_and_no_new_change_makes_zero_further_model_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let basis = FixtureBasis {
+            digest: std::cell::RefCell::new("digest-1".into()),
+            cursor: std::cell::RefCell::new(0),
+        };
+        let counter = CountingRunner::default();
+        let gate = ContemplationGatingRunner::new(
+            dir.path().join("contemplation-occurrences.json"),
+            ContemplationOccurrenceContext::default(),
+            basis,
+            counter.clone(),
+        );
+
+        // First-ever occurrence for this Routine: nothing recorded yet, so
+        // this is treated as a real change and contemplates once.
+        let first = gate.run(contemplation_request(
+            "routine:daily-contemplation",
+            "midnight-1",
+        ));
+        assert_eq!(first.status, RunStatus::Completed);
+        assert_eq!(counter.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // "midnight with no change": same digest, same change cursor.
+        let second = gate.run(contemplation_request(
+            "routine:daily-contemplation",
+            "midnight-2",
+        ));
+        assert_eq!(second.status, RunStatus::Completed);
+        assert!(second.detail.contains("no-op"), "detail: {}", second.detail);
+        assert_eq!(
+            counter.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an unchanged basis with no new change must make zero additional model calls"
+        );
+    }
+
+    /// "source changed → one Jev call": a field basis digest change between
+    /// occurrences triggers exactly one further call into the inner runner.
+    #[test]
+    fn changed_basis_triggers_exactly_one_model_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let basis = FixtureBasis {
+            digest: std::cell::RefCell::new("digest-1".into()),
+            cursor: std::cell::RefCell::new(0),
+        };
+        let counter = CountingRunner::default();
+        let gate = ContemplationGatingRunner::new(
+            dir.path().join("contemplation-occurrences.json"),
+            ContemplationOccurrenceContext::default(),
+            basis,
+            counter.clone(),
+        );
+
+        gate.run(contemplation_request(
+            "routine:daily-contemplation",
+            "day-1",
+        ));
+        assert_eq!(counter.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        *gate.basis.digest.borrow_mut() = "digest-2".into();
+        let outcome = gate.run(contemplation_request(
+            "routine:daily-contemplation",
+            "day-2",
+        ));
+        assert_eq!(outcome.status, RunStatus::Completed);
+        assert_eq!(
+            counter.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a changed field basis must trigger exactly one further model call"
+        );
+    }
+
+    /// A new participant change-stream entry (dependency Return arrived)
+    /// contemplates even when the field basis digest itself is unchanged.
+    #[test]
+    fn a_new_change_stream_entry_contemplates_even_with_unchanged_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let basis = FixtureBasis {
+            digest: std::cell::RefCell::new("digest-1".into()),
+            cursor: std::cell::RefCell::new(0),
+        };
+        let counter = CountingRunner::default();
+        let gate = ContemplationGatingRunner::new(
+            dir.path().join("contemplation-occurrences.json"),
+            ContemplationOccurrenceContext::default(),
+            basis,
+            counter.clone(),
+        );
+
+        gate.run(contemplation_request("routine:daily-contemplation", "d1"));
+        assert_eq!(counter.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        *gate.basis.cursor.borrow_mut() = 7;
+        gate.run(contemplation_request("routine:daily-contemplation", "d2"));
+        assert_eq!(
+            counter.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a new change-stream cursor must contemplate even with an unchanged digest"
+        );
+    }
+
+    /// A Routine whose Method is not the contemplation Method passes straight
+    /// through the gate: the gate must never suppress ordinary Routine work.
+    #[test]
+    fn a_non_contemplation_method_bypasses_the_gate_entirely() {
+        let dir = tempfile::tempdir().unwrap();
+        let basis = FixtureBasis {
+            digest: std::cell::RefCell::new("digest-1".into()),
+            cursor: std::cell::RefCell::new(0),
+        };
+        let counter = CountingRunner::default();
+        let gate = ContemplationGatingRunner::new(
+            dir.path().join("contemplation-occurrences.json"),
+            ContemplationOccurrenceContext::default(),
+            basis,
+            counter.clone(),
+        );
+        let mut request = contemplation_request("routine:other", "o1");
+        request.method_ref = r("method:not-contemplation");
+        gate.run(request.clone());
+        gate.run(request);
+        assert_eq!(
+            counter.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a non-contemplation Method must never be gated"
+        );
+    }
+
+    /// A failed contemplation must not advance the retained basis: the next
+    /// occurrence over the same unchanged digest must retry, not gate away.
+    #[test]
+    fn a_failed_contemplation_is_retried_at_the_next_occurrence() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("contemplation-occurrences.json");
+        let basis = FixtureBasis {
+            digest: std::cell::RefCell::new("digest-1".into()),
+            cursor: std::cell::RefCell::new(0),
+        };
+        let gate = ContemplationGatingRunner::new(
+            state_path,
+            ContemplationOccurrenceContext::default(),
+            basis,
+            FailingRunner,
+        );
+        let first = gate.run(contemplation_request("routine:daily-contemplation", "f1"));
+        assert_eq!(first.status, RunStatus::Failed);
+        // Same unchanged digest again: since the prior attempt failed, this
+        // must still be treated as needing contemplation, not a no-op.
+        let second = gate.run(contemplation_request("routine:daily-contemplation", "f2"));
+        assert_eq!(second.status, RunStatus::Failed);
+        assert_ne!(second.detail, "no-op");
     }
 }

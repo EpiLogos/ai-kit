@@ -22,6 +22,8 @@ mod cmux_config;
 pub mod collate;
 pub mod communique_turn;
 pub mod config_plane;
+pub mod contemplation_field;
+pub mod contemplation_intel;
 pub mod continuity_disclosure;
 pub mod control_ground;
 pub mod credential;
