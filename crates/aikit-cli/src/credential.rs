@@ -49,6 +49,10 @@ pub struct CredentialRequest {
     /// Declare the material's location instead of binding material. The ref
     /// is stored as-is; a resolver materialises from it at use time.
     pub declared_ref: Option<SecretRef>,
+    /// Read the material from standard input (one line) instead of a
+    /// terminal prompt — the path for a caller that hands the key over a
+    /// pipe. Never implied; refused when stdin is a terminal.
+    pub stdin: bool,
 }
 
 pub fn now_unix_seconds() -> u64 {
@@ -144,6 +148,13 @@ pub fn inspect(home: &AikitHome, request: &CredentialRequest) -> Result<Credenti
 pub fn setup(home: &AikitHome, request: &CredentialRequest) -> Result<CredentialSetupOutcome> {
     if let Some(secret_ref) = request.declared_ref.clone() {
         return declare_ref(home, request, secret_ref);
+    }
+    if request.stdin {
+        let secret = read_piped_secret(
+            io::stdin().lock(),
+            io::IsTerminal::is_terminal(&io::stdin()),
+        )?;
+        return bind_native_material(home, request, secret);
     }
     let inspection = inspect(home, request)?;
     if inspection.resolution.selected() {
@@ -297,6 +308,31 @@ pub fn rotate(home: &AikitHome, request: &CredentialRequest) -> Result<Credentia
             true,
             now_unix_seconds(),
         )
+    } else if request.stdin {
+        let secret = read_piped_secret(
+            io::stdin().lock(),
+            io::IsTerminal::is_terminal(&io::stdin()),
+        )?;
+        let native = NativeSecureStoreProvider::new();
+        if native.status(&request.credential) == NativeSecureStoreStatus::Unavailable {
+            return Err(AikitError::new(
+                "credential.native_store_unavailable",
+                "the OS secure store is unavailable; rotate by declaring a ref (--ref) instead",
+            ));
+        }
+        let mut fresh = native.bind(&request.credential, &secret)?;
+        fresh.declared_secret_ref = None;
+        if previous
+            .as_ref()
+            .is_some_and(|previous| previous.declared_secret_ref.is_some())
+        {
+            notes.push(
+                "the previous binding declared an external store location; it has been \
+                 replaced by the OS secure store binding"
+                    .into(),
+            );
+        }
+        fresh.with_lifecycle(previous.as_ref(), true, now_unix_seconds())
     } else if request.from_env {
         let env_var = request.env_var.as_ref().ok_or_else(|| {
             AikitError::new(
@@ -817,6 +853,23 @@ fn bind_native(home: &AikitHome, request: &CredentialRequest) -> Result<Credenti
         ));
     }
     let secret = read_secret("Secret: ")?;
+    bind_native_material(home, request, secret)
+}
+
+/// Bind material already in hand into the OS secure store (the prompt and
+/// the `--stdin` pipe share this one path).
+fn bind_native_material(
+    home: &AikitHome,
+    request: &CredentialRequest,
+    secret: SecretValue,
+) -> Result<CredentialSetupOutcome> {
+    let native = NativeSecureStoreProvider::new();
+    if native.status(&request.credential) == NativeSecureStoreStatus::Unavailable {
+        return Err(AikitError::new(
+            "credential.native_store_unavailable",
+            "the OS secure store is unavailable; declare where the key lives (--ref) instead",
+        ));
+    }
     let binding = native.bind(&request.credential, &secret)?;
     CredentialBindingStore::new(home).save(&binding)?;
     let rebound_native = NativeSecureStoreProvider::with_binding(Some(&binding));
@@ -984,11 +1037,48 @@ fn read_secret(label: &str) -> Result<SecretValue> {
     SecretValue::new(secret)
 }
 
+/// Read one line of key material from a pipe. A terminal is refused (the
+/// prompt without `--stdin` hides typing; a pipe never echoes); an empty
+/// line is refused; the trailing newline is not part of the key.
+fn read_piped_secret(mut reader: impl io::BufRead, is_terminal: bool) -> Result<SecretValue> {
+    if is_terminal {
+        return Err(AikitError::new(
+            "credential.stdin_is_terminal",
+            "--stdin reads a key from a pipe; at a terminal, run setup without --stdin to be prompted",
+        ));
+    }
+    let mut line = String::new();
+    reader.read_line(&mut line).map_err(io_error)?;
+    let material = line.trim_end_matches(['\n', '\r']).trim().to_string();
+    if material.is_empty() {
+        return Err(AikitError::new(
+            "credential.stdin_empty",
+            "no key arrived on standard input; nothing was bound",
+        ));
+    }
+    SecretValue::new(material)
+}
+
 fn io_error(error: io::Error) -> AikitError {
     AikitError::new(
         "credential.io_failed",
         format!("credential prompt I/O failed: {error}"),
     )
+}
+
+#[cfg(test)]
+mod stdin_tests {
+    use super::*;
+
+    #[test]
+    fn a_piped_key_is_one_trimmed_line_and_never_a_terminal() {
+        let secret = read_piped_secret(io::Cursor::new(b"sk-pipe-dummy-1234\n"), false).unwrap();
+        assert_eq!(secret.expose(), "sk-pipe-dummy-1234");
+        let refused = read_piped_secret(io::Cursor::new(b"sk-x\n"), true).unwrap_err();
+        assert_eq!(refused.code(), "credential.stdin_is_terminal");
+        let empty = read_piped_secret(io::Cursor::new(b"\n"), false).unwrap_err();
+        assert_eq!(empty.code(), "credential.stdin_empty");
+    }
 }
 
 #[cfg(test)]
@@ -1012,6 +1102,7 @@ mod tests {
             from_env: false,
             headless: true,
             declared_ref: None,
+            stdin: false,
         };
         let resolution = resolve_registered_credential(
             requirement(&request).unwrap(),

@@ -1835,8 +1835,14 @@ pub struct CredentialSetupArgs {
     pub headless: bool,
     /// Declare where the material already lives (op://, varlock://, pass://,
     /// keychain://) instead of binding material. No secret is read or stored.
-    #[arg(long = "ref", value_name = "SECRET_REF")]
+    #[arg(long = "ref", value_name = "SECRET_REF", conflicts_with_all = ["stdin", "from_env"])]
     pub declared_ref: Option<String>,
+    /// Read the key from standard input (one line) and bind it into the OS
+    /// secure store — for a caller that hands material over a pipe (the
+    /// desktop's write-only key field). Refused when stdin is a terminal;
+    /// the material never enters argv, the environment or any output.
+    #[arg(long, conflicts_with = "from_env")]
+    pub stdin: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1855,8 +1861,12 @@ pub struct CredentialRotateArgs {
     #[arg(long, requires = "env_var")]
     pub from_env: bool,
     /// Declare a new external location for the material (op://, varlock://…).
-    #[arg(long = "ref", value_name = "SECRET_REF")]
+    #[arg(long = "ref", value_name = "SECRET_REF", conflicts_with_all = ["stdin", "from_env"])]
     pub declared_ref: Option<String>,
+    /// Read fresh material from standard input (one line) into the OS secure
+    /// store. Refused when stdin is a terminal.
+    #[arg(long, conflicts_with = "from_env")]
+    pub stdin: bool,
 }
 
 #[derive(Debug, Args)]
