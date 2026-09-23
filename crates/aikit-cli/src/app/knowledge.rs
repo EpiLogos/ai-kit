@@ -1284,7 +1284,11 @@ impl Service {
             code.push(provider);
         }
         for (reason, projects) in gitnexus_unavailable {
-            absences.push(format!(
+            // A status note, not a per-query absence: capability state is the
+            // same for every query, and a scoped reply must keep another
+            // project's disclosures out (the discipline authored_pending and
+            // the anchor lines already follow). Status names every project.
+            status_notes.push(format!(
                 "GitNexus unavailable for {}: {reason}",
                 projects.join(", ")
             ));

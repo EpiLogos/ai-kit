@@ -711,6 +711,13 @@ pub fn discover_bkmr_stores(config_dir: &Path) -> Vec<BkmrStore> {
             if name.is_empty() {
                 continue;
             }
+            // bkmr's own backup artefacts (`<name>_backup_<date>.db`, sometimes
+            // nested) are never stores: they carry pre-migration schemas, so
+            // opening one teaches bkmr to migrate it and mint yet another
+            // backup — a feedback loop with the owner's human space.
+            if is_backup_store_name(&name) {
+                continue;
+            }
             let resolved = path.canonicalize().unwrap_or_else(|_| path.clone());
             if resolved.is_file() && seen.insert(resolved) {
                 stores.push(BkmrStore { name, path });
@@ -718,6 +725,11 @@ pub fn discover_bkmr_stores(config_dir: &Path) -> Vec<BkmrStore> {
         }
     }
     stores
+}
+
+/// Whether a store file stem names one of bkmr's automatic backups.
+fn is_backup_store_name(name: &str) -> bool {
+    name.contains("_backup_") || name.ends_with("-backup") || name.contains(".backup")
 }
 
 /// FTS5-safe query form: every whitespace-separated term is wrapped in double
@@ -734,6 +746,14 @@ pub fn fts5_quote_query(query: &str) -> String {
         .join(" ")
 }
 
+/// The first line of an error message, bounded — bkmr failure output can run
+/// to thousands of pool-diagnostic lines, and the disclosure only needs the
+/// cause.
+fn first_line(message: &str) -> String {
+    let line = message.lines().next().unwrap_or_default();
+    line.chars().take(200).collect()
+}
+
 /// Read-only search over the configured bkmr stores. Canonical SourceRefs
 /// ride the bookmark description (`aikit-source-ref:`) when a store carries
 /// them; personal bookmarks are minted refs in the pool's own namespace
@@ -744,6 +764,10 @@ pub struct BkmrStoreSearchProvider<R> {
     stores: Vec<BkmrStore>,
     provider: ProviderRef,
     cli: BkmrCliSurface,
+    /// Stores that failed this session's searches, named with a bounded
+    /// reason. One broken store must not take the whole pool's answers down,
+    /// and a skipped store must not stay silent: status carries the record.
+    skipped: std::sync::Mutex<Vec<String>>,
 }
 
 impl<R: CommandRunner> BkmrStoreSearchProvider<R> {
@@ -756,6 +780,7 @@ impl<R: CommandRunner> BkmrStoreSearchProvider<R> {
             stores,
             provider: ProviderRef::parse(BKMR_STORES_PROVIDER_REF).expect("static ref"),
             cli,
+            skipped: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -1006,7 +1031,7 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrStoreSearchProvider<R> {
         let required: BTreeSet<&str> = tags.iter().map(String::as_str).collect();
         let mut merged: Vec<SourceHit> = Vec::new();
         for store in &self.stores {
-            let stdout = self.run(
+            let stdout = match self.run(
                 &[
                     "--db".into(),
                     store.path.display().to_string(),
@@ -1017,8 +1042,31 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrStoreSearchProvider<R> {
                     "--no-color".into(),
                 ],
                 "knowledge.bkmr_stores_search_failed",
-            )?;
-            let records = json_records(&stdout)?;
+            ) {
+                Ok(stdout) => stdout,
+                Err(error) => {
+                    // One broken store (a locked database, a failed
+                    // migration) skips that store and is named in status;
+                    // the other stores still answer the query.
+                    let reason = first_line(error.message());
+                    self.skipped
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push(format!("{}: {reason}", store.name));
+                    continue;
+                }
+            };
+            let records = match json_records(&stdout) {
+                Ok(records) => records,
+                Err(error) => {
+                    let reason = first_line(error.message());
+                    self.skipped
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push(format!("{}: {reason}", store.name));
+                    continue;
+                }
+            };
             merged.extend(
                 records
                     .iter()
@@ -1048,13 +1096,24 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrStoreSearchProvider<R> {
             .iter()
             .map(|store| store.name.as_str())
             .collect();
+        let skipped = self
+            .skipped
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .join("; ");
         let detail = match self.surface_reason() {
             Some(reason) => format!("read-only store pool unavailable: {reason}"),
-            None => format!(
-                "read-only search over {} configured bkmr store(s): {}; no write ever reaches them",
-                self.stores.len(),
-                names.join(", ")
-            ),
+            None => {
+                let mut detail = format!(
+                    "read-only search over {} configured bkmr store(s): {}; no write ever reaches them",
+                    self.stores.len(),
+                    names.join(", ")
+                );
+                if !skipped.is_empty() {
+                    detail.push_str(&format!("; stores skipped this session: {skipped}"));
+                }
+                detail
+            }
         };
         SourceProviderStatus {
             provider: self.provider.clone(),
@@ -1264,6 +1323,53 @@ mod tests {
         )
         .unwrap();
         assert!(discover_bkmr_stores(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn discovery_skips_bkmr_backup_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::write(projects.join("books_backup_20260923.db"), b"db").unwrap();
+        std::fs::write(
+            projects.join("books_backup_20260923_backup_20260923.db"),
+            b"db",
+        )
+        .unwrap();
+        std::fs::write(projects.join("books.db"), b"db").unwrap();
+        let stores = discover_bkmr_stores(dir.path());
+        let names: Vec<&str> = stores.iter().map(|store| store.name.as_str()).collect();
+        assert_eq!(names, vec!["books"], "backups are never stores: {names:?}");
+    }
+
+    #[test]
+    fn a_broken_store_is_skipped_and_named_while_the_others_answer() {
+        let runner = store_cli_scripted()
+            .failing("/stores/broken.db", 64, "disk I/O error\nr2d2: line2\n")
+            .on(
+                "/stores/kept.db",
+                store_record_json(7, "Kept", "reachable content").as_str(),
+            );
+        let provider = BkmrStoreSearchProvider::connect(
+            runner,
+            "bkmr",
+            vec![
+                store("broken", Path::new("/stores/broken.db")),
+                store("kept", Path::new("/stores/kept.db")),
+            ],
+        );
+        let hits = provider
+            .search("reachable", SourceSearchMode::Fulltext, &[], 10)
+            .unwrap();
+        assert_eq!(hits.len(), 1, "the healthy store still answers: {hits:?}");
+        let status = provider.status();
+        assert!(
+            status
+                .detail
+                .contains("stores skipped this session: broken"),
+            "the skipped store is named: {}",
+            status.detail
+        );
     }
 
     #[test]
