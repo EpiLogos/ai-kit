@@ -336,6 +336,67 @@ capabilities = { ordered-streaming = true, cancellation = true }
 "#,
     ),
     (
+        // Epi-Logos Prime-QL roster repair (2026-09-23). prime-agent 0.9.4 is
+        // an installed harness whose own model catalogue names exactly five
+        // providers on the r14 detection machine — deepseek, kimi-coding,
+        // minimax, openrouter, zai (`prime-agent model list`, 2026-09-23) —
+        // and Actuation catalog r14 declares that dispatch binding from live
+        // observation. Without an embedded profile here, candidates served
+        // through a harness/prime route kept the base candidate's unfilled
+        // harness gate and the roster refused every child selection.
+        "prime",
+        r#"
+schema = "aikit.harness-profile/v1"
+slug = "prime"
+edition = "cli"
+
+[presence]
+executables = ["prime-agent"]
+config-dir = "~/.prime/agent"
+
+[skills]
+posture = "brokered"
+# The verified skill surface is the per-launch `--skill <capsule>` flag
+# (prime-agent --help 0.9.4). Skill-discovery directories are unverified on
+# this install, so no observe path is declared: the layer brokers instead of
+# claiming a projection target it has not read.
+
+[guidance]
+posture = "brokered"
+# No guidance file surface is verified for prime 0.9.4 on this install; the
+# layer brokers rather than inventing a path.
+
+[models]
+posture = "observed"
+dispatch = "provider-plural"
+roster-note = "Provider and model chosen per invocation (--provider/--model) from prime's own catalogue; encounter model policy pins the native selector."
+compatibility-note = "Provider-plural, so the profile's gate is open: candidates served through a harness/prime route are not further provider-limited here, because the route's own reachability (Actuation catalog r14 prime capability) already constrains them to the five providers prime's catalogue discloses."
+argv-selectors = { provider = "--provider", model = "--model" }
+
+[models.key-delivery]
+env-var = [
+  { provider-ref = "provider:deepseek", env-var = "DEEPSEEK_API_KEY" },
+  { provider-ref = "provider:zai", env-var = "ZAI_API_KEY" },
+  { provider-ref = "provider:openrouter", env-var = "OPENROUTER_API_KEY" },
+]
+own-login = [
+  { provider-ref = "provider:kimi-coding", note = "prime resolves the Moonshot coding-plan key (KIMI_API_KEY/MOONSHOT_API_KEY) through its own auth surface (~/.prime/agent/auth.json) or its process environment" },
+  { provider-ref = "provider:minimax", note = "prime resolves the MiniMax key (MINIMAX_API_KEY) through its own auth surface (~/.prime/agent/auth.json) or its process environment" },
+]
+note = "prime keeps provider auth in its own store (~/.prime/agent/auth.json) and reads provider env keys from its process environment; the env-var names were read from the installed 0.9.4 distribution's provider clients (2026-09-23). A selected-model dispatch delivers its policy-named credential explicitly."
+
+[sessions]
+posture = "observed"
+# The wire contract is pinned to PrimeIntellect-ai/prime-agent
+# f771dfcedd684d1afff84ca2c6fa95c7a21efbc2: one launched process carries one
+# native session, so only attach is declared; create/load/resume are not.
+protocol = "rpc"
+open-modes = ["attach"]
+connect = { argv = ["prime-agent", "--mode", "rpc"] }
+capabilities = { ordered-streaming = true, cancellation = true }
+"#,
+    ),
+    (
         "gemini",
         r#"
 schema = "aikit.harness-profile/v1"
@@ -1583,6 +1644,7 @@ mod tests {
         // Only a harness whose own command surface was observed reading
         // per-invocation flags may declare them. Today that is pi (its
         // `--help` census and the encounter selected-model path both name
+        // --provider/--model) and prime (prime-agent --help 0.9.4 names
         // --provider/--model); every other provider-plural profile leaves the
         // field absent rather than invent a selector.
         for (slug, profile) in all() {
@@ -1591,7 +1653,7 @@ mod tests {
             };
             assert_eq!(
                 models.argv_selectors.is_some(),
-                slug == "pi",
+                matches!(slug, "pi" | "prime"),
                 "{slug}: argv selectors must be declared exactly where observed"
             );
         }
@@ -1603,6 +1665,16 @@ mod tests {
             .argv_selectors
             .as_ref()
             .expect("pi observed --provider/--model");
+        assert_eq!(selectors.provider, "--provider");
+        assert_eq!(selectors.model, "--model");
+        let prime = for_slug("prime").unwrap();
+        let selectors = prime
+            .models
+            .as_ref()
+            .unwrap()
+            .argv_selectors
+            .as_ref()
+            .expect("prime observed --provider/--model");
         assert_eq!(selectors.provider, "--provider");
         assert_eq!(selectors.model, "--model");
     }

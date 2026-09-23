@@ -970,7 +970,11 @@ impl Service {
                         bindings
                             .into_iter()
                             .filter(|binding| !binding.revoked)
-                            .map(|binding| binding.credential_ref.as_str().to_string()),
+                            .map(|binding| {
+                                aikit_adapters::actuation_model_routes::qualified_credential_ref(
+                                    binding.credential_ref.as_str(),
+                                )
+                            }),
                     )
                 }
                 Err(error) => {
@@ -3325,7 +3329,11 @@ impl PaletteBackend for Service {
                 aikit_adapters::actuation_model_routes::CredentialEvidence::from_binding_refs(
                     list.iter()
                         .filter(|binding| !binding.revoked)
-                        .map(|binding| binding.credential_ref.as_str().to_string()),
+                        .map(|binding| {
+                            aikit_adapters::actuation_model_routes::qualified_credential_ref(
+                                binding.credential_ref.as_str(),
+                            )
+                        }),
                 ),
                 None,
             ),

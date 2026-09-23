@@ -191,6 +191,20 @@ impl CredentialEvidence {
     }
 }
 
+/// Qualify one stored credential-binding ref to the `credential:` spelling
+/// the credential evidence map parses. The binding store saves bare
+/// credential names ("openrouter") while the evidence map's vendor law reads
+/// qualified refs ("credential:openrouter/research"); a join that feeds the
+/// bare spelling straight in silently treats every stored binding as absent
+/// and every observed route as keyless.
+pub fn qualified_credential_ref(stored: &str) -> String {
+    if stored.starts_with("credential:") {
+        stored.to_owned()
+    } else {
+        format!("credential:{stored}")
+    }
+}
+
 /// What the join yielded.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelRouteJoin {

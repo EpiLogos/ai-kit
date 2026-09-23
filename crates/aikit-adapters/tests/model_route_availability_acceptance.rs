@@ -612,6 +612,43 @@ fn credential_evidence_records_a_binding_and_never_a_secret() {
     assert_eq!(evidence.binding_for(&provider("provider:deepseek")), None);
 }
 
+#[test]
+fn credential_evidence_reads_the_binding_store_bare_ref_spelling() {
+    // The credential binding store persists the bare credential name (for
+    // example "openrouter"), while the evidence map's vendor law reads the
+    // qualified "credential:<vendor>" form. Callers qualify stored refs
+    // through `qualified_credential_ref` before joining: a join fed the bare
+    // spelling silently treats every stored binding as absent and every
+    // observed route as keyless.
+    let stored = ["openrouter", "deepseek"];
+    let evidence = CredentialEvidence::from_binding_refs(
+        stored
+            .iter()
+            .map(|r| aikit_adapters::actuation_model_routes::qualified_credential_ref(r))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        evidence.providers(),
+        ["provider:deepseek", "provider:openrouter"]
+    );
+    assert_eq!(
+        evidence.binding_for(&provider("provider:openrouter")),
+        Some("credential:openrouter")
+    );
+    assert_eq!(
+        evidence.binding_for(&provider("provider:zai")),
+        None,
+        "a provider with no binding stays keyless; nothing is inferred from a neighbour"
+    );
+    // An already-qualified ref passes through unchanged.
+    assert_eq!(
+        aikit_adapters::actuation_model_routes::qualified_credential_ref(
+            "credential:openai/research"
+        ),
+        "credential:openai/research"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // harness workability evidence joins Model identities
 // ---------------------------------------------------------------------------
