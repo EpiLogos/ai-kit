@@ -11,7 +11,7 @@ use aikit_adapters::gitnexus::GitNexusCodeIndexProvider;
 use aikit_adapters::now_field::{NowFieldScope, NowFieldSourcePoolProvider};
 use aikit_adapters::runner::SystemRunner;
 use aikit_adapters::work_repos::{
-    discover_work_roster, WorkRepoProject, WorkReposSourcePoolProvider,
+    discover_work_projects, WorkRepoProject, WorkReposSourcePoolProvider,
 };
 use aikit_core::knowledge::{KnowledgeContextPack, KnowledgeRelationView, KnowledgeRoute};
 use aikit_core::knowledge_code::CodeIndexProvider;
@@ -56,16 +56,16 @@ pub(super) struct KnowledgeRuntime {
     central: Option<CentralFileMapProvider<SystemRunner>>,
     now_field: Option<NowFieldSourcePoolProvider<SystemRunner>>,
     now_field_roster: Vec<SourceMaterial>,
-    /// The live Work-repos pool, one repo per declared project. Registered
-    /// only when a roster exists, so a non-Central context keeps its old
-    /// shape.
+    /// The live Work-repos pool, one repo per discovered project. Registered
+    /// only when projects were discovered, so a non-Central context keeps its
+    /// old shape.
     work_repos: Option<WorkReposSourcePoolProvider<SystemRunner>>,
     /// `source:project:<project_id>:` prefix → `Work/<name>` display, for
     /// scoped queries to keep another project's repo hits out of their
     /// results.
     work_repo_scopes: BTreeMap<String, String>,
     central_expected: bool,
-    /// One code-index provider per declared project; unavailable ones are
+    /// One code-index provider per discovered project; unavailable ones are
     /// kept so the absence is per project, never a global "provider absent".
     code: Vec<GitNexusCodeIndexProvider<SystemRunner>>,
     project_map: ProjectMap,
@@ -989,16 +989,16 @@ impl Service {
                 folder_subjects.objects,
             );
 
-            // Project roster from declarations, not env (Design B, A-4): the
+            // Projects from declarations, not env (Design B, A-4): the
             // manifests every Work folder already carries. A folder whose
             // manifest cannot be honoured is one named absence, never a
             // silent skip.
-            for entry in discover_work_roster(central_root) {
+            for entry in discover_work_projects(central_root) {
                 match entry {
-                    aikit_adapters::work_repos::RosterEntry::Project(project) => {
+                    aikit_adapters::work_repos::WorkProjectEntry::Project(project) => {
                         work_projects.push(project);
                     }
-                    aikit_adapters::work_repos::RosterEntry::Absence { name, reason } => {
+                    aikit_adapters::work_repos::WorkProjectEntry::Absence { name, reason } => {
                         absences.push(format!("Work/{name} {reason}"));
                     }
                 }
@@ -1039,19 +1039,16 @@ impl Service {
             }
             if work_projects.is_empty() {
                 status_notes.push(
-                    "Work roster is empty: no Work/*/ProjectCentral/project.json manifests were found"
+                    "Work projects: none — no Work/*/ProjectCentral/project.json manifests were found"
                         .into(),
                 );
             } else {
                 let names: Vec<&str> = work_projects.iter().map(|p| p.name.as_str()).collect();
                 status_notes.push(format!(
-                    "Work roster: {} project(s) from manifests: {}",
+                    "Projects: {} discovered from Work/*/ProjectCentral manifests: {}",
                     work_projects.len(),
                     names.join(", ")
                 ));
-                status_notes.push(
-                    "roster note: projects are the manifested Work folders; the roster composition ruling (manifests vs placement.json) stays with the owner".into(),
-                );
             }
         }
 
@@ -1097,9 +1094,9 @@ impl Service {
         } else {
             None
         };
-        // The live Work-repos pool (Design A): one repo per declared
-        // project, searched at query time. It exists only where a roster
-        // exists; the NOW-field/native providers keep their priority.
+        // The live Work-repos pool (Design A): one repo per discovered
+        // project, searched at query time. It exists only where projects
+        // were discovered; the NOW-field/native providers keep their priority.
         let work_repos = if work_projects.is_empty() {
             None
         } else {
@@ -1240,7 +1237,7 @@ impl Service {
         if let Some(provider) = &central {
             material.extend(provider.descriptors().iter().cloned());
         }
-        // GitNexus per declared project (Design C): the structural layer is
+        // GitNexus per discovered project (Design C): the structural layer is
         // capability-gated per project. Each provider joins the runtime even
         // when it cannot index, so the absence is per project — never a
         // global "provider absent"; unavailable projects share one grouped

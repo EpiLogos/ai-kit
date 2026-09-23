@@ -2,11 +2,11 @@
 //! at query time, so `aikit knowledge search` reaches repo code and docs the
 //! same way it reaches Control prose.
 //!
-//! The roster is read from the manifests every Work folder already carries —
-//! `Work/<name>/ProjectCentral/project.json` (`central.project/v1`, field
-//! `project_id`) — the same mechanical test ctrl's file map uses. A missing,
-//! unparseable, or invalid manifest is one named absence per project, never a
-//! silent skip; a double-prefixed `project_id` is rejected with a named
+//! Projects are discovered from the manifests every Work folder already
+//! carries — `Work/<name>/ProjectCentral/project.json` (`central.project/v1`,
+//! field `project_id`) — the same mechanical test ctrl's file map uses. A
+//! missing, unparseable, or invalid manifest is one named absence per project,
+//! never a silent skip; a double-prefixed `project_id` is rejected with a named
 //! absence until the register itself is fixed.
 //!
 //! Search runs at query time over the existing ripgrep searcher. No index is
@@ -62,7 +62,7 @@ pub const WORK_REPOS_TYPES: [&str; 14] = [
 /// discovery walk's ignore list, for repos without a gitignore of their own).
 const IGNORED_DIR_NAMES: [&str; 5] = [".git", "target", "node_modules", ".next", "dist"];
 
-/// One declared project on the runtime roster.
+/// One project discovered from the Work/ manifests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkRepoProject {
     /// The Work folder name (`Work/<name>`), used for display and scoping.
@@ -73,20 +73,20 @@ pub struct WorkRepoProject {
     pub root: PathBuf,
 }
 
-/// One roster outcome: a usable project, or a named absence for a folder that
-/// carries a manifest the roster cannot honour.
+/// One discovery outcome: a usable project, or a named absence for a folder
+/// that carries a manifest discovery cannot honour.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RosterEntry {
+pub enum WorkProjectEntry {
     Project(WorkRepoProject),
     Absence { name: String, reason: String },
 }
 
-/// Assemble the project roster from declarations, not environment: every
-/// `Work/*` folder carrying `ProjectCentral/project.json` is a candidate (the
-/// same mechanical test ctrl's file map uses), and each manifest is parsed and
+/// Discover the projects from declarations, not environment: every `Work/*`
+/// folder carrying `ProjectCentral/project.json` is a candidate (the same
+/// mechanical test ctrl's file map uses), and each manifest is parsed and
 /// validated on its own terms. Infallible: a folder that cannot be honoured
-/// yields one [`RosterEntry::Absence`] naming it.
-pub fn discover_work_roster(central_root: &Path) -> Vec<RosterEntry> {
+/// yields one [`WorkProjectEntry::Absence`] naming it.
+pub fn discover_work_projects(central_root: &Path) -> Vec<WorkProjectEntry> {
     let mut entries = Vec::new();
     let Ok(projects) = std::fs::read_dir(central_root.join("Work")) else {
         return entries;
@@ -104,14 +104,14 @@ pub fn discover_work_roster(central_root: &Path) -> Vec<RosterEntry> {
         .collect();
     candidates.sort_by(|left, right| left.0.cmp(&right.0));
     for (name, root) in candidates {
-        entries.push(read_roster_entry(&name, &root));
+        entries.push(read_work_project_entry(&name, &root));
     }
     entries
 }
 
-fn read_roster_entry(name: &str, root: &Path) -> RosterEntry {
+fn read_work_project_entry(name: &str, root: &Path) -> WorkProjectEntry {
     let manifest_path = root.join("ProjectCentral/project.json");
-    let invalid = |reason: String| RosterEntry::Absence {
+    let invalid = |reason: String| WorkProjectEntry::Absence {
         name: name.to_owned(),
         reason,
     };
@@ -149,14 +149,14 @@ fn read_roster_entry(name: &str, root: &Path) -> RosterEntry {
         return invalid("register invalid: project_id is empty".to_owned());
     }
     // A double-prefixed id (`project:quaternal-logic`) would mint double-
-    // prefixed refs (`source:project:project:…`). The roster rejects it with
+    // prefixed refs (`source:project:project:…`). Discovery rejects it with
     // a named absence; the register itself is the place the fix belongs.
     if project_id.starts_with("project:") || project_id.contains("::") {
         return invalid(format!(
             "register invalid: project_id {project_id:?} is already namespaced; expected the bare project id"
         ));
     }
-    RosterEntry::Project(WorkRepoProject {
+    WorkProjectEntry::Project(WorkRepoProject {
         name: name.to_owned(),
         project_id,
         root: root.to_path_buf(),
@@ -265,9 +265,9 @@ pub struct WorkReposSourcePoolProvider<R> {
 }
 
 impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
-    /// Attach to the declared Work roster. The ripgrep probe happens here so
-    /// an unavailable binary is an attachment disclosure, not a mid-search
-    /// surprise.
+    /// Attach to the projects discovered from the Work/ manifests. The
+    /// ripgrep probe happens here so an unavailable binary is an attachment
+    /// disclosure, not a mid-search surprise.
     pub fn connect(
         runner: R,
         executable: impl Into<PathBuf>,
@@ -305,7 +305,7 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
 
     /// Parse `source:project:<project_id>:<relative>` back into its project
     /// and a safe project-relative path. Anything that escapes the project
-    /// root, or names a project off the roster, is refused.
+    /// root, or names a project discovery did not find, is refused.
     fn resolve_ref(&self, source: &SourceRef) -> Result<(&WorkRepoProject, PathBuf)> {
         let raw = source.as_str();
         let prefix = "source:project:";
@@ -324,7 +324,9 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
         let project = self.project_for(project_id).ok_or_else(|| {
             AikitError::new(
                 "work_repos.source_out_of_scope",
-                format!("{project_id:?} is not on this horizon's Work roster"),
+                format!(
+                    "{project_id:?} is not a project discovered from this world's Work/ manifests"
+                ),
             )
         })?;
         let relative = PathBuf::from(relative);
@@ -686,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn roster_reads_declared_manifests_and_names_every_failure() {
+    fn discovery_reads_declared_manifests_and_names_every_failure() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         write(
@@ -711,13 +713,13 @@ mod tests {
             &manifest("project:delta"),
         );
 
-        let entries = discover_work_roster(root);
+        let entries = discover_work_projects(root);
         let mut projects = Vec::new();
         let mut absences = Vec::new();
         for entry in entries {
             match entry {
-                RosterEntry::Project(project) => projects.push(project),
-                RosterEntry::Absence { name, reason } => absences.push((name, reason)),
+                WorkProjectEntry::Project(project) => projects.push(project),
+                WorkProjectEntry::Absence { name, reason } => absences.push((name, reason)),
             }
         }
         assert_eq!(projects.len(), 1, "{absences:?}");
@@ -756,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn roster_is_stable_and_sorted_by_folder_name() {
+    fn discovery_is_stable_and_sorted_by_folder_name() {
         let temp = tempfile::tempdir().unwrap();
         for name in ["zeta", "Alpha", "beta"] {
             write(
@@ -768,11 +770,11 @@ mod tests {
                 &manifest(name),
             );
         }
-        let names: Vec<String> = discover_work_roster(temp.path())
+        let names: Vec<String> = discover_work_projects(temp.path())
             .into_iter()
             .filter_map(|entry| match entry {
-                RosterEntry::Project(project) => Some(project.name),
-                RosterEntry::Absence { .. } => None,
+                WorkProjectEntry::Project(project) => Some(project.name),
+                WorkProjectEntry::Absence { .. } => None,
             })
             .collect();
         assert_eq!(names, vec!["Alpha", "beta", "zeta"]);
@@ -956,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn status_discloses_the_roster_and_version_drift() {
+    fn status_discloses_the_projects_and_version_drift() {
         let runner = ScriptedRunner::new().on("--version", "ripgrep 14.1.0");
         let provider =
             WorkReposSourcePoolProvider::connect(runner, "rg", vec![project(Path::new("/ground"))]);

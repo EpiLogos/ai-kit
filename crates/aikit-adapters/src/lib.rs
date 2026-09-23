@@ -213,7 +213,9 @@ pub use tool_sources::{
     plan_tools_projection, ToolServerRecord, ToolSourceEntry, ToolSourceError,
     ToolsProjectionOutcome, ToolsProjectionPlan, TOOLS_PROJECTION_OWNERSHIP,
 };
-pub use work_repos::{discover_work_roster, WorkRepoProject, WorkReposSourcePoolProvider};
+pub use work_repos::{
+    discover_work_projects, WorkProjectEntry, WorkRepoProject, WorkReposSourcePoolProvider,
+};
 pub use working_environment::{
     MuxSessionSpaceActivationDriver, MuxWorkingEnvironment, NativeBindingKind,
     ProviderNativeBinding, WorkingEnvironmentCapabilities, WorkingEnvironmentHealth,

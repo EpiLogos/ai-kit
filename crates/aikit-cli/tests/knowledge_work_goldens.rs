@@ -71,7 +71,7 @@ fn manifest(project_id: &str) -> String {
 /// A fixture Central: `Control/` + `Work/demo` with the routine code, the
 /// encounter/MCP source and the Workcell-style placement doc the acceptance
 /// queries target, plus a minimal second project so per-project lines are
-/// proven for more than one roster entry.
+/// proven for more than one discovered project.
 fn write_fixture_central(temp: &TempDir) {
     let root = temp.path();
     fs::create_dir_all(root.join("Control")).unwrap();
@@ -252,7 +252,7 @@ fn absences_stay_clean_and_anchor_state_is_loud_in_status_only() {
         "status carries no identity-gate absence: {:#?}",
         status.absences
     );
-    // Per-project anchor lines are loud in status for every roster project.
+    // Per-project anchor lines are loud in status for every discovered project.
     for project in ["demo", "other"] {
         assert!(
             status
@@ -272,13 +272,13 @@ fn absences_stay_clean_and_anchor_state_is_loud_in_status_only() {
         "the bkmr store pool is disclosed in status: {:#?}",
         status.notes
     );
-    // The Work roster itself is disclosed.
+    // The discovered projects themselves are disclosed.
     assert!(
         status
             .notes
             .iter()
-            .any(|note| note.starts_with("Work roster:")),
-        "the roster is disclosed in status: {:#?}",
+            .any(|note| note.starts_with("Projects: ")),
+        "the projects are disclosed in status: {:#?}",
         status.notes
     );
 }
@@ -359,8 +359,8 @@ fn the_three_acceptance_queries_hit_the_live_world() {
     // carry "automation/scheduler", not the plural forms of the fixture
     // query: the live pool is content-literal, so the parent spec's plural
     // query cannot reach these files by content — vocabulary gaps are
-    // GitNexus's structural layer, currently capability-blocked by the
-    // installed 1.4.7.
+    // GitNexus's structural layer, which joins where its binary passes
+    // capability discovery.
     let routine = service
         .knowledge_search("routine scheduler automation", 200)
         .unwrap();

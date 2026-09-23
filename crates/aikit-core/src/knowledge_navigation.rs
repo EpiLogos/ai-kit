@@ -663,7 +663,7 @@ impl<'a> KnowledgeApplication<'a> {
                         why_selected: "selected from the eligible project SourcePool".into(),
                     });
                 }
-                // Search can surface a source no attachment roster declared:
+                // Search can surface a source no attached source set declared:
                 // a live pool over a large owner ground cannot enumerate every
                 // file it might ever match. The SourcePoolProvider::read
                 // contract is the live owner read, so the owning pool is asked
