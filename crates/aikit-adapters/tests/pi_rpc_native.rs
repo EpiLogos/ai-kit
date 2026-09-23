@@ -149,3 +149,57 @@ fn native_pi_stream_interrupt_and_resident_identity_survive_view_handle_drop() {
     assert_eq!(completed_text(&lane).trim(), "OI_NATIVE_STILL_RESIDENT");
     host.shutdown().unwrap();
 }
+
+#[test]
+#[ignore = "requires OI_PI_BIN naming the installed Pi harness; read-only native model observation"]
+fn native_pi_advertises_one_current_model_with_its_real_name() {
+    let executable =
+        PathBuf::from(std::env::var_os("OI_PI_BIN").expect("OI_PI_BIN names installed Pi"));
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().to_string_lossy().into_owned();
+    let adapter = PiRpcConnectionAdapter::new(
+        ResourceRef::parse("connection/native-pi-model-name").unwrap(),
+        cwd.clone(),
+        vec!["Pi native get_state".into()],
+    );
+    let host = AgentSessionHost::launch(
+        adapter,
+        &[
+            executable.to_string_lossy().into_owned(),
+            "--mode".into(),
+            "rpc".into(),
+            "--no-session".into(),
+            "--no-tools".into(),
+            "--no-extensions".into(),
+        ],
+        Some(root.path()),
+        AgentSessionHostLimits::default(),
+    )
+    .unwrap();
+    host.initialize().unwrap();
+    let lane = host
+        .open_session(SessionOpenRequest {
+            mode: SessionOpenMode::Attach,
+            native_session_id: None,
+            cwd,
+            additional_directories: vec![],
+            mcp_servers: vec![],
+            agent_session: Some(ResourceRef::parse("agent-session/native-pi-model-name").unwrap()),
+        })
+        .unwrap();
+    let observation = lane
+        .binding()
+        .model_observation
+        .as_ref()
+        .expect("Pi discloses its configured model without a policy override");
+    assert_eq!(observation.available_models.len(), 1);
+    let model = &observation.available_models[0];
+    assert_eq!(model.model_id, observation.current_model_id);
+    assert!(!model.name.trim().is_empty());
+    assert_ne!(model.name, "harness");
+    assert_ne!(model.name, "Unnamed model");
+    println!(
+        "native Pi current model: {} ({})",
+        model.name, model.model_id
+    );
+}

@@ -93,3 +93,67 @@ fn a_selector_without_the_required_model_category_stays_read_only() {
             .model_selection
     );
 }
+
+#[test]
+fn native_selector_deduplicates_routes_without_merging_distinct_models() {
+    let mut adapter = opened(json!({"sessionId":"native-test","configOptions":[
+        {"id":"model","category":"model","type":"select","currentValue":"provider/a","options":[
+            {"value":"provider/a","name":"Model A"}, {"value":"provider/a","name":"Model A"},
+            {"value":"provider/b","name":"Model B"}
+        ]}
+    ]}));
+    let request = adapter
+        .set_session_model("native-test", "provider/b")
+        .unwrap();
+    let signals = adapter.ingest(json!({"jsonrpc":"2.0","id":request.payload["id"],"result":{"configOptions":[
+        {"id":"model","category":"model","type":"select","currentValue":"provider/b","options":[
+            {"value":"provider/a","name":"Model A"}, {"value":"provider/a","name":"Model A"},
+            {"value":"provider/b","name":"Model B"}
+        ]}
+    ]}})).unwrap();
+    let aikit_adapters::agent_connection::ConnectionSignalKind::ModelConfigured {
+        model_observation,
+    } = &signals[0].kind
+    else {
+        panic!("native configuration receipt required");
+    };
+    assert_eq!(model_observation.available_models.len(), 2);
+    assert_eq!(model_observation.available_models[0].name, "Model A");
+    assert_eq!(model_observation.available_models[1].name, "Model B");
+    assert_eq!(model_observation.current_model_id, "provider/b");
+}
+
+#[test]
+fn pi_advertises_its_observed_model_name_without_an_aikit_policy() {
+    let mut adapter = PiRpcConnectionAdapter::new(r("connection/test/pi"), "/tmp".into(), vec![]);
+    let state = json!({"sessionId":"native-pi","isStreaming":false,"isCompacting":false,"pendingMessageCount":0,
+        "model":{"provider":"anthropic","id":"claude-sonnet-4-5","name":"Claude Sonnet 4.5"}});
+    let initialize = adapter.initialize().unwrap();
+    adapter
+        .ingest(
+            json!({"type":"response","id":initialize.payload["id"],"success":true,"data":state}),
+        )
+        .unwrap();
+    let attach = adapter
+        .open_session(SessionOpenRequest {
+            mode: SessionOpenMode::Attach,
+            native_session_id: None,
+            cwd: "/tmp".into(),
+            additional_directories: vec![],
+            mcp_servers: vec![],
+            agent_session: Some(r("agent-session/test/pi-model")),
+        })
+        .unwrap();
+    let signals = adapter
+        .ingest(json!({"type":"response","id":attach.payload["id"],"success":true,"data":state}))
+        .unwrap();
+    let aikit_adapters::agent_connection::ConnectionSignalKind::SessionOpened { binding } =
+        &signals[0].kind
+    else {
+        panic!("native binding required");
+    };
+    let models = &binding.model_observation.as_ref().unwrap().available_models;
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].name, "Claude Sonnet 4.5");
+    assert_eq!(models[0].model_id, "claude-sonnet-4-5");
+}

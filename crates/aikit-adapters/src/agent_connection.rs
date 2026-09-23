@@ -123,6 +123,17 @@ pub struct NativeConfigOption {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
+/// A native route is identified by its provider model id, never by its label.
+/// Preserve the first native display name and wire order while merging repeated
+/// advertisements of the same selectable route.
+fn unique_advertised_models(models: Vec<NativeAdvertisedModel>) -> Vec<NativeAdvertisedModel> {
+    let mut seen = BTreeSet::new();
+    models
+        .into_iter()
+        .filter(|model| seen.insert(model.model_id.clone()))
+        .collect()
+}
+
 impl NativeModelObservation {
     pub(crate) fn from_acp(value: &Value) -> Result<Self> {
         let current = value
@@ -158,7 +169,7 @@ impl NativeModelObservation {
         }
         Ok(Self {
             current_model_id: current.into(),
-            available_models: models,
+            available_models: unique_advertised_models(models),
             reasoning_effort: None,
             standing:
                 "provider-reported-configuration-not-independent-selection-or-inference-proof"
@@ -244,7 +255,7 @@ impl NativeModelObservation {
         let reasoning_effort = Self::select_config(value, "reasoning_effort")?;
         Ok(Some(Self {
             current_model_id,
-            available_models,
+            available_models: unique_advertised_models(available_models),
             reasoning_effort,
             standing:
                 "provider-reported-configuration-not-independent-selection-or-inference-proof"
