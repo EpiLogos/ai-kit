@@ -157,11 +157,55 @@ def contemplation_request(args, matrix_rows: list[dict], trace: dict) -> dict:
     return request
 
 
+def discover_matrix_carriers(projectcentral: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path] | None:
+    """Find capability-matrix carriers under a ProjectCentral, telos folder first.
+
+    The integrated-field spec places documents and capability matrices in the
+    telos folder at ProjectCentral level; until a lane lands them there they
+    live directly under user/. Either location wires identically.
+    """
+    for base in (projectcentral / "user" / "telos", projectcentral / "user", projectcentral / "telos"):
+        manifest = base / "capability-matrix.json"
+        csv_carrier = base / "capability-matrix.csv"
+        if manifest.is_file() and csv_carrier.is_file():
+            return manifest, csv_carrier
+    return None
+
+
+def telos_anchor(goal_dir: pathlib.Path, serving_track: str | None) -> dict | None:
+    """Read the long-horizon anchor: goal + tracks from a telos goal folder."""
+    goal_md = goal_dir / "goal.md"
+    if not goal_md.is_file():
+        return None
+    title = None
+    for line in goal_md.read_text().splitlines():
+        if line.startswith("# "):
+            title = line[2:].strip()
+            break
+    tracks = sorted(
+        p.stem for p in (goal_dir / "tracks").glob("*.md")
+    ) if (goal_dir / "tracks").is_dir() else []
+    anchor = {"goal": title, "tracks": tracks, "source": str(goal_dir)}
+    if serving_track:
+        anchor["serving_track"] = serving_track
+        track_file = goal_dir / "tracks" / f"{serving_track}.md"
+        if track_file.is_file():
+            anchor["serving_track_excerpt"] = track_file.read_text()[:600]
+    return anchor
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--matrix-manifest", required=True)
-    ap.add_argument("--matrix-csv", required=True)
+    ap.add_argument("--matrix-manifest", required=False)
+    ap.add_argument("--matrix-csv", required=False)
+    ap.add_argument("--projectcentral", required=False,
+                    help="ProjectCentral dir; discovers capability-matrix carriers "
+                         "(telos folder first, then user/)")
     ap.add_argument("--spine-trace", required=True)
+    ap.add_argument("--telos-goal-dir", required=False,
+                    help="telos goal folder (goal.md + tracks/); anchors the state "
+                         "in the long horizon per the integrated-field chain of custody")
+    ap.add_argument("--serving-track", default=None)
     ap.add_argument("--now-ref", required=True)
     ap.add_argument("--participant-ref", default="participant/contemplation/forward")
     ap.add_argument("--agent-session", default=None)
@@ -172,6 +216,16 @@ def main() -> None:
     ap.add_argument("--out-request", required=True)
     args = ap.parse_args()
 
+    if args.projectcentral:
+        found = discover_matrix_carriers(pathlib.Path(args.projectcentral))
+        if not found:
+            raise SystemExit(
+                f"no capability-matrix.json+csv under {args.projectcentral} "
+                "(searched user/telos/, user/, telos/)")
+        args.matrix_manifest, args.matrix_csv = str(found[0]), str(found[1])
+    if not args.matrix_manifest or not args.matrix_csv:
+        raise SystemExit("provide --matrix-manifest/--matrix-csv or --projectcentral")
+
     matrix_rows = load_matrix_rows(pathlib.Path(args.matrix_csv))
     trace = json.loads(pathlib.Path(args.spine_trace).read_text())
     request = contemplation_request(args, matrix_rows, trace)
@@ -181,14 +235,27 @@ def main() -> None:
            "pass": "retrospective" if args.retrospective else "prospective",
            "participant_ref": args.participant_ref,
            "stories_served_by_practice": served_by,
+           "matrix_carriers": {"manifest": args.matrix_manifest, "csv": args.matrix_csv},
            "jev_request": request}
+    if args.telos_goal_dir:
+        out["telos"] = telos_anchor(pathlib.Path(args.telos_goal_dir), args.serving_track)
+        request["state"]["telos_anchor"] = (
+            f"Long horizon: goal '{out['telos']['goal']}' with tracks "
+            f"{out['telos']['tracks']}"
+            + (f"; this contemplation serves the '{args.serving_track}' track"
+               if args.serving_track else "")
+            + ". Recognitions returned from this contemplation must name the "
+              "goal/track they serve (integrated-field chain of custody: "
+              "telos -> task -> now -> sessions)."
+        )
     if args.redis_config:
         out["redis"] = json.loads(pathlib.Path(args.redis_config).read_text())
     pathlib.Path(args.out_request).write_text(json.dumps(out, indent=1))
     skill_less = [p["id"] for p in spine_practices(trace) if not p.get("canonical_skill")]
     print(f"assembled {out['pass']} contemplation: "
           f"{len(skill_less)} skill-less practices {skill_less}, "
-          f"state fields: {list(request['state'].keys())}")
+          f"matrix from {args.matrix_csv}"
+          + (f", telos anchor: {out['telos']['goal']}" if args.telos_goal_dir else ""))
 
 
 if __name__ == "__main__":
