@@ -663,12 +663,16 @@ pub fn bkmr_config_dir() -> PathBuf {
 
 /// Discover the configured stores: the active database named by
 /// `config.toml` (`db_url`) plus every per-project database under
-/// `projects/*.db`, deduplicated by resolved path. Only stores that exist are
-/// listed; discovery never opens a database (opening one can trigger bkmr's
-/// automatic schema migration, and that is bkmr's business, not ours).
+/// `projects/*.db`, deduplicated by resolved path. Distinct databases may
+/// share a file stem (the active store and a per-project copy of the same
+/// name), so display names are disambiguated by the parent directory. Only
+/// stores that exist are listed; discovery never opens a database (opening
+/// one can trigger bkmr's automatic schema migration, and that is bkmr's
+/// business, not ours).
 pub fn discover_bkmr_stores(config_dir: &Path) -> Vec<BkmrStore> {
     let mut stores: Vec<BkmrStore> = Vec::new();
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut names: BTreeSet<String> = BTreeSet::new();
     let config_path = config_dir.join("config.toml");
     if let Ok(text) = std::fs::read_to_string(&config_path) {
         let active = toml::from_str::<toml::Value>(&text).ok().and_then(|value| {
@@ -686,10 +690,11 @@ pub fn discover_bkmr_stores(config_dir: &Path) -> Vec<BkmrStore> {
             };
             let resolved = path.canonicalize().unwrap_or_else(|_| path.clone());
             if resolved.is_file() && seen.insert(resolved) {
-                let name = path
+                let stem = path
                     .file_stem()
                     .map(|stem| stem.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "active".into());
+                let name = unique_display_name(stem, &path, &mut names);
                 stores.push(BkmrStore { name, path });
             }
         }
@@ -704,27 +709,59 @@ pub fn discover_bkmr_stores(config_dir: &Path) -> Vec<BkmrStore> {
             .collect();
         project_stores.sort();
         for path in project_stores {
-            let name = path
+            let stem = path
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            if name.is_empty() {
+            if stem.is_empty() {
                 continue;
             }
             // bkmr's own backup artefacts (`<name>_backup_<date>.db`, sometimes
             // nested) are never stores: they carry pre-migration schemas, so
             // opening one teaches bkmr to migrate it and mint yet another
             // backup — a feedback loop with the owner's human space.
-            if is_backup_store_name(&name) {
+            if is_backup_store_name(&stem) {
                 continue;
             }
             let resolved = path.canonicalize().unwrap_or_else(|_| path.clone());
             if resolved.is_file() && seen.insert(resolved) {
+                let name = unique_display_name(stem, &path, &mut names);
                 stores.push(BkmrStore { name, path });
             }
         }
     }
     stores
+}
+
+/// A display name for a store: the file stem when no other store claims it,
+/// otherwise qualified by the parent directory (a per-project copy of the
+/// active store's name reads `projects/<stem>`), with a numeric suffix as
+/// the last resort.
+fn unique_display_name(stem: String, path: &Path, used: &mut BTreeSet<String>) -> String {
+    if stem.is_empty() || used.insert(stem.clone()) {
+        return stem;
+    }
+    let parent = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .map(|parent| parent.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let qualified = if parent.is_empty() {
+        format!("{stem}-2")
+    } else {
+        format!("{parent}/{stem}")
+    };
+    if used.insert(qualified.clone()) {
+        return qualified;
+    }
+    let mut suffix = 2;
+    loop {
+        let candidate = format!("{qualified}-{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        suffix += 1;
+    }
 }
 
 /// Whether a store file stem names one of bkmr's automatic backups.
@@ -1323,6 +1360,35 @@ mod tests {
         )
         .unwrap();
         assert!(discover_bkmr_stores(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn stores_sharing_a_stem_are_disambiguated_not_silently_twinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path();
+        let projects = config.join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        // The live shape: the active database at the config root and a
+        // distinct per-project database with the same stem.
+        let active = config.join("agent-payment-protocol.db");
+        std::fs::write(&active, b"db").unwrap();
+        let project_copy = projects.join("agent-payment-protocol.db");
+        std::fs::write(&project_copy, b"db2").unwrap();
+        std::fs::write(
+            config.join("config.toml"),
+            format!("db_url = \"{}\"\n", active.display()),
+        )
+        .unwrap();
+
+        let stores = discover_bkmr_stores(config);
+        let names: Vec<&str> = stores.iter().map(|store| store.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["agent-payment-protocol", "projects/agent-payment-protocol"],
+            "{stores:?}"
+        );
+        assert_eq!(stores[0].path, active);
+        assert_eq!(stores[1].path, project_copy);
     }
 
     #[test]
