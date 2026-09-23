@@ -31,6 +31,18 @@
 //! openclaw, cursor-cli and ollama record why no env-var key path is declared
 //! for them, and no variable was invented to fill the table.
 //!
+//! ## Login commands (2026-09-23 pass; cards evidence)
+//!
+//! An own-login fact may carry the harness's declared one-shot login command
+//! (`login.argv`), grounded in the 2026-09-22 connection truth cards
+//! (docs/plans/2026-09-22-harness-connection-truth-cards.md, tags VL/VD):
+//! verified-live for codex, opencode and hermes, docs-verified for cline,
+//! qoder and cursor-cli. Harnesses whose login has no one-shot form — the
+//! in-TUI flows (claude, kimi, qwen), the browser consent gate the 2026-09-22
+//! live walk proved for gemini, the first-launch wizards (grok,
+//! antigravity) — stay note-only, and that absence is the honest record, not
+//! a gap.
+//!
 //! ## Pi hooks (2026-09-18 census; carrier commissioned same day)
 //!
 //! Pi 0.84.4 carries hooks as TypeScript extension events, not shell commands
@@ -101,6 +113,8 @@ dispatch = { native-provider-binding = { provider-ref = "provider:anthropic", se
 
 [models.key-delivery]
 env-var = [{ provider-ref = "provider:anthropic", env-var = "ANTHROPIC_API_KEY" }]
+# Login commands pass 2026-09-23: claude's login is the in-TUI /login flow
+# (the cards verify no one-shot login command), so this fact stays note-only.
 own-login = [{ provider-ref = "provider:anthropic", note = "claude login keeps OAuth material in its own credential store (~/.claude/.credentials.json); the API key delivers only when credential:anthropic is bound" }]
 
 [sessions]
@@ -176,7 +190,9 @@ dispatch = { native-provider-binding = { provider-ref = "provider:openai", selec
 
 [models.key-delivery]
 env-var = [{ provider-ref = "provider:openai", env-var = "OPENAI_API_KEY" }]
-own-login = [{ provider-ref = "provider:openai", note = "codex login writes its own auth store (~/.codex/auth.json); the API key delivers only when credential:openai is bound" }]
+# Login command verified 2026-09-22 against the connection truth cards [VL]:
+# `codex login` runs the ChatGPT OAuth browser flow and writes ~/.codex/auth.json.
+own-login = [{ provider-ref = "provider:openai", note = "codex login runs the ChatGPT OAuth browser flow and writes its own auth store (~/.codex/auth.json); the API key delivers only when credential:openai is bound", login = { argv = ["codex", "login"] } }]
 
 [sessions]
 posture = "observed"
@@ -365,6 +381,9 @@ dispatch = "provider-plural"
 
 [models.key-delivery]
 env-var = [{ provider-ref = "provider:gemini", env-var = "GEMINI_API_KEY" }]
+# Login commands pass 2026-09-23: Sign-in-with-Google is the TUI's own OAuth
+# flow and the 2026-09-22 live walk proved its headless 401 consent gate — no
+# one-shot login command exists to declare, so this fact stays note-only.
 own-login = [{ provider-ref = "provider:gemini", note = "Login with Google (OAuth) is Gemini CLI's default auth; the API key delivers only when credential:gemini is bound" }]
 
 [sessions]
@@ -485,6 +504,12 @@ dispatch = { none = { reason = "Cursor's model surface is subscription-mediated;
 
 [models.key-delivery]
 note = "cursor-agent authenticates through Cursor's own subscription login; no env-var key path is declared."
+# Login command verified 2026-09-22 against the connection truth cards [VD
+# docs.cursor.com]: the docs spell the command `agent login`, while the
+# installed CLI binary is `cursor-agent` (this profile's presence executable).
+# The argv carries the documented spelling verbatim — resolve the binary name
+# on the first install-probe before any runnable use.
+own-login = [{ provider-ref = "provider:cursor", note = "Cursor's own subscription login stores the auth cursor-agent reads; the docs spell the command `agent login` while the installed CLI binary is `cursor-agent` — resolve the spelling on install-probe", login = { argv = ["agent", "login"] } }]
 
 [sessions]
 posture = "observed"
@@ -595,6 +620,14 @@ observe = [{ path = "~/.hermes/config.yaml", collection = "mcp_servers" }]
 posture = "observed"
 dispatch = "provider-plural"
 roster-note = "Provider and model chosen per invocation (--provider/-m) or the config.yaml model defaults (observed 2026-09-18: provider zai, model glm-5.3-flash); hermes carries its own provider catalog."
+
+[models.key-delivery]
+# Auth verified 2026-09-22 against the connection truth cards [VL]: pooled
+# credentials in ~/.hermes/auth.json via `hermes auth add`/`hermes auth
+# priority`; Nous Portal accounts log in with `hermes portal login`. The
+# provider-ref names the provider the pool is observed serving on this
+# machine; `hermes auth add` is the pool's door, not one vendor's.
+own-login = [{ provider-ref = "provider:zai", note = "pooled credential store (~/.hermes/auth.json): `hermes auth add` stores a credential and `hermes auth priority` orders the pool (observed 2026-09-18 default provider zai); Nous Portal accounts log in with `hermes portal login`", login = { argv = ["hermes", "auth", "add"] } }]
 
 [sessions]
 posture = "observed"
@@ -862,7 +895,13 @@ posture = "observed"
 dispatch = { none = { reason = "The catalog declares no capability document for opencode and the census records no provider binding surface; no model dispatch is declared." } }
 
 [models.key-delivery]
+# Login command verified 2026-09-22 against the connection truth cards [VL]:
+# `opencode auth login` is the one door to the per-provider store. One entry
+# stands for that store as a whole — it is not a single model vendor, and the
+# note says so — because the schema's own-login facts are per-provider and no
+# store entry was verified for one vendor alone.
 note = "opencode authenticates through its own per-provider auth store (opencode auth login) and per-provider config; no fixed env-var key path is declared for its native launch."
+own-login = [{ provider-ref = "provider:opencode", note = "opencode's own per-provider auth store (~/.local/share/opencode/auth.json); `opencode auth login` is the store's one interactive door across the providers it serves — this entry names the store, not a single model vendor", login = { argv = ["opencode", "auth", "login"] } }]
 
 [sessions]
 posture = "observed"
@@ -936,6 +975,12 @@ posture = "observed"
 dispatch = "provider-plural"
 roster-note = "Provider and model are selected through the CLINE_PROVIDER and CLINE_MODEL environment variables; the API key arrives via CLINE_API_KEY or `cline auth` [VD docs.cline.bot]."
 
+[models.key-delivery]
+# Auth verified 2026-09-22 against the connection truth cards [VD
+# docs.cline.bot]: the key arrives via CLINE_API_KEY or `cline auth`. Only the
+# own-login entry is declared here (the env-var census is a separate lane).
+own-login = [{ provider-ref = "provider:cline", note = "Cline's own auth stores the credential the CLI reads in place of CLINE_API_KEY (`cline auth`)", login = { argv = ["cline", "auth"] } }]
+
 [sessions]
 # First-party ACP face [VD docs.cline.bot]; `--auto-approve true` is
 # documented but deliberately NOT part of the declared door. Capabilities
@@ -994,6 +1039,18 @@ edition = "cli"
 
 [presence]
 executables = ["qoder"]
+
+[models]
+# The 2026-09-22 connection truth cards record no model-selection surface for
+# qoder (headless undocumented), so no model dispatch is declared.
+posture = "observed"
+dispatch = { none = { reason = "The connection truth cards (2026-09-22) record no model-selection surface for qoder; headless is undocumented and no dispatch was observed." } }
+
+[models.key-delivery]
+# Auth per the connection truth cards 2026-09-22 [VD]: `qoder login` or
+# QODER_PERSONAL_ACCESS_TOKEN. Only the own-login entry is declared here (the
+# env-var census is a separate lane).
+own-login = [{ provider-ref = "provider:qoder", note = "Qoder's own login stores the credential the CLI reads in place of QODER_PERSONAL_ACCESS_TOKEN", login = { argv = ["qoder", "login"] } }]
 
 [sessions]
 # First-party ACP face [VD docs.qoder.com/cli/acp]. Capabilities stay at the
@@ -1533,6 +1590,66 @@ mod tests {
                 delivery.own_login.is_empty(),
                 "{slug}: no own-login store is evidenced, so none may be declared"
             );
+        }
+    }
+
+    #[test]
+    fn login_argv_is_declared_exactly_where_the_cards_verify_a_dedicated_login_command() {
+        // The 2026-09-23 login-commands pass over the 2026-09-22 connection
+        // truth cards: verified-live for codex/opencode/hermes, docs-verified
+        // for cline/qoder/cursor-cli. Every other harness stays note-only —
+        // an in-TUI flow, a browser consent gate or a first-launch wizard has
+        // no one-shot login command to declare, and none is invented.
+        let expected: &[(&str, &[&str])] = &[
+            ("codex", &["codex", "login"]),
+            ("opencode", &["opencode", "auth", "login"]),
+            ("hermes", &["hermes", "auth", "add"]),
+            ("cline", &["cline", "auth"]),
+            ("qoder", &["qoder", "login"]),
+            ("cursor-cli", &["agent", "login"]),
+        ];
+        for (slug, argv) in expected {
+            let profile = for_slug(slug).unwrap_or_else(|| panic!("{slug} must resolve"));
+            let delivery = profile
+                .models
+                .as_ref()
+                .unwrap_or_else(|| panic!("{slug} must declare models"))
+                .key_delivery
+                .as_ref()
+                .unwrap_or_else(|| panic!("{slug} must declare key delivery"));
+            let runnable: Vec<_> = delivery
+                .own_login
+                .iter()
+                .filter(|fact| fact.login.is_some())
+                .collect();
+            assert_eq!(
+                runnable.len(),
+                1,
+                "{slug}: exactly one runnable login is declared"
+            );
+            assert_eq!(
+                runnable[0].login.as_ref().unwrap().argv,
+                *argv,
+                "{slug}: the declared login argv matches the cards"
+            );
+        }
+        for (slug, profile) in all() {
+            if expected.iter().any(|(s, _)| *s == slug) {
+                continue;
+            }
+            let Some(delivery) = profile
+                .models
+                .as_ref()
+                .and_then(|models| models.key_delivery.as_ref())
+            else {
+                continue;
+            };
+            for fact in &delivery.own_login {
+                assert!(
+                    fact.login.is_none(),
+                    "{slug}: no runnable login is verified, so none may be declared"
+                );
+            }
         }
     }
 

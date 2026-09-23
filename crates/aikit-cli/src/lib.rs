@@ -34,6 +34,7 @@ pub mod file_context;
 pub mod foreign;
 pub mod gateway_ops;
 pub mod guardian_family;
+pub mod harness_auth;
 pub mod hook;
 pub mod jev_now;
 pub mod json;

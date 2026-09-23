@@ -27,7 +27,10 @@
 //! shape law — [`crate::credential::valid_credential_variable`] — and is
 //! refused here otherwise; the launch path that consumes the declaration
 //! materialises through the same credential seam the selected-model path
-//! uses, never passing an empty or ambient value.
+//! uses, never passing an empty or ambient value. An own-login fact may
+//! additionally carry the harness's declared one-shot login command, so the
+//! login is runnable and renderable next to the env-var option; where no
+//! such command is verified, the fact stays note-only and that is honest.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -279,6 +282,29 @@ pub struct ModelArgvSelectors {
 pub struct ModelOwnLogin {
     pub provider_ref: String,
     pub note: String,
+    /// The harness's declared one-shot login command, when its own command
+    /// surface verifies one: the exact argv that runs the login interactively
+    /// in the user's own terminal. Absent means the login has no declared
+    /// one-shot form (an in-TUI flow, a browser gate, a first-launch wizard) —
+    /// a note-only fact, which is honest, not incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<ModelLoginCommand>,
+}
+
+/// The declared one-shot login command of an own-login fact. The argv follows
+/// the same shape law as the sessions layer's connect declaration: the first
+/// element names the binary, the rest are the harness's own flags carried
+/// verbatim. The command runs in the user's own terminal with the caller's
+/// environment — it is a login, not a connection launch, so it never routes
+/// through the scrubbed launch environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ModelLoginCommand {
+    pub argv: Vec<String>,
+    /// Optional prose beside the command (for example, naming a second,
+    /// portal-scoped login the same harness offers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// Declared key-delivery facts of the models layer: which env var each served
@@ -765,6 +791,39 @@ fn session_protocol_word(protocol: SessionProtocol) -> &'static str {
     }
 }
 
+/// The connect argv shape law applied to a declared login command: non-empty,
+/// the first element names the binary, no blank elements. A login command
+/// that names no binary would run nothing, and blank padding would hand the
+/// terminal a word that was never declared.
+fn validate_login_argv(
+    provider_ref: &str,
+    login: &ModelLoginCommand,
+) -> Result<(), HarnessProfileError> {
+    if login.argv.is_empty() || login.argv[0].trim().is_empty() {
+        return Err(HarnessProfileError::new(
+            "harness_profile.invalid_login_argv",
+            format!(
+                "the own-login declaration for {provider_ref} declares no binary; its first \
+                 element must name the harness binary (an absolute path or a PATH name)"
+            ),
+        )
+        .with("provider-ref", provider_ref.to_string())
+        .with("field", "login.argv"));
+    }
+    if let Some(position) = login.argv.iter().position(|part| part.trim().is_empty()) {
+        return Err(HarnessProfileError::new(
+            "harness_profile.invalid_login_argv",
+            format!(
+                "the own-login declaration for {provider_ref} has an empty argument at offset \
+                 {position}; carry the harness's flags verbatim, never as blank padding"
+            ),
+        )
+        .with("provider-ref", provider_ref.to_string())
+        .with("field", "login.argv"));
+    }
+    Ok(())
+}
+
 /// Posture truth for the argv-selector declaration: only a provider-plural
 /// dispatch may carry observed per-invocation flags, and the declared names
 /// must look like the flags the harness actually reads (a leading dash and no
@@ -870,6 +929,9 @@ fn validate_key_delivery(delivery: &ModelKeyDeliveryLayer) -> Result<(), Harness
             )
             .with("provider-ref", fact.provider_ref.clone())
             .with("field", "note"));
+        }
+        if let Some(login) = &fact.login {
+            validate_login_argv(&fact.provider_ref, login)?;
         }
     }
     if delivery.env_var.is_empty()
@@ -1176,6 +1238,7 @@ mcp-servers = false
                 own_login: vec![ModelOwnLogin {
                     provider_ref: "provider:anthropic".to_string(),
                     note: "claude login stores its own credential".to_string(),
+                    login: None,
                 }],
                 note: None,
             }),
@@ -1293,6 +1356,120 @@ mcp-servers = false
             .note = "   ".to_string();
         let error = profile.validate().unwrap_err();
         assert_eq!(error.code, "harness_profile.empty_own_login_note");
+    }
+
+    #[test]
+    fn a_declared_login_command_validates_and_round_trips_kebab_case() {
+        let mut profile = claude_shaped_profile();
+        profile
+            .models
+            .as_mut()
+            .unwrap()
+            .key_delivery
+            .as_mut()
+            .unwrap()
+            .own_login[0]
+            .login = Some(ModelLoginCommand {
+            argv: vec!["claude".to_string(), "login".to_string()],
+            note: Some("the in-TUI login".to_string()),
+        });
+        profile
+            .validate()
+            .expect("a well-shaped login command satisfies posture truth");
+        let text = toml::to_string_pretty(&profile).expect("serialises");
+        assert!(
+            text.contains("own-login.login"),
+            "the login command renders under its kebab name: {text}"
+        );
+        let reparsed: HarnessProfile = toml::from_str(&text).expect("reparses");
+        assert_eq!(reparsed, profile);
+        let login = reparsed
+            .models
+            .as_ref()
+            .unwrap()
+            .key_delivery
+            .as_ref()
+            .unwrap()
+            .own_login[0]
+            .login
+            .as_ref()
+            .unwrap();
+        assert_eq!(login.argv, vec!["claude".to_string(), "login".to_string()]);
+    }
+
+    #[test]
+    fn an_absent_login_stays_legal_everywhere() {
+        // Note-only harnesses are honest: claude's login is the in-TUI /login
+        // flow, and no one-shot command is invented for it.
+        let profile = claude_shaped_profile();
+        assert!(
+            profile
+                .models
+                .as_ref()
+                .unwrap()
+                .key_delivery
+                .as_ref()
+                .unwrap()
+                .own_login[0]
+                .login
+                .is_none(),
+            "the fixture starts note-only"
+        );
+        profile
+            .validate()
+            .expect("an absent login is legal, not incomplete");
+    }
+
+    #[test]
+    fn a_login_command_that_names_no_binary_is_refused() {
+        for empty in [Vec::new(), vec!["   ".to_string()]] {
+            let mut profile = claude_shaped_profile();
+            profile
+                .models
+                .as_mut()
+                .unwrap()
+                .key_delivery
+                .as_mut()
+                .unwrap()
+                .own_login[0]
+                .login = Some(ModelLoginCommand {
+                argv: empty,
+                note: None,
+            });
+            let error = profile.validate().unwrap_err();
+            assert_eq!(error.code, "harness_profile.invalid_login_argv");
+            assert!(
+                error.to_string().contains("provider:anthropic"),
+                "the refusal names the own-login fact: {error}"
+            );
+            assert!(
+                error.to_string().contains("must name the harness binary"),
+                "the refusal names the fix: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_login_command_with_a_blank_argument_is_refused() {
+        let mut profile = claude_shaped_profile();
+        profile
+            .models
+            .as_mut()
+            .unwrap()
+            .key_delivery
+            .as_mut()
+            .unwrap()
+            .own_login[0]
+            .login = Some(ModelLoginCommand {
+            argv: vec!["claude".to_string(), " ".to_string(), "login".to_string()],
+            note: None,
+        });
+        let error = profile.validate().unwrap_err();
+        assert_eq!(error.code, "harness_profile.invalid_login_argv");
+        assert!(
+            error.to_string().contains("offset 1"),
+            "the refusal names the offending offset: {error}"
+        );
     }
 
     #[test]

@@ -4476,19 +4476,58 @@ fn cmd_log(cwd: &std::path::Path, c: LogCmd) -> Result<Reply> {
 /// dry runs print.
 fn cmd_harness(cwd: &std::path::Path, c: HarnessCmd, json_mode: bool) -> Result<Reply> {
     let _ = cwd;
-    let HarnessCmd {
-        command: HarnessSub::Run(args),
-    } = c;
-    let home = AikitHome::discover()?;
-    let plan = aikit_cli::route_launch::plan_route_launch(
-        &home,
-        &args.harness,
-        &args.model,
-        args.provider.as_deref(),
-        &args.passthrough,
-    )?;
-    if args.dry_run {
-        let data = aikit_cli::route_launch::plan_disclosure(&plan);
+    match c.command {
+        HarnessSub::Run(args) => {
+            let home = AikitHome::discover()?;
+            let plan = aikit_cli::route_launch::plan_route_launch(
+                &home,
+                &args.harness,
+                &args.model,
+                args.provider.as_deref(),
+                &args.passthrough,
+            )?;
+            if args.dry_run {
+                let data = aikit_cli::route_launch::plan_disclosure(&plan);
+                return Ok(Reply::Data {
+                    context: EnvelopeContext::default(),
+                    data,
+                    warnings: vec![],
+                    exit_code: json::EXIT_OK,
+                });
+            }
+            if !json_mode {
+                eprintln!(
+                    "aikit harness run: {} (route via {}, model {} as {}; credential: {})",
+                    plan.argv.join(" "),
+                    plan.provider,
+                    plan.model,
+                    plan.provider_native_id,
+                    plan.credential_disclosure,
+                );
+                for var in &plan.delivered_env_vars {
+                    eprintln!("  delivering bound key under {var}");
+                }
+            }
+            let code = aikit_cli::route_launch::run_plan(&plan)?;
+            Ok(Reply::Status(code))
+        }
+        HarnessSub::Auth(args) => cmd_harness_auth(args, json_mode),
+    }
+}
+
+/// `aikit harness auth <harness>`: with `--json`, print the harness's declared
+/// auth options without executing anything — the face a settings surface
+/// renders next to the API-key input. Otherwise run the declared one-shot
+/// login interactively: the child owns this terminal and its own environment.
+fn cmd_harness_auth(args: HarnessAuthArgs, json_mode: bool) -> Result<Reply> {
+    if json_mode {
+        let face = aikit_cli::harness_auth::auth_face(&args.harness)?;
+        let data = serde_json::to_value(&face).map_err(|error| {
+            AikitError::new(
+                "cli.harness_auth_encode_failed",
+                format!("could not encode auth options: {error}"),
+            )
+        })?;
         return Ok(Reply::Data {
             context: EnvelopeContext::default(),
             data,
@@ -4496,20 +4535,13 @@ fn cmd_harness(cwd: &std::path::Path, c: HarnessCmd, json_mode: bool) -> Result<
             exit_code: json::EXIT_OK,
         });
     }
-    if !json_mode {
-        eprintln!(
-            "aikit harness run: {} (route via {}, model {} as {}; credential: {})",
-            plan.argv.join(" "),
-            plan.provider,
-            plan.model,
-            plan.provider_native_id,
-            plan.credential_disclosure,
-        );
-        for var in &plan.delivered_env_vars {
-            eprintln!("  delivering bound key under {var}");
-        }
-    }
-    let code = aikit_cli::route_launch::run_plan(&plan)?;
+    let plan = aikit_cli::harness_auth::plan_login(&args.harness)?;
+    eprintln!(
+        "aikit harness auth: {} (declared login for {})",
+        plan.argv.join(" "),
+        plan.slug
+    );
+    let code = aikit_cli::harness_auth::run_login_argv(&plan.argv)?;
     Ok(Reply::Status(code))
 }
 

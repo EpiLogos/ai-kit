@@ -2582,6 +2582,18 @@ pub struct HarnessCmd {
 pub enum HarnessSub {
     /// Run a harness in the foreground against a declared model route.
     Run(HarnessRunArgs),
+    /// Show a harness's declared auth options (`--json`), or run its declared
+    /// one-shot login interactively in this terminal.
+    Auth(HarnessAuthArgs),
+}
+
+/// `aikit harness auth <harness>`
+#[derive(Debug, Args)]
+pub struct HarnessAuthArgs {
+    /// The harness to authenticate: a registry name, registered alias,
+    /// catalog slug or embedded profile slug.
+    #[arg(value_name = "HARNESS")]
+    pub harness: String,
 }
 
 #[derive(Debug, Args)]
