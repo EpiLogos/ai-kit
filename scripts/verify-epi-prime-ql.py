@@ -190,7 +190,11 @@ def paced_admission(session, text, cursor, expected_marker, *, timeout: int = 15
                 )
             time.sleep(20.0)
             continue
-        if "Completed" not in terminal or root_text.strip() != expected_marker:
+        # GLM-family roots narrate before the terminal token; the marker is
+        # required as the final emitted text, raw narration kept in the error.
+        clean = root_text.strip()
+        admitted = clean == expected_marker or clean.endswith(expected_marker)
+        if "Completed" not in terminal or not admitted:
             raise RuntimeError(
                 f"{expected_marker} admission failed: {terminal} / {root_text!r}"
             )
@@ -445,7 +449,12 @@ try:
     draft = request("draft", agent_session=session, basis=0, text=prompt)
     request("prompt", agent_session=session, draft_revision=draft["revision"])
     cursor, root_text, terminal, captured = wait_turn(cursor)
-    if "Completed" not in terminal or root_text.strip() != "ROOT_CHILD_ADMITTED":
+    root_clean = root_text.strip()
+    root_admitted = (
+        root_clean == "ROOT_CHILD_ADMITTED"
+        or root_clean.endswith("ROOT_CHILD_ADMITTED")
+    )
+    if "Completed" not in terminal or not root_admitted:
         raise RuntimeError(f"root child-admission turn failed: {terminal} / {root_text!r}")
 
     child_updates = []
@@ -585,9 +594,18 @@ try:
         basis=basis,
         text="Write the integers 1 through 50000 separated by spaces. Begin immediately. Do not use tools.",
     )
-    request("prompt", agent_session=session, draft_revision=draft["revision"])
-    time.sleep(1.0)
-    request("cancel", agent_session=session, reason="Prime-QL installed acceptance cancellation")
+    prompt_when_idle(session, draft["revision"])
+    # The interrupt races the turn's own start over RPC; a cancel that lands
+    # before the turn begins is retried until the turn is genuinely in flight.
+    cancel_deadline = time.monotonic() + 2400
+    while True:
+        try:
+            request("cancel", agent_session=session, reason="Prime-QL installed acceptance cancellation")
+            break
+        except RuntimeError as error:
+            if "no turn in flight" not in str(error) or time.monotonic() >= cancel_deadline:
+                raise
+            time.sleep(0.5)
     cursor, _, cancelled, _ = wait_turn(cursor)
     if "Cancelled" not in cancelled:
         raise RuntimeError(f"Prime cancellation did not terminate as cancelled: {cancelled}")
