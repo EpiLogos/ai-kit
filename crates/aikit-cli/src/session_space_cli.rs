@@ -144,6 +144,19 @@ enum Command {
         #[command(flatten)]
         args: Box<EpiPrimeConfigureArgs>,
     },
+    /// Derive (dry-run) the encounter provider a harness profile's connection
+    /// facts produce. Prints the provider JSON and exits; no state changes.
+    EncounterDerive {
+        /// The embedded harness profile slug (e.g. gemini, pi, hermes, kimi).
+        #[arg(long = "from-profile")]
+        from_profile: String,
+        /// Provider id; defaults to the profile slug.
+        #[arg(long)]
+        id: Option<String>,
+        /// Provider label; defaults to "<slug> (profile-derived)".
+        #[arg(long)]
+        label: Option<String>,
+    },
     /// Provision or withdraw a native Agency binding under an exact revision.
     /// This is an owner-only operation, not gateway/IPC input.
     EncounterAgencyConfigure {
@@ -499,6 +512,10 @@ fn run(cli: Cli) -> Result<()> {
                     id: provider_id.clone(),
                     label: "Epi-Logos Prime-QL".into(),
                     argv,
+                    from_profile: None,
+                    argv_fallback: Vec::new(),
+                    env: Default::default(),
+                    cwd: None,
                     body_ref: Some("agent-body/epi-prime-ql".into()),
                     body_revision: Some(body_revision.clone()),
                     required_context: None,
@@ -515,6 +532,26 @@ fn run(cli: Cli) -> Result<()> {
                 "model_selection":"Prime native configured model unless an explicit AIKit model policy overrides it",
                 "standing":"configured-not-started"
             }))
+        }
+        Command::EncounterDerive {
+            from_profile,
+            id,
+            label,
+        } => {
+            let profile = aikit_adapters::profiles::for_slug(&from_profile).ok_or_else(|| {
+                AikitError::new(
+                    "encounter.from_profile_unknown",
+                    format!(
+                        "no embedded harness profile names slug {from_profile}; \
+                             encounter-derive is a dry run, nothing was configured"
+                    ),
+                )
+            })?;
+            emit(&crate::encounter_profile_provider::derive_provider(
+                profile,
+                id.unwrap_or_else(|| from_profile.clone()),
+                label.unwrap_or_else(|| format!("{from_profile} (profile-derived)")),
+            )?)
         }
         Command::EncounterAgencyConfigure {
             agent_session,

@@ -95,6 +95,10 @@ fn missing_and_stale_required_source_refuse_before_real_provider_process_effect(
         argv: vec!["/usr/bin/touch".into(), marker.display().to_string()],
         body_ref: None,
         body_revision: None,
+        from_profile: None,
+        argv_fallback: Vec::new(),
+        env: Default::default(),
+        cwd: None,
         required_context: Some(context(source.clone(), b"admitted source\n")),
         now_context: None,
     };

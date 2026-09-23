@@ -355,23 +355,107 @@ impl PreparedModel {
     }
 }
 
-/// The launch argv for a policy-selected provider. Where the declared
-/// dispatch rides argv (pi's native flags select its model) the declared
-/// flags are appended, and the harness's real get_state and assistant result
-/// must also confirm the same provider/id; these arguments alone are not
-/// proof. Where the selection rides the native session's model configuration
-/// instead, the provider starts unchanged and the resident delivers the
-/// selection after the session exists.
-fn selected_argv(provider: &EncounterProvider, model: &PreparedModel) -> Result<Vec<String>> {
+/// The exec resolution of one declared launch program: `Some(reason)` names
+/// why the program cannot be resolved to an executable; `None` means it
+/// resolves. An explicit path (absolute, or containing a separator) resolves
+/// when it exists; a bare name resolves when an executable file of that name
+/// sits on the given `PATH`. This is a resolution check only, made once
+/// before any exec — a program that resolves but fails later is the protocol
+/// or the model speaking, never a wrong argv.
+fn unresolvable_program_reason_in(
+    program: &str,
+    search: Option<&std::ffi::OsStr>,
+) -> Option<String> {
+    if program.is_empty() {
+        return Some("the program is empty".to_string());
+    }
+    let path = std::path::Path::new(program);
+    if path.is_absolute() || program.contains('/') {
+        return (!path.exists()).then(|| "the path does not exist".to_string());
+    }
+    let Some(search) = search else {
+        return Some("PATH is not set".to_string());
+    };
+    let hit = std::env::split_paths(search).any(|dir| {
+        let candidate = dir.join(path);
+        candidate.is_file() && is_executable_file(&candidate)
+    });
+    (!hit).then(|| "no executable file with this name is on PATH".to_string())
+}
+
+fn unresolvable_program_reason(program: &str) -> Option<String> {
+    unresolvable_program_reason_in(program, std::env::var_os("PATH").as_deref())
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    path.is_file()
+}
+
+/// The declared launch variant the final exec rides: the primary argv when
+/// its program resolves, otherwise the first declared `argv_fallback`
+/// variant whose program resolves, in declared order. Declared variants are
+/// resolved exactly once, before any exec — never retried, never discovered.
+/// When no declared variant resolves, the launch refuses naming every
+/// declared variant and what was checked.
+fn resolved_launch_variant(provider: &EncounterProvider) -> Result<(Vec<String>, usize)> {
+    let mut checked: Vec<String> = Vec::new();
+    for (index, variant) in std::iter::once(&provider.argv)
+        .chain(provider.argv_fallback.iter())
+        .enumerate()
+    {
+        let declared = if index == 0 {
+            "primary".to_string()
+        } else {
+            format!("fallback {index}")
+        };
+        let Some(program) = variant.first() else {
+            checked.push(format!("{declared}: empty launch argv"));
+            continue;
+        };
+        match unresolvable_program_reason(program) {
+            Some(reason) => checked.push(format!("{declared} `{program}` ({reason})")),
+            None => return Ok((variant.clone(), index)),
+        }
+    }
+    Err(error(format!(
+        "No declared launch variant of provider {} resolves for exec; every declared variant \
+         was checked and unresolvable: {}",
+        provider.id,
+        checked.join("; ")
+    )))
+}
+
+/// The launch a bound policy resolves to: the declared provider variant
+/// selected by exec resolution, carrying the declared dispatch flags where
+/// the dispatch rides argv (pi's native flags select its model, and the
+/// harness's real get_state and assistant result must also confirm the same
+/// provider/id; these arguments alone are not proof). Where the selection
+/// rides the native session's model configuration instead, the selected
+/// variant starts unchanged and the resident delivers the selection after
+/// the session exists.
+fn selected_launch(
+    provider: &EncounterProvider,
+    model: &PreparedModel,
+) -> Result<(Vec<String>, usize)> {
+    let (base, launch_variant) = resolved_launch_variant(provider)?;
     let ModelDispatchDelivery::Argv {
         provider_flag,
         model_flag,
     } = &model.dispatch
     else {
-        return Ok(provider.argv.clone());
+        return Ok((base, launch_variant));
     };
-    if provider.argv.is_empty()
-        || provider.argv.iter().any(|a| {
+    if base.is_empty()
+        || base.iter().any(|a| {
             a == "--"
                 || a == provider_flag
                 || a == model_flag
@@ -381,14 +465,14 @@ fn selected_argv(provider: &EncounterProvider, model: &PreparedModel) -> Result<
     {
         return Err(error("Model-selected provider needs one unambiguous native provider/model binding; conflicting flags are not rewritten"));
     }
-    let mut argv = provider.argv.clone();
+    let mut argv = base;
     argv.extend([
         provider_flag.clone(),
         model.policy.native_provider.clone(),
         model_flag.clone(),
         model.policy.provider_native_id.clone(),
     ]);
-    Ok(argv)
+    Ok((argv, launch_variant))
 }
 
 /// Scoped final-child environment. Owned by the adapters' spawn seam (where
@@ -489,17 +573,34 @@ pub(crate) fn profile_environment(
     Ok((!environment.is_empty()).then_some(environment))
 }
 
-pub(crate) fn execution(
+/// The final-exec resolution of a bound-policy launch: the scoped argv and
+/// environment, and which declared provider variant the argv rides. A
+/// non-primary selection happens only because the primary launch program
+/// could not be resolved for exec; the caller records it on its receipt
+/// surface.
+struct ResolvedExecution {
+    argv: Vec<String>,
+    environment: Option<ModelEnvironment>,
+    /// 0 is the provider's primary argv; n > 0 is the nth declared
+    /// `argv_fallback` variant.
+    launch_variant: usize,
+}
+
+fn resolved_execution(
     home: &AikitHome,
     session: &ResourceRef,
     provider: &EncounterProvider,
-) -> Result<(Vec<String>, Option<ModelEnvironment>)> {
+) -> Result<ResolvedExecution> {
     let Some(model) = prepare(home, session, provider)? else {
         // No selected-model policy: the profile-declared key delivery is the
         // whole launch environment (None when nothing is declared and bound),
         // which is the route that carries keys to non-pi harnesses.
         let environment = profile_environment(home, session, provider)?;
-        return Ok((provider.argv.clone(), environment));
+        return Ok(ResolvedExecution {
+            argv: provider.argv.clone(),
+            environment,
+            launch_variant: 0,
+        });
     };
     let delivery = model
         .policy
@@ -529,7 +630,21 @@ pub(crate) fn execution(
     if let Some(profile) = profile_environment(home, session, provider)? {
         environment.extend(profile)?;
     }
-    Ok((selected_argv(provider, &model)?, Some(environment)))
+    let (argv, launch_variant) = selected_launch(provider, &model)?;
+    Ok(ResolvedExecution {
+        argv,
+        environment: Some(environment),
+        launch_variant,
+    })
+}
+
+pub(crate) fn execution(
+    home: &AikitHome,
+    session: &ResourceRef,
+    provider: &EncounterProvider,
+) -> Result<(Vec<String>, Option<ModelEnvironment>)> {
+    resolved_execution(home, session, provider)
+        .map(|resolved| (resolved.argv, resolved.environment))
 }
 
 pub(crate) fn direct_launcher(
@@ -576,7 +691,24 @@ impl EncounterService {
         if model.fingerprint()? != expected {
             return Err(error("Model launch basis changed since native admission"));
         }
-        let (argv, environment) = execution(home, session, &provider)?;
+        let resolved = resolved_execution(home, session, &provider)?;
+        if resolved.launch_variant != 0 {
+            // The open path's declared-variant loop cannot reach this re-exec
+            // child, so the selection is journaled here — the same receipt
+            // surface the open path records its launch attempts on. Receipt
+            // trouble refuses the launch rather than execing unrecorded.
+            service.store.append(
+                session,
+                &json!({
+                    "kind":"native-model-launch-variant-selected",
+                    "provider":provider_id,
+                    "attempt":resolved.launch_variant,
+                    "argv":resolved.argv,
+                    "reason":"primary-launch-program-unresolvable"
+                }),
+            )?;
+        }
+        let (argv, environment) = (resolved.argv, resolved.environment);
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| error("Missing native model executable"))?;
@@ -694,6 +826,10 @@ mod tests {
             argv: vec![program.to_string()],
             body_ref: None,
             body_revision: None,
+            from_profile: None,
+            argv_fallback: Vec::new(),
+            env: Default::default(),
+            cwd: None,
             required_context: None,
             model_policy: None,
             now_context: None,
@@ -786,6 +922,10 @@ mod tests {
             argv: argv.iter().map(|s| s.to_string()).collect(),
             body_ref: None,
             body_revision: None,
+            from_profile: None,
+            argv_fallback: Vec::new(),
+            env: Default::default(),
+            cwd: None,
             required_context: None,
             model_policy: None,
             now_context: None,
@@ -974,6 +1114,7 @@ mod tests {
             ("cursor-agent", ExpectedDispatch::Refusal),
             ("opencode", ExpectedDispatch::Refusal),
             ("grok-bot", ExpectedDispatch::Refusal),
+            ("grok", ExpectedDispatch::Refusal),
             ("aider", ExpectedDispatch::Refusal),
         ];
         for (program, expected) in expected {
@@ -1022,6 +1163,19 @@ mod tests {
 
     // --- dispatch translation ---
 
+    /// A fake executable at a controlled path: the file exists and carries
+    /// the executable bit on unix, so launch-program resolution resolves it.
+    fn fake_executable(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
     fn prepared_with_dispatch(dispatch: ModelDispatchDelivery) -> PreparedModel {
         PreparedModel {
             policy_source: EncounterRequiredSource {
@@ -1043,39 +1197,42 @@ mod tests {
 
     #[test]
     fn an_argv_dispatch_appends_exactly_the_declared_flags() {
-        let provider = pi_rpc_provider(&["/Users/admin/.local/bin/pi", "--mode", "rpc"]);
+        let temp = tempfile::tempdir().unwrap();
+        let program = fake_executable(temp.path(), "probe-pi");
+        let provider = pi_rpc_provider(&[program.to_str().unwrap(), "--mode", "rpc"]);
         let model = prepared_with_dispatch(ModelDispatchDelivery::Argv {
             provider_flag: "--provider".into(),
             model_flag: "--model".into(),
         });
-        let argv = selected_argv(&provider, &model).unwrap();
+        let (argv, variant) = selected_launch(&provider, &model).unwrap();
+        assert_eq!(variant, 0);
         assert_eq!(
             argv,
             vec![
-                "/Users/admin/.local/bin/pi",
-                "--mode",
-                "rpc",
-                "--provider",
-                "probe-native",
-                "--model",
-                "probe-model-1",
+                program.display().to_string(),
+                "--mode".to_string(),
+                "rpc".to_string(),
+                "--provider".to_string(),
+                "probe-native".to_string(),
+                "--model".to_string(),
+                "probe-model-1".to_string(),
             ]
         );
     }
 
     #[test]
     fn a_conflicting_native_flag_refuses_without_rewriting() {
+        let temp = tempfile::tempdir().unwrap();
+        let program = fake_executable(temp.path(), "probe-pi-conflict");
         let model = prepared_with_dispatch(ModelDispatchDelivery::Argv {
             provider_flag: "--provider".into(),
             model_flag: "--model".into(),
         });
-        for existing in [
-            vec!["pi", "--model", "other"],
-            vec!["pi", "--provider=zai"],
-            vec!["pi", "--"],
-        ] {
-            let provider = pi_rpc_provider(&existing);
-            let error = selected_argv(&provider, &model).unwrap_err();
+        for existing in [vec!["--model", "other"], vec!["--provider=zai"], vec!["--"]] {
+            let mut argv = vec![program.to_str().unwrap().to_string()];
+            argv.extend(existing.iter().map(|s| s.to_string()));
+            let provider = pi_rpc_provider(&argv.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+            let error = selected_launch(&provider, &model).unwrap_err();
             assert!(
                 error
                     .message()
@@ -1091,12 +1248,131 @@ mod tests {
         // The selection rides the session's model configuration after the
         // session exists, so the launch argv is the provider's own, never
         // rewritten with pi's flags.
-        let provider = acp_provider(&["/opt/homebrew/bin/gemini", "--experimental-acp"]);
+        let temp = tempfile::tempdir().unwrap();
+        let program = fake_executable(temp.path(), "probe-gemini");
+        let provider = acp_provider(&[program.to_str().unwrap(), "--experimental-acp"]);
         let model = prepared_with_dispatch(ModelDispatchDelivery::ConfigKey {
             name: "model".into(),
         });
-        let argv = selected_argv(&provider, &model).unwrap();
+        let argv = selected_launch(&provider, &model).unwrap().0;
         assert_eq!(argv, provider.argv);
+    }
+
+    // --- declared launch-variant resolution at the final exec ---
+
+    #[test]
+    fn an_unresolvable_primary_rides_the_first_resolvable_declared_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let second = fake_executable(temp.path(), "probe-resolved-fallback");
+        let mut provider = acp_provider(&["/nonexistent/aikit-probe/primary-program"]);
+        provider.argv_fallback = vec![
+            vec!["/nonexistent/aikit-probe/first-fallback".to_string()],
+            vec![second.display().to_string()],
+        ];
+        // Declared order decides: the first variant whose program resolves
+        // is selected, skipping only the unresolvable ones before it.
+        let (argv, variant) = resolved_launch_variant(&provider).unwrap();
+        assert_eq!(variant, 2);
+        assert_eq!(argv, vec![second.display().to_string()]);
+    }
+
+    #[test]
+    fn a_resolvable_primary_is_never_swapped_for_a_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let primary = fake_executable(temp.path(), "probe-resolved-primary");
+        let mut provider = acp_provider(&[primary.to_str().unwrap()]);
+        provider.argv_fallback = vec![vec!["/nonexistent/aikit-probe/fallback".to_string()]];
+        let (argv, variant) = resolved_launch_variant(&provider).unwrap();
+        assert_eq!(variant, 0);
+        assert_eq!(argv, provider.argv, "a resolving primary is never swapped");
+    }
+
+    #[test]
+    fn a_selected_fallback_carries_the_declared_dispatch_flags() {
+        // The dispatch delivery joins whichever declared variant the exec
+        // resolution selected — a fallback is a full argv for the same
+        // harness in the same protocol mode, so the flags ride it too.
+        let temp = tempfile::tempdir().unwrap();
+        let fallback = fake_executable(temp.path(), "probe-fallback-flags");
+        let mut provider = pi_rpc_provider(&["/nonexistent/aikit-probe/primary"]);
+        provider.argv_fallback = vec![vec![fallback.to_str().unwrap().to_string()]];
+        let model = prepared_with_dispatch(ModelDispatchDelivery::Argv {
+            provider_flag: "--provider".into(),
+            model_flag: "--model".into(),
+        });
+        let (argv, variant) = selected_launch(&provider, &model).unwrap();
+        assert_eq!(variant, 1);
+        assert_eq!(
+            argv,
+            vec![
+                fallback.display().to_string(),
+                "--provider".to_string(),
+                "probe-native".to_string(),
+                "--model".to_string(),
+                "probe-model-1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_resolvable_declared_variant_refuses_naming_every_checked_variant() {
+        let mut provider = acp_provider(&["/nonexistent/aikit-probe/primary"]);
+        provider.argv_fallback = vec![vec!["aikit-probe-no-such-executable".to_string()]];
+        let error = resolved_launch_variant(&provider).unwrap_err();
+        let message = error.message();
+        assert!(message.contains("every declared variant"), "{message}");
+        assert!(message.contains(provider.id.as_str()), "{message}");
+        assert!(
+            message
+                .contains("primary `/nonexistent/aikit-probe/primary` (the path does not exist)"),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "fallback 1 `aikit-probe-no-such-executable` (no executable file with this \
+                 name is on PATH)"
+            ),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_bare_name_resolves_only_through_an_executable_hit_on_the_search_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = fake_executable(temp.path(), "probe-on-path");
+        let search = Some(temp.path().as_os_str());
+        assert_eq!(
+            unresolvable_program_reason_in("probe-on-path", search),
+            None,
+            "an executable hit on PATH resolves"
+        );
+        let plain = temp.path().join("probe-not-executable");
+        fs::write(&plain, b"not executable").unwrap();
+        assert_eq!(
+            unresolvable_program_reason_in("probe-not-executable", search),
+            Some("no executable file with this name is on PATH".to_string()),
+            "a PATH hit without the executable bit is not a resolution"
+        );
+        assert_eq!(
+            unresolvable_program_reason_in("probe-absent", search),
+            Some("no executable file with this name is on PATH".to_string())
+        );
+        assert_eq!(
+            unresolvable_program_reason_in(
+                "probe-on-path",
+                Some(std::path::Path::new("/nonexistent-aikit-probe-path").as_os_str())
+            ),
+            Some("no executable file with this name is on PATH".to_string())
+        );
+        assert_eq!(
+            unresolvable_program_reason_in(executable.to_str().unwrap(), None),
+            None,
+            "an explicit path resolves without any PATH"
+        );
+        assert_eq!(
+            unresolvable_program_reason_in("/nonexistent/aikit-probe/primary", None),
+            Some("the path does not exist".to_string())
+        );
     }
 
     #[test]

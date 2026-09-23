@@ -78,6 +78,8 @@ pub use session_space_ops::SessionSpaceCliAdapter;
 pub use session_space_service::SessionSpaceServiceOps;
 
 pub mod encounter_mcp;
+pub mod encounter_native_projection;
+pub mod encounter_profile_provider;
 pub mod encounter_service;
 
 /// Self-invocation shape for session-space verbs. The main `aikit` binary

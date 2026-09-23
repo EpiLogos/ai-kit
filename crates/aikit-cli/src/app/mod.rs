@@ -50,18 +50,23 @@ use aikit_adapters::clients::aider::AiderAdapter;
 use aikit_adapters::clients::antigravity::AntigravityAdapter;
 use aikit_adapters::clients::broker::BrokerAdapter;
 use aikit_adapters::clients::claude::ClaudeAdapter;
+use aikit_adapters::clients::cline::ClineAdapter;
 use aikit_adapters::clients::codex::CodexAdapter;
+use aikit_adapters::clients::copilot::CopilotAdapter;
 use aikit_adapters::clients::cursor::CursorAdapter;
+use aikit_adapters::clients::droid::DroidAdapter;
 use aikit_adapters::clients::dsh::DshAdapter;
 use aikit_adapters::clients::gemini::GeminiAdapter;
 use aikit_adapters::clients::goose::GooseAdapter;
-use aikit_adapters::clients::grokbot::GrokbotAdapter;
+use aikit_adapters::clients::grok::GrokAdapter;
 use aikit_adapters::clients::hermes::HermesAdapter;
 use aikit_adapters::clients::kimi::KimiAdapter;
+use aikit_adapters::clients::kiro_cli::KiroCliAdapter;
 use aikit_adapters::clients::ollama::OllamaAdapter;
 use aikit_adapters::clients::openclaw::OpenclawAdapter;
 use aikit_adapters::clients::opencode::OpencodeAdapter;
 use aikit_adapters::clients::pi::PiAdapter;
+use aikit_adapters::clients::qoder::QoderAdapter;
 use aikit_adapters::clients::qwen::QwenAdapter;
 use aikit_adapters::clients::zcode::ZcodeAdapter;
 use aikit_adapters::factory_developmental::{
@@ -2500,17 +2505,38 @@ impl Service {
                 }
                 // Harness-admission sweep round 3: six catalog-r4 harnesses
                 // admitted through Actuation detection records; ids align to
-                // catalog slugs (gemini-antigravity, grok-bot, kimi, ollama,
+                // catalog slugs (gemini-antigravity, grok, kimi, ollama,
                 // openclaw, pi). Binding one opts the context into that
                 // harness's honest effect; unbound harnesses stay inert.
                 TargetId::ANTIGRAVITY => plan_effect(
                     &AntigravityAdapter::new(ctx_dir.join("projections/antigravity")),
                     &rc,
                 ),
-                TargetId::GROK_BOT => plan_effect(
-                    &GrokbotAdapter::new(ctx_dir.join("projections/grokbot")),
+                // Owner decision 2026-09-22: grok-bot was a misidentification
+                // (bot/group management, not a coding harness); the adapter now
+                // profiles Grok Build, slug `grok`. The aikit-core TargetId
+                // constant keeps its legacy spelling, so both the legacy id and
+                // the new slug route here; behavior is otherwise unchanged.
+                TargetId::GROK_BOT | "grok" => {
+                    plan_effect(&GrokAdapter::new(ctx_dir.join("projections/grok")), &rc)
+                }
+                // Harness-connection roster expansion 2026-09-23 (connection
+                // truth cards 2026-09-22): docs-level census adapters. These
+                // slugs have no aikit-core TargetId constant yet, so the arms
+                // match their catalog-slug spellings directly (the grok
+                // precedent); each routes to that harness's honest brokered
+                // plan. Unbound harnesses stay inert.
+                "copilot" => plan_effect(
+                    &CopilotAdapter::new(ctx_dir.join("projections/copilot")),
                     &rc,
                 ),
+                "cline" => plan_effect(&ClineAdapter::new(ctx_dir.join("projections/cline")), &rc),
+                "kiro-cli" => plan_effect(
+                    &KiroCliAdapter::new(ctx_dir.join("projections/kiro-cli")),
+                    &rc,
+                ),
+                "qoder" => plan_effect(&QoderAdapter::new(ctx_dir.join("projections/qoder")), &rc),
+                "droid" => plan_effect(&DroidAdapter::new(ctx_dir.join("projections/droid")), &rc),
                 TargetId::HERMES => {
                     plan_effect(&HermesAdapter::new(ctx_dir.join("projections/hermes")), &rc)
                 }

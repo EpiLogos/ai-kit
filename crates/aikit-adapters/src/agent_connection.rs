@@ -58,6 +58,26 @@ impl ConnectionCapabilities {
     }
 }
 
+/// The negotiated ACP `agentCapabilities.sessionCapabilities` lifecycle facts:
+/// the post-pin session operations the target advertised at initialize.
+/// Absent means false — a target that did not advertise an operation does not
+/// have it, and nothing is inferred from a protocol version alone. The
+/// `resume` fact also appears as [`SessionOpenMode::Resume`] in
+/// [`ConnectionCapabilities::session_open`]; this carries the raw negotiated
+/// flags for read models that disclose them as such.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AcpSessionCapabilities {
+    /// The target advertised `sessionCapabilities.resume`: `session/resume`
+    /// (stabilized 2026-04-23) opens an existing native session with no
+    /// history replay.
+    #[serde(default)]
+    pub resume: bool,
+    /// The target advertised `sessionCapabilities.close`.
+    #[serde(default)]
+    pub close: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionDescriptor {
     pub adapter_ref: ResourceRef,
@@ -596,6 +616,7 @@ pub struct AcpV1ConnectionAdapter {
     next_request_id: u64,
     next_sequence: u64,
     capabilities: ConnectionCapabilities,
+    session_capabilities: AcpSessionCapabilities,
     pending: BTreeMap<u64, PendingAcpRequest>,
     provenance: Vec<String>,
 }
@@ -630,6 +651,7 @@ impl AcpV1ConnectionAdapter {
                 additional_directories: false,
                 mcp_servers: false,
             },
+            session_capabilities: AcpSessionCapabilities::default(),
             pending: BTreeMap::new(),
             provenance,
         }
@@ -637,6 +659,36 @@ impl AcpV1ConnectionAdapter {
 
     pub fn negotiated_capabilities(&self) -> &ConnectionCapabilities {
         &self.capabilities
+    }
+
+    /// The negotiated `agentCapabilities.sessionCapabilities` facts, parsed at
+    /// initialize. Absent capabilities are false.
+    pub fn negotiated_session_capabilities(&self) -> &AcpSessionCapabilities {
+        &self.session_capabilities
+    }
+
+    /// Open an existing native session through ACP `session/resume` — the
+    /// operation stabilized 2026-04-23 that, unlike `session/load`, performs
+    /// no history replay: the response carries no replayed history and none is
+    /// fabricated here. Mirrors the `session/new` open shape (session id, cwd,
+    /// mcp servers) and returns the same opened-session command; the response
+    /// resolves through the same `SessionOpened` binding path. Gated on the
+    /// negotiated `sessionCapabilities.resume`; a target that did not
+    /// advertise it is refused before any wire message is emitted.
+    pub fn session_resume(
+        &mut self,
+        native_session_id: impl Into<String>,
+        cwd: impl Into<String>,
+        mcp_servers: Vec<Value>,
+    ) -> Result<ConnectionCommand> {
+        self.open_session(SessionOpenRequest {
+            mode: SessionOpenMode::Resume,
+            native_session_id: Some(native_session_id.into()),
+            cwd: cwd.into(),
+            additional_directories: Vec::new(),
+            mcp_servers,
+            agent_session: None,
+        })
     }
 
     fn request(
@@ -706,11 +758,20 @@ impl AcpV1ConnectionAdapter {
         if capability_present(&agent, "loadSession") || capability_present(&sessions, "load") {
             open.insert(SessionOpenMode::Load);
         }
-        if capability_present(&sessions, "resume") {
+        let resume = capability_present(&sessions, "resume");
+        if resume {
             open.insert(SessionOpenMode::Resume);
         }
-        // ACP v1 has no generic attach-to-live-session method. A target-specific
-        // extension may be represented by another adapter, never inferred here.
+        // ACP v1 grew post-pin session lifecycle operations under
+        // `sessionCapabilities` while `protocolVersion` stayed 1. Attach has
+        // no dedicated method: where the target advertises `resume`, the
+        // stabilized `session/resume` operation (2026-04-23) is the one honest
+        // route to an existing native session, and open_session refuses
+        // naming that capability when it is absent.
+        self.session_capabilities = AcpSessionCapabilities {
+            resume,
+            close: capability_present(&sessions, "close"),
+        };
         self.capabilities.session_open = open;
         self.capabilities.additional_directories =
             capability_present(&sessions, "additionalDirectories");
@@ -941,10 +1002,26 @@ impl AgentConnectionAdapter for AcpV1ConnectionAdapter {
     }
 
     fn open_session(&mut self, request: SessionOpenRequest) -> Result<ConnectionCommand> {
-        if !self.capabilities.supports(request.mode) {
+        // Resume and attach both ride the stabilized `session/resume`
+        // operation; both are gated on the negotiated
+        // `agentCapabilities.sessionCapabilities.resume` fact, and the refusal
+        // names that capability rather than a protocol-generation claim.
+        let resume_routed = matches!(
+            request.mode,
+            SessionOpenMode::Resume | SessionOpenMode::Attach
+        );
+        if !self.capabilities.supports(request.mode)
+            && !(resume_routed && self.capabilities.supports(SessionOpenMode::Resume))
+        {
             return Err(AikitError::new(
                 "connection.session_operation_unsupported",
-                format!("ACP target does not advertise {:?}", request.mode),
+                if resume_routed {
+                    "ACP target does not advertise agentCapabilities.sessionCapabilities.resume; \
+                     there is no protocol operation to open an existing native session"
+                        .to_owned()
+                } else {
+                    format!("ACP target does not advertise {:?}", request.mode)
+                },
             ));
         }
         if !request.additional_directories.is_empty() && !self.capabilities.additional_directories {
@@ -957,13 +1034,7 @@ impl AgentConnectionAdapter for AcpV1ConnectionAdapter {
         let method = match request.mode {
             SessionOpenMode::Create => "session/new",
             SessionOpenMode::Load => "session/load",
-            SessionOpenMode::Resume => "session/resume",
-            SessionOpenMode::Attach => {
-                return Err(AikitError::new(
-                    "connection.session_operation_unsupported",
-                    "ACP v1 has no generic attach operation",
-                ));
-            }
+            SessionOpenMode::Resume | SessionOpenMode::Attach => "session/resume",
         };
         let mut params = json!({
             "cwd": request.cwd,

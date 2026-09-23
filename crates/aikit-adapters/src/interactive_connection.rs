@@ -29,8 +29,14 @@ pub enum PermissionDecision {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcpStableSessionCapabilities {
+    /// The target advertised `sessionCapabilities.close`.
     pub close: bool,
+    /// The target advertised `sessionCapabilities.list`.
     pub list: bool,
+    /// The target advertised `sessionCapabilities.resume`: `session/resume`
+    /// opens an existing native session with no history replay.
+    #[serde(default)]
+    pub resume: bool,
 }
 
 /// Non-mutating disclosure from the actual adapter, not inferred from model
@@ -233,6 +239,9 @@ impl AcpStableConnectionAdapter {
             .is_some_and(capability_present);
         self.session_capabilities.list = session
             .and_then(|value| value.get("list"))
+            .is_some_and(capability_present);
+        self.session_capabilities.resume = session
+            .and_then(|value| value.get("resume"))
             .is_some_and(capability_present);
     }
 

@@ -33,12 +33,21 @@ const OVERLAY_NAMES: &[&str] = &[
     "gemini-cli",
     "pi",
     "gemini-antigravity",
-    "grok-bot",
+    "grok",
     "kimi",
     "openclaw",
     "ollama",
     "hermes",
     "hermes-acp",
+    // Harness-connection roster expansion 2026-09-23 (connection truth cards
+    // 2026-09-22): five docs-level census overlays, each joining its own
+    // catalog slug — the rows exist once Actuation's descriptors declare the
+    // slugs, never before.
+    "copilot",
+    "cline",
+    "kiro-cli",
+    "qoder",
+    "droid",
 ];
 
 /// A stand-in `actuation` binary: serves fixture descriptors for the slugs a

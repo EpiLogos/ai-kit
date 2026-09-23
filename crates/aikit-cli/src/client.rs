@@ -39,12 +39,17 @@ use aikit_adapters::actuation_harness_detection::{
 };
 use aikit_adapters::clients::{
     antigravity::AntigravityAdapter, broker::BrokerAdapter, claude::ClaudeAdapter,
-    codex::CodexAdapter, gemini::GeminiAdapter, grokbot::GrokbotAdapter, hermes::HermesAdapter,
-    kimi::KimiAdapter, ollama::OllamaAdapter, openclaw::OpenclawAdapter, opencode::OpencodeAdapter,
-    pi::PiAdapter, zcode::ZcodeAdapter, ClientAdapter,
+    cline::ClineAdapter, codex::CodexAdapter, copilot::CopilotAdapter, droid::DroidAdapter,
+    gemini::GeminiAdapter, grok::GrokAdapter, hermes::HermesAdapter, kimi::KimiAdapter,
+    kiro_cli::KiroCliAdapter, ollama::OllamaAdapter, openclaw::OpenclawAdapter,
+    opencode::OpencodeAdapter, pi::PiAdapter, qoder::QoderAdapter, zcode::ZcodeAdapter,
+    ClientAdapter,
 };
 use aikit_adapters::runner::SystemRunner;
-use aikit_adapters::tool_sources::{plan_tools_projection, ToolsProjectionOutcome};
+use aikit_adapters::tool_sources::{
+    plan_tools_projection, ToolSourceEntry, ToolsProjectionOutcome,
+};
+use aikit_store::AikitHome;
 
 use crate::app::Service;
 
@@ -411,14 +416,20 @@ static OVERLAYS: &[ClientOverlay] = &[
         admission: |dirs| AntigravityAdapter::new(projection_dir(dirs, "antigravity")).admission(),
     },
     ClientOverlay {
-        name: TargetId::GROK_BOT,
-        aliases: &["grokbot"],
-        catalog_slug: TargetId::GROK_BOT,
+        // Owner decision 2026-09-22: the grok-bot row was a misidentification
+        // (the grok-bot CLI manages bots/groups, not a coding harness); the
+        // adapter now profiles xAI's Grok Build (`grok`). The catalog slug is
+        // the join key, so it is `grok` — until Actuation lands its owed
+        // catalog correction, its grok-bot detection rows describe the wrong
+        // product and join no overlay.
+        name: "grok",
+        aliases: &[],
+        catalog_slug: "grok",
         semantic: SemanticBasis::None,
         reach: Reach::AdapterOnly {
-            build: |dirs| Box::new(GrokbotAdapter::new(projection_dir(dirs, "grokbot"))),
+            build: |dirs| Box::new(GrokAdapter::new(projection_dir(dirs, "grok"))),
         },
-        admission: |dirs| GrokbotAdapter::new(projection_dir(dirs, "grokbot")).admission(),
+        admission: |dirs| GrokAdapter::new(projection_dir(dirs, "grok")).admission(),
     },
     ClientOverlay {
         name: TargetId::KIMI,
@@ -469,6 +480,63 @@ static OVERLAYS: &[ClientOverlay] = &[
             build: |dirs| Box::new(HermesAdapter::acp(projection_dir(dirs, "hermes-acp"))),
         },
         admission: |dirs| HermesAdapter::acp(projection_dir(dirs, "hermes-acp")).admission(),
+    },
+    // Harness-connection roster expansion 2026-09-23 (connection truth cards
+    // 2026-09-22, expansion shortlist): five docs-level census adapters. None
+    // of these harnesses is installed on the authoring machine, so each row's
+    // admission is a docs-cited census and the reach is AdapterOnly — no
+    // launch or install seam is claimed. The catalog slugs are the harnesses'
+    // own spellings; the roster rows appear when Actuation's descriptors land,
+    // never before.
+    ClientOverlay {
+        name: "copilot",
+        aliases: &[],
+        catalog_slug: "copilot",
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(CopilotAdapter::new(projection_dir(dirs, "copilot"))),
+        },
+        admission: |dirs| CopilotAdapter::new(projection_dir(dirs, "copilot")).admission(),
+    },
+    ClientOverlay {
+        name: "cline",
+        aliases: &[],
+        catalog_slug: "cline",
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(ClineAdapter::new(projection_dir(dirs, "cline"))),
+        },
+        admission: |dirs| ClineAdapter::new(projection_dir(dirs, "cline")).admission(),
+    },
+    ClientOverlay {
+        name: "kiro-cli",
+        aliases: &[],
+        catalog_slug: "kiro-cli",
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(KiroCliAdapter::new(projection_dir(dirs, "kiro-cli"))),
+        },
+        admission: |dirs| KiroCliAdapter::new(projection_dir(dirs, "kiro-cli")).admission(),
+    },
+    ClientOverlay {
+        name: "qoder",
+        aliases: &[],
+        catalog_slug: "qoder",
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(QoderAdapter::new(projection_dir(dirs, "qoder"))),
+        },
+        admission: |dirs| QoderAdapter::new(projection_dir(dirs, "qoder")).admission(),
+    },
+    ClientOverlay {
+        name: "droid",
+        aliases: &[],
+        catalog_slug: "droid",
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(DroidAdapter::new(projection_dir(dirs, "droid"))),
+        },
+        admission: |dirs| DroidAdapter::new(projection_dir(dirs, "droid")).admission(),
     },
 ];
 
@@ -983,6 +1051,14 @@ pub struct ToolsLayerOutcome {
     pub removed: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kept_foreign: Option<usize>,
+    /// The names behind the added/replaced counts: the records the merge
+    /// wrote into the seam, when a plan was made.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub written_entries: Option<Vec<String>>,
+    /// The names behind the removed count: the stale AIKit-owned records the
+    /// merge swept, when a plan was made.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swept_entries: Option<Vec<String>>,
     /// When the harness sees the change, as the profile declares it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activation: Option<aikit_core::harness_profile::ActivationEffectName>,
@@ -1021,7 +1097,7 @@ fn managed_tools_clients() -> Vec<(&'static str, &'static str)> {
 /// capsule resolved. An enabled-but-unreviewed capsule is named as such, with
 /// the capsule and the way forward, because "reviewed" is exactly the fact the
 /// projection turns on; anything else is the plain no-composition truth.
-fn uncomposed_tools_reason(service: &Service) -> String {
+pub(crate) fn uncomposed_tools_reason(service: &Service) -> String {
     let view = service.resolved();
     let untrusted: Vec<String> = view
         .catalog_index
@@ -1082,6 +1158,8 @@ pub fn project_tools_layers(service: &Service) -> Vec<ToolsLayerOutcome> {
                     replaced: None,
                     removed: None,
                     kept_foreign: None,
+                    written_entries: None,
+                    swept_entries: None,
                     activation: None,
                     reason: Some(reason.clone()),
                 })
@@ -1091,23 +1169,115 @@ pub fn project_tools_layers(service: &Service) -> Vec<ToolsLayerOutcome> {
     // With nothing composed there is nothing a fresh document would carry, so
     // a missing config stays missing — creating empty record files for
     // harnesses that may not even be installed projects nothing.
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
     let tree = service
         .descriptor()
         .project_root
         .clone()
+        .unwrap_or_else(|| PathBuf::from("."));
+    let machine_home = std::env::var_os("HOME")
+        .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     let uncomposed = (entries.is_empty()).then(|| uncomposed_tools_reason(service));
 
     clients
         .into_iter()
         .map(|(client, slug)| {
-            let refused = |reason: String| ToolsLayerOutcome {
+            apply_managed_tools_projection(
+                service.home(),
+                &tree,
+                &machine_home,
                 client,
                 slug,
-                state: "refused",
+                &entries,
+                uncomposed.as_deref(),
+            )
+        })
+        .collect()
+}
+
+/// The overlay row joined by catalog slug, when one exists — the encounter's
+/// native-projection fallback names its write the way `apply` does, and a
+/// harness without an overlay row keeps its slug as the name.
+pub(crate) fn client_for_slug(slug: &str) -> Option<&'static str> {
+    OVERLAYS
+        .iter()
+        .find(|overlay| overlay.catalog_slug == slug)
+        .map(|overlay| overlay.name)
+}
+
+/// Apply one harness's managed tools-layer projection end to end: plan the
+/// merge from the profile's `tools.project` declaration through the one layer
+/// merge grammar, stage the merged write as a [`WorldEdit`] with its
+/// [`Inverse`], and run it as a [`Procedure`] — the same receipt pipeline
+/// every other AIKit write goes through. This is the ONE application entry:
+/// `aikit apply`'s tools tail ([`project_tools_layers`]) and the encounter
+/// native-MCP fallback ([`crate::encounter_native_projection`]) both call it;
+/// there is no second merge, staging or run implementation.
+///
+/// `machine_home` roots the profile's `~/`-anchored seam paths (the machine
+/// home in production, an isolated root in tests); `tree` roots a relative
+/// seam against the project, resolved exactly as the apply path resolves it.
+/// `uncomposed` carries the apply path's plain no-composition reason: a
+/// missing seam then stays missing (creating empty record files for harnesses
+/// that may not even be installed projects nothing), while an existing one is
+/// still processed, because the sweep of stale AIKit-owned records is real
+/// retraction work even with nothing composed. The encounter fallback passes
+/// `None` — its resolution fires only when capsules ARE composed.
+pub(crate) fn apply_managed_tools_projection(
+    home: &AikitHome,
+    tree: &Path,
+    machine_home: &Path,
+    client: &'static str,
+    slug: &'static str,
+    entries: &[ToolSourceEntry],
+    uncomposed: Option<&str>,
+) -> ToolsLayerOutcome {
+    let refused = |reason: String| ToolsLayerOutcome {
+        client,
+        slug,
+        state: "refused",
+        path: None,
+        procedure: None,
+        undo: None,
+        added: None,
+        replaced: None,
+        removed: None,
+        kept_foreign: None,
+        written_entries: None,
+        swept_entries: None,
+        activation: None,
+        reason: Some(reason),
+    };
+    // The profile facts the projection is gated by. The apply path derives the
+    // slug from the profile itself, so these are invariants there; a caller
+    // handing a profile that lost its declaration gets a refusal naming the
+    // gap, never a panic.
+    let Some(profile) = aikit_adapters::profiles::for_slug(slug) else {
+        return refused(format!(
+            "no embedded harness profile is named {slug}; there is no declared seam to \
+             project tool records into"
+        ));
+    };
+    let Some(tools) = profile.tools.as_ref() else {
+        return refused(format!(
+            "the {slug} profile declares no tools layer; there is no seam AIKit may project \
+             MCP server records into"
+        ));
+    };
+    let Some(project) = tools.project.as_ref() else {
+        return refused(format!(
+            "the {slug} profile's tools layer declares no project seam; a managed layer \
+             must name the seam it projects into"
+        ));
+    };
+
+    let expanded = expand_seam(&project.file, machine_home, tree);
+    if let Some(reason) = uncomposed {
+        if !expanded.exists() {
+            return ToolsLayerOutcome {
+                client,
+                slug,
+                state: "not-projected",
                 path: None,
                 procedure: None,
                 undo: None,
@@ -1115,151 +1285,141 @@ pub fn project_tools_layers(service: &Service) -> Vec<ToolsLayerOutcome> {
                 replaced: None,
                 removed: None,
                 kept_foreign: None,
+                written_entries: None,
+                swept_entries: None,
+                activation: None,
+                reason: Some(reason.to_string()),
+            };
+        }
+        // A config already exists: the sweep of stale AIKit-owned
+        // records is real retraction work even with nothing composed.
+    }
+
+    let outcome =
+        plan_tools_projection(
+            entries.iter().cloned(),
+            profile,
+            |raw| match std::fs::read_to_string(expand_seam(raw, machine_home, tree)) {
+                Ok(contents) => Ok(Some(contents)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error),
+            },
+        );
+    let plan = match outcome {
+        Err(error) => return refused(error.to_string()),
+        Ok(ToolsProjectionOutcome::NotProjected { reason }) => {
+            return ToolsLayerOutcome {
+                client,
+                slug,
+                state: "not-projected",
+                path: None,
+                procedure: None,
+                undo: None,
+                added: None,
+                replaced: None,
+                removed: None,
+                kept_foreign: None,
+                written_entries: None,
+                swept_entries: None,
                 activation: None,
                 reason: Some(reason),
             };
-            // The profile facts the client was selected by; the join key came
-            // from the profile, so both are present.
-            let profile = aikit_adapters::profiles::for_slug(slug)
-                .expect("the overlay's catalog slug carries an embedded profile");
-            let tools = profile
-                .tools
-                .as_ref()
-                .expect("a managed tools client was derived from a tools layer");
-            let project = tools
-                .project
-                .as_ref()
-                .expect("a managed tools client was derived from a project declaration");
+        }
+        Ok(ToolsProjectionOutcome::Projected(plan)) => plan,
+    };
+    let ProjectionItem::Write { contents, .. } = &plan.item else {
+        return refused(format!(
+            "the {client} tools layer planned an item that is not the merged config \
+             write: {:?}",
+            plan.item
+        ));
+    };
+    let written_entries = || {
+        Some(
+            plan.report
+                .added
+                .iter()
+                .chain(plan.report.replaced.iter())
+                .cloned()
+                .collect::<Vec<String>>(),
+        )
+    };
+    let swept_entries = || Some(plan.report.removed.clone());
 
-            if let Some(reason) = &uncomposed {
-                if !expand_seam(&project.file, &home, &tree).exists() {
-                    return ToolsLayerOutcome {
-                        client,
-                        slug,
-                        state: "not-projected",
-                        path: None,
-                        procedure: None,
-                        undo: None,
-                        added: None,
-                        replaced: None,
-                        removed: None,
-                        kept_foreign: None,
-                        activation: None,
-                        reason: Some(reason.clone()),
-                    };
-                }
-                // A config already exists: the sweep of stale AIKit-owned
-                // records is real retraction work even with nothing composed.
-            }
+    // The merge output is already exactly in place: nothing was
+    // written, so no procedure runs and no receipt is claimed.
+    if std::fs::read_to_string(&expanded).is_ok_and(|existing| existing == *contents) {
+        return ToolsLayerOutcome {
+            client,
+            slug,
+            state: "satisfied",
+            path: Some(expanded.display().to_string()),
+            procedure: None,
+            undo: None,
+            added: Some(plan.report.added.len()),
+            replaced: Some(plan.report.replaced.len()),
+            removed: Some(plan.report.removed.len()),
+            kept_foreign: Some(plan.report.kept_foreign.len()),
+            written_entries: written_entries(),
+            swept_entries: swept_entries(),
+            activation: plan.activation,
+            reason: None,
+        };
+    }
 
-            let expanded = expand_seam(&project.file, &home, &tree);
-            let outcome = plan_tools_projection(entries.iter().cloned(), profile, |raw| {
-                match std::fs::read_to_string(expand_seam(raw, &home, &tree)) {
-                    Ok(contents) => Ok(Some(contents)),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                    Err(error) => Err(error),
-                }
-            });
-            let plan = match outcome {
-                Err(error) => return refused(error.to_string()),
-                Ok(ToolsProjectionOutcome::NotProjected { reason }) => {
-                    return ToolsLayerOutcome {
-                        client,
-                        slug,
-                        state: "not-projected",
-                        path: None,
-                        procedure: None,
-                        undo: None,
-                        added: None,
-                        replaced: None,
-                        removed: None,
-                        kept_foreign: None,
-                        activation: None,
-                        reason: Some(reason),
-                    };
-                }
-                Ok(ToolsProjectionOutcome::Projected(plan)) => plan,
-            };
-            let ProjectionItem::Write { contents, .. } = &plan.item else {
-                return refused(format!(
-                    "the {client} tools layer planned an item that is not the merged config \
-                     write: {:?}",
-                    plan.item
-                ));
-            };
-
-            // The merge output is already exactly in place: nothing was
-            // written, so no procedure runs and no receipt is claimed.
-            if std::fs::read_to_string(&expanded).is_ok_and(|existing| existing == *contents) {
-                return ToolsLayerOutcome {
-                    client,
-                    slug,
-                    state: "satisfied",
-                    path: Some(expanded.display().to_string()),
-                    procedure: None,
-                    undo: None,
-                    added: Some(plan.report.added.len()),
-                    replaced: Some(plan.report.replaced.len()),
-                    removed: Some(plan.report.removed.len()),
-                    kept_foreign: Some(plan.report.kept_foreign.len()),
-                    activation: plan.activation,
-                    reason: None,
-                };
-            }
-
-            // Stage the write through the one Procedure engine: the inverse
-            // restores the previous bytes, or removes the file when there
-            // were none — undo is exact either way.
-            let inverse = if expanded.exists() {
-                Inverse::Restore {
-                    blob: aikit_core::procedure::BlobId::deferred(),
-                }
+    // Stage the write through the one Procedure engine: the inverse
+    // restores the previous bytes, or removes the file when there
+    // were none — undo is exact either way.
+    let inverse = if expanded.exists() {
+        Inverse::Restore {
+            blob: aikit_core::procedure::BlobId::deferred(),
+        }
+    } else {
+        Inverse::Remove
+    };
+    let procedure_plan = Plan::new()
+        .with_note(format!(
+            "project {client}'s managed tools layer into {}",
+            expanded.display()
+        ))
+        .with_edit(WorldEdit::WriteFile {
+            path: expanded.clone(),
+            contents: contents.clone().into_bytes(),
+            inverse,
+        });
+    let procedure = match aikit_store::procedure::plan_procedure(
+        home,
+        ProcedureKind::ToolsProjection {
+            client: TargetId::new(client),
+        },
+        procedure_plan,
+    ) {
+        Ok(procedure) => procedure,
+        Err(error) => return refused(error.message().to_string()),
+    };
+    match aikit_store::procedure::ProcedureRunner::new(home).run(&procedure) {
+        Ok(applied) => ToolsLayerOutcome {
+            client,
+            slug,
+            state: if applied.already_satisfied {
+                "satisfied"
             } else {
-                Inverse::Remove
-            };
-            let procedure_plan = Plan::new()
-                .with_note(format!(
-                    "project {client}'s managed tools layer into {}",
-                    expanded.display()
-                ))
-                .with_edit(WorldEdit::WriteFile {
-                    path: expanded.clone(),
-                    contents: contents.clone().into_bytes(),
-                    inverse,
-                });
-            let procedure = match aikit_store::procedure::plan_procedure(
-                service.home(),
-                ProcedureKind::ToolsProjection {
-                    client: TargetId::new(client),
-                },
-                procedure_plan,
-            ) {
-                Ok(procedure) => procedure,
-                Err(error) => return refused(error.message().to_string()),
-            };
-            match aikit_store::procedure::ProcedureRunner::new(service.home()).run(&procedure) {
-                Ok(applied) => ToolsLayerOutcome {
-                    client,
-                    slug,
-                    state: if applied.already_satisfied {
-                        "satisfied"
-                    } else {
-                        "written"
-                    },
-                    path: Some(expanded.display().to_string()),
-                    procedure: Some(procedure.id.to_string()),
-                    undo: Some(format!("aikit procedure undo {}", procedure.id)),
-                    added: Some(plan.report.added.len()),
-                    replaced: Some(plan.report.replaced.len()),
-                    removed: Some(plan.report.removed.len()),
-                    kept_foreign: Some(plan.report.kept_foreign.len()),
-                    activation: plan.activation,
-                    reason: None,
-                },
-                Err(error) => refused(error.message().to_string()),
-            }
-        })
-        .collect()
+                "written"
+            },
+            path: Some(expanded.display().to_string()),
+            procedure: Some(procedure.id.to_string()),
+            undo: Some(format!("aikit procedure undo {}", procedure.id)),
+            added: Some(plan.report.added.len()),
+            replaced: Some(plan.report.replaced.len()),
+            removed: Some(plan.report.removed.len()),
+            kept_foreign: Some(plan.report.kept_foreign.len()),
+            written_entries: written_entries(),
+            swept_entries: swept_entries(),
+            activation: plan.activation,
+            reason: None,
+        },
+        Err(error) => refused(error.message().to_string()),
+    }
 }
 
 /// The argv that starts a client against this context's projection.
@@ -2304,7 +2464,6 @@ mod tests {
             ("claude-code", "claude"),
             ("antigravity", TargetId::ANTIGRAVITY),
             ("gemini", TargetId::GEMINI_CLI),
-            ("grokbot", TargetId::GROK_BOT),
         ] {
             let via_alias = client_overlay(alias).expect("alias must resolve");
             let via_name = client_overlay(name).expect("name must resolve");

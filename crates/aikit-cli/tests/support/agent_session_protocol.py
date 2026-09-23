@@ -48,8 +48,11 @@ for line in sys.stdin:
     method = message.get("method")
     ident = message.get("id")
     if method == "initialize":
-        result(ident, {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}})
-    elif method in ("session/new", "session/load"):
+        # Resume advertised: the encounter reconnect rides the capability-gated
+        # session/resume (no history replay), not session/load.
+        result(ident, {"protocolVersion": 1, "agentCapabilities": {"loadSession": True,
+                        "sessionCapabilities": {"resume": True}}})
+    elif method in ("session/new", "session/load", "session/resume"):
         native = message.get("params", {}).get("sessionId", native)
         result(ident, {"sessionId": native, "configOptions": config(), "modes": modes()})
     elif method == "session/set_mode":
