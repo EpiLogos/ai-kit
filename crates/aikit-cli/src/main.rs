@@ -348,6 +348,34 @@ fn cmd_inhabit(cwd: &std::path::Path, args: InhabitArgs, json_mode: bool) -> Res
             ))
         });
     }
+    if args.attach {
+        let attached = inhabit::attach(&owners, &args.position, args.generation.as_deref(), cwd)?;
+        if args.command.is_empty() {
+            let exports = attached
+                .env
+                .iter()
+                .map(|(key, value)| format!("export {key}={value}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Ok(if json_mode {
+                let mut data = attached.claim.clone();
+                data["exports"] = Value::from(exports);
+                envelope(data)
+            } else {
+                Reply::Text(format!(
+                    "{} is still held by generation {}\n{exports}",
+                    attached.position_ref, attached.generation_ref
+                ))
+            });
+        }
+        eprintln!(
+            "aikit inhabit: continuing {} as generation {} (verified current) — launching `{}`",
+            attached.position_ref,
+            attached.generation_ref,
+            args.command.join(" ")
+        );
+        return Err(inhabit::exec_harness(&args.command, &attached));
+    }
     let reason = args.reason.clone().ok_or_else(|| {
         inhabit::refusal(
             "inhabit.reason_required",

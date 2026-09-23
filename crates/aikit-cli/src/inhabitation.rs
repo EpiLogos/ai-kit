@@ -2227,7 +2227,16 @@ pub fn render_lean_entry(reading: &InhabitationReading, project: Option<&str>) -
             "Body: {} · context: aikit compose --json; prepared: aikit now-context inspect",
             value_line(&f.body)
         ),
-        format!("Return: {}", value_line(&f.return_destination)),
+        format!(
+            "Return: {}{}",
+            value_line(&f.return_destination),
+            match (&reading.position_ref, &reading.identity.occupant_generation) {
+                (Some(position), Some(generation)) => format!(
+                    " · attribute Returns and Communiques as actor {position} (generation {generation}), not the harness name"
+                ),
+                _ => String::new(),
+            }
+        ),
         format!(
             "Faculties: aikit whoami (full reading, peers) · aikit refocus (trace to ground) · {gateway} · skills: aikit method, aikit knowledge search · surface: {working_surface}"
         ),
