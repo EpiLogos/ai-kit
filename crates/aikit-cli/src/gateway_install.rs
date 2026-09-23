@@ -261,7 +261,10 @@ mod tests {
     fn uninstall_refuses_when_nothing_is_installed() {
         let dir = tempfile::tempdir().unwrap();
         let error = uninstall(dir.path()).unwrap_err();
+        #[cfg(target_os = "macos")]
         assert_eq!(error.code(), "gateway.service_not_installed");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(error.code(), "gateway.service_install_unsupported");
         assert!(!is_installed(dir.path()));
     }
 }

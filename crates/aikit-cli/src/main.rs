@@ -487,7 +487,6 @@ fn cmd_now_context(cwd: &std::path::Path, command: NowContextCmd) -> Result<Repl
     data_reply(data)
 }
 
-
 /// The LaunchAgent tree lives under the real home directory, not AIKIT_HOME:
 /// launchd owns `~/Library/LaunchAgents`, and the agent runs against whatever
 /// AIKIT_HOME the environment carries at load time.
