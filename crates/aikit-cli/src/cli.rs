@@ -367,6 +367,102 @@ pub enum NowContextSub {
     /// GitNexus code lens and deterministic cross-lens joins — the native
     /// continuation of `scripts/jev-redis/assemble_contemplation.py`.
     Field(Box<NowFieldArgs>),
+    /// Build the typed `aikit.contemplation-questions/v1` set over an
+    /// assembled field and invoke Jev, returning `aikit.contemplation-
+    /// decision/v1`.
+    Contemplate(NowContemplateArgs),
+    /// Prepare `aikit.test-selection/v1` (JSON + Markdown) from a field and
+    /// an optional prior contemplation decision. A pure read/compose view —
+    /// no new store, no acceptance database.
+    TestSelection(NowTestSelectionArgs),
+    /// Publish the field, an optional decision and an optional test-selection
+    /// into the participant's prepared view through the existing CAS publish
+    /// path, and append one replayable change per published item.
+    PublishIntelligence(Box<NowPublishIntelligenceArgs>),
+}
+
+#[derive(Debug, Args)]
+pub struct NowContemplateArgs {
+    /// The assembled `aikit.contemplation-field/v1` document.
+    #[arg(long, value_name = "PATH")]
+    pub field: std::path::PathBuf,
+    /// Forward (planning/development) or returning (review/analysis) pass.
+    #[arg(
+        long,
+        value_name = "prospective|retrospective",
+        default_value = "prospective"
+    )]
+    pub pass: String,
+    #[arg(long = "limits-file", value_name = "PATH")]
+    pub limits_file: std::path::PathBuf,
+    /// Native secret reference (varlock://, pass://, keychain://, op://; env:// requires explicit opt-in).
+    #[arg(long = "credential-ref", value_name = "SECRET_REF")]
+    pub credential_ref: String,
+    /// Deterministic protocol proof only: explicit loopback endpoint. Omit for the official provider.
+    #[arg(long = "controlled-endpoint", value_name = "HOST:PORT")]
+    pub controlled_endpoint: Option<std::net::SocketAddr>,
+    #[arg(long = "curl", value_name = "PATH")]
+    pub curl: Option<std::path::PathBuf>,
+    /// Permit a deliberately supplied env:// secret reference for this invocation only.
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
+    /// Minimum Noul score for a candidate to be treated as selected.
+    #[arg(long = "relevance-threshold", default_value_t = 0.5)]
+    pub relevance_threshold: f64,
+    #[arg(long = "invocation-ref", value_name = "RESOURCE_REF")]
+    pub invocation_ref: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct NowTestSelectionArgs {
+    /// The assembled `aikit.contemplation-field/v1` document.
+    #[arg(long, value_name = "PATH")]
+    pub field: std::path::PathBuf,
+    /// An `aikit.contemplation-decision/v1` from `now-context contemplate`.
+    #[arg(long, value_name = "PATH")]
+    pub decision: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct NowPublishIntelligenceArgs {
+    #[arg(long = "config-file", value_name = "PATH")]
+    pub config_file: std::path::PathBuf,
+    #[arg(long = "participant-ref", value_name = "RESOURCE_REF")]
+    pub participant_ref: String,
+    #[arg(long = "project-ref", value_name = "RESOURCE_REF")]
+    pub project_ref: String,
+    #[arg(long = "now-ref", value_name = "RESOURCE_REF")]
+    pub now_ref: String,
+    #[arg(long = "agent-session", value_name = "RESOURCE_REF")]
+    pub agent_session: String,
+    #[arg(long, value_name = "TEXT")]
+    pub concern: String,
+    #[arg(long = "disclosure-revision", value_name = "REVISION")]
+    pub disclosure_revision: String,
+    #[arg(long = "expected-version", value_name = "N")]
+    pub expected_version: u64,
+    /// The assembled `aikit.contemplation-field/v1` document.
+    #[arg(long = "field-file", value_name = "PATH")]
+    pub field_file: std::path::PathBuf,
+    /// An `aikit.contemplation-decision/v1` from `now-context contemplate`.
+    #[arg(long = "decision-file", value_name = "PATH")]
+    pub decision_file: Option<std::path::PathBuf>,
+    /// An `aikit.test-selection/v1` from `now-context test-selection`.
+    #[arg(long = "test-selection-file", value_name = "PATH")]
+    pub test_selection_file: Option<std::path::PathBuf>,
+    /// Central root to read `central.day.read` from, folding the Day ref/
+    /// revision into the prepared basis. Omit to leave the Day basis absent.
+    #[arg(long = "central-root", value_name = "DIR")]
+    pub central_root: Option<std::path::PathBuf>,
+    #[arg(long = "ctrl-bin", value_name = "PATH")]
+    pub ctrl_bin: Option<std::path::PathBuf>,
+    /// A `REF=REVISION` pair (repeatable) folded into the prepared basis —
+    /// e.g. a Workcell root/child NOW ref, supplied by the caller rather
+    /// than fetched.
+    #[arg(long = "now-basis-ref", value_name = "REF=REVISION")]
+    pub now_basis_refs: Vec<String>,
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
 }
 
 #[derive(Debug, Args)]
