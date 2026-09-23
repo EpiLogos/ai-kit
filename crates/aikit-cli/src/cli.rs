@@ -540,6 +540,21 @@ pub enum RoutineSub {
         #[arg(value_name = "ROUTINE_REF")]
         routine_ref: String,
     },
+    /// Bind where a native Routine run finds an owner credential its Method
+    /// declares (a location, never the value), or clear the binding.
+    Credential {
+        #[arg(value_name = "ROUTINE_REF")]
+        routine_ref: String,
+        /// The credential variable the Method's native body declares.
+        #[arg(long, value_name = "ENV")]
+        env: String,
+        /// `file:/abs/path` (owner-only) or a keychain:// / pass:// / op:// /
+        /// varlock:// ref.
+        #[arg(long, value_name = "LOCATION", required_unless_present = "clear")]
+        location: Option<String>,
+        #[arg(long, conflicts_with = "location")]
+        clear: bool,
+    },
     /// Reconcile one foreign harness cron job (read-only over the harness
     /// store) into a Routine. `--report` only reads and reports.
     ImportForeign {
@@ -589,6 +604,147 @@ pub enum GatewaySub {
     Ecology(GatewayQueryArgs),
     /// Read the serialisable semantic snapshot of a running gateway.
     Snapshot(GatewayQueryArgs),
+    /// Who is here: every Position of the Project World with its occupancy,
+    /// current work and undelivered Communiques (`aikit.population-reading/v1`).
+    Who(GatewayWhoArgs),
+    /// Address a Communique to a Position. Never blocks: a vacant Position
+    /// holds it for its next occupant; an occupant on another Workcell gets it
+    /// relayed through that Workcell's gateway.
+    Send(GatewaySendArgs),
+    /// The Communiques waiting for an occupant; `--ack` marks them delivered
+    /// to this body's verified occupant generation.
+    Inbox(GatewayInboxArgs),
+    /// Both directions between this Position and another, from the journal.
+    Conversation(GatewayConversationArgs),
+    /// Cross a Communique into obligation-bearing work: Factory assigns custody
+    /// to its recipient Position and the Communique is marked escalated.
+    Delegate(GatewayDelegateArgs),
+    /// Relay every Communique whose recipient now stands on a declared remote
+    /// Workcell (the gateway service also runs this every tick).
+    Forward(GatewayQueryArgs),
+    /// Declare, list or remove the gateway endpoints of other Workcells.
+    Remote(GatewayRemoteCmd),
+}
+
+/// `aikit gateway who`.
+#[derive(Debug, Args)]
+pub struct GatewayWhoArgs {
+    /// Project World to read (`project:O-I` or `O-I`); defaults to the World
+    /// Central says this directory stands in.
+    #[arg(long = "project-world", value_name = "WORLD")]
+    pub project_world: Option<String>,
+    #[command(flatten)]
+    pub carrier: GatewayQueryArgs,
+}
+
+/// `aikit gateway send`.
+#[derive(Debug, Args)]
+pub struct GatewaySendArgs {
+    /// Recipient Position: `central:position:<world>:<slug>` or `@handle`.
+    #[arg(long, value_name = "POSITION|@HANDLE")]
+    pub to: String,
+    /// The words to send.
+    #[arg(long, value_name = "TEXT", conflicts_with = "body_file")]
+    pub body: Option<String>,
+    /// Read the words from a file (`-` for stdin).
+    #[arg(long = "body-file", value_name = "PATH")]
+    pub body_file: Option<std::path::PathBuf>,
+    /// The Communique this one answers.
+    #[arg(long = "reply-to", value_name = "COMMUNIQUE")]
+    pub reply_to: Option<String>,
+    /// Speak as this Position when the body carries no OI_POSITION_REF.
+    /// Attribution is still verified from occupancy, never taken on trust.
+    #[arg(long = "from-position", value_name = "POSITION")]
+    pub from_position: Option<String>,
+    /// Project World an @handle is looked up in.
+    #[arg(long = "project-world", value_name = "WORLD")]
+    pub project_world: Option<String>,
+    #[command(flatten)]
+    pub carrier: GatewayQueryArgs,
+}
+
+/// `aikit gateway inbox`.
+#[derive(Debug, Args)]
+pub struct GatewayInboxArgs {
+    /// The Position to read; defaults to this body's OI_POSITION_REF.
+    #[arg(long, value_name = "POSITION")]
+    pub position: Option<String>,
+    /// Mark every listed Communique delivered to this body's verified
+    /// occupant generation.
+    #[arg(long)]
+    pub ack: bool,
+    #[command(flatten)]
+    pub carrier: GatewayQueryArgs,
+}
+
+/// `aikit gateway conversation`.
+#[derive(Debug, Args)]
+pub struct GatewayConversationArgs {
+    /// The other Position (`central:position:…` or `@handle`).
+    #[arg(long, value_name = "POSITION|@HANDLE")]
+    pub with: String,
+    /// This side of the conversation; defaults to OI_POSITION_REF.
+    #[arg(long, value_name = "POSITION")]
+    pub position: Option<String>,
+    /// Project World an @handle is looked up in.
+    #[arg(long = "project-world", value_name = "WORLD")]
+    pub project_world: Option<String>,
+    #[command(flatten)]
+    pub carrier: GatewayQueryArgs,
+}
+
+/// `aikit gateway delegate`.
+#[derive(Debug, Args)]
+pub struct GatewayDelegateArgs {
+    /// The Communique to escalate.
+    #[arg(long, value_name = "COMMUNIQUE")]
+    pub communique: String,
+    /// The developmental work the recipient Position takes custody of.
+    #[arg(long, value_name = "WORK_REF")]
+    pub work: String,
+    #[arg(long, value_name = "RUN_REF")]
+    pub run: Option<String>,
+    #[arg(long, value_name = "JOURNEY_REF")]
+    pub journey: Option<String>,
+    #[arg(long = "workflow-unit", value_name = "UNIT_REF")]
+    pub workflow_unit: Option<String>,
+    /// Why this crossing into obligation-bearing work is made.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: String,
+    #[command(flatten)]
+    pub carrier: GatewayQueryArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct GatewayRemoteCmd {
+    #[command(subcommand)]
+    pub command: GatewayRemoteSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GatewayRemoteSub {
+    /// Declare (or replace) the gateway endpoint of a remote Workcell.
+    Add {
+        /// The remote Workcell, e.g. `workcell:omarchy`.
+        #[arg(long, value_name = "WORKCELL_REF")]
+        workcell: String,
+        /// Its gateway WebSocket carrier, `HOST:PORT`.
+        #[arg(long = "ws", value_name = "HOST:PORT")]
+        websocket_bind: String,
+        #[arg(long = "ws-path", value_name = "PATH", default_value = "/")]
+        websocket_path: String,
+        /// Where its bearer token lives: `file:/abs/path` (owner-only) or a
+        /// keychain:// / pass:// / op:// / varlock:// ref. Never the token.
+        #[arg(long = "token-location", value_name = "LOCATION")]
+        token_location: String,
+    },
+    /// List the declared endpoints (token locations only).
+    List,
+    /// Remove a declared endpoint.
+    Remove {
+        #[arg(long, value_name = "WORKCELL_REF")]
+        workcell: String,
+    },
 }
 
 /// Arguments for `aikit compose` — the composition reads the authored ground;

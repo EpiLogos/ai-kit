@@ -80,6 +80,9 @@ pub fn dispatch(
         // costs the budget and becomes a warning — never a stalled prompt.
         &SystemRunner::probe(),
     );
+    // Gateway contact: Communiques for this body's Position ride its turn
+    // boundary; staged here, marked delivered only once the document is written.
+    crate::communique_turn::offer_at_turn_boundary(&mut decision, event);
 
     if decision.bypass_consumed {
         if let Some(record) = &active {

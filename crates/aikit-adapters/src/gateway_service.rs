@@ -28,7 +28,8 @@ use aikit_core::{AikitError, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::gateway_runtime::{
-    execute_gateway_command, AgencyGateway, GatewayRequestEnvelope, GatewayResponseEnvelope,
+    execute_gateway_command, AgencyGateway, GatewayCommand, GatewayRequestEnvelope,
+    GatewayResponse, GatewayResponseEnvelope,
 };
 
 pub const GATEWAY_SERVICE_CARRIER_VERSION: &str = "aikit.gateway-service-carrier/v1";
@@ -182,6 +183,131 @@ pub fn persist_gateway_state(gateway: &AgencyGateway, state_file: Option<&Path>)
     Ok(())
 }
 
+/// An advisory, kernel-held lock on one gateway state file.
+///
+/// A running service holds it for its whole lifetime; an offline writer (a
+/// CLI verb executing a command straight against the state file because no
+/// service answered) holds it for one command. The two can therefore never
+/// interleave: the service keeps its state in memory and rewrites the whole
+/// file after every command, so an offline write under a running service would
+/// be silently lost. The lock is released by the kernel when the holder exits,
+/// so a crashed holder never wedges the file.
+pub struct GatewayStateLock {
+    _file: fs::File,
+    path: PathBuf,
+}
+
+impl GatewayStateLock {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+fn state_lock_path(state_file: &Path) -> PathBuf {
+    let mut name = state_file
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_else(|| "gateway.json".into());
+    name.push(".lock");
+    state_file.with_file_name(name)
+}
+
+/// Take the state file's lock, polling until `timeout`. A holder that does not
+/// let go in time is reported by what it wrote into the lock file.
+pub fn acquire_gateway_state_lock(
+    state_file: &Path,
+    timeout: Duration,
+    purpose: &str,
+) -> Result<GatewayStateLock> {
+    use fs4::FileExt;
+
+    let path = state_lock_path(state_file);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            AikitError::new(
+                "agency_gateway_service.state_directory",
+                format!(
+                    "create gateway state directory {}: {error}",
+                    parent.display()
+                ),
+            )
+        })?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| {
+            AikitError::new(
+                "agency_gateway_service.state_lock",
+                format!("open gateway state lock {}: {error}", path.display()),
+            )
+        })?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match FileExt::try_lock(&file) {
+            Ok(()) => break,
+            Err(fs4::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    let mut holder = String::new();
+                    let _ = fs::File::open(&path).and_then(|mut f| f.read_to_string(&mut holder));
+                    return Err(AikitError::new(
+                        "agency_gateway_service.state_locked",
+                        format!(
+                            "gateway state {} is held by another process ({})",
+                            state_file.display(),
+                            if holder.trim().is_empty() {
+                                "holder unrecorded".to_owned()
+                            } else {
+                                holder.trim().to_owned()
+                            }
+                        ),
+                    )
+                    .with("state_file", state_file.display().to_string()));
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(fs4::TryLockError::Error(error)) => {
+                return Err(AikitError::new(
+                    "agency_gateway_service.state_lock",
+                    format!("lock gateway state {}: {error}", path.display()),
+                ))
+            }
+        }
+    }
+    let record = format!("pid {} ({purpose})", std::process::id());
+    let _ = file
+        .set_len(0)
+        .and_then(|()| {
+            use std::io::Seek;
+            file.seek(io::SeekFrom::Start(0)).map(|_| ())
+        })
+        .and_then(|()| file.write_all(record.as_bytes()));
+    Ok(GatewayStateLock { _file: file, path })
+}
+
+/// Execute one gateway command directly against a persisted state file, for
+/// when no service is running. Restores the semantic snapshot, runs the same
+/// kernel command a carrier would, and persists only on success — under the
+/// state lock, so a service that starts meanwhile waits for this write.
+pub fn execute_against_state_file(
+    fresh: AgencyGateway,
+    state_file: &Path,
+    command: GatewayCommand,
+    lock_timeout: Duration,
+) -> Result<GatewayResponse> {
+    let _lock = acquire_gateway_state_lock(state_file, lock_timeout, "offline gateway command")?;
+    let mut gateway = restore_gateway_state(fresh, Some(state_file))?;
+    let read_only = command.is_read_only();
+    let response = execute_gateway_command(&mut gateway, command)?;
+    if !read_only {
+        persist_gateway_state(&gateway, Some(state_file))?;
+    }
+    Ok(response)
+}
+
 /// Run every configured service carrier against one shared gateway state.
 pub fn run_gateway_service(gateway: AgencyGateway, config: GatewayServiceConfig) -> Result<()> {
     run_gateway_service_with_ticks(gateway, config, None)
@@ -209,6 +335,16 @@ pub fn run_gateway_service_with_ticks(
     ticks: Option<GatewayTickLoop>,
 ) -> Result<()> {
     config.validate()?;
+    // Held until this function returns: the service is the only writer of its
+    // state file while it runs (see `GatewayStateLock`).
+    let _state_lock = match config.state_file.as_deref() {
+        Some(path) => Some(acquire_gateway_state_lock(
+            path,
+            Duration::from_secs(10),
+            "gateway service",
+        )?),
+        None => None,
+    };
     let gateway = restore_gateway_state(gateway, config.state_file.as_deref())?;
     let gateway = Arc::new(Mutex::new(gateway));
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -266,14 +402,20 @@ pub fn run_gateway_service_with_ticks(
         let state_file = config.state_file.clone();
         let max_frame_bytes = config.max_frame_bytes;
         workers.push(thread::spawn(move || {
-            serve_websocket_listener(
+            let result = serve_websocket_listener(
                 listener,
                 gateway,
-                shutdown,
+                Arc::clone(&shutdown),
                 token,
                 state_file,
                 max_frame_bytes,
-            )
+            );
+            // A carrier that fails stops the whole service: a half-alive
+            // gateway answering on one carrier only is silent degradation.
+            if result.is_err() {
+                shutdown.store(true, Ordering::SeqCst);
+            }
+            result
         }));
     }
 
@@ -283,7 +425,11 @@ pub fn run_gateway_service_with_ticks(
         let shutdown = Arc::clone(&shutdown);
         let state_file = config.state_file.clone();
         workers.push(thread::spawn(move || {
-            serve_unix_socket(path, gateway, shutdown, state_file)
+            let result = serve_unix_socket(path, gateway, Arc::clone(&shutdown), state_file);
+            if result.is_err() {
+                shutdown.store(true, Ordering::SeqCst);
+            }
+            result
         }));
     }
 
@@ -1023,6 +1169,93 @@ mod tests {
         assert!(!encoded.contains("workcell"));
         let restored = restore_gateway_state(gateway(), Some(&state)).unwrap();
         assert_eq!(restored.status(), original_gateway.status());
+    }
+
+    fn communique_draft(reference: &str) -> crate::gateway_communique::CommuniqueDraft {
+        crate::gateway_communique::CommuniqueDraft {
+            communique_ref: format!("aikit:communique:{reference}"),
+            from_position_ref: None,
+            from_generation_ref: None,
+            attribution: crate::gateway_communique::SenderAttribution::Unknown,
+            attribution_basis: "test".into(),
+            to_position_ref: "central:position:control:root:keeper".into(),
+            to_workcell_ref: None,
+            body: "offline".into(),
+            sent_at_unix_ms: 1,
+            state: crate::gateway_communique::CommuniqueState::Held,
+            state_basis: "test".into(),
+            reply_to: None,
+            forward_to_workcell_ref: None,
+        }
+    }
+
+    #[test]
+    fn an_offline_command_never_interleaves_with_a_service_holding_the_state() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("gateway.json");
+        let send = |reference: &str| GatewayCommand::SendCommunique {
+            draft: communique_draft(reference),
+        };
+
+        // A service holds the state: the offline writer waits, then refuses.
+        let service =
+            acquire_gateway_state_lock(&state, Duration::from_secs(1), "gateway service").unwrap();
+        let refused =
+            execute_against_state_file(gateway(), &state, send("one"), Duration::from_millis(100))
+                .unwrap_err();
+        assert_eq!(refused.code(), "agency_gateway_service.state_locked");
+        assert!(refused.to_string().contains("gateway service"));
+        assert!(
+            !state.exists(),
+            "nothing was written under a holding service"
+        );
+        drop(service);
+
+        // With no service, the same kernel command lands in the state file.
+        execute_against_state_file(gateway(), &state, send("one"), Duration::from_secs(1)).unwrap();
+        let restored = restore_gateway_state(gateway(), Some(&state)).unwrap();
+        assert_eq!(restored.communiques().len(), 1);
+
+        // A read never rewrites the file.
+        let before = fs::read(&state).unwrap();
+        let modified = fs::metadata(&state).unwrap().modified().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        execute_against_state_file(
+            gateway(),
+            &state,
+            GatewayCommand::CommuniqueCounts,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&state).unwrap(), before);
+        assert_eq!(fs::metadata(&state).unwrap().modified().unwrap(), modified);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_carrier_that_cannot_bind_stops_the_service_instead_of_leaving_it_half_alive() {
+        let root = tempfile::tempdir().unwrap();
+        // Longer than any platform's sun_path: the Unix carrier cannot bind.
+        let unusable = root.path().join("x".repeat(120)).join("gateway.sock");
+        let config = GatewayServiceConfig {
+            websocket_bind: Some("127.0.0.1:0".into()),
+            websocket_bearer_token: Some("token".into()),
+            unix_socket: Some(unusable),
+            state_file: Some(root.path().join("gateway.json")),
+            max_frame_bytes: DEFAULT_GATEWAY_MAX_FRAME_BYTES,
+        };
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(run_gateway_service(gateway(), config));
+        });
+        let outcome = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the service must stop when a carrier cannot bind");
+        let error = outcome.unwrap_err();
+        assert!(
+            error.code().starts_with("agency_gateway_service.unix"),
+            "{error}"
+        );
     }
 
     #[test]

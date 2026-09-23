@@ -33,6 +33,10 @@ use aikit_core::{AikitError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+use crate::gateway_communique::{
+    Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForwardOutcome, CommuniqueJournal,
+};
+
 pub const AGENCY_GATEWAY_VERSION: &str = "aikit.agency-gateway/v1";
 pub const ACTUATION_STREAM_SCHEMA: &str = "actuation.stream/v1";
 
@@ -434,6 +438,11 @@ pub struct GatewaySnapshot {
     #[serde(default)]
     pub delivery_receipts: Vec<DeliveryReceipt>,
     pub next_operation_sequence: u64,
+    /// The Communique journal (`aikit.communique/v1`), in journal order.
+    /// Absent from snapshots that never carried contact, so older state
+    /// files restore unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub communiques: Vec<Communique>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -463,6 +472,7 @@ pub struct AgencyGateway {
     pending_deliveries: BTreeMap<ResourceRef, OutboundOperation>,
     delivery_receipts: Vec<DeliveryReceipt>,
     next_operation_sequence: u64,
+    communiques: CommuniqueJournal,
 }
 
 impl AgencyGateway {
@@ -477,7 +487,13 @@ impl AgencyGateway {
             pending_deliveries: BTreeMap::new(),
             delivery_receipts: Vec::new(),
             next_operation_sequence: 1,
+            communiques: CommuniqueJournal::default(),
         }
+    }
+
+    /// The Communique journal this gateway keeps.
+    pub fn communiques(&self) -> &CommuniqueJournal {
+        &self.communiques
     }
 
     pub fn gateway_ref(&self) -> &ResourceRef {
@@ -954,6 +970,7 @@ impl AgencyGateway {
             pending_deliveries: self.pending_deliveries.values().cloned().collect(),
             delivery_receipts: self.delivery_receipts.clone(),
             next_operation_sequence: self.next_operation_sequence,
+            communiques: self.communiques.records().to_vec(),
         }
     }
 
@@ -1006,6 +1023,7 @@ impl AgencyGateway {
         }
         gateway.delivery_receipts = snapshot.delivery_receipts;
         gateway.next_operation_sequence = snapshot.next_operation_sequence;
+        gateway.communiques = CommuniqueJournal::restore(snapshot.communiques)?;
         Ok(gateway)
     }
 }
@@ -1155,12 +1173,74 @@ pub enum GatewayCommand {
     Restore {
         snapshot: GatewaySnapshot,
     },
+    /// Append a sender's Communique (non-blocking contact).
+    SendCommunique {
+        draft: CommuniqueDraft,
+    },
+    /// Accept a Communique relayed by another Workcell's gateway.
+    IngestCommunique {
+        communique: Communique,
+        relayed_by: String,
+    },
+    /// Undelivered Communiques addressed to one Position.
+    CommuniqueInbox {
+        position_ref: String,
+    },
+    /// Mark Communiques delivered to one occupant generation.
+    AcknowledgeCommuniques {
+        position_ref: String,
+        generation_ref: String,
+        communique_refs: Vec<String>,
+        delivered_at_unix_ms: u64,
+        via: String,
+    },
+    /// Both directions between two Positions, from the journal.
+    CommuniqueConversation {
+        position_ref: String,
+        with_position_ref: String,
+    },
+    ReadCommunique {
+        communique_ref: String,
+    },
+    /// Record the explicit crossing into Factory custody.
+    EscalateCommunique {
+        communique_ref: String,
+        custody_ref: String,
+        escalated_at_unix_ms: u64,
+        basis: String,
+    },
+    CommuniqueCounts,
+    CommuniqueForwardQueue,
+    RecordCommuniqueForward {
+        communique_ref: String,
+        outcome: CommuniqueForwardOutcome,
+    },
     Shutdown,
 }
 
 impl GatewayCommand {
     pub fn is_shutdown(&self) -> bool {
         matches!(self, Self::Shutdown)
+    }
+
+    /// Reads that change no semantic state. An offline execution against the
+    /// state file does not rewrite the file for these.
+    pub fn is_read_only(&self) -> bool {
+        matches!(
+            self,
+            Self::Protocol
+                | Self::Discover
+                | Self::Status
+                | Self::Ecology
+                | Self::Replay { .. }
+                | Self::Control { .. }
+                | Self::Snapshot
+                | Self::CommuniqueInbox { .. }
+                | Self::CommuniqueConversation { .. }
+                | Self::ReadCommunique { .. }
+                | Self::CommuniqueCounts
+                | Self::CommuniqueForwardQueue
+        )
     }
 }
 
@@ -1214,6 +1294,21 @@ pub enum GatewayResponse {
     },
     Restored {
         status: GatewayStatus,
+    },
+    CommuniqueAccepted {
+        communique: Communique,
+        replayed: bool,
+        /// The gateway whose journal now holds the record.
+        accepted_by: String,
+    },
+    CommuniqueList {
+        communiques: Vec<Communique>,
+    },
+    CommuniqueRecord {
+        communique: Communique,
+    },
+    CommuniqueCounts {
+        counts: Vec<CommuniqueCount>,
     },
     Shutdown,
 }
@@ -1293,8 +1388,101 @@ pub fn execute_gateway_command(
                 status: gateway.status(),
             })
         }
+        GatewayCommand::SendCommunique { draft } => {
+            let gateway_ref = gateway.gateway_ref.to_string();
+            let (communique, replayed) = gateway.communiques.send(&gateway_ref, draft)?;
+            Ok(GatewayResponse::CommuniqueAccepted {
+                communique,
+                replayed,
+                accepted_by: gateway_ref,
+            })
+        }
+        GatewayCommand::IngestCommunique {
+            communique,
+            relayed_by,
+        } => {
+            let at = communique_now_unix_ms();
+            let (communique, replayed) = gateway.communiques.ingest(communique, &relayed_by, at)?;
+            Ok(GatewayResponse::CommuniqueAccepted {
+                communique,
+                replayed,
+                accepted_by: gateway.gateway_ref.to_string(),
+            })
+        }
+        GatewayCommand::CommuniqueInbox { position_ref } => Ok(GatewayResponse::CommuniqueList {
+            communiques: gateway.communiques.inbox(&position_ref),
+        }),
+        GatewayCommand::AcknowledgeCommuniques {
+            position_ref,
+            generation_ref,
+            communique_refs,
+            delivered_at_unix_ms,
+            via,
+        } => Ok(GatewayResponse::CommuniqueList {
+            communiques: gateway.communiques.acknowledge(
+                &position_ref,
+                &generation_ref,
+                &communique_refs,
+                delivered_at_unix_ms,
+                &via,
+            )?,
+        }),
+        GatewayCommand::CommuniqueConversation {
+            position_ref,
+            with_position_ref,
+        } => Ok(GatewayResponse::CommuniqueList {
+            communiques: gateway
+                .communiques
+                .conversation(&position_ref, &with_position_ref),
+        }),
+        GatewayCommand::ReadCommunique { communique_ref } => {
+            Ok(GatewayResponse::CommuniqueRecord {
+                communique: gateway.communiques.get(&communique_ref)?.clone(),
+            })
+        }
+        GatewayCommand::EscalateCommunique {
+            communique_ref,
+            custody_ref,
+            escalated_at_unix_ms,
+            basis,
+        } => {
+            let (communique, replayed) = gateway.communiques.escalate(
+                &communique_ref,
+                &custody_ref,
+                escalated_at_unix_ms,
+                &basis,
+            )?;
+            Ok(GatewayResponse::CommuniqueAccepted {
+                communique,
+                replayed,
+                accepted_by: gateway.gateway_ref.to_string(),
+            })
+        }
+        GatewayCommand::CommuniqueCounts => Ok(GatewayResponse::CommuniqueCounts {
+            counts: gateway.communiques.counts(),
+        }),
+        GatewayCommand::CommuniqueForwardQueue => Ok(GatewayResponse::CommuniqueList {
+            communiques: gateway.communiques.forward_queue(),
+        }),
+        GatewayCommand::RecordCommuniqueForward {
+            communique_ref,
+            outcome,
+        } => Ok(GatewayResponse::CommuniqueRecord {
+            communique: gateway
+                .communiques
+                .record_forward(&communique_ref, outcome)?,
+        }),
         GatewayCommand::Shutdown => Ok(GatewayResponse::Shutdown),
     }
+}
+
+/// The relaying gateway stamps receipt time itself: a relayed record's own
+/// timestamps are the sender's, never the receiver's clock.
+fn communique_now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

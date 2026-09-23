@@ -220,6 +220,13 @@ AIKit capability grant. The `aikit-gateway` binary remains the minimal
 stdio/serve body for Workcell materialisation; the CLI group is the same
 protocol with the product's JSON envelope.
 
+The gateway is also the contact plane between World Positions: `aikit gateway
+who | send | inbox | conversation | delegate | forward | remote` read the
+population, send Communiques that are delivered at the recipient occupant's
+next turn, and relay them to other Workcells' gateways. The service's tick also
+fires native-body Routines such as the environmental DAY rollover. See
+[GATEWAY-CONTACT-AND-DAY.md](GATEWAY-CONTACT-AND-DAY.md).
+
 ## What “working” means
 
 At minimum, all of these should succeed:
