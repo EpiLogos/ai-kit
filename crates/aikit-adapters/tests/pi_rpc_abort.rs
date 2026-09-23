@@ -36,27 +36,41 @@ fn attached() -> PiRpcConnectionAdapter {
     adapter
 }
 
-fn settle_after(adapter: &mut PiRpcConnectionAdapter, abort: bool) -> ConnectionSignalKind {
+fn settle_after(
+    adapter: &mut PiRpcConnectionAdapter,
+    abort: bool,
+    acknowledged_first: bool,
+) -> ConnectionSignalKind {
     adapter
         .prompt(PromptRequest {
             native_session_id: "native-pi".into(),
             prompt: json!("sleep"),
         })
         .unwrap();
-    if abort {
-        let cancel = adapter
+    let cancel = abort.then(|| {
+        adapter
             .cancel(CancelRequest {
                 native_session_id: "native-pi".into(),
             })
-            .unwrap();
-        adapter
-            .ingest(json!({"type":"response","id":cancel.payload["id"].clone(),"command":"abort","success":true}))
-            .unwrap();
+            .unwrap()
+    });
+    let ack = |adapter: &mut PiRpcConnectionAdapter| {
+        if let Some(cancel) = &cancel {
+            adapter
+                .ingest(json!({"type":"response","id":cancel.payload["id"].clone(),"command":"abort","success":true}))
+                .unwrap();
+        }
+    };
+    if acknowledged_first {
+        ack(adapter);
     }
     adapter
         .ingest(json!({"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"This operation was aborted"}}))
         .unwrap();
     let signals = adapter.ingest(json!({"type":"agent_settled"})).unwrap();
+    if !acknowledged_first {
+        ack(adapter);
+    }
     signals.last().unwrap().kind.clone()
 }
 
@@ -73,7 +87,7 @@ fn an_error_after_an_acknowledged_abort_is_the_stop() {
 fn the_same_error_without_an_abort_stays_a_failure() {
     let mut adapter = attached();
     assert!(matches!(
-        settle_after(&mut adapter, false),
+        settle_after(&mut adapter, false, false),
         ConnectionSignalKind::Failed { reason } if reason == "This operation was aborted"
     ));
 }

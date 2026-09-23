@@ -36,6 +36,9 @@ pub struct PiRpcConnectionAdapter {
     expected_model: Option<(String, String)>,
     model_observation: Option<crate::agent_connection::NativeModelObservation>,
     abort_acknowledged: bool,
+    /// The person asked for this turn to stop (an `abort` was sent). Pi may
+    /// acknowledge it only after the turn has already settled.
+    abort_requested: bool,
 }
 
 impl PiRpcConnectionAdapter {
@@ -53,6 +56,7 @@ impl PiRpcConnectionAdapter {
             expected_model: None,
             model_observation: None,
             abort_acknowledged: false,
+            abort_requested: false,
         }
     }
 
@@ -254,11 +258,13 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
             })?;
         self.stop = None;
         self.abort_acknowledged = false;
+        self.abort_requested = false;
         Ok(self.request("prompt", json!({"message": text}), Pending::Prompt))
     }
 
     fn cancel(&mut self, request: CancelRequest) -> Result<ConnectionCommand> {
         self.require_session(&request.native_session_id)?;
+        self.abort_requested = true;
         Ok(self.request("abort", json!({}), Pending::Control))
     }
 
@@ -344,10 +350,19 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
                 Some(match reason.as_str() {
                     "aborted" => ConnectionSignalKind::Cancelled,
                     "unknown" if self.abort_acknowledged => ConnectionSignalKind::Cancelled,
-                    // After Pi acknowledged the person's abort, the in-flight tool
-                    // or request ends with Pi's own "operation was aborted"
-                    // error: that is the stop, not a provider failure.
-                    "error" if self.abort_acknowledged => ConnectionSignalKind::Cancelled,
+                    // After the person's abort, the in-flight tool or request
+                    // ends with Pi's own "operation was aborted" error: that is
+                    // the stop, not a provider failure. Pi may acknowledge the
+                    // abort only after this settles, so the request counts.
+                    "error"
+                        if self.abort_acknowledged
+                            || (self.abort_requested
+                                && detail
+                                    .as_deref()
+                                    .is_some_and(|text| text.contains("aborted"))) =>
+                    {
+                        ConnectionSignalKind::Cancelled
+                    }
                     "unknown" => ConnectionSignalKind::Failed {
                         reason: "Pi settled without a terminal assistant result".into(),
                     },
