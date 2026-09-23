@@ -98,7 +98,9 @@ pub fn derive_provider(
         from_profile: Some(profile.slug.clone()),
         required_context: None,
         model_policy: None,
-    })
+            body_ref: None,
+        body_revision: None,
+})
 }
 
 /// Resolve a configured provider's connection facts at provider-load time.

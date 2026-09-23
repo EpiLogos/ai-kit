@@ -512,6 +512,10 @@ fn run(cli: Cli) -> Result<()> {
                     id: provider_id.clone(),
                     label: "Epi-Logos Prime-QL".into(),
                     argv,
+                    from_profile: None,
+                    argv_fallback: Vec::new(),
+                    env: Default::default(),
+                    cwd: None,
                     body_ref: Some("agent-body/epi-prime-ql".into()),
                     body_revision: Some(body_revision.clone()),
                     required_context: None,
@@ -526,7 +530,7 @@ fn run(cli: Cli) -> Result<()> {
                 "ql_revision":ql_revision,
                 "model_selection":"Prime native configured model unless an explicit AIKit model policy overrides it",
                 "standing":"configured-not-started"
-            }))?;
+            }))
         }
         Command::EncounterDerive {
             from_profile,
@@ -546,8 +550,7 @@ fn run(cli: Cli) -> Result<()> {
                 profile,
                 id.unwrap_or_else(|| from_profile.clone()),
                 label.unwrap_or_else(|| format!("{from_profile} (profile-derived)")),
-            )?)?;
-        }
+            )?)
         }
         Command::EncounterAgencyConfigure {
             agent_session,
