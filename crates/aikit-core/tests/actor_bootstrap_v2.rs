@@ -322,3 +322,69 @@ fn no_detection_ground_stays_unproven_never_absence() {
     };
     assert!(matches!(cause, MissingCause::Unproven));
 }
+
+/// O:I #65 native-owner repair: `governance_sources` must carry every
+/// `human-governance`-standing ContextSource in full, never subject to
+/// `context_sources`'s 12-item example cap — this is what lets the managed
+/// bootstrap name a specific governance statement (e.g.
+/// `authorship-and-return/responsibility.md`) even when many other
+/// ContextSources are also in scope. Driven through the real
+/// `compose_context_resolution` + `project_actor_bootstrap` seam, not a
+/// hand-built `ActorBootstrap`.
+#[test]
+fn governance_sources_carries_every_human_governance_context_source_unsummarised() {
+    let deterministic = Fixture::new(vec![script("script/test/check")])
+        .resolve()
+        .expect("deterministic resolution");
+    let binding = ProjectBinding::new(
+        ProjectRef::parse("project/test").unwrap(),
+        ProjectConstituentRef::parse("constituent:working-tree").unwrap(),
+        ProjectBindingLocator::LocalDirectory {
+            path: PathBuf::from("/work/test"),
+        },
+    );
+    let mut resources = MemoryResourceIndex::default();
+    // More than the 12-item example cap, so a passing test proves the field
+    // is genuinely unsummarised rather than accidentally fitting under it.
+    for index in 0..14 {
+        let mut record = resource(
+            &format!("central:source:control:root:Control/agents/governance/statement-{index}.md"),
+            ResourceKind::ContextSource,
+        );
+        record
+            .descriptor
+            .annotations
+            .insert("central.standing".into(), "human-governance".into());
+        resources.insert(record);
+    }
+    // A ContextSource without governance standing must be excluded.
+    resources.insert(resource(
+        "context-source/project/readme",
+        ResourceKind::ContextSource,
+    ));
+    let resolution = compose_context_resolution(
+        &deterministic,
+        binding,
+        &[],
+        &resources,
+        RequestedActors::default(),
+    );
+    assert_eq!(resolution.context_sources.len(), 15);
+
+    let bootstrap = project_actor_bootstrap(&resolution, ActorBootstrapRequest::default()).unwrap();
+    assert_eq!(
+        bootstrap.governance_sources.len(),
+        14,
+        "every human-governance source must be named, not truncated: {:?}",
+        bootstrap.governance_sources
+    );
+    assert!(bootstrap
+        .governance_sources
+        .iter()
+        .any(|r| r.as_str()
+            == "central:source:control:root:Control/agents/governance/statement-13.md"));
+    assert!(!bootstrap
+        .governance_sources
+        .iter()
+        .any(|r| r.as_str() == "context-source/project/readme"));
+}

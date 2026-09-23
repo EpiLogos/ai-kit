@@ -207,6 +207,17 @@ pub struct ActorBootstrap {
     pub capabilities: ResourceSetSummary,
     pub actions: ResourceSetSummary,
     pub context_sources: ResourceSetSummary,
+    /// Applicable governance ContextSources for this context, named in full —
+    /// never truncated by `context_sources`'s sample cap. A rendering
+    /// consumer (the managed bootstrap skill) must be able to name every
+    /// governance statement bearing on this context, not only whichever
+    /// happened to survive the top-N example window: root
+    /// `Control/agents/governance/**` under the enclosing Central root, plus
+    /// this Project's own `ProjectCentral/agents/governance/**` when one
+    /// exists. Never a read body — named refs only, same as every other
+    /// ContextSource here.
+    #[serde(default)]
+    pub governance_sources: Vec<ResourceRef>,
     pub projection_targets: Vec<TargetId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_body: Option<HarnessCompositionPointer>,
@@ -283,6 +294,7 @@ pub fn project_actor_bootstrap(
         capabilities: summarize_set(&resolution.capabilities),
         actions: summarize_set(&resolution.actions),
         context_sources: summarize_set(&resolution.context_sources),
+        governance_sources: governance_sources(&resolution.context_sources),
         projection_targets: resolution.projection.targets.clone(),
         runtime_body: request.runtime_body.map(HarnessCompositionPointer::from),
         warnings: resolution.warnings.clone(),
@@ -380,6 +392,30 @@ fn summarize_resolved(resource: &ResolvedResource) -> BootstrapReference {
         sources: resource.resource.descriptor.sources.clone(),
         providers: resource.resource.providers.clone(),
     }
+}
+
+/// The human-authored governance ContextSources within a resolved set, in
+/// full and sorted, never subject to `summarize_set`'s example cap. A
+/// ContextSource is governance when its provider annotated it
+/// `central.standing = human-governance` — the same marker
+/// `root_governance_context_source_records` and the Project governance scan
+/// both set, so root and Project governance are treated identically here.
+fn governance_sources(resources: &[ResolvedResource]) -> Vec<ResourceRef> {
+    let mut refs: Vec<ResourceRef> = resources
+        .iter()
+        .filter(|resource| {
+            resource
+                .resource
+                .descriptor
+                .annotations
+                .get("central.standing")
+                .map(String::as_str)
+                == Some("human-governance")
+        })
+        .map(|resource| resource.resource.descriptor.id.clone())
+        .collect();
+    refs.sort();
+    refs
 }
 
 fn summarize_set(resources: &[ResolvedResource]) -> ResourceSetSummary {
