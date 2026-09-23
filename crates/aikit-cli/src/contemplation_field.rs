@@ -212,7 +212,10 @@ fn assemble(cwd: &Path, request: &FieldRequest) -> Result<Value> {
                     &repo_root,
                     &repo_name,
                     &source_ref,
-                    &head_sha,
+                    CompareRevisions {
+                        base: &base_sha,
+                        head: &head_sha,
+                    },
                     &changed_paths,
                     request.max_code_symbols.unwrap_or(DEFAULT_MAX_CODE_SYMBOLS),
                     request.gitnexus_binary.as_deref(),
@@ -751,15 +754,27 @@ fn exists_at_revision(runner: &SystemRunner, repo: &Path, revision: &str, path: 
 // GitNexus code lens
 // ---------------------------------------------------------------------
 
+/// The changed subject's compare pair: GitNexus compares against `base`;
+/// readings are stamped with `head`.
+#[derive(Clone, Copy)]
+struct CompareRevisions<'a> {
+    base: &'a str,
+    head: &'a str,
+}
+
 fn code_lens_readings(
     repo_root: &Path,
     repo_name: &str,
     source_ref: &SourceRef,
-    head_sha: &str,
+    revisions: CompareRevisions<'_>,
     changed_paths: &[String],
     max_symbols: usize,
     gitnexus_binary: Option<&str>,
 ) -> (Value, Vec<String>) {
+    let CompareRevisions {
+        base: base_sha,
+        head: head_sha,
+    } = revisions;
     let revision = SourceRevision::parse(format!("git:{head_sha}")).ok();
     let mut provider = match gitnexus_binary {
         Some(bin) => GitNexusCodeIndexProvider::with_binary(
@@ -789,26 +804,38 @@ fn code_lens_readings(
             Vec::new(),
         );
     }
+    // The index is derived and rebuildable: when an incremental refresh fails
+    // (e.g. an inconsistent upstream FTS index), rebuild once from source and
+    // disclose that the reading stands on a forced rebuild.
+    let mut index_disclosure: Option<String> = None;
     let indexed_status = match provider.index(repo_root, false) {
         Ok(s) => s,
-        Err(e) => {
-            return (
-                json!({
-                    "provider": status.provider,
-                    "available": true,
-                    "indexed": false,
-                    "disclosure": format!("GitNexus index failed: {e}"),
-                    "readings": [],
-                }),
-                Vec::new(),
-            )
-        }
+        Err(first) => match provider.index(repo_root, true) {
+            Ok(s) => {
+                index_disclosure = Some(format!(
+                    "incremental GitNexus index failed ({first}); rebuilt with --force"
+                ));
+                s
+            }
+            Err(e) => {
+                return (
+                    json!({
+                        "provider": status.provider,
+                        "available": true,
+                        "indexed": false,
+                        "disclosure": format!("GitNexus index failed: {first}; forced rebuild also failed: {e}"),
+                        "readings": [],
+                    }),
+                    Vec::new(),
+                )
+            }
+        },
     };
 
     let mut readings = Vec::new();
     let mut derived_paths = BTreeSet::new();
 
-    match provider.detect_changes("compare", Some(head_sha)) {
+    match provider.detect_changes("compare", Some(base_sha)) {
         Ok(changes) => readings.push(json!({
             "kind": "detect_changes",
             "provider": changes.provider,
@@ -874,6 +901,7 @@ fn code_lens_readings(
             "indexed": indexed_status.indexed,
             "source_ref": source_ref,
             "source_revision": revision,
+            "index_disclosure": index_disclosure,
             "readings": readings,
         }),
         derived_paths.into_iter().collect(),
