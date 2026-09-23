@@ -469,12 +469,116 @@ pub enum RoutineSub {
     },
     /// List all admitted invocation envelopes in stable identity order.
     Invocations,
+    /// List stored Routines (and, read-only, the foreign harness timers that
+    /// no Routine claims).
+    List {
+        /// Only show Routines in this state: draft | enabled | disabled | stale-proof.
+        #[arg(long = "state", value_name = "STATE")]
+        state: Option<String>,
+    },
+    /// Show one stored Routine in full: proof, trigger, authority, binding.
+    Show {
+        #[arg(value_name = "ROUTINE_REF")]
+        routine_ref: String,
+    },
+    /// Create a Routine from a proven basis. The Routine sits in Draft until
+    /// explicitly enabled.
+    Create {
+        #[arg(long, value_name = "NAME")]
+        name: String,
+        #[arg(default_value = "", long, value_name = "TEXT")]
+        description: Option<String>,
+        #[arg(long, value_name = "REF")]
+        method: String,
+        /// ProvenMethodBasis JSON from `aikit method prove`. Prefix with @ for a file.
+        #[arg(long = "proof-json", value_name = "JSON|@FILE")]
+        proof_json: String,
+        /// Trigger JSON: an aikit.time-schedule/v1 record, or
+        /// {"kind":"manual"|"event"|"external", ...}. Prefix with @ for a file.
+        #[arg(long = "trigger-json", value_name = "JSON|@FILE")]
+        trigger_json: String,
+        /// RoutineAuthority JSON: authority_ref, revision, action_refs, granted,
+        /// unattended. Prefix with @ for a file.
+        #[arg(long = "authority-json", value_name = "JSON|@FILE")]
+        authority_json: String,
+        /// Opaque Central AgentProfile source relation.
+        #[arg(long = "agent-profile", value_name = "REF")]
+        agent_profile: Option<String>,
+        /// Context scope refs the run resolves inside.
+        #[arg(long = "context-scope", value_name = "REF")]
+        context_scope: Vec<String>,
+    },
+    /// Enable a stored Routine with a fresh authority receipt at the current
+    /// revision. Schedule and event triggers additionally require unattended
+    /// authority.
+    Enable {
+        #[arg(value_name = "ROUTINE_REF")]
+        routine_ref: String,
+        #[arg(long = "authority-json", value_name = "JSON|@FILE")]
+        authority_json: String,
+    },
+    /// Disable a stored Routine. Disabled Routines observe nothing.
+    Disable {
+        #[arg(value_name = "ROUTINE_REF")]
+        routine_ref: String,
+    },
+    /// Run a stored Routine now through the same authorisation gate.
+    RunNow {
+        #[arg(value_name = "ROUTINE_REF")]
+        routine_ref: String,
+    },
+    /// Replace a Routine's proof after a Method change. The Routine returns to
+    /// Disabled and must be explicitly enabled again.
+    Reprove {
+        #[arg(value_name = "ROUTINE_REF")]
+        routine_ref: String,
+        #[arg(long = "proof-json", value_name = "JSON|@FILE")]
+        proof_json: String,
+    },
+    /// Delete a stored Routine. Refuses while the Routine is Enabled.
+    Delete {
+        #[arg(value_name = "ROUTINE_REF")]
+        routine_ref: String,
+    },
+    /// Reconcile one foreign harness cron job (read-only over the harness
+    /// store) into a Routine. `--report` only reads and reports.
+    ImportForeign {
+        /// Foreign provider: openclaw-cron | hermes-cron.
+        #[arg(long, value_name = "PROVIDER")]
+        provider: String,
+        /// The job's id in the harness store.
+        #[arg(long = "job-id", value_name = "ID")]
+        job_id: String,
+        /// The Method this job's payload runs. Inferred when omitted.
+        #[arg(long, value_name = "REF")]
+        method: Option<String>,
+        /// ProvenMethodBasis JSON from `aikit method prove`. Prefix with @ for a file.
+        #[arg(long = "proof-json", value_name = "JSON|@FILE")]
+        proof_json: Option<String>,
+        /// Declare the Routine's intent to take over this timer; the harness
+        /// timer itself is retired by you, in the harness, after the Routine's
+        /// first admitted scheduled run.
+        #[arg(long = "adopt", conflicts_with = "report")]
+        adopt: bool,
+        /// Read-only reconciliation report; nothing is created.
+        #[arg(long = "report", conflicts_with = "adopt")]
+        report: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum GatewaySub {
-    /// Run the persistent gateway service until a `shutdown` command.
+    /// Run the persistent gateway service until a `shutdown` command. The
+    /// Routine dispatcher ticks every 30 seconds while the service runs.
     Serve(GatewayServeArgs),
+    /// Run exactly one dispatcher pass: resolve occurrences, admit due items,
+    /// dispatch, record outcomes, exit. No gateway required.
+    Tick,
+    /// Install the macOS user LaunchAgent that keeps the gateway (and the
+    /// dispatcher tick) alive across restart, sleep and reboot.
+    InstallService,
+    /// Remove the LaunchAgent.
+    UninstallService,
     /// Negotiate protocol versions with a running gateway.
     Protocol(GatewayQueryArgs),
     /// Discover the connectors and bindings of a running gateway.
@@ -2014,6 +2118,20 @@ pub enum MethodCommand {
     List {
         /// Only show methods whose name or payload contains this substring.
         filter: Option<String>,
+    },
+    /// Promote one proven Method run into a ProvenMethodBasis for Routine use.
+    ///
+    /// The Method must be catalogue-resolved at an exact revision; the proof
+    /// JSON carries the run's Activity/Return/Evidence/verification refs and
+    /// the invocation_succeeded/verification_passed facts. No proof, no
+    /// Routine — this is the gate, unchanged.
+    Prove {
+        /// The Method ref (`aikit method list` shows the ids).
+        #[arg(long, value_name = "REF")]
+        method: String,
+        /// MethodProofInput JSON. Prefix a path with @ to read a file.
+        #[arg(long = "proof-json", value_name = "JSON|@FILE")]
+        proof_json: String,
     },
 }
 
