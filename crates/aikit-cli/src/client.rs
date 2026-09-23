@@ -135,6 +135,40 @@ fn expand_seam_with(
             };
         }
     }
+    // A `~/`-anchored seam that literally names a harness's own documented
+    // default root (`~/.claude`, `~/.codex`, `~/.dsh` — the very defaults
+    // `SEAM_HOME_DEFAULTS` states) follows that harness's override variable
+    // exactly as a `$VAR`-led seam does, whether the seam sits inside the
+    // root (`~/.claude/settings.json`) or beside it as the harness's own
+    // dotfile (`~/.claude.json`, the tools-layer seam `profiles.rs`
+    // declares). Without this, `CLAUDE_CONFIG_DIR` moved `aikit client
+    // status`'s disclosed `config_dir` but silently left every write from
+    // `aikit apply`'s tools and hook seams pointed at the real, unoverridden
+    // home — a caller who isolated a harness's home through its own
+    // documented variable got a truthful read model and an untruthful write.
+    // An unset override changes nothing: the seam falls through exactly as
+    // it always did, against the plain `home`.
+    if let Some((name, tail)) = leading_seam_home_default(seam_path) {
+        if let Some(base) = env(name).filter(|value| !value.is_empty()) {
+            let base = PathBuf::from(base);
+            let joined = if let Some(sub) = tail.strip_prefix('/') {
+                base.join(sub)
+            } else if tail.is_empty() {
+                base
+            } else {
+                // `.json` and the like: a suffix on the harness's own root,
+                // not a new path segment under it.
+                let mut with_suffix = base.into_os_string();
+                with_suffix.push(tail);
+                PathBuf::from(with_suffix)
+            };
+            return if joined.is_absolute() {
+                joined
+            } else {
+                tree.join(joined)
+            };
+        }
+    }
     let expanded = if let Some(rest) = seam_path.strip_prefix("~/") {
         home.join(rest)
     } else {
@@ -145,6 +179,21 @@ fn expand_seam_with(
     } else {
         tree.join(expanded)
     }
+}
+
+/// A `~/`-anchored seam whose remainder starts with one of
+/// [`SEAM_HOME_DEFAULTS`]'s literal default names (`.claude`, `.codex`,
+/// `.dsh`) → (the variable, whatever follows the name — `/settings.json`,
+/// `.json`, or empty). `None` for a seam under no documented harness
+/// variable (zcode, openclaw today) or with no `~/` anchor at all.
+fn leading_seam_home_default(seam_path: &str) -> Option<(&'static str, &str)> {
+    let rest = seam_path.strip_prefix("~/")?;
+    SEAM_HOME_DEFAULTS.iter().find_map(|(name, default)| {
+        let literal = default
+            .strip_prefix("~/")
+            .expect("SEAM_HOME_DEFAULTS entries are ~/-anchored");
+        rest.strip_prefix(literal).map(|tail| (*name, tail))
+    })
 }
 
 /// `$NAME/rest` or `${NAME}/rest` → (NAME, rest); `rest` may be empty.
@@ -2269,6 +2318,64 @@ mod tests {
             PathBuf::from("/work/project/$NOT_A_HOME/x.json")
         );
     }
+
+    /// Reproduces the tools-layer real-home leak (O:I #65 native-owner repair,
+    /// 2026-09-23): the tools-layer profile seams are spelled literally —
+    /// `~/.claude.json`, not `$CLAUDE_CONFIG_DIR/.claude.json` — so the
+    /// `$VAR`-led resolution `expand_seam_with` already carries (the #402
+    /// fix) never fires for them. `aikit client status` already discloses
+    /// `config_dir` through `CLAUDE_CONFIG_DIR`
+    /// (`a_client_honours_its_own_config_home_override_over_every_default` in
+    /// `tests/client_surface.rs`), so a caller who isolates a harness's home
+    /// through its own documented variable gets a truthful `client status`
+    /// and a write that silently ignores it — the disclosure and the actual
+    /// write target disagree. A literal seam naming a harness's *own*
+    /// documented default root (`~/.claude`, `~/.codex`, `~/.dsh` — the
+    /// defaults `SEAM_HOME_DEFAULTS` already states) must follow that
+    /// harness's override variable exactly as a `$VAR`-led seam does.
+    #[test]
+    fn a_literal_seam_under_a_harnesss_own_default_root_follows_its_home_variable_too() {
+        let home = Path::new("/Users/walker");
+        let tree = Path::new("/work/project");
+        let claude_override = |name: &str| {
+            (name == "CLAUDE_CONFIG_DIR").then(|| std::ffi::OsString::from("/scratch/claude"))
+        };
+        let unset = |_: &str| None;
+
+        // This is the actual tools-layer seam declared in profiles.rs: a
+        // dotfile *beside* the harness's own default directory, not inside
+        // it — `~/.claude.json`, not `~/.claude/....`. Before this fix,
+        // `expand_seam_with` only recognised `$CLAUDE_CONFIG_DIR`-*led*
+        // seams, so this one fell straight through to the raw `home` and the
+        // override was silently dropped.
+        assert_eq!(
+            expand_seam_with("~/.claude.json", home, tree, claude_override),
+            PathBuf::from("/scratch/claude.json"),
+            "CLAUDE_CONFIG_DIR must relocate the harness's own dotfile the same way it \
+             relocates everything under its directory"
+        );
+
+        // The hooks-layer seam, inside the directory: same variable, same law.
+        assert_eq!(
+            expand_seam_with("~/.claude/settings.json", home, tree, claude_override),
+            PathBuf::from("/scratch/claude/settings.json")
+        );
+
+        // Unset: unchanged from today — the documented default still applies.
+        assert_eq!(
+            expand_seam_with("~/.claude.json", home, tree, unset),
+            PathBuf::from("/Users/walker/.claude.json")
+        );
+
+        // A seam under a harness with no documented override variable (zcode,
+        // openclaw) is untouched by this: no default row names it, so it
+        // keeps resolving against the plain `home`.
+        assert_eq!(
+            expand_seam_with("~/.openclaw/mcp.json", home, tree, claude_override),
+            PathBuf::from("/Users/walker/.openclaw/mcp.json")
+        );
+    }
+
     use super::*;
     use aikit_adapters::actuation_harness_detection::ActuationDetectionRecord;
 
