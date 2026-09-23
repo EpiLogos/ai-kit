@@ -34,6 +34,16 @@ pub const PROJECTCENTRAL_WIKI_SOURCE: &str = "ProjectCentral/agents/wiki/wiki.js
 pub const PROJECTCENTRAL_GROUND_RELATIONS_SOURCE: &str =
     "ProjectCentral/relations/source-relations.json";
 pub const CENTRAL_ROOT_WIKI_SOURCE: &str = "Control/agents/wiki/wiki.json";
+/// Central's own root governance tree, human-authored under the Central root
+/// (never a Project's `ProjectCentral/agents/governance`, which stays keyed by
+/// `PROJECTCENTRAL_GOVERNANCE_ROOT`). A context standing at the Central root —
+/// or inside any Project under it — takes this as the applicable root-scope
+/// governance source tree, distinct from and in addition to a Project's own.
+pub const CENTRAL_ROOT_GOVERNANCE_ROOT: &str = "Control/agents/governance";
+/// Ref prefix for a Central root-scope source, matching the grammar already
+/// used across `now_field`, `central_entities` and `actor_composition`:
+/// `central:source:control:root:<relative-path>`.
+pub const CENTRAL_ROOT_SOURCE_REF_PREFIX: &str = "central:source:control:root:";
 pub const NO_AGENT_RETRIEVAL_MARKER: &str = ".no-agent-retrieval";
 pub const PROJECTCENTRAL_FILESYSTEM_PROVIDER: &str = "provider/projectcentral/filesystem";
 

@@ -1359,26 +1359,41 @@ impl Service {
             // receipt and the Central-authored profile. Absent or ambiguous
             // projections resolve to defaults — never guessed; a fetch failure
             // is fail-soft (no projection), never a resolution failure.
-            let composed = match self.descriptor.project_root.as_deref() {
-                Some(root) => self
-                    .central_meta_root
+            let central_root = self.descriptor.project_root.as_deref().and_then(|root| {
+                self.central_meta_root
                     .clone()
                     .or_else(|| process_central_root(Some(root)))
-                    .and_then(|central| {
-                        let runner = SystemRunner::probe();
-                        compose_live_actor_inputs(&runner, &central, root)
-                            .ok()
-                            .flatten()
-                    }),
+            });
+            let composed = match self.descriptor.project_root.as_deref() {
+                Some(root) => central_root.as_deref().and_then(|central| {
+                    let runner = SystemRunner::probe();
+                    compose_live_actor_inputs(&runner, central, root)
+                        .ok()
+                        .flatten()
+                }),
                 None => None,
             };
 
+            let mut source_resources = composed
+                .as_ref()
+                .map(|c| c.source_resources.clone())
+                .unwrap_or_default();
+            // Governance ContextSources ride alongside the actor-composed
+            // sources — root Control/agents/governance plus this Project's
+            // own ProjectCentral/agents/governance — through the same shared
+            // reading `context_resource_records` uses, so the managed
+            // bootstrap this projection materialises (the Claude/Codex
+            // `aikit-context` skill an `apply` writes) names governance
+            // identically to every other resolution path instead of never
+            // naming it at all.
+            if let Some(root) = self.descriptor.project_root.as_deref() {
+                source_resources
+                    .extend(self.governance_context_records(root, central_root.as_deref()));
+            }
+
             let resources = aikit_tui::project_world_service::resource_index_with_records(
                 self,
-                composed
-                    .as_ref()
-                    .map(|c| c.source_resources.clone())
-                    .unwrap_or_default(),
+                source_resources,
             )?;
             let mut resolution =
                 aikit_tui::project_world_service::context_resolution_from_resources(
@@ -1589,13 +1604,18 @@ impl Service {
             }
         }
 
-        let resources = aikit_tui::project_world_service::resource_index_with_records(
-            self,
-            composed
-                .as_ref()
-                .map(|c| c.source_resources.clone())
-                .unwrap_or_default(),
-        )?;
+        let mut source_resources = composed
+            .as_ref()
+            .map(|c| c.source_resources.clone())
+            .unwrap_or_default();
+        // Same shared governance reading `context_resource_records` and
+        // `projection_context_for` use: `aikit compose` previews exactly
+        // what an `apply` would materialise, so it must name the same
+        // governance sources rather than silently omitting them.
+        source_resources
+            .extend(self.governance_context_records(project_root, central_root.as_deref()));
+        let resources =
+            aikit_tui::project_world_service::resource_index_with_records(self, source_resources)?;
         let actors = composed
             .as_ref()
             .map(|c| c.requested_actors.clone())
@@ -3086,6 +3106,61 @@ fn create_directory_link(target: &Path, link: &Path) -> Result<()> {
     })
 }
 
+impl Service {
+    /// Governance ContextSources applicable to `project`: Central's own root
+    /// `Control/agents/governance/**` under `central_root` (when this
+    /// context has one), plus `project`'s own
+    /// `ProjectCentral/agents/governance/**` when it exists. Shared by every
+    /// resolution path that builds a resource index for this Project —
+    /// `context_resource_records` (the generic `PaletteBackend` path),
+    /// `projection_context_for` (client projection / `apply`) and
+    /// `compose_selected_plan` (`aikit compose`) all call this rather than
+    /// each re-deriving the same governance read, so a governance source
+    /// named to one is named to all of them alike. Fail-soft: a governance
+    /// read failure decorates the reading with a composition note, it never
+    /// fails a context that is otherwise sound. Bodies are never read here —
+    /// named refs with a filesystem revision only.
+    fn governance_context_records(
+        &self,
+        project: &Path,
+        central_root: Option<&Path>,
+    ) -> Vec<aikit_core::resource::ResourceRecord> {
+        let mut records = Vec::new();
+        if let Some(central) = central_root {
+            match aikit_adapters::projectcentral::root_governance_context_source_records(central) {
+                Ok(governance) => records.extend(governance),
+                Err(error) => self.context_composition_notes.borrow_mut().push(format!(
+                    "root governance context sources skipped ({}): {}",
+                    error.code(),
+                    error.message()
+                )),
+            }
+        }
+        if std::fs::symlink_metadata(project.join("ProjectCentral/project.json")).is_ok() {
+            match aikit_adapters::ProjectCentralFilesystemBinding::inspect(project, central_root)
+                .and_then(|binding| binding.semantic.context_sources())
+            {
+                Ok(entries) => records.extend(entries.into_iter().filter_map(|entry| {
+                    (entry
+                        .resource
+                        .descriptor
+                        .annotations
+                        .get("central.standing")
+                        .map(String::as_str)
+                        == Some("human-governance"))
+                    .then_some(entry.resource)
+                })),
+                Err(error) => self.context_composition_notes.borrow_mut().push(format!(
+                    "project governance context sources skipped ({}): {}",
+                    error.code(),
+                    error.message()
+                )),
+            }
+        }
+        records
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PaletteBackend — the same state, shaped for the palette
 // ---------------------------------------------------------------------------
@@ -3139,12 +3214,12 @@ impl PaletteBackend for Service {
         let Some(project) = self.descriptor.project_root.as_deref() else {
             return Ok(Vec::new());
         };
-        let mut records = if let Some(central) = self
+        let central_root = self
             .central_meta_root
             .clone()
-            .or_else(|| process_central_root(Some(project)))
-        {
-            match compose_live_actor_inputs(&SystemRunner::probe(), &central, project) {
+            .or_else(|| process_central_root(Some(project)));
+        let mut records = if let Some(central) = central_root.as_deref() {
+            match compose_live_actor_inputs(&SystemRunner::probe(), central, project) {
                 Ok(composed) => composed
                     .map(|inputs| inputs.source_resources)
                     .unwrap_or_default(),
@@ -3163,6 +3238,11 @@ impl PaletteBackend for Service {
         } else {
             Vec::new()
         };
+        // Governance ContextSources: root Control/agents/governance plus this
+        // Project's own ProjectCentral/agents/governance, shared with every
+        // other resolution path through `governance_context_records` so a
+        // governance source named here is named identically everywhere else.
+        records.extend(self.governance_context_records(project, central_root.as_deref()));
         if let Some(started) = &self.factory_started_resources {
             records.extend(started.clone());
             return Ok(records);
