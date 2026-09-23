@@ -145,6 +145,40 @@ def request(action: str, **fields):
     return reply["data"]
 
 
+def paced_admission(session, text, cursor, expected_marker, *, timeout: int = 1500):
+    """Draft, prompt and observe one admission turn, waiting out parent busyness.
+
+    A completed child keeps delivering result messages to the parent, and
+    Prime 0.9.4 refuses a prompt that lands while the parent still processes
+    one - sometimes as a request refusal, sometimes as a turn-level failure
+    after the prompt was forwarded. Retrying that specific refusal is pacing;
+    the marker assertion is unchanged.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        page = event_page(cursor)
+        draft = request(
+            "draft",
+            agent_session=session,
+            basis=page["draft"]["revision"],
+            text=text,
+        )
+        prompt_when_idle(session, draft["revision"])
+        cursor, root_text, terminal, _ = wait_turn(cursor)
+        if "already processing" in json.dumps(terminal):
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"{expected_marker} admission kept colliding with parent processing: {terminal}"
+                )
+            time.sleep(20.0)
+            continue
+        if "Completed" not in terminal or root_text.strip() != expected_marker:
+            raise RuntimeError(
+                f"{expected_marker} admission failed: {terminal} / {root_text!r}"
+            )
+        return cursor, root_text, terminal
+
+
 def wait_socket(server):
     deadline = time.monotonic() + 30
     while not socket_path.exists():
@@ -186,7 +220,7 @@ def event_page(cursor: int, limit: int = 128):
     return request("read", agent_session=session, after=cursor, limit=limit)
 
 
-def wait_turn(cursor: int, *, timeout: int = 240):
+def wait_turn(cursor: int, *, timeout: int = 600):
     text = ""
     terminal = None
     captured = []
@@ -398,7 +432,7 @@ try:
 
     child_updates = []
     saw_child_message = False
-    deadline = time.monotonic() + 300
+    deadline = time.monotonic() + 600
     while time.monotonic() < deadline:
         page = event_page(cursor)
         for item in page["events"]:
@@ -479,22 +513,12 @@ try:
             + ", name='ql-child-replacement', use_type='agent-child'). "
             "After admission reply exactly ROOT_REPLACEMENT_ADMITTED."
         )
-        page = event_page(cursor)
-        draft = request(
-            "draft",
-            agent_session=session,
-            basis=page["draft"]["revision"],
-            text=replacement_prompt,
+        cursor, root_text, terminal = paced_admission(
+            session, replacement_prompt, cursor, "ROOT_REPLACEMENT_ADMITTED"
         )
-        request("prompt", agent_session=session, draft_revision=draft["revision"])
-        cursor, root_text, terminal, _ = wait_turn(cursor)
-        if "Completed" not in terminal or root_text.strip() != "ROOT_REPLACEMENT_ADMITTED":
-            raise RuntimeError(
-                f"replacement admission failed: {terminal} / {root_text!r}"
-            )
 
         replacement_updates = []
-        deadline = time.monotonic() + 300
+        deadline = time.monotonic() + 600
         while time.monotonic() < deadline:
             page = event_page(cursor)
             for item in page["events"]:
@@ -550,17 +574,12 @@ try:
     if "Cancelled" not in cancelled:
         raise RuntimeError(f"Prime cancellation did not terminate as cancelled: {cancelled}")
 
-    page = event_page(cursor)
-    draft = request(
-        "draft",
-        agent_session=session,
-        basis=page["draft"]["revision"],
-        text="Reply exactly EPI_PRIME_CONTINUED_OK. Do not use tools.",
+    cursor, continuation, terminal = paced_admission(
+        session,
+        "Reply exactly EPI_PRIME_CONTINUED_OK. Do not use tools.",
+        cursor,
+        "EPI_PRIME_CONTINUED_OK",
     )
-    request("prompt", agent_session=session, draft_revision=draft["revision"])
-    cursor, continuation, terminal, _ = wait_turn(cursor)
-    if "Completed" not in terminal or continuation.strip() != "EPI_PRIME_CONTINUED_OK":
-        raise RuntimeError(f"Prime continuation failed: {terminal} / {continuation!r}")
     if request("status", agent_session=session)["native_session_id"] != native_session:
         raise RuntimeError("continuation reminted the native Prime session")
 
