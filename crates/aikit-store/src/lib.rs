@@ -71,6 +71,7 @@ pub mod procedure;
 pub mod procedure_history;
 pub mod registry;
 pub mod routine_invocation;
+pub mod routine_store;
 pub mod scan;
 pub mod session_lifecycle;
 pub mod session_space_application;
@@ -127,6 +128,7 @@ pub use routine_invocation::{
     RoutineInvocationAdmission, RoutineInvocationAdmissionStatus, RoutineInvocationStore,
     ROUTINE_INVOCATION_ADMISSION_VERSION, ROUTINE_INVOCATION_LEDGER_VERSION,
 };
+pub use routine_store::{ForeignAdoption, RoutineStore, StoredRoutine, ROUTINE_STORE_VERSION};
 pub use scan::{Finding, Scanner};
 pub use session_lifecycle::{SessionLifecycleStore, SESSION_LIFECYCLE_STORE_VERSION};
 pub use session_space_application::{
