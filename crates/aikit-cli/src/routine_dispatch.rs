@@ -422,6 +422,31 @@ impl RoutineRunner for ResidentEncounterRunner {
     }
 }
 
+/// The session-open request a dispatched Routine run composes: active
+/// tool-protocol capsules populate `mcp_servers` through the one application
+/// engine `aikit status` uses, cwd is the run's working ground, and the open
+/// creates a fresh canonical session for the run. This is the request the
+/// connection layer passes to the harness child — skills are already
+/// projected into the composition it resolves against.
+pub fn compose_routine_open_request(
+    home: &aikit_store::AikitHome,
+    cwd: &Path,
+) -> Result<aikit_adapters::agent_connection::SessionOpenRequest> {
+    let entries = crate::encounter_mcp::active_tool_source_entries(home, cwd)?;
+    let protocol = std::env::var("AIKIT_ROUTINE_PROTOCOL").unwrap_or_else(|_| "acp".into());
+    let supports_mcp = std::env::var("AIKIT_ROUTINE_PROTOCOL_SUPPORTS_MCP")
+        .map(|value| value != "0" && value != "false")
+        .unwrap_or(true);
+    let mcp = crate::encounter_mcp::session_mcp_resolution(&protocol, supports_mcp, entries)?;
+    Ok(crate::encounter_mcp::build_session_open_request(
+        aikit_adapters::agent_connection::SessionOpenMode::Create,
+        None,
+        &cwd.display().to_string(),
+        mcp,
+        None,
+    ))
+}
+
 fn invocation_slug(reference: &ResourceRef) -> String {
     blake3::hash(reference.as_str().as_bytes()).to_hex()[..24].to_string()
 }
@@ -677,7 +702,19 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
                         }
                         report.dispatched.append(&mut dispatch);
                     }
-                    Err(error) => report.failures.push(format!("{routine_ref}: {error}")),
+                    Err(error) => {
+                        // Method-revision drift is not just a failure of this
+                        // pass: the Routine flips to StaleProof durably and
+                        // stays there until an explicit reprove.
+                        if matches!(
+                            error.code(),
+                            "routine.proof_stale" | "routine.proof_method_mismatch"
+                        ) {
+                            self.persist_stale_proof(&record.routine.id)?;
+                            report.stale_proofs.push(routine_ref.clone());
+                        }
+                        report.failures.push(format!("{routine_ref}: {error}"));
+                    }
                 }
             }
         }
@@ -818,6 +855,19 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
         self.ledger.admit(request).map(|_| ())
     }
 
+    /// Method-revision drift flips the Routine to StaleProof at the next
+    /// trigger check — and the flip is durable: never auto-healed, only an
+    /// explicit reprove returns it to service.
+    fn persist_stale_proof(&self, routine_ref: &ResourceRef) -> Result<()> {
+        let mut record = self.routines.get(routine_ref)?;
+        if record.routine.state == RoutineState::StaleProof {
+            return Ok(());
+        }
+        record.routine.state = RoutineState::StaleProof;
+        record.restamp_revision()?;
+        self.routines.put(record).map(|_| ())
+    }
+
     fn adoption_retirement_check(
         &self,
         record: &StoredRoutine,
@@ -953,6 +1003,21 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
                 ),
             )?;
             let observed_at = rfc3339(now_unix_ms)?;
+            // An identical event hashes to an identical observation and
+            // invocation identity. One already admitted means this exact
+            // occurrence was already observed — replay delivers no second run
+            // and never mints work.
+            if self.ledger.get(&invocation_ref).is_ok() {
+                dispatched.push(DispatchRecord {
+                    routine: record.routine.id.to_string(),
+                    occurrence_ref: String::new(),
+                    invocation_ref: invocation_ref.to_string(),
+                    due_unix_ms: now_unix_ms,
+                    admission: "already-admitted".into(),
+                    outcome: None,
+                });
+                continue;
+            }
             let result = (|| -> Result<DispatchRecord> {
                 let method = self.methods.resolve(&record.routine.method)?;
                 let prompt = event_prompt(&record, &method, &packet);
@@ -1176,5 +1241,53 @@ pub fn binding_observed_state(record: &StoredRoutine) -> RoutineSchedulerState {
     match record.routine.state {
         RoutineState::Enabled => RoutineSchedulerState::Active,
         _ => RoutineSchedulerState::Planned,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The dispatched run's session-open request is built through the real
+    /// composition engine: an isolated home with no active tool capsules
+    /// composes an honest empty `mcp_servers` (nothing composed, nothing
+    /// dropped), and cwd carries the run's working ground. The supplied-MCP
+    /// wire behaviour is proven in `encounter_mcp`'s tests; the full
+    /// real-ACP-child proof for a dispatched Routine run is the named
+    /// remaining live test (caw_native_delivery extension).
+    #[test]
+    fn the_dispatched_run_composes_a_fresh_session_open_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = aikit_store::AikitHome::at(dir.path().join("home"));
+        let request = compose_routine_open_request(&home, dir.path()).unwrap();
+        assert_eq!(request.cwd, dir.path().display().to_string());
+        assert!(request.mcp_servers.is_empty());
+        assert!(request.native_session_id.is_none());
+        assert!(request.additional_directories.is_empty());
+        assert_eq!(
+            request.mode,
+            aikit_adapters::agent_connection::SessionOpenMode::Create
+        );
+    }
+
+    /// A supplied MCP resolution rides onto the open request unchanged: the
+    /// dispatcher never silently drops a composed tool surface.
+    #[test]
+    fn supplied_mcp_resolution_rides_onto_the_open_request() {
+        let request = crate::encounter_mcp::build_session_open_request(
+            aikit_adapters::agent_connection::SessionOpenMode::Create,
+            None,
+            "/tmp/run-ground",
+            crate::encounter_mcp::SessionMcpResolution::Supplied(vec![serde_json::json!({
+                "name": "bimba",
+                "command": "/usr/local/bin/bimba-mcp",
+                "args": [],
+                "env": []
+            })]),
+            None,
+        );
+        assert_eq!(request.mcp_servers.len(), 1);
+        assert_eq!(request.mcp_servers[0]["name"], "bimba");
+        assert_eq!(request.cwd, "/tmp/run-ground");
     }
 }
