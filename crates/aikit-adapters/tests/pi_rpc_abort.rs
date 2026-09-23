@@ -78,7 +78,7 @@ fn settle_after(
 fn an_error_after_an_acknowledged_abort_is_the_stop() {
     let mut adapter = attached();
     assert_eq!(
-        settle_after(&mut adapter, true),
+        settle_after(&mut adapter, true, true),
         ConnectionSignalKind::Cancelled
     );
 }
