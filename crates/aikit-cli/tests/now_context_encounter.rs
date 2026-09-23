@@ -250,6 +250,8 @@ fn redis_prepared_now_is_delivered_before_turn_and_verifier_context_is_isolated(
                 script.display().to_string(),
                 "echo-prompt".into(),
             ],
+            body_ref: None,
+            body_revision: None,
             required_context: None,
             model_policy: None,
             now_context: Some(EncounterNowContextConfig {
