@@ -1916,6 +1916,7 @@ fn run_credential_setup_from_palette(service: &Service) -> Result<Reply> {
         from_env: false,
         headless: false,
         declared_ref: None,
+        stdin: false,
     };
     let outcome = credential::setup(service.home(), &request)?;
     println!(
@@ -2714,6 +2715,7 @@ fn cmd_explain(cwd: &std::path::Path, a: ExplainArgs) -> Result<Reply> {
             from_env: a.from_env,
             headless: a.headless,
             declared_ref: None,
+            stdin: false,
         };
         let inspection = credential::inspect(service.home(), &request)?;
         return Ok(reply(
@@ -2795,6 +2797,7 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
                 from_env: a.from_env,
                 headless: a.headless || json_mode,
                 declared_ref: declared_ref(a.declared_ref)?,
+                stdin: a.stdin,
             };
             let outcome = credential::setup(service.home(), &request)?;
             let notes = if outcome.binding.declared_secret_ref.is_some() {
@@ -2827,6 +2830,7 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
                 from_env: a.from_env,
                 headless: a.headless || json_mode,
                 declared_ref: None,
+                stdin: false,
             };
             let inspection = credential::inspect(service.home(), &request)?;
             Ok(reply(
@@ -2859,6 +2863,7 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
                 from_env: a.from_env,
                 headless: true,
                 declared_ref: declared_ref(a.declared_ref)?,
+                stdin: a.stdin,
             };
             let outcome = credential::rotate(service.home(), &request)?;
             Ok(reply(
