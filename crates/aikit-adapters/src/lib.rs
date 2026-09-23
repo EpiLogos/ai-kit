@@ -42,6 +42,7 @@ pub mod home_agent_profile;
 pub mod hook_sources;
 pub mod hyprland;
 pub mod interactive_connection;
+pub mod jev;
 pub mod layers;
 pub mod local_source_discovery;
 pub mod markdown_document;

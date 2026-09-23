@@ -503,6 +503,7 @@ fn run(cli: Cli) -> Result<()> {
                     body_revision: Some(body_revision.clone()),
                     required_context: None,
                     model_policy: None,
+                    now_context: None,
                 },
             )?;
             emit(&serde_json::json!({

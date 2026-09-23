@@ -212,6 +212,8 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Flow(c)) => cmd_flow(cwd, c),
         Some(Command::Method(a)) => cmd_method(cwd, a),
         Some(Command::Routine(c)) => cmd_routine(c),
+        Some(Command::Jev(c)) => cmd_jev(c),
+        Some(Command::NowContext(c)) => cmd_now_context(cwd, c),
         Some(Command::Factory(c)) => cmd_factory(c),
         Some(Command::Trust(a)) => cmd_trust(cwd, a),
         Some(Command::Wiki(c)) => cmd_wiki(cwd, c),
@@ -403,6 +405,35 @@ fn cmd_routine(command: RoutineCmd) -> Result<Reply> {
         warnings: vec![],
         exit_code: json::EXIT_OK,
     })
+}
+
+fn data_reply(data: Value) -> Result<Reply> {
+    Ok(Reply::Data {
+        context: EnvelopeContext::default(),
+        data,
+        warnings: vec![],
+        exit_code: json::EXIT_OK,
+    })
+}
+
+fn cmd_jev(command: JevCmd) -> Result<Reply> {
+    let data = match command.command {
+        JevSub::Validate(args) => aikit_cli::jev_now::jev_validate(args)?,
+        JevSub::Invoke(args) => aikit_cli::jev_now::jev_invoke(args)?,
+    };
+    data_reply(data)
+}
+
+fn cmd_now_context(cwd: &std::path::Path, command: NowContextCmd) -> Result<Reply> {
+    let data = match command.command {
+        NowContextSub::Status(args) => aikit_cli::jev_now::now_status(args)?,
+        NowContextSub::Prepare(args) => aikit_cli::jev_now::now_prepare(cwd, args)?,
+        NowContextSub::Inspect(args) => aikit_cli::jev_now::now_inspect(args)?,
+        NowContextSub::Publish(args) => aikit_cli::jev_now::now_publish(args)?,
+        NowContextSub::AppendChange(args) => aikit_cli::jev_now::now_append_change(args)?,
+        NowContextSub::Revoke(args) => aikit_cli::jev_now::now_revoke(args)?,
+    };
+    data_reply(data)
 }
 
 fn cmd_factory(command: FactoryCmd) -> Result<Reply> {

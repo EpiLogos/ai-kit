@@ -55,7 +55,10 @@ for line in sys.stdin:
         result(ident, {"configOptions": config()})
     elif method == "session/prompt":
         prompt = "".join(item.get("text", "") for item in message["params"]["prompt"])
-        if prompt == "deny":
+        if mode == "echo-prompt":
+            text(prompt)
+            result(ident, {"stopReason": "end_turn"})
+        elif prompt == "deny":
             waiting = ident
             update({"sessionUpdate": "tool_call", "toolCallId": "read-1", "title": "Read a source", "kind": "read", "status": "pending"})
             emit({"jsonrpc": "2.0", "id": "permission-1", "method": "session/request_permission", "params": {

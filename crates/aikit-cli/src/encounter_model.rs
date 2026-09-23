@@ -696,6 +696,7 @@ mod tests {
             body_revision: None,
             required_context: None,
             model_policy: None,
+            now_context: None,
         }
     }
 
@@ -787,6 +788,7 @@ mod tests {
             body_revision: None,
             required_context: None,
             model_policy: None,
+            now_context: None,
         }
     }
 

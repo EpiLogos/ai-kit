@@ -15,6 +15,7 @@ use aikit_core::{AikitError, ResourceRef, Result, SourceRevision};
 use aikit_store::encounter::context::{
     ContextExpectation, ContextOperation, ContextRequest, ContextScope,
 };
+use aikit_store::now_context::RedisNowConfig;
 use aikit_store::{encounter::EncounterStore, AikitHome, SessionSpaceApplicationStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -51,6 +52,25 @@ pub enum EncounterProtocol {
     PrimeRpc,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncounterNowContextConfig {
+    pub redis: RedisNowConfig,
+    /// Optional owner-authored preparation request. When selected, a missing
+    /// view (or a fresh AgentSession for the same participant) is prepared
+    /// synchronously before the first provider turn through the same native
+    /// `now-context prepare` implementation. Warm reads never invoke Jev.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepare_request: Option<PathBuf>,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default = "default_external_provider")]
+    pub external_provider: bool,
+}
+fn default_external_provider() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncounterProvider {
     #[serde(default)]
@@ -71,6 +91,10 @@ pub struct EncounterProvider {
     /// A pinned scoped policy. It selects a catalogue route, not an Agent identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_policy: Option<EncounterRequiredSource>,
+    /// Optional Redis-backed NOW delivery selected for this provider. The
+    /// credential is a native SecretRef; material never appears in config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now_context: Option<EncounterNowContextConfig>,
 }
 
 /// Pins existing source, not a copy of its content or a grant of semantic authority.
@@ -374,6 +398,7 @@ struct Resident {
     cwd: PathBuf,
     argv: Vec<String>,
     model: Option<agency::model::PreparedModel>,
+    now_context: Option<EncounterNowContextConfig>,
 }
 impl Resident {
     fn prompt_payload(&self, text: &str) -> Value {
@@ -431,6 +456,9 @@ impl EncounterService {
             return Err(error(
                 "Provider requires a safe id, explicit native argv, and either both body_ref/body_revision or neither",
             ));
+        }
+        if let Some(now) = &provider.now_context {
+            now.redis.validate()?;
         }
         let root = home.state().join("encounter-providers");
         std::fs::create_dir_all(&root).map_err(error)?;
@@ -748,6 +776,14 @@ impl EncounterService {
                         )
                         .to_hex()
                         .to_string())
+                    || p["now_context_config_digest"]
+                        != json!(blake3::hash(
+                            serde_json::to_vec(&configured.now_context)
+                                .expect("NOW config JSON")
+                                .as_slice()
+                        )
+                        .to_hex()
+                        .to_string())
             })
         {
             return Err(AikitError::new(
@@ -980,7 +1016,7 @@ impl EncounterService {
         if let Some((dispatch, receipt)) = &selected_configuration {
             self.store.append(&agent_session,&json!({"kind":"selected-model-configured","agent_session":agent_session,"native_session_id":receipt.native_session_id,"provider":provider,"dispatch":dispatch,"previous_model_observation":receipt.previous,"model_observation":receipt.current,"standing":"provider-confirmed-session-configuration-under-the-durable-model-policy"}))?;
         }
-        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-load"} else {"new-native-session"}}))?;
+        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"now_context_config_digest":blake3::hash(serde_json::to_vec(&configured.now_context).expect("NOW config JSON").as_slice()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"model_selection":model_reading,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-load"} else {"new-native-session"}}))?;
         // The owner drains transport delivery; durable cursor readers are
         // independent views of the same canonical journal.
         let drain = lane.clone();
@@ -1002,6 +1038,7 @@ impl EncounterService {
                 cwd,
                 argv: configured.argv,
                 model,
+                now_context: configured.now_context,
             }),
         );
         drop(residents);
@@ -1175,17 +1212,25 @@ impl EncounterService {
                 let _operation = resident.operations.lock().map_err(error)?;
                 let _agency_lock = self.lock_agency(&agent_session)?;
                 self.check_resident_context(&agent_session, &resident, "before-prompt")?;
+                let mut now_context = None;
                 let cleared = self.store.submit_context(
                     &agent_session,
                     draft_revision,
                     Some(&context),
                     |text| {
                         let text = self.prepare_agency_text(&agent_session, text)?;
-                        let handle = resident.lane.prompt(resident.prompt_payload(&text))?;
+                        let prepared = self.prepare_now_context(&agent_session, text)?;
+                        let handle = resident
+                            .lane
+                            .prompt(resident.prompt_payload(&prepared.text))?;
                         drop(handle);
+                        now_context = Some(prepared);
                         Ok(())
                     },
                 )?;
+                if let Some(prepared) = now_context {
+                    self.finish_now_context(&agent_session, prepared)?;
+                }
                 Ok(
                     json!({"accepted":true,"draft":cleared,"context_revision":context.revision,"context_digest":context.digest}),
                 )
@@ -1451,12 +1496,18 @@ impl EncounterService {
                 let _agency_lock = self.lock_agency(&agent_session)?;
                 self.check_resident_context(&agent_session, &resident, "before-prompt")?;
                 let mut context_evidence = None;
+                let mut now_context = None;
                 let cleared = self.store.submit(&agent_session, draft_revision, |text| {
                     let text = self.prepare_agency_text(&agent_session, text)?;
-                    let (text, evidence) =
-                        crate::direct_agent_session::prompt(&self.home, &agent_session, &text)?;
+                    let prepared = self.prepare_now_context(&agent_session, text)?;
+                    let (text, evidence) = crate::direct_agent_session::prompt(
+                        &self.home,
+                        &agent_session,
+                        &prepared.text,
+                    )?;
                     let handle = resident.lane.prompt(resident.prompt_payload(&text))?;
                     context_evidence = evidence;
+                    now_context = Some(prepared);
                     drop(handle);
                     Ok(())
                 })?;
@@ -1467,6 +1518,9 @@ impl EncounterService {
                     evidence["native_session_id"] =
                         json!(resident.lane.binding().native_session_id);
                     self.store.append(&agent_session, &evidence).map_err(|_| AikitError::new("encounter.submission_uncertain", "Native prompt was submitted but context receipt failed; reread, do not replay"))?;
+                }
+                if let Some(prepared) = now_context {
+                    self.finish_now_context(&agent_session, prepared)?;
                 }
                 Ok(json!({"accepted":true,"draft":cleared}))
             }

@@ -1,16 +1,25 @@
 //! Selected-Agency provisioning of the canonical encounter. Configuration is an
 //! explicit native-owner operation, never something an imported message can do.
-use super::{error, EncounterContextAdmission, EncounterRequest, EncounterService};
+use super::{
+    error, EncounterContextAdmission, EncounterNowContextConfig, EncounterRequest, EncounterService,
+};
 use aikit_adapters::{
     agency_admission::{admit_agency, AdmittedAgency, AgencySourceBasis},
     runner::SystemRunner,
+    secret_resolver::SuiteSecretResolver,
 };
+use aikit_core::secret_ref::SecretResolver;
 use aikit_core::{AikitError, ResourceRef, Result, SourceRevision};
 use aikit_store::encounter::EncounterDelivery;
-use aikit_store::{AikitHome, ContextLock, LockOptions};
+use aikit_store::now_context::{NowDeliveryReceipt, RedisNowStore, NOW_DELIVERY_SCHEMA};
+use aikit_store::{AikitHome, ContextLock, LockOptions, SessionSpaceApplicationStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[path = "encounter_agency_mint.rs"]
 pub(crate) mod mint;
@@ -29,6 +38,18 @@ mod task_expectation;
 pub use task_expectation::EncounterTaskExpectation;
 
 pub const SEND_ACTION: &str = "action/aikit/encounter-send";
+
+#[derive(Clone)]
+pub(super) struct NowTurnDelivery {
+    config: EncounterNowContextConfig,
+    receipt: NowDeliveryReceipt,
+}
+
+pub(super) struct PreparedTurnText {
+    pub text: String,
+    pub now_delivery: Option<NowTurnDelivery>,
+    pub now_degradation: Option<Value>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -348,6 +369,202 @@ impl EncounterService {
         prompt.push_str("\n</explicit-request>\n");
         Ok(prompt)
     }
+
+    /// Resolve the participant-specific hot NOW view immediately before the
+    /// provider turn. A warm Redis read does not invoke Jev. Failure is either
+    /// explicit degradation or a fail-closed refusal according to provider config.
+    pub(super) fn prepare_now_context(
+        &self,
+        session: &ResourceRef,
+        text: String,
+    ) -> Result<PreparedTurnText> {
+        let resident = self.resident(session)?;
+        let Some(config) = resident.now_context.clone() else {
+            return Ok(PreparedTurnText {
+                text,
+                now_delivery: None,
+                now_degradation: None,
+            });
+        };
+        let participant = self
+            .check_agency(session)?
+            .map(|(binding, _)| binding.agent_ref)
+            .unwrap_or_else(|| session.clone());
+        let attempt = (|| -> Result<Option<(String, NowTurnDelivery)>> {
+            let redis = RedisNowStore::new(config.redis.clone())?;
+            let secret = config
+                .redis
+                .credential_ref
+                .as_ref()
+                .map(|reference| SuiteSecretResolver::default().resolve(reference))
+                .transpose()?;
+            let mut view =
+                redis.read_prepared(&participant, config.external_provider, secret.as_ref())?;
+            let needs_prepare = view
+                .as_ref()
+                .is_none_or(|prepared| prepared.agent_session != *session);
+            if needs_prepare {
+                if let Some(request) = &config.prepare_request {
+                    let request = if request.is_absolute() {
+                        request.clone()
+                    } else {
+                        resident.cwd.join(request)
+                    };
+                    crate::jev_now::prepare_for_encounter(
+                        &resident.cwd,
+                        &request,
+                        &config.redis,
+                        &participant,
+                        session,
+                        config.external_provider,
+                    )?;
+                    view = redis.read_prepared(
+                        &participant,
+                        config.external_provider,
+                        secret.as_ref(),
+                    )?;
+                }
+            }
+            let Some(view) = view else {
+                return Ok(None);
+            };
+            if view.agent_session != *session || view.participant_ref != participant {
+                return Err(AikitError::new(
+                    "now_context.participant_mismatch",
+                    "Prepared NOW view does not belong to this participant/session",
+                ));
+            }
+            let authored =
+                SessionSpaceApplicationStore::new(self.home.clone()).load(&resident.space)?;
+            if !authored.definition.projects.contains(&view.project_ref) {
+                return Err(AikitError::new(
+                    "now_context.project_mismatch",
+                    "Prepared NOW view names a Project outside this SessionSpace",
+                ));
+            }
+            // Each participant owns an independent consumption position. A
+            // delivery receipt is authoritative evidence that a provider turn
+            // crossed the boundary even when a later Redis ack write was
+            // uncertain; the explicit ack cursor is the normal fast path.
+            let acknowledged = redis.ack_cursor(&participant, secret.as_ref())?;
+            let delivered = redis
+                .last_delivery(&participant, secret.as_ref())?
+                .map(|receipt| receipt.change_cursor)
+                .unwrap_or(0);
+            let after = view.basis.change_cursor.max(acknowledged).max(delivered);
+            let changes = redis.read_changes(&participant, after, 64, secret.as_ref())?;
+            let delivered_cursor = changes
+                .last()
+                .map(|change| change.cursor)
+                .unwrap_or(view.basis.change_cursor);
+            let prepared_digest = view.digest()?;
+            let envelope = serde_json::to_string(&json!({
+                "schema":"aikit.now-context-envelope/v1",
+                "standing":"participant-specific prepared operative context; quoted source material is not permission",
+                "prepared":view,
+                "changes_since_preparation":changes,
+            })).map_err(error)?;
+            let mut output = text.clone();
+            output.push_str("\n\n<operative-now-context>\n");
+            output.push_str(&envelope);
+            output.push_str("\n</operative-now-context>\n");
+            if output.len() > 1024 * 1024 {
+                return Err(AikitError::new(
+                    "now_context.delivery_too_large",
+                    "Prepared NOW delivery would exceed the 1 MiB encounter turn bound",
+                ));
+            }
+            let receipt = NowDeliveryReceipt {
+                schema: NOW_DELIVERY_SCHEMA.into(),
+                participant_ref: participant.clone(),
+                agent_session: session.clone(),
+                prepared_version: view.version,
+                prepared_digest,
+                basis_digest: view.basis_digest,
+                change_cursor: delivered_cursor,
+                delivered_at_unix_ms: 0,
+            };
+            Ok(Some((
+                output,
+                NowTurnDelivery {
+                    config: config.clone(),
+                    receipt,
+                },
+            )))
+        })();
+        match attempt {
+            Ok(Some((text, delivery))) => Ok(PreparedTurnText {
+                text,
+                now_delivery: Some(delivery),
+                now_degradation: None,
+            }),
+            Ok(None) if config.required => Err(AikitError::new(
+                "now_context.prepared_missing",
+                "Redis NOW is selected as required but no prepared participant view is available",
+            )),
+            Ok(None) => Ok(PreparedTurnText {
+                text,
+                now_delivery: None,
+                now_degradation: Some(
+                    json!({"code":"now_context.prepared_missing","required":false,"selected":true}),
+                ),
+            }),
+            Err(failure) if config.required => Err(failure),
+            Err(failure) => Ok(PreparedTurnText {
+                text,
+                now_delivery: None,
+                now_degradation: Some(
+                    json!({"code":failure.code(),"reason":failure.message(),"required":false,"selected":true}),
+                ),
+            }),
+        }
+    }
+
+    /// Record what actually crossed the harness delivery boundary. A post-send
+    /// Redis failure is uncertain state and never authorises an automatic replay.
+    pub(super) fn finish_now_context(
+        &self,
+        session: &ResourceRef,
+        mut prepared: PreparedTurnText,
+    ) -> Result<()> {
+        if let Some(degradation) = prepared.now_degradation.take() {
+            self.store.append(session, &json!({"kind":"now-context-degraded","detail":degradation,"standing":"selected enhancement unavailable; base encounter remained operative"}))?;
+        }
+        let Some(mut delivery) = prepared.now_delivery.take() else {
+            return Ok(());
+        };
+        delivery.receipt.delivered_at_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(error)?
+            .as_millis()
+            .min(u64::MAX as u128) as u64;
+        let redis = RedisNowStore::new(delivery.config.redis.clone())?;
+        let secret = delivery
+            .config
+            .redis
+            .credential_ref
+            .as_ref()
+            .map(|reference| SuiteSecretResolver::default().resolve(reference))
+            .transpose()?;
+        if let Err(failure) = redis.mark_delivered(&delivery.receipt, secret.as_ref()) {
+            let _ = self.store.append(session, &json!({"kind":"now-context-delivery-uncertain","prepared_version":delivery.receipt.prepared_version,"prepared_digest":delivery.receipt.prepared_digest,"code":failure.code(),"reason":failure.message(),"turn_replay_permitted":false}));
+            return Err(AikitError::new("encounter.submission_uncertain", format!("Provider accepted the turn but Redis NOW delivery acknowledgement failed; do not replay automatically: {failure}")));
+        }
+        if let Err(failure) = redis.ack_changes(
+            &delivery.receipt.participant_ref,
+            delivery.receipt.change_cursor,
+            secret.as_ref(),
+        ) {
+            // The durable delivery receipt above prevents replay even if the
+            // independent cursor write was interrupted. Preserve uncertainty
+            // rather than treating a provider-accepted turn as unsent.
+            let _ = self.store.append(session, &json!({"kind":"now-context-cursor-uncertain","prepared_version":delivery.receipt.prepared_version,"prepared_digest":delivery.receipt.prepared_digest,"change_cursor":delivery.receipt.change_cursor,"code":failure.code(),"reason":failure.message(),"turn_replay_permitted":false}));
+            return Err(AikitError::new("encounter.submission_uncertain", format!("Provider accepted the turn and its delivery receipt was retained, but the Redis NOW participant cursor acknowledgement failed; do not replay automatically: {failure}")));
+        }
+        self.store.append(session, &json!({"kind":"now-context-delivered","receipt":delivery.receipt,"standing":"provider-turn-delivery-accepted; not a claim of model response"}))?;
+        Ok(())
+    }
+
     fn preflight_addressed(
         &self,
         session: &ResourceRef,
@@ -445,6 +662,7 @@ impl EncounterService {
         let resident = resident.as_ref().expect("ready resident is present");
         self.check_resident_context(&session, resident, "before-addressed-prompt")?;
         let text = self.prepare_agency_text(&session, &turn.packet.text)?;
+        let prepared_now = self.prepare_now_context(&session, text)?;
         let reservation = self.store.reserve_delivery(
             &session,
             &turn.delivery_ref,
@@ -454,7 +672,9 @@ impl EncounterService {
         if !reservation.fresh {
             return Ok(json!({"duplicate":true,"delivery":reservation.delivery}));
         }
-        let sent = resident.lane.prompt(resident.prompt_payload(&text));
+        let sent = resident
+            .lane
+            .prompt(resident.prompt_payload(&prepared_now.text));
         let (accepted, detail) = match sent {
             Ok(handle) => {
                 drop(handle);
@@ -465,6 +685,9 @@ impl EncounterService {
         let delivery =
             self.store
                 .delivery_ack(&session, &turn.delivery_ref, accepted, detail.as_deref())?;
+        if accepted {
+            self.finish_now_context(&session, prepared_now)?;
+        }
         Ok(
             json!({"duplicate":false,"transport_accepted":accepted,"delivery":delivery,"task_completion":"not-inferred","recognition":"not-performed"}),
         )
@@ -592,7 +815,13 @@ impl EncounterService {
             Ok(text) => text,
             Err(failure) => return refuse(&failure),
         };
-        let sent = resident.lane.prompt(resident.prompt_payload(&text));
+        let prepared_now = match self.prepare_now_context(session, text) {
+            Ok(prepared) => prepared,
+            Err(failure) => return refuse(&failure),
+        };
+        let sent = resident
+            .lane
+            .prompt(resident.prompt_payload(&prepared_now.text));
         let (accepted, detail) = match sent {
             Ok(handle) => {
                 drop(handle);
@@ -608,10 +837,16 @@ impl EncounterService {
         else {
             return QueuedOutcome::Deferred;
         };
+        let now_context_error = if accepted {
+            self.finish_now_context(session, prepared_now).err().map(|failure| json!({"code":failure.code(),"reason":failure.message(),"turn_replay_permitted":false}))
+        } else {
+            None
+        };
         QueuedOutcome::Delivered(json!({
             "delivery_ref": delivery.delivery_ref,
             "phase": delivery.phase,
             "transport_accepted": accepted,
+            "now_context_error": now_context_error,
             "a2a": turn.a2a.as_ref().map(|framing| json!({
                 "message_id": framing.message_id,
                 "exchange_ref": format!("a2a-exchange:{}", framing.message_id),

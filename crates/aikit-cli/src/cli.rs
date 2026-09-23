@@ -168,6 +168,11 @@ pub enum Command {
     Method(MethodArgs),
     /// Authorise and read versioned Routine invocation evidence.
     Routine(RoutineCmd),
+    /// Invoke or validate the general typed Jev decision capability.
+    Jev(JevCmd),
+    /// Prepare, inspect and mutate Redis-backed participant NOW context.
+    #[command(name = "now-context")]
+    NowContext(NowContextCmd),
     /// Start developmental work through Factory's native Commission boundary.
     Factory(FactoryCmd),
     /// Record review decisions for catalogued capsule revisions.
@@ -286,6 +291,134 @@ pub struct GatewayQueryArgs {
 pub struct GatewayCmd {
     #[command(subcommand)]
     pub command: GatewaySub,
+}
+
+#[derive(Debug, Args)]
+pub struct JevCmd {
+    #[command(subcommand)]
+    pub command: JevSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum JevSub {
+    /// Validate a captured provider answer against the exact typed request.
+    Validate(JevValidateArgs),
+    /// Invoke the official Jev provider with explicit native credential and spend bounds.
+    Invoke(JevInvokeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct JevValidateArgs {
+    #[arg(long = "request-file", value_name = "PATH")]
+    pub request_file: std::path::PathBuf,
+    #[arg(long = "response-file", value_name = "PATH")]
+    pub response_file: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct JevInvokeArgs {
+    #[arg(long = "request-file", value_name = "PATH")]
+    pub request_file: std::path::PathBuf,
+    #[arg(long = "limits-file", value_name = "PATH")]
+    pub limits_file: std::path::PathBuf,
+    /// Native secret reference (varlock://, pass://, keychain://, op://; env:// requires explicit opt-in).
+    #[arg(long = "credential-ref", value_name = "SECRET_REF")]
+    pub credential_ref: String,
+    #[arg(long = "invocation-ref", value_name = "RESOURCE_REF")]
+    pub invocation_ref: Option<String>,
+    #[arg(long = "curl", value_name = "PATH")]
+    pub curl: Option<std::path::PathBuf>,
+    /// Deterministic protocol proof only: explicit loopback endpoint. Omit for the official provider.
+    #[arg(long = "controlled-endpoint", value_name = "HOST:PORT")]
+    pub controlled_endpoint: Option<std::net::SocketAddr>,
+    /// Permit a deliberately supplied env:// secret reference for this invocation only.
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NowContextCmd {
+    #[command(subcommand)]
+    pub command: NowContextSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NowContextSub {
+    /// Check the selected Redis material service and report its actual version.
+    Status(NowStatusArgs),
+    /// Resolve Central/BKMR + Wiki + Factory relations and atomically prepare one participant view.
+    Prepare(NowPrepareArgs),
+    /// Inspect one participant's current prepared version, delivery and cursor state.
+    Inspect(NowInspectArgs),
+    /// Publish an already owner-resolved prepared view through the same CAS boundary.
+    Publish(NowPublishArgs),
+    /// Append one replayable semantic source/dependency/Return change for a participant.
+    AppendChange(NowAppendChangeArgs),
+    /// Revoke one participant's cached material at the disclosure boundary.
+    Revoke(NowRevokeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct NowStatusArgs {
+    #[arg(long = "config-file", value_name = "PATH")]
+    pub config_file: std::path::PathBuf,
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NowPrepareArgs {
+    #[arg(long = "request-file", value_name = "PATH")]
+    pub request_file: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct NowInspectArgs {
+    #[arg(long = "config-file", value_name = "PATH")]
+    pub config_file: std::path::PathBuf,
+    #[arg(long = "participant-ref", value_name = "RESOURCE_REF")]
+    pub participant_ref: String,
+    /// Validate the cached payload for external-provider disclosure before returning it.
+    #[arg(long = "external-provider")]
+    pub external_provider: bool,
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NowPublishArgs {
+    #[arg(long = "config-file", value_name = "PATH")]
+    pub config_file: std::path::PathBuf,
+    #[arg(long = "view-file", value_name = "PATH")]
+    pub view_file: std::path::PathBuf,
+    #[arg(long = "expected-version", value_name = "N")]
+    pub expected_version: u64,
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NowAppendChangeArgs {
+    #[arg(long = "config-file", value_name = "PATH")]
+    pub config_file: std::path::PathBuf,
+    #[arg(long = "participant-ref", value_name = "RESOURCE_REF")]
+    pub participant_ref: String,
+    #[arg(long = "change-file", value_name = "PATH")]
+    pub change_file: std::path::PathBuf,
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NowRevokeArgs {
+    #[arg(long = "config-file", value_name = "PATH")]
+    pub config_file: std::path::PathBuf,
+    #[arg(long = "participant-ref", value_name = "RESOURCE_REF")]
+    pub participant_ref: String,
+    #[arg(long = "disclosure-revision", value_name = "REVISION")]
+    pub disclosure_revision: String,
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
 }
 
 #[derive(Debug, Args)]

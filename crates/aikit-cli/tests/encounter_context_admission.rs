@@ -96,6 +96,7 @@ fn missing_and_stale_required_source_refuse_before_real_provider_process_effect(
         body_ref: None,
         body_revision: None,
         required_context: Some(context(source.clone(), b"admitted source\n")),
+        now_context: None,
     };
     EncounterService::configure(&home, provider.clone()).unwrap();
     let open = || EncounterRequest::Open {
