@@ -27,7 +27,9 @@ use crate::temporal::central_root_enclosing;
 pub fn entity_disclosure(event: &HookEvent) -> Result<Option<String>, String> {
     let central_root = central_root_enclosing(event.cwd.as_deref());
     entity_disclosure_in(
-        &SystemRunner::new(),
+        // A disclosure read is a probe: bounded, so a hanging owner read
+        // degrades to no disclosure within the budget.
+        &SystemRunner::probe(),
         central_root.as_deref(),
         event.cwd.as_deref(),
     )

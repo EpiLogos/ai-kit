@@ -76,7 +76,9 @@ pub fn dispatch(
         event,
         event.cwd.as_deref(),
         central_root.as_deref(),
-        &SystemRunner::new(),
+        // A hook re-ground read is a probe: bounded, so a hanging owner read
+        // costs the budget and becomes a warning — never a stalled prompt.
+        &SystemRunner::probe(),
     );
 
     if decision.bypass_consumed {

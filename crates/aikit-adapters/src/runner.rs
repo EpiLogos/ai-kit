@@ -138,6 +138,23 @@ impl SystemRunner {
         Self::default()
     }
 
+    /// A runner bounded by the shared probe budget
+    /// ([`aikit_core::probe::probe_budget`], default 10s, `AIKIT_PROBE_BUDGET_SECS`
+    /// overrides). Read, status and probe surfaces construct this instead of an
+    /// unbounded runner, so a hanging child — the gemini-with-expired-oauth
+    /// class — is killed inside the budget and reported as `timed-out` rather
+    /// than silently stalling the surface. An explicit [`with_timeout`] still
+    /// wins: the probe budget is the default, never a ceiling on configuration.
+    #[must_use]
+    pub fn probe() -> Self {
+        Self::new().with_timeout(aikit_core::probe::probe_budget())
+    }
+
+    /// The configured timeout, when this runner is bounded.
+    pub fn timeout(&self) -> Option<std::time::Duration> {
+        self.timeout
+    }
+
     #[must_use]
     pub fn with_cwd(mut self, cwd: impl AsRef<Path>) -> Self {
         self.cwd = Some(cwd.as_ref().to_path_buf());
@@ -472,6 +489,23 @@ mod tests {
             .run(&["sleep".into(), "30".into()])
             .expect_err("a 30s sleep cannot finish inside a 120ms budget");
         assert_eq!(error.code(), "mux.command_timeout");
+    }
+
+    #[test]
+    fn the_probe_constructor_rides_the_shared_budget_without_dropping_the_explicit_one() {
+        let probe = SystemRunner::probe();
+        assert_eq!(
+            probe.timeout(),
+            Some(aikit_core::probe::DEFAULT_PROBE_BUDGET),
+            "probe() is bounded by the shared budget, never unbounded"
+        );
+        let explicit = SystemRunner::probe().with_timeout(std::time::Duration::from_millis(120));
+        assert_eq!(
+            explicit.timeout(),
+            Some(std::time::Duration::from_millis(120)),
+            "an explicit budget wins over the probe default"
+        );
+        assert_eq!(SystemRunner::new().timeout(), None);
     }
 
     #[test]

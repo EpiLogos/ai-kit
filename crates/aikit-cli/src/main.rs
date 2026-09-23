@@ -658,7 +658,8 @@ fn cmd_compose(cwd: &std::path::Path, args: ComposeArgs) -> Result<Reply> {
             )
             .map_err(|e| AikitError::new("compose.source_invalid", format!("{e}")))?;
             aikit_adapters::agency_admission::admit_agency(
-                &aikit_adapters::runner::SystemRunner::new(),
+                // Compose-time admission is a probe of `actuation`: bounded.
+                &aikit_adapters::runner::SystemRunner::probe(),
                 "actuation",
                 &basis,
                 &aikit_core::ResourceRef::parse(args.agent.as_deref().unwrap_or(""))?,
@@ -3308,7 +3309,9 @@ fn cmd_continuity(cwd: &std::path::Path, c: ContinuityCmd) -> Result<Reply> {
                     _ => None,
                 };
                 let verification = aikit_cli::closeout::verify(
-                    &SystemRunner::new(),
+                    // A verification is a probe of the owner: bounded, so a
+                    // hanging `ctrl` fails the close-out inside the budget.
+                    &SystemRunner::probe(),
                     &central_root,
                     &project,
                     a.since,
@@ -4552,7 +4555,9 @@ fn cmd_alias(cwd: &std::path::Path, c: AliasCmd, _json_mode: bool) -> Result<Rep
     let home = AikitHome::discover()?;
     match c.command {
         AliasSub::List | AliasSub::Check => {
-            let runner = aikit_adapters::runner::SystemRunner::new();
+            // `check` probes each launchable entry's route join live: bounded,
+            // so a hanging helper binary is a finding within the budget.
+            let runner = aikit_adapters::runner::SystemRunner::probe();
             let (readings, problems) = aikit_cli::alias_family::read_all(&home, Some(&runner));
             let launchable = readings
                 .iter()

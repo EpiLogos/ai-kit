@@ -51,7 +51,8 @@ impl Service {
         if let Some(project) = self.descriptor.project_root.as_deref() {
             if let Some(central) = process_central_root(Some(project)) {
                 records.extend(project_development_field_resources(
-                    &SystemRunner::new(),
+                    // A read-model leg: bounded like every probe surface.
+                    &SystemRunner::probe(),
                     &central,
                     project,
                 )?);

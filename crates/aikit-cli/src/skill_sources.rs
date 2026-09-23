@@ -1010,7 +1010,9 @@ fn central_bundle(spec: &SourceSpec) -> Result<serde_json::Value> {
         .map(PathBuf::from)
         .unwrap_or_else(|| central_root.clone());
     let value = aikit_adapters::central_file_map::call(
-        &aikit_adapters::runner::SystemRunner::new(),
+        // Reading the owner's skill tree is a probe: bounded, so a hanging
+        // `ctrl` is a source error within the budget, never a stalled read.
+        &aikit_adapters::runner::SystemRunner::probe(),
         &aikit_adapters::central_file_map::executable(),
         &root,
         "skill-tree",
