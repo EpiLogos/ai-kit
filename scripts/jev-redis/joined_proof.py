@@ -612,10 +612,10 @@ def main():
             args.aikit, ["now-context", "inspect", "--config-file", str(work/"jev-redis.json"),
                          "--participant-ref", "agent/comparison-worker"], jev_env, central)
         jev_ms = (time.perf_counter() - t0) * 1000.0
-        selected = jev_result["selection"]["selected_candidate_refs"]
-        if len(selected) < 2 or jev_result["selection"]["catalogue_sufficient_noul"] >= 0.5:
+        selected = jev_result["selection"]["selectedCandidateRefs"]
+        if len(selected) < 2 or jev_result["selection"]["catalogueSufficientNoul"] >= 0.5:
             raise RuntimeError("controlled Jev arm did not expose multi-capability selection + catalogue gap")
-        if "context-source/verifier-canary" not in jev_result["selection"]["withheld_from_jev"]:
+        if "context-source/verifier-canary" not in jev_result["selection"]["withheldFromJev"]:
             raise RuntimeError("egress-denied verifier material was sent to Jev")
         if "VERIFIER_EXPECTATION_CANARY" in json.dumps(jev_inspect):
             raise RuntimeError("verifier canary leaked into worker prepared context")
@@ -788,7 +788,7 @@ def main():
         "matrix_pressure": {
             "warranted": bool(
                 jev_result is not None
-                and jev_result["selection"]["catalogue_sufficient_noul"] < 0.5
+                and jev_result["selection"]["catalogueSufficientNoul"] < 0.5
             ),
             "standing": "proposal-pressure-not-silent-authorship",
             "reason": "controlled multi-capability need was judged insufficiently represented; human-authored account/matrix ground remains an explicit source decision"
