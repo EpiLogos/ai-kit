@@ -19,7 +19,17 @@
 //!   receipt.json                          aikit.inhabitation-team-projection/v1
 //!   claude/<set>-team/.claude-plugin/plugin.json
 //!   claude/<set>-team/agents/<member>.md
+//!   claude/<set>-team/skills/<skill>/…      each member skill AIKit catalogues
 //! ```
+//!
+//! The team carries its own skills. Every skill a member names (expression
+//! frontmatter, then profile `skill_refs`) that AIKit's catalogue can supply
+//! is copied into the plugin, and the member's `skills:` names it by the only
+//! name Claude Code gives a plugin skill, `<plugin>:<skill>`. So a team works
+//! on a machine where its skills are catalogued but not active in any scope,
+//! and nothing is activated for unrelated sessions. A skill the catalogue
+//! cannot supply keeps its bare name and is disclosed, never silently dropped;
+//! it does not refuse the team.
 //!
 //! and the Claude Code harness is launched with `--plugin-dir` naming that
 //! directory, which Claude Code loads for that session only. Nothing is
@@ -34,12 +44,12 @@
 //! say whether the Agent orchestrates a set (an older `ctrl`), nothing is
 //! projected and that is said too.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use aikit_adapters::clients::claude_team::{
-    parse_member_expression, render_plugin_manifest, render_subagent, subagent_name,
-    team_plugin_name, TeamMember, MAX_MEMBER_EXPRESSION_BYTES,
+    claude_skill_name, parse_member_expression, render_plugin_manifest, render_subagent_with,
+    subagent_name, team_plugin_name, TeamMember, MAX_MEMBER_EXPRESSION_BYTES,
 };
 use aikit_core::{AikitError, Result};
 use aikit_store::home::AikitHome;
@@ -90,6 +100,103 @@ pub struct SetProjection {
     pub plugin_name: String,
     /// `(relative path inside the plugin directory, contents, provenance)`.
     pub files: Vec<(PathBuf, String, Value)>,
+    /// How many members became subagents.
+    pub members: usize,
+    /// Skill refs whose files travel inside the plugin.
+    pub skills_bundled: Vec<String>,
+    /// Skill refs a member names that the catalogue could not supply, each
+    /// with the reason.
+    pub skills_missing: Vec<String>,
+}
+
+/// One catalogued skill's files, ready to travel inside a team plugin.
+#[derive(Debug, Clone)]
+pub struct SkillPayload {
+    /// The directory name the skill takes in the plugin (the capsule leaf).
+    pub name: String,
+    pub revision: Option<String>,
+    /// `(path relative to the skill directory, contents)`.
+    pub files: Vec<(PathBuf, String)>,
+}
+
+/// Where a team's skills come from. The CLI answers from AIKit's catalogue;
+/// tests may answer from anything.
+pub trait SkillSource {
+    fn payload(&self, skill_ref: &str) -> std::result::Result<SkillPayload, String>;
+}
+
+/// Skills as AIKit's own catalogue holds them: every registry under the home
+/// and every promoted skill source, the same load `aikit status` reads.
+pub struct CatalogSkills {
+    skills: BTreeMap<String, (PathBuf, Option<String>)>,
+}
+
+impl CatalogSkills {
+    pub fn load(home: &AikitHome) -> Result<Self> {
+        use aikit_core::catalog::Catalog as _;
+        let load = crate::app::load_catalog(home, None)?;
+        let skills = load
+            .catalog
+            .capsules()
+            .into_iter()
+            .filter_map(|capsule| {
+                let section = capsule.skill()?;
+                let root = capsule.root.clone()?;
+                let payload_root = if section.root.trim().is_empty() {
+                    "payload"
+                } else {
+                    section.root.as_str()
+                };
+                Some((
+                    capsule.id.to_string(),
+                    (
+                        root.join(payload_root),
+                        capsule.revision.as_ref().map(ToString::to_string),
+                    ),
+                ))
+            })
+            .collect();
+        Ok(Self { skills })
+    }
+}
+
+/// Largest single skill file carried into a team plugin.
+const MAX_BUNDLED_SKILL_FILE_BYTES: u64 = 1024 * 1024;
+
+impl SkillSource for CatalogSkills {
+    fn payload(&self, skill_ref: &str) -> std::result::Result<SkillPayload, String> {
+        let (payload, revision) = self
+            .skills
+            .get(skill_ref)
+            .ok_or_else(|| "not in AIKit's catalogue on this machine".to_owned())?;
+        let skill = aikit_adapters::clients::agent_skills::validate(payload).map_err(|error| {
+            format!(
+                "its payload is not a valid Agent Skill: {}",
+                error.message()
+            )
+        })?;
+        let mut files = Vec::new();
+        for relative in &skill.files {
+            let path = skill.root.join(relative);
+            let size = std::fs::metadata(&path)
+                .map_err(|error| format!("{} cannot be read: {error}", path.display()))?
+                .len();
+            if size > MAX_BUNDLED_SKILL_FILE_BYTES {
+                return Err(format!(
+                    "{} is {size} bytes; a bundled skill file is at most {MAX_BUNDLED_SKILL_FILE_BYTES}",
+                    path.display()
+                ));
+            }
+            let text = std::fs::read_to_string(&path)
+                .map_err(|error| format!("{} is not UTF-8 text: {error}", path.display()))?;
+            files.push((PathBuf::from(relative), text));
+        }
+        Ok(SkillPayload {
+            name: claude_skill_name(skill_ref),
+            revision: revision.clone(),
+            files,
+        })
+    }
 }
 
 /// What `aikit inhabit` does about the Agent's team.
@@ -128,6 +235,7 @@ pub fn resolve(
     target: &HarnessTarget,
     skip: bool,
     base_command: &str,
+    skills: Option<&dyn SkillSource>,
 ) -> Result<TeamOutcome> {
     if skip {
         return Ok(TeamOutcome::Disclosed(
@@ -246,8 +354,43 @@ pub fn resolve(
             render_plugin_manifest(&set, &revision, agent, &team),
             json!({ "agent_set_ref": set, "agent_set_revision": revision }),
         )];
+        // The team's skills travel with it, named as Claude Code names a
+        // plugin skill. A skill the catalogue cannot supply keeps its bare
+        // name and is disclosed.
+        let mut bundled: BTreeMap<String, String> = BTreeMap::new();
+        let mut skills_missing = Vec::new();
+        let wanted: BTreeSet<String> = team.iter().flat_map(TeamMember::skill_refs).collect();
+        for skill_ref in &wanted {
+            let Some(source) = skills else {
+                skills_missing.push(format!("{skill_ref} (no skill catalogue was available)"));
+                continue;
+            };
+            match source.payload(skill_ref) {
+                Ok(payload) => {
+                    if bundled
+                        .values()
+                        .any(|name| name == &format!("{plugin_name}:{}", payload.name))
+                    {
+                        skills_missing.push(format!(
+                            "{skill_ref} (another bundled skill already takes the name {})",
+                            payload.name
+                        ));
+                        continue;
+                    }
+                    for (relative, text) in payload.files {
+                        files.push((
+                            PathBuf::from("skills").join(&payload.name).join(relative),
+                            text,
+                            json!({ "skill_ref": skill_ref, "skill_revision": payload.revision }),
+                        ));
+                    }
+                    bundled.insert(skill_ref.clone(), format!("{plugin_name}:{}", payload.name));
+                }
+                Err(reason) => skills_missing.push(format!("{skill_ref} ({reason})")),
+            }
+        }
         for member in &team {
-            match render_subagent(member) {
+            match render_subagent_with(member, &bundled) {
                 Ok(text) => files.push((
                     PathBuf::from("agents")
                         .join(format!("{}.md", subagent_name(&member.agent_ref)?)),
@@ -266,6 +409,9 @@ pub fn resolve(
             agent_set_revision: revision,
             plugin_name,
             files,
+            members: team.len(),
+            skills_bundled: bundled.keys().cloned().collect(),
+            skills_missing,
         });
     }
     if !problems.is_empty() {
@@ -450,7 +596,9 @@ pub fn write(
             "agent_set_ref": set.agent_set_ref,
             "agent_set_revision": set.agent_set_revision,
             "plugin_dir": plugin_dir.display().to_string(),
-            "members": set.files.len().saturating_sub(1),
+            "members": set.members,
+            "skills_bundled": set.skills_bundled,
+            "skills_missing": set.skills_missing,
         }));
     }
     let receipt = json!({

@@ -305,6 +305,11 @@ pub fn claim(
     // The team is resolved whole before anything is claimed: a member that
     // cannot be projected refuses here, with no tenure opened.
     let central_root = owners.central_root.clone().or(here_root);
+    // The team's skills come from AIKit's own catalogue; an unreadable
+    // catalogue leaves every member skill disclosed as missing, never refused.
+    let catalog = home
+        .as_ref()
+        .and_then(|home| crate::inhabit_team::CatalogSkills::load(home).ok());
     let team = crate::inhabit_team::resolve(
         owners,
         central_root.as_deref(),
@@ -312,6 +317,9 @@ pub fn claim(
         &HarnessTarget::from_argv(&request.harness_argv),
         request.no_team,
         &base,
+        catalog
+            .as_ref()
+            .map(|catalog| catalog as &dyn crate::inhabit_team::SkillSource),
     )?;
     if matches!(team, TeamOutcome::Planned { .. }) && home.is_none() {
         return Err(refusal(
