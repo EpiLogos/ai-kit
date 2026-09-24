@@ -175,6 +175,12 @@ impl PrimeRpcConnectionAdapter {
                 native_provider: Some(observed_provider.to_owned()),
             current_model_id: observed_model.into(),
             available_models: vec![NativeAdvertisedModel {
+                roster_identity: Some(crate::agent_connection::NativeModelRosterIdentity {
+                    provider_ref: format!("provider:{observed_provider}"), provider_native_id: observed_model.to_owned(),
+                    // This adapter knows the native provider/model. It does
+                    // not invent an admitted profile for Prime.
+                    harness_slug: None,
+                }),
                 model_id: observed_model.into(),
                 name: data["model"]["name"].as_str().unwrap_or(observed_model).into(),
                 description: Some(format!(

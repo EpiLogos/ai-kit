@@ -420,6 +420,23 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
         parse_herdr_snapshot(&self.run(&["api", "snapshot"])?)
     }
 
+    /// Read only the pane bound by this provider's persisted plan and fresh
+    /// snapshot. No workspace creation, focus or input occurs here.
+    pub fn capture_surface(&self, subject: &ResourceRef, lines: u16) -> Result<(String, String)> {
+        if !(1..=2000).contains(&lines) {
+            return Err(AikitError::new("herdr.capture_limit", "Capture lines must be between 1 and 2000"));
+        }
+        let observation = self.observation(self.snapshot()?);
+        let native = observation.canonical_native_id(subject).ok_or_else(||
+            AikitError::new("herdr.surface_not_live", "The persisted working Surface has no currently observed Herdr pane"))?.to_string();
+        let text = self.run(&["pane", "read", &native, "--source", "visible", "--format", "ansi", "--lines", &lines.to_string(), "--raw"])?;
+        let after = self.observation(self.snapshot()?);
+        if after.canonical_native_id(subject) != Some(native.as_str()) {
+            return Err(AikitError::new("herdr.surface_changed", "The working pane changed during capture; retry its current binding"));
+        }
+        Ok((native, text))
+    }
+
     pub fn create_workspace(&mut self) -> Result<HerdrWorkspaceCreation> {
         let cwd = self.create_cwd.clone().ok_or_else(|| {
             AikitError::new(

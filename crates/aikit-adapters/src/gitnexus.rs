@@ -5,6 +5,7 @@
 //! absent without changing [`CodeReference`] identity.
 
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use aikit_core::knowledge_code::{
@@ -17,6 +18,8 @@ use aikit_core::{AikitError, Result};
 use serde_json::{Map, Value};
 
 use crate::runner::CommandRunner;
+#[path = "gitnexus_snapshot.rs"]
+mod snapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GitNexusCliSurface {
@@ -43,6 +46,8 @@ pub struct GitNexusCodeIndexProvider<R> {
     provider: ProviderRef,
     root: Option<PathBuf>,
     indexed: bool,
+    index_observation: Option<String>,
+    isolate_reads: bool,
     cli: GitNexusCliSurface,
 }
 
@@ -75,8 +80,94 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
                 .expect("static GitNexus provider ref must be valid"),
             root: None,
             indexed: false,
+            index_observation: None,
+            isolate_reads: false,
             cli,
         }
+    }
+
+    /// Reuse one executable capability observation across a project census.
+    /// This neither opens nor rebuilds any index.
+    pub fn for_project(&self, runner: R, repo_name: impl Into<String>, source: SourceRef) -> Self {
+        Self {
+            runner,
+            binary: self.binary.clone(),
+            repo_name: repo_name.into(),
+            source,
+            revision: None,
+            provider: self.provider.clone(),
+            root: None,
+            indexed: false,
+            index_observation: None,
+            isolate_reads: false,
+            cli: self.cli.clone(),
+        }
+    }
+
+    /// Admit an already materialised owner index without invoking GitNexus.
+    /// `list` and even query discovery in current GitNexus may prune its registry
+    /// or migrate old databases; neither belongs on a Knowledge read path.
+    pub fn open_existing(&mut self, root: &Path) -> Result<CodeIndexStatus> {
+        self.root = Some(root.to_path_buf());
+        self.isolate_reads = true;
+        self.indexed = false;
+        self.index_observation = Some("existing index absent; explicit indexing required".into());
+        let directory = root.join(".gitnexus");
+        let primary = directory.join("gitnexus.json");
+        let file = match std::fs::File::open(&primary) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::File::open(directory.join("meta.json")).map_err(|error| {
+                    AikitError::new("knowledge.gitnexus_existing_index", error.to_string())
+                })?
+            }
+            Err(error) => {
+                return Err(AikitError::new(
+                    "knowledge.gitnexus_existing_index",
+                    error.to_string(),
+                ))
+            }
+        };
+        let mut bytes = Vec::new();
+        file.take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| {
+                AikitError::new("knowledge.gitnexus_existing_index", error.to_string())
+            })?;
+        if bytes.len() > 1024 * 1024 {
+            return Err(AikitError::new(
+                "knowledge.gitnexus_existing_index",
+                "index metadata exceeds 1 MiB",
+            ));
+        }
+        let meta: Value = serde_json::from_slice(&bytes).map_err(|error| {
+            AikitError::new(
+                "knowledge.gitnexus_existing_index",
+                format!("invalid index metadata: {error}"),
+            )
+        })?;
+        let commit = meta
+            .get("lastCommit")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                AikitError::new(
+                    "knowledge.gitnexus_existing_index",
+                    "index metadata has no commit",
+                )
+            })?;
+        if !directory.join("lbug").is_file() {
+            return Err(AikitError::new(
+                "knowledge.gitnexus_existing_index",
+                "current index database absent; explicit indexing or legacy migration required",
+            ));
+        }
+        self.revision = Some(SourceRevision::parse(format!("git:{commit}"))?);
+        self.indexed = true;
+        // Resolve native queries by actual root, never a colliding project alias.
+        self.repo_name = root.to_string_lossy().into_owned();
+        self.index_observation = Some(format!("existing index at {commit}; freshness against current source and branch is unverified; no rebuild performed"));
+        Ok(self.status())
     }
 
     fn argv(&self, args: &[String]) -> Vec<String> {
@@ -85,9 +176,39 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
         argv
     }
 
+    fn run_read(&self, args: &[String], code: &'static str) -> Result<String> {
+        let snapshot = if self.isolate_reads {
+            Some(snapshot::Snapshot::read_only(
+                self.root.as_deref().ok_or_else(|| {
+                    AikitError::new(
+                        "knowledge.gitnexus_not_indexed",
+                        "existing index root absent",
+                    )
+                })?,
+            )?)
+        } else {
+            None
+        };
+        let mut argv = self.argv(args);
+        if let Some(snapshot) = snapshot.as_ref() {
+            argv.splice(
+                0..0,
+                [
+                    "env".into(),
+                    format!("GITNEXUS_HOME={}", snapshot.home.display()),
+                ],
+            );
+        }
+        Ok(self
+            .runner
+            .run_with_timeout(&argv, std::time::Duration::from_secs(15))?
+            .require(&argv, code)?
+            .stdout)
+    }
+
     fn run_json(&self, args: &[String], code: &'static str) -> Result<Value> {
         let argv = self.argv(args);
-        let stdout = self.runner.run(&argv)?.require(&argv, code)?.stdout;
+        let stdout = self.run_read(args, code)?;
         serde_json::from_str(stdout.trim()).map_err(|error| {
             AikitError::new(
                 "knowledge.gitnexus_invalid_json",
@@ -98,14 +219,7 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
     }
 
     fn run_text(&self, args: &[String], code: &'static str) -> Result<String> {
-        let argv = self.argv(args);
-        Ok(self
-            .runner
-            .run(&argv)?
-            .require(&argv, code)?
-            .stdout
-            .trim()
-            .to_string())
+        Ok(self.run_read(args, code)?.trim().to_string())
     }
 
     /// Why the CLI surface is unavailable, when it is. Absence means the
@@ -140,7 +254,7 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
         } else {
             Err(AikitError::new(
                 "knowledge.gitnexus_not_indexed",
-                "GitNexus code provider has not indexed the Project source in this AIKit provider instance",
+                "No existing GitNexus index was admitted; explicit indexing is required",
             ))
         }
     }
@@ -261,7 +375,17 @@ impl<R: CommandRunner> CodeIndexProvider for GitNexusCodeIndexProvider<R> {
             detail: self
                 .root
                 .as_ref()
-                .map(|root| format!("repo={} root={}", self.repo_name, root.display()))
+                .map(|root| {
+                    format!(
+                        "repo={} root={}{}",
+                        self.repo_name,
+                        root.display(),
+                        self.index_observation
+                            .as_ref()
+                            .map(|note| format!("; {note}"))
+                            .unwrap_or_default()
+                    )
+                })
                 .unwrap_or_else(|| format!("repo={} root=unmaterialised", self.repo_name)),
         }
     }

@@ -297,6 +297,7 @@ pub struct Service {
     /// binary; like the health reading, it does not shift under ordinary
     /// navigation, so it is observed once per session and reused.
     workcell_reading: std::cell::RefCell<Option<aikit_core::workcell_world::WorkcellDisclosure>>,
+    workcell_run_reading: std::cell::RefCell<Option<Vec<aikit_core::resource::ResourceRecord>>>,
     /// Cached Model roster. Composing it runs the same detection+join the
     /// compose path does; it is fetched on demand (roster overlay open), so one
     /// composition per session is reused rather than recomputed on each open.
@@ -309,6 +310,19 @@ pub struct Service {
 }
 
 impl Service {
+    fn workcell_run_resources(&self) -> Vec<aikit_core::resource::ResourceRecord> {
+        if let Some(reading) = self.workcell_run_reading.borrow().as_ref() { return reading.clone(); }
+        let executable = std::env::var("AIKIT_WORKCELL_BIN").unwrap_or_else(|_| "workcell".into());
+        let records = match aikit_adapters::workcell_run_intake::read(&SystemRunner::probe(), &executable) {
+            Ok(observed) => observed,
+            Err(error) => {
+                self.context_composition_notes.borrow_mut().push(format!("Workcell run resources unavailable: {error}"));
+                Vec::new()
+            }
+        };
+        *self.workcell_run_reading.borrow_mut() = Some(records.clone());
+        records
+    }
     /// Discover everything from the current working directory and process
     /// environment, and resolve the view.
     pub fn discover(cwd: &Path) -> Result<Self> {
@@ -448,6 +462,7 @@ impl Service {
             working_environments: std::cell::RefCell::new(None),
             doctor_report: std::cell::RefCell::new(None),
             workcell_reading: std::cell::RefCell::new(None),
+            workcell_run_reading: std::cell::RefCell::new(None),
             model_roster_reading: std::cell::RefCell::new(None),
             context_composition_notes: std::cell::RefCell::new(Vec::new()),
         })
@@ -1074,22 +1089,43 @@ impl Service {
     /// can show what lost and why. There is deliberately no standalone roster
     /// listing command — this, `model-catalogue show` and the TUI overlay are
     /// the resolution surfaces.
+    pub fn read_model_roster(
+        &self, composed: &serde_json::Value, use_type: &str,
+        policy: aikit_core::resource::ModelRankingPolicy,
+    ) -> Result<serde_json::Value> {
+        use aikit_core::resource::{rank_model_roster, ModelRouteSet};
+        let routes: Vec<ModelRouteSet> = serde_json::from_value(composed.get("model_routes").cloned().unwrap_or_default())
+            .map_err(|error| AikitError::new("model_roster.route_sets_unreadable", error.to_string()))?;
+        let roster = rank_model_roster(self.model_roster_demand(use_type)?, policy, self.roster_candidates(&routes)?);
+        let (catalogue, _) = aikit_store::model_catalogue::resolved_catalogue(&self.home);
+        let route_facts: Vec<_> = routes.iter().flat_map(|set| set.routes.iter()).map(|route| {
+            let harness = if route.kind == aikit_core::resource::ModelRouteKind::HarnessNative {
+                route.endpoint.as_deref().and_then(|endpoint| endpoint.rsplit_once(" via ")).and_then(|(_, through)| through.strip_prefix("harness/")).filter(|slug| aikit_adapters::profiles::for_slug(slug).is_some())
+            } else { None };
+            serde_json::json!({"model":route.model,"provider":route.provider,"variant":route.provider_native_id,
+                "name":catalogue.get(&route.model).map(|entry|entry.name.as_str()),"harness":harness,
+                "availability":route.availability})
+        }).collect();
+        Ok(serde_json::json!({"schema":"aikit.model-roster-reading/v1","roster":roster,"route_facts":route_facts,
+            "standing":"Read-only ranked native route evidence; no selection, session launch or inference"}))
+    }
+
     pub fn resolve_model(
         &self,
         composed: &serde_json::Value,
         use_type: &str,
         policy: aikit_core::resource::ModelRankingPolicy,
     ) -> Result<serde_json::Value> {
-        use aikit_core::resource::{rank_model_roster, select_model, ModelRouteSet};
+        use aikit_core::resource::{select_model, ModelRouteSet};
 
         let route_sets: Vec<ModelRouteSet> =
             serde_json::from_value(composed.get("model_routes").cloned().unwrap_or_default())
                 .map_err(|error| {
                     AikitError::new("model_roster.route_sets_unreadable", error.to_string())
                 })?;
-        let candidates = self.roster_candidates(&route_sets)?;
-        let demand = self.model_roster_demand(use_type)?;
-        let roster = rank_model_roster(demand, policy, candidates);
+        let reading = self.read_model_roster(composed, use_type, policy)?;
+        let roster: aikit_core::resource::ModelRoster = serde_json::from_value(reading["roster"].clone())
+            .map_err(|error| AikitError::new("model_roster.reading_unreadable", error.to_string()))?;
 
         let winning_model = roster
             .entries
@@ -3245,8 +3281,9 @@ impl PaletteBackend for Service {
     }
 
     fn context_resource_records(&self) -> Result<Vec<aikit_core::resource::ResourceRecord>> {
+        let run_resources = self.workcell_run_resources();
         let Some(project) = self.descriptor.project_root.as_deref() else {
-            return Ok(Vec::new());
+            return Ok(run_resources);
         };
         let central_root = self
             .central_meta_root
@@ -3277,6 +3314,10 @@ impl PaletteBackend for Service {
         // other resolution path through `governance_context_records` so a
         // governance source named here is named identically everywhere else.
         records.extend(self.governance_context_records(project, central_root.as_deref()));
+        // Native material runs and their actual operative refs enter the same
+        // @/operator field as other Resources. An unreadable owner is disclosed,
+        // never substituted with an empty successful reading or invented refs.
+        records.extend(run_resources);
         if let Some(started) = &self.factory_started_resources {
             records.extend(started.clone());
             return Ok(records);

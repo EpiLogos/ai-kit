@@ -386,6 +386,14 @@ pub struct ResidentEncounterRunner {
     pub home: aikit_store::AikitHome,
 }
 
+fn resident_request(socket: &Path, request: &crate::encounter_service::EncounterRequest) -> Result<Value> {
+    let response = crate::encounter_service::request(socket, request)?;
+    if response["ok"] != true {
+        return Err(AikitError::new("routine.encounter_refused", response["error"]["message"].as_str().unwrap_or("Resident encounter owner refused the Routine request")));
+    }
+    Ok(response["data"].clone())
+}
+
 impl RoutineRunner for ResidentEncounterRunner {
     fn run(&self, request: RoutineRunRequest) -> RoutineRunOutcome {
         let socket = crate::encounter_service::socket_path(&self.home);
@@ -433,7 +441,7 @@ impl RoutineRunner for ResidentEncounterRunner {
             provider,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         };
-        if let Err(error) = crate::encounter_service::request(&socket, &open) {
+        if let Err(error) = resident_request(&socket, &open) {
             return RoutineRunOutcome {
                 status: RunStatus::Failed,
                 detail: format!("session open failed: {error}"),
@@ -444,16 +452,16 @@ impl RoutineRunner for ResidentEncounterRunner {
             basis: 0,
             text: request.prompt.clone(),
         };
-        if let Err(error) = crate::encounter_service::request(&socket, &draft) {
+        if let Err(error) = resident_request(&socket, &draft) {
             return RoutineRunOutcome {
                 status: RunStatus::Failed,
                 detail: format!("prompt draft failed: {error}"),
             };
         }
         RoutineRunOutcome {
-            status: RunStatus::Completed,
+            status: RunStatus::Unreturned,
             detail: format!(
-                "dispatched to resident encounter owner at {}",
+                "draft prepared at resident encounter owner {}; no prompt was sent and no execution return exists",
                 socket.display()
             ),
         }
@@ -859,6 +867,17 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
         outcome: &RoutineRunOutcome,
         gate_delivery: &RoutineProviderDelivery,
     ) -> Result<()> {
+        use aikit_store::routine_invocation::{RoutineExecutionOutcome, RoutineExecutionStatus};
+        // Preserve the actual return before adding delivery provenance. The
+        // provider delivery hash alone cannot disclose success or failure.
+        self.ledger.record_outcome(&evidence.invocation_ref, RoutineExecutionOutcome {
+            status: match outcome.status {
+                RunStatus::Completed => RoutineExecutionStatus::Completed,
+                RunStatus::Failed => RoutineExecutionStatus::Failed,
+                RunStatus::Unreturned => RoutineExecutionStatus::Unreturned,
+            },
+            detail: outcome.detail.clone(),
+        })?;
         let status_text = match outcome.status {
             RunStatus::Completed => "completed",
             RunStatus::Failed => "failed",

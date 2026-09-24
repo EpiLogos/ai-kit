@@ -109,6 +109,17 @@ pub struct NativeAdvertisedModel {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Exact owner-observed join coordinates. Absent for protocols which do
+    /// not disclose a provider; a display/model ID is never parsed to guess it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roster_identity: Option<NativeModelRosterIdentity>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeModelRosterIdentity {
+    pub provider_ref: String,
+    pub provider_native_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_slug: Option<String>,
 }
 /// A bounded provider-advertised select control. Disclosure grants no write route.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +144,9 @@ fn unique_advertised_models(models: Vec<NativeAdvertisedModel>) -> Vec<NativeAdv
     let mut seen = BTreeSet::new();
     models
         .into_iter()
+        // ACP model options carry opaque IDs, not an admitted native
+        // provider/profile join. Ignore extensions claiming that authority.
+        .map(|mut model| { model.roster_identity = None; model })
         .filter(|model| seen.insert(model.model_id.clone()))
         .collect()
 }
@@ -238,6 +252,7 @@ impl NativeModelObservation {
                         )
                     })?;
                 Ok(NativeAdvertisedModel {
+                    roster_identity: None,
                     model_id: model_id.to_owned(),
                     name: name.to_owned(),
                     description: option

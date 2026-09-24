@@ -470,6 +470,12 @@ pub fn mint_per_project_agency(
     actuation_bin: &Path,
     runner: &dyn CommandRunner,
 ) -> Result<Value> {
+    mint_per_project_agency_with_intent(home,project_cwd,session,explicit_agent_ref,actuation_bin,runner,false)
+}
+fn mint_per_project_agency_with_intent(
+    home:&AikitHome,project_cwd:&Path,session:&ResourceRef,explicit_agent_ref:Option<ResourceRef>,
+    actuation_bin:&Path,runner:&dyn CommandRunner,for_task:bool,
+)->Result<Value> {
     if !session.as_str().starts_with("agent-session/") {
         return Err(mint_error(
             "agency_mint.session_invalid",
@@ -486,7 +492,14 @@ pub fn mint_per_project_agency(
         resolve_agent_identity(runner, project_cwd, &world, explicit_agent_ref)?;
 
     let template = load_template(project_cwd)?;
-    let (request, tag) = mint_request_document(&template, agent_ref.as_str(), world_ref.as_str())?;
+    let (mut request, tag) = mint_request_document(&template, agent_ref.as_str(), world_ref.as_str())?;
+    if for_task {
+        let allowed=request["determination"]["delegated_autonomy"]["allowed_action_refs"].as_array_mut().ok_or_else(||mint_error("agency_mint.actions","Native determination actions are absent"))?;
+        let action=json!("action/aikit/encounter-task");
+        if !allowed.contains(&action) {allowed.push(action);}
+        // This is a requested determination. Actualise below still decides
+        // against the owner's unchanged grant and bounds.
+    }
 
     // Content-addressed persistence: the same agent + project derives
     // byte-identical request text, so re-mints land on the same source.
@@ -586,4 +599,9 @@ pub fn mint_from_cli(
         &resolve_actuation_bin(),
         &SystemRunner::new(),
     )
+}
+
+/// Explicit task intent; ordinary chat minting retains its existing Actions.
+pub fn mint_task_from_cli(home:&AikitHome,project_cwd:&Path,session:&ResourceRef,agent:Option<ResourceRef>)->Result<Value> {
+    mint_per_project_agency_with_intent(home,project_cwd,session,agent,&resolve_actuation_bin(),&SystemRunner::new(),true)
 }

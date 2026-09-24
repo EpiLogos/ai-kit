@@ -165,6 +165,9 @@ impl PiRpcConnectionAdapter {
                     .map(str::to_owned),
                 current_model_id: model.into(),
                 available_models: vec![NativeAdvertisedModel {
+                    roster_identity: data["model"]["provider"].as_str().filter(|provider| !provider.trim().is_empty()).map(|provider| crate::agent_connection::NativeModelRosterIdentity {
+                        provider_ref: format!("provider:{provider}"), provider_native_id: model.to_owned(), harness_slug: Some("pi".into()),
+                    }),
                     model_id: model.into(),
                     name: data["model"]["name"]
                         .as_str()

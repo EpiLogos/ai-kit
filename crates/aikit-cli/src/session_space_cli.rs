@@ -185,6 +185,10 @@ enum Command {
         /// project scope when exactly one exists, else a derived project agent.
         #[arg(long)]
         agent_ref: Option<String>,
+        /// Request bounded task execution as well as ordinary chat. The native
+        /// authority owner must still actualise it against the standing grant.
+        #[arg(long)]
+        for_task: bool,
     },
     /// Correlate operator-reviewed native evidence for a stuck delivery; never replay it.
     EncounterDeliveryReconcile {
@@ -283,6 +287,10 @@ enum Command {
 enum WorkingSurfaceCommand {
     /// Read the persisted binding and its current provider observation.
     Observe { space: String, binding: String },
+    /// Capture the exact persisted terminal Surface without focus or input.
+    Capture { space: String, binding: String, #[arg(long, default_value_t = 500)] lines: u16 },
+    /// Read the provider's verified attachment command without starting a client.
+    Attachment { space: String, binding: String },
     /// Explicitly create-or-attach the persisted provider plan for this Surface.
     Open { space: String, binding: String },
     /// Focus only the currently live persisted Surface; this never recreates it.
@@ -588,12 +596,14 @@ fn run(cli: Cli) -> Result<()> {
             agent_session,
             project_cwd,
             agent_ref,
+            for_task,
         } => {
             let agent_ref = agent_ref
                 .as_deref()
                 .map(aikit_core::ResourceRef::parse)
                 .transpose()?;
-            emit(&crate::encounter_service::mint_from_cli(
+            let mint=if for_task {crate::encounter_service::mint_task_from_cli} else {crate::encounter_service::mint_from_cli};
+            emit(&mint(
                 service.home(),
                 &project_cwd,
                 &aikit_core::ResourceRef::parse(agent_session)?,
@@ -632,6 +642,14 @@ fn run(cli: Cli) -> Result<()> {
         Command::Show { space } => emit(&service.session_space_show(&space_ref(&space)?)?),
         Command::Open { space } => emit(&service.session_space_open(&space_ref(&space)?)?),
         Command::WorkingSurface { command } => match command {
+            WorkingSurfaceCommand::Capture { space, binding, lines } => {
+                let state = service.session_space_show(&space_ref(&space)?)?;
+                emit(&crate::session_space_working_surface::capture(&state, &aikit_core::ResourceRef::parse(binding)?, lines)?)
+            }
+            WorkingSurfaceCommand::Attachment { space, binding } => {
+                let state = service.session_space_show(&space_ref(&space)?)?;
+                emit(&crate::session_space_working_surface::terminal_attachment(&state, &aikit_core::ResourceRef::parse(binding)?)?)
+            }
             WorkingSurfaceCommand::Observe { space, binding } => {
                 let state = service.session_space_show(&space_ref(&space)?)?;
                 emit(&crate::session_space_working_surface::observe(

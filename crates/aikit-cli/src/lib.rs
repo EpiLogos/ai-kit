@@ -42,6 +42,7 @@ pub mod gateway_ops;
 pub mod gateway_owners;
 pub mod guardian_family;
 pub mod harness_auth;
+pub mod harness_disclosure;
 pub mod hook;
 pub mod inhabit;
 pub mod inhabitation;

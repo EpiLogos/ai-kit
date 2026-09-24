@@ -629,11 +629,64 @@ fn split_into_batches(request: &JevRequest, ceiling: u64) -> Result<Vec<JevReque
             batches.push(std::mem::replace(&mut current, empty.clone()));
             current.questions.insert(id.clone(), question.clone());
         }
+        if estimated_input_tokens(&current) > ceiling {
+            return Err(fail(
+                "contemplation_intel.request_over_input_ceiling",
+                format!("question {id} and the full state cannot fit the declared input ceiling"),
+            ));
+        }
     }
     if !current.questions.is_empty() {
         batches.push(current);
     }
     Ok(batches)
+}
+
+/// A split request still has one commissioned invocation budget. Reservations
+/// include failed/unknown attempts; a new batch cannot reset money, time or tries.
+fn remaining_batch_limits(
+    limits: &JevLimits,
+    reserved: u64,
+    attempts: u32,
+    elapsed_ms: u64,
+) -> Result<JevLimits> {
+    let mut remaining = limits.clone();
+    remaining.max_total_reserved_microusd = limits
+        .max_total_reserved_microusd
+        .checked_sub(reserved)
+        .ok_or_else(|| {
+            fail(
+                "jev.budget_exhausted",
+                "Batch reservations exceeded the invocation budget",
+            )
+        })?;
+    remaining.max_attempts = limits
+        .max_attempts
+        .checked_sub(attempts)
+        .filter(|n| *n > 0)
+        .ok_or_else(|| {
+            fail(
+                "jev.budget_exhausted",
+                "No attempts remain for the next batch",
+            )
+        })?;
+    remaining.timeout_ms = limits
+        .timeout_ms
+        .checked_sub(elapsed_ms)
+        .filter(|n| *n > 0)
+        .ok_or_else(|| {
+            fail(
+                "jev.timeout",
+                "No invocation time remains for the next batch",
+            )
+        })?;
+    if remaining.max_total_reserved_microusd < limits.tariff.reservation()? {
+        return Err(fail(
+            "jev.budget_exhausted",
+            "Cannot reserve the next batch within the original invocation budget",
+        ));
+    }
+    Ok(remaining)
 }
 
 fn build_question_set(
@@ -790,6 +843,10 @@ pub fn now_contemplate(args: NowContemplateArgs) -> Result<Value> {
     };
     let mut returned_model: Option<String> = None;
     let mut batch_refs = Vec::new();
+    let mut batch_receipts = Vec::new();
+    let mut total_reserved = 0u64;
+    let mut total_attempts = 0u32;
+    let batch_clock = std::time::Instant::now();
     let mut invocation = None;
     for (index, batch) in batches.iter().enumerate() {
         let batch_ref = if batches.len() == 1 {
@@ -797,14 +854,32 @@ pub fn now_contemplate(args: NowContemplateArgs) -> Result<Value> {
         } else {
             ResourceRef::parse(format!("{invocation_ref}-batch{}", index + 1))?
         };
+        let batch_limits = remaining_batch_limits(
+            &limits,
+            total_reserved,
+            total_attempts,
+            batch_clock.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        )?;
         let attempt = provider.invoke(
             batch_ref.clone(),
             batch,
-            &limits,
+            &batch_limits,
             &secret,
             &cancellation,
             &mut guard,
         )?;
+        total_reserved = total_reserved
+            .checked_add(attempt.total_reserved_microusd)
+            .ok_or_else(|| {
+                fail(
+                    "jev.budget_exhausted",
+                    "Batch reservation arithmetic overflow",
+                )
+            })?;
+        total_attempts = total_attempts
+            .checked_add(attempt.attempts.len() as u32)
+            .ok_or_else(|| fail("jev.budget_exhausted", "Batch attempt arithmetic overflow"))?;
+        batch_receipts.push(attempt.clone());
         // A field that changed mid-call is the cause to report, not the
         // attempt failure it produced.
         let (_, batch_field_digest) =
@@ -944,6 +1019,9 @@ pub fn now_contemplate(args: NowContemplateArgs) -> Result<Value> {
         "invocation_ref": invocation_ref,
         "jev_invocation_ref": invocation_ref,
         "jev_batches": batch_refs,
+        "jev_batch_receipts": batch_receipts,
+        "total_reserved_microusd": total_reserved,
+        "total_attempts": total_attempts,
         "requested_model": request.model,
         "returned_model": answer.model,
         "usage": answer.usage,
@@ -2145,6 +2223,46 @@ mod tests {
         assert_eq!(seen.len(), 40);
         // A state that cannot fit alone is refused, never silently truncated.
         assert!(split_into_batches(&request, 1000).is_err());
+    }
+
+    #[test]
+    fn an_individual_oversized_question_is_refused_before_any_batch_can_run() {
+        let request = JevRequest {
+            model: "jev-1.13.0".into(),
+            state: json!({}),
+            questions: BTreeMap::from([(
+                "large".into(),
+                Question::Noul {
+                    instructions: json!("x".repeat(10000)),
+                    criteria: None,
+                },
+            )]),
+        };
+        assert!(split_into_batches(&request, 1000).is_err());
+    }
+
+    #[test]
+    fn batches_share_original_reservation_attempt_and_time_limits() {
+        let limits = JevLimits {
+            timeout_ms: 10000,
+            max_attempts: 3,
+            max_total_reserved_microusd: 300,
+            tariff: aikit_core::jev::JevTariff {
+                model_version: "jev-1.13.0".into(),
+                source: "test tariff".into(),
+                max_input_tokens_per_attempt: 1000,
+                max_output_tokens_per_attempt: 1000,
+                input_microusd_per_million_tokens: 50000,
+                output_microusd_per_million_tokens: 50000,
+            },
+        };
+        let remaining = remaining_batch_limits(&limits, 100, 1, 2000).unwrap();
+        assert_eq!(remaining.max_total_reserved_microusd, 200);
+        assert_eq!(remaining.max_attempts, 2);
+        assert_eq!(remaining.timeout_ms, 8000);
+        assert!(remaining_batch_limits(&limits, 250, 1, 2000).is_err());
+        assert!(remaining_batch_limits(&limits, 100, 3, 2000).is_err());
+        assert!(remaining_batch_limits(&limits, 100, 1, 10000).is_err());
     }
 
     #[test]

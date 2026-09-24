@@ -814,7 +814,11 @@ fn cmd_routine(command: RoutineCmd) -> Result<Reply> {
                 )
             })?
         }
-        RoutineSub::Invocations => serde_json::to_value(store.list()?).map_err(|error| {
+        RoutineSub::Invocations { with_outcomes } => (if with_outcomes {
+            serde_json::to_value(store.history()?)
+        } else {
+            serde_json::to_value(store.list()?)
+        }).map_err(|error| {
             AikitError::new(
                 "cli.routine_json_failed",
                 format!("could not encode Routine invocation evidence: {error}"),
@@ -1496,7 +1500,7 @@ fn cmd_model_resolve(cwd: &std::path::Path, args: ModelResolveArgs) -> Result<Re
     let service = Service::discover(cwd)?;
     let composed = service.compose_selected_plan(None)?;
     let policy = aikit_core::resource::ModelRankingPolicy::parse_name(&args.ranking_policy)?;
-    let data = service.resolve_model(&composed, &args.use_type, policy)?;
+    let data = if args.roster_only { service.read_model_roster(&composed, &args.use_type, policy)? } else { service.resolve_model(&composed, &args.use_type, policy)? };
     Ok(reply(&service, data, diagnostic_warnings(&service)))
 }
 
@@ -1707,6 +1711,7 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                     "git_commit": snapshot.git_commit,
                     "owner_revision": snapshot.owner_revision,
                     "skills": snapshot.skills.len(),
+                    "rejected": snapshot.rejected,
                 }),
                 vec![],
             ))
@@ -1739,6 +1744,8 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                     "active_skills": status.active.as_ref().map(|record| record.skills.len()),
                     "candidate_retired_skills": retired(&status.candidate),
                     "active_retired_skills": retired(&status.active),
+                    "candidate_rejected": status.candidate.as_ref().map(|record| record.rejected.clone()),
+                    "active_rejected": status.active.as_ref().map(|record| record.rejected.clone()),
                     "rollback_points": status.state.history,
                 }),
                 vec![],
@@ -5329,6 +5336,11 @@ fn cmd_log(cwd: &std::path::Path, c: LogCmd) -> Result<Reply> {
 fn cmd_harness(cwd: &std::path::Path, c: HarnessCmd, json_mode: bool) -> Result<Reply> {
     let _ = cwd;
     match c.command {
+        HarnessSub::Disclose { harness } => {
+            let service = Service::discover(cwd)?;
+            let data = aikit_cli::harness_disclosure::reading(&service, cwd, harness.as_deref())?;
+            Ok(reply(&service, data, diagnostic_warnings(&service)))
+        }
         HarnessSub::Run(args) => {
             let home = AikitHome::discover()?;
             let plan = aikit_cli::route_launch::plan_route_launch(

@@ -14,7 +14,6 @@ use aikit_adapters::work_repos::{
     discover_work_projects, WorkRepoProject, WorkReposSourcePoolProvider,
 };
 use aikit_core::knowledge::{KnowledgeContextPack, KnowledgeRelationView, KnowledgeRoute};
-use aikit_core::knowledge_code::CodeIndexProvider;
 use aikit_core::knowledge_navigation::ProjectAuthoredPending;
 use aikit_core::knowledge_source_pool::{
     material_for_actor, NativeSourcePoolProvider, SourceMaterial, SourcePool, SourcePoolProvider,
@@ -1237,62 +1236,48 @@ impl Service {
         if let Some(provider) = &central {
             material.extend(provider.descriptors().iter().cloned());
         }
-        // GitNexus per discovered project (Design C): the structural layer is
-        // capability-gated per project. Each provider joins the runtime even
-        // when it cannot index, so the absence is per project — never a
-        // global "provider absent"; unavailable projects share one grouped
-        // line per distinct reason.
+        // Knowledge reads observe existing derived indexes. Rebuilding all Work
+        // repos here made even a wiki relation read mutate source repositories
+        // and wait indefinitely for an unrelated code analysis.
         let mut code = Vec::new();
-        let mut gitnexus_unavailable: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut prototype: Option<GitNexusCodeIndexProvider<SystemRunner>> = None;
         for project in &work_projects {
             let source = SourceRef::parse(format!("source:project-code:{}", project.project_id))?;
-            let mut provider = GitNexusCodeIndexProvider::new(
-                SystemRunner::new().with_cwd(&project.root),
-                project.project_id.clone(),
-                source,
-                None,
-            );
-            let status = provider.status();
-            if status.available && status.capabilities.index {
-                if let Err(error) = provider.index(&project.root, false) {
-                    absences.push(format!(
-                        "GitNexus CodeIndex degraded for Work/{}: {error}",
-                        project.name
-                    ));
+            let runner = SystemRunner::probe().with_cwd(&project.root);
+            let mut provider = match prototype.as_ref() {
+                Some(value) => value.for_project(runner, project.project_id.clone(), source),
+                None => {
+                    GitNexusCodeIndexProvider::new(runner, project.project_id.clone(), source, None)
                 }
-            } else if !status.available {
-                let reason = provider
-                    .unavailable_reason()
-                    .unwrap_or_else(|| "GitNexus executable is unavailable".into());
-                gitnexus_unavailable
-                    .entry(reason)
-                    .or_default()
-                    .push(format!("Work/{}", project.name));
-            } else {
-                gitnexus_unavailable
-                    .entry(format!(
-                        "installed version {} does not expose the `analyze --index-only` surface this integration uses (tested {})",
-                        status.version.as_deref().unwrap_or("unknown"),
-                        aikit_core::knowledge_code::GITNEXUS_TESTED_VERSION
-                    ))
-                    .or_default()
-                    .push(format!("Work/{}", project.name));
+            };
+            if prototype.is_none() {
+                prototype = Some(provider.for_project(
+                    SystemRunner::probe(),
+                    project.project_id.clone(),
+                    SourceRef::parse(format!("source:project-code:{}", project.project_id))?,
+                ));
+            }
+            match provider.open_existing(&project.root) {
+                Ok(status) => {
+                    status_notes.push(format!("GitNexus Work/{}: {}", project.name, status.detail))
+                }
+                Err(error) => status_notes.push(format!(
+                    "GitNexus Work/{}: existing index unavailable: {error}; no rebuild performed",
+                    project.name
+                )),
+            }
+            if let Some(reason) = provider.unavailable_reason() {
+                status_notes.push(format!(
+                    "GitNexus Work/{} executable unavailable: {reason}",
+                    project.name
+                ));
             }
             code.push(provider);
-        }
-        for (reason, projects) in gitnexus_unavailable {
-            // A status note, not a per-query absence: capability state is the
-            // same for every query, and a scoped reply must keep another
-            // project's disclosures out (the discipline authored_pending and
-            // the anchor lines already follow). Status names every project.
-            status_notes.push(format!(
-                "GitNexus unavailable for {}: {reason}",
-                projects.join(", ")
-            ));
         }
 
         let project_map =
             self.build_project_map(wiki.as_ref().map(SqliteWikiProvider::index), &material)?;
+        absences.extend(self.context_composition_notes());
 
         let now_field_roster = now_field
             .as_ref()
@@ -1340,7 +1325,13 @@ impl Service {
         material: &[SourceMaterial],
     ) -> Result<ProjectMap> {
         let mut map = ProjectMap::new();
-        let shallow = PaletteBackend::navigation_index(self);
+        let observed = self.workcell_run_resources();
+        let material_run_refs = observed
+            .iter()
+            .map(|record| record.descriptor.id.clone())
+            .collect::<BTreeSet<_>>();
+        let shallow =
+            aikit_tui::project_world_service::resource_index_with_records(self, observed)?;
         let mut project_resource = None;
 
         for record in ResourceIndex::resources(&shallow) {
@@ -1413,6 +1404,11 @@ impl Service {
                 .filter(|resource| resource != project)
                 .collect::<Vec<_>>();
             for resource in endpoints {
+                // A global Workcell ledger reading does not establish that a
+                // run or its binding belongs to the current Project.
+                if material_run_refs.contains(&resource) {
+                    continue;
+                }
                 map.bind(ProjectMapBinding {
                     from: project.clone(),
                     to: resource,
