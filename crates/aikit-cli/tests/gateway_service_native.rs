@@ -152,7 +152,11 @@ fn real_owner_commands_and_disposable_resident_gateway_run_under_rendered_launch
     );
     let github = json(run(
         "/usr/bin/env",
-        &["gh", "api", "repos/EpiLogos/Factory/actions/runs/35988215169"],
+        &[
+            "gh",
+            "api",
+            "repos/EpiLogos/Factory/actions/runs/35988215169",
+        ],
         &carried,
     ));
     assert_eq!(
