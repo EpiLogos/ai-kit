@@ -661,4 +661,104 @@ mod tests {
             .iter()
             .any(|line| { line.contains("check --cycles --json --repo demo") }));
     }
+
+    /// The live-ground defect this bound repairs: `gitnexus analyze
+    /// --index-only` on one large Work repository ran past five minutes with
+    /// no bound at all, and the code-lens provider awaited it unconditionally
+    /// (`self.runner.run(&argv)?`, no `run_with_timeout`). A real subprocess
+    /// that would run far longer than its budget must be killed and reported
+    /// — not silently awaited — so `index()` (and by the same runner,
+    /// `search()`, `context()` and the rest) can never again turn one query
+    /// into a multi-minute stall. This drives an actual slow child process
+    /// through `SystemRunner`'s own timeout enforcement, the same seam the
+    /// production `knowledge.rs` caller now binds every GitNexus subprocess
+    /// call through.
+    #[test]
+    fn index_is_bounded_by_the_runner_budget_and_reports_a_timeout_instead_of_hanging() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("slow-gitnexus.sh");
+        let mut file = std::fs::File::create(&script_path).unwrap();
+        write!(
+            file,
+            r#"#!/bin/sh
+case "$1" in
+  --version) echo "1.6.9"; exit 0 ;;
+  --help) echo "analyze query context impact trace detect-changes check cypher"; exit 0 ;;
+  analyze)
+    if [ "$2" = "--help" ]; then
+      echo "--index-only --force --name <name>"
+      exit 0
+    fi
+    sleep 30
+    echo "Indexed"
+    exit 0
+    ;;
+  impact)
+    if [ "$2" = "--help" ]; then
+      echo "--mode <callgraph|pdg>"
+      exit 0
+    fi
+    exit 1
+    ;;
+esac
+exit 1
+"#
+        )
+        .unwrap();
+        drop(file);
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        // Generous enough that the trivial `--version`/`--help` capability
+        // probes finish comfortably even on a loaded machine (this fixture
+        // answers them instantly; the budget is not what bounds them in
+        // practice) — but still far below the 30s the `analyze` branch below
+        // would otherwise sleep, so the assertion on `elapsed` below stays a
+        // genuine proof of bounding rather than a race against machine load.
+        let budget = Duration::from_secs(10);
+        let runner = crate::runner::SystemRunner::new().with_timeout(budget);
+        let mut provider = GitNexusCodeIndexProvider::with_binary(
+            runner,
+            script_path.display().to_string(),
+            "demo",
+            SourceRef::parse("source:git/demo").unwrap(),
+            None,
+        );
+        assert!(
+            provider.capabilities().index,
+            "the fixture answers the same capability probe a real GitNexus release does: {:?} ({:?})",
+            provider.status(),
+            provider.unavailable_reason()
+        );
+
+        let start = Instant::now();
+        let error = provider
+            .index(dir.path(), false)
+            .expect_err("a call that would run 30s against a 10s budget is killed, not awaited");
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            error.code(),
+            "mux.command_timeout",
+            "the refusal names the runner's own bound, not a generic index failure: {error}"
+        );
+        assert!(
+            error.message().contains("did not finish within"),
+            "the refusal names what happened: {}",
+            error.message()
+        );
+        assert!(
+            elapsed < Duration::from_secs(25),
+            "the call returned inside its budget instead of waiting out the 30s script: {elapsed:?}"
+        );
+        assert!(
+            !provider.status().indexed,
+            "a killed index attempt never claims to have indexed"
+        );
+    }
 }
