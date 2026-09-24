@@ -155,6 +155,9 @@ jobs:
           AIKIT_TEST_REDIS_ADDR=127.0.0.1:6381 \
             cargo test --locked -p aikit-cli --test now_context_encounter -- --nocapture \
             2>&1 | tee -a "$RUNNER_TEMP/real-redis-now.log"
+          AIKIT_TEST_REDIS_ADDR=127.0.0.1:6381 \
+            cargo test --locked -p aikit-cli --test factory_sensing_redis -- --nocapture \
+            2>&1 | tee -a "$RUNNER_TEMP/real-redis-now.log"
           cargo build --locked -p aikit-cli
           target/debug/aikit jev --help | tee "$RUNNER_TEMP/jev-help.txt"
           target/debug/aikit now-context --help | tee "$RUNNER_TEMP/now-context-help.txt"
@@ -322,6 +325,15 @@ jobs:
           done
           docker exec aikit-jev-now-joined-redis redis-cli PING | grep -qx PONG
           docker exec aikit-jev-now-joined-redis redis-server --version | tee "$RUNNER_TEMP/joined-redis-version.txt"
+      - name: Run Factory sensing through saved-cadence native Routine and Redis
+        shell: bash
+        env:
+          AIKIT_TEST_REDIS_ADDR: 127.0.0.1:6382
+          AIKIT_TEST_FACTORY: ${{ runner.temp }}/Factory/target/debug/factory
+        run: |
+          set -euo pipefail
+          test -x "$AIKIT_TEST_FACTORY"
+          cargo test --locked -p aikit-cli --test routine_native_factory -- --nocapture 2>&1 | tee "$RUNNER_TEMP/factory-sensing-routine.log"
       - name: Run joined controlled episode through native binaries
         shell: bash
         run: |
@@ -394,6 +406,7 @@ jobs:
             ${{ runner.temp }}/joined-redis-restart.txt
             ${{ runner.temp }}/joined-proof.json
             ${{ runner.temp }}/joined-proof.log
+            ${{ runner.temp }}/factory-sensing-routine.log
           if-no-files-found: warn
           retention-days: 14
       - name: Remove disposable Redis

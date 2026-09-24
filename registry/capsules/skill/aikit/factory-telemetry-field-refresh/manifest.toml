@@ -1,0 +1,20 @@
+schema = 1
+id = "skill/aikit/factory-telemetry-field-refresh"
+kind = "skill"
+name = "Factory project telemetry field refresh"
+description = "METHOD: Read Factory's current project telemetry field and refresh its project-scoped Redis projection through a native Routine."
+maturity = "draft"
+tags = ["aikit", "routine", "method", "factory", "sensing", "native-method"]
+
+[skill]
+root = "payload"
+
+[metadata.native-method]
+schema = "aikit.native-method/v1"
+body = "factory-field-refresh"
+actions = ["factory:action/telemetry.field"]
+
+[metadata.native-method.factory]
+state = "/Users/admin/Central/Work/Factory/.factory/development-state.json"
+policy = "/Users/admin/Central/Work/Factory/ProjectCentral/user/factory-policy.json"
+project_world_ref = "project:Factory"

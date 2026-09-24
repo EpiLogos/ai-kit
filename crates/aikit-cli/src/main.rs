@@ -909,6 +909,7 @@ fn cmd_jev(command: JevCmd) -> Result<Reply> {
 fn cmd_now_context(cwd: &std::path::Path, command: NowContextCmd) -> Result<Reply> {
     let data = match command.command {
         NowContextSub::Status(args) => aikit_cli::jev_now::now_status(args)?,
+        NowContextSub::FactorySensing(args) => aikit_cli::jev_now::factory_sensing_read(args)?,
         NowContextSub::Prepare(args) => aikit_cli::jev_now::now_prepare(cwd, args)?,
         NowContextSub::Inspect(args) => aikit_cli::jev_now::now_inspect(args)?,
         NowContextSub::Publish(args) => aikit_cli::jev_now::now_publish(args)?,

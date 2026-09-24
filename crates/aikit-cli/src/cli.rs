@@ -457,6 +457,8 @@ pub struct NowContextCmd {
 pub enum NowContextSub {
     /// Check the selected Redis material service and report its actual version.
     Status(NowStatusArgs),
+    /// Read one Project's bounded Factory sensing projection from Redis.
+    FactorySensing(NowFactorySensingArgs),
     /// Resolve Central/BKMR + Wiki + Factory relations and atomically prepare one participant view.
     Prepare(NowPrepareArgs),
     /// Inspect one participant's current prepared version, delivery and cursor state.
@@ -660,6 +662,16 @@ pub struct NowFieldArgs {
 pub struct NowStatusArgs {
     #[arg(long = "config-file", value_name = "PATH")]
     pub config_file: std::path::PathBuf,
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NowFactorySensingArgs {
+    #[arg(long = "config-file", value_name = "PATH")]
+    pub config_file: std::path::PathBuf,
+    #[arg(long = "project-world-ref", value_name = "PROJECT_REF")]
+    pub project_world_ref: String,
     #[arg(long = "allow-env-import")]
     pub allow_env_import: bool,
 }

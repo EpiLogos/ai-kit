@@ -131,6 +131,9 @@ pub struct RoutineRunRequest {
     pub method_revision: SourceRevision,
     pub prompt: String,
     pub observation_payload: Option<Value>,
+    /// The saved schedule record admitted with this Routine, if scheduled.
+    /// Native project operations use it to bind execution to current policy.
+    pub time_schedule: Option<aikit_core::schedule::ScheduleRecord>,
     /// The Method's native body; `Some` selects the native runner.
     pub native: Option<crate::routine_native::NativeMethod>,
     /// The Actions the admitted invocation's authority grants — the only
@@ -821,6 +824,7 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
                     "time_policy_ref": reading.time_policy_ref.to_string(),
                     "time_policy_revision": reading.time_policy_revision.to_string(),
                 })),
+                time_schedule: record.time_schedule.clone(),
                 native: native.clone(),
                 authorised_actions: admission.evidence.action_refs.clone(),
             });
@@ -988,6 +992,7 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
             method_revision: record.routine.method_revision.clone(),
             prompt,
             observation_payload: None,
+            time_schedule: record.time_schedule.clone(),
             native: native.clone(),
             authorised_actions: admission.evidence.action_refs.clone(),
         });
@@ -1107,6 +1112,7 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
                     method_revision: record.routine.method_revision.clone(),
                     prompt,
                     observation_payload: Some(packet.clone()),
+                    time_schedule: record.time_schedule.clone(),
                     native: native.clone(),
                     authorised_actions: admission.evidence.action_refs.clone(),
                 });
@@ -1647,6 +1653,7 @@ mod tests {
             method_revision: SourceRevision::parse("method-rev-1").unwrap(),
             prompt: "contemplate now".into(),
             observation_payload: None,
+            time_schedule: None,
             // Contemplation is an encounter (model) Routine, never a native body.
             native: None,
             authorised_actions: Vec::new(),
