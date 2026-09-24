@@ -161,3 +161,7 @@ jobs:
         env:
           AIKIT_REQUIRE_GITNEXUS_REAL: "1"
         run: cargo test --locked -p aikit-cli --test knowledge_project_code_scope_real -- --nocapture --test-threads=1
+      - name: Enforce Project NOW scope with real ripgrep
+        env:
+          AIKIT_REQUIRE_RIPGREP_REAL: "1"
+        run: cargo test --locked -p aikit-adapters --test now_field_real -- --nocapture --test-threads=1

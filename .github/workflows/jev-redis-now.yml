@@ -531,7 +531,7 @@ jobs:
           if docker inspect workcell-redis-now >/dev/null 2>&1; then
             docker start workcell-redis-now >/dev/null
           else
-            docker run --detach --name workcell-redis-now \
+            docker run --pull=never --detach --name workcell-redis-now \
               --publish 6383:6379 \
               --volume "$data:/data" \
               redis:8.10 redis-server \
@@ -578,6 +578,13 @@ jobs:
             }]
           }
           JSON
+      - name: Resolve the Redis image before Workcell's bounded service start
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull --quiet redis:8.10
+          docker image inspect redis:8.10 --format '{{.Id}}' \
+            | tee "$RUNNER_TEMP/workcell-redis-image.txt"
       - name: Materialise Redis through Workcell and prove command-exit persistence
         shell: bash
         run: |
@@ -631,6 +638,7 @@ jobs:
           path: |
             ${{ runner.temp }}/workcell-revision.txt
             ${{ runner.temp }}/workcell-redis-tests.log
+            ${{ runner.temp }}/workcell-redis-image.txt
             ${{ runner.temp }}/workcell-discover-before.json
             ${{ runner.temp }}/workcell-prepare.json
             ${{ runner.temp }}/workcell-observe-before.json

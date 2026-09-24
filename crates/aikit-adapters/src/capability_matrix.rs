@@ -29,6 +29,20 @@ pub struct MatrixReading {
     pub absences: Vec<String>,
 }
 
+/// A world compilation keeps errors from the root composition common and
+/// errors from a Work Project attached to their producer.
+pub struct WorldMatrixReading {
+    pub objects: Vec<WikiObject>,
+    pub absences: Vec<String>,
+    pub project_absences: Vec<ProjectMatrixAbsence>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectMatrixAbsence {
+    pub project: String,
+    pub message: String,
+}
+
 /// Compile the matrix at `matrix_dir` (`capability-matrix.json` manifest +
 /// `capability-matrix.csv` records). `space_ref` places the compiled objects
 /// in the requesting wiki (project space or the Central root).
@@ -247,12 +261,14 @@ pub fn compile_capability_matrix(matrix_dir: &Path, space_ref: Option<String>) -
 /// Discover and compile every capability matrix disclosed by the world:
 /// the Central root composition (`ProjectCentral/user/`) and each project's
 /// own account (`Work/<project>/ProjectCentral/user/`).
-pub fn compile_world_matrices(central_root: &Path) -> MatrixReading {
+pub fn compile_world_matrices(central_root: &Path) -> WorldMatrixReading {
     let mut objects = Vec::new();
     let mut absences = Vec::new();
-    let mut homes: Vec<(std::path::PathBuf, Option<String>)> = vec![(
+    let mut project_absences = Vec::new();
+    let mut homes: Vec<(std::path::PathBuf, Option<String>, Option<String>)> = vec![(
         central_root.join("ProjectCentral/user"),
         Some("central:wiki:root".to_owned()),
+        None,
     )];
     if let Ok(projects) = fs::read_dir(central_root.join("Work")) {
         let mut names: Vec<_> = projects
@@ -262,19 +278,18 @@ pub fn compile_world_matrices(central_root: &Path) -> MatrixReading {
             .collect();
         names.sort();
         for project in names {
+            let name = project
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
             homes.push((
                 project.join("ProjectCentral/user"),
                 Some(
-                    aikit_core::project_wiki_space_ref(
-                        project
-                            .file_name()
-                            .map(|name| name.to_string_lossy().to_string())
-                            .unwrap_or_default()
-                            .as_str(),
-                    )
-                    .map(|reference| reference.as_str().to_owned())
-                    .unwrap_or_default(),
+                    aikit_core::project_wiki_space_ref(&name)
+                        .map(|reference| reference.as_str().to_owned())
+                        .unwrap_or_default(),
                 ),
+                Some(format!("Work/{name}")),
             ));
         }
     }
@@ -283,7 +298,7 @@ pub fn compile_world_matrices(central_root: &Path) -> MatrixReading {
     // from an earlier home is skipped with a disclosure — first home wins
     // (canonical order), and genuinely distinct matrices still compile.
     let mut seen_refs = std::collections::BTreeSet::new();
-    for (dir, space_ref) in homes {
+    for (dir, space_ref, project) in homes {
         if !dir.join("capability-matrix.json").is_file() {
             continue;
         }
@@ -294,14 +309,35 @@ pub fn compile_world_matrices(central_root: &Path) -> MatrixReading {
             if seen_refs.insert(object_ref.clone()) {
                 objects.push(object);
             } else {
-                absences.push(format!(
+                let message = format!(
                     "Capability matrix at {home} re-declares {object_ref} from an earlier home; kept the first"
-                ));
+                );
+                if let Some(project) = &project {
+                    project_absences.push(ProjectMatrixAbsence {
+                        project: project.clone(),
+                        message,
+                    });
+                } else {
+                    absences.push(message);
+                }
             }
         }
-        absences.append(&mut reading.absences);
+        if let Some(project) = &project {
+            project_absences.extend(reading.absences.into_iter().map(|message| {
+                ProjectMatrixAbsence {
+                    project: project.clone(),
+                    message,
+                }
+            }));
+        } else {
+            absences.append(&mut reading.absences);
+        }
     }
-    MatrixReading { objects, absences }
+    WorldMatrixReading {
+        objects,
+        absences,
+        project_absences,
+    }
 }
 
 fn matrix_provenance(carrier: &str, revision: &str) -> WikiProvenanceRef {
