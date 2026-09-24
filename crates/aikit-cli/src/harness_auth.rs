@@ -469,5 +469,24 @@ mod tests {
             "provider:openai",
         )
         .unwrap());
+        #[cfg(unix)]
+        {
+            // The selected command may be a symlink named `codex` whose
+            // executable target has another basename (npm global installs).
+            // This is the actual native binary and login status, not a fake
+            // response from a scripted runner.
+            use std::os::unix::fs::symlink;
+            let renamed = temp.path().join("renamed-native-codex");
+            std::fs::hard_link(std::fs::canonicalize(&codex).unwrap(), &renamed).unwrap();
+            let linked = temp.path().join("codex");
+            symlink(&renamed, &linked).unwrap();
+            assert!(codex_chatgpt_login_ready(
+                &SystemRunner::probe(),
+                &home,
+                linked.to_str().unwrap(),
+                "provider:openai",
+            )
+            .unwrap());
+        }
     }
 }

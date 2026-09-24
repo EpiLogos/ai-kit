@@ -30,6 +30,9 @@ use crate::agent_connection::ConnectionCommand;
 #[derive(Default)]
 pub struct ModelEnvironment {
     credentials: Vec<(String, SecretValue)>,
+    /// The exact installed Codex executable verified for a profile-derived
+    /// ACP wrapper. Never taken from ambient CODEX_PATH.
+    codex_path: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for ModelEnvironment {
@@ -41,6 +44,7 @@ impl std::fmt::Debug for ModelEnvironment {
             .collect();
         f.debug_struct("ModelEnvironment")
             .field("credentials", &names)
+            .field("codex_path", &self.codex_path)
             .finish()
     }
 }
@@ -65,6 +69,9 @@ impl ModelEnvironment {
     /// Merge another environment's deliveries into this one. Every merged
     /// name passes the same shape law.
     pub fn extend(&mut self, other: ModelEnvironment) -> Result<()> {
+        if let Some(path) = other.codex_path {
+            self.set_codex_path(path)?;
+        }
         for (env_var, secret) in other.credentials {
             self.push_credential(env_var, secret)?;
         }
@@ -77,6 +84,12 @@ impl ModelEnvironment {
         secret: SecretValue,
     ) -> Result<()> {
         let env_var = env_var.into();
+        if env_var == "CODEX_PATH" {
+            return Err(AikitError::new(
+                "connection.codex_path_reserved",
+                "CODEX_PATH is a native executable binding, not a credential delivery variable",
+            ));
+        }
         if !aikit_core::credential::valid_credential_variable(&env_var) {
             return Err(AikitError::new(
                 "connection.credential_variable_invalid",
@@ -89,10 +102,35 @@ impl ModelEnvironment {
         Ok(())
     }
 
+    /// Bind the codex-acp wrapper to the same native Codex binary whose
+    /// login was checked. This is a nonsecret executable path, not a caller
+    /// supplied general environment override.
+    pub fn set_codex_path(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        if !path.is_absolute() || !path.is_file() || !is_executable_file(path) {
+            return Err(AikitError::new(
+                "connection.codex_path_invalid",
+                "CODEX_PATH needs an absolute executable file selected by the native owner",
+            ));
+        }
+        if self
+            .codex_path
+            .as_deref()
+            .is_some_and(|existing| existing != path)
+        {
+            return Err(AikitError::new(
+                "connection.codex_path_conflict",
+                "Two different Codex executables cannot share one child environment",
+            ));
+        }
+        self.codex_path = Some(path.to_path_buf());
+        Ok(())
+    }
+
     /// Whether any credential would be delivered. Callers may still apply an
     /// empty environment to scrub ambient API keys for native own-login.
     pub fn is_empty(&self) -> bool {
-        self.credentials.is_empty()
+        self.credentials.is_empty() && self.codex_path.is_none()
     }
 
     pub fn apply(&self, command: &mut Command) {
@@ -127,7 +165,21 @@ impl ModelEnvironment {
         for (name, value) in &self.credentials {
             command.env(name, value.expose());
         }
+        if let Some(path) = &self.codex_path {
+            command.env("CODEX_PATH", path);
+        }
     }
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// A real stdio child process. ACP uses the JSON-line methods; classic targets
@@ -708,6 +760,28 @@ mod tests {
             String::from_utf8(output.stdout).unwrap(),
             "/isolated/native-codex-login\nwithheld\n"
         );
+    }
+
+    #[test]
+    fn scoped_codex_path_reaches_a_real_child_without_ambient_override() {
+        let executable = std::env::current_exe().unwrap();
+        let mut environment = ModelEnvironment::new();
+        environment.set_codex_path(&executable).unwrap();
+        assert!(!environment.is_empty());
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "printf '%s\\n' \"$CODEX_PATH\""])
+            .env("CODEX_PATH", "/ambient/foreign-codex");
+        environment.apply_with(&mut command, |_| None);
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            executable.to_str().unwrap()
+        );
+        assert!(ModelEnvironment::new()
+            .push_credential("CODEX_PATH", SecretValue::new("not-a-path").unwrap())
+            .is_err());
     }
 
     #[test]

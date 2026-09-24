@@ -74,9 +74,20 @@ pub(crate) struct PreparedModel {
     /// This is a source/readiness fact, never a claim of USD cost or inference.
     #[serde(default)]
     pub credential_mode: String,
+    /// Exact native login executable and, for a direct provider, the declared
+    /// launch variant selected when the login was checked. Both enter the
+    /// fingerprint so a changed fallback cannot borrow old login evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codex_login_basis: Option<CodexLoginBasis>,
     /// The declared dispatch this policy is delivered through. Part of the
     /// serialized basis, so a dispatch change is a basis change.
     pub dispatch: ModelDispatchDelivery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CodexLoginBasis {
+    program: String,
+    direct_launch_variant: Option<usize>,
 }
 
 /// The ACP stable schema's session configuration option for the model: the
@@ -123,7 +134,7 @@ pub(crate) struct ModelDispatch {
 /// not to the basename of its wrapper (`npx` for Codex ACP). An arbitrary
 /// from_profile string alongside foreign argv cannot claim Codex's login or
 /// model-selection contract.
-fn declared_provider_profile(
+pub(crate) fn declared_provider_profile(
     provider: &EncounterProvider,
 ) -> Result<Option<&'static HarnessProfile>> {
     if let Some(slug) = provider.from_profile.as_deref() {
@@ -149,6 +160,49 @@ fn declared_provider_profile(
         .argv
         .first()
         .and_then(|program| aikit_adapters::profiles::for_argv_program(program)))
+}
+
+fn codex_login_basis(
+    provider: &EncounterProvider,
+    profile: &HarnessProfile,
+) -> Result<Option<CodexLoginBasis>> {
+    if profile.slug != "codex" {
+        return Ok(None);
+    }
+    if provider.from_profile.is_some() {
+        // The ACP wrapper is npx; the validated embedded profile identifies
+        // the native Codex executable. codex-acp otherwise starts a bundled
+        // Codex; resolve the installed binary and later bind CODEX_PATH to
+        // this exact path in its final child environment.
+        let program = profile
+            .presence
+            .as_ref()
+            .and_then(|presence| presence.executables.first())
+            .ok_or_else(|| error("Codex profile declares no native presence executable"))?;
+        let installed = crate::probe::which(program)
+            .ok_or_else(|| error(format!("Codex profile executable {program} is not on PATH")))?;
+        // Keep the resolved command pathname (including its `codex` symlink
+        // name). Canonicalizing a global npm install may produce `codex.js`,
+        // which is still the executable but no longer joins the declared
+        // Codex profile by program name. Probe and CODEX_PATH use this same
+        // absolute pathname.
+        let absolute = if installed.is_absolute() {
+            installed
+        } else {
+            std::env::current_dir().map_err(error)?.join(installed)
+        };
+        return Ok(Some(CodexLoginBasis {
+            program: absolute.display().to_string(),
+            direct_launch_variant: None,
+        }));
+    }
+    // A direct provider may launch its first resolving declared fallback.
+    // Probe that executable, not a stale or absent primary argv[0].
+    let (selected, variant) = resolved_launch_variant(provider)?;
+    Ok(selected.first().map(|program| CodexLoginBasis {
+        program: program.clone(),
+        direct_launch_variant: Some(variant),
+    }))
 }
 
 /// The declared dispatch for one provider, decided from the harness profile's
@@ -348,37 +402,22 @@ pub(crate) fn prepare(
     let requires_credential = routes
         .iter()
         .any(|r| r.credential != CredentialCondition::NotRequired);
-    let codex_own_login = if requires_credential && policy.credential.is_none() {
-        let profile = declared_provider_profile(provider)?;
-        let program = profile
-            .filter(|profile| profile.slug == "codex")
-            .and_then(|profile| {
-                if provider.from_profile.is_some() {
-                    // The ACP wrapper is npx; its validated embedded profile
-                    // names the native Codex executable whose store it uses.
-                    profile
-                        .presence
-                        .as_ref()
-                        .and_then(|presence| presence.executables.first())
-                        .map(String::as_str)
-                } else {
-                    // An explicitly configured Codex launch may name an absolute
-                    // executable. Probe precisely the program that will launch.
-                    provider.argv.first().map(String::as_str)
+    let mut verified_codex_login_basis = None;
+    if requires_credential && policy.credential.is_none() {
+        if let Some(profile) = declared_provider_profile(provider)? {
+            if let Some(basis) = codex_login_basis(provider, profile)? {
+                if crate::harness_auth::codex_chatgpt_login_ready(
+                    &crate::probe::probe_runner(),
+                    home,
+                    &basis.program,
+                    policy.provider_ref.as_str(),
+                )? {
+                    verified_codex_login_basis = Some(basis);
                 }
-            });
-        match program {
-            Some(program) => crate::harness_auth::codex_chatgpt_login_ready(
-                &crate::probe::probe_runner(),
-                home,
-                program,
-                policy.provider_ref.as_str(),
-            )?,
-            None => false,
+            }
         }
-    } else {
-        false
-    };
+    }
+    let codex_own_login = verified_codex_login_basis.is_some();
     if requires_credential && policy.credential.is_none() && !codex_own_login {
         return Err(error(
             "The declared model route requires an explicitly resolved credential or a verified native Codex own-login for this exact provider",
@@ -411,6 +450,7 @@ pub(crate) fn prepare(
         world_binding_ref: admitted.world_binding_ref,
         credential_reading,
         credential_mode: credential_mode.into(),
+        codex_login_basis: verified_codex_login_basis,
         dispatch: dispatch.delivery,
     }))
 }
@@ -573,8 +613,8 @@ use aikit_adapters::connection_process::ModelEnvironment;
 ///   never bypassed through the harness's own login.
 ///
 /// `None` means nothing was declared or bound: the child inherits the
-/// caller's environment. Unbound Codex own-login returns `Some(empty)` so the
-/// child retains its native login store path but cannot inherit an API key.
+/// caller's environment. A selected Codex own-login policy takes the separate
+/// `resolved_execution` path, which scrubs ambient keys and pins CODEX_PATH.
 pub(crate) fn profile_environment(
     home: &AikitHome,
     session: &ResourceRef,
@@ -603,7 +643,6 @@ pub(crate) fn profile_environment(
         .collect();
     let store = CredentialBindingStore::new(home);
     let mut environment = ModelEnvironment::new();
-    let mut codex_own_login_unbound = false;
     for entry in &declared.env_var {
         let vendor = entry
             .provider_ref
@@ -613,9 +652,6 @@ pub(crate) fn profile_environment(
         let binding = store.load(&credential_ref)?;
         let Some(binding) = binding else {
             if own_login.contains(entry.provider_ref.as_str()) {
-                if profile.slug == "codex" && entry.provider_ref == "provider:openai" {
-                    codex_own_login_unbound = true;
-                }
                 continue;
             }
             return Err(error(format!(
@@ -650,10 +686,7 @@ pub(crate) fn profile_environment(
         let secret = secret.ok_or_else(|| error("Missing delivered key material"))?;
         environment.push_credential(entry.env_var.clone(), secret)?;
     }
-    // Codex's ChatGPT login uses its native store, not an API key. Keep the
-    // final child scrubbed even with no delivered key so an ambient API key
-    // cannot silently switch the invocation to a paid credential path.
-    Ok((codex_own_login_unbound || !environment.is_empty()).then_some(environment))
+    Ok((!environment.is_empty()).then_some(environment))
 }
 
 /// The final-exec resolution of a bound-policy launch: the scoped argv and
@@ -715,15 +748,43 @@ fn resolved_execution(
         // subscription-mode body onto paid API delivery. The final child is
         // scrubbed and receives no provider key in this mode.
         ensure_codex_api_key_still_unbound(home)?;
+        if provider.from_profile.is_some() {
+            let basis = model.codex_login_basis.as_ref().ok_or_else(|| {
+                error("Codex own-login preparation lacks its executable basis; re-resolve")
+            })?;
+            environment.set_codex_path(&basis.program)?;
+        }
     } else if let Some(profile) = profile_environment(home, session, provider)? {
         environment.extend(profile)?;
     }
     let (argv, launch_variant) = selected_launch(provider, &model)?;
+    ensure_codex_login_launch_matches(&model, &argv, launch_variant)?;
     Ok(ResolvedExecution {
         argv,
         environment: Some(environment),
         launch_variant,
     })
+}
+
+fn ensure_codex_login_launch_matches(
+    model: &PreparedModel,
+    argv: &[String],
+    launch_variant: usize,
+) -> Result<()> {
+    if model.credential_mode != "codex-chatgpt-own-login" {
+        return Ok(());
+    }
+    let basis = model.codex_login_basis.as_ref().ok_or_else(|| {
+        error("Codex own-login preparation lacks its exact executable basis; re-resolve")
+    })?;
+    if let Some(expected_variant) = basis.direct_launch_variant {
+        if launch_variant != expected_variant || argv.first() != Some(&basis.program) {
+            return Err(error(
+                "Codex launch variant changed after own-login verification; re-resolve the selected model",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn ensure_codex_api_key_still_unbound(home: &AikitHome) -> Result<()> {
@@ -1239,6 +1300,92 @@ mod tests {
     }
 
     #[test]
+    fn direct_codex_login_binds_the_exact_resolved_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let fallback = fake_executable(temp.path(), "codex");
+        let mut provider = acp_provider(&["/nonexistent/aikit-codex-primary/codex"]);
+        provider.argv_fallback = vec![vec![fallback.display().to_string()]];
+        let profile = declared_provider_profile(&provider).unwrap().unwrap();
+        let basis = codex_login_basis(&provider, profile).unwrap().unwrap();
+        assert_eq!(basis.program, fallback.display().to_string());
+        assert_eq!(basis.direct_launch_variant, Some(1));
+
+        let mut model = prepared_with_dispatch(ModelDispatchDelivery::ConfigKey {
+            name: "model".into(),
+        });
+        model.credential_mode = "codex-chatgpt-own-login".into();
+        model.codex_login_basis = Some(basis);
+        let (argv, variant) = selected_launch(&provider, &model).unwrap();
+        ensure_codex_login_launch_matches(&model, &argv, variant).unwrap();
+
+        let replacement = fake_executable(temp.path(), "replacement-codex");
+        provider.argv_fallback = vec![vec![replacement.display().to_string()]];
+        let (changed_argv, changed_variant) = selected_launch(&provider, &model).unwrap();
+        let error =
+            ensure_codex_login_launch_matches(&model, &changed_argv, changed_variant).unwrap_err();
+        assert!(error.message().contains("launch variant changed"));
+    }
+
+    #[test]
+    #[ignore = "requires installed Codex with a real ChatGPT login"]
+    fn installed_codex_absolute_fallback_is_the_verified_launch_executable() {
+        let codex = crate::probe::which("codex").expect("installed Codex executable");
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path().join("aikit"));
+        let mut provider = acp_provider(&["/nonexistent/aikit-codex-primary/codex"]);
+        provider.argv_fallback = vec![vec![codex.display().to_string()]];
+        let profile = declared_provider_profile(&provider).unwrap().unwrap();
+        let basis = codex_login_basis(&provider, profile).unwrap().unwrap();
+        assert_eq!(basis.program, codex.display().to_string());
+        assert_eq!(basis.direct_launch_variant, Some(1));
+        assert!(crate::harness_auth::codex_chatgpt_login_ready(
+            &crate::probe::probe_runner(),
+            &home,
+            &basis.program,
+            "provider:openai",
+        )
+        .unwrap());
+        let mut model = prepared_with_dispatch(ModelDispatchDelivery::ConfigKey {
+            name: "model".into(),
+        });
+        model.credential_mode = "codex-chatgpt-own-login".into();
+        model.codex_login_basis = Some(basis);
+        let (argv, variant) = selected_launch(&provider, &model).unwrap();
+        ensure_codex_login_launch_matches(&model, &argv, variant).unwrap();
+        assert_eq!(argv.first().map(String::as_str), codex.to_str());
+    }
+
+    #[test]
+    #[ignore = "requires installed Codex with a real ChatGPT login"]
+    fn installed_codex_acp_profile_binds_its_verified_native_executable() {
+        let profile = aikit_adapters::profiles::for_slug("codex").unwrap();
+        let provider = crate::encounter_profile_provider::derive_provider(
+            profile,
+            "installed-codex-acp".to_string(),
+            "Installed Codex ACP".to_string(),
+        )
+        .unwrap();
+        let verified_profile = declared_provider_profile(&provider).unwrap().unwrap();
+        let basis = codex_login_basis(&provider, verified_profile)
+            .unwrap()
+            .unwrap();
+        assert_eq!(basis.direct_launch_variant, None);
+        assert!(std::path::Path::new(&basis.program).is_absolute());
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path().join("aikit"));
+        assert!(crate::harness_auth::codex_chatgpt_login_ready(
+            &crate::probe::probe_runner(),
+            &home,
+            &basis.program,
+            "provider:openai",
+        )
+        .unwrap());
+        let mut environment = ModelEnvironment::new();
+        environment.set_codex_path(&basis.program).unwrap();
+        assert!(!environment.is_empty());
+    }
+
+    #[test]
     fn every_declared_executable_resolves_to_its_expected_dispatch() {
         // The whole declared table in one place: the dispatch determination
         // is decided by the embedded profiles, so the expectation is legible
@@ -1335,6 +1482,7 @@ mod tests {
             world_binding_ref: ResourceRef::parse("world-binding/probe").unwrap(),
             credential_reading: None,
             credential_mode: "not-required".into(),
+            codex_login_basis: None,
             dispatch,
         }
     }

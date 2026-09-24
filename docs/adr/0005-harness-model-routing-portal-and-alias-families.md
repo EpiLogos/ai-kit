@@ -127,7 +127,8 @@ and route-explain surfaces.
   keys, and revoked or expired bindings still refuse. This is authentication
   readiness, not a claim that the model is entitled or that inference costs
   nothing; a real launch determines that. The ACP Encounter keeps its
-  profile-declared session `model` config-key delivery.
+  profile-declared session `model` config-key delivery and pins the adapter's
+  `CODEX_PATH` to the same installed executable whose login was checked.
 - **Stage 3.** Config-plane integration for family and profile defaults at
   machine scope, sequenced after the in-flight configuration work lands so it
   extends the shared registry rather than colliding with it.
