@@ -1558,12 +1558,15 @@ impl Service {
             .central_meta_root
             .clone()
             .or_else(|| process_central_root(Some(project_root)));
-        let native_binding = if self.descriptor.project_root.is_none() {
+        let root_admission = admission.is_some_and(|a| a.is_root_context());
+        let native_binding = if self.descriptor.project_root.is_none()
+            || (root_admission && self.central_meta_root.is_some())
+        {
             admission.map(|a| a.context_binding()).transpose()?
         } else {
             None
         };
-        if admission.is_some_and(|a| a.scope_ref.as_str() == "scope:root")
+        if root_admission
             && self.descriptor.project_root.is_some()
             && self.central_meta_root.is_none()
         {
@@ -1671,21 +1674,15 @@ impl Service {
             .as_ref()
             .map(|c| c.requested_actors.clone())
             .unwrap_or_default();
-        let mut resolution = if self.descriptor.project_root.is_none() {
-            if let Some(binding) = native_binding {
-                aikit_core::application_context_resolution_with_binding(
-                    &self.descriptor,
-                    &self.view,
-                    &self.layers,
-                    &resources,
-                    actors,
-                    binding,
-                )?
-            } else {
-                aikit_tui::project_world_service::context_resolution_from_resources(
-                    self, actors, &resources,
-                )?
-            }
+        let mut resolution = if let Some(binding) = native_binding {
+            aikit_core::application_context_resolution_with_binding(
+                &self.descriptor,
+                &self.view,
+                &self.layers,
+                &resources,
+                actors,
+                binding,
+            )?
         } else {
             aikit_tui::project_world_service::context_resolution_from_resources(
                 self, actors, &resources,
@@ -1921,10 +1918,11 @@ impl Service {
         Ok(serde_json::json!({
             "project_root": self.descriptor.project_root.as_ref().map(|p|p.display().to_string()),
             "working_directory": project_root,
+            "invocation_cwd": self.invocation_cwd,
             "project_present": true,
             "local_project_directory_present": self.descriptor.project_root.is_some(),
             "root_meta_project": self.central_meta_root.is_some()
-                || admission.is_some_and(|a| a.scope_ref.as_str() == "scope:root"),
+                || root_admission,
             "project_binding": resolution.project_binding,
             "agency_admission": admission,
             "model_candidates": resolution.model_candidates,

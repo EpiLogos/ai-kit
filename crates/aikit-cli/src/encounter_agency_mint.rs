@@ -575,6 +575,8 @@ fn mint_per_project_agency_with_intent(
             "revision": binding.revision.as_str(),
             "agency_ref": admitted.agency_ref.as_str(),
             "world_binding_ref": admitted.world_binding_ref.as_str(),
+            "agency_source": &binding.agency_source,
+            "agency_admission": &admitted,
             "receipt_ref": receipt["receipt_ref"],
             "source_path": source_path.display().to_string(),
             "agent_identity_source": identity_source,

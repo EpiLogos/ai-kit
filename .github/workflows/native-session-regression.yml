@@ -1,7 +1,7 @@
 name: Native session regressions
 on:
   push:
-    branches: [agent/native-session-controls-20260920]
+    branches: [agent/native-session-controls-20260920, repair/65-native-pi-model-controls]
   pull_request:
     paths:
       - 'crates/aikit-adapters/src/interactive_connection.rs'

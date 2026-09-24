@@ -50,14 +50,21 @@ impl World {
             socket,
             child: None,
         };
-        for p in ["Control/user", "Control/relations", "Work/demo/src"] {
+        for p in [
+            "Control/user",
+            "Control/relations",
+            "Work/demo/src",
+            "Work/demo/ProjectCentral",
+            "Work/sibling",
+        ] {
             fs::create_dir_all(world.root.join(p)).unwrap();
         }
         fs::write(world.root.join("Control/user/human.md"), "HUMAN_UNCHANGED").unwrap();
         let policy_path = "Control/user/placement.json";
         let policy_ref = format!("central:source:control:root:{policy_path}");
         fs::write(world.root.join(policy_path), json!({"schema":"central.work-placement-policy/v1",
-            "scope_ref":"control:root", "writable":[{"path":"Work/demo","class":"repository"}], "protected":[],
+            "scope_ref":"control:root", "writable":[{"path":"Work/demo","class":"repository"}],
+            "protected":["Work/demo/ProjectCentral"],
             "enforcement":"material-filesystem", "required_coverage":["file-content","file-creation","file-removal","rename-link","truncate","descendant-processes"], "lease_seconds":300}).to_string()).unwrap();
         fs::write(world.root.join("Control/relations/source-relations.json"), json!({"schema":"central.control.ground-relations/v1",
             "project_id":"control:root", "relations":[{"ref":policy_ref,"path":policy_path,"roles":["work-placement-policy"],
@@ -183,7 +190,7 @@ impl World {
         json!({"central":{"ctrl_bin":std::env::var("AIKIT_CAW_CTRL_BIN").expect("native Central required"),"central_root":self.root,
             "project":null,"task_ref":"task:native-joined","purpose":"Native protected task","participant_refs":["agent:existing-1"],"source_refs":["source/agency"]},
             "provider":{"id":"controlled-task","label":"Controlled native, not model","protocol":"acp","argv":["python3","-u",Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/caw_task_provider.py"), self.root.join("Work/demo/src/protocol.log"),self.root.join("Control/user/human.md"), self.root.join("Work/loose.txt")]},
-            "cwd":self.root.join("Work/demo/src"),"selected_directories":[self.root.join("Work/demo/src")],
+            "cwd":self.root.join("Work/demo"),"selected_directories":[self.root.join("Work/demo/src")],
             "workcell_boundary_bin":std::env::var("AIKIT_CAW_WORKCELL_BOUNDARY_BIN").expect("native Workcell required"),"authority_ref":"authority:project:delegation"})
     }
     fn prepare(&self) -> Value {
@@ -470,7 +477,7 @@ fn real_task_dispatch_confines_protocol_and_rechecks_source_without_duplicate_wo
     );
     assert_eq!(alternate["ok"], false);
     assert!(!w.root.join("Work/demo/src/protocol.log").exists());
-    assert_eq!(w.open(&prepared, &w.root.join("Work/demo/src"))["ok"], true);
+    assert_eq!(w.open(&prepared, &w.root.join("Work/demo"))["ok"], true);
     let before = fs::read(w.root.join("Work/demo/src/protocol.log")).unwrap();
     for field in [
         "revision",
@@ -506,7 +513,7 @@ fn real_task_dispatch_confines_protocol_and_rechecks_source_without_duplicate_wo
     assert_eq!(evidence["denied"], json!([true, true]));
     assert_eq!(evidence["selected_context"], true);
     assert_eq!(evidence["central_token_present"], false);
-    assert_eq!(evidence["cwd"], json!(w.root.join("Work/demo/src")));
+    assert_eq!(evidence["cwd"], json!(w.root.join("Work/demo")));
     assert_eq!(
         fs::read_to_string(w.root.join("Control/user/human.md")).unwrap(),
         "HUMAN_UNCHANGED"
@@ -551,12 +558,50 @@ fn wrong_actual_cwd_and_removed_now_cannot_launch_a_provider() {
         }
         w.start();
         let cwd = if remove {
-            w.root.join("Work/demo/src")
+            w.root.join("Work/demo")
         } else {
             w.root.clone()
         };
         assert_eq!(w.open(&prepared, &cwd)["ok"], false);
         assert!(!w.root.join("Work/demo/src/protocol.log").exists());
+    }
+}
+
+#[test]
+#[ignore = "requires exact native owners; mandatory CAW lane"]
+fn protected_or_sibling_working_directory_refuses_before_provider_start() {
+    for relative in ["Work/demo/ProjectCentral", "Work/sibling"] {
+        let w = World::new(true);
+        let mut input = w.prepare_input();
+        input["cwd"] = json!(w.root.join(relative));
+        let result = w.command(&[
+            "encounter-task-configure".into(),
+            "--agent-session".into(),
+            "agent-session/task".into(),
+            "--request-json".into(),
+            input.to_string(),
+        ]);
+        assert!(!result.status.success(), "{relative}");
+        assert!(!w.root.join("Work/demo/src/protocol.log").exists());
+    }
+}
+
+#[test]
+#[ignore = "requires exact native owners; mandatory CAW lane"]
+fn removed_or_replaced_working_directory_refuses_at_task_continuation() {
+    for replace in [false, true] {
+        let mut w = World::new(true);
+        let prepared = w.prepare();
+        let working_directory = w.root.join("Work/demo");
+        let moved = w.root.join("Work/demo-before");
+        fs::rename(&working_directory, &moved).unwrap();
+        if replace {
+            fs::create_dir_all(working_directory.join("src")).unwrap();
+            fs::create_dir_all(working_directory.join("ProjectCentral")).unwrap();
+        }
+        w.start();
+        assert_eq!(w.open(&prepared, &working_directory)["ok"], false);
+        assert!(!working_directory.join("src/protocol.log").exists());
     }
 }
 #[test]
