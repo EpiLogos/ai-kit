@@ -143,37 +143,57 @@ fn assemble(cwd: &Path, request: &FieldRequest) -> Result<Value> {
         None => None,
     };
 
-    let spine_trace_path = request.spine_trace.as_ref().ok_or_else(|| {
-        fail(
-            "contemplation_field.missing_spine",
-            "spine_trace is required",
-        )
-    })?;
-    let (trace, spine_digest) = read_spine(spine_trace_path)?;
-    let spine_repo_root = match &request.spine_repo_root {
-        Some(p) => p.clone(),
-        None => discover_repo_root(spine_trace_path.parent().unwrap_or(Path::new(".")))
-            .ok_or_else(|| {
-                fail(
-                "contemplation_field.spine_repo_root",
-                "could not discover the spine trace's Git repository root; pass --spine-repo-root",
-            )
-            })?,
-    };
+    // A UX-spine trace is an optional lens: the field's code, capability and
+    // test joins stand on their own, and no one product's spine is assumed.
     let ai_kit_repo_root = match &request.ai_kit_repo_root {
         Some(p) => p.clone(),
         None => discover_repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf()),
     };
     let mut alias_roots = BTreeMap::new();
     alias_roots.insert("ai-kit".to_string(), ai_kit_repo_root.clone());
-
-    let stories = trace["stories"].as_array().cloned().unwrap_or_default();
-    let coverage_cells = trace["m_capability_coverage"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    let (practices, bound, bound_missing, unbound) =
-        build_practices(&trace, &spine_repo_root, &alias_roots)?;
+    let (spine, practice_binding_summary) = match request.spine_trace.as_ref() {
+        None => (
+            Value::Null,
+            json!({"disclosure": "no UX-spine trace supplied; practice bindings not assessed"}),
+        ),
+        Some(spine_trace_path) => {
+            let (trace, spine_digest) = read_spine(spine_trace_path)?;
+            let spine_repo_root = match &request.spine_repo_root {
+                Some(p) => p.clone(),
+                None => discover_repo_root(spine_trace_path.parent().unwrap_or(Path::new(".")))
+                    .ok_or_else(|| {
+                        fail(
+                            "contemplation_field.spine_repo_root",
+                            "could not discover the spine trace's Git repository root; pass --spine-repo-root",
+                        )
+                    })?,
+            };
+            let stories = trace["stories"].as_array().cloned().unwrap_or_default();
+            let coverage_cells = trace["m_capability_coverage"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let (practices, bound, bound_missing, unbound) =
+                build_practices(&trace, &spine_repo_root, &alias_roots)?;
+            (
+                json!({
+                    "source": spine_trace_path.display().to_string(),
+                    "source_revision": spine_digest,
+                    "spine_repo_root": spine_repo_root.display().to_string(),
+                    "format": SPINE_TRACE_FORMAT,
+                    "stories": stories,
+                    "practices": practices,
+                    "coverage_cells": coverage_cells,
+                }),
+                json!({
+                    "bound": bound,
+                    "bound_missing": bound_missing,
+                    "unbound": unbound,
+                    "total": bound + bound_missing + unbound,
+                }),
+            )
+        }
+    };
 
     let matrix_config = resolve_matrix_config(request)?;
     let (_items, matrix_evidence) = read_matrix(&matrix_config)?;
@@ -309,21 +329,8 @@ fn assemble(cwd: &Path, request: &FieldRequest) -> Result<Value> {
         "pass": pass,
         "assembled_at_unix_ms": now_ms(),
         "telos": telos,
-        "spine": {
-            "source": spine_trace_path.display().to_string(),
-            "source_revision": spine_digest,
-            "spine_repo_root": spine_repo_root.display().to_string(),
-            "format": SPINE_TRACE_FORMAT,
-            "stories": stories,
-            "practices": practices,
-            "coverage_cells": coverage_cells,
-        },
-        "practice_binding_summary": {
-            "bound": bound,
-            "bound_missing": bound_missing,
-            "unbound": unbound,
-            "total": bound + bound_missing + unbound,
-        },
+        "spine": spine,
+        "practice_binding_summary": practice_binding_summary,
         "matrix": {
             "source_manifest": matrix_config.manifest.display().to_string(),
             "source_csv": matrix_config.csv.display().to_string(),
@@ -1580,6 +1587,24 @@ mod tests {
         assert_eq!(field["matrix"]["capabilities"].as_array().unwrap().len(), 1);
         assert_eq!(field["practice_binding_summary"]["total"], 3);
         assert!(field["experience_reading_disclosure"].is_string());
+    }
+
+    #[test]
+    fn field_assembly_without_a_spine_trace_discloses_it_and_keeps_every_other_lens() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manifest, csv) = write_matrix(dir.path(), "crates/one.rs", "tests/one.rs");
+        let request = FieldRequest {
+            schema: Some(FIELD_REQUEST_SCHEMA.into()),
+            ai_kit_repo_root: Some(dir.path().to_path_buf()),
+            matrix_manifest: Some(manifest),
+            matrix_csv: Some(csv),
+            pass: Some("prospective".into()),
+            ..Default::default()
+        };
+        let field = assemble(dir.path(), &request).unwrap();
+        assert!(field["spine"].is_null(), "no product's spine is assumed");
+        assert!(field["practice_binding_summary"]["disclosure"].is_string());
+        assert_eq!(field["matrix"]["capabilities"].as_array().unwrap().len(), 1);
     }
 
     #[test]

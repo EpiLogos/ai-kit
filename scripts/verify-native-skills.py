@@ -25,8 +25,6 @@ EXPECTED_SKILLS = {
     "skill/aikit/meta-harness-craft",
     "skill/aikit/wiki-inhabitation",
     "skill/aikit/experience-campaign",
-    "skill/aikit/named-praxis",
-    "skill/aikit/session-continuity",
     "skill/aikit/central-day-rollover",
     "skill/aikit/factory-telemetry-collect",
     "skill/aikit/factory-telemetry-field-refresh",

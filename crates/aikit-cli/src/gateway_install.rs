@@ -8,7 +8,12 @@
 //! persistent-lifetime proof the CAW native-delivery join asks for. Uninstall
 //! is the exact inverse and refuses when nothing is installed.
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::time::Duration;
 
 use aikit_core::{AikitError, Result};
 use serde_json::{json, Value};
@@ -30,9 +35,129 @@ pub fn log_path(home_dir: &std::path::Path) -> PathBuf {
         .join(format!("{LAUNCH_AGENT_LABEL}.log"))
 }
 
+/// The only process material carried into launchd. Credentials are resolved
+/// later per admitted Routine action, never copied from the installing shell.
+#[derive(Debug, Clone)]
+pub struct ServiceEnvironment {
+    pub values: BTreeMap<String, String>,
+}
+
+fn owner_binary(names: &[&str], fallback: &str) -> Result<Option<PathBuf>> {
+    let configured = names.iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    });
+    let requested = configured.as_deref().unwrap_or(fallback);
+    let found = crate::probe::which(requested);
+    if configured.is_some() && found.is_none() {
+        return Err(AikitError::new(
+            "gateway.service_owner_unresolved",
+            format!("configured native owner {requested} is not executable"),
+        ));
+    }
+    found
+        .map(|path| {
+            if path.is_absolute() {
+                Ok(path)
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(path))
+                    .map_err(|error| {
+                        AikitError::new(
+                            "gateway.service_owner_unresolved",
+                            format!("could not anchor native owner {requested}: {error}"),
+                        )
+                    })
+            }
+        })
+        .transpose()
+}
+
+impl ServiceEnvironment {
+    /// Capture only the installed native-owner relation this service needs.
+    /// The user's interactive PATH may contain unrelated, mutable directories;
+    /// launchd receives only discovered owner directories and system paths.
+    pub fn discover(home_dir: &Path, home: &aikit_store::AikitHome) -> Result<Self> {
+        if !home_dir.is_absolute() || !home.root().is_absolute() {
+            return Err(AikitError::new(
+                "gateway.service_home_unresolved",
+                "HOME and AIKIT_HOME must be absolute for a resident gateway",
+            ));
+        }
+        let central_root = crate::routine_dispatch::CtrlOccurrenceSource::discover()?;
+        if !central_root.is_absolute() {
+            return Err(AikitError::new(
+                "gateway.service_central_root_unresolved",
+                "the resident gateway's Central root must be absolute",
+            ));
+        }
+        let ctrl = owner_binary(&["CENTRAL_CTRL_BIN", "OI_CENTRAL_CTRL_BIN"], "ctrl")?.ok_or_else(
+            || {
+                AikitError::new(
+                    "gateway.service_owner_unresolved",
+                    "ctrl is required for the resident Routine scheduler",
+                )
+            },
+        )?;
+        let factory = owner_binary(
+            &["FACTORY_BIN", "OI_FACTORY_BIN", "AIKIT_FACTORY_BIN"],
+            "factory",
+        )?;
+        let actuation = owner_binary(&["ACTUATION_BIN", "OI_ACTUATION_BIN"], "actuation")?;
+        let gh = owner_binary(&[], "gh")?;
+        let mut paths = Vec::new();
+        for binary in [
+            Some(&ctrl),
+            gh.as_ref(),
+            factory.as_ref(),
+            actuation.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(parent) = binary.parent() {
+                if !paths.contains(&parent.to_path_buf()) {
+                    paths.push(parent.to_path_buf());
+                }
+            }
+        }
+        for system in ["/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
+            let path = PathBuf::from(system);
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        let path = std::env::join_paths(paths).map_err(|error| {
+            AikitError::new(
+                "gateway.service_path_invalid",
+                format!("native owner search path cannot be carried to launchd: {error}"),
+            )
+        })?;
+        let mut values = BTreeMap::from([
+            ("HOME".into(), home_dir.display().to_string()),
+            ("AIKIT_HOME".into(), home.root().display().to_string()),
+            (
+                "AIKIT_CENTRAL_ROOT".into(),
+                central_root.display().to_string(),
+            ),
+            ("CENTRAL_CTRL_BIN".into(), ctrl.display().to_string()),
+            ("PATH".into(), path.to_string_lossy().into_owned()),
+        ]);
+        if let Some(factory) = factory {
+            values.insert("FACTORY_BIN".into(), factory.display().to_string());
+            values.insert("AIKIT_FACTORY_BIN".into(), factory.display().to_string());
+        }
+        if let Some(actuation) = actuation {
+            values.insert("ACTUATION_BIN".into(), actuation.display().to_string());
+        }
+        Ok(Self { values })
+    }
+}
+
 /// Render the LaunchAgent plist. `binary` is the exact executable launchd
 /// should run; args mirror a bare `aikit gateway serve`.
-pub fn render_plist(binary: &std::path::Path, log: &std::path::Path) -> String {
+pub fn render_plist(binary: &Path, log: &Path, environment: &ServiceEnvironment) -> String {
     let program_arguments = [
         binary.display().to_string(),
         "gateway".into(),
@@ -48,6 +173,18 @@ pub fn render_plist(binary: &std::path::Path, log: &std::path::Path) -> String {
         .map(|argument| format!("        <string>{}</string>", esc(argument)))
         .collect::<Vec<_>>()
         .join("\n");
+    let variables = environment
+        .values
+        .iter()
+        .map(|(key, value)| {
+            format!(
+                "        <key>{}</key>\n        <string>{}</string>",
+                esc(key),
+                esc(value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -59,6 +196,10 @@ pub fn render_plist(binary: &std::path::Path, log: &std::path::Path) -> String {
     <array>
 {arguments}
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+{variables}
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -72,6 +213,7 @@ pub fn render_plist(binary: &std::path::Path, log: &std::path::Path) -> String {
 "#,
         label = LAUNCH_AGENT_LABEL,
         arguments = arguments,
+        variables = variables,
         log = esc(&log.display().to_string()),
     )
 }
@@ -120,28 +262,134 @@ pub fn is_installed(home_dir: &std::path::Path) -> bool {
     plist_path(home_dir).exists()
 }
 
+/// Clear a socket left by an exited default Gateway before launchd starts its
+/// replacement. The Gateway's native state lock excludes owners using this
+/// state file, and a live Unix connection also protects custom-state owners.
+/// Other files at this path are never treated as stale sockets.
+#[cfg(unix)]
+fn clear_stale_gateway_socket(home: &aikit_store::AikitHome) -> Result<bool> {
+    use std::os::unix::{fs::FileTypeExt, fs::MetadataExt, net::UnixStream};
+
+    let socket = home.gateway_socket();
+    let metadata = match std::fs::symlink_metadata(&socket) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(AikitError::new(
+                "gateway.service_install_socket_unreadable",
+                format!("inspect Gateway socket {}: {error}", socket.display()),
+            ));
+        }
+    };
+    if !metadata.file_type().is_socket() {
+        return Err(AikitError::new(
+            "gateway.service_install_conflict",
+            format!(
+                "refusing to replace a non-socket Gateway path at {}",
+                socket.display()
+            ),
+        ));
+    }
+
+    // A resident Gateway using this state file holds the lock for its
+    // lifetime. Holding it here excludes that native owner starting between
+    // the lstat and unlink; the connection probe covers custom-state owners.
+    let _lock = aikit_adapters::acquire_gateway_state_lock(
+        &home.gateway_state(),
+        Duration::from_millis(200),
+        "Gateway LaunchAgent socket inspection",
+    )
+    .map_err(|error| {
+        AikitError::new(
+            "gateway.service_install_conflict",
+            format!("Gateway owner state is active; refusing socket cleanup: {error}"),
+        )
+    })?;
+    match UnixStream::connect(&socket) {
+        Ok(_) => {
+            return Err(AikitError::new(
+                "gateway.service_install_conflict",
+                format!(
+                    "a Gateway is answering at {}; stop it before installation",
+                    socket.display()
+                ),
+            ));
+        }
+        Err(error) if error.kind() == ErrorKind::ConnectionRefused => {}
+        Err(error) => {
+            return Err(AikitError::new(
+                "gateway.service_install_conflict",
+                format!(
+                    "cannot prove Gateway socket {} is stale: {error}",
+                    socket.display()
+                ),
+            ));
+        }
+    }
+    let current = std::fs::symlink_metadata(&socket).map_err(|error| {
+        AikitError::new(
+            "gateway.service_install_conflict",
+            format!(
+                "Gateway socket {} changed during inspection: {error}",
+                socket.display()
+            ),
+        )
+    })?;
+    if !current.file_type().is_socket()
+        || current.dev() != metadata.dev()
+        || current.ino() != metadata.ino()
+    {
+        return Err(AikitError::new(
+            "gateway.service_install_conflict",
+            format!(
+                "Gateway socket {} changed during inspection",
+                socket.display()
+            ),
+        ));
+    }
+    std::fs::remove_file(&socket).map_err(|error| {
+        AikitError::new(
+            "gateway.service_install_socket_cleanup_failed",
+            format!(
+                "remove proven stale Gateway socket {}: {error}",
+                socket.display()
+            ),
+        )
+    })?;
+    Ok(true)
+}
+
 /// Install the LaunchAgent: write the plist, then bootstrap it into the user's
 /// GUI domain. A gateway already answering at the default socket is refused —
-/// KeepAlive would fight it over the endpoint.
+/// KeepAlive would fight it over the endpoint. A proven stale socket from an
+/// exited owner is cleared under the native Gateway state lock.
 pub fn install(home_dir: &std::path::Path, home: &aikit_store::AikitHome) -> Result<Value> {
     assert_macos()?;
-    let binary = std::env::current_exe().map_err(|error| {
+    let running = std::env::current_exe().map_err(|error| {
         AikitError::new(
             "gateway.service_install_binary_unresolved",
             format!("could not resolve the running aikit executable: {error}"),
         )
     })?;
-    let socket = home.gateway_socket();
-    if socket.exists() {
-        return Err(AikitError::new(
-            "gateway.service_install_conflict",
-            format!(
-                "a gateway is already answering at {}; stop it (`aikit gateway serve` owns that \
-                 socket) before installing the persistent service",
-                socket.display()
-            ),
-        ));
-    }
+    // Prefer the managed stable `aikit` command only when it resolves to this
+    // exact running executable. A worktree build must never install an older
+    // managed binary by accident.
+    let binary = crate::probe::which("aikit")
+        .filter(|managed| {
+            match (
+                std::fs::canonicalize(managed),
+                std::fs::canonicalize(&running),
+            ) {
+                (Ok(managed), Ok(running)) => managed == running,
+                _ => false,
+            }
+        })
+        .unwrap_or(running);
+    let environment = ServiceEnvironment::discover(home_dir, home)?;
+    #[cfg(unix)]
+    let stale_socket_removed = clear_stale_gateway_socket(home)?;
+    #[cfg(not(unix))]
+    let stale_socket_removed = false;
     let plist = plist_path(home_dir);
     let log = log_path(home_dir);
     if let Some(parent) = plist.parent() {
@@ -152,7 +400,7 @@ pub fn install(home_dir: &std::path::Path, home: &aikit_store::AikitHome) -> Res
             )
         })?;
     }
-    std::fs::write(&plist, render_plist(&binary, &log)).map_err(|error| {
+    std::fs::write(&plist, render_plist(&binary, &log, &environment)).map_err(|error| {
         AikitError::new(
             "gateway.service_install_write_failed",
             format!("{}: {error}", plist.display()),
@@ -181,6 +429,10 @@ pub fn install(home_dir: &std::path::Path, home: &aikit_store::AikitHome) -> Res
         "plist": plist.display().to_string(),
         "log": log.display().to_string(),
         "binary": binary.display().to_string(),
+        "native_owners": environment.values.iter().filter(|(key, _)| matches!(key.as_str(), "CENTRAL_CTRL_BIN" | "FACTORY_BIN" | "ACTUATION_BIN")).map(|(key, value)| (key.clone(), value.clone())).collect::<BTreeMap<_, _>>(),
+        "aikit_home": home.root().display().to_string(),
+        "stale_socket_removed": stale_socket_removed,
+        "central_root": environment.values["AIKIT_CENTRAL_ROOT"],
         "note": "launchd keeps `aikit gateway serve` alive; the Routine dispatcher ticks every 30 seconds",
     }))
 }
@@ -227,6 +479,9 @@ mod tests {
         let plist = render_plist(
             std::path::Path::new("/usr/local/bin/aikit"),
             std::path::Path::new("/Users/me/Library/Logs/ai.aikit.gateway.log"),
+            &ServiceEnvironment {
+                values: BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
+            },
         );
         assert!(plist.contains("<key>Label</key>"));
         assert!(plist.contains(LAUNCH_AGENT_LABEL));
@@ -266,5 +521,67 @@ mod tests {
         #[cfg(not(target_os = "macos"))]
         assert_eq!(error.code(), "gateway.service_install_unsupported");
         assert!(!is_installed(dir.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installer_socket_boundary_preserves_live_and_other_paths_but_clears_real_stale_socket() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::{UnixListener, UnixStream};
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = aikit_store::AikitHome::at(dir.path());
+        std::fs::create_dir_all(home.state()).unwrap();
+        let socket = home.gateway_socket();
+
+        let listener = UnixListener::bind(&socket).unwrap();
+        let conflict = clear_stale_gateway_socket(&home).unwrap_err();
+        assert_eq!(conflict.code(), "gateway.service_install_conflict");
+        assert!(
+            UnixStream::connect(&socket).is_ok(),
+            "live listener must remain reachable"
+        );
+        drop(listener);
+
+        let owner_lock = aikit_adapters::acquire_gateway_state_lock(
+            &home.gateway_state(),
+            Duration::from_millis(100),
+            "real lock regression test",
+        )
+        .unwrap();
+        let conflict = clear_stale_gateway_socket(&home).unwrap_err();
+        assert_eq!(conflict.code(), "gateway.service_install_conflict");
+        assert!(
+            socket.exists(),
+            "a held native owner lock preserves the socket"
+        );
+        drop(owner_lock);
+
+        assert!(
+            clear_stale_gateway_socket(&home).unwrap(),
+            "closed real Unix listener leaves a stale path"
+        );
+        assert!(!socket.exists());
+        assert!(
+            !clear_stale_gateway_socket(&home).unwrap(),
+            "a missing socket needs no cleanup"
+        );
+
+        std::fs::write(&socket, b"owner material").unwrap();
+        let conflict = clear_stale_gateway_socket(&home).unwrap_err();
+        assert_eq!(conflict.code(), "gateway.service_install_conflict");
+        assert_eq!(std::fs::read(&socket).unwrap(), b"owner material");
+
+        std::fs::remove_file(&socket).unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, b"symlink target").unwrap();
+        symlink(&target, &socket).unwrap();
+        let conflict = clear_stale_gateway_socket(&home).unwrap_err();
+        assert_eq!(conflict.code(), "gateway.service_install_conflict");
+        assert!(std::fs::symlink_metadata(&socket)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&target).unwrap(), b"symlink target");
     }
 }

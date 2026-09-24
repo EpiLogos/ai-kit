@@ -14,8 +14,8 @@
 //! Hits and reads carry canonical Central identity: source refs in the
 //! `central:source:control:root:<path>` form and revisions in Central's own
 //! in-tree `central.content-fnv1a64/v1` grammar. Search is literal by default;
-//! regex is a separate, deliberate method. Ripgrep never follows symlinks here
-//! (its default), so an eligible scope cannot be escaped through one.
+//! regex is a separate, deliberate method. Ripgrep does not follow symlinks;
+//! direct reads also reject symlink and traversal components.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -35,8 +35,6 @@ pub const MAX_READ_BYTES: u64 = 1024 * 1024;
 /// Bound on the descriptor roster carried at attachment. The roster carries
 /// identity (ref/revision/tags), never bodies; reads go back to the file.
 pub const MAX_ROSTER_FILES: usize = 2048;
-/// Depth cap for `**` directory expansion when authorising a scope.
-const RECURSIVE_WALK_DEPTH: usize = 8;
 
 /// The owner's withhold lever: a subtree carrying this marker is invisible to
 /// the provider no matter where it sits inside an eligible record family.
@@ -121,23 +119,42 @@ impl NowFieldScope {
         scope
     }
 
+    /// Retain common Control records and only one discovered Work project's
+    /// NOW files. `None` keeps Control alone, so an unknown Project cannot
+    /// turn a wildcard scope into a search of every sibling register.
+    pub fn for_project(&self, project_name: Option<&str>) -> Self {
+        let mut scoped = self.clone();
+        scoped.includes.retain_mut(|include| {
+            if let Some(rest) = include.glob.strip_prefix("Work/*/").map(str::to_owned) {
+                if let Some(name) = project_name {
+                    include.glob = format!("Work/{}/{rest}", escape_glob_literal(name));
+                    true
+                } else {
+                    false
+                }
+            } else {
+                !include.glob.starts_with("Work/")
+            }
+        });
+        let own_root = project_name.map(|name| format!("Work/{name}"));
+        scoped.pruned.retain(|path| {
+            !path.starts_with("Work/")
+                || own_root
+                    .as_ref()
+                    .is_some_and(|root| path == root || path.starts_with(&format!("{root}/")))
+        });
+        scoped
+    }
+
     /// Walk only the directories an include glob can actually reach, and stop
     /// at any directory carrying the owner's marker. This is the
     /// before-processing half of authorisation: a pruned path is never opened.
     fn prune_marked_subtrees(&mut self) {
         let mut pruned = BTreeSet::new();
         for include in &self.includes {
-            for dir in candidate_directories(&self.central_root, &include.glob) {
-                if pruned
-                    .iter()
-                    .any(|existing| dir.starts_with(self.central_root.join(existing)))
-                {
-                    continue;
-                }
-                if dir.join(AGENT_RETRIEVAL_MARKER).exists() {
-                    if let Ok(relative) = dir.strip_prefix(&self.central_root) {
-                        pruned.insert(relative.to_string_lossy().into_owned());
-                    }
+            for dir in marked_boundaries(&self.central_root, &include.glob) {
+                if let Ok(relative) = dir.strip_prefix(&self.central_root) {
+                    pruned.insert(relative.to_string_lossy().into_owned());
                 }
             }
         }
@@ -166,6 +183,17 @@ impl NowFieldScope {
     }
 }
 
+fn escape_glob_literal(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, '*' | '?' | '[' | ']' | '{' | '}' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GlobPart {
     Literal(String),
@@ -181,8 +209,11 @@ fn parse_glob(glob: &str) -> Vec<Vec<GlobPart>> {
             }
             let mut parts = Vec::new();
             let mut literal = String::new();
-            for ch in part.chars() {
-                if ch == '*' {
+            let mut chars = part.chars();
+            while let Some(ch) = chars.next() {
+                if ch == '\\' {
+                    literal.push(chars.next().unwrap_or('\\'));
+                } else if ch == '*' {
                     if !literal.is_empty() {
                         parts.push(GlobPart::Literal(std::mem::take(&mut literal)));
                     }
@@ -258,17 +289,21 @@ fn candidate_directories(root: &Path, glob: &str) -> Vec<PathBuf> {
         let mut next = Vec::new();
         for dir in &current {
             if parts.len() == 1 && parts[0] == GlobPart::AnyDepth {
-                next.extend(walk_marked(root, dir, RECURSIVE_WALK_DEPTH));
+                next.extend(
+                    walk_marked(root, dir)
+                        .into_iter()
+                        .filter(|candidate| !marker_between(root, candidate)),
+                );
             } else if let Some(literal) = single_literal(parts) {
                 let child = dir.join(literal);
-                if !marker_between(root, &child) && child.is_dir() {
+                if !marker_between(root, &child) && is_real_directory(&child) {
                     next.push(child);
                 }
-            } else if dir.is_dir() {
+            } else if is_real_directory(dir) {
                 if let Ok(entries) = std::fs::read_dir(dir) {
                     for entry in entries.flatten() {
                         let child = entry.path();
-                        if child.is_dir()
+                        if is_real_directory(&child)
                             && !marker_between(root, &child)
                             && matches_parts(parts, file_name(&child))
                         {
@@ -281,6 +316,49 @@ fn candidate_directories(root: &Path, glob: &str) -> Vec<PathBuf> {
         current = next;
     }
     current
+}
+
+/// Discover the first marker on each path an include could traverse. Unlike
+/// `candidate_directories`, this keeps a marked directory long enough to
+/// record its boundary, then refuses to descend or read any child beneath it.
+/// Ripgrep uses these boundaries as excludes before searching; descriptor
+/// enumeration independently uses `candidate_directories` and cannot open the
+/// marked directories either.
+fn marked_boundaries(root: &Path, glob: &str) -> BTreeSet<PathBuf> {
+    let pattern = parse_glob(glob);
+    let mut current = vec![root.to_path_buf()];
+    let mut marked = BTreeSet::new();
+    for parts in &pattern[..pattern.len().saturating_sub(1)] {
+        let mut next = Vec::new();
+        for dir in &current {
+            let candidates = if parts.len() == 1 && parts[0] == GlobPart::AnyDepth {
+                walk_marked(root, dir)
+            } else if let Some(literal) = single_literal(parts) {
+                vec![dir.join(literal)]
+            } else {
+                std::fs::read_dir(dir)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|child| matches_parts(parts, file_name(child)))
+                    .collect()
+            };
+            for child in candidates {
+                if !is_real_directory(&child) {
+                    continue;
+                }
+                if std::fs::symlink_metadata(child.join(AGENT_RETRIEVAL_MARKER)).is_ok() {
+                    marked.insert(child);
+                } else {
+                    next.push(child);
+                }
+            }
+        }
+        current = next;
+    }
+    marked
 }
 
 fn single_literal(parts: &[GlobPart]) -> Option<&str> {
@@ -302,6 +380,14 @@ fn file_name(path: &Path) -> &str {
         .unwrap_or_default()
 }
 
+fn is_real_directory(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+}
+
+fn is_real_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
+}
+
 /// Whether this directory or any ancestor below the root carries the marker.
 fn marker_between(root: &Path, dir: &Path) -> bool {
     let mut cursor = Some(dir);
@@ -309,7 +395,7 @@ fn marker_between(root: &Path, dir: &Path) -> bool {
         if current == root {
             return false;
         }
-        if current.join(AGENT_RETRIEVAL_MARKER).exists() {
+        if std::fs::symlink_metadata(current.join(AGENT_RETRIEVAL_MARKER)).is_ok() {
             return true;
         }
         cursor = current.parent();
@@ -317,18 +403,23 @@ fn marker_between(root: &Path, dir: &Path) -> bool {
     false
 }
 
-fn walk_marked(root: &Path, dir: &Path, depth: usize) -> Vec<PathBuf> {
-    let mut found = vec![dir.to_path_buf()];
-    if depth == 0 || marker_between(root, dir) || !dir.is_dir() {
-        return found;
-    }
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let child = entry.path();
-            // A marked child is still reported — as a boundary leaf — so the
-            // pruner can name it; walk_marked simply refuses to descend.
-            if child.is_dir() {
-                found.extend(walk_marked(root, &child, depth - 1));
+fn walk_marked(root: &Path, dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        let may_descend = is_real_directory(&current) && !marker_between(root, &current);
+        found.push(current.clone());
+        if !may_descend {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&current) {
+            for entry in entries.flatten() {
+                let child = entry.path();
+                // A marked child is still reported as a boundary leaf, but
+                // neither its contents nor a symbolic-link target are walked.
+                if is_real_directory(&child) {
+                    pending.push(child);
+                }
             }
         }
     }
@@ -398,7 +489,7 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
                 };
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if !path.is_file() {
+                    if !is_real_file(&path) {
                         continue;
                     }
                     let Some(relative) = self.relative_to_root(&path) else {
@@ -421,7 +512,30 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
     }
 
     fn material(&self, relative: &Path) -> Result<SourceMaterial> {
-        let absolute = self.scope.central_root.join(relative);
+        let mut absolute = self.scope.central_root.clone();
+        for component in relative.components() {
+            let std::path::Component::Normal(name) = component else {
+                return Err(AikitError::new(
+                    "now_field.source_unauthorised",
+                    format!("{relative:?} is not a canonical relative NOW-field path"),
+                ));
+            };
+            absolute.push(name);
+            if std::fs::symlink_metadata(&absolute)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return Err(AikitError::new(
+                    "now_field.source_unauthorised",
+                    format!("{relative:?} crosses a symbolic link"),
+                ));
+            }
+        }
+        if marker_between(&self.scope.central_root, &absolute) {
+            return Err(AikitError::new(
+                "now_field.source_unauthorised",
+                format!("{relative:?} is withheld by an owner marker"),
+            ));
+        }
         let bytes = std::fs::read(&absolute).map_err(|e| {
             AikitError::new(
                 "now_field.source_unreadable",
@@ -539,8 +653,18 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
         if limit == 0 || pattern.is_empty() {
             return Ok(Vec::new());
         }
-        let mut excludes = self.scope.excludes.clone();
-        excludes.extend(self.scope.pruned.iter().map(|dir| format!("{dir}/**")));
+        // A marker may have arrived after this provider attached. Refresh the
+        // owner boundary before ripgrep, which otherwise searches files before
+        // `hit` can reject an unauthorised result.
+        let mut live_scope = self.scope.clone();
+        live_scope.prune_marked_subtrees();
+        let mut excludes = live_scope.excludes.clone();
+        excludes.extend(
+            live_scope
+                .pruned
+                .iter()
+                .map(|dir| format!("{}/**", escape_glob_literal(dir))),
+        );
         let request = SearchRequest {
             pattern: pattern.to_string(),
             regex,
@@ -550,8 +674,7 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
             // The runner is pinned to the central root (see default_runner);
             // a relative search root is what makes root-relative globs match.
             roots: vec![PathBuf::from(".")],
-            include_globs: self
-                .scope
+            include_globs: live_scope
                 .includes
                 .iter()
                 .map(|include| include.glob.clone())
@@ -728,6 +851,27 @@ mod tests {
         assert!(!scope.is_authorised(Path::new("Work/Factory/.git/config")));
         assert!(!scope.is_authorised(Path::new(
             "Work/Factory/ProjectCentral/now/sealed/secret.json"
+        )));
+    }
+
+    #[test]
+    fn project_view_keeps_common_control_and_escapes_literal_work_name() {
+        let scope = scope();
+        let scoped = scope.for_project(Some("fee*box"));
+        assert!(scoped.is_authorised(Path::new("Control/user/day/2026-09-17/day.md")));
+        assert!(scoped.is_authorised(Path::new(
+            "Work/fee*box/ProjectCentral/now/agents/handoff.json"
+        )));
+        assert!(!scoped.is_authorised(Path::new(
+            "Work/feeeeeebox/ProjectCentral/now/agents/handoff.json"
+        )));
+        assert!(!scoped.is_authorised(Path::new(
+            "Work/Factory/ProjectCentral/now/agents/handoff.json"
+        )));
+        let unknown = scope.for_project(None);
+        assert!(unknown.is_authorised(Path::new("Control/user/day/2026-09-17/day.md")));
+        assert!(!unknown.is_authorised(Path::new(
+            "Work/Factory/ProjectCentral/now/agents/handoff.json"
         )));
     }
 

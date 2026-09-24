@@ -33,6 +33,7 @@ pub use agency::mint::{
     mint_from_cli, mint_task_from_cli, mint_per_project_agency, mint_request_document, REQUIRED_MINTED_ACTIONS,
 };
 pub use agency::model::EncounterModelOpen;
+pub(crate) use agency::model::PreparedModel;
 pub use agency::{
     EncounterA2aFraming, EncounterAddressedTurn, EncounterAgencyBinding, EncounterContextPacket,
     EncounterGroupRecipient,
@@ -440,6 +441,7 @@ struct Resident {
     cwd: PathBuf,
     argv: Vec<String>,
     model: Option<agency::model::PreparedModel>,
+    body_basis: Value,
     now_context: Option<EncounterNowContextConfig>,
 }
 impl Resident {
@@ -1026,7 +1028,7 @@ impl EncounterService {
                 ));
             }
             self.check_resident_context(&agent_session, held, "resident-open")?;
-            let receipt = json!({"agent_session":agent_session,"native_session_id":held.lane.binding().native_session_id,"model_observation":held.lane.binding().model_observation,"model_selection":held.model,"resident":true});
+            let receipt = json!({"agent_session":agent_session,"native_session_id":held.lane.binding().native_session_id,"model_observation":held.lane.binding().model_observation,"provider":held.provider,"protocol":held.protocol,"body_basis":held.body_basis,"model_selection":held.model,"resident":true});
             drop(residents);
             drop(agency_lock);
             // An already-resident open is a readiness moment too: queued
@@ -1143,6 +1145,17 @@ impl EncounterService {
         let default_argv =
             crate::model_defaults::launch_argv(&default_provider, launch_default.as_ref())?;
 
+        let body_provider = if task_bound {
+            serde_json::from_value::<EncounterProvider>(
+                Self::read_task(&self.home, &agent_session)?
+                    .pointer("/request/provider")
+                    .cloned()
+                    .ok_or_else(|| error("Prepared task lacks its underlying provider basis"))?,
+            )
+            .map_err(error)?
+        } else {
+            configured.clone()
+        };
         if configured.protocol == EncounterProtocol::PrimeRpc
             && (configured.body_ref.is_none() || configured.body_revision.is_none())
         {
@@ -1532,11 +1545,51 @@ impl EncounterService {
         let model_reading = serde_json::to_value(&model).map_err(error)?;
         let body_ref = configured.body_ref.clone();
         let body_revision = configured.body_revision.clone();
+        let owner_launcher_argv_digest = blake3::hash(
+            serde_json::to_string(&configured.argv)
+                .expect("argv JSON")
+                .as_bytes(),
+        )
+        .to_hex()
+        .to_string();
+        let effective_launch_argv_digest = blake3::hash(
+            serde_json::to_string(&launch_argv)
+                .expect("launch argv JSON")
+                .as_bytes(),
+        )
+        .to_hex()
+        .to_string();
+        let provider_argv_digest = blake3::hash(
+            serde_json::to_string(&body_provider.argv)
+                .expect("argv JSON")
+                .as_bytes(),
+        )
+        .to_hex()
+        .to_string();
+        let harness_profile = body_provider
+            .argv
+            .first()
+            .and_then(|program| aikit_adapters::profiles::for_argv_program(program))
+            .map(|profile| profile.slug.clone());
+        let body_basis = json!({
+            "schema":"aikit.resident-body-basis/v1",
+            "provider_id":body_provider.id,
+            "protocol":body_provider.protocol,
+            "provider_argv_digest":provider_argv_digest,
+            "owner_launcher_provider_id":configured.id,
+            "owner_launcher_argv_digest":owner_launcher_argv_digest,
+            "effective_launch_argv_digest":effective_launch_argv_digest,
+            "harness_profile":harness_profile,
+            "task_bound":task_bound,
+            "cwd":cwd,
+            "required_context":configured.required_context,
+            "model_basis_digest":model.as_ref().map(PreparedModel::fingerprint).transpose()?,
+        });
         if let Some((dispatch, receipt)) = &selected_configuration {
             self.store.append(&agent_session,&json!({"kind":"selected-model-configured","agent_session":agent_session,"native_session_id":receipt.native_session_id,"provider":provider,"dispatch":dispatch,"previous_model_observation":receipt.previous,"model_observation":receipt.current,"standing":"provider-confirmed-session-configuration-under-the-durable-model-policy"}))?;
         }
         let opened_mode_observation = lane.binding().mode_observation.clone();
-        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"now_context_config_digest":blake3::hash(serde_json::to_vec(&configured.now_context).expect("NOW config JSON").as_slice()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"mode_observation":opened_mode_observation,"model_selection":model_reading,"launch_model_default":launch_default,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-resume"} else {"new-native-session"},"composed_tools_route":if mcp_native_fallback.is_some() {"harness-native-mcp-config-seam"} else {"session-wire-or-none"},"mcp_native_fallback_reason":mcp_native_fallback.as_ref().map(|(reason, _)| reason.clone())}))?;
+        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":owner_launcher_argv_digest,"body_basis":body_basis,"now_context_config_digest":blake3::hash(serde_json::to_vec(&configured.now_context).expect("NOW config JSON").as_slice()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"mode_observation":opened_mode_observation,"model_selection":model_reading,"launch_model_default":launch_default,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-resume"} else {"new-native-session"},"composed_tools_route":if mcp_native_fallback.is_some() {"harness-native-mcp-config-seam"} else {"session-wire-or-none"},"mcp_native_fallback_reason":mcp_native_fallback.as_ref().map(|(reason, _)| reason.clone())}))?;
         // The owner drains transport delivery; durable cursor readers are
         // independent views of the same canonical journal.
         let drain = lane.clone();
@@ -1618,6 +1671,8 @@ impl EncounterService {
             .identity(&agent_session)
             .ok()
             .and_then(|identity| identity.binding.mode_observation);
+        let receipt_provider = provider.clone();
+        let receipt_protocol = configured.protocol;
         residents.insert(
             agent_session.clone(),
             Arc::new(Resident {
@@ -1635,6 +1690,7 @@ impl EncounterService {
                 cwd,
                 argv: configured.argv,
                 model,
+                body_basis: body_basis.clone(),
                 now_context: configured.now_context,
             }),
         );
@@ -1642,7 +1698,7 @@ impl EncounterService {
         drop(agency_lock);
         // The resident just became ready: this is the moment queued durable
         // deliveries wait for. Drain before answering the open.
-        let mut receipt = json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"mode_observation":mode_observation,"model_selection":model_reading,"body_ref":configured.body_ref,"body_revision":configured.body_revision,"resident":true,"inference_observed":false});
+        let mut receipt = json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"mode_observation":mode_observation,"model_selection":model_reading,"provider":receipt_provider,"protocol":receipt_protocol,"body_basis":body_basis,"body_ref":configured.body_ref,"body_revision":configured.body_revision,"resident":true,"inference_observed":false});
         if let Some((reason, projection)) = &mcp_native_fallback {
             // The composed tool surface does not ride this session's wire: the
             // open outcome names the harness's native MCP configuration seam

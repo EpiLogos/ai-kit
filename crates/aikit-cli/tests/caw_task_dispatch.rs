@@ -5,6 +5,9 @@ use aikit_adapters::agency_admission::AgencySourceBasis;
 use aikit_cli::encounter_service::{
     EncounterAgencyBinding, EncounterContextAdmission, EncounterRequiredSource,
 };
+use aikit_core::resource::{
+    CredentialCondition, DeclaredRoute, ModelCatalogueEntry, ModelRouteKind, ProviderRef, SourceRef,
+};
 use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::session_space_application::{
     SessionSpaceAgentAttachmentIntent, SessionSpaceMutation,
@@ -16,7 +19,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 fn r(s: &str) -> ResourceRef {
     ResourceRef::parse(s).unwrap()
@@ -33,6 +36,9 @@ struct World {
 }
 impl World {
     fn new(allowed: bool) -> Self {
+        Self::with_model_action(allowed, false)
+    }
+    fn with_model_action(allowed: bool, model_action: bool) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let home = AikitHome::at(root.join("home"));
@@ -92,8 +98,15 @@ impl World {
             serde_json::from_str(include_str!("fixtures/caw-agency-request.json")).unwrap();
         source["differentiated_binding"]["world_ref"] = json!("control:root");
         if allowed {
-            source["determination"]["delegated_autonomy"]["allowed_action_refs"] =
-                json!(["action/aikit/encounter-send", "action/aikit/encounter-task"]);
+            source["determination"]["delegated_autonomy"]["allowed_action_refs"] = if model_action {
+                json!([
+                    "action/aikit/encounter-send",
+                    "action/aikit/encounter-task",
+                    "action/aikit/model-realise"
+                ])
+            } else {
+                json!(["action/aikit/encounter-send", "action/aikit/encounter-task"])
+            };
         }
         let path = world.root.join("agency.json");
         let bytes = serde_json::to_vec(&source).unwrap();
@@ -183,8 +196,15 @@ impl World {
         ])
     }
     fn start(&mut self) {
+        self.start_with_pi_config_ambient(None);
+    }
+    fn start_with_pi_config_ambient(&mut self, ambient_pi_config: Option<&Path>) {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_aikit-session-space"));
+        if let Some(path) = ambient_pi_config {
+            command.env("PI_CODING_AGENT_DIR", path);
+        }
         self.child = Some(
-            Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
+            command
                 .env("AIKIT_HOME", self.home.root())
                 .env("WORKCELL_CONTROL_TOKEN", "controlled-caw-material-token")
                 .env("CENTRAL_NATIVE_TOKEN", "CONTROLLED_MUST_NOT_REACH_PROVIDER")
@@ -239,6 +259,145 @@ impl World {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+}
+
+fn prepare_actual_pi_task(world: &World) -> Value {
+    let pi = PathBuf::from(std::env::var_os("AIKIT_CAW_PI_BIN").expect("actual Pi required"));
+    assert_eq!(pi.file_name().and_then(|name| name.to_str()), Some("pi"));
+    let entry = ModelCatalogueEntry {
+        model: r("model:north-mini-code"),
+        name: "North Mini Code free".into(),
+        description: "Actual Pi selected-model startup without inference".into(),
+        superseded_refs: Default::default(),
+        routes: vec![DeclaredRoute {
+            provider: ProviderRef::parse("provider:openrouter").unwrap(),
+            kind: ModelRouteKind::ProviderNative,
+            provider_native_ids: ["cohere/north-mini-code:free".to_string()].into(),
+            endpoint: None,
+            credential: CredentialCondition::NotRequired,
+        }],
+        source: SourceRef::parse("source/actual-pi-task-selection-test").unwrap(),
+        freshness: None,
+        book: None,
+    };
+    let catalogue = world
+        .home
+        .root()
+        .join(aikit_store::model_catalogue::MODEL_CATALOGUE_DIR);
+    fs::create_dir_all(&catalogue).unwrap();
+    fs::write(
+        catalogue.join("actual-pi-task.json"),
+        serde_json::to_vec(&vec![&entry]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        aikit_store::model_catalogue::resolved_catalogue(&world.home)
+            .0
+            .get(&entry.model),
+        Some(&entry)
+    );
+    let policy = json!({
+        "schema":"aikit.model-dispatch-policy/v1",
+        "agent_ref":"agent:existing-1",
+        "world_ref":"control:root",
+        "authority_ref":"authority:project:delegation",
+        "bounds_refs":["bound:project:delegation"],
+        "model_ref":"model:north-mini-code",
+        "provider_ref":"provider:openrouter",
+        "native_provider":"openrouter",
+        "provider_native_id":"cohere/north-mini-code:free",
+        "expires_at_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() + 300_000,
+        "credential":null,
+    });
+    let policy_path = world.root.join("actual-pi-task-policy.json");
+    let policy_bytes = serde_json::to_vec(&policy).unwrap();
+    fs::write(&policy_path, &policy_bytes).unwrap();
+    let mut request = world.prepare_input();
+    request["provider"] = json!({
+        "id":"native-pi-task",
+        "label":"Actual Pi RPC protected task startup",
+        "protocol":"pi-rpc",
+        "argv":[pi,"--mode","rpc","--no-extensions","--session-dir",
+            world.root.join("Work/demo/src/pi-sessions")],
+        "model_policy":{
+            "source":"source/actual-pi-task-policy",
+            "revision":"rev/actual-pi-task-policy-1",
+            "path":policy_path,
+            "content_digest":format!("blake3:{}", blake3::hash(&policy_bytes).to_hex()),
+        }
+    });
+    let prepared = world.cli(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        request.to_string(),
+    ]);
+    assert_eq!(prepared["ready"], true);
+    world.cli(&[
+        "encounter-configure".into(),
+        "--provider-json".into(),
+        request["provider"].to_string(),
+    ]);
+    prepared
+}
+
+#[test]
+#[ignore = "requires source-built Central, Workcell, Actuation and actual pinned Pi; mandatory CAW lane"]
+fn real_pi_task_startup_uses_allocated_now_instead_of_ambient_config() {
+    let mut world = World::with_model_action(true, true);
+    let ambient = world.root.join("ambient-outside-task");
+    let prepared = prepare_actual_pi_task(&world);
+    world.start_with_pi_config_ambient(Some(&ambient));
+    let opened = world.open(&prepared, &world.root.join("Work/demo/src"));
+    assert_eq!(opened["ok"], true, "{opened}");
+    assert_eq!(opened["data"]["inference_observed"], false);
+    assert_eq!(opened["data"]["protocol"], "pi-rpc");
+    assert_eq!(opened["data"]["body_basis"]["harness_profile"], "pi");
+    assert_eq!(
+        opened["data"]["model_observation"]["current_model_id"], "cohere/north-mini-code:free",
+        "the native Pi get_state must confirm the selected free model"
+    );
+    assert!(
+        opened["data"]["native_session_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "the real Pi protocol must open an identified native session"
+    );
+    let now = PathBuf::from(
+        prepared["allocation"]["allocation"]["writable_destination"]
+            .as_str()
+            .unwrap(),
+    );
+    assert!(prepared["requirements"]["writable_paths"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(now)));
+    assert!(now.join("pi-agent").is_dir());
+    assert!(
+        !ambient.exists(),
+        "ambient Pi config escaped the task grant"
+    );
+    println!("ACTUAL_PI_TASK_STARTUP_INSIDE_NATIVE_NOW_WORKCELL");
+}
+
+#[test]
+#[ignore = "requires source-built Central, Workcell, Actuation and actual pinned Pi; mandatory CAW lane"]
+fn real_pi_task_refuses_redirected_allocated_config_directory() {
+    let mut world = World::with_model_action(true, true);
+    let prepared = prepare_actual_pi_task(&world);
+    let now = PathBuf::from(
+        prepared["allocation"]["allocation"]["writable_destination"]
+            .as_str()
+            .unwrap(),
+    );
+    let outside = world.root.join("outside-task-pi-config");
+    fs::create_dir(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, now.join("pi-agent")).unwrap();
+    world.start();
+    let refused = world.open(&prepared, &world.root.join("Work/demo/src"));
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
 }
 impl Drop for World {
     fn drop(&mut self) {

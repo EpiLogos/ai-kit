@@ -1,7 +1,7 @@
 //! Task admission for the existing encounter owner. Central owns the clearing;
 //! Workcell confines the existing protocol child; this module owns neither.
 use super::{error, native_admission, read_binding};
-use crate::encounter_service::{EncounterProvider, EncounterService};
+use crate::encounter_service::{EncounterProtocol, EncounterProvider, EncounterService};
 use aikit_adapters::central_placement::{
     AllocatedCentralTask, CentralTaskRequest, NativeCentralPlacement,
 };
@@ -586,6 +586,37 @@ impl EncounterService {
             .requirements
             .as_ref()
             .expect("validated requirements");
+        // Pi writes its agent configuration at startup even when --session-dir
+        // points into task scratch. Keep that state in this task's actual
+        // Central allocation, already present in the prepared Workcell grant.
+        // Do not inherit an ambient PI_CODING_AGENT_DIR or widen the grant.
+        let pi_config_dir = if record.launcher.protocol == EncounterProtocol::PiRpc {
+            let now = record
+                .allocation
+                .as_ref()
+                .expect("validated allocation")
+                .now_directory()?;
+            if now.canonicalize().map_err(error)? != now
+                || !requirements["writable_paths"]
+                    .as_array()
+                    .is_some_and(|paths| paths.contains(&json!(now)))
+            {
+                return Err(error(
+                    "Pi state needs the exact prepared task NOW write allocation",
+                ));
+            }
+            let config_dir = now.join("pi-agent");
+            match fs::symlink_metadata(&config_dir) {
+                Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+                    return Err(error("Pi state directory must be a native directory"));
+                }
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(error(e)),
+                _ => {}
+            }
+            Some(config_dir)
+        } else {
+            None
+        };
         let (mut model_argv, model_environment) =
             super::model::execution(home, session, &record.request.provider)?;
         if record.request.provider.model_policy.is_none() {
@@ -612,6 +643,9 @@ impl EncounterService {
             .env_remove("WORKCELL_CONTROL_TOKEN");
         if let Some(environment) = model_environment {
             environment.apply(&mut command);
+        }
+        if let Some(config_dir) = pi_config_dir {
+            command.env("PI_CODING_AGENT_DIR", config_dir);
         }
         // Retain the immutable requirements path across exec. Its private owner
         // directory is outside every write aperture. History can inspect it.
