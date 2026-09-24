@@ -712,18 +712,6 @@ impl EncounterService {
         }
         Ok((body, true))
     }
-    pub(crate) fn check_task_launch(
-        &self,
-        session: &ResourceRef,
-        provider: &EncounterProvider,
-        cwd: &std::path::Path,
-    ) -> Result<()> {
-        self.selected_model_provider(session, provider, cwd)
-            .map(|_| ())
-    }
-    pub(crate) fn is_task_bound(&self, session: &ResourceRef) -> Result<bool> {
-        Ok(read(&self.home, session)?.is_some())
-    }
     pub fn read_task(home: &AikitHome, session: &ResourceRef) -> Result<Value> {
         serde_json::to_value(read(home, session)?).map_err(error)
     }

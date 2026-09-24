@@ -51,6 +51,24 @@ provider credentials. The `actual_pi_open_emits_factory_selection_without_infere
 case emits an actual owner receipt for the Factory consumer tests; controlled
 protocol nonregression and live provider execution retain separate evidence.
 
+The real Codex ACP selected-model case requires a private, current ChatGPT
+Codex login. It is compiled and run only when an operator explicitly enables
+`codex-account-native` on that account's host. The mandatory credential-free
+CAW workflow still runs all its existing ignored tests. To execute the Codex
+acceptance without sending a prompt, set `AIKIT_CAW_ACTUATION_BIN` to the exact
+native Actuation executable and run:
+
+```text
+cargo test --locked -p aikit-cli --features codex-account-native \
+  --test caw_native_delivery \
+  model_proof::application::actual_codex_acp_open_emits_factory_selection_without_inference \
+  -- --exact --ignored --nocapture
+```
+
+This test preserves its real login, native model-readback and no-inference
+assertions; a missing private login is a refusal in this explicit run, not a
+hosted-CI skip presented as success.
+
 ## Proof and remaining work
 
 The maintained `caw_native_delivery` target includes controlled model tests plus the public application and compose-CLI paths. They exercise scoped key delivery, profile-independent selection, actual native protocol response, changed catalogue/policy, revoked/missing credentials, unavailable authority, unknown or contradictory model facts, duplicate delivery, and removal of the running owner. Controlled keys and replies are not commercial-model or installed evidence. Only an actually executed exact-head CI result establishes the tests' standing.

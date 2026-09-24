@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 description = "The aikit binary: CLI contract, JSON envelope, multicall shim dispatch, TUI host."
 
+[features]
+# Opt in only on a host with the user's real Codex ChatGPT login. The mandatory
+# credential-free CAW native lane runs every ignored test in its target.
+codex-account-native = []
+
 [[bin]]
 name = "aikit"
 path = "src/main.rs"

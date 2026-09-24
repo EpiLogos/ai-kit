@@ -107,6 +107,7 @@ fn actual_pi_setup(w: &World) -> Value {
     }})
 }
 
+#[cfg(feature = "codex-account-native")]
 fn actual_codex_setup(w: &World) -> EncounterAgencyBinding {
     let mut binding = w.attach("root", "acp");
     let mut source: Value =
@@ -185,6 +186,7 @@ fn actual_codex_setup(w: &World) -> EncounterAgencyBinding {
 }
 
 #[test]
+#[cfg(feature = "codex-account-native")]
 #[ignore = "requires real Codex ACP, an existing ChatGPT login and pinned Actuation; selects only, never prompts"]
 fn actual_codex_acp_open_emits_factory_selection_without_inference() {
     let mut w = World::new();
