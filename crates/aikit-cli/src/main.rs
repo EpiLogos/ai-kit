@@ -1097,10 +1097,18 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                     },
                 }),
             });
-            aikit_adapters::run_gateway_service_with_ticks(
+            // Peers ask this gateway who occupies a Position on this
+            // Workcell; the answer is this Workcell's Actuation, read then.
+            let occupancy: Option<std::sync::Arc<dyn aikit_adapters::GatewayOccupancyReader>> =
+                Some(std::sync::Arc::new(
+                    aikit_cli::gateway_contact::ServedOccupancy {
+                        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                    },
+                ));
+            aikit_adapters::run_gateway_service_with_hooks(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
-                ticks,
+                aikit_adapters::GatewayServiceHooks { ticks, occupancy },
             )?;
             Ok(Reply::Text("gateway service stopped cleanly".into()))
         }
@@ -1136,6 +1144,7 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
         GatewaySub::Who(a) => {
             let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
             gateway_data(aikit_cli::gateway_contact::who(
+                &home,
                 &owners,
                 &gateway,
                 &cwd,

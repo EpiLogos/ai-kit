@@ -28,8 +28,8 @@ use aikit_core::{AikitError, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::gateway_runtime::{
-    execute_gateway_command, AgencyGateway, GatewayCommand, GatewayRequestEnvelope,
-    GatewayResponse, GatewayResponseEnvelope,
+    execute_gateway_command, AgencyGateway, GatewayCommand, GatewayOccupancyReading,
+    GatewayRequestEnvelope, GatewayResponse, GatewayResponseEnvelope,
 };
 
 pub const GATEWAY_SERVICE_CARRIER_VERSION: &str = "aikit.gateway-service-carrier/v1";
@@ -327,6 +327,23 @@ pub struct GatewayTickLoop {
     pub hook: Box<dyn GatewayTick>,
 }
 
+/// The serving gateway's own Workcell occupancy, read from that Workcell's
+/// occupancy owner (Actuation) at the moment a peer asks. The gateway keeps no
+/// copy: a reader answers each `occupancy-read`/`occupancy-list` command fresh,
+/// outside the gateway state lock, and never writes gateway state. It always
+/// returns a reading; an owner that could not answer is recorded inside it.
+pub trait GatewayOccupancyReader: Send + Sync + 'static {
+    /// `position_ref: None` asks for the whole listing.
+    fn read(&self, gateway_ref: &str, position_ref: Option<&str>) -> GatewayOccupancyReading;
+}
+
+/// What runs beside the carriers: the periodic tick and the occupancy reader.
+#[derive(Default)]
+pub struct GatewayServiceHooks {
+    pub ticks: Option<GatewayTickLoop>,
+    pub occupancy: Option<Arc<dyn GatewayOccupancyReader>>,
+}
+
 /// Run every configured service carrier against one shared gateway state,
 /// with an optional periodic tick loop.
 pub fn run_gateway_service_with_ticks(
@@ -334,6 +351,24 @@ pub fn run_gateway_service_with_ticks(
     config: GatewayServiceConfig,
     ticks: Option<GatewayTickLoop>,
 ) -> Result<()> {
+    run_gateway_service_with_hooks(
+        gateway,
+        config,
+        GatewayServiceHooks {
+            ticks,
+            occupancy: None,
+        },
+    )
+}
+
+/// Run every configured service carrier against one shared gateway state,
+/// with the given hooks.
+pub fn run_gateway_service_with_hooks(
+    gateway: AgencyGateway,
+    config: GatewayServiceConfig,
+    hooks: GatewayServiceHooks,
+) -> Result<()> {
+    let GatewayServiceHooks { ticks, occupancy } = hooks;
     config.validate()?;
     // Held until this function returns: the service is the only writer of its
     // state file while it runs (see `GatewayStateLock`).
@@ -401,6 +436,7 @@ pub fn run_gateway_service_with_ticks(
         let shutdown = Arc::clone(&shutdown);
         let state_file = config.state_file.clone();
         let max_frame_bytes = config.max_frame_bytes;
+        let occupancy = occupancy.clone();
         workers.push(thread::spawn(move || {
             let result = serve_websocket_listener(
                 listener,
@@ -409,6 +445,7 @@ pub fn run_gateway_service_with_ticks(
                 token,
                 state_file,
                 max_frame_bytes,
+                occupancy,
             );
             // A carrier that fails stops the whole service: a half-alive
             // gateway answering on one carrier only is silent degradation.
@@ -424,8 +461,10 @@ pub fn run_gateway_service_with_ticks(
         let gateway = Arc::clone(&gateway);
         let shutdown = Arc::clone(&shutdown);
         let state_file = config.state_file.clone();
+        let occupancy = occupancy.clone();
         workers.push(thread::spawn(move || {
-            let result = serve_unix_socket(path, gateway, Arc::clone(&shutdown), state_file);
+            let result =
+                serve_unix_socket(path, gateway, Arc::clone(&shutdown), state_file, occupancy);
             if result.is_err() {
                 shutdown.store(true, Ordering::SeqCst);
             }
@@ -479,6 +518,8 @@ pub fn run_gateway_service_with_ticks(
     persist_gateway_state(&gateway, config.state_file.as_deref())
 }
 
+type OccupancyHook = Option<Arc<dyn GatewayOccupancyReader>>;
+
 fn serve_websocket_listener(
     listener: TcpListener,
     gateway: Arc<Mutex<AgencyGateway>>,
@@ -486,6 +527,7 @@ fn serve_websocket_listener(
     token: String,
     state_file: Option<PathBuf>,
     max_frame_bytes: usize,
+    occupancy: OccupancyHook,
 ) -> Result<()> {
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
@@ -502,6 +544,7 @@ fn serve_websocket_listener(
                 let shutdown = Arc::clone(&shutdown);
                 let token = token.clone();
                 let state_file = state_file.clone();
+                let occupancy = occupancy.clone();
                 thread::spawn(move || {
                     let _ = handle_websocket_connection(
                         stream,
@@ -510,6 +553,7 @@ fn serve_websocket_listener(
                         &token,
                         state_file.as_deref(),
                         max_frame_bytes,
+                        occupancy.as_deref(),
                     );
                 });
             }
@@ -534,6 +578,7 @@ fn handle_websocket_connection(
     token: &str,
     state_file: Option<&Path>,
     max_frame_bytes: usize,
+    occupancy: Option<&dyn GatewayOccupancyReader>,
 ) -> Result<()> {
     stream
         .set_read_timeout(Some(Duration::from_secs(60)))
@@ -566,7 +611,7 @@ fn handle_websocket_connection(
                     )
                 })?;
                 let (response, should_shutdown) =
-                    execute_serialized_request(&gateway, &text, state_file)?;
+                    execute_serialized_request(&gateway, &text, state_file, occupancy)?;
                 write_websocket_text(&mut writer, response.as_bytes())?;
                 if should_shutdown {
                     shutdown.store(true, Ordering::SeqCst);
@@ -594,6 +639,7 @@ fn serve_unix_socket(
     gateway: Arc<Mutex<AgencyGateway>>,
     shutdown: Arc<AtomicBool>,
     state_file: Option<PathBuf>,
+    occupancy: OccupancyHook,
 ) -> Result<()> {
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
@@ -653,9 +699,15 @@ fn serve_unix_socket(
                 let gateway = Arc::clone(&gateway);
                 let shutdown = Arc::clone(&shutdown);
                 let state_file = state_file.clone();
+                let occupancy = occupancy.clone();
                 thread::spawn(move || {
-                    let _ =
-                        handle_line_connection(stream, gateway, shutdown, state_file.as_deref());
+                    let _ = handle_line_connection(
+                        stream,
+                        gateway,
+                        shutdown,
+                        state_file.as_deref(),
+                        occupancy.as_deref(),
+                    );
                 });
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -680,6 +732,7 @@ fn handle_line_connection<S>(
     gateway: Arc<Mutex<AgencyGateway>>,
     shutdown: Arc<AtomicBool>,
     state_file: Option<&Path>,
+    occupancy: Option<&dyn GatewayOccupancyReader>,
 ) -> Result<()>
 where
     S: Read + Write + Send + 'static,
@@ -700,7 +753,7 @@ where
             continue;
         }
         let (response, should_shutdown) =
-            execute_serialized_request(&gateway, line.trim_end(), state_file)?;
+            execute_serialized_request(&gateway, line.trim_end(), state_file, occupancy)?;
         {
             let stream = reader.get_mut();
             stream
@@ -724,6 +777,7 @@ fn execute_serialized_request(
     gateway: &Arc<Mutex<AgencyGateway>>,
     input: &str,
     state_file: Option<&Path>,
+    occupancy: Option<&dyn GatewayOccupancyReader>,
 ) -> Result<(String, bool)> {
     let request = match serde_json::from_str::<GatewayRequestEnvelope>(input) {
         Ok(request) => request,
@@ -739,6 +793,32 @@ fn execute_serialized_request(
             return Ok((response.to_string(), false));
         }
     };
+    // An occupancy query is the Workcell owner's answer, not gateway state:
+    // read it outside the state lock so a slow owner never stalls the journal.
+    if let (Some(position_ref), Some(reader)) = (request.command.occupancy_query(), occupancy) {
+        let gateway_ref = gateway
+            .lock()
+            .map_err(|_| {
+                AikitError::new(
+                    "agency_gateway_service.poisoned",
+                    "gateway state lock was poisoned",
+                )
+            })?
+            .gateway_ref()
+            .to_string();
+        let reading = reader.read(&gateway_ref, position_ref);
+        let response = GatewayResponseEnvelope::from_result(
+            request.request_id,
+            Ok(GatewayResponse::Occupancy { reading }),
+        );
+        let encoded = serde_json::to_string(&response).map_err(|error| {
+            AikitError::new(
+                "agency_gateway_service.response_encode",
+                format!("encode gateway response: {error}"),
+            )
+        })?;
+        return Ok((encoded, false));
+    }
     let should_shutdown = request.command.is_shutdown();
     let mut gateway = gateway.lock().map_err(|_| {
         AikitError::new(
@@ -1186,6 +1266,7 @@ mod tests {
             state_basis: "test".into(),
             reply_to: None,
             forward_to_workcell_ref: None,
+            routing: None,
         }
     }
 
@@ -1366,6 +1447,7 @@ mod tests {
                 "secret".into(),
                 None,
                 64 * 1024,
+                None,
             );
             done_tx.send(result).unwrap();
         });
@@ -1485,5 +1567,124 @@ mod tests {
             .unwrap();
         assert!(state.exists());
         assert!(!socket.exists());
+    }
+
+    /// A fixture Workcell owner: answers from a map, counts how often it was
+    /// asked, and proves it is consulted per query rather than cached.
+    struct FixtureOccupancy {
+        asked: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl GatewayOccupancyReader for FixtureOccupancy {
+        fn read(&self, gateway_ref: &str, position_ref: Option<&str>) -> GatewayOccupancyReading {
+            let asked = self.asked.fetch_add(1, Ordering::SeqCst) + 1;
+            GatewayOccupancyReading {
+                schema: crate::gateway_runtime::GATEWAY_OCCUPANCY_READING_SCHEMA.into(),
+                position_ref: position_ref.map(str::to_owned),
+                gateway_ref: gateway_ref.into(),
+                workcell_ref: Some("workcell:b".into()),
+                workcell_basis: "fixture".into(),
+                occupancy: Some(serde_json::json!({
+                    "position_ref": position_ref,
+                    "state": "occupied",
+                    "current": {"generation_ref": format!("actuation:generation:{asked}")},
+                })),
+                unavailable: None,
+                read_at_unix_ms: 1,
+            }
+        }
+    }
+
+    fn line_exchange(stream: &mut std::os::unix::net::UnixStream, request: Value) -> Value {
+        writeln!(stream, "{request}").unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut response = String::new();
+        reader.read_line(&mut response).unwrap();
+        serde_json::from_str(response.trim()).unwrap()
+    }
+
+    #[test]
+    fn an_occupancy_query_is_answered_fresh_by_the_owner_hook_and_never_by_the_kernel() {
+        use std::os::unix::net::UnixStream;
+
+        // No hook: the kernel holds no occupancy and says so.
+        let mut kernel = gateway();
+        let refused = execute_gateway_command(
+            &mut kernel,
+            GatewayCommand::OccupancyRead {
+                position_ref: "central:position:project:O-I:scribe".into(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(refused.code(), "agency_gateway.occupancy_not_served");
+        assert!(GatewayCommand::OccupancyList.is_read_only());
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("gateway.sock");
+        let state = root.path().join("gateway.json");
+        let config = GatewayServiceConfig {
+            websocket_bind: None,
+            websocket_bearer_token: None,
+            unix_socket: Some(socket.clone()),
+            state_file: Some(state.clone()),
+            max_frame_bytes: DEFAULT_GATEWAY_MAX_FRAME_BYTES,
+        };
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hooks = GatewayServiceHooks {
+            ticks: None,
+            occupancy: Some(Arc::new(FixtureOccupancy {
+                asked: Arc::clone(&asked),
+            })),
+        };
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            done_tx
+                .send(run_gateway_service_with_hooks(gateway(), config, hooks))
+                .unwrap()
+        });
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !socket.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        let first = line_exchange(
+            &mut stream,
+            serde_json::json!({"request_id":"o1","command":{"type":"occupancy-read","position_ref":"central:position:project:O-I:scribe"}}),
+        );
+        assert_eq!(first["ok"], true, "{first}");
+        let reading = &first["response"]["reading"];
+        assert_eq!(first["response"]["type"], "occupancy");
+        assert_eq!(reading["schema"], "aikit.gateway-occupancy-reading/v1");
+        assert_eq!(reading["gateway_ref"], "agency-gateway/test");
+        assert_eq!(reading["workcell_ref"], "workcell:b");
+        assert_eq!(
+            reading["position_ref"],
+            "central:position:project:O-I:scribe"
+        );
+        assert_eq!(
+            reading["occupancy"]["current"]["generation_ref"],
+            "actuation:generation:1"
+        );
+        let listing = line_exchange(
+            &mut stream,
+            serde_json::json!({"request_id":"o2","command":{"type":"occupancy-list"}}),
+        );
+        assert!(listing["response"]["reading"]["position_ref"].is_null());
+        // Asked twice, read twice: nothing is cached.
+        assert_eq!(
+            listing["response"]["reading"]["occupancy"]["current"]["generation_ref"],
+            "actuation:generation:2"
+        );
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
+        // An occupancy query writes no gateway state.
+        assert!(!state.exists());
+        line_exchange(
+            &mut stream,
+            serde_json::json!({"request_id":"stop","command":{"type":"shutdown"}}),
+        );
+        done_rx
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .unwrap();
     }
 }

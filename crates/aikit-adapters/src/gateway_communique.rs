@@ -117,6 +117,22 @@ impl CommuniqueForward {
     }
 }
 
+/// Why a Communique was routed to another Workcell when this Workcell's own
+/// occupancy ledger had no current occupant for the recipient: the remote
+/// gateway that reported one, the Workcell it serves, and the generation it
+/// named. Recorded once the route is taken, so a relay can always be traced
+/// back to the occupancy answer that justified it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommuniqueRouting {
+    pub workcell_ref: String,
+    pub gateway_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_ref: Option<String>,
+    /// Plain words: what was asked, of whom, and what it answered.
+    pub basis: String,
+    pub observed_at_unix_ms: u64,
+}
+
 /// One state change, appended in order. The journal never rewrites a
 /// transition; the record's `state` is always the last entry's state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +178,9 @@ pub struct Communique {
     pub received_from_gateway_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forward: Option<CommuniqueForward>,
+    /// Set when the route came from another Workcell's occupancy answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<CommuniqueRouting>,
     #[serde(default)]
     pub transitions: Vec<CommuniqueTransition>,
 }
@@ -210,6 +229,9 @@ pub struct CommuniqueDraft {
     /// Queue for relay to this remote Workcell's gateway.
     #[serde(default)]
     pub forward_to_workcell_ref: Option<String>,
+    /// The remote occupancy answer the route was taken on, if any.
+    #[serde(default)]
+    pub routing: Option<CommuniqueRouting>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -481,6 +503,7 @@ impl CommuniqueJournal {
             origin_gateway_ref: gateway_ref.into(),
             received_from_gateway_ref: None,
             forward,
+            routing: draft.routing,
             transitions: vec![CommuniqueTransition {
                 at_unix_ms: draft.sent_at_unix_ms,
                 state: draft.state,
@@ -702,10 +725,15 @@ impl CommuniqueJournal {
             .collect()
     }
 
+    /// Record one relay attempt. `routing` names the remote occupancy answer
+    /// the attempt was made on, when the route came from one (a Communique
+    /// re-resolved by a relay pass); it replaces any earlier routing, because
+    /// the latest answer is the one the relay followed.
     pub fn record_forward(
         &mut self,
         communique_ref: &str,
         outcome: CommuniqueForwardOutcome,
+        routing: Option<CommuniqueRouting>,
     ) -> Result<Communique> {
         let record = self.get_mut(communique_ref)?;
         if !record.awaits_local_delivery() {
@@ -718,6 +746,13 @@ impl CommuniqueJournal {
             ));
         }
         let attempts = record.forward.as_ref().map(|f| f.attempts()).unwrap_or(0) + 1;
+        let routed_on = routing
+            .as_ref()
+            .map(|routing| format!(" (routed on: {})", routing.basis))
+            .unwrap_or_default();
+        if routing.is_some() {
+            record.routing = routing;
+        }
         match outcome {
             CommuniqueForwardOutcome::Forwarded {
                 workcell_ref,
@@ -729,7 +764,7 @@ impl CommuniqueJournal {
                     at_unix_ms,
                     state: record.state,
                     basis: format!(
-                        "relayed to Workcell {workcell_ref} through gateway {remote_gateway_ref}; delivery is recorded there"
+                        "relayed to Workcell {workcell_ref} through gateway {remote_gateway_ref}; delivery is recorded there{routed_on}"
                     ),
                     generation_ref: None,
                 });
@@ -789,6 +824,7 @@ mod tests {
             state_basis: "fixture".into(),
             reply_to: None,
             forward_to_workcell_ref: None,
+            routing: None,
         }
     }
 
@@ -947,6 +983,7 @@ mod tests {
                     error: "connection refused".into(),
                     at_unix_ms: 11,
                 },
+                None,
             )
             .unwrap();
         assert!(matches!(
@@ -961,6 +998,7 @@ mod tests {
                     remote_gateway_ref: "agency-gateway/omarchy".into(),
                     at_unix_ms: 12,
                 },
+                None,
             )
             .unwrap();
         assert!(matches!(
@@ -970,6 +1008,48 @@ mod tests {
         assert!(journal.inbox(B).is_empty());
         assert!(journal.counts().is_empty());
         assert_eq!(forwarded.state, CommuniqueState::Pending);
+    }
+
+    #[test]
+    fn a_relay_taken_on_a_remote_occupancy_answer_records_that_answer() {
+        let mut journal = CommuniqueJournal::default();
+        let (held, _) = journal
+            .send("g", draft("one", Some(A), B, CommuniqueState::Held))
+            .unwrap();
+        assert!(held.routing.is_none());
+        let routing = CommuniqueRouting {
+            workcell_ref: "workcell:omarchy".into(),
+            gateway_ref: "agency-gateway/omarchy".into(),
+            generation_ref: Some("actuation:generation:b1".into()),
+            basis: "vacant here; agency-gateway/omarchy reports actuation:generation:b1".into(),
+            observed_at_unix_ms: 11,
+        };
+        let relayed = journal
+            .record_forward(
+                &held.communique_ref,
+                CommuniqueForwardOutcome::Forwarded {
+                    workcell_ref: "workcell:omarchy".into(),
+                    remote_gateway_ref: "agency-gateway/omarchy".into(),
+                    at_unix_ms: 12,
+                },
+                Some(routing.clone()),
+            )
+            .unwrap();
+        assert_eq!(relayed.routing, Some(routing));
+        assert_eq!(relayed.state, CommuniqueState::Held);
+        assert!(relayed
+            .transitions
+            .last()
+            .unwrap()
+            .basis
+            .contains("routed on: vacant here"));
+        assert!(journal.inbox(B).is_empty());
+        // The record, routing included, survives a restore.
+        let restored = CommuniqueJournal::restore(journal.records().to_vec()).unwrap();
+        assert_eq!(
+            restored.get(&held.communique_ref).unwrap().routing,
+            relayed.routing
+        );
     }
 
     #[test]
