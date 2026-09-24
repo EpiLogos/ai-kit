@@ -813,6 +813,42 @@ fn unhosted_pending_abort_revalidates_ready_with_fresh_revision_and_stale_cas_re
 
 #[test]
 #[ignore = "requires exact source-built Central, Workcell and Actuation; mandatory CAW lane"]
+fn profile_derived_codex_task_keeps_its_body_inside_the_workcell_launcher() {
+    let w = World::new(true);
+    let mut request = w.prepare_input();
+    request["provider"] = json!({
+        "id":"codex-task-body",
+        "label":"Codex ACP body selected through its native profile",
+        "protocol":"acp",
+        "from_profile":"codex",
+    });
+    let prepared = w.cli(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        request.to_string(),
+    ]);
+    assert_eq!(prepared["ready"], true);
+    assert_eq!(prepared["request"]["provider"]["from_profile"], "codex");
+    assert_eq!(prepared["launcher"]["from_profile"], Value::Null);
+    assert!(prepared["launcher"]["argv_fallback"]
+        .as_array()
+        .is_none_or(Vec::is_empty));
+    assert!(prepared["launcher"]["argv"]
+        .as_array()
+        .is_some_and(|argv| argv.iter().any(|arg| arg == "encounter-task-exec")));
+    let reread = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(reread["revision"], prepared["revision"]);
+    assert_eq!(reread["request"]["provider"]["from_profile"], "codex");
+}
+
+#[test]
+#[ignore = "requires exact source-built Central, Workcell and Actuation; mandatory CAW lane"]
 fn expired_unhosted_ready_is_reprepared_with_same_native_now_and_fresh_lease() {
     let mut w = World::new(true);
     let policy_path = w.root.join("Control/user/placement.json");

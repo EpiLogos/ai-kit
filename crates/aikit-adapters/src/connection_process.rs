@@ -30,6 +30,9 @@ use crate::agent_connection::ConnectionCommand;
 #[derive(Default)]
 pub struct ModelEnvironment {
     credentials: Vec<(String, SecretValue)>,
+    /// The exact installed Codex executable verified for a profile-derived
+    /// ACP wrapper. Never taken from ambient CODEX_PATH.
+    codex_path: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for ModelEnvironment {
@@ -41,6 +44,7 @@ impl std::fmt::Debug for ModelEnvironment {
             .collect();
         f.debug_struct("ModelEnvironment")
             .field("credentials", &names)
+            .field("codex_path", &self.codex_path)
             .finish()
     }
 }
@@ -65,6 +69,9 @@ impl ModelEnvironment {
     /// Merge another environment's deliveries into this one. Every merged
     /// name passes the same shape law.
     pub fn extend(&mut self, other: ModelEnvironment) -> Result<()> {
+        if let Some(path) = other.codex_path {
+            self.set_codex_path(path)?;
+        }
         for (env_var, secret) in other.credentials {
             self.push_credential(env_var, secret)?;
         }
@@ -77,6 +84,12 @@ impl ModelEnvironment {
         secret: SecretValue,
     ) -> Result<()> {
         let env_var = env_var.into();
+        if env_var == "CODEX_PATH" {
+            return Err(AikitError::new(
+                "connection.codex_path_reserved",
+                "CODEX_PATH is a native executable binding, not a credential delivery variable",
+            ));
+        }
         if !aikit_core::credential::valid_credential_variable(&env_var) {
             return Err(AikitError::new(
                 "connection.credential_variable_invalid",
@@ -89,17 +102,50 @@ impl ModelEnvironment {
         Ok(())
     }
 
-    /// Whether anything would actually be delivered. An environment with no
-    /// credential is never applied: launching without a key inherits the
-    /// caller's environment unchanged rather than scrubbing it for nothing.
+    /// Bind the codex-acp wrapper to the same native Codex binary whose
+    /// login was checked. This is a nonsecret executable path, not a caller
+    /// supplied general environment override.
+    pub fn set_codex_path(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        if !path.is_absolute() || !path.is_file() || !is_executable_file(path) {
+            return Err(AikitError::new(
+                "connection.codex_path_invalid",
+                "CODEX_PATH needs an absolute executable file selected by the native owner",
+            ));
+        }
+        if self
+            .codex_path
+            .as_deref()
+            .is_some_and(|existing| existing != path)
+        {
+            return Err(AikitError::new(
+                "connection.codex_path_conflict",
+                "Two different Codex executables cannot share one child environment",
+            ));
+        }
+        self.codex_path = Some(path.to_path_buf());
+        Ok(())
+    }
+
+    /// Whether any credential would be delivered. Callers may still apply an
+    /// empty environment to scrub ambient API keys for native own-login.
     pub fn is_empty(&self) -> bool {
-        self.credentials.is_empty()
+        self.credentials.is_empty() && self.codex_path.is_none()
     }
 
     pub fn apply(&self, command: &mut Command) {
+        self.apply_with(command, |name| std::env::var_os(name));
+    }
+
+    fn apply_with(
+        &self,
+        command: &mut Command,
+        mut ambient: impl FnMut(&str) -> Option<std::ffi::OsString>,
+    ) {
         command.env_clear();
         for name in [
             "HOME",
+            "CODEX_HOME",
             "PATH",
             "TERM",
             "LANG",
@@ -112,14 +158,28 @@ impl ModelEnvironment {
             "AIKIT_CONTEXT_ID",
             "AIKIT_ISOLATION",
         ] {
-            if let Some(value) = std::env::var_os(name) {
+            if let Some(value) = ambient(name) {
                 command.env(name, value);
             }
         }
         for (name, value) in &self.credentials {
             command.env(name, value.expose());
         }
+        if let Some(path) = &self.codex_path {
+            command.env("CODEX_PATH", path);
+        }
     }
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// A real stdio child process. ACP uses the JSON-line methods; classic targets
@@ -309,9 +369,10 @@ fn spawn_parts(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    // A delivered key is injected under the scrubbed final-child environment;
-    // without a delivery the caller's environment is inherited unchanged.
-    if let Some(environment) = environment.filter(|environment| !environment.is_empty()) {
+    // The caller may request a scrubbed environment with no delivered key,
+    // notably for Codex own-login. Absence of an environment alone means
+    // ordinary inheritance.
+    if let Some(environment) = environment {
         environment.apply(&mut command);
     }
     // Human native-action authority is not a provider credential. Even an
@@ -670,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn an_environment_with_no_credentials_is_never_applied() {
+    fn an_environment_with_no_credentials_is_distinct_from_no_environment() {
         assert!(ModelEnvironment::new().is_empty());
         let environment = ModelEnvironment::new()
             .with_credential(
@@ -679,6 +740,75 @@ mod tests {
             )
             .unwrap();
         assert!(!environment.is_empty());
+    }
+
+    #[test]
+    fn empty_scrubbed_environment_keeps_codex_home_and_withholds_api_keys() {
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "printf '%s\\n' \"$CODEX_HOME\"; if [ -n \"$OPENAI_API_KEY\" ]; then echo leaked; else echo withheld; fi",
+            ])
+            .env("OPENAI_API_KEY", "ambient-probe-key");
+        ModelEnvironment::new().apply_with(&mut command, |name| {
+            (name == "CODEX_HOME").then(|| "/isolated/native-codex-login".into())
+        });
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "/isolated/native-codex-login\nwithheld\n"
+        );
+    }
+
+    #[test]
+    fn scoped_codex_path_reaches_a_real_child_without_ambient_override() {
+        let executable = std::env::current_exe().unwrap();
+        let mut environment = ModelEnvironment::new();
+        environment.set_codex_path(&executable).unwrap();
+        assert!(!environment.is_empty());
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "printf '%s\\n' \"$CODEX_PATH\""])
+            .env("CODEX_PATH", "/ambient/foreign-codex");
+        environment.apply_with(&mut command, |_| None);
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            executable.to_str().unwrap()
+        );
+        assert!(ModelEnvironment::new()
+            .push_credential("CODEX_PATH", SecretValue::new("not-a-path").unwrap())
+            .is_err());
+    }
+
+    #[test]
+    fn empty_environment_on_real_connection_process_scrubs_ambient_variables() {
+        // This exercises spawn_parts, which used to drop Some(empty) and
+        // inherit the full ambient environment despite an own-login plan.
+        const NAME: &str = "AIKIT_CONNECTION_EMPTY_SCRUB_PROBE";
+        let old = std::env::var_os(NAME);
+        std::env::set_var(NAME, "ambient-present");
+        let argv = vec![
+            "sh".into(),
+            "-c".into(),
+            "if [ -n \"$AIKIT_CONNECTION_EMPTY_SCRUB_PROBE\" ]; then echo leaked; else echo withheld; fi".into(),
+        ];
+        let result = ConnectionProcess::spawn_split_with_environment(
+            &argv,
+            None,
+            Some(&ModelEnvironment::new()),
+        );
+        match old {
+            Some(value) => std::env::set_var(NAME, value),
+            None => std::env::remove_var(NAME),
+        }
+        let (writer, mut reader, control) = result.unwrap();
+        drop(writer);
+        assert_eq!(reader.read_line().unwrap(), "withheld");
+        drop(control);
     }
 
     #[test]

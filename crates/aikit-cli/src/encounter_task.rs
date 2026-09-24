@@ -169,7 +169,9 @@ fn launcher_for(
     provider: &EncounterProvider,
     revision: &SourceRevision,
 ) -> Result<EncounterProvider> {
+    let resolved_body = crate::encounter_profile_provider::resolve_provider(provider.clone())?;
     let mut launcher = provider.clone();
+    launcher.protocol = resolved_body.protocol;
     launcher.id = format!(
         "task-{}",
         blake3::hash(session.as_str().as_bytes()).to_hex()
@@ -189,15 +191,29 @@ fn launcher_for(
         revision.to_string(),
     ]);
     launcher.argv = argv;
+    // The outer launcher is a single Workcell boundary command. The original
+    // profile and its variants remain in request.provider for final exec;
+    // carrying them on this wrapper would either contradict from_profile or
+    // allow a fallback around the boundary.
+    launcher.from_profile = None;
+    launcher.argv_fallback.clear();
     Ok(launcher)
 }
 fn launcher_belongs_to(session: &ResourceRef, record: &TaskRecord) -> bool {
+    let Ok(resolved_body) =
+        crate::encounter_profile_provider::resolve_provider(record.request.provider.clone())
+    else {
+        return false;
+    };
     let mut expected = record.request.provider.clone();
+    expected.protocol = resolved_body.protocol;
     expected.id = format!(
         "task-{}",
         blake3::hash(session.as_str().as_bytes()).to_hex()
     );
     expected.argv = record.launcher.argv.clone();
+    expected.from_profile = None;
+    expected.argv_fallback.clear();
     let suffix = [
         "encounter-task-exec",
         "--agent-session",
@@ -321,6 +337,12 @@ fn validate(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Res
             "Task preparation is incomplete; explicitly recover the same request",
         ));
     }
+    if !launcher_belongs_to(session, record) {
+        return Err(error(
+            "Prepared task launcher no longer corresponds to its exact source body",
+        ));
+    }
+    crate::encounter_profile_provider::ensure_connection_facts_reachable(&record.request.provider)?;
     if authority(home, session, &record.request)? != record.agency_revision {
         return Err(error(
             "Task Agency changed; explicitly re-resolve before further work",
@@ -492,6 +514,17 @@ impl EncounterService {
         expected: Option<&SourceRevision>,
     ) -> Result<Value> {
         let request: TaskRequest = serde_json::from_value(input).map_err(error)?;
+        crate::encounter_profile_provider::ensure_connection_facts_reachable(&request.provider)?;
+        // Resolve and validate the declared body before journalling a pending
+        // task or allocating its NOW. The raw request remains the immutable
+        // source; its exact embedded profile is resolved again at admission
+        // and final protected exec.
+        let resolved_body =
+            crate::encounter_profile_provider::resolve_provider(request.provider.clone())?;
+        crate::encounter_profile_provider::ensure_connection_facts_reachable(&resolved_body)?;
+        if resolved_body.argv.first().is_none_or(|arg| arg.is_empty()) {
+            return Err(error("Task body has no native protocol launcher"));
+        }
         let _lock = ContextLock::acquire(
             home,
             &format!(
@@ -651,32 +684,33 @@ impl EncounterService {
             "record": prior,
         }))
     }
-    pub(crate) fn check_task_launch(
+    pub(crate) fn selected_model_provider(
         &self,
         session: &ResourceRef,
         provider: &EncounterProvider,
         cwd: &std::path::Path,
-    ) -> Result<()> {
+    ) -> Result<(EncounterProvider, bool)> {
         let Some(record) = read(&self.home, session)? else {
-            return Ok(());
+            return Ok((provider.clone(), false));
         };
         validate(&self.home, session, &record)?;
         if let Some(material) = &record.material {
             material.check_encounter_owner()?;
         }
-        if provider.id != record.launcher.id
-            || provider.argv != record.launcher.argv
-            || provider.protocol != record.launcher.protocol
-            || provider.required_context != record.launcher.required_context
-            || provider.model_policy != record.launcher.model_policy
+        if serde_json::to_value(provider).map_err(error)?
+            != serde_json::to_value(&record.launcher).map_err(error)?
             || cwd != record.request.cwd
         {
             return Err(error("Task-bound session must use its prepared native launcher and exact working directory; another provider is not a permitted fallback"));
         }
-        Ok(())
-    }
-    pub(crate) fn is_task_bound(&self, session: &ResourceRef) -> Result<bool> {
-        Ok(read(&self.home, session)?.is_some())
+        let body =
+            crate::encounter_profile_provider::resolve_provider(record.request.provider.clone())?;
+        if body.protocol != record.launcher.protocol {
+            return Err(error(
+                "Prepared task body protocol differs from its Workcell launcher",
+            ));
+        }
+        Ok((body, true))
     }
     pub fn read_task(home: &AikitHome, session: &ResourceRef) -> Result<Value> {
         serde_json::to_value(read(home, session)?).map_err(error)
@@ -747,8 +781,15 @@ impl EncounterService {
         } else {
             None
         };
+        let resolved_body =
+            crate::encounter_profile_provider::resolve_provider(record.request.provider.clone())?;
+        if resolved_body.protocol != record.launcher.protocol {
+            return Err(error(
+                "Prepared task body protocol differs from its Workcell launcher",
+            ));
+        }
         let (model_argv, model_environment) =
-            super::model::execution(home, session, &record.request.provider)?;
+            super::model::execution(home, session, &resolved_body)?;
         let mut command = Command::new(&record.request.workcell_boundary_bin);
         command
             .args([
@@ -785,5 +826,46 @@ impl EncounterService {
                 "Native task protocol boundary unsupported on this platform",
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod profile_task_tests {
+    use super::*;
+
+    #[test]
+    fn codex_profile_request_keeps_raw_source_and_resolves_inside_the_boundary() {
+        let raw: EncounterProvider = serde_json::from_value(json!({
+            "id":"codex-native-body",
+            "label":"Codex native body",
+            "protocol":"acp",
+            "from_profile":"codex"
+        }))
+        .unwrap();
+        assert!(raw.argv.is_empty());
+        let resolved = crate::encounter_profile_provider::resolve_provider(raw.clone()).unwrap();
+        assert_eq!(resolved.from_profile.as_deref(), Some("codex"));
+        assert_eq!(resolved.protocol, EncounterProtocol::Acp);
+        assert_eq!(resolved.argv.first().map(String::as_str), Some("npx"));
+        assert!(resolved
+            .argv
+            .iter()
+            .any(|arg| arg == "@agentclientprotocol/codex-acp"));
+
+        let session = ResourceRef::parse("agent-session/codex-native-task").unwrap();
+        let revision = SourceRevision::parse("task-binding/codex-native-task").unwrap();
+        let launcher = launcher_for(&session, &raw, &revision).unwrap();
+        assert!(
+            raw.argv.is_empty(),
+            "saved request is still the raw profile source"
+        );
+        assert_eq!(launcher.from_profile, None);
+        assert!(launcher.argv_fallback.is_empty());
+        assert_eq!(launcher.protocol, resolved.protocol);
+        assert!(launcher.argv.iter().any(|arg| arg == "encounter-task-exec"));
+        assert_ne!(
+            launcher.argv, resolved.argv,
+            "Codex is not launched outside Workcell"
+        );
     }
 }

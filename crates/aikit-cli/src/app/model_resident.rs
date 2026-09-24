@@ -75,19 +75,45 @@ fn explicit_factory_selection(
             )
         })?;
     let body_basis = native["data"]["body_basis"].clone();
-    if native["data"]["protocol"] != "pi-rpc"
-        || body_basis["schema"] != "aikit.resident-body-basis/v1"
-        || body_basis["protocol"] != "pi-rpc"
-        || body_basis["harness_profile"] != "pi"
-    {
+    let (profile_slug, harness_ref, scope_kind, scope_standing) =
+        match (
+            native["data"]["protocol"].as_str(),
+            body_basis["protocol"].as_str(),
+            body_basis["harness_profile"].as_str(),
+        ) {
+            (Some("pi-rpc"), Some("pi-rpc"), Some("pi")) => (
+                "pi",
+                "harness/pi",
+                "thin-native-pi",
+                "empty selections mean this receipt claims the exact Pi body and launch basis only; it does not claim ambient skills, extensions, tools, or contributions",
+            ),
+            (Some("acp"), Some("acp"), Some("codex")) => (
+                "codex",
+                "harness/codex",
+                "thin-native-codex-acp",
+                "empty selections mean this receipt claims the exact Codex ACP body and launch basis only; it does not claim ambient skills, extensions, tools, or contributions",
+            ),
+            _ => return Ok(None),
+        };
+    if body_basis["schema"] != "aikit.resident-body-basis/v1" {
         return Ok(None);
     }
-    let profile = aikit_adapters::profiles::for_slug("pi").ok_or_else(|| {
+    let profile = aikit_adapters::profiles::for_slug(profile_slug).ok_or_else(|| {
         AikitError::new(
             "model.selection_receipt",
-            "The embedded Pi harness profile is unavailable",
+            format!("The embedded {profile_slug} harness profile is unavailable"),
         )
     })?;
+    if native["data"]["model_observation"]["current_model_id"] != prepared.policy.provider_native_id
+        || !native["data"]["native_session_id"]
+            .as_str()
+            .is_some_and(|session| !session.trim().is_empty())
+    {
+        return Err(AikitError::new(
+            "model.selection_receipt",
+            "The resident native session did not confirm the exact selected model",
+        ));
+    }
     let profile_digest = format!("blake3:{}", digest(profile)?);
     let model_basis_digest = prepared.fingerprint()?;
     if body_basis["model_basis_digest"] != model_basis_digest {
@@ -118,7 +144,7 @@ fn explicit_factory_selection(
     let composition = resolve_harness_composition(
         &CompositionCatalog::default(),
         HarnessCompositionRequest {
-            harness: ResourceRef::parse("harness/pi")?,
+            harness: ResourceRef::parse(harness_ref)?,
             project,
             agent: Some(prepared.policy.agent_ref.clone()),
             agency: Some(prepared.agency_ref.clone()),
@@ -150,10 +176,10 @@ fn explicit_factory_selection(
         "digest_contract":SORTED_JSON_DIGEST_CONTRACT,
         "route_basis": route_basis,
         "composition_scope": {
-            "kind":"thin-native-pi",
+            "kind":scope_kind,
             "selected_components":[],
             "ambient_components_claimed":false,
-            "standing":"empty selections mean this receipt claims the exact Pi body and launch basis only; it does not claim ambient skills, extensions, tools, or contributions",
+            "standing":scope_standing,
         },
         "composition_target_basis":composition_target_basis,
         "harness_composition": composition,
@@ -171,7 +197,7 @@ fn explicit_factory_selection(
         "model_ref": prepared.policy.model_ref,
         "provider_ref": prepared.policy.provider_ref,
         "route_ref": route_ref,
-        "harness_ref": "harness/pi",
+        "harness_ref": harness_ref,
         "harness_composition_ref": harness_composition_ref,
         "basis": basis,
         "basis_digest": basis_digest,

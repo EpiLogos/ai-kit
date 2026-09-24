@@ -746,7 +746,8 @@ impl EncounterService {
             phase,
             resident.required_context.as_ref(),
         )?;
-        let model = agency::model::prepare(&self.home, session, &current)?;
+        let (model_provider, _) = self.selected_model_provider(session, &current, &resident.cwd)?;
+        let model = agency::model::prepare(&self.home, session, &model_provider)?;
         if model != resident.model {
             return Err(error(
                 "Resident model policy/catalogue/credential/Agency basis changed; explicit re-resolution is required",
@@ -1094,10 +1095,17 @@ impl EncounterService {
             "before-provider-start",
             configured.required_context.as_ref(),
         )?;
+        let (body_provider, task_bound) =
+            self.selected_model_provider(&agent_session, &configured, &cwd)?;
         if let Some(target) = model_target {
-            agency::model::validate_target(&self.home, &agent_session, &configured, target)?;
+            agency::model::validate_target(
+                &self.home,
+                &agent_session,
+                &configured,
+                &body_provider,
+                target,
+            )?;
         }
-        self.check_task_launch(&agent_session, &configured, &cwd)?;
         let connection = ResourceRef::parse(format!(
             "connection/encounter-{}",
             blake3::hash(agent_session.as_str().as_bytes()).to_hex()
@@ -1125,19 +1133,7 @@ impl EncounterService {
             self.permissions.clone(),
             generation.clone(),
         )));
-        let model = agency::model::prepare(&self.home, &agent_session, &configured)?;
-        let task_bound = self.is_task_bound(&agent_session)?;
-        let body_provider = if task_bound {
-            serde_json::from_value::<EncounterProvider>(
-                Self::read_task(&self.home, &agent_session)?
-                    .pointer("/request/provider")
-                    .cloned()
-                    .ok_or_else(|| error("Prepared task lacks its underlying provider basis"))?,
-            )
-            .map_err(error)?
-        } else {
-            configured.clone()
-        };
+        let model = agency::model::prepare(&self.home, &agent_session, &body_provider)?;
         if configured.protocol == EncounterProtocol::PrimeRpc
             && (configured.body_ref.is_none() || configured.body_revision.is_none())
         {
@@ -1504,10 +1500,10 @@ impl EncounterService {
         )
         .to_hex()
         .to_string();
-        let harness_profile = body_provider
-            .argv
-            .first()
-            .and_then(|program| aikit_adapters::profiles::for_argv_program(program))
+        // A profile-derived ACP launcher may start with a bridge executable
+        // (`npx` for Codex). Bind the body to the validated declared profile,
+        // not to that executable's basename.
+        let harness_profile = agency::model::declared_provider_profile(&body_provider)?
             .map(|profile| profile.slug.clone());
         let body_basis = json!({
             "schema":"aikit.resident-body-basis/v1",
@@ -2025,6 +2021,7 @@ impl EncounterService {
                 self.require_attached(&agent_session)?;
                 let resident = self.resident(&agent_session)?;
                 let _operation = resident.operations.lock().map_err(error)?;
+                let _agency_lock = self.lock_agency(&agent_session)?;
                 self.check_resident_context(&agent_session, &resident, "native-model-read")?;
                 let identity = resident.host.identity(&agent_session)?;
                 Ok(json!({
@@ -2063,6 +2060,7 @@ impl EncounterService {
                 }
                 let resident = self.resident(&agent_session)?;
                 let _operation = resident.operations.lock().map_err(error)?;
+                let _agency_lock = self.lock_agency(&agent_session)?;
                 self.check_resident_context(&agent_session, &resident, "native-model-select")?;
                 let observed = resident.host.identity(&agent_session)?;
                 if expected_native_session_id
@@ -2116,6 +2114,7 @@ impl EncounterService {
                 self.require_attached(&agent_session)?;
                 let resident = self.resident(&agent_session)?;
                 let _operation = resident.operations.lock().map_err(error)?;
+                let _agency_lock = self.lock_agency(&agent_session)?;
                 self.check_resident_context(&agent_session, &resident, "native-mode-read")?;
                 let identity = resident.host.identity(&agent_session)?;
                 Ok(json!({
@@ -2143,6 +2142,7 @@ impl EncounterService {
                 }
                 let resident = self.resident(&agent_session)?;
                 let _operation = resident.operations.lock().map_err(error)?;
+                let _agency_lock = self.lock_agency(&agent_session)?;
                 self.check_resident_context(&agent_session, &resident, "native-mode-select")?;
                 let observed = resident.host.identity(&agent_session)?;
                 if expected_native_session_id
