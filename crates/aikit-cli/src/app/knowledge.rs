@@ -77,6 +77,9 @@ pub(super) struct KnowledgeRuntime {
     /// results.
     work_repo_scopes: BTreeMap<String, String>,
     central_expected: bool,
+    /// `source:project-code:<project_id>` → `Work/<name>` for real CodeIndex
+    /// hits whose public resource refs are opaque code digests.
+    code_source_scopes: BTreeMap<String, String>,
     /// One code-index provider per discovered project; unavailable ones are
     /// kept so the absence is per project, never a global "provider absent".
     code: Vec<GitNexusCodeIndexProvider<SystemRunner>>,
@@ -122,6 +125,10 @@ impl KnowledgeRuntime {
         let Some(key) = explicit_scope else {
             return self.current_project.clone();
         };
+        let key = key.trim();
+        if key.is_empty() || key.contains("..") {
+            return None;
+        }
         if let Some(pending) = self
             .authored_pending
             .iter()
@@ -133,10 +140,6 @@ impl KnowledgeRuntime {
             if display_matches_key(current, key) {
                 return Some(current.clone());
             }
-        }
-        let key = key.trim();
-        if key.contains("..") {
-            return None;
         }
         if let Some(rest) = key.strip_prefix("Work/") {
             return (!rest.is_empty() && !rest.contains('/')).then(|| key.to_owned());
@@ -261,6 +264,12 @@ impl Service {
         let explicit_scope = expression_scope_project(expression).map(str::to_owned);
         let mut result = self.with_knowledge(|runtime, application| {
             let scoped_display = runtime.scoped_project_display(explicit_scope.as_deref());
+            if explicit_scope.is_some() && scoped_display.is_none() {
+                return Err(aikit_core::AikitError::new(
+                    "knowledge.scope_invalid",
+                    "Explicit Project scope is invalid or cannot be resolved",
+                ));
+            }
             let mut result = application.resolve(expression, candidate_limit);
             result.absences.extend(runtime.absences.clone());
             // Pending authored relations are scoped: a query sees its own
@@ -290,35 +299,36 @@ impl Service {
             // unattributable material passes through. Work-repo hits carry
             // their project in the ref itself (`source:project:<id>:…`), so
             // the same discipline applies to them.
-            if explicit_scope.is_some() {
-                if let Some(display) = &scoped_display {
-                    let attributed_to_other_project =
-                        |attribution: &BTreeMap<String, String>, resource: &str| {
-                            attribution
-                                .get(resource)
-                                .is_some_and(|project| project != display)
-                        };
-                    let repo_hit_of_other_project = |resource: &str| {
-                        runtime.work_repo_scopes.iter().any(|(prefix, project)| {
-                            resource.starts_with(prefix.as_str()) && project != display
-                        })
+            if let Some(display) = &scoped_display {
+                let attributed_to_other_project =
+                    |attribution: &BTreeMap<String, String>, resource: &str| {
+                        attribution
+                            .get(resource)
+                            .is_some_and(|project| project != display)
                     };
-                    result.hits.retain(|hit| match &hit.address {
-                        aikit_core::KnowledgeAddress::Wiki(resource) => {
-                            !attributed_to_other_project(
-                                &runtime.authored_edge_projects,
-                                resource.as_str(),
-                            ) && !attributed_to_other_project(
-                                &runtime.folder_subject_projects,
-                                resource.as_str(),
-                            )
-                        }
-                        aikit_core::KnowledgeAddress::Source(_) => {
-                            !repo_hit_of_other_project(hit.resource.as_str())
-                        }
+                result.hits.retain(|hit| {
+                    let resource = hit.resource.as_str();
+                    // A Source ref may surface through SourcePool or a
+                    // ProjectMap endpoint. The address wrapper does not
+                    // change which Project owns it.
+                    if resource.starts_with("source:project:") {
+                        return runtime.work_repo_scopes.iter().any(|(prefix, project)| {
+                            resource.starts_with(prefix.as_str()) && project == display
+                        });
+                    }
+                    if attributed_to_other_project(&runtime.authored_edge_projects, resource)
+                        || attributed_to_other_project(&runtime.folder_subject_projects, resource)
+                    {
+                        return false;
+                    }
+                    match &hit.address {
+                        aikit_core::KnowledgeAddress::Code(reference) => runtime
+                            .code_source_scopes
+                            .get(reference.source.as_str())
+                            .is_some_and(|project| project == display),
                         _ => true,
-                    });
-                }
+                    }
+                });
             }
             Ok(result)
         })?;
@@ -1152,6 +1162,15 @@ impl Service {
                 )
             })
             .collect();
+        let code_source_scopes: BTreeMap<String, String> = work_projects
+            .iter()
+            .map(|project| {
+                (
+                    format!("source:project-code:{}", project.project_id),
+                    format!("Work/{}", project.name),
+                )
+            })
+            .collect();
 
         // The default read-only bkmr store pool (owner-corrected A-2): bkmr
         // is part of agent context sourcing by default, so the configured
@@ -1371,6 +1390,7 @@ impl Service {
             work_repos,
             work_repo_scopes,
             central_expected: central_root.is_some(),
+            code_source_scopes,
             code,
             code_degradations,
             project_map,

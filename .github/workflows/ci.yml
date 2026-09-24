@@ -109,7 +109,7 @@ jobs:
   gitnexus-real:
     name: Real GitNexus 1.6.9 ProjectMap conformance
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Install Rust 1.98
@@ -150,3 +150,7 @@ jobs:
             echo "::error title=GitNexus conformance failure::$message"
           fi
           exit "$status"
+      - name: Enforce Project scope with real GitNexus and WorkRepos
+        env:
+          AIKIT_REQUIRE_GITNEXUS_REAL: "1"
+        run: cargo test --locked -p aikit-cli --test knowledge_project_code_scope_real -- --nocapture --test-threads=1
