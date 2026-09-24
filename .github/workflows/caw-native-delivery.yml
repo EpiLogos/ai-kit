@@ -44,6 +44,28 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.11.0"
+      - name: Install exact native Pi for model selection proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --prefix "$RUNNER_TEMP/caw-pi" --ignore-scripts --no-audit --no-fund --save-exact '@earendil-works/pi-coding-agent@0.84.4'
+          pi_bin="$RUNNER_TEMP/caw-pi/node_modules/.bin/pi"
+          test -x "$pi_bin"
+          test "$("$pi_bin" --version)" = '0.84.4'
+          PI_LOCK="$RUNNER_TEMP/caw-pi/package-lock.json" python3 - <<'PY'
+          import json
+          import os
+
+          with open(os.environ['PI_LOCK'], encoding='utf-8') as lock_file:
+              lock = json.load(lock_file)
+          package = lock['packages']['node_modules/@earendil-works/pi-coding-agent']
+          assert package['version'] == '0.84.4'
+          assert package['integrity'] == 'sha512-jmOlrqUmvhh/siNWFRXjYLJzhKFIHNsAQaysRwzQPQFnPAaV/vhqHsLH/MBsIISA1Rjj7WTUFR3nJrpXoLx39w=='
+          PY
+          echo "AIKIT_CAW_PI_BIN=$pi_bin" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           repository: EpiLogos/Actuation
@@ -107,8 +129,11 @@ jobs:
             echo "Central=$CENTRAL_SHA"
             echo "Workcell=$WORKCELL_SHA"
             rustc -Vv
+            node --version
+            "$AIKIT_CAW_PI_BIN" --version
+            sha256sum "$(realpath "$AIKIT_CAW_PI_BIN")"
             python3 --version
-            echo 'Standing=accepted cut revisions pinned per product; controlled native providers, not installed or real-model proof.'
+            echo 'Standing=accepted cut revisions pinned per product; actual Pi opens without inference; controlled native providers are not installed or real-model proof.'
             echo 'FIXTURE_REPLY is not a real model response or installed-harness proof.'
           } > "$RUNNER_TEMP/caw-evidence/basis.txt"
       - name: Actual binaries through native Actuation and controlled provider processes
@@ -119,6 +144,7 @@ jobs:
           grep -q MODEL_SELECTED_NATIVE_RESPONSE_EXECUTED "$RUNNER_TEMP/caw-evidence/native.log"
           grep -q MODEL_APPLICATION_NATIVE_CONNECTION_EXECUTED "$RUNNER_TEMP/caw-evidence/native.log"
           grep -q MODEL_COMPOSE_NATIVE_CONNECTION_EXECUTED "$RUNNER_TEMP/caw-evidence/native.log"
+          grep -q ACTUAL_PI_FACTORY_SELECTION_EMITTED_WITHOUT_INFERENCE "$RUNNER_TEMP/caw-evidence/native.log"
       - name: Native Central allocation to Workcell protection preparation
         shell: bash
         run: |
