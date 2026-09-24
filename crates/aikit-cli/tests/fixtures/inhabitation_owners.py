@@ -13,6 +13,11 @@ implementations publish:
 
 Every invocation is appended to $FIXTURE_WORLD.calls so a test can prove which
 owner verbs ran. Anything else answers the way a not-yet-upgraded owner does.
+
+Occupancy is Actuation's, and Actuation keeps one ledger per Workcell. When
+$FIXTURE_OCCUPANCY names a file, `actuation` reads and writes occupancy there
+instead of in the world file, so two AIKit homes standing for two Workcells
+share Central's Position definitions but each keeps its own occupancy ledger.
 """
 import json
 import os
@@ -21,18 +26,35 @@ import time
 import uuid
 
 WORLD = os.environ["FIXTURE_WORLD"]
+LEDGER = os.environ.get("FIXTURE_OCCUPANCY") or None
 
 
-def load():
-    with open(WORLD) as handle:
+def load(path=WORLD):
+    with open(path) as handle:
         return json.load(handle)
 
 
-def save(world):
-    tmp = WORLD + ".tmp"
+def save(world, path=WORLD):
+    tmp = path + ".tmp"
     with open(tmp, "w") as handle:
         json.dump(world, handle, indent=2)
-    os.replace(tmp, WORLD)
+    os.replace(tmp, path)
+
+
+def load_ledger():
+    """This Workcell's occupancy ledger: its own file, or the world file."""
+    if LEDGER is None:
+        return load()
+    if not os.path.exists(LEDGER):
+        return {"occupancy": {}, "presence": {}}
+    return load(LEDGER)
+
+
+def save_ledger(ledger):
+    if LEDGER is None:
+        save(ledger)
+    else:
+        save(ledger, LEDGER)
 
 
 def emit(value, status=0):
@@ -117,7 +139,7 @@ def actuation(args):
         sys.stderr.write("actuation: unknown command %s; run actuation help\n" % (args[:1] or [""])[0])
         sys.exit(2)
     verb = args[1]
-    world = load()
+    world = load_ledger()
     position = flag(args, "--position")
     if verb == "list":
         rows = []
@@ -167,8 +189,17 @@ def actuation(args):
             now["end_kind"] = "superseded"
             new["predecessor_generation_ref"] = now["generation_ref"]
         gens.append(new)
-        save(world)
+        save_ledger(world)
         emit({"ok": True, "verb": "claim", "tenure": new})
+    if verb == "release":
+        now = current(world, position)
+        if not now:
+            refusal("occupancy.vacant", "%s has no current occupant to release." % position,
+                    "Nothing was released.", "actuation occupancy read --position %s" % position)
+        now["ended_at_unix_ms"] = int(time.time() * 1000)
+        now["end_kind"] = "released"
+        save_ledger(world)
+        emit({"ok": True, "verb": "release", "tenure": now})
     sys.stderr.write("actuation occupancy: unknown verb %s\n" % verb)
     sys.exit(2)
 
