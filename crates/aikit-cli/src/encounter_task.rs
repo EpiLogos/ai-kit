@@ -155,7 +155,10 @@ fn historical_ready(
             return Err(error("Task history digest mismatch"));
         }
         let record: TaskRecord = serde_json::from_slice(&bytes).map_err(error)?;
-        if &record.revision == revision {
+        // One successful configure journals pending and ready with the same
+        // revision. Only the actual ready reading can be a restore target;
+        // two ready readings for one revision remain an ambiguity refusal.
+        if record.ready && &record.revision == revision {
             if found.replace(record).is_some() {
                 return Err(error("Ambiguous task history revision"));
             }

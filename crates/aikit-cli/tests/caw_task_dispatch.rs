@@ -696,12 +696,32 @@ fn unhosted_pending_abort_revalidates_ready_with_fresh_revision_and_stale_cas_re
         pending
     );
     let history = w.home.state().join("encounter-tasks/history");
+    let same_revision_history: Vec<Value> = fs::read_dir(&history)
+        .unwrap()
+        .map(|item| serde_json::from_slice(&fs::read(item.unwrap().path()).unwrap()).unwrap())
+        .filter(|record: &Value| record["revision"] == ready["revision"])
+        .collect();
+    assert_eq!(
+        same_revision_history
+            .iter()
+            .filter(|record| record["ready"] == true)
+            .count(),
+        1,
+        "exactly one ready history reading may be restored"
+    );
+    assert!(
+        same_revision_history
+            .iter()
+            .any(|record| record["ready"] == false),
+        "the native pending journal legitimately shares its revision with ready"
+    );
     let entry = fs::read_dir(&history)
         .unwrap()
         .map(|item| item.unwrap().path())
         .find(|path| {
-            serde_json::from_slice::<Value>(&fs::read(path).unwrap())
-                .is_ok_and(|record| record["revision"] == ready["revision"])
+            serde_json::from_slice::<Value>(&fs::read(path).unwrap()).is_ok_and(|record| {
+                record["revision"] == ready["revision"] && record["ready"] == true
+            })
         })
         .expect("the actual earlier ready record is retained in native history");
     let original = fs::read(&entry).unwrap();
