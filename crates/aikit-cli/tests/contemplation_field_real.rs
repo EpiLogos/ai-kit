@@ -117,6 +117,15 @@ fn field_over_the_real_registered_telos_matrix_and_ql_spine_matches_the_document
         .skip(1)
         .filter(|line| line.split(',').nth(1) == Some("capability"))
         .count();
+    let expected_relation_records = csv_text
+        .lines()
+        .skip(1)
+        .filter(|line| {
+            line.split(',')
+                .nth(1)
+                .is_some_and(|kind| !kind.is_empty() && kind != "capability")
+        })
+        .count();
 
     let args = field_args(
         manifest,
@@ -137,6 +146,14 @@ fn field_over_the_real_registered_telos_matrix_and_ql_spine_matches_the_document
         field["matrix"]["capabilities"].as_array().unwrap().len(),
         expected_capabilities,
         "capability row count must match the real CSV's own capability rows"
+    );
+    assert_eq!(
+        field["matrix"]["all_view_relations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        expected_relation_records,
+        "contemplation reads every view's relation records, not only the default view's"
     );
 
     let summary = &field["practice_binding_summary"];

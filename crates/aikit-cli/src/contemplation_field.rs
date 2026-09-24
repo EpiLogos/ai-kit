@@ -334,6 +334,7 @@ fn assemble(cwd: &Path, request: &FieldRequest) -> Result<Value> {
             "view_id": matrix_evidence.view_id,
             "capabilities": matrix_evidence.capability_rows.iter().map(capability_row_json).collect::<Vec<_>>(),
             "grid_relations": matrix_evidence.grid_relations,
+            "all_view_relations": matrix_evidence.all_view_relations,
         },
         "changed_subject": changed_subject,
         "code_lens": code_lens,
