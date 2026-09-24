@@ -813,6 +813,157 @@ fn unhosted_pending_abort_revalidates_ready_with_fresh_revision_and_stale_cas_re
 
 #[test]
 #[ignore = "requires exact source-built Central, Workcell and Actuation; mandatory CAW lane"]
+fn expired_unhosted_ready_is_reprepared_with_same_native_now_and_fresh_lease() {
+    let mut w = World::new(true);
+    let policy_path = w.root.join("Control/user/placement.json");
+    let mut policy: Value = serde_json::from_slice(&fs::read(&policy_path).unwrap()).unwrap();
+    policy["lease_seconds"] = json!(10);
+    fs::write(&policy_path, policy.to_string()).unwrap();
+    let ready = w.prepare();
+    let old_expiry = ready["allocation"]["allocation"]["policy"]["expires_at_unix_seconds"]
+        .as_u64()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        <= old_expiry
+    {
+        assert!(
+            Instant::now() < deadline,
+            "real short native lease did not expire"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let mut invalid = w.prepare_input();
+    invalid["selected_directories"] =
+        json!([w.root.join("Work/demo/src/missing-native-directory")]);
+    let refused = w.command(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        invalid.to_string(),
+        "--expected-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!refused.status.success());
+    let pending = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(pending["ready"], false);
+    let restored = w.cli(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    let resumed = &restored["record"];
+    assert_eq!(resumed["ready"], true);
+    assert_ne!(resumed["revision"], ready["revision"]);
+    assert_eq!(
+        resumed["allocation"]["allocation"]["now_ref"],
+        ready["allocation"]["allocation"]["now_ref"]
+    );
+    assert_eq!(
+        resumed["allocation"]["allocation"]["source"]["ref"],
+        ready["allocation"]["allocation"]["source"]["ref"]
+    );
+    assert_eq!(
+        resumed["allocation"]["allocation"]["policy"]["revision"],
+        ready["allocation"]["allocation"]["policy"]["revision"]
+    );
+    assert!(
+        resumed["allocation"]["allocation"]["policy"]["expires_at_unix_seconds"]
+            .as_u64()
+            .unwrap()
+            > old_expiry,
+        "recovery must obtain a fresh finite native lease"
+    );
+    for key in ["writable_paths", "protected_paths", "required_coverage"] {
+        assert_eq!(resumed["requirements"][key], ready["requirements"][key]);
+    }
+    w.start();
+    assert_eq!(w.open(resumed, &w.root.join("Work/demo/src"))["ok"], true);
+}
+
+#[test]
+#[ignore = "requires exact source-built Central, Workcell and Actuation; mandatory CAW lane"]
+fn pending_abort_refuses_changed_native_placement_policy_and_remains_recoverable() {
+    let w = World::new(true);
+    let ready = w.prepare();
+    let mut invalid = w.prepare_input();
+    invalid["selected_directories"] =
+        json!([w.root.join("Work/demo/src/missing-native-directory")]);
+    let refused = w.command(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        invalid.to_string(),
+        "--expected-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!refused.status.success());
+    let pending = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    let policy_path = w.root.join("Control/user/placement.json");
+    let original = fs::read(&policy_path).unwrap();
+    let mut changed: Value = serde_json::from_slice(&original).unwrap();
+    changed["lease_seconds"] = json!(301);
+    fs::write(&policy_path, changed.to_string()).unwrap();
+    let command = |expected_revision: &str| {
+        vec![
+            "encounter-task-abort".into(),
+            "--agent-session".into(),
+            "agent-session/task".into(),
+            "--expected-revision".into(),
+            expected_revision.into(),
+            "--restore-revision".into(),
+            ready["revision"].as_str().unwrap().into(),
+        ]
+    };
+    let rejected = w.command(&command(pending["revision"].as_str().unwrap()));
+    assert!(
+        !rejected.status.success(),
+        "changed policy cannot renew the old task authority"
+    );
+    let still_pending = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(still_pending["ready"], false);
+    assert_ne!(still_pending["revision"], pending["revision"]);
+    assert_eq!(
+        still_pending["request"], ready["request"],
+        "pending recovery is bound to the original request"
+    );
+    fs::write(&policy_path, original).unwrap();
+    let stale = w.command(&command(pending["revision"].as_str().unwrap()));
+    assert!(
+        !stale.status.success(),
+        "the first pending CAS was consumed by the recovery journal"
+    );
+    let recovered = w.cli(&command(still_pending["revision"].as_str().unwrap()));
+    assert_eq!(recovered["record"]["ready"], true);
+    assert_eq!(
+        recovered["record"]["allocation"]["allocation"]["now_ref"],
+        ready["allocation"]["allocation"]["now_ref"]
+    );
+}
+
+#[test]
+#[ignore = "requires exact source-built Central, Workcell and Actuation; mandatory CAW lane"]
 fn first_pending_preparation_remains_bound_to_same_native_request() {
     let w = World::new(true);
     let directory = w.root.join("Work/demo/src/selected-after-failure");

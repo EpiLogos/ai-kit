@@ -158,10 +158,8 @@ fn historical_ready(
         // One successful configure journals pending and ready with the same
         // revision. Only the actual ready reading can be a restore target;
         // two ready readings for one revision remain an ambiguity refusal.
-        if record.ready && &record.revision == revision {
-            if found.replace(record).is_some() {
-                return Err(error("Ambiguous task history revision"));
-            }
+        if record.ready && &record.revision == revision && found.replace(record).is_some() {
+            return Err(error("Ambiguous task history revision"));
         }
     }
     found.ok_or_else(|| error("Requested ready task revision is absent from native history"))
@@ -211,7 +209,7 @@ fn launcher_belongs_to(session: &ResourceRef, record: &TaskRecord) -> bool {
         .ok()
         .zip(serde_json::to_value(&expected).ok())
         .is_some_and(|(actual, expected)| actual == expected)
-        && record.launcher.argv.len() >= suffix.len() + 1
+        && record.launcher.argv.len() > suffix.len()
         && PathBuf::from(&record.launcher.argv[0]).is_absolute()
         && record.launcher.argv[record.launcher.argv.len() - suffix.len()..]
             .iter()
@@ -408,6 +406,82 @@ pub(super) fn prompt(service: &EncounterService, session: &ResourceRef) -> Resul
     let task = record.allocation.as_ref().expect("validated allocation");
     Ok(format!("\nTask: {}\nTask NOW: {}\nTask output directory: {}\nWorking directory: {}\nPolicy revision: {}\n", task.request.task_ref, task.allocation["now_ref"], task.now_directory()?.display(), record.request.cwd.display(), task.allocation["policy"]["revision"]))
 }
+/// Complete a previously journalled pending task under the caller's session
+/// lock. Recovery uses the same native owners, but must retain the historical
+/// Central identity and protection basis while obtaining a fresh finite lease.
+fn prepare_published(
+    home: &AikitHome,
+    session: &ResourceRef,
+    mut record: TaskRecord,
+    restore: Option<&TaskRecord>,
+) -> Result<TaskRecord> {
+    let owner = NativeCentralPlacement::new(OwnerRunner);
+    let task = owner.allocate(&record.request.central)?;
+    if let Some(previous) = restore {
+        let old = previous
+            .allocation
+            .as_ref()
+            .ok_or_else(|| error("Recovery target lacks native Central allocation"))?;
+        if task.allocation["policy"]["revision"] != old.allocation["policy"]["revision"]
+            || task.allocation["now_ref"] != old.allocation["now_ref"]
+            || task.allocation["source"]["ref"] != old.allocation["source"]["ref"]
+            || task.allocation["record"]["task_ref"] != old.allocation["record"]["task_ref"]
+        {
+            return Err(error(
+                "Native Central task or placement policy changed; recovery cannot widen the historical allocation",
+            ));
+        }
+    }
+    let binding = read_binding(home, session)?.ok_or_else(|| error("Agency disappeared"))?;
+    if task.allocation["policy"]["scope_ref"] != json!(binding.world_ref) {
+        return Err(error("Central task scope differs from the native Agency World; an explicit owner-backed relation is required"));
+    }
+    record.cwd_anchor =
+        Some(owner.validate_write(&task, &record.request.cwd)?["destination_anchor"].clone());
+    let requirements = owner.write_boundary_requirements(
+        &task,
+        &record.request.authority_ref,
+        &record.request.selected_directories,
+    )?;
+    if let Some(previous) = restore {
+        let old = previous
+            .requirements
+            .as_ref()
+            .ok_or_else(|| error("Recovery target lacks native material requirements"))?;
+        if ["writable_paths", "protected_paths", "required_coverage"]
+            .iter()
+            .any(|key| requirements[*key] != old[*key])
+        {
+            return Err(error(
+                "Native material boundary changed; recovery cannot widen the historical protection",
+            ));
+        }
+    }
+    record.inspection = Some(inspect(&record.request, &requirements)?);
+    if let Some(host) = &record.request.material_host {
+        record.material = Some(host.prepare(
+            &task,
+            json!({
+                "agent":binding.agent_ref, "agency":binding.agency_ref,
+                "world_binding":binding.world_binding_ref, "world":binding.world_ref,
+                "agent_session":session, "task":task.request.task_ref,
+                "now":task.allocation["now_ref"], "source":task.allocation["source"]["ref"],
+                "now_revision":task.allocation["revision"]["revision"],
+                "policy_revision":task.allocation["policy"]["revision"],
+                "authority":record.request.authority_ref
+            }),
+        )?);
+    }
+    record.allocation = Some(task);
+    record.requirements = Some(requirements);
+    // Configuration does not retrofit an existing resident with Workcell
+    // protection. The fresh launcher is checked again at its prompt boundary.
+    EncounterService::configure(home, record.launcher.clone())?;
+    record.ready = true;
+    validate(home, session, &record)?;
+    publish(home, session, &record)?;
+    Ok(record)
+}
 impl EncounterService {
     /// Owner-only CAS. A pending record is durable before allocating NOW; any
     /// failed preparation remains blocking, not an unconfined fallback.
@@ -490,7 +564,7 @@ impl EncounterService {
         }
         let revision = SourceRevision::parse(format!("task-binding/{}", ulid::Ulid::generate()))?;
         let launcher = launcher_for(session, &request.provider, &revision)?;
-        let mut record = TaskRecord {
+        let record = TaskRecord {
             schema: "aikit.encounter-task/v1".into(),
             revision,
             request,
@@ -504,43 +578,7 @@ impl EncounterService {
             material: None,
         };
         publish(home, session, &record)?;
-        let owner = NativeCentralPlacement::new(OwnerRunner);
-        let task = owner.allocate(&record.request.central)?;
-        let binding = read_binding(home, session)?.ok_or_else(|| error("Agency disappeared"))?;
-        if task.allocation["policy"]["scope_ref"] != json!(binding.world_ref) {
-            return Err(error("Central task scope differs from the native Agency World; an explicit owner-backed relation is required"));
-        }
-        record.cwd_anchor =
-            Some(owner.validate_write(&task, &record.request.cwd)?["destination_anchor"].clone());
-        let requirements = owner.write_boundary_requirements(
-            &task,
-            &record.request.authority_ref,
-            &record.request.selected_directories,
-        )?;
-        record.inspection = Some(inspect(&record.request, &requirements)?);
-        if let Some(host) = &record.request.material_host {
-            record.material = Some(host.prepare(
-                &task,
-                json!({
-                    "agent":binding.agent_ref, "agency":binding.agency_ref,
-                    "world_binding":binding.world_binding_ref, "world":binding.world_ref,
-                    "agent_session":session, "task":task.request.task_ref,
-                    "now":task.allocation["now_ref"], "source":task.allocation["source"]["ref"],
-                    "now_revision":task.allocation["revision"]["revision"],
-                    "policy_revision":task.allocation["policy"]["revision"],
-                    "authority":record.request.authority_ref
-                }),
-            )?);
-        }
-        record.allocation = Some(task);
-        record.requirements = Some(requirements);
-        // Configuration is independent from the resident. Changing this does
-        // not pretend to retrofit an existing process with Landlock.
-        Self::configure(home, record.launcher.clone())?;
-        record.ready = true;
-        validate(home, session, &record)?;
-        publish(home, session, &record)?;
-        serde_json::to_value(record).map_err(error)
+        serde_json::to_value(prepare_published(home, session, record, None)?).map_err(error)
     }
     /// Explicitly restore one exact ready revision after a failed unhosted
     /// preparation. A hosted pending demand may have uncertain external
@@ -589,11 +627,24 @@ impl EncounterService {
                 "Recovery target must be an earlier unhosted ready revision for the same task",
             ));
         }
+        if prior.request.cwd.canonicalize().map_err(error)? != prior.request.cwd
+            || !prior.request.cwd.is_dir()
+        {
+            return Err(error("Task cwd must be an existing canonical directory"));
+        }
+        let agency_revision = authority(home, session, &prior.request)?;
+        let historical = prior.clone();
         prior.revision = SourceRevision::parse(format!("task-binding/{}", ulid::Ulid::generate()))?;
         prior.launcher = launcher_for(session, &prior.request.provider, &prior.revision)?;
-        validate(home, session, &prior)?;
-        Self::configure(home, prior.launcher.clone())?;
+        prior.agency_revision = agency_revision;
+        prior.ready = false;
+        prior.allocation = None;
+        prior.requirements = None;
+        prior.inspection = None;
+        prior.cwd_anchor = None;
+        prior.material = None;
         publish(home, session, &prior)?;
+        let prior = prepare_published(home, session, prior, Some(&historical))?;
         Ok(json!({
             "status":"restored",
             "aborted_revision": current.revision,
