@@ -136,15 +136,12 @@ fn admitted_factory_collect_runs_natively_and_refresh_rebuilds_the_hot_field() {
     let owner = store.read_factory_sensing(project, None).unwrap().unwrap();
     assert_eq!(owner.version, 1);
     assert_eq!(owner.field["project_world_ref"], project);
-    assert!(owner.field["coverage"].as_array().unwrap().len() > 0);
+    assert!(!owner.field["coverage"].as_array().unwrap().is_empty());
     let durable: Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
-    assert!(
-        durable["state"]["sensing"]["collections"]
-            .as_array()
-            .unwrap()
-            .len()
-            > 0
-    );
+    assert!(!durable["state"]["sensing"]["collections"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 
     let second = runner.run(request(
         NativeBody::FactoryFieldRefresh,
