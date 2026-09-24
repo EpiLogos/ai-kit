@@ -2021,6 +2021,7 @@ impl EncounterService {
                 self.require_attached(&agent_session)?;
                 let resident = self.resident(&agent_session)?;
                 let _operation = resident.operations.lock().map_err(error)?;
+                let _agency_lock = self.lock_agency(&agent_session)?;
                 self.check_resident_context(&agent_session, &resident, "native-model-read")?;
                 let identity = resident.host.identity(&agent_session)?;
                 Ok(json!({
@@ -2059,6 +2060,7 @@ impl EncounterService {
                 }
                 let resident = self.resident(&agent_session)?;
                 let _operation = resident.operations.lock().map_err(error)?;
+                let _agency_lock = self.lock_agency(&agent_session)?;
                 self.check_resident_context(&agent_session, &resident, "native-model-select")?;
                 let observed = resident.host.identity(&agent_session)?;
                 if expected_native_session_id
@@ -2112,6 +2114,7 @@ impl EncounterService {
                 self.require_attached(&agent_session)?;
                 let resident = self.resident(&agent_session)?;
                 let _operation = resident.operations.lock().map_err(error)?;
+                let _agency_lock = self.lock_agency(&agent_session)?;
                 self.check_resident_context(&agent_session, &resident, "native-mode-read")?;
                 let identity = resident.host.identity(&agent_session)?;
                 Ok(json!({
@@ -2139,6 +2142,7 @@ impl EncounterService {
                 }
                 let resident = self.resident(&agent_session)?;
                 let _operation = resident.operations.lock().map_err(error)?;
+                let _agency_lock = self.lock_agency(&agent_session)?;
                 self.check_resident_context(&agent_session, &resident, "native-mode-select")?;
                 let observed = resident.host.identity(&agent_session)?;
                 if expected_native_session_id
