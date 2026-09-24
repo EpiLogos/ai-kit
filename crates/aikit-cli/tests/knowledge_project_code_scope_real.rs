@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::Command;
 
 use aikit_cli::app::Service;
-use aikit_core::resource::ResolveExpression;
+use aikit_core::resource::{parse_or_search_expression, ResolveExpression};
 use aikit_core::KnowledgeAddress;
 use aikit_store::AikitHome;
 use tempfile::TempDir;
@@ -193,9 +193,8 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     );
     // The public `knowledge resolve` CLI uses an unscoped expression and
     // reaches this service method directly. It must inherit cedar's scope.
-    let direct = service
-        .knowledge_resolve(&ResolveExpression::subject(NEEDLE), 256)
-        .unwrap();
+    let cli_expression = parse_or_search_expression(NEEDLE).unwrap();
+    let direct = service.knowledge_resolve(&cli_expression, 256).unwrap();
     assert!(!has_larch_code(&direct), "cedar resolve leaked larch Code");
     assert!(
         !has_larch_project_source(&direct),
@@ -234,4 +233,9 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     let global = root_service.knowledge_search(NEEDLE, 256).unwrap();
     assert!(has_larch_code(&global));
     assert!(has_larch_project_source(&global));
+    let global_direct = root_service
+        .knowledge_resolve(&cli_expression, 256)
+        .unwrap();
+    assert!(has_larch_code(&global_direct));
+    assert!(has_larch_project_source(&global_direct));
 }
