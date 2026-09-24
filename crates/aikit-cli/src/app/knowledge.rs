@@ -1354,11 +1354,19 @@ impl Service {
                                 None,
                             );
                             let status = provider.status();
-                            let index_error = if status.available && status.capabilities.index {
-                                provider.index(&project.root, false).err()
-                            } else {
-                                None
-                            };
+                            // A query reads the existing derived index; it
+                            // never re-indexes one that exists (that made
+                            // every `knowledge` call cost minutes). Only an
+                            // unindexed project is indexed here; freshness
+                            // of an existing index is disclosed, not
+                            // re-checked (`aikit knowledge code index`).
+                            let adopted = provider.adopt_existing_index(&project.root);
+                            let index_error =
+                                if status.available && status.capabilities.index && !adopted {
+                                    provider.index(&project.root, false).err()
+                                } else {
+                                    None
+                                };
                             (project, provider, index_error)
                         })
                     })

@@ -541,8 +541,41 @@ fn collect_objects<'a>(value: &'a Value, out: &mut Vec<&'a Map<String, Value>>) 
     }
 }
 
+impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
+    /// Read an index GitNexus already keeps for `root` (`<root>/.gitnexus/meta.json`)
+    /// instead of re-analysing the repository on every query. Returns whether an
+    /// existing index was adopted; its freshness is the index owner's concern
+    /// (`aikit knowledge code index`, the GitNexus freshness hook), not re-checked here.
+    pub fn adopt_existing_index(&mut self, root: &Path) -> bool {
+        if root.join(".gitnexus").join("meta.json").is_file() {
+            self.root = Some(root.to_path_buf());
+            self.indexed = true;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_existing_index_is_adopted_without_reanalysing_and_a_missing_one_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = crate::runner::SystemRunner::new();
+        let mut provider = GitNexusCodeIndexProvider::new(
+            runner,
+            "demo",
+            SourceRef::parse("source:project-code:demo").unwrap(),
+            None,
+        );
+        assert!(!provider.adopt_existing_index(dir.path()));
+        std::fs::create_dir_all(dir.path().join(".gitnexus")).unwrap();
+        std::fs::write(dir.path().join(".gitnexus/meta.json"), "{}").unwrap();
+        assert!(provider.adopt_existing_index(dir.path()));
+        assert!(provider.indexed);
+    }
+
     use std::sync::Arc;
 
     use crate::runner::ScriptedRunner;
