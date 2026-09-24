@@ -1,4 +1,6 @@
-use aikit_core::jev::{JevLimits, JevRequest, JevResponse, JevTariff, TokenUsage};
+use aikit_core::jev::{
+    estimated_input_tokens_range, JevLimits, JevRequest, JevResponse, JevTariff, TokenUsage,
+};
 use serde_json::{json, Value};
 
 fn request() -> JevRequest {
@@ -166,4 +168,28 @@ fn reserve_spend_before_an_attempt_and_do_not_overflow_tariff_arithmetic() {
             output_tokens: u64::MAX
         })
         .is_err());
+}
+
+#[test]
+fn the_input_token_estimate_is_a_range_and_never_refuses_by_itself() {
+    let limits: JevLimits = serde_json::from_value(json!({
+        "timeout_ms": 1000,
+        "max_attempts": 1,
+        "max_total_reserved_microusd": 5000,
+        "tariff": {
+            "model_version": "jev-1.13.0",
+            "source": "observed provider ceiling",
+            "max_input_tokens_per_attempt": 32_768,
+            "max_output_tokens_per_attempt": 4_096,
+            "input_microusd_per_million_tokens": 42_000,
+            "output_microusd_per_million_tokens": 0
+        }
+    }))
+    .unwrap();
+    let mut large = request();
+    large.state = json!({"catalogue": "x".repeat(100_000)});
+    let (low, high) = estimated_input_tokens_range(&large);
+    assert!(low < high && low > 20_000 && high > 32_768, "{low}-{high}");
+    // A byte ratio cannot decide it: a request the provider may accept is not refused locally.
+    assert!(limits.validate(&large).is_ok());
 }
