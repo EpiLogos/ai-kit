@@ -1504,10 +1504,10 @@ impl EncounterService {
         )
         .to_hex()
         .to_string();
-        let harness_profile = body_provider
-            .argv
-            .first()
-            .and_then(|program| aikit_adapters::profiles::for_argv_program(program))
+        // A profile-derived ACP launcher may start with a bridge executable
+        // (`npx` for Codex). Bind the body to the validated declared profile,
+        // not to that executable's basename.
+        let harness_profile = crate::encounter_model::declared_provider_profile(&body_provider)?
             .map(|profile| profile.slug.clone());
         let body_basis = json!({
             "schema":"aikit.resident-body-basis/v1",
