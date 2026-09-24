@@ -2175,6 +2175,11 @@ pub const LEAN_ENTRY_MAX_CHARS: usize = 2_000;
 
 /// The SessionStart lean entry: World, Position, occupant, work, NOW, body and
 /// context pointers and the faculties — replacing the historical NOW dump.
+/// Factory answered for this Position and it holds nothing in progress.
+fn identity_holds_no_work(reading: &InhabitationReading) -> bool {
+    reading.identity.current_work_outcome.as_deref() == Some("none")
+}
+
 pub fn render_lean_entry(reading: &InhabitationReading, project: Option<&str>) -> String {
     let f = &reading.facets;
     let value_line = |facet: &Facet| -> String {
@@ -2217,7 +2222,15 @@ pub fn render_lean_entry(reading: &InhabitationReading, project: Option<&str>) -
             f.agent.summary.as_deref().unwrap_or("-"),
             f.agency.summary.as_deref().unwrap_or("-")
         ),
-        format!("Current work: {}", value_line(&f.current_work)),
+        format!(
+            "Current work: {}{}",
+            value_line(&f.current_work),
+            if identity_holds_no_work(reading) {
+                " — this Position holds no custody: other actors' NOW handoffs are not its work; check `aikit gateway inbox`, or ask for work to be commissioned"
+            } else {
+                ""
+            }
+        ),
         format!(
             "NOW: root {} · child {}",
             value_line(&f.root_now),
