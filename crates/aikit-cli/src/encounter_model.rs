@@ -27,6 +27,7 @@ use crate::encounter_service::{
     EncounterService,
 };
 use aikit_core::credential::{CredentialRef, SecretRequirementRef};
+use aikit_core::harness_profile::HarnessProfile;
 use aikit_core::harness_profile::ModelDispatchPosture;
 use aikit_core::resource::{canonical_model_ref, CredentialCondition, ProviderRef};
 use aikit_core::{ResourceRef, Result};
@@ -69,9 +70,24 @@ pub(crate) struct PreparedModel {
     pub agency_ref: ResourceRef,
     pub world_binding_ref: ResourceRef,
     pub credential_reading: Option<Value>,
+    /// Explicit API key, verified Codex own-login, or a route needing no key.
+    /// This is a source/readiness fact, never a claim of USD cost or inference.
+    #[serde(default)]
+    pub credential_mode: String,
+    /// Exact native login executable and, for a direct provider, the declared
+    /// launch variant selected when the login was checked. Both enter the
+    /// fingerprint so a changed fallback cannot borrow old login evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codex_login_basis: Option<CodexLoginBasis>,
     /// The declared dispatch this policy is delivered through. Part of the
     /// serialized basis, so a dispatch change is a basis change.
     pub dispatch: ModelDispatchDelivery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CodexLoginBasis {
+    program: String,
+    direct_launch_variant: Option<usize>,
 }
 
 /// The ACP stable schema's session configuration option for the model: the
@@ -114,6 +130,81 @@ pub(crate) struct ModelDispatch {
     pub delivery: ModelDispatchDelivery,
 }
 
+/// A profile-derived ACP provider is bound to its embedded connection argv,
+/// not to the basename of its wrapper (`npx` for Codex ACP). An arbitrary
+/// from_profile string alongside foreign argv cannot claim Codex's login or
+/// model-selection contract.
+pub(crate) fn declared_provider_profile(
+    provider: &EncounterProvider,
+) -> Result<Option<&'static HarnessProfile>> {
+    if let Some(slug) = provider.from_profile.as_deref() {
+        let profile = aikit_adapters::profiles::for_slug(slug)
+            .ok_or_else(|| error(format!("unknown harness profile {slug}")))?;
+        let derived = crate::encounter_profile_provider::derive_provider(
+            profile,
+            provider.id.clone(),
+            provider.label.clone(),
+        )?;
+        if provider.argv != derived.argv
+            || provider.argv_fallback != derived.argv_fallback
+            || provider.protocol != derived.protocol
+        {
+            return Err(error(format!(
+                "profile-derived provider {} differs from the embedded {} connection facts",
+                provider.id, slug
+            )));
+        }
+        return Ok(Some(profile));
+    }
+    Ok(provider
+        .argv
+        .first()
+        .and_then(|program| aikit_adapters::profiles::for_argv_program(program)))
+}
+
+fn codex_login_basis(
+    provider: &EncounterProvider,
+    profile: &HarnessProfile,
+) -> Result<Option<CodexLoginBasis>> {
+    if profile.slug != "codex" {
+        return Ok(None);
+    }
+    if provider.from_profile.is_some() {
+        // The ACP wrapper is npx; the validated embedded profile identifies
+        // the native Codex executable. codex-acp otherwise starts a bundled
+        // Codex; resolve the installed binary and later bind CODEX_PATH to
+        // this exact path in its final child environment.
+        let program = profile
+            .presence
+            .as_ref()
+            .and_then(|presence| presence.executables.first())
+            .ok_or_else(|| error("Codex profile declares no native presence executable"))?;
+        let installed = crate::probe::which(program)
+            .ok_or_else(|| error(format!("Codex profile executable {program} is not on PATH")))?;
+        // Keep the resolved command pathname (including its `codex` symlink
+        // name). Canonicalizing a global npm install may produce `codex.js`,
+        // which is still the executable but no longer joins the declared
+        // Codex profile by program name. Probe and CODEX_PATH use this same
+        // absolute pathname.
+        let absolute = if installed.is_absolute() {
+            installed
+        } else {
+            std::env::current_dir().map_err(error)?.join(installed)
+        };
+        return Ok(Some(CodexLoginBasis {
+            program: absolute.display().to_string(),
+            direct_launch_variant: None,
+        }));
+    }
+    // A direct provider may launch its first resolving declared fallback.
+    // Probe that executable, not a stale or absent primary argv[0].
+    let (selected, variant) = resolved_launch_variant(provider)?;
+    Ok(selected.first().map(|program| CodexLoginBasis {
+        program: program.clone(),
+        direct_launch_variant: Some(variant),
+    }))
+}
+
 /// The declared dispatch for one provider, decided from the harness profile's
 /// models layer joined by the launch program — never from the connection
 /// protocol alone. The old protocol gate refused every ACP provider because
@@ -137,7 +228,7 @@ pub(crate) fn dispatch_for(provider: &EncounterProvider) -> Result<ModelDispatch
                     "A model-selected provider needs a launch program; no dispatch surface is declared for an empty command",
                 ));
             };
-            let Some(profile) = aikit_adapters::profiles::for_argv_program(program) else {
+            let Some(profile) = declared_provider_profile(provider)? else {
                 return Err(error(format!(
                     "The launch program {program} joins no harness profile, so no model \
                      dispatch surface is declared for it; a bound policy is never delivered \
@@ -308,13 +399,28 @@ pub(crate) fn prepare(
             "Native model/provider does not name a declared route for the canonical Model",
         ));
     }
-    if routes
+    let requires_credential = routes
         .iter()
-        .any(|r| r.credential != CredentialCondition::NotRequired)
-        && policy.credential.is_none()
-    {
+        .any(|r| r.credential != CredentialCondition::NotRequired);
+    let mut verified_codex_login_basis = None;
+    if requires_credential && policy.credential.is_none() {
+        if let Some(profile) = declared_provider_profile(provider)? {
+            if let Some(basis) = codex_login_basis(provider, profile)? {
+                if crate::harness_auth::codex_chatgpt_login_ready(
+                    &crate::probe::probe_runner(),
+                    home,
+                    &basis.program,
+                    policy.provider_ref.as_str(),
+                )? {
+                    verified_codex_login_basis = Some(basis);
+                }
+            }
+        }
+    }
+    let codex_own_login = verified_codex_login_basis.is_some();
+    if requires_credential && policy.credential.is_none() && !codex_own_login {
         return Err(error(
-            "The declared model route requires an explicitly resolved credential",
+            "The declared model route requires an explicitly resolved credential or a verified native Codex own-login for this exact provider",
         ));
     }
     let credential_reading = policy
@@ -327,6 +433,13 @@ pub(crate) fn prepare(
         "blake3:{}",
         blake3::hash(catalogue_entry.to_string().as_bytes()).to_hex()
     );
+    let credential_mode = if codex_own_login {
+        "codex-chatgpt-own-login"
+    } else if policy.credential.is_some() {
+        "explicit-api-binding"
+    } else {
+        "not-required"
+    };
     Ok(Some(PreparedModel {
         policy_source: source.clone(),
         policy,
@@ -336,6 +449,8 @@ pub(crate) fn prepare(
         agency_ref: admitted.agency_ref,
         world_binding_ref: admitted.world_binding_ref,
         credential_reading,
+        credential_mode: credential_mode.into(),
+        codex_login_basis: verified_codex_login_basis,
         dispatch: dispatch.delivery,
     }))
 }
@@ -497,17 +612,18 @@ use aikit_adapters::connection_process::ModelEnvironment;
 /// * a revoked or expired binding refuses either way: a withdrawn key is
 ///   never bypassed through the harness's own login.
 ///
-/// `None` means nothing was declared or bound: the child then inherits the
-/// caller's environment unchanged rather than being scrubbed for nothing.
+/// `None` means nothing was declared or bound: the child inherits the
+/// caller's environment. A selected Codex own-login policy takes the separate
+/// `resolved_execution` path, which scrubs ambient keys and pins CODEX_PATH.
 pub(crate) fn profile_environment(
     home: &AikitHome,
     session: &ResourceRef,
     provider: &EncounterProvider,
 ) -> Result<Option<ModelEnvironment>> {
-    let Some(program) = provider.argv.first() else {
+    if provider.argv.is_empty() {
         return Ok(None);
-    };
-    let Some(profile) = aikit_adapters::profiles::for_argv_program(program) else {
+    }
+    let Some(profile) = declared_provider_profile(provider)? else {
         return Ok(None);
     };
     let Some(declared) = profile
@@ -627,15 +743,60 @@ fn resolved_execution(
     // A profile-declared delivery rides the same scrubbed environment. The
     // pi profile declares no env-var deliveries, so the pi selected-model
     // path is unchanged by this join.
-    if let Some(profile) = profile_environment(home, session, provider)? {
+    if model.credential_mode == "codex-chatgpt-own-login" {
+        // A key bound after prepare must not silently switch this selected
+        // subscription-mode body onto paid API delivery. The final child is
+        // scrubbed and receives no provider key in this mode.
+        ensure_codex_api_key_still_unbound(home)?;
+        if provider.from_profile.is_some() {
+            let basis = model.codex_login_basis.as_ref().ok_or_else(|| {
+                error("Codex own-login preparation lacks its executable basis; re-resolve")
+            })?;
+            environment.set_codex_path(&basis.program)?;
+        }
+    } else if let Some(profile) = profile_environment(home, session, provider)? {
         environment.extend(profile)?;
     }
     let (argv, launch_variant) = selected_launch(provider, &model)?;
+    ensure_codex_login_launch_matches(&model, &argv, launch_variant)?;
     Ok(ResolvedExecution {
         argv,
         environment: Some(environment),
         launch_variant,
     })
+}
+
+fn ensure_codex_login_launch_matches(
+    model: &PreparedModel,
+    argv: &[String],
+    launch_variant: usize,
+) -> Result<()> {
+    if model.credential_mode != "codex-chatgpt-own-login" {
+        return Ok(());
+    }
+    let basis = model.codex_login_basis.as_ref().ok_or_else(|| {
+        error("Codex own-login preparation lacks its exact executable basis; re-resolve")
+    })?;
+    if let Some(expected_variant) = basis.direct_launch_variant {
+        if launch_variant != expected_variant || argv.first() != Some(&basis.program) {
+            return Err(error(
+                "Codex launch variant changed after own-login verification; re-resolve the selected model",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_codex_api_key_still_unbound(home: &AikitHome) -> Result<()> {
+    if CredentialBindingStore::new(home)
+        .load(&CredentialRef::new("credential:openai")?)?
+        .is_some()
+    {
+        return Err(error(
+            "credential:openai changed after Codex own-login preparation; explicitly re-resolve the selected model",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn execution(
@@ -747,6 +908,7 @@ pub(crate) fn validate_target(
     home: &AikitHome,
     session: &ResourceRef,
     configured: &EncounterProvider,
+    model_provider: &EncounterProvider,
     request: &EncounterModelOpen,
 ) -> Result<()> {
     let binding = read_binding(home, session)?
@@ -755,14 +917,18 @@ pub(crate) fn validate_target(
     if admitted != request.expected_agency {
         return Err(error("Selected Agency/source/WorldBinding changed between composition and resident admission"));
     }
-    let model = prepare(home, session, configured)?
-        .ok_or_else(|| error("The configured body has no explicit model policy"))?;
+    let model = prepare(home, session, model_provider)?
+        .ok_or_else(|| error("The selected body has no explicit model policy"))?;
     if model.policy.model_ref != request.model_ref
         || request
             .provider_ref
             .as_ref()
             .is_some_and(|p| p != &model.policy.provider_ref)
-        || request.body.as_ref().is_some_and(|b| b != &configured.id)
+        // A task's existing explicit body names its Workcell launcher; the
+        // validated inner provider is also an exact name for that same task.
+        || request.body.as_ref().is_some_and(|b| {
+            b != &configured.id && b != &model_provider.id
+        })
     {
         return Err(error(
             "Resolved body/model does not match the explicit catalogue target",
@@ -775,15 +941,20 @@ impl EncounterService {
         self.require_attached(&request.agent_session)?;
         let mut candidates = Vec::new();
         for configured in self.providers()? {
-            if configured.model_policy.is_none()
-                || request.body.as_ref().is_some_and(|b| b != &configured.id)
-            {
+            let Ok((model_provider, _task_bound)) =
+                self.selected_model_provider(&request.agent_session, &configured, &request.cwd)
+            else {
                 continue;
-            }
-            if validate_target(&self.home, &request.agent_session, &configured, &request).is_ok()
-                && self
-                    .check_task_launch(&request.agent_session, &configured, &request.cwd)
-                    .is_ok()
+            };
+            if model_provider.model_policy.is_some()
+                && validate_target(
+                    &self.home,
+                    &request.agent_session,
+                    &configured,
+                    &model_provider,
+                    &request,
+                )
+                .is_ok()
             {
                 candidates.push(configured);
             }
@@ -910,6 +1081,25 @@ mod tests {
         let environment =
             profile_environment(&home, &session(), &provider_with_program("pi")).unwrap();
         assert!(environment.is_none(), "pi keeps its policy-delivery path");
+    }
+
+    #[test]
+    fn codex_own_login_refuses_a_key_bound_after_preparation() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = aikit_store::AikitHome::at(temp.path().join("aikit"));
+        ensure_codex_api_key_still_unbound(&home).unwrap();
+        let credential_ref = CredentialRef::new("credential:openai").unwrap();
+        let provider = EnvironmentImportProvider::from_value(
+            credential_ref.clone(),
+            "AIKIT_CODEX_KEY_SWITCH_PROBE",
+            Some("diagnostic-material".into()),
+        )
+        .unwrap();
+        let state = provider.binding_state(&credential_ref).unwrap().unwrap();
+        CredentialBindingStore::new(&home).save(&state).unwrap();
+        let error = ensure_codex_api_key_still_unbound(&home).unwrap_err();
+        assert!(error.message().contains("changed after Codex own-login"));
+        assert!(error.message().contains("explicitly re-resolve"));
     }
 
     // --- dispatch determination ---
@@ -1096,6 +1286,116 @@ mod tests {
     }
 
     #[test]
+    fn profile_derived_codex_acp_uses_its_exact_connection_facts() {
+        let profile = aikit_adapters::profiles::for_slug("codex").unwrap();
+        let provider = crate::encounter_profile_provider::derive_provider(
+            profile,
+            "codex-profile".to_string(),
+            "Codex profile".to_string(),
+        )
+        .unwrap();
+        assert_eq!(provider.argv.first().map(String::as_str), Some("npx"));
+        let dispatch = dispatch_for(&provider).unwrap();
+        assert_eq!(
+            dispatch.native_provider_ref.as_deref(),
+            Some("provider:openai")
+        );
+        assert!(
+            matches!(dispatch.delivery, ModelDispatchDelivery::ConfigKey { ref name } if name == "model")
+        );
+        let mut forged = provider;
+        forged.argv = vec!["npx".into(), "-y".into(), "foreign-acp".into()];
+        let error = dispatch_for(&forged).unwrap_err();
+        assert!(error.message().contains("differs from the embedded codex"));
+    }
+
+    #[test]
+    fn direct_codex_login_binds_the_exact_resolved_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let fallback = fake_executable(temp.path(), "codex");
+        let mut provider = acp_provider(&["/nonexistent/aikit-codex-primary/codex"]);
+        provider.argv_fallback = vec![vec![fallback.display().to_string()]];
+        let profile = declared_provider_profile(&provider).unwrap().unwrap();
+        let basis = codex_login_basis(&provider, profile).unwrap().unwrap();
+        assert_eq!(basis.program, fallback.display().to_string());
+        assert_eq!(basis.direct_launch_variant, Some(1));
+
+        let mut model = prepared_with_dispatch(ModelDispatchDelivery::ConfigKey {
+            name: "model".into(),
+        });
+        model.credential_mode = "codex-chatgpt-own-login".into();
+        model.codex_login_basis = Some(basis);
+        let (argv, variant) = selected_launch(&provider, &model).unwrap();
+        ensure_codex_login_launch_matches(&model, &argv, variant).unwrap();
+
+        let replacement = fake_executable(temp.path(), "replacement-codex");
+        provider.argv_fallback = vec![vec![replacement.display().to_string()]];
+        let (changed_argv, changed_variant) = selected_launch(&provider, &model).unwrap();
+        let error =
+            ensure_codex_login_launch_matches(&model, &changed_argv, changed_variant).unwrap_err();
+        assert!(error.message().contains("launch variant changed"));
+    }
+
+    #[test]
+    #[ignore = "requires installed Codex with a real ChatGPT login"]
+    fn installed_codex_absolute_fallback_is_the_verified_launch_executable() {
+        let codex = crate::probe::which("codex").expect("installed Codex executable");
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path().join("aikit"));
+        let mut provider = acp_provider(&["/nonexistent/aikit-codex-primary/codex"]);
+        provider.argv_fallback = vec![vec![codex.display().to_string()]];
+        let profile = declared_provider_profile(&provider).unwrap().unwrap();
+        let basis = codex_login_basis(&provider, profile).unwrap().unwrap();
+        assert_eq!(basis.program, codex.display().to_string());
+        assert_eq!(basis.direct_launch_variant, Some(1));
+        assert!(crate::harness_auth::codex_chatgpt_login_ready(
+            &crate::probe::probe_runner(),
+            &home,
+            &basis.program,
+            "provider:openai",
+        )
+        .unwrap());
+        let mut model = prepared_with_dispatch(ModelDispatchDelivery::ConfigKey {
+            name: "model".into(),
+        });
+        model.credential_mode = "codex-chatgpt-own-login".into();
+        model.codex_login_basis = Some(basis);
+        let (argv, variant) = selected_launch(&provider, &model).unwrap();
+        ensure_codex_login_launch_matches(&model, &argv, variant).unwrap();
+        assert_eq!(argv.first().map(String::as_str), codex.to_str());
+    }
+
+    #[test]
+    #[ignore = "requires installed Codex with a real ChatGPT login"]
+    fn installed_codex_acp_profile_binds_its_verified_native_executable() {
+        let profile = aikit_adapters::profiles::for_slug("codex").unwrap();
+        let provider = crate::encounter_profile_provider::derive_provider(
+            profile,
+            "installed-codex-acp".to_string(),
+            "Installed Codex ACP".to_string(),
+        )
+        .unwrap();
+        let verified_profile = declared_provider_profile(&provider).unwrap().unwrap();
+        let basis = codex_login_basis(&provider, verified_profile)
+            .unwrap()
+            .unwrap();
+        assert_eq!(basis.direct_launch_variant, None);
+        assert!(std::path::Path::new(&basis.program).is_absolute());
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path().join("aikit"));
+        assert!(crate::harness_auth::codex_chatgpt_login_ready(
+            &crate::probe::probe_runner(),
+            &home,
+            &basis.program,
+            "provider:openai",
+        )
+        .unwrap());
+        let mut environment = ModelEnvironment::new();
+        environment.set_codex_path(&basis.program).unwrap();
+        assert!(!environment.is_empty());
+    }
+
+    #[test]
     fn every_declared_executable_resolves_to_its_expected_dispatch() {
         // The whole declared table in one place: the dispatch determination
         // is decided by the embedded profiles, so the expectation is legible
@@ -1191,6 +1491,8 @@ mod tests {
             agency_ref: ResourceRef::parse("agency/probe").unwrap(),
             world_binding_ref: ResourceRef::parse("world-binding/probe").unwrap(),
             credential_reading: None,
+            credential_mode: "not-required".into(),
+            codex_login_basis: None,
             dispatch,
         }
     }

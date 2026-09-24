@@ -250,7 +250,17 @@ impl CurlJevProvider {
                                 RetryAfter::Invalid => None,
                             };
                         }
-                        Err(error("jev.provider_http", format!("Provider refused the invocation with HTTP {}; response payload withheld", http.status)))
+                        let hint = if http.status == 400 {
+                            let (low, high) =
+                                aikit_core::jev::estimated_input_tokens_range(request);
+                            format!(
+                                " (request is ~{low}-{high} estimated input tokens against a declared ceiling of {}; the provider refuses oversized requests this way, so try a narrower selection)",
+                                limits.tariff.max_input_tokens_per_attempt
+                            )
+                        } else {
+                            String::new()
+                        };
+                        Err(error("jev.provider_http", format!("Provider refused the invocation with HTTP {}; response payload withheld{hint}", http.status)))
                     }
                 }
             };

@@ -33,8 +33,11 @@
 use std::process::Command;
 
 use aikit_adapters::profiles;
+use aikit_adapters::runner::CommandRunner;
+use aikit_core::credential::CredentialRef;
 use aikit_core::harness_profile::HarnessProfile;
 use aikit_core::{AikitError, Result};
+use aikit_store::{AikitHome, CredentialBindingStore};
 use serde::{Deserialize, Serialize};
 
 /// One declared env-var delivery, by name: the provider whose key the
@@ -140,6 +143,81 @@ pub fn auth_face(harness: &str) -> Result<AuthFace> {
     })
 }
 
+/// A narrowly evidenced alternative to an API binding for Codex's own
+/// OpenAI route. This does not turn a ChatGPT login into an API credential or
+/// change the catalogue's global route availability. Only a declared Codex
+/// login, an absent API binding, and a successful native login-status probe
+/// permit the caller to use the harness's own store. Revocation and expiry
+/// always refuse, even if Codex remains logged in separately.
+pub(crate) fn codex_chatgpt_login_ready(
+    runner: &dyn CommandRunner,
+    home: &AikitHome,
+    harness_program: &str,
+    provider_ref: &str,
+) -> Result<bool> {
+    if provider_ref != "provider:openai" {
+        return Ok(false);
+    }
+    let Some(profile) = profiles::for_argv_program(harness_program) else {
+        return Ok(false);
+    };
+    if profile.slug != "codex" {
+        return Ok(false);
+    }
+    let declared = profile
+        .models
+        .as_ref()
+        .and_then(|models| models.key_delivery.as_ref())
+        .and_then(|delivery| {
+            delivery.own_login.iter().find(|fact| {
+                fact.provider_ref == provider_ref
+                    && fact.login.as_ref().is_some_and(|login| {
+                        login.argv.len() == 2
+                            && login.argv[0] == "codex"
+                            && login.argv[1] == "login"
+                    })
+            })
+        });
+    if declared.is_none() {
+        return Ok(false);
+    }
+    let credential_ref = CredentialRef::new("credential:openai")?;
+    if let Some(binding) = CredentialBindingStore::new(home).load(&credential_ref)? {
+        if binding.revoked
+            || binding
+                .expires_at
+                .as_deref()
+                .map(|value| {
+                    value.parse::<jiff::Timestamp>().map_err(|error| {
+                        AikitError::new("harness_auth.binding_expiry_invalid", error.to_string())
+                    })
+                })
+                .transpose()?
+                .is_some_and(|deadline| deadline <= jiff::Timestamp::now())
+        {
+            return Err(AikitError::new(
+                "harness_auth.binding_revoked_or_expired",
+                "credential:openai is revoked or expired; Codex own-login does not bypass that refusal",
+            ));
+        }
+        return Ok(false);
+    }
+    let argv = [
+        harness_program.to_owned(),
+        "login".to_owned(),
+        "status".to_owned(),
+    ];
+    let output = runner.run(&argv)?;
+    let stdout = output.stdout.trim();
+    let stderr = output.stderr.trim();
+    // Codex 0.155.1 reports this status on stderr. Accept the exact native
+    // answer from one stream only; warnings or an unknown login mode are not
+    // affirmative subscription evidence.
+    Ok(output.status == 0
+        && ((stdout == "Logged in using ChatGPT" && stderr.is_empty())
+            || (stderr == "Logged in using ChatGPT" && stdout.is_empty())))
+}
+
 /// Compose the login plan for one harness: the one runnable own-login entry
 /// its profile declares. A note-only harness refuses here, with its own note
 /// as the instruction; several runnable entries refuse rather than let the
@@ -228,6 +306,10 @@ pub fn run_login_argv(argv: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use aikit_adapters::credential_provider::EnvironmentImportProvider;
+    use aikit_adapters::runner::SystemRunner;
+    use aikit_core::credential::SecretProvider as _;
 
     #[test]
     fn describe_reports_codex_runnable_login_and_env_var_names_without_executing() {
@@ -326,5 +408,85 @@ mod tests {
         let plan = plan_login("codex").unwrap();
         assert_eq!(plan.slug, "codex");
         assert_eq!(plan.argv, vec!["codex".to_string(), "login".to_string()]);
+    }
+
+    #[test]
+    #[ignore = "requires an installed Codex executable; probes its real isolated login store"]
+    fn a_real_codex_login_probe_refuses_an_empty_isolated_login_store() {
+        let codex = crate::probe::which("codex").expect("installed Codex executable");
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path().join("aikit"));
+        let isolated_codex_home = temp.path().join("codex-home");
+        std::fs::create_dir_all(&isolated_codex_home).unwrap();
+        let runner =
+            SystemRunner::probe().with_env("CODEX_HOME", isolated_codex_home.to_string_lossy());
+        assert!(!codex_chatgpt_login_ready(
+            &runner,
+            &home,
+            codex.to_str().unwrap(),
+            "provider:openai"
+        )
+        .unwrap());
+        assert!(!codex_chatgpt_login_ready(
+            &runner,
+            &home,
+            codex.to_str().unwrap(),
+            "provider:anthropic"
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn revoked_api_binding_refuses_codex_login_fallback_before_a_probe() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path().join("aikit"));
+        let credential_ref = CredentialRef::new("credential:openai").unwrap();
+        let provider = EnvironmentImportProvider::from_value(
+            credential_ref.clone(),
+            "AIKIT_CODEX_REVOKED_PROBE",
+            Some("diagnostic-material".into()),
+        )
+        .unwrap();
+        let mut binding = provider.binding_state(&credential_ref).unwrap().unwrap();
+        binding.revoked = true;
+        CredentialBindingStore::new(&home).save(&binding).unwrap();
+        let error =
+            codex_chatgpt_login_ready(&SystemRunner::probe(), &home, "codex", "provider:openai")
+                .unwrap_err();
+        assert_eq!(error.code(), "harness_auth.binding_revoked_or_expired");
+    }
+
+    #[test]
+    #[ignore = "requires an installed Codex executable with a real ChatGPT login"]
+    fn installed_codex_own_login_is_verified_by_its_native_status() {
+        let codex = crate::probe::which("codex").expect("installed Codex executable");
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path().join("aikit"));
+        assert!(codex_chatgpt_login_ready(
+            &SystemRunner::probe(),
+            &home,
+            codex.to_str().unwrap(),
+            "provider:openai",
+        )
+        .unwrap());
+        #[cfg(unix)]
+        {
+            // The selected command may be a symlink named `codex` whose
+            // executable target has another basename (npm global installs).
+            // This is the actual native binary and login status, not a fake
+            // response from a scripted runner.
+            use std::os::unix::fs::symlink;
+            let renamed = temp.path().join("renamed-native-codex");
+            std::fs::hard_link(std::fs::canonicalize(&codex).unwrap(), &renamed).unwrap();
+            let linked = temp.path().join("codex");
+            symlink(&renamed, &linked).unwrap();
+            assert!(codex_chatgpt_login_ready(
+                &SystemRunner::probe(),
+                &home,
+                linked.to_str().unwrap(),
+                "provider:openai",
+            )
+            .unwrap());
+        }
     }
 }

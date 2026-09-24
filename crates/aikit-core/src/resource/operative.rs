@@ -1080,10 +1080,16 @@ pub fn horizons_for_kind(kind: ResourceKind) -> BTreeSet<AddressHorizon> {
 /// comma/space-separated `0..5` positions without changing canonical identity.
 pub fn horizons_for_resource(record: &ResourceRecord) -> BTreeSet<AddressHorizon> {
     let mut horizons = horizons_for_kind(record.descriptor.kind);
-    if record.descriptor.kind == ResourceKind::Capability
-        && crate::method::method_payload(&record.descriptor.description).is_some()
-    {
-        horizons.insert(AddressHorizon::H2);
+    if record.descriptor.kind == ResourceKind::Capability {
+        match crate::method::praxis_form(&record.descriptor.description) {
+            crate::method::PraxisForm::Method => {
+                horizons.insert(AddressHorizon::H2);
+            }
+            crate::method::PraxisForm::Methodology => {
+                horizons.insert(AddressHorizon::H3);
+            }
+            crate::method::PraxisForm::Skill => {}
+        }
     }
     if let Some(extra) = record.descriptor.annotations.get("oi.address-horizons") {
         for value in extra.split(|ch: char| ch == ',' || ch.is_whitespace()) {
@@ -1513,6 +1519,22 @@ mod tests {
         assert!(horizons.contains(&AddressHorizon::H2));
         assert!(horizons.contains(&AddressHorizon::H3));
         assert!(horizons.contains(&AddressHorizon::H5));
+    }
+
+    #[test]
+    fn methodology_classification_adds_the_form_horizon_not_a_kind() {
+        let mut methodology = record("skill:wayfinder", ResourceKind::Capability);
+        methodology.descriptor.description = "METHODOLOGY: orient the undertaking".into();
+        let horizons = horizons_for_resource(&methodology);
+        assert!(horizons.contains(&AddressHorizon::H3));
+        assert!(!horizons.contains(&AddressHorizon::H2));
+        assert!(horizons.contains(&AddressHorizon::H5));
+        assert_eq!(methodology.descriptor.kind, ResourceKind::Capability);
+
+        let plain = record("skill:research", ResourceKind::Capability);
+        let horizons = horizons_for_resource(&plain);
+        assert!(!horizons.contains(&AddressHorizon::H2));
+        assert!(!horizons.contains(&AddressHorizon::H3));
     }
 
     #[test]

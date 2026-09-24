@@ -1,6 +1,6 @@
 ---
 name: aikit-operation
-description: Orient and operate AIKit from application state, never UI-private steps. Proactively run aikit status and aikit explain at the start of work in an AIKit-governed context, and route every question about why a capability is active, withheld, or degraded through aikit explain rather than guessing from config files; near-miss: knowledge-navigation answers recorded-knowledge questions, operation establishes AIKit's own state.
+description: "Orient and operate AIKit from application state, never UI-private steps. Proactively run aikit status and aikit explain at the start of work in an AIKit-governed context, and route every question about why a capability is active, withheld, or degraded through aikit explain rather than guessing from config files; near-miss: knowledge-navigation answers recorded-knowledge questions, operation establishes AIKit's own state."
 ---
 
 # AIKit operation and Wayfinder

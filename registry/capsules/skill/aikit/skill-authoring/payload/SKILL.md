@@ -7,7 +7,7 @@ description: Use when creating, reviewing or simplifying managed Skills/Methods,
 
 Semantic ref: `aikit:skill-authoring`. Native owner: `EpiLogos/ai-kit`.
 
-A **Skill** is reusable organised intelligent praxis. A **Method** is that same Skill identity classified by a `METHOD:` description prefix so situated/interstitial praxis is discoverable. Useful relations to UsageOverlay receipts, Actions/Capabilities, ContextSources, Project/domain refs and verification/expected-return forms remain Skill or situated-use metadata. A **SkillSet** is additive repertoire and may recursively contain child SkillSets. Profile/ContextResolution determine why and where resources become operative.
+A **Skill** is reusable organised intelligent praxis. A **Method** is that same Skill identity classified by a `METHOD:` description prefix so situated/interstitial praxis is discoverable. A **Methodology** is that same Skill identity classified by a `METHODOLOGY:` prefix: field-level praxis that orients among ways of acting. Useful relations to UsageOverlay receipts, Actions/Capabilities, ContextSources, Project/domain refs and verification/expected-return forms remain Skill or situated-use metadata. A **SkillSet** is additive repertoire and may recursively contain child SkillSets. Profile/ContextResolution determine why and where resources become operative.
 
 Do not make a Skill absorb a Project merely because the Project needs it, and do not make a SkillSet become a workflow engine merely because several Skills are commonly used together.
 
@@ -161,6 +161,26 @@ Before authoring a Method-classified Skill:
 6. Preserve Skill source/revision and immutable overlay digests so Explain/History can reconstruct the praxis condition later.
 7. After real use, return fitness evidence as evidence about the Method-classified Skill/overlay condition; do not silently mutate durable praxis.
 
+## When to classify a Skill as Methodology
+
+The three forms answer different questions of one Skill identity:
+
+```text
+Skill        (unprefixed)    what reusable faculty can be exercised?
+Method       METHOD:         how do faculties, sources and operations compose for this class of act?
+Methodology  METHODOLOGY:    what field am I in, which kinds of determination exist here,
+                             which Methods apply under which conditions, and how does Return
+                             propagate through the field?
+```
+
+Use `METHODOLOGY:` only when the body actually discloses a field: its vocabulary, constitutive relations, the subordinate Methods and Skills with their selection conditions, an attention/retrieval strategy, transition grammar, verification expectations and Return destinations. A long Skill is not a Methodology; a checklist of steps is at most a Method.
+
+A Methodology composes and orients. It names its subordinate Methods and Skills by ref and never absorbs their bodies. Keep its common path compact — an Agent loads it to choose a Method, then loads only the Skill bodies that Method needs — and put deep field detail in `references/`. It also states its own non-trigger: the small local act that should select none of its Methods.
+
+Classification is read from the ordinary description and nothing else. It creates no ResourceKind, store, trust, activation or projection path, and grants no authority. `aikit praxis list --form methodology` lists them; the native verifier requires the manifest and payload descriptions to agree on the form.
+
+Do not re-grid inherited praxis to fit the forms. Classify an existing Skill only when its actual body supports the reading; record the reading and any adoption in the Skill's provenance.
+
 ## Project vocabulary and structural fidelity
 
 If a Project owns a constitutive ontology, coordinate map, protocol/state machine, schema graph or equivalent structural source, praxis must stay answerable to it. A generic convenient workflow must not flatten target-owned distinctions.
@@ -171,4 +191,4 @@ Use the target's stable semantic/source/code refs where possible. If no such str
 
 `registry/fixtures/minimal-authored-skill/` is the representative small Skill produced by this procedure. `scripts/verify-native-skills.py` validates both its capsule path/id and its Skill frontmatter.
 
-For Method conformance, verify the Skill's `METHOD:` description classification, unchanged capsule identity and ordinary Profile/ContextResolution projection. There is no separate Method store or source contract.
+For Method and Methodology conformance, verify the Skill's `METHOD:` / `METHODOLOGY:` description classification, unchanged capsule identity and ordinary Profile/ContextResolution projection. There is no separate Method or Methodology store or source contract.

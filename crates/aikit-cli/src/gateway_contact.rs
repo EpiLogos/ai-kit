@@ -21,6 +21,11 @@
 //!   is `held` for its next occupant; an occupant on another Workcell is
 //!   relayed through the gateway's authenticated WebSocket carrier, and a
 //!   remote that is down leaves the record queued for the next relay pass.
+//! - **Occupancy is each Workcell's own.** This Workcell's Actuation ledger
+//!   is read first; only when it records no current occupant are the declared
+//!   remote gateways asked, and each answers from its own Actuation at the
+//!   moment of asking. One answer routes; two are refused as ambiguous; none
+//!   holds. Nothing is cached and no second occupancy store exists.
 //! - **A Communique never mints obligation.** Only `delegate` crosses into
 //!   Factory custody, and the custody ref is Factory's answer.
 //! - **Every refusal is three-part**: the fact, what did or did not happen,
@@ -353,6 +358,300 @@ fn remote_command(workcell_ref: &str) -> String {
     format!(
         "aikit gateway remote add --workcell {workcell_ref} --ws HOST:PORT --token-location file:/ABSOLUTE/PATH/TO/TOKEN"
     )
+}
+
+// ---------------------------------------------------------------------------
+// Occupancy across declared Workcells.
+// ---------------------------------------------------------------------------
+
+/// How long one remote gateway may take to say who occupies a Position.
+/// Contact asks while the sender waits, so a Workcell that is asleep or gone
+/// costs this much at most (remotes are asked in parallel).
+pub const REMOTE_OCCUPANCY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// What one declared remote said when asked about occupancy.
+#[derive(Debug, Clone)]
+pub enum RemoteOutcome {
+    /// Its gateway answered with its own Workcell's Actuation reading (which
+    /// may itself record that Actuation could not answer).
+    Answered(aikit_adapters::GatewayOccupancyReading),
+    /// Its gateway was reached but refused the query (for example a gateway
+    /// that predates cross-Workcell occupancy).
+    Refused(String),
+    /// Its gateway could not be reached.
+    Unreachable(String),
+}
+
+/// One remote Workcell that reports a current occupant for a Position.
+#[derive(Debug, Clone)]
+pub struct RemoteClaim {
+    pub remote: GatewayRemote,
+    pub gateway_ref: String,
+    pub generation_ref: Option<String>,
+    pub tenure: Value,
+}
+
+/// Every declared remote, asked once, in declaration order. The survey holds
+/// the remote owners' answers for the length of one operation only; it is
+/// never stored.
+#[derive(Debug, Clone, Default)]
+pub struct RemoteSurvey {
+    pub answers: Vec<(GatewayRemote, RemoteOutcome)>,
+}
+
+/// The declared remotes other than this home's own Workcell.
+fn remotes_elsewhere(home: &AikitHome, local: Option<&str>) -> Result<Vec<GatewayRemote>> {
+    Ok(load_remotes(home)?
+        .remotes
+        .into_iter()
+        .filter(|remote| Some(remote.workcell_ref.as_str()) != local)
+        .collect())
+}
+
+fn ask_remote(remote: &GatewayRemote, command: GatewayCommand) -> RemoteOutcome {
+    let attempt = SecretLocation::parse(&remote.token_location)
+        .and_then(|location| location.resolve())
+        .and_then(|token| {
+            let target = GatewayCarrierTarget::WebSocket {
+                bind: remote.websocket_bind.clone(),
+                path: remote.websocket_path.clone(),
+                bearer_token: token.expose().to_owned(),
+            };
+            aikit_adapters::gateway_command_within(&target, command, None, REMOTE_OCCUPANCY_TIMEOUT)
+        });
+    match attempt {
+        Ok(GatewayResponse::Occupancy { reading }) => RemoteOutcome::Answered(reading),
+        Ok(other) => RemoteOutcome::Refused(unexpected(&other).to_string()),
+        Err(error) if error.code() == "agency_gateway_client.gateway_refused" => {
+            RemoteOutcome::Refused(error.to_string())
+        }
+        Err(error) => RemoteOutcome::Unreachable(error.to_string()),
+    }
+}
+
+/// The tenure a reading records as current for `position_ref`, whether the
+/// reading is one Position's document or the whole listing.
+fn tenure_in<'a>(occupancy: &'a Value, position_ref: &str) -> Option<&'a Value> {
+    match occupancy.get("positions").and_then(Value::as_array) {
+        Some(rows) => rows
+            .iter()
+            .find(|row| row.get("position_ref").and_then(Value::as_str) == Some(position_ref))
+            .and_then(current_tenure),
+        None => (occupancy.get("position_ref").and_then(Value::as_str) == Some(position_ref))
+            .then(|| current_tenure(occupancy))
+            .flatten(),
+    }
+}
+
+impl RemoteSurvey {
+    /// Ask every remote the same question, in parallel, each bounded by
+    /// [`REMOTE_OCCUPANCY_TIMEOUT`].
+    pub fn ask(remotes: &[GatewayRemote], command: &GatewayCommand) -> Self {
+        let answers = std::thread::scope(|scope| {
+            let asks: Vec<_> = remotes
+                .iter()
+                .map(|remote| {
+                    let command = command.clone();
+                    scope.spawn(move || ask_remote(remote, command))
+                })
+                .collect();
+            remotes
+                .iter()
+                .cloned()
+                .zip(asks.into_iter().map(|ask| {
+                    ask.join().unwrap_or_else(|_| {
+                        RemoteOutcome::Unreachable("the query thread panicked".into())
+                    })
+                }))
+                .collect()
+        });
+        Self { answers }
+    }
+
+    /// The remotes that report a current occupant of `position_ref`.
+    pub fn claims(&self, position_ref: &str) -> Vec<RemoteClaim> {
+        self.answers
+            .iter()
+            .filter_map(|(remote, outcome)| match outcome {
+                RemoteOutcome::Answered(reading) => reading
+                    .occupancy
+                    .as_ref()
+                    .and_then(|occupancy| tenure_in(occupancy, position_ref))
+                    .map(|tenure| RemoteClaim {
+                        remote: remote.clone(),
+                        gateway_ref: reading.gateway_ref.clone(),
+                        generation_ref: tenure
+                            .get("generation_ref")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        tenure: tenure.clone(),
+                    }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Plain words for every remote that could not say anything about
+    /// occupancy: unreachable, refused, or its Actuation unavailable.
+    pub fn unanswered(&self) -> Vec<String> {
+        self.answers
+            .iter()
+            .filter_map(|(remote, outcome)| match outcome {
+                RemoteOutcome::Answered(reading) => reading.unavailable.as_ref().map(|owner| {
+                    format!(
+                        "{} (its Actuation could not answer: `{}` failed: {})",
+                        remote.workcell_ref, owner.command, owner.reason
+                    )
+                }),
+                RemoteOutcome::Refused(detail) | RemoteOutcome::Unreachable(detail) => {
+                    Some(format!("{} ({detail})", remote.workcell_ref))
+                }
+            })
+            .collect()
+    }
+
+    /// The remotes that answered and record no current occupant.
+    pub fn answered_vacant(&self, position_ref: &str) -> Vec<String> {
+        self.answers
+            .iter()
+            .filter_map(|(remote, outcome)| match outcome {
+                RemoteOutcome::Answered(reading)
+                    if reading.unavailable.is_none()
+                        && reading.occupancy.as_ref().is_some_and(|occupancy| {
+                            tenure_in(occupancy, position_ref).is_none()
+                        }) =>
+                {
+                    Some(remote.workcell_ref.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `data.remotes` rows of the population reading and send receipts.
+    pub fn statuses(&self) -> Vec<Value> {
+        self.answers
+            .iter()
+            .map(|(remote, outcome)| match outcome {
+                RemoteOutcome::Answered(reading) => json!({
+                    "workcell_ref": remote.workcell_ref,
+                    "gateway_ref": reading.gateway_ref,
+                    "status": "reachable",
+                    "detail": match (&reading.unavailable, &reading.workcell_ref) {
+                        (Some(owner), _) => format!(
+                            "the gateway answered, but its Actuation could not: `{}` failed: {}",
+                            owner.command, owner.reason
+                        ),
+                        (None, Some(answered)) if answered != &remote.workcell_ref => format!(
+                            "the gateway declared for {} says it serves {answered} ({}); check `aikit gateway remote list`",
+                            remote.workcell_ref, reading.workcell_basis
+                        ),
+                        (None, _) => format!("answered from its Workcell's Actuation at {}", remote.websocket_bind),
+                    },
+                }),
+                RemoteOutcome::Refused(detail) => json!({
+                    "workcell_ref": remote.workcell_ref,
+                    "gateway_ref": Value::Null,
+                    "status": "reachable",
+                    "detail": format!("the gateway at {} refused the occupancy query (it may predate cross-Workcell occupancy): {detail}", remote.websocket_bind),
+                }),
+                RemoteOutcome::Unreachable(detail) => json!({
+                    "workcell_ref": remote.workcell_ref,
+                    "gateway_ref": Value::Null,
+                    "status": "unreachable",
+                    "detail": detail,
+                }),
+            })
+            .collect()
+    }
+}
+
+impl RemoteClaim {
+    fn routing(&self, position_ref: &str) -> aikit_adapters::CommuniqueRouting {
+        aikit_adapters::CommuniqueRouting {
+            workcell_ref: self.remote.workcell_ref.clone(),
+            gateway_ref: self.gateway_ref.clone(),
+            generation_ref: self.generation_ref.clone(),
+            basis: format!(
+                "{position_ref} has no current occupant on this Workcell; gateway {} of {} reports {} current there",
+                self.gateway_ref,
+                self.remote.workcell_ref,
+                self.generation_ref.as_deref().unwrap_or("an unnamed generation")
+            ),
+            observed_at_unix_ms: now_unix_ms(),
+        }
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "{} ({} via gateway {})",
+            self.remote.workcell_ref,
+            self.generation_ref
+                .as_deref()
+                .unwrap_or("an unnamed generation"),
+            self.gateway_ref
+        )
+    }
+}
+
+fn ambiguous_occupancy(position_ref: &str, claims: &[RemoteClaim]) -> AikitError {
+    three_part(
+        "gateway.occupancy_ambiguous",
+        format!(
+            "Position {position_ref} has a current occupant on more than one Workcell: {}.",
+            claims
+                .iter()
+                .map(RemoteClaim::describe)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        "Nothing was sent; no Communique was recorded. The gateway does not choose between two occupants of one address.",
+        format!(
+            "Settle the occupancy on those Workcells (`actuation occupancy read --position {position_ref}` on each; release the stale tenure), then send again."
+        ),
+    )
+}
+
+/// The serving gateway's answer to a peer's "who occupies P on your
+/// Workcell": this Workcell's Actuation, read when asked, beside this
+/// Workcell's ref. Nothing is cached; nothing is stored.
+pub struct ServedOccupancy {
+    pub cwd: PathBuf,
+}
+
+impl aikit_adapters::GatewayOccupancyReader for ServedOccupancy {
+    fn read(
+        &self,
+        gateway_ref: &str,
+        position_ref: Option<&str>,
+    ) -> aikit_adapters::GatewayOccupancyReading {
+        let owners = crate::gateway_owners::ProcessOwners::from_env();
+        let (workcell_ref, workcell_basis) = local_workcell(&owners, &self.cwd);
+        let answer = match position_ref {
+            Some(position_ref) => owners.occupancy_read(position_ref),
+            None => owners.occupancy_list(),
+        };
+        let (occupancy, unavailable) = match answer {
+            Ok(reading) => (Some(reading), None),
+            Err(owner) => (
+                None,
+                Some(aikit_adapters::GatewayOwnerUnavailable {
+                    command: owner.command,
+                    reason: owner.reason,
+                }),
+            ),
+        };
+        aikit_adapters::GatewayOccupancyReading {
+            schema: aikit_adapters::GATEWAY_OCCUPANCY_READING_SCHEMA.into(),
+            position_ref: position_ref.map(str::to_owned),
+            gateway_ref: gateway_ref.to_owned(),
+            workcell_ref,
+            workcell_basis,
+            occupancy,
+            unavailable,
+            read_at_unix_ms: now_unix_ms(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -689,6 +988,11 @@ pub fn send(
     let (local_workcell, workcell_basis) = local_workcell(owners, cwd);
     let now = now_unix_ms();
 
+    // Where the occupant stands. This Workcell's own ledger first; only when
+    // it records no current occupant are the declared remotes asked.
+    let mut remote = None;
+    let mut routing = None;
+    let mut remotes_asked = Vec::new();
     let (state, state_basis, occupant_workcell, delivery_notice) =
         match owners.occupancy_read(&recipient.position_ref) {
             Ok(reading) => match current_tenure(&reading) {
@@ -704,19 +1008,40 @@ pub fn send(
                         None,
                     )
                 }
-                None => (
-                    CommuniqueState::Held,
-                    format!("{} is vacant; held for the next occupant", recipient.position_ref),
-                    None,
-                    Some(json!({
-                        "fact": format!("Position {} is vacant: Actuation records no current occupant.", recipient.position_ref),
-                        "consequence": "The Communique is recorded held in this gateway's journal; nothing has been delivered yet.",
-                        "action": format!(
-                            "It is delivered to the next occupant that claims {} at that occupant's first turn boundary; follow it with `aikit gateway conversation --with {}`.",
-                            recipient.position_ref, recipient.position_ref
-                        ),
-                    })),
-                ),
+                None => {
+                    let elsewhere = remotes_elsewhere(home, local_workcell.as_deref())?;
+                    let survey = RemoteSurvey::ask(
+                        &elsewhere,
+                        &GatewayCommand::OccupancyRead {
+                            position_ref: recipient.position_ref.clone(),
+                        },
+                    );
+                    remotes_asked = survey.statuses();
+                    let claims = survey.claims(&recipient.position_ref);
+                    match claims.as_slice() {
+                        [claim] => {
+                            let route = claim.routing(&recipient.position_ref);
+                            let basis = format!(
+                                "{}; relayed to that Workcell's gateway, delivered at the occupant's next turn boundary there",
+                                route.basis
+                            );
+                            remote = Some(claim.remote.clone());
+                            routing = Some(route);
+                            (
+                                CommuniqueState::Pending,
+                                basis,
+                                Some(claim.remote.workcell_ref.clone()),
+                                None,
+                            )
+                        }
+                        [] => {
+                            let (basis, notice) =
+                                vacant_everywhere(&recipient.position_ref, &elsewhere, &survey);
+                            (CommuniqueState::Held, basis, None, Some(notice))
+                        }
+                        _ => return Err(ambiguous_occupancy(&recipient.position_ref, &claims)),
+                    }
+                }
             },
             Err(unavailable) => (
                 CommuniqueState::Pending,
@@ -730,9 +1055,9 @@ pub fn send(
             ),
         };
 
-    // Another Workcell holds the occupant: relay, or refuse before recording.
-    let mut remote = None;
-    if let (Some(occupant), Some(local)) = (&occupant_workcell, &local_workcell) {
+    // This Workcell's ledger places the occupant on another Workcell: relay
+    // there, or refuse before recording.
+    if let (None, Some(occupant), Some(local)) = (&routing, &occupant_workcell, &local_workcell) {
         if occupant != local {
             let remotes = load_remotes(home)?;
             match remotes
@@ -773,13 +1098,14 @@ pub fn send(
         state_basis,
         reply_to: request.reply_to,
         forward_to_workcell_ref: remote.as_ref().map(|entry| entry.workcell_ref.clone()),
+        routing,
     };
     let (mut communique, replayed, accepted_by) =
         expect_accepted(gateway.call(GatewayCommand::SendCommunique { draft })?)?;
 
     let mut forward = Value::Null;
     if let Some(entry) = remote {
-        let (record, report) = forward_one(gateway, &communique, &entry, &accepted_by)?;
+        let (record, report) = forward_one(gateway, &communique, &entry, &accepted_by, None)?;
         communique = record;
         forward = report;
     }
@@ -793,7 +1119,50 @@ pub fn send(
         "local_workcell": { "ref": local_workcell, "basis": workcell_basis },
         "delivery": delivery_notice,
         "forward": forward,
+        "remotes": remotes_asked,
     }))
+}
+
+/// The recipient is vacant here and no declared Workcell reports an occupant:
+/// the record's basis and the sender's three-part notice, naming exactly which
+/// Workcells were asked and which could not answer.
+fn vacant_everywhere(
+    position_ref: &str,
+    remotes: &[GatewayRemote],
+    survey: &RemoteSurvey,
+) -> (String, Value) {
+    let vacant = survey.answered_vacant(position_ref);
+    let unanswered = survey.unanswered();
+    let elsewhere = if remotes.is_empty() {
+        "no other Workcell is declared (`aikit gateway remote list`)".to_owned()
+    } else {
+        let mut parts = Vec::new();
+        if !vacant.is_empty() {
+            parts.push(format!("vacant on {}", vacant.join(", ")));
+        }
+        if !unanswered.is_empty() {
+            parts.push(format!("could not ask {}", unanswered.join("; ")));
+        }
+        parts.join("; ")
+    };
+    let basis = format!(
+        "{position_ref} is vacant on this Workcell and no declared Workcell reports an occupant ({elsewhere}); held for the next occupant"
+    );
+    let relay = if remotes.is_empty() {
+        String::new()
+    } else {
+        " If an occupant appears on a declared Workcell (or one that could not be asked answers with one), the next relay pass (every gateway service tick, or `aikit gateway forward`) relays it there.".to_owned()
+    };
+    let notice = json!({
+        "fact": format!("Position {position_ref} is vacant: Actuation on this Workcell records no current occupant, and {elsewhere}."),
+        "consequence": "The Communique is recorded held in this gateway's journal; nothing has been delivered yet.",
+        "action": format!(
+            "It is delivered to the next occupant that claims {position_ref} at that occupant's first turn boundary.{relay} Follow it with `aikit gateway conversation --with {position_ref}`."
+        ),
+        "vacant_on": vacant,
+        "unanswered": unanswered,
+    });
+    (basis, notice)
 }
 
 /// Relay one record to a declared remote gateway and record the outcome
@@ -804,6 +1173,7 @@ fn forward_one(
     communique: &Communique,
     remote: &GatewayRemote,
     local_gateway_ref: &str,
+    routing: Option<aikit_adapters::CommuniqueRouting>,
 ) -> Result<(Communique, Value)> {
     let at = now_unix_ms();
     let attempt = SecretLocation::parse(&remote.token_location)
@@ -839,6 +1209,7 @@ fn forward_one(
     let record = expect_record(gateway.call(GatewayCommand::RecordCommuniqueForward {
         communique_ref: communique.communique_ref.clone(),
         outcome,
+        routing,
     })?)?;
     let report = match attempt {
         Ok((_, replayed, remote_gateway_ref)) => json!({
@@ -862,8 +1233,45 @@ fn forward_one(
 // forward (the relay pass)
 // ---------------------------------------------------------------------------
 
-/// Re-evaluate every Communique this gateway still has to deliver: when its
-/// recipient's occupant now stands on a declared remote Workcell, relay it.
+/// Where this Workcell's own ledger places a Position's occupant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LedgerPlacement {
+    /// Occupied here, or occupied with no Workcell named: delivered here.
+    Here,
+    /// This ledger names another Workcell for the current tenure.
+    Elsewhere(String),
+    /// No current occupant in this ledger.
+    Vacant,
+    /// Actuation could not answer.
+    Unknown,
+}
+
+fn ledger_placement(
+    owners: &dyn ContactOwners,
+    position_ref: &str,
+    local: Option<&str>,
+) -> LedgerPlacement {
+    match owners.occupancy_read(position_ref) {
+        Ok(reading) => match current_tenure(&reading) {
+            None => LedgerPlacement::Vacant,
+            Some(tenure) => match (tenure.get("workcell_ref").and_then(Value::as_str), local) {
+                (Some(workcell), Some(local)) if workcell != local => {
+                    LedgerPlacement::Elsewhere(workcell.to_owned())
+                }
+                _ => LedgerPlacement::Here,
+            },
+        },
+        Err(_) => LedgerPlacement::Unknown,
+    }
+}
+
+/// Re-evaluate every Communique this gateway still has to deliver, the same
+/// way `send` routes a new one: when this Workcell's ledger places the
+/// recipient's occupant on a declared remote Workcell, relay there; when this
+/// ledger records no occupant, ask the declared remotes (once per pass) and
+/// relay to the one that reports a current occupant. A held Communique thus
+/// reaches a recipient who occupies later on another machine; one queued for
+/// a remote that was down is retried.
 pub fn forward_pass(
     home: &AikitHome,
     owners: &dyn ContactOwners,
@@ -872,66 +1280,98 @@ pub fn forward_pass(
 ) -> Result<Value> {
     let queue = expect_list(gateway.call(GatewayCommand::CommuniqueForwardQueue)?)?;
     let (local, basis) = local_workcell(owners, cwd);
-    let Some(local) = local else {
-        return Ok(json!({
-            "considered": queue.len(),
-            "forwarded": [],
-            "queued": [],
-            "skipped": [],
-            "note": format!("this home's Workcell is unknown ({basis}); nothing can be judged remote"),
-        }));
-    };
     let local_gateway_ref = match gateway.call(GatewayCommand::Status)? {
         GatewayResponse::Status { status } => status.gateway_ref.to_string(),
         other => return Err(unexpected(&other)),
     };
     let remotes = load_remotes(home)?;
-    let mut occupant_workcell: BTreeMap<String, Option<String>> = BTreeMap::new();
-    let (mut forwarded, mut queued, mut skipped) = (Vec::new(), Vec::new(), Vec::new());
-    for record in queue {
-        let workcell = occupant_workcell
+    let elsewhere = remotes_elsewhere(home, local.as_deref())?;
+    let mut placements: BTreeMap<String, LedgerPlacement> = BTreeMap::new();
+    // The remotes are surveyed at most once per pass, and only when some
+    // Communique's recipient is vacant here.
+    let mut survey: Option<RemoteSurvey> = None;
+    let (mut forwarded, mut queued, mut skipped, mut held, mut ambiguous) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for record in &queue {
+        let placement = placements
             .entry(record.to_position_ref.clone())
-            .or_insert_with(|| {
-                owners
-                    .occupancy_read(&record.to_position_ref)
-                    .ok()
-                    .and_then(|reading| {
-                        current_tenure(&reading)
-                            .and_then(|tenure| tenure.get("workcell_ref").and_then(Value::as_str))
-                            .map(str::to_owned)
-                    })
-            })
+            .or_insert_with(|| ledger_placement(owners, &record.to_position_ref, local.as_deref()))
             .clone();
-        let Some(workcell) = workcell.filter(|workcell| workcell != &local) else {
-            continue;
-        };
-        match remotes
-            .remotes
-            .iter()
-            .find(|entry| entry.workcell_ref == workcell)
-        {
-            Some(entry) => {
-                let (record, report) = forward_one(gateway, &record, entry, &local_gateway_ref)?;
-                if report["state"] == "forwarded" {
-                    forwarded.push(
-                        json!({"communique_ref": record.communique_ref, "workcell_ref": workcell}),
-                    );
-                } else {
-                    queued.push(json!({"communique_ref": record.communique_ref, "report": report}));
+        let (entry, routing) = match placement {
+            LedgerPlacement::Here | LedgerPlacement::Unknown => continue,
+            LedgerPlacement::Elsewhere(workcell) => {
+                match remotes
+                    .remotes
+                    .iter()
+                    .find(|entry| entry.workcell_ref == workcell)
+                {
+                    Some(entry) => (entry.clone(), None),
+                    None => {
+                        skipped.push(json!({
+                            "communique_ref": record.communique_ref,
+                            "workcell_ref": workcell,
+                            "action": format!("Declare the endpoint: {}", remote_command(&workcell)),
+                        }));
+                        continue;
+                    }
                 }
             }
-            None => skipped.push(json!({
+            LedgerPlacement::Vacant => {
+                if elsewhere.is_empty() {
+                    continue;
+                }
+                let survey = survey.get_or_insert_with(|| {
+                    RemoteSurvey::ask(&elsewhere, &GatewayCommand::OccupancyList)
+                });
+                let claims = survey.claims(&record.to_position_ref);
+                match claims.as_slice() {
+                    [claim] => (
+                        claim.remote.clone(),
+                        Some(claim.routing(&record.to_position_ref)),
+                    ),
+                    [] => {
+                        held.push(json!({
+                            "communique_ref": record.communique_ref,
+                            "position_ref": record.to_position_ref,
+                            "vacant_on": survey.answered_vacant(&record.to_position_ref),
+                            "unanswered": survey.unanswered(),
+                        }));
+                        continue;
+                    }
+                    _ => {
+                        let refusal = ambiguous_occupancy(&record.to_position_ref, &claims);
+                        ambiguous.push(json!({
+                            "communique_ref": record.communique_ref,
+                            "position_ref": record.to_position_ref,
+                            "fact": refusal.details().get("fact"),
+                            "consequence": "It stays in this gateway's journal, undelivered; nothing was relayed.",
+                            "action": refusal.details().get("action"),
+                        }));
+                        continue;
+                    }
+                }
+            }
+        };
+        let (record, report) = forward_one(gateway, record, &entry, &local_gateway_ref, routing)?;
+        if report["state"] == "forwarded" {
+            forwarded.push(json!({
                 "communique_ref": record.communique_ref,
-                "workcell_ref": workcell,
-                "action": format!("Declare the endpoint: {}", remote_command(&workcell)),
-            })),
+                "workcell_ref": entry.workcell_ref,
+                "routing": record.routing,
+            }));
+        } else {
+            queued.push(json!({"communique_ref": record.communique_ref, "report": report}));
         }
     }
     Ok(json!({
-        "local_workcell": local,
+        "considered": queue.len(),
+        "local_workcell": { "ref": local, "basis": basis },
         "forwarded": forwarded,
         "queued": queued,
         "skipped": skipped,
+        "held": held,
+        "ambiguous": ambiguous,
+        "remotes": survey.map(|survey| survey.statuses()).unwrap_or_default(),
     }))
 }
 
@@ -1219,6 +1659,7 @@ fn absence(facet: &str, reason: impl Into<String>, source: impl Into<String>) ->
 }
 
 pub fn who(
+    home: &AikitHome,
     owners: &dyn ContactOwners,
     gateway: &dyn GatewayAccess,
     cwd: &Path,
@@ -1361,13 +1802,42 @@ pub fn who(
             None
         }
     };
+    // Occupancy on the declared remote Workcells, one listing each, asked only
+    // when this Workcell's own ledger could be read (a Position is only
+    // "vacant here" when this ledger says so).
+    let (local_workcell_ref, _) = local_workcell(owners, cwd);
+    let elsewhere = remotes_elsewhere(home, local_workcell_ref.as_deref())?;
+    let survey = if occupancy.is_some() && !elsewhere.is_empty() {
+        RemoteSurvey::ask(&elsewhere, &GatewayCommand::OccupancyList)
+    } else {
+        RemoteSurvey::default()
+    };
+    let remote_occupied: Vec<String> = survey
+        .answers
+        .iter()
+        .filter_map(|(_, outcome)| match outcome {
+            RemoteOutcome::Answered(reading) => reading.occupancy.as_ref(),
+            _ => None,
+        })
+        .flat_map(|listing| {
+            listing
+                .get("positions")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|row| current_tenure(row).is_some())
+                .filter_map(|row| row.get("position_ref").and_then(Value::as_str))
+                .map(str::to_owned)
+        })
+        .collect();
+
     // An occupied Position this World should show but Central does not define
     // is still someone here: list it, marked, rather than hide them.
     if let Some(occupancy) = &occupancy {
         let world_prefix = project_world_ref
             .as_str()
             .map(|world| format!("central:position:{world}:"));
-        for reference in occupancy.keys() {
+        for reference in occupancy.keys().chain(remote_occupied.iter()) {
             let in_world = world_prefix
                 .as_deref()
                 .is_none_or(|prefix| reference.starts_with(prefix))
@@ -1414,32 +1884,54 @@ pub fn who(
 
     let mut positions = Vec::new();
     for (reference, mut row) in rows {
-        row["occupancy"] = match &occupancy {
+        let local_tenure = occupancy.as_ref().map(|occupancy| {
+            occupancy.get(&reference).and_then(|entry| {
+                entry
+                    .get("current")
+                    .filter(|current| !current.is_null())
+                    .map(|tenure| (entry, tenure))
+            })
+        });
+        row["occupancy"] = match local_tenure {
             None => json!({ "state": "unavailable" }),
-            Some(occupancy) => match occupancy.get(&reference) {
-                None => json!({ "state": "vacant" }),
-                Some(entry) => match entry.get("current").filter(|current| !current.is_null()) {
-                    None => json!({ "state": "vacant" }),
-                    Some(tenure) => {
-                        let presence = entry.get("presence").filter(|presence| {
-                            presence.get("generation_ref") == tenure.get("generation_ref")
-                        });
+            Some(Some((entry, tenure))) => {
+                let mut reading = occupied_row(entry, tenure, None);
+                reading["observed_via"] = json!("local");
+                reading
+            }
+            Some(None) => {
+                let claims = survey.claims(&reference);
+                match claims.as_slice() {
+                    [] => json!({ "state": "vacant", "observed_via": "local" }),
+                    [claim] => {
+                        let entry = remote_entry(&survey, claim, &reference);
+                        let mut reading = occupied_row(
+                            entry.as_ref().unwrap_or(&claim.tenure),
+                            &claim.tenure,
+                            Some(&claim.remote.workcell_ref),
+                        );
+                        reading["observed_via"] = json!(format!("gateway:{}", claim.gateway_ref));
+                        reading
+                    }
+                    _ => {
+                        let refusal = ambiguous_occupancy(&reference, &claims);
+                        absences.push(absence(
+                            &format!("occupancy:{reference}"),
+                            refusal.details().get("fact").cloned().unwrap_or_default(),
+                            "aikit gateway occupancy-list (declared remotes)",
+                        ));
                         json!({
-                            "state": "occupied",
-                            "generation_ref": tenure.get("generation_ref"),
-                            "generation_ordinal": tenure.get("generation_ordinal"),
-                            "kind": tenure.get("kind"),
-                            "agent_ref": tenure.get("agent_ref"),
-                            "agency_ref": tenure.get("agency_ref"),
-                            "agent_session_ref": tenure.get("agent_session_ref"),
-                            "workcell_ref": tenure.get("workcell_ref"),
-                            "since_unix_ms": tenure.get("began_at_unix_ms"),
-                            "presence": presence.and_then(|p| p.get("presence")),
-                            "attention": presence.and_then(|p| p.get("attention")),
+                            "state": "unavailable",
+                            "reason": "more than one Workcell reports a current occupant",
+                            "claims": claims.iter().map(|claim| json!({
+                                "workcell_ref": claim.remote.workcell_ref,
+                                "gateway_ref": claim.gateway_ref,
+                                "generation_ref": claim.generation_ref,
+                            })).collect::<Vec<_>>(),
                         })
                     }
-                },
-            },
+                }
+            }
         };
         row["current_work"] = match owners.current_work(&reference, &work_dir) {
             Ok(reading) => {
@@ -1482,9 +1974,62 @@ pub fn who(
         "schema": POPULATION_READING_SCHEMA,
         "project_world_ref": project_world_ref,
         "local_world_ref": local_world_ref,
+        "local_workcell_ref": local_workcell_ref,
         "positions": positions,
+        "remotes": survey.statuses(),
         "absences": absences,
     }))
+}
+
+/// The population reading's occupancy facet for a current tenure. A remote
+/// tenure that names no Workcell is placed on the Workcell that reported it.
+fn occupied_row(entry: &Value, tenure: &Value, reported_by: Option<&str>) -> Value {
+    let presence = entry
+        .get("presence")
+        .filter(|presence| presence.get("generation_ref") == tenure.get("generation_ref"));
+    let workcell_ref = tenure
+        .get("workcell_ref")
+        .filter(|workcell| !workcell.is_null())
+        .cloned()
+        .or_else(|| reported_by.map(|workcell| json!(workcell)))
+        .unwrap_or(Value::Null);
+    json!({
+        "state": "occupied",
+        "generation_ref": tenure.get("generation_ref"),
+        "generation_ordinal": tenure.get("generation_ordinal"),
+        "kind": tenure.get("kind"),
+        "agent_ref": tenure.get("agent_ref"),
+        "agency_ref": tenure.get("agency_ref"),
+        "agent_session_ref": tenure.get("agent_session_ref"),
+        "workcell_ref": workcell_ref,
+        "since_unix_ms": tenure.get("began_at_unix_ms"),
+        "presence": presence.and_then(|p| p.get("presence")),
+        "attention": presence.and_then(|p| p.get("attention")),
+    })
+}
+
+/// The remote listing row (with its presence) behind one claim.
+fn remote_entry(survey: &RemoteSurvey, claim: &RemoteClaim, position_ref: &str) -> Option<Value> {
+    survey
+        .answers
+        .iter()
+        .find_map(|(remote, outcome)| match outcome {
+            RemoteOutcome::Answered(reading)
+                if remote.workcell_ref == claim.remote.workcell_ref =>
+            {
+                reading
+                    .occupancy
+                    .as_ref()?
+                    .get("positions")?
+                    .as_array()?
+                    .iter()
+                    .find(|row| {
+                        row.get("position_ref").and_then(Value::as_str) == Some(position_ref)
+                    })
+                    .cloned()
+            }
+            _ => None,
+        })
 }
 
 /// The serve loop's relay hook: one relay pass per tick, through the carrier

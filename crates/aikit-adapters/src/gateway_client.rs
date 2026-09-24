@@ -57,6 +57,17 @@ pub fn gateway_request(
     command: GatewayCommand,
     request_id: Option<String>,
 ) -> Result<GatewayResponseEnvelope> {
+    gateway_request_within(target, command, request_id, CARRIER_TIMEOUT)
+}
+
+/// [`gateway_request`] with an explicit bound on connecting and on waiting for
+/// the answer, for callers that must not stall on a gateway that is asleep.
+pub fn gateway_request_within(
+    target: &GatewayCarrierTarget,
+    command: GatewayCommand,
+    request_id: Option<String>,
+    timeout: Duration,
+) -> Result<GatewayResponseEnvelope> {
     let request = GatewayRequestEnvelope {
         request_id,
         command,
@@ -69,12 +80,12 @@ pub fn gateway_request(
     })?;
     match target {
         #[cfg(unix)]
-        GatewayCarrierTarget::UnixSocket(path) => unix_line_request(path, &encoded),
+        GatewayCarrierTarget::UnixSocket(path) => unix_line_request(path, &encoded, timeout),
         GatewayCarrierTarget::WebSocket {
             bind,
             path,
             bearer_token,
-        } => websocket_request(bind, path, bearer_token, &encoded),
+        } => websocket_request(bind, path, bearer_token, &encoded, timeout),
     }
 }
 
@@ -85,7 +96,17 @@ pub fn gateway_command(
     command: GatewayCommand,
     request_id: Option<String>,
 ) -> Result<GatewayResponse> {
-    let envelope = gateway_request(target, command, request_id)?;
+    gateway_command_within(target, command, request_id, CARRIER_TIMEOUT)
+}
+
+/// [`gateway_command`] bounded by `timeout` for the connection and the answer.
+pub fn gateway_command_within(
+    target: &GatewayCarrierTarget,
+    command: GatewayCommand,
+    request_id: Option<String>,
+    timeout: Duration,
+) -> Result<GatewayResponse> {
+    let envelope = gateway_request_within(target, command, request_id, timeout)?;
     if !envelope.ok {
         return Err(envelope
             .error
@@ -116,6 +137,7 @@ pub fn gateway_command(
 fn unix_line_request(
     path: &std::path::Path,
     encoded_request: &str,
+    timeout: Duration,
 ) -> Result<GatewayResponseEnvelope> {
     use std::os::unix::net::UnixStream;
 
@@ -125,14 +147,12 @@ fn unix_line_request(
             format!("connect gateway socket {}: {error}", path.display()),
         )
     })?;
-    stream
-        .set_read_timeout(Some(CARRIER_TIMEOUT))
-        .map_err(|error| {
-            AikitError::new(
-                "agency_gateway_client.unix_timeout",
-                format!("set gateway socket read timeout: {error}"),
-            )
-        })?;
+    stream.set_read_timeout(Some(timeout)).map_err(|error| {
+        AikitError::new(
+            "agency_gateway_client.unix_timeout",
+            format!("set gateway socket read timeout: {error}"),
+        )
+    })?;
     write_request_line(&mut stream, encoded_request)?;
     read_response_line(&mut stream)
 }
@@ -182,8 +202,9 @@ fn websocket_request(
     path: &str,
     bearer_token: &str,
     encoded_request: &str,
+    timeout: Duration,
 ) -> Result<GatewayResponseEnvelope> {
-    let stream = tcp_connect(bind)?;
+    let stream = tcp_connect(bind, timeout)?;
     let mut writer = stream.try_clone().map_err(|error| {
         AikitError::new(
             "agency_gateway_client.stream_clone",
@@ -197,7 +218,7 @@ fn websocket_request(
     decode_response(&payload)
 }
 
-fn tcp_connect(bind: &str) -> Result<TcpStream> {
+fn tcp_connect(bind: &str, timeout: Duration) -> Result<TcpStream> {
     let address = bind
         .to_socket_addrs()
         .map_err(|error| {
@@ -213,15 +234,15 @@ fn tcp_connect(bind: &str) -> Result<TcpStream> {
                 format!("gateway bind {bind} resolved to no address"),
             )
         })?;
-    let stream = TcpStream::connect_timeout(&address, CARRIER_TIMEOUT).map_err(|error| {
+    let stream = TcpStream::connect_timeout(&address, timeout).map_err(|error| {
         AikitError::new(
             "agency_gateway_client.connect",
             format!("connect gateway at {bind}: {error}"),
         )
     })?;
     stream
-        .set_read_timeout(Some(CARRIER_TIMEOUT))
-        .and_then(|()| stream.set_write_timeout(Some(CARRIER_TIMEOUT)))
+        .set_read_timeout(Some(timeout))
+        .and_then(|()| stream.set_write_timeout(Some(timeout)))
         .map_err(|error| {
             AikitError::new(
                 "agency_gateway_client.timeout",

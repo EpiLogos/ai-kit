@@ -29,7 +29,9 @@ aikit gateway inbox [--position P] [--ack] --json
 aikit gateway conversation --with @factory-guardian --json
 aikit gateway delegate --communique aikit:communique:… --work work:cradle-fix [--run R] [--journey J] [--workflow-unit U] --reason "…"
 aikit gateway forward --json
-aikit gateway remote add --workcell workcell:omarchy --ws 192.168.1.20:7800 --token-location file:/Users/me/.aikit/omarchy-gateway.token
+aikit gateway remote add --workcell workcell:omarchy --ws 100.92.62.101:7800 --token-location file:/Users/me/.aikit/omarchy-gateway.token
+aikit gateway serve --ws HOST:PORT --ws-token-location file:/ABS/PATH --unix
+aikit gateway install-service [--ws HOST:PORT --ws-token-location file:/ABS/PATH] [--workcell-ref W] [--gateway-ref G]
 aikit gateway remote list | remove --workcell W
 ```
 
@@ -63,20 +65,57 @@ body can never pose as the header around it.
 
 - The recipient Position must exist in Central. An unknown ref or handle is
   refused and nothing is recorded; the refusal names `aikit gateway who --json`.
-- Occupied: `pending`, delivered at that occupant's next turn.
-- Vacant: `held`, with a three-part notice. It is delivered to whichever
-  occupant claims the Position next.
-- Occupied on another Workcell: relayed through that Workcell's gateway over
-  the authenticated WebSocket carrier, using a declared endpoint (`aikit
-  gateway remote add`, token by location only). No endpoint declared: refused
-  before recording, naming the exact `remote add` command. Endpoint down: the
-  Communique is recorded here, queued, and the sender is not blocked. The
-  relay pass (`aikit gateway forward`, and every gateway service tick) sends it
-  once the remote answers. Once relayed, delivery is recorded by the receiving
-  gateway, and the sender's copy shows `forward.state: forwarded`.
+
+Each Workcell's Actuation keeps its own occupancy ledger, so "who occupies
+this Position" has one answer per Workcell. The gateway keeps no copy of any
+of them. It routes in this order:
+
+1. **This Workcell's ledger first** (`actuation occupancy read`).
+   - A current tenure on this Workcell: `pending`, delivered at that
+     occupant's next turn.
+   - A current tenure that this ledger places on another Workcell: relayed
+     to that Workcell's declared gateway (below). No endpoint declared:
+     refused before recording, naming the exact `remote add` command.
+2. **No current tenure here: ask every declared remote.** Each remote gateway
+   answers `occupancy-read` (over its authenticated WebSocket, or its Unix
+   socket) from its own Workcell's Actuation, at the moment of asking, with
+   its `gateway_ref` and `workcell_ref`. Remotes are asked in parallel, each
+   bounded to 2 seconds.
+   - Exactly one reports a current tenure: `pending`, relayed there. The
+     Communique records the route it took in `routing`: the remote's
+     `workcell_ref`, `gateway_ref`, the `generation_ref` it reported, and a
+     plain-words `basis`.
+   - More than one reports a current tenure: refused before recording
+     (`gateway.occupancy_ambiguous`), naming each Workcell and generation.
+     The gateway does not choose between two occupants of one address.
+   - None does, or none could be asked: `held`, with a three-part notice
+     naming which Workcells answered vacant and which could not be asked
+     (unreachable, refused, or their Actuation unavailable).
+3. **Actuation here could not answer**: `pending` here, not relayed, with a
+   three-part notice.
+
+A relay whose remote is down leaves the Communique recorded here and queued;
+the sender is not blocked. The relay pass (`aikit gateway forward`, and every
+gateway service tick) re-resolves every undelivered Communique the same way,
+asking each declared remote for its whole listing (`occupancy-list`) once per
+pass. So a `held` Communique reaches a recipient who occupies later on another
+machine, a `pending` one follows an occupant whose address moved to another
+Workcell, and one queued for a remote that was down is retried. What a
+predecessor already received is never sent again. Once relayed, delivery is
+recorded by the receiving gateway, the sender's copy shows `forward.state:
+forwarded`, and the sender's attribution travels unchanged.
 
 This home's Workcell is `AIKIT_WORKCELL_REF` when set, otherwise the Workcell
-`central.world.here` declares current.
+`central.world.here` declares current. The gateway service answers peers'
+occupancy questions with the same Workcell identity.
+
+`who` overlays the remotes too. A Position vacant in this ledger but occupied
+on a reachable remote shows that occupancy, with `occupancy.workcell_ref` and
+`occupancy.observed_via: "gateway:<gateway_ref>"`. Rows read from this ledger
+carry `observed_via: "local"`. Two Workcells claiming one Position show
+`state: unavailable` with both `claims` and an absence. `data.remotes` lists
+every declared remote as `{workcell_ref, gateway_ref, status: reachable |
+unreachable, detail}`.
 
 ### Delivery at the turn boundary
 
@@ -109,6 +148,114 @@ file is guarded by an advisory lock: a running service holds it for as long as
 it runs, and an offline writer holds it for a single command. The two can
 never interleave, and a sender is never blocked because the gateway service
 is stopped.
+
+### Serving the gateway for other Workcells
+
+`aikit gateway serve` with no flags serves this home's Unix socket
+(`$AIKIT_HOME/state/gateway.sock`). Another Workcell reaches the gateway over
+its authenticated WebSocket carrier:
+
+```sh
+aikit gateway serve --ws 100.92.62.101:7800 --ws-token-location file:/home/frank/.aikit/gateway.token --unix
+```
+
+- `--ws-token-location` names where the bearer token lives, either an
+  owner-only `file:` path or a keychain/pass/op/varlock ref. The token is read
+  once, at start. A file that its group or anyone else can read is refused
+  before any carrier is bound. `--ws-token TOKEN` and `AIKIT_GATEWAY_TOKEN`
+  still work. A location cannot be given together with a raw token.
+- `--unix` with no path serves this home's socket beside the WebSocket, so
+  local `send`, `inbox`, turn-boundary delivery and the relay pass keep
+  reaching the running service. `--ws` alone serves the network carrier only.
+  In that case local contact verbs cannot reach the service, and the service
+  says so on stderr.
+
+`aikit gateway install-service` keeps that posture alive. It always serves the
+Unix socket, and it also serves the WebSocket when you pass `--ws` and
+`--ws-token-location`. The Workcell and gateway identity are set in the
+service's environment:
+
+```sh
+aikit gateway install-service --ws 100.92.62.101:7800 \
+  --ws-token-location file:/home/frank/.aikit/gateway.token \
+  --workcell-ref workcell:omarchy --gateway-ref agency-gateway/omarchy
+```
+
+| platform | service definition | started with |
+|---|---|---|
+| macOS | `~/Library/LaunchAgents/ai.aikit.gateway.plist` (KeepAlive) | `launchctl bootstrap gui/<uid>` |
+| Linux | `~/.config/systemd/user/aikit-gateway.service` (`Restart=always`, `WantedBy=default.target`) | `systemctl --user daemon-reload` then `enable --now` |
+
+The service definition carries the token's location, never the token itself.
+It also carries the owner relation the dispatcher and the relay pass need:
+`HOME`, `AIKIT_HOME`, the Central root, the resolved `ctrl`, `factory` and
+`actuation` executables, and a `PATH` of only their directories plus the
+system paths. It carries no credentials. A socket left by a gateway that has
+exited is cleared under the gateway state lock. A gateway that is still
+answering is refused.
+Install refuses a WebSocket without a token location, and a token file that
+is not owner-only, before it writes anything. If the service manager refuses
+the start, the definition is removed again. `aikit gateway uninstall-service`
+is the exact inverse. On Linux the user manager runs while you are logged in.
+To keep the gateway up without a login, the machine owner enables lingering
+(`loginctl enable-linger`).
+
+### Two Workcells, both directions
+
+These steps link the Mac (`workcell:mac`, tailnet 100.109.102.82) with Omarchy
+(`workcell:omarchy`, tailnet host `frank`, 100.92.62.101). Each machine
+serves its own gateway and declares the other one.
+
+1. **A token per gateway.** Each gateway checks the token presented to it, so
+   each machine keeps its own and gives a copy to the other:
+
+   ```sh
+   # on each machine
+   umask 077 && openssl rand -hex 32 > ~/.aikit/gateway.token
+   ```
+
+   Copy the Mac's token to Omarchy as `~/.aikit/mac-gateway.token`, and
+   Omarchy's to the Mac as `~/.aikit/omarchy-gateway.token`. Use `chmod 600`
+   on both copies.
+
+2. **Serve.** On the Mac:
+
+   ```sh
+   aikit gateway install-service --ws 100.109.102.82:7800 \
+     --ws-token-location file:$HOME/.aikit/gateway.token \
+     --workcell-ref workcell:mac --gateway-ref agency-gateway/mac
+   ```
+
+   On Omarchy:
+
+   ```sh
+   aikit gateway install-service --ws 100.92.62.101:7800 \
+     --ws-token-location file:$HOME/.aikit/gateway.token \
+     --workcell-ref workcell:omarchy --gateway-ref agency-gateway/omarchy
+   ```
+
+3. **Declare each other.** On the Mac:
+
+   ```sh
+   aikit gateway remote add --workcell workcell:omarchy --ws 100.92.62.101:7800 \
+     --token-location file:$HOME/.aikit/omarchy-gateway.token
+   ```
+
+   On Omarchy:
+
+   ```sh
+   aikit gateway remote add --workcell workcell:mac --ws 100.109.102.82:7800 \
+     --token-location file:$HOME/.aikit/mac-gateway.token
+   ```
+
+4. **Check.** `aikit gateway who --json` on either machine lists the other
+   under `data.remotes` with `status: reachable`. A Position occupied on the
+   other machine shows `observed_via: "gateway:agency-gateway/<other>"`.
+
+Shell commands run outside the service, such as `aikit gateway send` and the
+hook dispatcher, need the same identity. Set `AIKIT_WORKCELL_REF` in the
+shell profile on each machine, unless `central.world.here` already names the
+current Workcell there.
 
 ## The environmental DAY Routine
 
@@ -156,9 +303,19 @@ civil-time policy must say `automatic_day_rollover: true`, and
 - `crates/aikit-cli/tests/gateway_contact.rs`: the real binary and gateway.
   Covers same-Workcell send, inbox and ack; turn-boundary delivery; vacant →
   held → next claim; occupant replacement; unknown and forged attribution;
-  delegation into custody; the population reading; a missing owner. Across two
-  AIKit homes and two gateways: relay, and a remote that is down and receives
-  later.
+  delegation into custody; the population reading; a missing owner. Across
+  AIKit homes that each keep their own occupancy ledger (the fixture's
+  `FIXTURE_OCCUPANCY`) and their own gateway: a Position occupied only on B is
+  reached from A through B's occupancy answer, and B's reply reaches A the same
+  way; B down leaves the Communique held at A until a relay pass finds B's
+  occupant; an occupant whose address moves from A to B receives what it never
+  had and nothing twice; two Workcells claiming one Position are refused as
+  ambiguous; `who` shows occupancy observed through a remote gateway; a tenure
+  A's own ledger places on B is relayed, retried after B was down, or refused
+  when B is undeclared.
+- `crates/aikit-adapters/src/gateway_service.rs`: the occupancy query is
+  answered by the service's owner hook on every ask (nothing cached), writes
+  no gateway state, and the kernel alone refuses it.
 - `crates/aikit-cli/tests/routine_native_day.rs`: a disposable Central root with
   the real `ctrl`. An occurrence falls due, one `gateway tick` runs, the Day
   opens and the NOW fields roll, using native Actions only. With Central #217
