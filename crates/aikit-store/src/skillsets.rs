@@ -47,6 +47,15 @@ pub struct SetFile {
     /// capsule matching one is *proposed*, never joined.
     #[serde(default)]
     pub patterns: Vec<String>,
+    /// Sets carried by reference: home set names or registry semantic refs.
+    /// Resolved at load time; shared, never copied into `members`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<String>,
+    /// Neutral portable-package metadata (`[package]`), read by
+    /// `aikit set package`. Target-specific material lives only under
+    /// `[package.targets.<target>]`; nothing here changes membership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<aikit_core::skillset_package::PackageMetadata>,
 }
 
 /// Where sets live under the home.
@@ -69,15 +78,36 @@ pub fn load_all(home: &AikitHome) -> Result<Vec<SkillSet>> {
     let mut out = Vec::new();
     for entry in entries.flatten() {
         if entry.path().is_dir() {
-            out.push(load_dir(&entry.path(), SetProvenance::Composed)?);
+            let mut set = load_dir(&entry.path(), SetProvenance::Composed)?;
+            resolve_references(home, &mut set)?;
+            out.push(set);
         }
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
 }
 
-/// Read one set by name.
+/// Read one set by name — a home set path, or a registry semantic ref such as
+/// `central:documentation` — with its referenced children resolved.
 pub fn load(home: &AikitHome, name: &str) -> Result<SkillSet> {
+    let mut set = load_unresolved(home, name)?;
+    resolve_references(home, &mut set)?;
+    Ok(set)
+}
+
+/// Read one set exactly as authored: contained children loaded, `child_refs`
+/// left as declared. Mutations read this so they never write a referenced
+/// child's members back into the parent.
+pub fn load_unresolved(home: &AikitHome, name: &str) -> Result<SkillSet> {
+    if crate::registry_skillsets::is_semantic_ref(name) {
+        return crate::registry_skillsets::find(home, name)?.ok_or_else(|| {
+            AikitError::new(
+                "skillset.unknown",
+                format!("no registry declares the set `{name}`"),
+            )
+            .with("set", name.to_string())
+        });
+    }
     validate_name(name)?;
     let path = dir(home, name);
     if !path.is_dir() {
@@ -87,6 +117,54 @@ pub fn load(home: &AikitHome, name: &str) -> Result<SkillSet> {
         );
     }
     load_dir(&path, SetProvenance::Composed)
+}
+
+/// Attach every referenced child in `set`'s subtree, recursively.
+///
+/// A reference names a home set or a registry semantic ref. A cycle, or a
+/// reference nothing declares, is an error naming the path — a set never
+/// silently carries less than it says.
+pub fn resolve_references(home: &AikitHome, set: &mut SkillSet) -> Result<()> {
+    let mut stack = vec![set.reference().to_string()];
+    resolve_in(home, set, &mut stack)
+}
+
+fn resolve_in(home: &AikitHome, set: &mut SkillSet, stack: &mut Vec<String>) -> Result<()> {
+    for child in &mut set.children {
+        stack.push(child.reference().to_string());
+        resolve_in(home, child, stack)?;
+        stack.pop();
+    }
+    for reference in set.child_refs.clone() {
+        if stack.iter().any(|seen| seen == &reference) {
+            let mut path = stack.clone();
+            path.push(reference.clone());
+            return Err(AikitError::new(
+                "skillset.reference_cycle",
+                format!("set references form a cycle: {}", path.join(" -> ")),
+            )
+            .with("set", set.reference().to_string())
+            .with("reference", reference));
+        }
+        let mut child = load_unresolved(home, &reference).map_err(|error| {
+            AikitError::new(
+                "skillset.reference_unresolved",
+                format!(
+                    "set `{}` carries `{reference}` by reference, but it cannot be read: {}",
+                    set.reference(),
+                    error.message()
+                ),
+            )
+            .with("set", set.reference().to_string())
+            .with("reference", reference.clone())
+        })?;
+        child.attached_by = Some(reference.clone());
+        stack.push(reference.clone());
+        resolve_in(home, &mut child, stack)?;
+        stack.pop();
+        set.children.push(child);
+    }
+    Ok(())
 }
 
 /// Read a set from a directory, recursing into nested sets.
@@ -111,6 +189,7 @@ pub fn load_dir(path: &Path, provenance: SetProvenance) -> Result<SkillSet> {
         })?;
         set.description = note.description;
         set.patterns = note.patterns;
+        set.child_refs = note.children;
         for id in note.include {
             set.members.insert(id, SetMembership::Explicit);
         }
@@ -267,6 +346,60 @@ pub fn plan_add(home: &AikitHome, name: &str, ids: &[CapsuleId]) -> Result<Proce
     }
     members.sort();
     plan_membership(home, name, "add", &members, None)
+}
+
+/// Carry other sets by reference: record `refs` in the set's note so they are
+/// resolved at load time. Never copies a referenced set's members. Refuses a
+/// reference that does not resolve or that would close a cycle.
+pub fn plan_add_children(home: &AikitHome, name: &str, refs: &[String]) -> Result<Procedure> {
+    validate_name(name)?;
+    let path = dir(home, name);
+    let (_members, note) = read_authored(&path)?;
+    let note_existed = note.is_some();
+    let mut note = note.unwrap_or_default();
+    for reference in refs {
+        if reference.trim().is_empty() {
+            return Err(AikitError::new(
+                "skillset.reference_empty",
+                "a child reference must be non-empty",
+            ));
+        }
+        if !note.children.contains(reference) {
+            note.children.push(reference.clone());
+        }
+    }
+    // Prove the resulting relation resolves before planning any write.
+    let mut candidate = load_unresolved(home, name)?;
+    candidate.child_refs = note.children.clone();
+    candidate
+        .children
+        .retain(|child| child.attached_by.is_none());
+    resolve_references(home, &mut candidate)?;
+
+    let plan = Plan::new()
+        .with_note(format!(
+            "carry {} in set `{name}` by reference",
+            refs.join(", ")
+        ))
+        .with_edit(WorldEdit::WriteFile {
+            path: path.join(SET_FILE),
+            contents: render_note(&note)?,
+            inverse: if note_existed {
+                Inverse::Restore {
+                    blob: aikit_core::procedure::BlobId::deferred(),
+                }
+            } else {
+                Inverse::Remove
+            },
+        });
+    crate::procedure::plan_procedure(
+        home,
+        ProcedureKind::SkillSet {
+            operation: "add-child".to_string(),
+            set: name.to_string(),
+        },
+        plan,
+    )
 }
 
 /// Remove members from a set. Never deletes the capsule — a set is a view.

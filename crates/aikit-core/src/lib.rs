@@ -19,7 +19,9 @@
 #![forbid(unsafe_code)]
 
 pub mod a2a;
+pub mod a2a_card;
 pub mod actor_bootstrap;
+pub mod agent_praxis;
 pub mod application_context;
 pub mod arg;
 pub mod capsule;
@@ -110,6 +112,7 @@ pub mod session_space;
 pub mod session_space_application;
 pub mod session_space_contribution;
 pub mod skillset;
+pub mod skillset_package;
 pub mod star;
 pub mod surface_material;
 pub mod surfacing;

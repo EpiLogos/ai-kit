@@ -212,6 +212,8 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Knowledge(c)) => cmd_knowledge(cwd, c),
         Some(Command::Flow(c)) => cmd_flow(cwd, c),
         Some(Command::Method(a)) => cmd_method(cwd, a),
+        Some(Command::Praxis(a)) => cmd_praxis(cwd, a),
+        Some(Command::A2a(a)) => cmd_a2a(cwd, a),
         Some(Command::Routine(c)) => cmd_routine(c),
         Some(Command::Jev(c)) => cmd_jev(c),
         Some(Command::NowContext(c)) => cmd_now_context(cwd, c),
@@ -1037,7 +1039,7 @@ fn launch_agent_home() -> Result<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
         AikitError::new(
             "gateway.service_install_home_unresolved",
-            "no HOME is set; the LaunchAgent path cannot be resolved",
+            "no HOME is set; the gateway service definition path cannot be resolved",
         )
     })
 }
@@ -1148,6 +1150,13 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
     match command.command {
         GatewaySub::Serve(a) => {
             let config = aikit_cli::gateway_ops::serve_config(&home, &a)?;
+            if config.websocket_bind.is_some() && config.unix_socket.is_none() {
+                eprintln!(
+                    "warning: serving the WebSocket carrier only; local `aikit gateway send|inbox` \
+                     and turn-boundary delivery cannot reach this service or use its state while it \
+                     runs. Add --unix to serve this home's socket as well."
+                );
+            }
             let gateway_ref = a
                 .gateway_ref
                 .or_else(|| std::env::var("AIKIT_GATEWAY_REF").ok())
@@ -1201,10 +1210,18 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                     },
                 }),
             });
-            aikit_adapters::run_gateway_service_with_ticks(
+            // Peers ask this gateway who occupies a Position on this
+            // Workcell; the answer is this Workcell's Actuation, read then.
+            let occupancy: Option<std::sync::Arc<dyn aikit_adapters::GatewayOccupancyReader>> =
+                Some(std::sync::Arc::new(
+                    aikit_cli::gateway_contact::ServedOccupancy {
+                        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                    },
+                ));
+            aikit_adapters::run_gateway_service_with_hooks(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
-                ticks,
+                aikit_adapters::GatewayServiceHooks { ticks, occupancy },
             )?;
             Ok(Reply::Text("gateway service stopped cleanly".into()))
         }
@@ -1217,9 +1234,18 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 exit_code: json::EXIT_OK,
             })
         }
-        GatewaySub::InstallService => {
+        GatewaySub::InstallService(a) => {
             let home_dir = launch_agent_home()?;
-            let data = aikit_cli::gateway_install::install(&home_dir, &home)?;
+            let data = aikit_cli::gateway_install::install(
+                &home_dir,
+                &home,
+                &aikit_cli::gateway_install::ServiceOptions {
+                    websocket_bind: a.websocket_bind,
+                    token_location: a.token_location,
+                    gateway_ref: a.gateway_ref,
+                    workcell_ref: a.workcell_ref,
+                },
+            )?;
             Ok(Reply::Data {
                 context: EnvelopeContext::default(),
                 data,
@@ -1240,6 +1266,7 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
         GatewaySub::Who(a) => {
             let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
             gateway_data(aikit_cli::gateway_contact::who(
+                &home,
                 &owners,
                 &gateway,
                 &cwd,
@@ -1343,7 +1370,7 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 GatewaySub::Snapshot(_) => aikit_adapters::GatewayCommand::Snapshot,
                 GatewaySub::Serve(_)
                 | GatewaySub::Tick
-                | GatewaySub::InstallService
+                | GatewaySub::InstallService(_)
                 | GatewaySub::UninstallService
                 | GatewaySub::Who(_)
                 | GatewaySub::Send(_)
@@ -1361,7 +1388,7 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Snapshot(a) => a,
                 GatewaySub::Serve(_)
                 | GatewaySub::Tick
-                | GatewaySub::InstallService
+                | GatewaySub::InstallService(_)
                 | GatewaySub::UninstallService
                 | GatewaySub::Who(_)
                 | GatewaySub::Send(_)
@@ -2628,8 +2655,14 @@ fn cmd_set(cwd: &std::path::Path, c: SetCmd) -> Result<Reply> {
                 })).collect::<Vec<_>>(),
                 "complete": projection.is_complete(),
                 "children": set.children.iter().map(|c| jval!({
-                    "name": c.name, "members": c.len(),
+                    "name": c.name,
+                    "ref": c.reference(),
+                    "members": c.len(),
+                    "attached_by": c.attached_by,
                 })).collect::<Vec<_>>(),
+                "child_refs": set.child_refs,
+                "semantic_ref": set.semantic_ref,
+                "revision": set.revision,
                 "patterns": set.patterns,
             });
             Ok(reply(&service, data, vec![]))
@@ -2676,18 +2709,37 @@ fn cmd_set(cwd: &std::path::Path, c: SetCmd) -> Result<Reply> {
                 .iter()
                 .map(|r| CapsuleId::parse(r))
                 .collect::<Result<_>>()?;
-            let procedure = skillsets::plan_add(home, &a.name, &ids)?;
             let runner = aikit_store::procedure::ProcedureRunner::new(home);
-            let outcome = runner.run(&procedure)?;
+            let mut procedures = Vec::new();
+            let mut edits = 0_usize;
+            if !ids.is_empty() {
+                let procedure = skillsets::plan_add(home, &a.name, &ids)?;
+                edits += runner.run(&procedure)?.applied;
+                procedures.push(procedure.id.to_string());
+            }
+            if !a.children.is_empty() {
+                // A child reference is recorded, never expanded: the referenced
+                // set stays shared and its revisions reach every parent.
+                let procedure = skillsets::plan_add_children(home, &a.name, &a.children)?;
+                edits += runner.run(&procedure)?.applied;
+                procedures.push(procedure.id.to_string());
+            }
             let set = skillsets::load(home, &a.name)?;
             Ok(reply(
                 &service,
                 jval!({
                     "name": set.label(),
                     "members": set.len(),
-                    "procedure": procedure.id.to_string(),
-                    "edits": outcome.applied,
-                    "undo": format!("aikit procedure undo {}", procedure.id),
+                    "child_refs": set.child_refs,
+                    "procedure": procedures.first().cloned(),
+                    "procedures": procedures,
+                    "edits": edits,
+                    "undo": procedures
+                        .iter()
+                        .rev()
+                        .map(|id| format!("aikit procedure undo {id}"))
+                        .collect::<Vec<_>>()
+                        .join(" && "),
                 }),
                 vec![],
             ))
@@ -2746,6 +2798,10 @@ fn cmd_set(cwd: &std::path::Path, c: SetCmd) -> Result<Reply> {
                 }),
                 vec![],
             ))
+        }
+        SetSub::Package(p) => {
+            let data = aikit_cli::skillset_package_cli::run(&service, p)?;
+            Ok(reply(&service, data, vec![]))
         }
     }
 }
@@ -3377,6 +3433,42 @@ fn cmd_method(cwd: &std::path::Path, a: MethodArgs) -> Result<Reply> {
         }),
         diagnostic_warnings(&service),
     ))
+}
+
+/// `aikit praxis` — Skills by form, and the Agent praxis disclosure.
+fn cmd_praxis(cwd: &std::path::Path, a: PraxisCmd) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let data = match &a.command {
+        PraxisSub::List { form, filter } => {
+            aikit_cli::praxis_cli::list(service.resolved(), form.as_deref(), filter.as_deref())?
+        }
+        PraxisSub::Disclose {
+            profile_json,
+            activity_json,
+            select,
+        } => aikit_cli::praxis_cli::disclose(
+            service.home(),
+            service.resolved(),
+            profile_json,
+            activity_json.as_deref(),
+            select,
+        )?,
+    };
+    Ok(reply(&service, data, diagnostic_warnings(&service)))
+}
+
+/// `aikit a2a card` — the published A2A Agent Card, projected from a World
+/// participation reading. Pure: no service state is needed.
+fn cmd_a2a(cwd: &std::path::Path, a: A2aCmd) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let data = match &a.command {
+        A2aSub::Card {
+            participation_json,
+            interface_url,
+            out,
+        } => aikit_cli::praxis_cli::a2a_card(participation_json, interface_url, out.as_deref())?,
+    };
+    Ok(reply(&service, data, vec![]))
 }
 
 /// `aikit trust` — record and show review decisions for catalogued capsules.

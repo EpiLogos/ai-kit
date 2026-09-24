@@ -153,8 +153,8 @@ def limits(model, budget):
         "max_total_reserved_microusd": budget,
         "tariff": {
             "model_version": model,
-            "source": "https://docs.typesafe.ai/models; checked 2026-09-22",
-            "max_input_tokens_per_attempt": 64000,
+            "source": "https://docs.typesafe.ai/models; checked 2026-09-22; input ceiling observed live 2026-09-24 (31,342 tokens accepted, ~34k refused with HTTP 400)",
+            "max_input_tokens_per_attempt": 32768,
             "max_output_tokens_per_attempt": 64000,
             "input_microusd_per_million_tokens": 42000,
             "output_microusd_per_million_tokens": 0,

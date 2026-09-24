@@ -16,17 +16,30 @@ use crate::cli::{GatewayQueryArgs, GatewayServeArgs};
 
 /// Resolve the serve carriers. The state file always defaults to the home
 /// file; the Unix carrier defaults to the home socket when no carrier is
-/// named, so `serve` with no flags is same-host and discoverable. Naming
-/// `--ws` alone is a deliberate network-only posture and binds no socket.
+/// named, so `serve` with no flags is same-host and discoverable. `--unix`
+/// with no path is that same home socket, so `--ws ADDR --unix` serves both
+/// carriers. Naming `--ws` alone is a network-only posture and binds no
+/// socket (the service says so on stderr).
+///
+/// The WebSocket token comes from `--ws-token-location` (read once, here;
+/// a group- or world-readable file is refused), else `--ws-token`, else
+/// `AIKIT_GATEWAY_TOKEN`.
 pub fn serve_config(home: &AikitHome, args: &GatewayServeArgs) -> Result<GatewayServiceConfig> {
-    let websocket_bearer_token = args.websocket_token.clone().or_else(gateway_token_from_env);
+    let websocket_bearer_token = match &args.websocket_token_location {
+        Some(location) => Some(token_from_location(location)?),
+        None => args.websocket_token.clone().or_else(gateway_token_from_env),
+    };
+    let named_unix = args
+        .unix_socket
+        .clone()
+        .map(|path| path.unwrap_or_else(|| home.gateway_socket()));
     #[cfg(unix)]
-    let unix_socket = args.unix_socket.clone().or(match &args.websocket_bind {
+    let unix_socket = named_unix.or(match &args.websocket_bind {
         Some(_) => None,
         None => Some(home.gateway_socket()),
     });
     #[cfg(not(unix))]
-    let unix_socket = args.unix_socket.clone();
+    let unix_socket = named_unix;
     let config = GatewayServiceConfig {
         websocket_bind: args.websocket_bind.clone(),
         websocket_bearer_token,
@@ -99,6 +112,25 @@ pub fn unreachable_hint(error: &AikitError) -> Option<AikitError> {
     } else {
         None
     }
+}
+
+/// Read the WebSocket bearer token from its declared location, refusing a
+/// location that does not parse and a `file:` that is not owner-only.
+fn token_from_location(location: &str) -> Result<String> {
+    let parsed = crate::secret_location::SecretLocation::parse(location)?;
+    let token = parsed.resolve().map_err(|error| {
+        crate::gateway_contact::three_part(
+            "gateway.serve_token_unusable",
+            format!("The WebSocket token at {location} cannot be used: {error}"),
+            "The gateway was not started; no carrier was bound.",
+            format!(
+                "Make it an owner-only, non-empty file (chmod 600 {}) or name another location.",
+                location.trim_start_matches("file:")
+            ),
+        )
+        .with("source_code", error.code().to_owned())
+    })?;
+    Ok(token.expose().to_owned())
 }
 
 fn gateway_token_from_env() -> Option<String> {
