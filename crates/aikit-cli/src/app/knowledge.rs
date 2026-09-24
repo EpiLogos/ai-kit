@@ -1297,12 +1297,9 @@ impl Service {
                     source,
                     None,
                 ),
-                None => GitNexusCodeIndexProvider::new(
-                    runner,
-                    project.project_id.clone(),
-                    source,
-                    None,
-                ),
+                None => {
+                    GitNexusCodeIndexProvider::new(runner, project.project_id.clone(), source, None)
+                }
             };
             let status = provider.status();
             if status.available && status.capabilities.index {
