@@ -11,7 +11,7 @@
 //! pinned in `project_scoped_withhold.rs` and the adapter tests.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aikit_cli::app::Service;
 use aikit_core::KnowledgeAddress;
@@ -22,6 +22,49 @@ use tempfile::TempDir;
 fn write(path: &Path, contents: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, contents).unwrap();
+}
+
+/// A stand-in `gitnexus`: it answers discovery as an available, index-capable
+/// 1.6.9 binary, then fails every real `analyze … --index-only`, so every
+/// discovered project's code index degrades. Injected through
+/// `AIKIT_GITNEXUS_BIN`, it makes this test independent of whatever `gitnexus`
+/// (if any) the host carries on PATH, and it is the seam the scoping fix is
+/// proven through: with real degradations present for every project, a scoped
+/// reply must still carry only its own scope's.
+fn write_gitnexus_stub(dir: &Path) -> PathBuf {
+    let bin_dir = dir.join(".tools");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let path = bin_dir.join("gitnexus");
+    fs::write(
+        &path,
+        r#"#!/bin/sh
+case "$1" in
+  --version) echo "gitnexus 1.6.9" ;;
+  --help) echo "analyze query context impact trace detect-changes check cypher" ;;
+  analyze)
+    for arg in "$@"; do
+      if [ "$arg" = "--help" ]; then
+        echo "--index-only --force --name <name>"
+        exit 0
+      fi
+    done
+    echo "Not a git repository" >&2
+    exit 1 ;;
+  impact) echo "--mode pdg upstream downstream" ;;
+  *) : ;;
+esac
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+    }
+    path
 }
 
 /// One project's ProjectCentral register: a manifest, one disclosed authored
@@ -125,8 +168,11 @@ fn collapse_world() -> TempDir {
 fn open_service(temp: &TempDir, cwd: &Path) -> Service {
     let home = AikitHome::at(temp.path().join("aikit-home"));
     let root = temp.path().display().to_string();
-    Service::open(home, cwd, |key| {
-        (key == "CENTRAL_ROOT").then(|| root.clone())
+    let gitnexus = write_gitnexus_stub(temp.path()).display().to_string();
+    Service::open(home, cwd, move |key| match key {
+        "CENTRAL_ROOT" => Some(root.clone()),
+        "AIKIT_GITNEXUS_BIN" => Some(gitnexus.clone()),
+        _ => None,
     })
     .expect("open production application service")
 }
