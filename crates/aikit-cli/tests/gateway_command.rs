@@ -322,3 +322,131 @@ fn doctor_warns_that_scheduled_automations_will_not_fire_without_a_gateway() {
         "{finding}"
     );
 }
+
+fn free_bind() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    format!("127.0.0.1:{port}")
+}
+
+fn token_file(dir: &std::path::Path, mode: u32) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(format!("gateway-{mode:o}.token"));
+    std::fs::write(&path, "loopback-serve-token-0123456789\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    path
+}
+
+#[test]
+fn serve_refuses_a_token_file_others_can_read_before_binding_anything() {
+    let home = TempDir::new().unwrap();
+    let token = token_file(home.path(), 0o644);
+    let bind = free_bind();
+    let (ok, envelope, _) = run(
+        home.path(),
+        &[
+            "gateway",
+            "serve",
+            "--ws",
+            &bind,
+            "--ws-token-location",
+            &format!("file:{}", token.display()),
+            "--unix",
+        ],
+    );
+    assert!(!ok, "a world-readable token must be refused: {envelope}");
+    assert_eq!(envelope["error"]["code"], "gateway.serve_token_unusable");
+    let message = envelope["error"]["message"].as_str().unwrap();
+    assert!(message.contains("owner only"), "{message}");
+    assert!(message.contains("chmod 600"), "{message}");
+    assert!(!home.path().join("state/gateway.sock").exists());
+    assert!(std::net::TcpStream::connect(&bind).is_err());
+}
+
+#[test]
+fn serve_with_a_token_location_answers_on_the_websocket_and_the_home_socket_together() {
+    let home = TempDir::new().unwrap();
+    let token = token_file(home.path(), 0o600);
+    let bind = free_bind();
+    let child = Command::new(bin())
+        .args([
+            "gateway",
+            "serve",
+            "--ws",
+            &bind,
+            "--ws-token-location",
+            &format!("file:{}", token.display()),
+            "--unix",
+        ])
+        .env("AIKIT_HOME", home.path())
+        .env("HOME", home.path())
+        .env_remove("AIKIT_GATEWAY_TOKEN")
+        .current_dir(home.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_socket(home.path());
+
+    // The home socket: local verbs keep working while the WebSocket is served.
+    let (ok, local, _) = run(home.path(), &["gateway", "status"]);
+    assert!(ok, "the bare --unix binds the home socket: {local}");
+
+    // The WebSocket: the token read from the file is the one it demands.
+    let (ok, remote, _) = run(
+        home.path(),
+        &[
+            "gateway",
+            "status",
+            "--ws",
+            &bind,
+            "--ws-token",
+            "loopback-serve-token-0123456789",
+        ],
+    );
+    assert!(ok, "the WebSocket answers with the file's token: {remote}");
+    let (ok, refused, _) = run(
+        home.path(),
+        &[
+            "gateway",
+            "status",
+            "--ws",
+            &bind,
+            "--ws-token",
+            "wrong-token",
+        ],
+    );
+    assert!(!ok, "any other token is refused: {refused}");
+
+    let stopped = shutdown(home.path());
+    assert_eq!(stopped["ok"], Value::Bool(true));
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("serving the WebSocket carrier only"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_token_location_and_a_raw_token_cannot_both_be_given() {
+    let home = TempDir::new().unwrap();
+    let output = Command::new(bin())
+        .args([
+            "gateway",
+            "serve",
+            "--ws",
+            "127.0.0.1:1",
+            "--ws-token",
+            "raw",
+            "--ws-token-location",
+            "file:/tmp/x",
+        ])
+        .env("AIKIT_HOME", home.path())
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+}

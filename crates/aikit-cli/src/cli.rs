@@ -370,15 +370,47 @@ pub struct GatewayServeArgs {
     /// Bearer token for the WebSocket carrier, or `AIKIT_GATEWAY_TOKEN`.
     #[arg(long = "ws-token", value_name = "TOKEN")]
     pub websocket_token: Option<String>,
-    /// Unix-domain socket path for the same-host carrier.
-    #[arg(long = "unix", value_name = "PATH")]
-    pub unix_socket: Option<std::path::PathBuf>,
+    /// Where the WebSocket bearer token lives: `file:/abs/path` (owner-only,
+    /// chmod 600) or a keychain/pass/op/varlock ref. Read once at start.
+    #[arg(
+        long = "ws-token-location",
+        value_name = "LOCATION",
+        conflicts_with = "websocket_token"
+    )]
+    pub websocket_token_location: Option<String>,
+    /// Serve the same-host Unix-domain carrier: at PATH, or with no value at
+    /// this home's well-known socket. Name it beside --ws so local inbox,
+    /// send and turn delivery keep reaching the service.
+    #[arg(long = "unix", value_name = "PATH", num_args = 0..=1)]
+    pub unix_socket: Option<Option<std::path::PathBuf>>,
     /// Persist semantic state across restarts to this file.
     #[arg(long = "state-file", value_name = "PATH")]
     pub state_file: Option<std::path::PathBuf>,
     /// Semantic gateway ref, or `AIKIT_GATEWAY_REF`.
     #[arg(long = "gateway-ref", value_name = "REF")]
     pub gateway_ref: Option<String>,
+}
+
+/// `aikit gateway install-service` — what the kept-alive service serves.
+#[derive(Debug, Args)]
+pub struct GatewayInstallArgs {
+    /// Also serve the authenticated WebSocket carrier at `HOST:PORT`, for
+    /// other Workcells to relay through. Requires --ws-token-location.
+    #[arg(long = "ws", value_name = "HOST:PORT", requires = "token_location")]
+    pub websocket_bind: Option<String>,
+    /// Where the WebSocket bearer token lives (`file:/abs/path`, owner-only).
+    #[arg(
+        long = "ws-token-location",
+        value_name = "LOCATION",
+        requires = "websocket_bind"
+    )]
+    pub token_location: Option<String>,
+    /// `AIKIT_GATEWAY_REF` for the service (e.g. agency-gateway/omarchy).
+    #[arg(long = "gateway-ref", value_name = "REF")]
+    pub gateway_ref: Option<String>,
+    /// `AIKIT_WORKCELL_REF` for the service (e.g. workcell:omarchy).
+    #[arg(long = "workcell-ref", value_name = "REF")]
+    pub workcell_ref: Option<String>,
 }
 
 /// `aikit gateway <query>` — one command against a running gateway.
@@ -894,10 +926,11 @@ pub enum GatewaySub {
     /// Run exactly one dispatcher pass: resolve occurrences, admit due items,
     /// dispatch, record outcomes, exit. No gateway required.
     Tick,
-    /// Install the macOS user LaunchAgent that keeps the gateway (and the
-    /// dispatcher tick) alive across restart, sleep and reboot.
-    InstallService,
-    /// Remove the LaunchAgent.
+    /// Install the user service that keeps the gateway (the dispatcher tick
+    /// and the relay pass) alive across restart, sleep and reboot: a macOS
+    /// LaunchAgent or a Linux systemd user unit.
+    InstallService(GatewayInstallArgs),
+    /// Remove the installed gateway service.
     UninstallService,
     /// Negotiate protocol versions with a running gateway.
     Protocol(GatewayQueryArgs),

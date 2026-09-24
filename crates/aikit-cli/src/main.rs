@@ -934,7 +934,7 @@ fn launch_agent_home() -> Result<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
         AikitError::new(
             "gateway.service_install_home_unresolved",
-            "no HOME is set; the LaunchAgent path cannot be resolved",
+            "no HOME is set; the gateway service definition path cannot be resolved",
         )
     })
 }
@@ -1045,6 +1045,13 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
     match command.command {
         GatewaySub::Serve(a) => {
             let config = aikit_cli::gateway_ops::serve_config(&home, &a)?;
+            if config.websocket_bind.is_some() && config.unix_socket.is_none() {
+                eprintln!(
+                    "warning: serving the WebSocket carrier only; local `aikit gateway send|inbox` \
+                     and turn-boundary delivery cannot reach this service or use its state while it \
+                     runs. Add --unix to serve this home's socket as well."
+                );
+            }
             let gateway_ref = a
                 .gateway_ref
                 .or_else(|| std::env::var("AIKIT_GATEWAY_REF").ok())
@@ -1114,9 +1121,18 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 exit_code: json::EXIT_OK,
             })
         }
-        GatewaySub::InstallService => {
+        GatewaySub::InstallService(a) => {
             let home_dir = launch_agent_home()?;
-            let data = aikit_cli::gateway_install::install(&home_dir, &home)?;
+            let data = aikit_cli::gateway_install::install(
+                &home_dir,
+                &home,
+                &aikit_cli::gateway_install::ServiceOptions {
+                    websocket_bind: a.websocket_bind,
+                    token_location: a.token_location,
+                    gateway_ref: a.gateway_ref,
+                    workcell_ref: a.workcell_ref,
+                },
+            )?;
             Ok(Reply::Data {
                 context: EnvelopeContext::default(),
                 data,
@@ -1240,7 +1256,7 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 GatewaySub::Snapshot(_) => aikit_adapters::GatewayCommand::Snapshot,
                 GatewaySub::Serve(_)
                 | GatewaySub::Tick
-                | GatewaySub::InstallService
+                | GatewaySub::InstallService(_)
                 | GatewaySub::UninstallService
                 | GatewaySub::Who(_)
                 | GatewaySub::Send(_)
@@ -1258,7 +1274,7 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Snapshot(a) => a,
                 GatewaySub::Serve(_)
                 | GatewaySub::Tick
-                | GatewaySub::InstallService
+                | GatewaySub::InstallService(_)
                 | GatewaySub::UninstallService
                 | GatewaySub::Who(_)
                 | GatewaySub::Send(_)
