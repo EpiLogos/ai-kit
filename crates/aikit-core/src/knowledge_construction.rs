@@ -192,6 +192,13 @@ pub enum Change {
         participation_ref: ResourceRef,
         places: Vec<PlaceFacet>,
     },
+    /// Existing temporal facts of one participation. The enclosing frame CAS
+    /// protects the exact membership; this introduces no independent clock or
+    /// participation identity/revision.
+    TemporalSet {
+        participation_ref: ResourceRef,
+        temporal: Vec<TemporalFacet>,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -728,6 +735,20 @@ pub fn apply(input: &str, request: &Request) -> Result<Applied> {
                     } else {
                         meta.compositions.push(composition.clone());
                     }
+                }
+                Change::TemporalSet { participation_ref, temporal } => {
+                    let index = member_index(&frame, participation_ref)?;
+                    if temporal.len() > 256 {
+                        return Err(err("a participation accepts at most 256 temporal facts"));
+                    }
+                    if temporal.iter().any(|facet| facet.source_ref.as_deref().is_none_or(|source| source.trim().is_empty())) {
+                        return Err(err("a temporal fact requires a native source basis, not an inferred timestamp"));
+                    }
+                    let extensions = &mut frame.constellations[0].members[index].extensions;
+                    let mut facets = parse_facets_from_extensions(extensions)?;
+                    facets.temporal = temporal.clone();
+                    extensions.remove(TECHNE_FACET_EXTENSION);
+                    write_facets_to_extensions(extensions, &facets)?;
                 }
                 Change::PlaceSet {
                     participation_ref,

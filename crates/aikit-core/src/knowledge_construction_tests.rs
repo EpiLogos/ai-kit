@@ -32,6 +32,44 @@ mod tests {
     }
 
     #[test]
+    fn participation_temporal_set_preserves_places_and_source_objects_and_refuses_stale_or_invalid_facts() {
+        let created=apply(&initial(), &create("wiki:timed", "wiki:timed-anchor")).unwrap();
+        let placed=apply(&created.content,&request("wiki:timed",1,"operation:place",json!([
+            member("part:timed", "wiki:a"), member("part:other", "wiki:a"),
+            {"change":"place_set","participation_ref":"part:timed","places":[{"place_ref":"place:declared","precision":"unlocated","source_ref":"central:source:essay.md"}]}
+        ]))).unwrap();
+        let facts=json!([
+            {"kind":"occurrence","instant":"2024-06-03T10:30:00Z","precision":"minute","source_ref":"central:source:essay.md"},
+            {"kind":"valid","interval":{"from":"2024-01-01T00:00:00Z","to":"2024-12-31T23:59:59Z","from_precision":"year","to_precision":"second"},"source_ref":"central:source:essay.md"}
+        ]);
+        let command=request("wiki:timed",2,"operation:time",json!([{"change":"temporal_set","participation_ref":"part:timed","temporal":facts}]));
+        let timed=apply(&placed.content,&command).unwrap();
+        let reading=frame(&timed.content,"wiki:timed");
+        let members=&reading["frame"]["constellations"][0]["members"];
+        assert_eq!(members[0][TECHNE_FACET_EXTENSION]["temporal"],facts);
+        assert_eq!(members[0][TECHNE_FACET_EXTENSION]["spatial"],frame(&placed.content,"wiki:timed")["frame"]["constellations"][0]["members"][0][TECHNE_FACET_EXTENSION]["spatial"]);
+        assert!(members[1].get(TECHNE_FACET_EXTENSION).is_none(),"another participation over the same source gains no time");
+        let old=WikiDocument::parse(&placed.content).unwrap();let new=WikiDocument::parse(&timed.content).unwrap();
+        assert_eq!(old.object(&ResourceRef::parse("wiki:a").unwrap()),new.object(&ResourceRef::parse("wiki:a").unwrap()));
+        assert_eq!(apply(&timed.content,&command).unwrap().content,timed.content,"operation replay is byte-exact idempotent");
+        let stale=request("wiki:timed",2,"operation:stale",json!([{"change":"temporal_set","participation_ref":"part:timed","temporal":[]}]));
+        assert!(apply(&timed.content,&stale).is_err());
+        for (id,part,invalid) in [
+            ("missing-source","part:timed",json!([{"kind":"occurrence","instant":"2024-01-01T00:00:00Z"}])),
+            ("missing-carrier","part:timed",json!([{"kind":"occurrence","source_ref":"central:source:essay.md"}])),
+            ("invalid-date","part:timed",json!([{"kind":"occurrence","instant":"not-a-date","source_ref":"central:source:essay.md"}])),
+            ("wrong-participation","part:absent",facts.clone()),
+            ("over-budget","part:timed",Value::Array(vec![facts[0].clone();257])),
+        ] {
+            let attempt=request("wiki:timed",3,&format!("operation:{id}"),json!([{"change":"temporal_set","participation_ref":part,"temporal":invalid}]));
+            assert!(apply(&timed.content,&attempt).is_err(),"{id} must refuse before persistence");
+        }
+        let cleared=apply(&timed.content,&request("wiki:timed",3,"operation:clear-time",json!([{"change":"temporal_set","participation_ref":"part:timed","temporal":[]}]))).unwrap();
+        let cleared=frame(&cleared.content,"wiki:timed");
+        assert!(cleared["frame"]["constellations"][0]["members"][0][TECHNE_FACET_EXTENSION].get("temporal").is_none());
+        assert_eq!(cleared["frame"]["constellations"][0]["members"][0][TECHNE_FACET_EXTENSION]["spatial"],members[0][TECHNE_FACET_EXTENSION]["spatial"]);
+    }
+    #[test]
     fn native_empty_creation_reopens_and_repeated_return_is_byte_exact() {
         let input = initial();
         let command = create("wiki:inquiry", "wiki:whole");

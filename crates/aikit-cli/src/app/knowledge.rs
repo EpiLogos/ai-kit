@@ -1580,7 +1580,10 @@ impl Service {
                         None,
                     ),
                     None => GitNexusCodeIndexProvider::new(
-                        runner, project.project_id.clone(), source, None,
+                        runner,
+                        project.project_id.clone(),
+                        source,
+                        None,
                     ),
                 },
             };
@@ -1926,11 +1929,9 @@ fn discover_material(
             // that body — which used to make the sniff claim the shard as
             // malformed Wiki material and warn on every search. What parses
             // as SourceMaterial is SourceMaterial.
-            let source_items = serde_json::from_str::<SourceMaterial>(&text)
-                .map(|item| vec![item])
-                .or_else(|_| serde_json::from_str::<Vec<SourceMaterial>>(&text));
+            let source_items = parse_source_material(&text);
 
-            if source_items.is_err() && discover_wiki && text.contains("okf-wiki/v1") {
+            if source_items.is_none() && discover_wiki && text.contains("okf-wiki/v1") {
                 match parse_wiki_objects(&text) {
                     Ok(objects) => {
                         for object in objects {
@@ -1953,7 +1954,7 @@ fn discover_material(
                 }
             }
 
-            if let Ok(items) = source_items {
+            if let Some(items) = source_items {
                 for item in items {
                     let source = item.binding.source.clone();
                     if conflicted_sources.contains(&source) {
@@ -1975,6 +1976,25 @@ fn discover_material(
         }
     }
     Ok(discovered)
+}
+
+fn parse_source_material(text: &str) -> Option<Vec<SourceMaterial>> {
+    // Both fields are required by SourceMaterial. Reject impossible objects
+    // before serde walks unrelated, potentially megabyte-sized nested values.
+    // This is only a necessary condition: a mention inside a body may pass it.
+    // Escaped keys and arrays (including serde's struct sequence form) retain
+    // the exact parser. No accepted source representation or discovery path is
+    // excluded, and malformed Wiki candidates still reach the Wiki reader.
+    if text.trim_start().starts_with('{')
+        && (!text.contains("\"binding\"") || !text.contains("\"body\""))
+        && !text.contains("\\u")
+    {
+        return None;
+    }
+    serde_json::from_str::<SourceMaterial>(text)
+        .map(|item| vec![item])
+        .or_else(|_| serde_json::from_str::<Vec<SourceMaterial>>(text))
+        .ok()
 }
 
 /// The compiler's own anchor-gap disclosure, partitioned into status notes by
@@ -2068,4 +2088,151 @@ fn work_member(central_root: &Path, path: &Path) -> Option<String> {
         return None;
     }
     parts.next()?.as_os_str().to_str().map(str::to_owned)
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    use aikit_core::knowledge_source_pool::{SourceBinding, SourceVisibility};
+    use aikit_core::resource::SourceRevision;
+    use serde_json::json;
+
+    fn source(name: &str) -> SourceMaterial {
+        SourceMaterial {
+            binding: SourceBinding {
+                source: SourceRef::parse(format!("source:{name}")).unwrap(),
+                revision: SourceRevision::parse("sha256:discovery-test").unwrap(),
+                title: name.into(),
+                tags: Vec::new(),
+                visibility: SourceVisibility::Public,
+                owners: Vec::new(),
+                media_type: "text/markdown".into(),
+                locator: None,
+                metadata: BTreeMap::new(),
+            },
+            body: "An authored source discussing okf-wiki/v1, not a Wiki bundle.".into(),
+        }
+    }
+
+    #[test]
+    fn source_discovery_preserves_all_supported_material_representations() {
+        let material = source("representations");
+        let object = serde_json::to_string(&material).unwrap();
+        let binding = serde_json::to_string(&material.binding).unwrap();
+        let body = serde_json::to_string(&material.body).unwrap();
+        let sequence = format!("[{binding},{body}]");
+        let representations = [
+            object.clone(),
+            format!(" \n\t{object}\r"),
+            object.replace("\"binding\"", "\"\\u0062inding\""),
+            object.replace("\"body\"", "\"b\\u006fdy\""),
+            format!("{{\"unknown\":[{{\"nested\":true}}],\"body\":{body},\"binding\":{binding}}}"),
+            format!("[{object}]"),
+            sequence.clone(),
+            format!("[{sequence}]"),
+        ];
+        for text in representations {
+            // The production typed parser is the contract, including its
+            // accepted sequence and escaped-key representations.
+            let expected = serde_json::from_str::<SourceMaterial>(&text)
+                .map(|item| vec![item])
+                .or_else(|_| serde_json::from_str::<Vec<SourceMaterial>>(&text))
+                .unwrap();
+            assert_eq!(expected, vec![material.clone()]);
+            assert_eq!(parse_source_material(&text), Some(expected));
+        }
+        assert_eq!(parse_source_material("[]"), Some(Vec::new()));
+        for text in [
+            "{",
+            "{\"body\":\"text\"}",
+            "{\"binding\":{}}",
+            "{\"binding\":null,\"body\":\"text\"}",
+            "{\"\\u0062inding\":null,\"body\":\"text\"}",
+            "{\"body\":\"binding\",\"other\":\"body\"}",
+            "null",
+        ] {
+            assert!(serde_json::from_str::<SourceMaterial>(text).is_err());
+            assert!(serde_json::from_str::<Vec<SourceMaterial>>(text).is_err());
+            assert_eq!(parse_source_material(text), None);
+        }
+    }
+
+    #[test]
+    fn source_discovery_reads_real_files_without_reclassifying_authored_bodies() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let sources = [source("object"), source("escaped"), source("sequence")];
+        fs::write(
+            root.path().join("object.json"),
+            serde_json::to_vec(&sources[0]).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("escaped.json"),
+            serde_json::to_string(&sources[1])
+                .unwrap()
+                .replace("\"binding\"", "\"\\u0062inding\""),
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("sequence.json"),
+            serde_json::to_vec(&json!([sources[2].binding, sources[2].body])).unwrap(),
+        )
+        .unwrap();
+        // Valid large unrelated JSON from a real file exercises the early
+        // rejection; it must neither become a source nor a Wiki warning.
+        fs::write(
+            root.path().join("unrelated.json"),
+            serde_json::to_vec(&json!({"payload": "x".repeat(3 * 1024 * 1024)})).unwrap(),
+        )
+        .unwrap();
+        let mut absences = Vec::new();
+        let discovered = discover_material(root.path(), home.path(), &mut absences, true).unwrap();
+        assert!(absences.is_empty(), "{absences:?}");
+        assert!(discovered.wiki.is_empty());
+        assert_eq!(discovered.sources.len(), sources.len());
+        for material in sources {
+            assert_eq!(
+                discovered.sources.get(&material.binding.source),
+                Some(&material)
+            );
+        }
+    }
+
+    #[test]
+    fn source_discovery_keeps_conflicts_withheld_and_malformed_wiki_disclosed() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let original = source("conflict");
+        let mut changed = original.clone();
+        changed.body = "Conflicting content at the same native source reference.".into();
+        for (name, material) in [("a", &original), ("b", &changed), ("c", &original)] {
+            fs::write(
+                root.path().join(format!("{name}.json")),
+                serde_json::to_vec(material).unwrap(),
+            )
+            .unwrap();
+        }
+        fs::write(
+            root.path().join("wiki.json"),
+            r#"{"profile":"okf-wiki/v1","objects":"invalid"}"#,
+        )
+        .unwrap();
+        let mut absences = Vec::new();
+        let discovered = discover_material(root.path(), home.path(), &mut absences, true).unwrap();
+        assert!(discovered.sources.is_empty());
+        assert!(discovered.wiki.is_empty());
+        assert_eq!(absences.len(), 2, "{absences:?}");
+        assert!(absences
+            .iter()
+            .any(|line| line.contains("SourcePool material conflict")));
+        assert!(absences
+            .iter()
+            .any(|line| line.contains("self-identified SemanticWiki material")));
+        // Native Central discovery still leaves Wiki interpretation to its owner.
+        let mut native_absences = Vec::new();
+        discover_material(root.path(), home.path(), &mut native_absences, false).unwrap();
+        assert_eq!(native_absences.len(), 1);
+        assert!(native_absences[0].contains("SourcePool material conflict"));
+    }
 }
