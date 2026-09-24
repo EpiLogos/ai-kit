@@ -1453,6 +1453,12 @@ pub fn join(owners: &Owners<'_>, input: &JoinInput, reads: &AikitReads<'_>) -> J
                                     data.clone(),
                                 )
                                 .because(basis);
+                                // The occupant acts on its own custody through Factory.
+                                if let Some(custody) = refs.get("custody_ref") {
+                                    facets.current_work = facets.current_work.clone().with_next(format!(
+                                        "factory development custody update {state} --custody {custody} --state completed|blocked|released --reason <why>"
+                                    ));
+                                }
                             }
                             "ambiguous" => {
                                 facets.current_work = Facet::ambiguous(
@@ -2225,10 +2231,12 @@ pub fn render_lean_entry(reading: &InhabitationReading, project: Option<&str>) -
         format!(
             "Current work: {}{}",
             value_line(&f.current_work),
-            if identity_holds_no_work(reading) {
-                " — this Position holds no custody: other actors' NOW handoffs are not its work; check `aikit gateway inbox`, or ask for work to be commissioned"
+            if let Some(next) = f.current_work.next.as_deref().filter(|_| f.current_work.is_present()) {
+                format!(" · update it: {next}")
+            } else if identity_holds_no_work(reading) {
+                " — this Position holds no custody: other actors' NOW handoffs are not its work; check `aikit gateway inbox`, or ask for work to be commissioned".to_owned()
             } else {
-                ""
+                String::new()
             }
         ),
         format!(
@@ -2656,6 +2664,12 @@ pub(crate) mod tests {
         assert_eq!(f.body.state, FacetState::Present);
         assert_eq!(f.workcell.state, FacetState::Present);
         assert_eq!(f.current_work.state, FacetState::Present);
+        let update = f.current_work.next.as_deref().unwrap_or_default();
+        assert!(
+            update.contains("factory development custody update")
+                && update.contains("--custody factory:custody:c1"),
+            "the occupant is told how to act on its own custody: {update}"
+        );
         assert_eq!(f.root_now.state, FacetState::Present);
         assert_eq!(f.child_now.state, FacetState::Present);
         assert_eq!(
