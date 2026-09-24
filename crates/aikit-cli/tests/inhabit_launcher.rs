@@ -176,6 +176,7 @@ fn inhabit_claims_then_execs_the_harness_with_the_occupancy_stamped() {
 #[test]
 fn handover_expects_the_current_generation() {
     let world = world();
+    world.seed_agency("agent/aikit-guardian", "agency:x");
     let output = world.run(
         &args(&[
             "inhabit",
@@ -201,6 +202,50 @@ fn handover_expects_the_current_generation() {
         "{calls:?}"
     );
     assert!(!calls[1].contains("--expect-vacant"));
+}
+
+#[test]
+fn supplied_agent_or_agency_cannot_bypass_eligibility_or_admission() {
+    let world = world();
+    world.seed_agency("agent/aikit-guardian", "agency:aikit-mint-o-i");
+    let output = world.run(
+        &args(&[
+            "inhabit",
+            "--position",
+            POSITION,
+            "--agent",
+            "agent/someone-else",
+            "--agency",
+            "agency:aikit-mint-o-i",
+            "--reason",
+            "bypass",
+        ]),
+        &[],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("does not name agent/someone-else as an eligible Agent"), "{stderr}");
+    assert!(stderr.contains("Nothing was claimed."), "{stderr}");
+    assert!(world.actuation_calls().is_empty(), "ineligible agent claimed nothing");
+
+    let output = world.run(
+        &args(&[
+            "inhabit",
+            "--position",
+            POSITION,
+            "--agent",
+            "agent/aikit-guardian",
+            "--agency",
+            "agency:not-admitted",
+            "--reason",
+            "bypass",
+        ]),
+        &[],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("is not an admitted Agency"), "{stderr}");
+    assert!(world.actuation_calls().is_empty(), "unadmitted agency claimed nothing");
 }
 
 #[test]
@@ -268,6 +313,7 @@ fn release_ends_exactly_the_generation_this_body_holds() {
 #[test]
 fn without_a_harness_the_claim_prints_the_exports() {
     let world = world();
+    world.seed_agency("agent/aikit-guardian", "agency:x");
     let output = world.run(
         &[
             "inhabit",
