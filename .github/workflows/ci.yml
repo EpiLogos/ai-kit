@@ -135,6 +135,13 @@ jobs:
             sleep $((attempt * 10))
           done
       - run: gitnexus --version
+      - name: Ensure real ripgrep for WorkRepos conformance
+        run: |
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y ripgrep
+          fi
+          rg --version
       - name: Run real ProjectMap code-index conformance
         shell: bash
         env:

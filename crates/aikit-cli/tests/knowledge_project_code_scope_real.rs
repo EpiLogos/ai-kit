@@ -152,7 +152,8 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     );
     assert!(
         has_larch_project_source(&cross),
-        "real WorkRepos provider did not surface larch source"
+        "real WorkRepos provider did not surface larch source; absences: {:?}",
+        cross.absences
     );
     let own_positive = service.knowledge_search("cedarOwnedLocator", 256).unwrap();
     assert!(
