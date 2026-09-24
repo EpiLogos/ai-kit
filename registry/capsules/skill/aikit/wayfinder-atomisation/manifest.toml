@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/wayfinder-atomisation"
+kind = "skill"
+name = "AIKit Wayfinder atomisation"
+description = "METHOD: Decompose a Wayfinder, protocol or large development plan into source-bound atoms and context-efficient packets, then either export paste-ready harness prompts or compile the same packets into native Factory/NOW execution; use when a parent scope needs focused parallel or chained work."
+maturity = "candidate"
+tags = ["aikit", "wayfinder", "planning", "subagents", "bounded-work", "task-decomposition"]
+
+[skill]
+root = "payload"
