@@ -16,7 +16,7 @@
 //! That keeps the team out of the user's repository and out of
 //! `~/.claude/agents`, and lets it disappear with the tenure.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use aikit_core::{AikitError, Result};
 use serde::Deserialize;
@@ -136,13 +136,37 @@ impl TeamMember {
     /// The member's skills as Claude Code names them: the expression's first,
     /// then any further ones the profile grants, each once.
     pub fn claude_skills(&self) -> Vec<String> {
+        self.claude_skills_with(&BTreeMap::new())
+    }
+
+    /// The member's skill refs: the expression's first, then any further ones
+    /// the profile grants, each once, in that order.
+    pub fn skill_refs(&self) -> Vec<String> {
         let mut seen = BTreeSet::new();
         self.expression
             .frontmatter
             .skills
             .iter()
             .chain(self.profile_skill_refs.iter())
-            .map(|skill| claude_skill_name(skill))
+            .map(|skill| skill.trim().to_owned())
+            .filter(|skill| !skill.is_empty() && seen.insert(skill.clone()))
+            .collect()
+    }
+
+    /// The member's skills as Claude Code names them when some of them travel
+    /// inside the team's own plugin: a bundled skill is named by its
+    /// plugin-qualified name (`<plugin>:<skill>`, the only name Claude Code
+    /// gives a plugin skill), every other skill by its bare leaf, each once.
+    pub fn claude_skills_with(&self, bundled: &BTreeMap<String, String>) -> Vec<String> {
+        let mut seen = BTreeSet::new();
+        self.skill_refs()
+            .iter()
+            .map(|skill| {
+                bundled
+                    .get(skill)
+                    .cloned()
+                    .unwrap_or_else(|| claude_skill_name(skill))
+            })
             .filter(|name| !name.is_empty() && seen.insert(name.clone()))
             .collect()
     }
@@ -158,6 +182,15 @@ fn yaml_string(value: &str) -> String {
 /// `description`, `tools`, `skills`; body = the member's operating
 /// instructions, then where they and the profile came from.
 pub fn render_subagent(member: &TeamMember) -> Result<String> {
+    render_subagent_with(member, &BTreeMap::new())
+}
+
+/// [`render_subagent`], naming the skills the team's plugin bundles by their
+/// plugin-qualified names (`bundled`: skill ref → `<plugin>:<skill>`).
+pub fn render_subagent_with(
+    member: &TeamMember,
+    bundled: &BTreeMap<String, String>,
+) -> Result<String> {
     let name = subagent_name(&member.agent_ref)?;
     if member.expression.frontmatter.name != name {
         return Err(AikitError::new(
@@ -190,7 +223,7 @@ pub fn render_subagent(member: &TeamMember) -> Result<String> {
     if !tools.is_empty() {
         text.push_str(&format!("tools: {}\n", tools.join(", ")));
     }
-    let skills = member.claude_skills();
+    let skills = member.claude_skills_with(bundled);
     if !skills.is_empty() {
         text.push_str(&format!("skills: {}\n", skills.join(", ")));
     }
