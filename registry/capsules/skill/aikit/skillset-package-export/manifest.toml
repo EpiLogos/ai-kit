@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/skillset-package-export"
+kind = "skill"
+name = "AIKit SkillSet package export"
+description = "METHOD: Export a SkillSet to a native agent package — resolve exact member revisions, read the target plan, render, validate natively, prove Skill discovery and return the receipt, leaving the SkillSet untouched."
+maturity = "draft"
+tags = ["aikit", "skillset", "package", "export", "method"]
+
+[skill]
+root = "payload"

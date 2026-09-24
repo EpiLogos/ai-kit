@@ -102,9 +102,30 @@ pub struct SkillSet {
     /// Members, in a stable order. A `BTreeMap` because a set is a *set*: naming
     /// the same member twice is idempotent, not a duplicate.
     pub members: BTreeMap<CapsuleId, SetMembership>,
-    /// Nested sets, giving sub-sets for free.
+    /// Nested sets, giving sub-sets for free. Contained children (directory
+    /// nesting) and referenced children (resolved from `child_refs`) both land
+    /// here once loaded; a referenced child names its ref in `attached_by`.
     #[serde(default)]
     pub children: Vec<SkillSet>,
+    /// Other sets this set carries **by reference** — a home set name or a
+    /// registry semantic ref such as `central:documentation`. A referenced
+    /// child is shared, never copied: two parents carrying `documentation`
+    /// carry the same set, and a revision to it reaches both. Still union
+    /// only — a reference adds, it cannot exclude or override.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_refs: Vec<String>,
+    /// The ref through which this set was attached to its parent, when it was
+    /// attached by reference rather than contained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attached_by: Option<String>,
+    /// The portable semantic ref of a registry set (`aikit:operator`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_ref: Option<String>,
+    /// Exact content revision of the set's own authored source (index entry
+    /// and membership), when the store computed one. Members keep their own
+    /// capsule revisions; this names only the repertoire relation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
     /// The glob a `--match` authoring step expanded, retained as provenance only.
     ///
     /// Globs expand at **authoring** time, never at resolution time: if sets
@@ -124,8 +145,27 @@ impl SkillSet {
             description: String::new(),
             members: BTreeMap::new(),
             children: Vec::new(),
+            child_refs: Vec::new(),
+            attached_by: None,
+            semantic_ref: None,
+            revision: None,
             patterns: Vec::new(),
         }
+    }
+
+    /// The ref other sets use to carry this one: its semantic ref when it has
+    /// one, its name otherwise.
+    pub fn reference(&self) -> &str {
+        self.semantic_ref.as_deref().unwrap_or(&self.name)
+    }
+
+    /// Every set in this subtree, this one first, depth-first.
+    pub fn subtree(&self) -> Vec<&SkillSet> {
+        let mut out = vec![self];
+        for child in &self.children {
+            out.extend(child.subtree());
+        }
+        out
     }
 
     #[must_use]

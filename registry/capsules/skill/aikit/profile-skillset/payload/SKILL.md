@@ -14,6 +14,17 @@ Profile is a resolution input; SkillSet is an additive projection request. Two S
 
 Neither relation carries trust or authority. SkillSets compose by union and have no semantic precedence/reorder operation; any optional presentation order is not resolution authority.
 
+## Nested repertoire
+
+A SkillSet carries child SkillSets in two ways, and both remain union-only repertoire:
+
+- **contained child** — a sub-directory of a home set (`<home>/skillsets/<parent>/<child>/members`);
+- **referenced child** — `aikit set add <set> --child <ref>` records the ref (a home set name or a registry semantic ref such as `central:documentation`) in `set.toml` `children`; a registry set declares `child_refs` in `skillsets/index.toml`.
+
+A referenced child is shared, never copied: two parents carrying `documentation` carry the same set, so a revision to it reaches both. When a parent needs another repertoire, carry that set by reference instead of repeating its members; the native verifier refuses a registry parent that duplicates members its child already carries. A reference that does not resolve, or that closes a cycle, is refused before any write.
+
+Registry SkillSets (`<root>/skillsets/index.toml`) are portable source addressed by semantic ref and travel with their owner's repository; `aikit set show <semantic-ref>` resolves them. An Agent ordinarily carries `Intent + SkillSet refs + World relation`, not an enumeration of Skills. To export a set as a provider-native package, use `skill/aikit/skillset-package-export`.
+
 ## Operation
 
 Use AIKit's shared Profile/SkillSet composition application operation. The operation is UI-neutral: CLI, TUI and agent surfaces may project it differently, but all consumers must preserve the same canonical capability identities, authored/effective distinction, resolver basis, staged intent, changed-ground preview and apply evidence.
