@@ -189,6 +189,12 @@ fn launcher_for(
         revision.to_string(),
     ]);
     launcher.argv = argv;
+    // The outer launcher is a single Workcell boundary command. The original
+    // profile and its variants remain in request.provider for final exec;
+    // carrying them on this wrapper would either contradict from_profile or
+    // allow a fallback around the boundary.
+    launcher.from_profile = None;
+    launcher.argv_fallback.clear();
     Ok(launcher)
 }
 fn launcher_belongs_to(session: &ResourceRef, record: &TaskRecord) -> bool {
@@ -198,6 +204,8 @@ fn launcher_belongs_to(session: &ResourceRef, record: &TaskRecord) -> bool {
         blake3::hash(session.as_str().as_bytes()).to_hex()
     );
     expected.argv = record.launcher.argv.clone();
+    expected.from_profile = None;
+    expected.argv_fallback.clear();
     let suffix = [
         "encounter-task-exec",
         "--agent-session",
@@ -651,29 +659,35 @@ impl EncounterService {
             "record": prior,
         }))
     }
+    pub(crate) fn selected_model_provider(
+        &self,
+        session: &ResourceRef,
+        provider: &EncounterProvider,
+        cwd: &std::path::Path,
+    ) -> Result<(EncounterProvider, bool)> {
+        let Some(record) = read(&self.home, session)? else {
+            return Ok((provider.clone(), false));
+        };
+        validate(&self.home, session, &record)?;
+        if let Some(material) = &record.material {
+            material.check_encounter_owner()?;
+        }
+        if serde_json::to_value(provider).map_err(error)?
+            != serde_json::to_value(&record.launcher).map_err(error)?
+            || cwd != record.request.cwd
+        {
+            return Err(error("Task-bound session must use its prepared native launcher and exact working directory; another provider is not a permitted fallback"));
+        }
+        Ok((record.request.provider, true))
+    }
     pub(crate) fn check_task_launch(
         &self,
         session: &ResourceRef,
         provider: &EncounterProvider,
         cwd: &std::path::Path,
     ) -> Result<()> {
-        let Some(record) = read(&self.home, session)? else {
-            return Ok(());
-        };
-        validate(&self.home, session, &record)?;
-        if let Some(material) = &record.material {
-            material.check_encounter_owner()?;
-        }
-        if provider.id != record.launcher.id
-            || provider.argv != record.launcher.argv
-            || provider.protocol != record.launcher.protocol
-            || provider.required_context != record.launcher.required_context
-            || provider.model_policy != record.launcher.model_policy
-            || cwd != record.request.cwd
-        {
-            return Err(error("Task-bound session must use its prepared native launcher and exact working directory; another provider is not a permitted fallback"));
-        }
-        Ok(())
+        self.selected_model_provider(session, provider, cwd)
+            .map(|_| ())
     }
     pub(crate) fn is_task_bound(&self, session: &ResourceRef) -> Result<bool> {
         Ok(read(&self.home, session)?.is_some())

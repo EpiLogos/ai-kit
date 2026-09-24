@@ -908,6 +908,7 @@ pub(crate) fn validate_target(
     home: &AikitHome,
     session: &ResourceRef,
     configured: &EncounterProvider,
+    model_provider: &EncounterProvider,
     request: &EncounterModelOpen,
 ) -> Result<()> {
     let binding = read_binding(home, session)?
@@ -916,14 +917,18 @@ pub(crate) fn validate_target(
     if admitted != request.expected_agency {
         return Err(error("Selected Agency/source/WorldBinding changed between composition and resident admission"));
     }
-    let model = prepare(home, session, configured)?
-        .ok_or_else(|| error("The configured body has no explicit model policy"))?;
+    let model = prepare(home, session, model_provider)?
+        .ok_or_else(|| error("The selected body has no explicit model policy"))?;
     if model.policy.model_ref != request.model_ref
         || request
             .provider_ref
             .as_ref()
             .is_some_and(|p| p != &model.policy.provider_ref)
-        || request.body.as_ref().is_some_and(|b| b != &configured.id)
+        // A task's existing explicit body names its Workcell launcher; the
+        // validated inner provider is also an exact name for that same task.
+        || request.body.as_ref().is_some_and(|b| {
+            b != &configured.id && b != &model_provider.id
+        })
     {
         return Err(error(
             "Resolved body/model does not match the explicit catalogue target",
@@ -936,15 +941,20 @@ impl EncounterService {
         self.require_attached(&request.agent_session)?;
         let mut candidates = Vec::new();
         for configured in self.providers()? {
-            if configured.model_policy.is_none()
-                || request.body.as_ref().is_some_and(|b| b != &configured.id)
-            {
+            let Ok((model_provider, _task_bound)) =
+                self.selected_model_provider(&request.agent_session, &configured, &request.cwd)
+            else {
                 continue;
-            }
-            if validate_target(&self.home, &request.agent_session, &configured, &request).is_ok()
-                && self
-                    .check_task_launch(&request.agent_session, &configured, &request.cwd)
-                    .is_ok()
+            };
+            if model_provider.model_policy.is_some()
+                && validate_target(
+                    &self.home,
+                    &request.agent_session,
+                    &configured,
+                    &model_provider,
+                    &request,
+                )
+                .is_ok()
             {
                 candidates.push(configured);
             }
