@@ -8,8 +8,8 @@
 
 use crate::app::Service;
 use crate::cli::{
-    JevInvokeArgs, JevValidateArgs, NowAppendChangeArgs, NowInspectArgs, NowPrepareArgs,
-    NowPublishArgs, NowRevokeArgs, NowStatusArgs,
+    JevInvokeArgs, JevValidateArgs, NowAppendChangeArgs, NowFactorySensingArgs, NowInspectArgs,
+    NowPrepareArgs, NowPublishArgs, NowRevokeArgs, NowStatusArgs,
 };
 use aikit_adapters::central_file_map::{self, CentralFileMapProvider};
 use aikit_adapters::jev::{
@@ -1372,6 +1372,23 @@ pub fn now_status(args: NowStatusArgs) -> Result<Value> {
     let secret = resolve_secret(&config, args.allow_env_import)?;
     let status = RedisNowStore::new(config)?.status(secret.as_ref())?;
     serde_json::to_value(status).map_err(|e| fail("jev_now.encode", e.to_string()))
+}
+
+pub fn factory_sensing_read(args: NowFactorySensingArgs) -> Result<Value> {
+    if !(args.project_world_ref.starts_with("project:") || args.project_world_ref == "control:root")
+    {
+        return Err(fail(
+            "factory_sensing.project_invalid",
+            "project_world_ref must identify one ProjectWorld or control:root",
+        ));
+    }
+    let config: RedisNowConfig = read_json(&args.config_file, "Redis NOW config", 256 * 1024)?;
+    let secret = resolve_secret(&config, args.allow_env_import)?;
+    let projection = RedisNowStore::new(config)?
+        .read_factory_sensing(&args.project_world_ref, secret.as_ref())?;
+    Ok(
+        json!({"schema":"aikit.factory-sensing-reading/v1","project_world_ref":args.project_world_ref,"available":projection.is_some(),"projection":projection}),
+    )
 }
 
 pub fn now_inspect(args: NowInspectArgs) -> Result<Value> {

@@ -131,6 +131,9 @@ pub struct RoutineRunRequest {
     pub method_revision: SourceRevision,
     pub prompt: String,
     pub observation_payload: Option<Value>,
+    /// The saved schedule record admitted with this Routine, if scheduled.
+    /// Native project operations use it to bind execution to current policy.
+    pub time_schedule: Option<aikit_core::schedule::ScheduleRecord>,
     /// The Method's native body; `Some` selects the native runner.
     pub native: Option<crate::routine_native::NativeMethod>,
     /// The Actions the admitted invocation's authority grants — the only
@@ -580,6 +583,10 @@ pub struct RoutineDispatcher<O: OccurrenceSource, M: MethodResolver, R: RoutineR
 }
 
 impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher<O, M, R> {
+    pub fn home(&self) -> &aikit_store::AikitHome {
+        &self.home
+    }
+
     pub fn new(home: aikit_store::AikitHome, occurrences: O, methods: M, runner: R) -> Self {
         Self {
             routines: RoutineStore::new(home.clone()),
@@ -821,6 +828,7 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
                     "time_policy_ref": reading.time_policy_ref.to_string(),
                     "time_policy_revision": reading.time_policy_revision.to_string(),
                 })),
+                time_schedule: record.time_schedule.clone(),
                 native: native.clone(),
                 authorised_actions: admission.evidence.action_refs.clone(),
             });
@@ -988,6 +996,7 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
             method_revision: record.routine.method_revision.clone(),
             prompt,
             observation_payload: None,
+            time_schedule: record.time_schedule.clone(),
             native: native.clone(),
             authorised_actions: admission.evidence.action_refs.clone(),
         });
@@ -1107,6 +1116,7 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
                     method_revision: record.routine.method_revision.clone(),
                     prompt,
                     observation_payload: Some(packet.clone()),
+                    time_schedule: record.time_schedule.clone(),
                     native: native.clone(),
                     authorised_actions: admission.evidence.action_refs.clone(),
                 });
@@ -1141,9 +1151,17 @@ fn event_matches(event_ref: &str, client: &str, kind: &str, payload: &Value) -> 
     let mut parts = rest.splitn(3, ':');
     match (parts.next(), parts.next(), parts.next()) {
         (Some(event_client), Some(event_kind), None) => {
+            if event_client == "factory" && event_kind == "field-changed" {
+                return false;
+            }
             event_client == client && event_kind == kind
         }
         (Some(event_client), Some(event_kind), Some(filter)) => {
+            if event_client == "factory" && event_kind == "field-changed" {
+                return client == "factory"
+                    && kind == "field-changed"
+                    && payload.get("project_world_ref").and_then(Value::as_str) == Some(filter);
+            }
             event_client == client
                 && event_kind == kind
                 && serde_json::to_string(payload)
@@ -1551,6 +1569,39 @@ impl<B: ContemplationBasis, Inner: RoutineRunner> RoutineRunner
 mod tests {
     use super::*;
 
+    #[test]
+    fn factory_field_change_events_match_exactly_one_project() {
+        let payload = json!({
+            "project_world_ref": "project:Alpha",
+            "source_revision": "blake3:owner",
+            "other_reference": "project:Beta",
+        });
+        assert!(event_matches(
+            "aikit.routine-event/v1:factory:field-changed:project:Alpha",
+            "factory",
+            "field-changed",
+            &payload,
+        ));
+        assert!(!event_matches(
+            "aikit.routine-event/v1:factory:field-changed:project:Beta",
+            "factory",
+            "field-changed",
+            &payload,
+        ));
+        assert!(!event_matches(
+            "aikit.routine-event/v1:factory:field-changed",
+            "factory",
+            "field-changed",
+            &payload,
+        ));
+        assert!(!event_matches(
+            "aikit.routine-event/v1:factory:field-changed:project:Alpha",
+            "claude",
+            "Stop",
+            &payload,
+        ));
+    }
+
     /// The dispatched run's session-open request is built through the real
     /// composition engine: an isolated home with no active tool capsules
     /// composes an honest empty `mcp_servers` (nothing composed, nothing
@@ -1647,6 +1698,7 @@ mod tests {
             method_revision: SourceRevision::parse("method-rev-1").unwrap(),
             prompt: "contemplate now".into(),
             observation_payload: None,
+            time_schedule: None,
             // Contemplation is an encounter (model) Routine, never a native body.
             native: None,
             authorised_actions: Vec::new(),

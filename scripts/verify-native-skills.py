@@ -28,6 +28,8 @@ EXPECTED_SKILLS = {
     "skill/aikit/named-praxis",
     "skill/aikit/session-continuity",
     "skill/aikit/central-day-rollover",
+    "skill/aikit/factory-telemetry-collect",
+    "skill/aikit/factory-telemetry-field-refresh",
 }
 EXPECTED_GUIDANCE = {
     "guidance/aikit/living-project-collaboration",
