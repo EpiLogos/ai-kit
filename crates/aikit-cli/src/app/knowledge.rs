@@ -43,6 +43,18 @@ use super::Service;
 const MAX_DISCOVERY_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_DISCOVERY_FILES: usize = 4096;
 
+/// One project's GitNexus code-index degradation: the binary was present and
+/// index-capable, but building that project's index failed. Held per project
+/// so a scoped reply carries only its own scope's line and `knowledge status`
+/// names every project — the same discipline `authored_pending` and the
+/// per-project anchor lines already follow.
+struct ProjectCodeDegradation {
+    /// Work-relative project display, e.g. `Work/demo`.
+    project: String,
+    /// The full disclosure line, already naming the project and the reason.
+    message: String,
+}
+
 pub(super) struct KnowledgeRuntime {
     wiki: Option<SqliteWikiProvider>,
     material: Vec<SourceMaterial>,
@@ -68,6 +80,10 @@ pub(super) struct KnowledgeRuntime {
     /// One code-index provider per discovered project; unavailable ones are
     /// kept so the absence is per project, never a global "provider absent".
     code: Vec<GitNexusCodeIndexProvider<SystemRunner>>,
+    /// Per-project code-index degradations, kept out of the global per-query
+    /// `absences` so another project's code state never leaks into a scoped
+    /// reply; a reply carries only its own scope's, and status carries all.
+    code_degradations: Vec<ProjectCodeDegradation>,
     project_map: ProjectMap,
     absences: Vec<String>,
     /// Informational per-project and per-pool disclosure lines (anchor
@@ -257,6 +273,17 @@ impl Service {
                     .find(|pending| pending.project == display)
             }) {
                 result.absences.push(pending.rollup_line());
+            }
+            // Code-index degradations are scoped the same way: a reply carries
+            // only its own scope's line, never another project's — the leak
+            // this fix closes. Every project's degradation stays in
+            // `knowledge status`.
+            if let Some(display) = scoped_display.as_deref() {
+                for degradation in &runtime.code_degradations {
+                    if degradation.project == display {
+                        result.absences.push(degradation.message.clone());
+                    }
+                }
             }
             // A scoped query keeps another project's compiled authored edges
             // — and its compiled folder subjects — out of its results;
@@ -675,8 +702,8 @@ impl Service {
         let mut frame = self.with_knowledge(|runtime, application| {
             let mut frame = application.context_pack(query, addresses);
             frame.absences.extend(runtime.absences.clone());
-            // A frame carries its own project's pending rollup, never other
-            // projects'.
+            // A frame carries its own project's pending rollup and code-index
+            // degradation, never other projects'.
             if let Some(current) = &runtime.current_project {
                 if let Some(pending) = runtime
                     .authored_pending
@@ -684,6 +711,11 @@ impl Service {
                     .find(|pending| &pending.project == current)
                 {
                     frame.absences.push(pending.rollup_line());
+                }
+                for degradation in &runtime.code_degradations {
+                    if &degradation.project == current {
+                        frame.absences.push(degradation.message.clone());
+                    }
                 }
             }
             Ok(frame)
@@ -739,6 +771,11 @@ impl Service {
             // rollup and the full per-target detail.
             for pending in &runtime.authored_pending {
                 status.absences.push(pending.rollup_line());
+            }
+            // Likewise every project's code-index degradation: a scoped reply
+            // carries only its own, but the diagnostic surface names all.
+            for degradation in &runtime.code_degradations {
+                status.absences.push(degradation.message.clone());
             }
             status.authored_pending = runtime.authored_pending.clone();
             Ok(status)
@@ -1243,22 +1280,43 @@ impl Service {
         // global "provider absent"; unavailable projects share one grouped
         // line per distinct reason.
         let mut code = Vec::new();
+        let mut code_degradations: Vec<ProjectCodeDegradation> = Vec::new();
         let mut gitnexus_unavailable: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for project in &work_projects {
             let source = SourceRef::parse(format!("source:project-code:{}", project.project_id))?;
-            let mut provider = GitNexusCodeIndexProvider::new(
-                SystemRunner::new().with_cwd(&project.root),
-                project.project_id.clone(),
-                source,
-                None,
-            );
+            // The binary is a seam: `AIKIT_GITNEXUS_BIN` (resolved through the
+            // process environment at `Service::open`) overrides the PATH lookup,
+            // so a test — and an operator — pins code intelligence to a known
+            // binary instead of depending on whatever the host happens to have.
+            let runner = SystemRunner::new().with_cwd(&project.root);
+            let mut provider = match self.gitnexus_binary.as_deref() {
+                Some(binary) => GitNexusCodeIndexProvider::with_binary(
+                    runner,
+                    binary,
+                    project.project_id.clone(),
+                    source,
+                    None,
+                ),
+                None => GitNexusCodeIndexProvider::new(
+                    runner,
+                    project.project_id.clone(),
+                    source,
+                    None,
+                ),
+            };
             let status = provider.status();
             if status.available && status.capabilities.index {
                 if let Err(error) = provider.index(&project.root, false) {
-                    absences.push(format!(
-                        "GitNexus CodeIndex degraded for Work/{}: {error}",
-                        project.name
-                    ));
+                    // Per-project code state, scoped like `authored_pending`:
+                    // never the global per-query absence that leaked another
+                    // project's code degradation into a scoped reply.
+                    code_degradations.push(ProjectCodeDegradation {
+                        project: format!("Work/{}", project.name),
+                        message: format!(
+                            "GitNexus CodeIndex degraded for Work/{}: {error}",
+                            project.name
+                        ),
+                    });
                 }
             } else if !status.available {
                 let reason = provider
@@ -1317,6 +1375,7 @@ impl Service {
             work_repo_scopes,
             central_expected: central_root.is_some(),
             code,
+            code_degradations,
             project_map,
             absences,
             status_notes,

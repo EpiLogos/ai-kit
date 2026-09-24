@@ -275,6 +275,11 @@ pub struct Service {
     factory_state: Option<PathBuf>,
     factory_project_ref: Option<String>,
     factory_request_file: Option<PathBuf>,
+    /// Optional override for the GitNexus code-index binary. `None` uses the
+    /// PATH lookup (`gitnexus`); `AIKIT_GITNEXUS_BIN` pins it to a known binary
+    /// so code intelligence does not depend on the host's PATH — the seam the
+    /// knowledge tests inject through.
+    gitnexus_binary: Option<String>,
     /// Owner observations returned by a Factory Commission in this running
     /// application. This is an ephemeral read cache, not an AIKit Factory
     /// store; restarting re-observes through the configured owner binding.
@@ -425,6 +430,7 @@ impl Service {
         let factory_state = env("AIKIT_FACTORY_STATE").map(PathBuf::from);
         let factory_project_ref = env("AIKIT_FACTORY_PROJECT_REF");
         let factory_request_file = env("AIKIT_FACTORY_REQUEST_FILE").map(PathBuf::from);
+        let gitnexus_binary = env("AIKIT_GITNEXUS_BIN").filter(|value| !value.is_empty());
 
         Ok(Self {
             home,
@@ -444,6 +450,7 @@ impl Service {
             factory_state,
             factory_project_ref,
             factory_request_file,
+            gitnexus_binary,
             factory_started_resources: None,
             working_environments: std::cell::RefCell::new(None),
             doctor_report: std::cell::RefCell::new(None),
