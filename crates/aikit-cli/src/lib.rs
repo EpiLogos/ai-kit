@@ -44,6 +44,7 @@ pub mod guardian_family;
 pub mod harness_auth;
 pub mod hook;
 pub mod inhabit;
+pub mod inhabit_team;
 pub mod inhabitation;
 pub mod jev_now;
 pub mod json;

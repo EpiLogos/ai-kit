@@ -33,6 +33,7 @@ pub mod antigravity;
 pub mod bootstrap;
 pub mod broker;
 pub mod claude;
+pub mod claude_team;
 pub mod cline;
 pub mod codex;
 pub mod copilot;
