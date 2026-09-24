@@ -254,6 +254,10 @@ pub struct InhabitArgs {
     pub harness_composition: Option<String>,
     #[arg(long, value_name = "REF")]
     pub model: Option<String>,
+    /// Launch without projecting the members of an agent set this Agent
+    /// orchestrates as the harness's subagents.
+    #[arg(long = "no-team", conflicts_with = "release")]
+    pub no_team: bool,
     /// The harness argv to exec after the claim (after `--`). Without one the
     /// claim is printed with the variables to export.
     #[arg(last = true, value_name = "HARNESS_ARGV")]

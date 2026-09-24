@@ -250,6 +250,36 @@ then execs the harness with `OI_POSITION_REF` and `OI_OCCUPANT_GENERATION`
 added to its environment. Nothing is released when the harness exits; leaving
 is `--release`, which ends the generation the body holds.
 
+**An orchestrator comes with its team.** Suppose the Agent is the
+`orchestrator_agent_ref` of a Central agent set (`central.agent-set.list`,
+root register), as `agent/anima` orchestrates `anima` and `agent/aletheia`
+orchestrates `aletheia`. Then every other member of that set becomes a Claude
+Code subagent of the launched session:
+
+- **Where each subagent comes from.** Each member's Central profile
+  (`agent-profile.list`) names its expression file among its
+  `governance_refs` (`Control/agents/expressions/<team>/members/<member>.md`).
+  The file's frontmatter gives the subagent's `description`, `tools` and
+  `skills`, and its body gives the instructions. Skills are named the way the
+  Claude projection names them, by the id's last segment
+  (`skill/ql/vak-evaluate` → `vak-evaluate`).
+- **Where the files go.** They are written once per inhabitation, as a Claude
+  Code plugin under `$AIKIT_HOME/state/inhabitations/<generation>/claude/<set>-team/`
+  (`agents/<member>.md` and `.claude-plugin/plugin.json`), with a
+  `receipt.json` that lists every file and its digest.
+- **How Claude Code sees them.** The `claude` argv is launched with
+  `--plugin-dir <that directory>`, which Claude Code loads for that session
+  only. Nothing is written into the repository or `~/.claude`. `--attach`
+  hands the same directory to the continued session, and `--release` removes
+  it with the tenure.
+- **All or nothing.** A member with no profile, no expression, or an
+  unreadable expression refuses the whole launch before anything is claimed.
+  `--no-team` launches the orchestrator alone.
+- **Other harnesses.** Any harness other than Claude Code is launched without
+  the team, and `aikit inhabit` says so on stderr.
+- **No argv.** Without a harness argv, the JSON reply carries
+  `team_projection` with the plugin directory to pass.
+
 `aikit whoami` (`aikit.inhabitation-reading/v1`) resolves the Position from
 `--position`, then the stamped `OI_POSITION_REF` (verified with
 `actuation occupancy verify`), then the one open tenure naming the current

@@ -326,9 +326,12 @@ impl HarnessAdmissionAdapter for ClaudeAdapter {
             },
             HarnessFacultyObservation {
                 faculty: HarnessFaculty::DelegatedAgents,
-                support: FacultySupport::Unknown,
-                evidence_refs: vec![],
-                note: Some("not censused from primary sources by this admission".into()),
+                support: FacultySupport::Supported,
+                evidence_refs: vec![
+                    "native:claude --plugin-dir <dir> (a plugin's agents/<name>.md loaded for one session)".to_string(),
+                    "aikit:inhabit_team (agent-set members projected per inhabitation, test-covered)".to_string(),
+                ],
+                note: Some("`aikit inhabit` projects the other members of an agent set the inhabiting Agent orchestrates as this session's subagents; the projection lives with the tenure, not in a generation".into()),
             },
             HarnessFacultyObservation {
                 faculty: HarnessFaculty::ProjectRoots,
