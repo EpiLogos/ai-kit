@@ -89,17 +89,25 @@ impl ModelEnvironment {
         Ok(())
     }
 
-    /// Whether anything would actually be delivered. An environment with no
-    /// credential is never applied: launching without a key inherits the
-    /// caller's environment unchanged rather than scrubbing it for nothing.
+    /// Whether any credential would be delivered. Callers may still apply an
+    /// empty environment to scrub ambient API keys for native own-login.
     pub fn is_empty(&self) -> bool {
         self.credentials.is_empty()
     }
 
     pub fn apply(&self, command: &mut Command) {
+        self.apply_with(command, |name| std::env::var_os(name));
+    }
+
+    fn apply_with(
+        &self,
+        command: &mut Command,
+        mut ambient: impl FnMut(&str) -> Option<std::ffi::OsString>,
+    ) {
         command.env_clear();
         for name in [
             "HOME",
+            "CODEX_HOME",
             "PATH",
             "TERM",
             "LANG",
@@ -112,7 +120,7 @@ impl ModelEnvironment {
             "AIKIT_CONTEXT_ID",
             "AIKIT_ISOLATION",
         ] {
-            if let Some(value) = std::env::var_os(name) {
+            if let Some(value) = ambient(name) {
                 command.env(name, value);
             }
         }
@@ -309,9 +317,10 @@ fn spawn_parts(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    // A delivered key is injected under the scrubbed final-child environment;
-    // without a delivery the caller's environment is inherited unchanged.
-    if let Some(environment) = environment.filter(|environment| !environment.is_empty()) {
+    // The caller may request a scrubbed environment with no delivered key,
+    // notably for Codex own-login. Absence of an environment alone means
+    // ordinary inheritance.
+    if let Some(environment) = environment {
         environment.apply(&mut command);
     }
     // Human native-action authority is not a provider credential. Even an
@@ -670,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn an_environment_with_no_credentials_is_never_applied() {
+    fn an_environment_with_no_credentials_is_distinct_from_no_environment() {
         assert!(ModelEnvironment::new().is_empty());
         let environment = ModelEnvironment::new()
             .with_credential(
@@ -679,6 +688,53 @@ mod tests {
             )
             .unwrap();
         assert!(!environment.is_empty());
+    }
+
+    #[test]
+    fn empty_scrubbed_environment_keeps_codex_home_and_withholds_api_keys() {
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "printf '%s\\n' \"$CODEX_HOME\"; if [ -n \"$OPENAI_API_KEY\" ]; then echo leaked; else echo withheld; fi",
+            ])
+            .env("OPENAI_API_KEY", "ambient-probe-key");
+        ModelEnvironment::new().apply_with(&mut command, |name| {
+            (name == "CODEX_HOME").then(|| "/isolated/native-codex-login".into())
+        });
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "/isolated/native-codex-login\nwithheld\n"
+        );
+    }
+
+    #[test]
+    fn empty_environment_on_real_connection_process_scrubs_ambient_variables() {
+        // This exercises spawn_parts, which used to drop Some(empty) and
+        // inherit the full ambient environment despite an own-login plan.
+        const NAME: &str = "AIKIT_CONNECTION_EMPTY_SCRUB_PROBE";
+        let old = std::env::var_os(NAME);
+        std::env::set_var(NAME, "ambient-present");
+        let argv = vec![
+            "sh".into(),
+            "-c".into(),
+            "if [ -n \"$AIKIT_CONNECTION_EMPTY_SCRUB_PROBE\" ]; then echo leaked; else echo withheld; fi".into(),
+        ];
+        let result = ConnectionProcess::spawn_split_with_environment(
+            &argv,
+            None,
+            Some(&ModelEnvironment::new()),
+        );
+        match old {
+            Some(value) => std::env::set_var(NAME, value),
+            None => std::env::remove_var(NAME),
+        }
+        let (writer, mut reader, control) = result.unwrap();
+        drop(writer);
+        assert_eq!(reader.read_line().unwrap(), "withheld");
+        drop(control);
     }
 
     #[test]

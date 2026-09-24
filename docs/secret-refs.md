@@ -142,6 +142,10 @@ declared ref through the resolver suite) and is injected under the declared
 variable into the scrubbed final-child environment — never an empty or
 ambient value. Where the profile records an own-login fact for the provider,
 an unbound key is an honest absence and the harness's native login stands;
+the Codex model-selected `provider:openai` path additionally requires the
+selected Codex executable to report a ChatGPT login, then launches under a
+scrubbed environment without `OPENAI_API_KEY` delivery. `CODEX_HOME`, when
+set, is retained so that the probe and child use the same native login store;
 where it does not, an unbound key refuses the launch with the bind
 remediation instead of starting a body that cannot authenticate. A revoked
 or expired binding refuses either way.
