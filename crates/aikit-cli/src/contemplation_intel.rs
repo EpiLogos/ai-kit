@@ -20,7 +20,7 @@ use aikit_adapters::jev::{CurlJevProvider, JevBoundary, JevCancellation, JevEndp
 use aikit_adapters::runner::SystemRunner;
 use aikit_adapters::secret_resolver::SuiteSecretResolver;
 use aikit_core::context_source::{AgentVisibility, ExternalEgress};
-use aikit_core::jev::{Answer, JevLimits, JevRequest, Question};
+use aikit_core::jev::{Answer, JevLimits, JevRequest, JevResponse, Question, TokenUsage};
 use aikit_core::secret_ref::{SecretRef, SecretResolver};
 use aikit_core::{ResourceRef, Result};
 use aikit_store::now_context::{
@@ -125,9 +125,8 @@ fn build_practices_category(built: &mut BuiltQuestions, budget: &mut usize, fiel
                     "category": "practice-applies",
                     "question": "Does this Practice/METHOD apply to the current concern?",
                     "practice_id": id,
-                    "purpose": practice["purpose"],
                     "binding_status": practice["binding"]["status"],
-                    "stories_served": practice["stories_served"],
+                    "state_ref": "state.ux_spine.practices (by id), its stories and coverage cells",
                 }),
                 json!({"practice_id": id}),
             );
@@ -211,10 +210,7 @@ fn build_capabilities_category(
                 "category": "capability-implicated",
                 "question": "Is this capability materially implicated by the current concern?",
                 "capability_id": id,
-                "need": capability["need"],
-                "operation": capability["operation"],
-                "outcome": capability["outcome"],
-                "implementation_status": capability["implementation_status"],
+                "state_ref": "state.capability_matrix.capabilities (by id), with its relations_all_views",
             }),
             json!({"capability_id": id}),
         );
@@ -534,6 +530,112 @@ fn build_retrospective_category(built: &mut BuiltQuestions, budget: &mut usize, 
     }
 }
 
+/// The spine as Jev state: every story, practice and coverage cell, with the
+/// duplication removed — practices reference their coverage cells by
+/// capability_ref instead of embedding copies, bindings drop local absolute
+/// paths, and a scope sentence shared by every cell is stated once.
+fn compact_spine(spine: &Value) -> Value {
+    let practices: Vec<Value> = spine["practices"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .map(|p| {
+                    json!({
+                        "id": p["id"],
+                        "purpose": p["purpose"],
+                        "stories_served": p["stories_served"],
+                        "support": p["support"],
+                        "implementation_owner": p["implementation_owner"],
+                        "binding": {
+                            "status": p["binding"]["status"],
+                            "kind": p["binding"]["kind"],
+                            "skill_ref": p["binding"]["skill_ref"],
+                            "classification": p["binding"]["classification"],
+                            "gap_owner": p["binding"]["gap_owner"],
+                        },
+                        "coverage_cell_refs": p["capability_coverage_cells"]
+                            .as_array()
+                            .map(|cells| cells.iter().map(|c| c["capability_ref"].clone()).collect::<Vec<_>>())
+                            .unwrap_or_default(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let cells = spine["coverage_cells"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let shared_scope = cells
+        .first()
+        .map(|c| c["scope"].clone())
+        .filter(|scope| cells.iter().all(|c| &c["scope"] == scope));
+    let coverage_cells: Vec<Value> = cells
+        .iter()
+        .map(|c| {
+            let mut cell = c.clone();
+            if shared_scope.is_some() {
+                if let Some(obj) = cell.as_object_mut() {
+                    obj.remove("scope");
+                }
+            }
+            cell
+        })
+        .collect();
+    json!({
+        "source": spine["source"],
+        "stories": spine["stories"],
+        "practices": practices,
+        "coverage_cells": coverage_cells,
+        "coverage_scope_for_every_cell": shared_scope,
+    })
+}
+
+/// Conservative input-token estimate for a Jev request (observed ~2.65 bytes
+/// per token on this field; 2.5 overestimates tokens, so the guard trips early
+/// rather than letting the provider refuse with an opaque HTTP 400).
+fn estimated_input_tokens(request: &JevRequest) -> u64 {
+    let bytes = serde_json::to_vec(request)
+        .map(|b| b.len())
+        .unwrap_or(usize::MAX) as u64;
+    bytes.saturating_mul(10) / 25
+}
+
+/// Split one contemplation request into batches that each carry the whole
+/// state and as many questions as fit under `ceiling` estimated input tokens.
+fn split_into_batches(request: &JevRequest, ceiling: u64) -> Result<Vec<JevRequest>> {
+    let empty = JevRequest {
+        model: request.model.clone(),
+        state: request.state.clone(),
+        questions: BTreeMap::new(),
+    };
+    if estimated_input_tokens(&empty) >= ceiling {
+        return Err(fail(
+            "contemplation_intel.request_over_input_ceiling",
+            format!(
+                "the field state alone is ~{} input tokens, over the declared ceiling of {ceiling}; \
+                 no question batch can carry it",
+                estimated_input_tokens(&empty)
+            ),
+        ));
+    }
+    let mut batches = Vec::new();
+    let mut current = empty.clone();
+    for (id, question) in &request.questions {
+        current.questions.insert(id.clone(), question.clone());
+        if estimated_input_tokens(&current) > ceiling && current.questions.len() > 1 {
+            current.questions.remove(id);
+            batches.push(std::mem::replace(&mut current, empty.clone()));
+            current.questions.insert(id.clone(), question.clone());
+        }
+    }
+    if !current.questions.is_empty() {
+        batches.push(current);
+    }
+    Ok(batches)
+}
+
 fn build_question_set(
     field: &Value,
     pass: &str,
@@ -564,12 +666,23 @@ fn build_question_set(
             "the assembled field produced no questions for this pass; nothing to contemplate",
         ));
     }
+    // Jev judges relations only as well as the state carries them: the whole
+    // capability matrix (every row with every field, every view's relation
+    // records) and the spine's practice -> story -> coverage traversal are
+    // stated in full, not summarised into per-question slices.
     let state = json!({
         "pass": pass,
         "telos": field["telos"],
         "changed_subject": field["changed_subject"],
-        "spine_source": field["spine"]["source"],
-        "matrix_id": field["matrix"]["matrix_id"],
+        "explicit_joins": field["joins"],
+        "capability_matrix": {
+            "matrix_id": field["matrix"]["matrix_id"],
+            "source": field["matrix"]["source_csv"],
+            "capabilities": field["matrix"]["capabilities"],
+            "relations_all_views": field["matrix"]["all_view_relations"],
+        },
+        "ux_spine": compact_spine(&field["spine"]),
+        "tests_evidence": field["tests_evidence"],
         "now": field["now"],
     });
     let request = JevRequest {
@@ -621,6 +734,10 @@ pub fn now_contemplate(args: NowContemplateArgs) -> Result<Value> {
     let (request, built) =
         build_question_set(&field, &args.pass, limits.tariff.model_version.clone())?;
     limits.validate(&request)?;
+    // Every batch carries the whole state; questions are split so each call
+    // fits the declared input ceiling (the provider answers an over-ceiling
+    // request with an opaque HTTP 400).
+    let batches = split_into_batches(&request, limits.tariff.max_input_tokens_per_attempt)?;
 
     let credential_ref = SecretRef::parse(&args.credential_ref)?;
     let resolver = if args.allow_env_import {
@@ -666,14 +783,72 @@ pub fn now_contemplate(args: NowContemplateArgs) -> Result<Value> {
         }
         Ok(())
     };
-    let invocation = provider.invoke(
-        invocation_ref.clone(),
-        &request,
-        &limits,
-        &secret,
-        &cancellation,
-        &mut guard,
-    )?;
+    let mut merged_answers = BTreeMap::new();
+    let mut usage = TokenUsage {
+        input_tokens: 0,
+        output_tokens: 0,
+    };
+    let mut returned_model: Option<String> = None;
+    let mut batch_refs = Vec::new();
+    let mut invocation = None;
+    for (index, batch) in batches.iter().enumerate() {
+        let batch_ref = if batches.len() == 1 {
+            invocation_ref.clone()
+        } else {
+            ResourceRef::parse(format!("{invocation_ref}-batch{}", index + 1))?
+        };
+        let attempt = provider.invoke(
+            batch_ref.clone(),
+            batch,
+            &limits,
+            &secret,
+            &cancellation,
+            &mut guard,
+        )?;
+        // A field that changed mid-call is the cause to report, not the
+        // attempt failure it produced.
+        let (_, batch_field_digest) =
+            file_digest(&args.field, "contemplation field", MAX_FIELD_BYTES)?;
+        if batch_field_digest != initial_field_digest {
+            return Err(fail(
+                "contemplation_intel.field_changed",
+                "The contemplation field document changed during the Jev invocation; refuse publication exactly as jev_now does",
+            ));
+        }
+        let answer = attempt.answer.clone().ok_or_else(|| {
+            fail(
+                "contemplation_intel.jev_failed",
+                format!(
+                    "batch {} of {}: {}",
+                    index + 1,
+                    batches.len(),
+                    attempt
+                        .failure
+                        .as_ref()
+                        .map(|f| f.message.as_str())
+                        .unwrap_or("Jev produced no successful determination")
+                ),
+            )
+        })?;
+        if returned_model.as_ref().is_some_and(|m| m != &answer.model) {
+            return Err(fail(
+                "contemplation_intel.jev_model_changed",
+                "batches of one contemplation were answered by different models",
+            ));
+        }
+        returned_model = Some(answer.model.clone());
+        usage.input_tokens += answer.usage.input_tokens;
+        usage.output_tokens += answer.usage.output_tokens;
+        merged_answers.extend(answer.answers);
+        batch_refs.push(batch_ref);
+        invocation = Some(attempt);
+    }
+    let mut invocation = invocation.expect("at least one batch");
+    invocation.answer = Some(JevResponse {
+        model: returned_model.unwrap_or_default(),
+        answers: merged_answers,
+        usage,
+    });
 
     // Final revalidation immediately before the decision is returned, so a
     // late edit between the last attempt and this point cannot slip through.
@@ -768,6 +943,7 @@ pub fn now_contemplate(args: NowContemplateArgs) -> Result<Value> {
         "field_basis_digest": initial_field_digest,
         "invocation_ref": invocation_ref,
         "jev_invocation_ref": invocation_ref,
+        "jev_batches": batch_refs,
         "requested_model": request.model,
         "returned_model": answer.model,
         "usage": answer.usage,
@@ -1933,6 +2109,42 @@ mod tests {
             grade["declared_tests_exist_at_head"].is_null(),
             "not assessed is not missing"
         );
+    }
+
+    #[test]
+    fn batches_carry_the_whole_state_and_every_question_once_under_the_ceiling() {
+        let mut questions = BTreeMap::new();
+        for i in 0..40 {
+            questions.insert(
+                format!("capability/cap.{i:03}"),
+                Question::Noul {
+                    instructions: json!({"category": "capability-implicated", "capability_id": format!("cap.{i:03}"), "question": "Is this capability materially implicated by the current concern?"}),
+                    criteria: None,
+                },
+            );
+        }
+        let request = JevRequest {
+            model: "jev-1.13.0".into(),
+            state: json!({"capability_matrix": "x".repeat(4000)}),
+            questions,
+        };
+        let ceiling = 3000;
+        let batches = split_into_batches(&request, ceiling).unwrap();
+        assert!(batches.len() > 1, "this request must not fit one call");
+        let mut seen = BTreeSet::new();
+        for batch in &batches {
+            assert_eq!(
+                batch.state, request.state,
+                "every batch carries the whole state"
+            );
+            assert!(estimated_input_tokens(batch) <= ceiling);
+            for id in batch.questions.keys() {
+                assert!(seen.insert(id.clone()), "question {id} asked twice");
+            }
+        }
+        assert_eq!(seen.len(), 40);
+        // A state that cannot fit alone is refused, never silently truncated.
+        assert!(split_into_batches(&request, 1000).is_err());
     }
 
     #[test]
