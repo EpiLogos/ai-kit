@@ -90,6 +90,25 @@ fn code_query_failed_for(result: &aikit_core::KnowledgeSearchResult, project: &s
     })
 }
 
+fn work_repos_search_failed(result: &aikit_core::KnowledgeSearchResult) -> bool {
+    result.absences.iter().any(|absence| {
+        absence.starts_with("SourcePool search degraded for provider/source-pool/work-repos:")
+    })
+}
+
+#[cfg(unix)]
+struct RestorePermissions {
+    path: std::path::PathBuf,
+    original: fs::Permissions,
+}
+
+#[cfg(unix)]
+impl Drop for RestorePermissions {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.path, self.original.clone());
+    }
+}
+
 #[test]
 fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     let binary = std::env::var("AIKIT_GITNEXUS_BIN").unwrap_or_else(|_| "gitnexus".into());
@@ -271,4 +290,63 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     let root_failure = root_service.knowledge_search("", 256).unwrap();
     assert!(code_query_failed_for(&root_failure, "cedar"));
     assert!(code_query_failed_for(&root_failure, "larch"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        // A real unreadable file makes the installed ripgrep return status 2.
+        // It lives only in larch; cedar must not see that sibling failure,
+        // while an explicit larch or root query must still report it.
+        let larch_source = world.join("Work/larch/src/owner.ts");
+        let original_permissions = fs::metadata(&larch_source).unwrap().permissions();
+        let original_mode = original_permissions.mode();
+        let restore = RestorePermissions {
+            path: larch_source.clone(),
+            original: original_permissions,
+        };
+        fs::set_permissions(&larch_source, fs::Permissions::from_mode(0)).unwrap();
+        let ripgrep = Command::new(aikit_adapters::ripgrep::executable())
+            .args(["--json", "cedarOwnedLocator"])
+            .arg(&larch_source)
+            .output()
+            .unwrap();
+        assert_eq!(
+            ripgrep.status.code(),
+            Some(2),
+            "real unreadable sibling file must make ripgrep fail"
+        );
+        let own_with_sibling_error = service.knowledge_search("cedarOwnedLocator", 256).unwrap();
+        assert!(
+            !work_repos_search_failed(&own_with_sibling_error),
+            "cedar search disclosed larch's real ripgrep failure: {:?}",
+            own_with_sibling_error.absences
+        );
+        assert!(
+            own_with_sibling_error
+                .hits
+                .iter()
+                .any(|hit| hit.resource.as_str().starts_with("source:project:cedar:")),
+            "cedar's healthy source should remain searchable"
+        );
+        let explicit_larch_error = service
+            .knowledge_search(": larch cedarOwnedLocator", 256)
+            .unwrap();
+        assert!(
+            work_repos_search_failed(&explicit_larch_error),
+            "larch's own ripgrep failure was hidden"
+        );
+        let root_with_sibling_error = root_service
+            .knowledge_search("cedarOwnedLocator", 256)
+            .unwrap();
+        assert!(
+            work_repos_search_failed(&root_with_sibling_error),
+            "the explicitly broad root query hid larch's real failure"
+        );
+        drop(restore);
+        assert_eq!(
+            fs::metadata(&larch_source).unwrap().permissions().mode(),
+            original_mode
+        );
+    }
 }

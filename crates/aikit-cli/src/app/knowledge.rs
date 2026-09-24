@@ -167,14 +167,15 @@ impl KnowledgeRuntime {
         self.central.as_ref().map(|p| p as &dyn SourcePoolProvider)
     }
     fn application(&self, context: FamiliarityContext) -> KnowledgeApplication<'_> {
-        self.application_with_code_scope(context, None)
+        self.application_with_project_scope(context, None, self.work_repos.as_ref())
     }
 
-    fn application_with_code_scope(
-        &self,
+    fn application_with_project_scope<'a>(
+        &'a self,
         context: FamiliarityContext,
         scoped_project: Option<&str>,
-    ) -> KnowledgeApplication<'_> {
+        work_repos: Option<&'a WorkReposSourcePoolProvider<SystemRunner>>,
+    ) -> KnowledgeApplication<'a> {
         let mut application =
             KnowledgeApplication::new(context).with_project_map(&self.project_map);
         if let Some(provider) = &self.wiki {
@@ -188,7 +189,7 @@ impl KnowledgeRuntime {
             // roster carries identity only, and reads go back to the file.
             application = application.with_source_pool(provider, &self.now_field_roster);
         }
-        if let Some(provider) = &self.work_repos {
+        if let Some(provider) = work_repos {
             // Live Work-repos search slots in after NOW-field and before the
             // native shard baseline (addendum A-1): existing pools keep
             // priority on material they already carry, and the live pool's
@@ -284,8 +285,34 @@ impl Service {
                     "Explicit Project scope is invalid or cannot be resolved",
                 ));
             }
+            // A Work-repos search can fail before producing any hits. Search
+            // only the resolved Project at the provider boundary so another
+            // repo's ripgrep failure cannot appear in this reply's absences.
+            // The root World deliberately retains the broad native provider.
+            let scoped_work_repos = scoped_display.as_deref().and_then(|display| {
+                let project = runtime
+                    .work_repos
+                    .as_ref()?
+                    .projects()
+                    .iter()
+                    .find(|project| format!("Work/{}", project.name) == display)?;
+                Some(WorkReposSourcePoolProvider::connect(
+                    SystemRunner::new().with_env_removed("RIPGREP_CONFIG_PATH"),
+                    aikit_adapters::ripgrep::executable(),
+                    vec![project.clone()],
+                ))
+            });
+            let work_repos = if scoped_display.is_some() {
+                scoped_work_repos.as_ref()
+            } else {
+                runtime.work_repos.as_ref()
+            };
             let mut result = runtime
-                .application_with_code_scope(self.knowledge_context(), scoped_display.as_deref())
+                .application_with_project_scope(
+                    self.knowledge_context(),
+                    scoped_display.as_deref(),
+                    work_repos,
+                )
                 .resolve(expression, candidate_limit);
             result.absences.extend(runtime.absences.clone());
             // Pending authored relations are scoped: a query sees its own
