@@ -165,6 +165,14 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         &world.join("Work/larch/ProjectCentral/user/oversized.md"),
         &"x".repeat((4 * 1024 * 1024) + 1),
     );
+    write(
+        &world.join("Work/larch/ProjectCentral/user/capability-matrix.json"),
+        r#"{"protocol":"larch-invalid","matrix_id":"larch-matrix"}"#,
+    );
+    write(
+        &world.join("ProjectCentral/user/capability-matrix.json"),
+        r#"{"protocol":"root-invalid","matrix_id":"root-matrix"}"#,
+    );
     fs::create_dir_all(world.join("Work/unbound")).unwrap();
     write(
         &world.join("Work/cedar/ProjectCentral/now/returns/own.md"),
@@ -241,6 +249,14 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         .absences
         .iter()
         .any(|absence| { absence.contains("Work/larch") && absence.contains("oversized.md") }));
+    assert!(cross
+        .absences
+        .iter()
+        .any(|absence| absence.contains("larch-invalid")));
+    assert!(cross
+        .absences
+        .iter()
+        .any(|absence| absence.contains("root-invalid")));
     let own_positive = service.knowledge_search("cedarOwnedLocator", 256).unwrap();
     assert!(
         own_positive.hits.iter().any(|hit| {
@@ -304,6 +320,14 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         "cedar search disclosed sibling authored-wiki or discovery diagnostics: {:?}",
         own.absences
     );
+    assert!(!own
+        .absences
+        .iter()
+        .any(|absence| absence.contains("larch-invalid")));
+    assert!(own
+        .absences
+        .iter()
+        .any(|absence| absence.contains("root-invalid")));
     let broken = service.knowledge_search(": broken broken", 256).unwrap();
     assert!(
         broken
@@ -408,6 +432,14 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         .absences
         .iter()
         .any(|absence| absence.contains("Work/unbound")));
+    assert!(global
+        .absences
+        .iter()
+        .any(|absence| absence.contains("larch-invalid")));
+    assert!(global
+        .absences
+        .iter()
+        .any(|absence| absence.contains("root-invalid")));
     let global_direct = root_service
         .knowledge_resolve(&cli_expression, 256)
         .unwrap();

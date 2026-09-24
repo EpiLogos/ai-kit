@@ -9,7 +9,6 @@ use aikit_adapters::bkmr::{
 use aikit_adapters::central_file_map::CentralFileMapProvider;
 use aikit_adapters::gitnexus::GitNexusCodeIndexProvider;
 use aikit_adapters::now_field::{NowFieldScope, NowFieldSourcePoolProvider};
-use aikit_adapters::projectcentral_authored_wiki::ProjectAuthoredAbsence;
 use aikit_adapters::runner::SystemRunner;
 use aikit_adapters::work_repos::{
     discover_work_projects, WorkRepoProject, WorkReposSourcePoolProvider,
@@ -53,6 +52,11 @@ struct ProjectCodeDegradation {
     /// Work-relative project display, e.g. `Work/demo`.
     project: String,
     /// The full disclosure line, already naming the project and the reason.
+    message: String,
+}
+
+struct ProjectOwnedAbsence {
+    project: String,
     message: String,
 }
 
@@ -107,7 +111,7 @@ pub(super) struct KnowledgeRuntime {
     authored_pending: Vec<ProjectAuthoredPending>,
     /// Materialisation failures are attributed by their native producer;
     /// scoped replies show their own Project, while status shows the World.
-    project_absences: Vec<ProjectAuthoredAbsence>,
+    project_absences: Vec<ProjectOwnedAbsence>,
     /// Authored edge ref → Work-relative project display, for scoped queries
     /// to keep another project's authored edges out of their results.
     authored_edge_projects: BTreeMap<String, String>,
@@ -1086,6 +1090,12 @@ impl Service {
             // (project spaces + the Central root composition), origin Compiled.
             let matrices = aikit_adapters::capability_matrix::compile_world_matrices(central_root);
             absences.extend(matrices.absences);
+            project_absences.extend(matrices.project_absences.into_iter().map(|absence| {
+                ProjectOwnedAbsence {
+                    project: absence.project,
+                    message: absence.message,
+                }
+            }));
             aikit_adapters::central_entities::adopt_into(&mut discovered.wiki, matrices.objects);
             // CASE 19 / W10 V9.4: authored Markdown under each project's
             // ProjectCentral/user/** compiles its explicit [[wikilinks]]
@@ -1096,7 +1106,12 @@ impl Service {
                 aikit_adapters::projectcentral_authored_wiki::compile_world_authored_wiki(
                     central_root,
                 );
-            project_absences.extend(authored_wiki.absences);
+            project_absences.extend(authored_wiki.absences.into_iter().map(|absence| {
+                ProjectOwnedAbsence {
+                    project: absence.project,
+                    message: absence.message,
+                }
+            }));
             authored_pending = authored_wiki.pending;
             authored_edge_projects = authored_wiki.edge_projects;
             aikit_adapters::central_entities::adopt_into(
@@ -1286,7 +1301,7 @@ impl Service {
                         work_projects.push(project);
                     }
                     aikit_adapters::work_repos::WorkProjectEntry::Absence { name, reason } => {
-                        project_absences.push(ProjectAuthoredAbsence {
+                        project_absences.push(ProjectOwnedAbsence {
                             project: format!("Work/{name}"),
                             message: format!("Work/{name} {reason}"),
                         });
