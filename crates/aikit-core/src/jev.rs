@@ -344,13 +344,15 @@ impl JevTariff {
         })
     }
 }
-/// Conservative input-token estimate for a Jev request: serialized bytes over
-/// 2.5 (measured ~2.65 on matrix/spine state), so it errs toward refusing.
-pub fn estimated_input_tokens(request: &JevRequest) -> u64 {
+/// Estimated input-token range for a Jev request: serialized bytes over 4.5
+/// (low) and 2.5 (high). Observed bytes per token ranged ~2.65 (matrix JSON)
+/// to ~4.25 (catalogue prose), so no single ratio can decide over/under the
+/// provider's ceiling without its tokenizer; the range is for diagnosis only.
+pub fn estimated_input_tokens_range(request: &JevRequest) -> (u64, u64) {
     let bytes = serde_json::to_vec(request)
         .map(|b| b.len())
         .unwrap_or(usize::MAX) as u64;
-    bytes.saturating_mul(10) / 25
+    (bytes.saturating_mul(10) / 45, bytes.saturating_mul(10) / 25)
 }
 
 impl JevLimits {
@@ -371,21 +373,6 @@ impl JevLimits {
         {
             return Err(invalid(
                 "Time, attempts and concrete model-specific token/tariff bounds must be explicit",
-            ));
-        }
-        // The provider refuses an over-ceiling request with an opaque HTTP 400
-        // (observed 2026-09-24: 31,342 input tokens accepted, ~34k refused).
-        // Estimate conservatively (~2.5 bytes per token; measured ~2.65) and
-        // refuse locally, naming both numbers, before anything is sent.
-        let estimated = estimated_input_tokens(request);
-        if estimated > self.tariff.max_input_tokens_per_attempt {
-            return Err(AikitError::new(
-                "jev.request_over_input_ceiling",
-                format!(
-                    "The request is ~{estimated} input tokens, over the declared ceiling of {}; \
-                     select fewer rows or ask fewer questions",
-                    self.tariff.max_input_tokens_per_attempt
-                ),
             ));
         }
         let reservation = self.tariff.reservation()?;
