@@ -510,9 +510,13 @@ fn cmd_inhabit(cwd: &std::path::Path, args: InhabitArgs, json_mode: bool) -> Res
                     .into_iter()
                     .flatten()
                     .map(|plugin| format!(
-                        "{} members of agent set {}",
+                        "{} members of agent set {} with {} bundled skills",
                         plugin["members"],
-                        plugin["agent_set_ref"].as_str().unwrap_or("?")
+                        plugin["agent_set_ref"].as_str().unwrap_or("?"),
+                        plugin["skills_bundled"]
+                            .as_array()
+                            .map(Vec::len)
+                            .unwrap_or(0)
                     ))
                     .collect::<Vec<_>>()
                     .join(", "),
@@ -521,6 +525,21 @@ fn cmd_inhabit(cwd: &std::path::Path, args: InhabitArgs, json_mode: bool) -> Res
                     .collect::<Vec<_>>()
                     .join(" ")
             );
+            for plugin in team["plugins"].as_array().into_iter().flatten() {
+                let missing: Vec<&str> = plugin["skills_missing"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                if !missing.is_empty() {
+                    eprintln!(
+                        "aikit inhabit: agent set {} names skills that were not bundled and keep their bare names: {}",
+                        plugin["agent_set_ref"].as_str().unwrap_or("?"),
+                        missing.join("; ")
+                    );
+                }
+            }
             inhabit_team::with_plugin_dirs(&args.command, &dirs)
         }
         None => {

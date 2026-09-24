@@ -479,3 +479,117 @@ fn without_a_harness_the_claim_reports_the_team_it_wrote_and_attach_hands_it_on(
     assert!(attached.status.success(), "{stdout}{stderr}");
     assert!(stdout.contains(&format!("ARG={plugin}")), "{stdout}");
 }
+
+/// A skill capsule in the fixture home's own registry, as AIKit catalogues
+/// the QL skills: manifest plus a `payload/` Agent Skill with a script.
+fn seed_skill(world: &World, id: &str, leaf: &str) {
+    let base = world
+        .root
+        .join("home/registries/personal/capsules")
+        .join(id);
+    fs::create_dir_all(base.join("payload/scripts")).unwrap();
+    fs::write(
+        base.join("manifest.toml"),
+        format!(
+            "schema = 1\nid = \"{id}\"\nkind = \"skill\"\nname = \"{leaf}\"\ndescription = \"Fixture skill {leaf}.\"\n\n[skill]\nroot = \"payload\"\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        base.join("payload/SKILL.md"),
+        format!("---\nname: {leaf}\ndescription: Fixture skill {leaf} for the team projection test.\n---\n\n# {leaf}\n\nRead the frame first.\n"),
+    )
+    .unwrap();
+    fs::write(base.join("payload/scripts/frame.py"), "print('frame')\n").unwrap();
+}
+
+#[test]
+fn the_team_carries_the_skills_aikit_catalogues_and_names_them_as_plugin_skills() {
+    let world = world();
+    seed_skill(
+        &world,
+        "skill/ql/vak-coordinate-frame",
+        "vak-coordinate-frame",
+    );
+    let claude = world.claude();
+    let output = world.run(&[
+        "inhabit",
+        "--position",
+        POSITION,
+        "--reason",
+        "fixture",
+        "--",
+        &claude,
+        "-p",
+        "go",
+    ]);
+    let (stdout, stderr) = text(&output);
+    assert!(output.status.success(), "{stdout}{stderr}");
+    let args: Vec<&str> = stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix("ARG="))
+        .collect();
+    let plugin = PathBuf::from(args[1]);
+    let plugin_name = plugin.file_name().unwrap().to_string_lossy().into_owned();
+
+    // The catalogued skill travels inside the plugin, whole.
+    let skill = plugin.join("skills/vak-coordinate-frame");
+    assert!(fs::read_to_string(skill.join("SKILL.md"))
+        .unwrap()
+        .contains("Read the frame first."));
+    assert_eq!(
+        fs::read_to_string(skill.join("scripts/frame.py")).unwrap(),
+        "print('frame')\n"
+    );
+    assert!(
+        stderr.contains("2 members of agent set anima with 1 bundled skills"),
+        "{stderr}"
+    );
+
+    // Each member names it by the plugin-qualified name Claude Code gives a
+    // plugin skill; skills the catalogue lacks keep their bare names.
+    let (fields, _) = frontmatter(&plugin.join("agents/anima-nous.md"));
+    assert_eq!(
+        field(&fields, "skills"),
+        format!("{plugin_name}:vak-coordinate-frame, brainstorming, gnosis-retrieve")
+    );
+
+    // The two it could not carry are disclosed, not dropped and not refused.
+    assert!(
+        stderr.contains("names skills that were not bundled")
+            && stderr.contains("skill/personal/brainstorming")
+            && stderr.contains("skill/ql/gnosis-retrieve"),
+        "{stderr}"
+    );
+
+    // The receipt records what was bundled and what was not, and every
+    // bundled file with its skill provenance.
+    let receipt: Value = serde_json::from_slice(
+        &fs::read(
+            plugin
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("receipt.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let entry = &receipt["plugins"][0];
+    assert_eq!(entry["members"], 2);
+    assert_eq!(
+        entry["skills_bundled"],
+        json!(["skill/ql/vak-coordinate-frame"])
+    );
+    assert_eq!(entry["skills_missing"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        receipt["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|file| file["skill_ref"] == "skill/ql/vak-coordinate-frame")
+            .count(),
+        2
+    );
+}
