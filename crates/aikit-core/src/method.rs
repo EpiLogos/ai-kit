@@ -1,4 +1,5 @@
-//! Method classification and situated metadata for Skills.
+//! Praxis classification (Skill / Method / Methodology) and situated
+//! metadata for Skills.
 //!
 //! A Method is not a second resource. It is a Skill whose description starts
 //! with [`METHOD_DESCRIPTION_PREFIX`]. The optional situated relations below are
@@ -21,13 +22,100 @@ pub const METHOD_VERSION: &str = "aikit.skill-method-metadata/v1";
 /// discoverable as such.
 pub const METHOD_DESCRIPTION_PREFIX: &str = "METHOD:";
 
+/// The sibling convention for field-level praxis: a Methodology is a Skill
+/// whose description carries a `METHODOLOGY:` prefix. It orients among ways of
+/// acting — field vocabulary, determining relations, the Methods that apply and
+/// when, attention strategy and Return paths. Like `METHOD:` it is only a
+/// classification of the ordinary Skill identity: no resource kind, store,
+/// trust or projection lifecycle follows from it.
+pub const METHODOLOGY_DESCRIPTION_PREFIX: &str = "METHODOLOGY:";
+
 /// The situated payload declared after the prefix, if the description carries
 /// one. Detection is prefix-only: an empty payload is still a declared Method
 /// (the full description remains the skill's description).
+///
+/// `METHODOLOGY:` never detects as a Method: the prefixes differ at the colon.
 pub fn method_payload(description: &str) -> Option<&str> {
     let trimmed = description.trim_start();
     let rest = trimmed.strip_prefix(METHOD_DESCRIPTION_PREFIX)?;
     Some(rest.trim())
+}
+
+/// The field-level payload after a `METHODOLOGY:` prefix, if declared.
+pub fn methodology_payload(description: &str) -> Option<&str> {
+    let trimmed = description.trim_start();
+    let rest = trimmed.strip_prefix(METHODOLOGY_DESCRIPTION_PREFIX)?;
+    Some(rest.trim())
+}
+
+/// The common classification of one Skill identity.
+///
+/// ```text
+/// Skill        what reusable faculty can be exercised?            (unprefixed)
+/// Method       how do faculties, sources and operations compose   (METHOD:)
+///              for this class of act?
+/// Methodology  what field am I in, which Methods apply when, and  (METHODOLOGY:)
+///              how does Return propagate through it?
+/// ```
+///
+/// The form is read from the ordinary Skill description and nothing else. It
+/// grants no authority, orders nothing and never changes the Skill's identity,
+/// source, trust, activation or projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PraxisForm {
+    Skill,
+    Method,
+    Methodology,
+}
+
+impl PraxisForm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Skill => "skill",
+            Self::Method => "method",
+            Self::Methodology => "methodology",
+        }
+    }
+
+    /// The disclosure position this form answers in the Agent's sixfold
+    /// reading: `#1` what can I do, `#2` how do I act, `#3` how do I orient.
+    pub fn position(self) -> u8 {
+        match self {
+            Self::Skill => 1,
+            Self::Method => 2,
+            Self::Methodology => 3,
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "skill" => Some(Self::Skill),
+            "method" => Some(Self::Method),
+            "methodology" => Some(Self::Methodology),
+            _ => None,
+        }
+    }
+}
+
+/// Classify a Skill description. Unprefixed descriptions are ordinary Skill
+/// praxis; a mid-description mention of either prefix classifies nothing.
+pub fn praxis_form(description: &str) -> PraxisForm {
+    if methodology_payload(description).is_some() {
+        PraxisForm::Methodology
+    } else if method_payload(description).is_some() {
+        PraxisForm::Method
+    } else {
+        PraxisForm::Skill
+    }
+}
+
+/// The payload after whichever prefix classified the description, or the
+/// whole trimmed description for ordinary Skill praxis.
+pub fn praxis_payload(description: &str) -> &str {
+    methodology_payload(description)
+        .or_else(|| method_payload(description))
+        .unwrap_or_else(|| description.trim())
 }
 
 /// Immutable receipt identifying the scoped adaptation of an unchanged Skill.
@@ -399,6 +487,33 @@ mod tests {
         // mention does not detect.
         assert_eq!(method_payload("Review docs before merging."), None);
         assert_eq!(method_payload("Use a METHOD: prefix here"), None);
+    }
+
+    #[test]
+    fn praxis_form_classifies_one_skill_identity_three_ways() {
+        assert_eq!(praxis_form("Recover sources first."), PraxisForm::Skill);
+        assert_eq!(
+            praxis_form("METHOD: repair from evidence"),
+            PraxisForm::Method
+        );
+        assert_eq!(
+            praxis_form("  METHODOLOGY: orient the documentation field"),
+            PraxisForm::Methodology
+        );
+        // The Methodology prefix is not a Method, and neither prefix detects
+        // mid-description.
+        assert_eq!(method_payload("METHODOLOGY: orient"), None);
+        assert_eq!(methodology_payload("METHOD: act"), None);
+        assert_eq!(
+            praxis_form("Explains the METHODOLOGY: prefix."),
+            PraxisForm::Skill
+        );
+        assert_eq!(praxis_payload("METHODOLOGY: orient"), "orient");
+        assert_eq!(praxis_payload("METHOD: act"), "act");
+        assert_eq!(praxis_payload(" plain "), "plain");
+        assert_eq!(PraxisForm::Methodology.position(), 3);
+        assert_eq!(PraxisForm::parse("Method"), Some(PraxisForm::Method));
+        assert_eq!(PraxisForm::parse("workflow"), None);
     }
 
     fn record(id: &str, kind: ResourceKind) -> ResourceRecord {

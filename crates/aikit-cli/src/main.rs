@@ -212,6 +212,8 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Knowledge(c)) => cmd_knowledge(cwd, c),
         Some(Command::Flow(c)) => cmd_flow(cwd, c),
         Some(Command::Method(a)) => cmd_method(cwd, a),
+        Some(Command::Praxis(a)) => cmd_praxis(cwd, a),
+        Some(Command::A2a(a)) => cmd_a2a(cwd, a),
         Some(Command::Routine(c)) => cmd_routine(c),
         Some(Command::Jev(c)) => cmd_jev(c),
         Some(Command::NowContext(c)) => cmd_now_context(cwd, c),
@@ -2525,8 +2527,14 @@ fn cmd_set(cwd: &std::path::Path, c: SetCmd) -> Result<Reply> {
                 })).collect::<Vec<_>>(),
                 "complete": projection.is_complete(),
                 "children": set.children.iter().map(|c| jval!({
-                    "name": c.name, "members": c.len(),
+                    "name": c.name,
+                    "ref": c.reference(),
+                    "members": c.len(),
+                    "attached_by": c.attached_by,
                 })).collect::<Vec<_>>(),
+                "child_refs": set.child_refs,
+                "semantic_ref": set.semantic_ref,
+                "revision": set.revision,
                 "patterns": set.patterns,
             });
             Ok(reply(&service, data, vec![]))
@@ -2573,18 +2581,37 @@ fn cmd_set(cwd: &std::path::Path, c: SetCmd) -> Result<Reply> {
                 .iter()
                 .map(|r| CapsuleId::parse(r))
                 .collect::<Result<_>>()?;
-            let procedure = skillsets::plan_add(home, &a.name, &ids)?;
             let runner = aikit_store::procedure::ProcedureRunner::new(home);
-            let outcome = runner.run(&procedure)?;
+            let mut procedures = Vec::new();
+            let mut edits = 0_usize;
+            if !ids.is_empty() {
+                let procedure = skillsets::plan_add(home, &a.name, &ids)?;
+                edits += runner.run(&procedure)?.applied;
+                procedures.push(procedure.id.to_string());
+            }
+            if !a.children.is_empty() {
+                // A child reference is recorded, never expanded: the referenced
+                // set stays shared and its revisions reach every parent.
+                let procedure = skillsets::plan_add_children(home, &a.name, &a.children)?;
+                edits += runner.run(&procedure)?.applied;
+                procedures.push(procedure.id.to_string());
+            }
             let set = skillsets::load(home, &a.name)?;
             Ok(reply(
                 &service,
                 jval!({
                     "name": set.label(),
                     "members": set.len(),
-                    "procedure": procedure.id.to_string(),
-                    "edits": outcome.applied,
-                    "undo": format!("aikit procedure undo {}", procedure.id),
+                    "child_refs": set.child_refs,
+                    "procedure": procedures.first().cloned(),
+                    "procedures": procedures,
+                    "edits": edits,
+                    "undo": procedures
+                        .iter()
+                        .rev()
+                        .map(|id| format!("aikit procedure undo {id}"))
+                        .collect::<Vec<_>>()
+                        .join(" && "),
                 }),
                 vec![],
             ))
@@ -2643,6 +2670,10 @@ fn cmd_set(cwd: &std::path::Path, c: SetCmd) -> Result<Reply> {
                 }),
                 vec![],
             ))
+        }
+        SetSub::Package(p) => {
+            let data = aikit_cli::skillset_package_cli::run(&service, p)?;
+            Ok(reply(&service, data, vec![]))
         }
     }
 }
@@ -3274,6 +3305,42 @@ fn cmd_method(cwd: &std::path::Path, a: MethodArgs) -> Result<Reply> {
         }),
         diagnostic_warnings(&service),
     ))
+}
+
+/// `aikit praxis` — Skills by form, and the Agent praxis disclosure.
+fn cmd_praxis(cwd: &std::path::Path, a: PraxisCmd) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let data = match &a.command {
+        PraxisSub::List { form, filter } => {
+            aikit_cli::praxis_cli::list(service.resolved(), form.as_deref(), filter.as_deref())?
+        }
+        PraxisSub::Disclose {
+            profile_json,
+            activity_json,
+            select,
+        } => aikit_cli::praxis_cli::disclose(
+            service.home(),
+            service.resolved(),
+            profile_json,
+            activity_json.as_deref(),
+            select,
+        )?,
+    };
+    Ok(reply(&service, data, diagnostic_warnings(&service)))
+}
+
+/// `aikit a2a card` — the published A2A Agent Card, projected from a World
+/// participation reading. Pure: no service state is needed.
+fn cmd_a2a(cwd: &std::path::Path, a: A2aCmd) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let data = match &a.command {
+        A2aSub::Card {
+            participation_json,
+            interface_url,
+            out,
+        } => aikit_cli::praxis_cli::a2a_card(participation_json, interface_url, out.as_deref())?,
+    };
+    Ok(reply(&service, data, vec![]))
 }
 
 /// `aikit trust` — record and show review decisions for catalogued capsules.

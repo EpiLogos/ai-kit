@@ -28,6 +28,8 @@ EXPECTED_SKILLS = {
     "skill/aikit/central-day-rollover",
     "skill/aikit/factory-telemetry-collect",
     "skill/aikit/factory-telemetry-field-refresh",
+    "skill/aikit/skillset-package-authoring",
+    "skill/aikit/skillset-package-export",
 }
 EXPECTED_GUIDANCE = {
     "guidance/aikit/living-project-collaboration",
@@ -46,6 +48,20 @@ def normalised_description(description: str) -> str:
     return " ".join(description.split())
 
 
+def praxis_form(description: str) -> str:
+    """Skill / Method / Methodology, read from the ordinary description only.
+
+    `METHODOLOGY:` is checked first; it never detects as `METHOD:` because the
+    prefixes differ at the colon.
+    """
+    text = description.lstrip()
+    if text.startswith("METHODOLOGY:"):
+        return "methodology"
+    if text.startswith("METHOD:"):
+        return "method"
+    return "skill"
+
+
 def frontmatter_description(body: Path, text: str) -> str:
     closing = text.index("\n---", 4)
     for line in text[4:closing].splitlines():
@@ -58,6 +74,7 @@ def frontmatter_description(body: Path, text: str) -> str:
 
 
 seen_skills: set[str] = set()
+skill_forms: dict[str, str] = {}
 seen_guidance: set[str] = set()
 seen_hooks: set[str] = set()
 seen_carriers: set[str] = set()
@@ -92,10 +109,12 @@ for manifest in REGISTRY.glob("**/manifest.toml"):
                 f"  manifest.toml:      {manifest_description!r}\n"
                 f"  payload/SKILL.md:   {payload_description!r}"
             )
-        if manifest_description.startswith("METHOD:") != payload_description.startswith("METHOD:"):
+        if praxis_form(manifest_description) != praxis_form(payload_description):
             raise SystemExit(
-                f"{capsule_id}: METHOD: classification must match on both description surfaces"
+                f"{capsule_id}: praxis form (Skill / METHOD: / METHODOLOGY:) must match on "
+                "both description surfaces"
             )
+        skill_forms[capsule_id] = praxis_form(manifest_description)
         seen_skills.add(capsule_id)
     elif kind == "guidance":
         guidance = data.get("guidance", {})
@@ -169,31 +188,59 @@ if seen_hooks != EXPECTED_HOOKS:
     raise SystemExit(f"first-party hook corpus mismatch: {seen_hooks ^ EXPECTED_HOOKS}")
 
 index = tomllib.loads((SETS / "index.toml").read_text(encoding="utf-8"))
-refs = {entry["semantic_ref"]: entry["directory"] for entry in index["skillset"]}
-if set(refs) != {"aikit:operator", "aikit:project-author", "aikit:extension-developer"}:
+entries = {entry["semantic_ref"]: entry for entry in index["skillset"]}
+refs = {semantic_ref: entry["directory"] for semantic_ref, entry in entries.items()}
+if set(refs) != {
+    "aikit:operator",
+    "aikit:project-author",
+    "aikit:extension-developer",
+    "aikit:account-authoring",
+}:
     raise SystemExit("native SkillSet semantic refs mismatch")
-for semantic_ref, directory in refs.items():
-    members = [line.strip() for line in (SETS / directory / "members").read_text().splitlines() if line.strip()]
+
+
+def own_members(semantic_ref):
+    return [
+        line.strip()
+        for line in (SETS / refs[semantic_ref] / "members").read_text().splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
+def effective_members(semantic_ref, stack=()):
+    """Own members plus every child carried by reference (shared, not copied)."""
+    if semantic_ref in stack:
+        raise SystemExit(f"SkillSet reference cycle: {' -> '.join(stack + (semantic_ref,))}")
+    if semantic_ref not in refs:
+        raise SystemExit(f"SkillSet reference {semantic_ref} is not declared in this registry")
+    out = set(own_members(semantic_ref))
+    for child in entries[semantic_ref].get("child_refs", []):
+        out |= effective_members(child, stack + (semantic_ref,))
+    return out
+
+
+for semantic_ref in refs:
+    members = own_members(semantic_ref)
     if not members or len(members) != len(set(members)):
         raise SystemExit(f"{semantic_ref}: empty/duplicate member list")
     unknown = set(members) - EXPECTED_SKILLS
     if unknown:
         raise SystemExit(f"{semantic_ref}: unknown members {unknown}")
+    for child in entries[semantic_ref].get("child_refs", []):
+        duplicated = set(members) & effective_members(child)
+        if duplicated:
+            raise SystemExit(
+                f"{semantic_ref}: members {duplicated} are already carried by child {child}; "
+                "carry the child by reference instead of repeating its members"
+            )
 
 for semantic_ref in ("aikit:project-author", "aikit:extension-developer"):
-    members = {
-        line.strip()
-        for line in (SETS / refs[semantic_ref] / "members").read_text().splitlines()
-        if line.strip()
-    }
-    if "skill/aikit/product-understanding" not in members:
+    if "skill/aikit/product-understanding" not in effective_members(semantic_ref):
         raise SystemExit(f"{semantic_ref}: product-understanding Skill missing")
 
-project_author_members = {
-    line.strip()
-    for line in (SETS / refs["aikit:project-author"] / "members").read_text().splitlines()
-    if line.strip()
-}
+if "aikit:account-authoring" not in entries["aikit:project-author"].get("child_refs", []):
+    raise SystemExit("aikit:project-author must carry aikit:account-authoring by reference")
+project_author_members = effective_members("aikit:project-author")
 for required in (
     "skill/aikit/structured-account-authoring",
     "skill/aikit/projection-authoring",
@@ -201,24 +248,24 @@ for required in (
 ):
     if required not in project_author_members:
         raise SystemExit(f"aikit:project-author: account authoring member missing: {required}")
-operator_members = {
-    line.strip()
-    for line in (SETS / refs["aikit:operator"] / "members").read_text().splitlines()
-    if line.strip()
-}
 if {
     "skill/aikit/structured-account-authoring",
     "skill/aikit/projection-authoring",
     "skill/aikit/html-account",
-} & operator_members:
+} & effective_members("aikit:operator"):
     raise SystemExit("aikit:operator must not imply deep account/projection authoring")
-extension_members = {
-    line.strip()
-    for line in (SETS / refs["aikit:extension-developer"] / "members").read_text().splitlines()
-    if line.strip()
-}
-if "skill/aikit/harness-adapter-authoring" not in extension_members:
-    raise SystemExit("aikit:extension-developer: harness adapter authoring member missing")
+extension_members = effective_members("aikit:extension-developer")
+for required in (
+    "skill/aikit/harness-adapter-authoring",
+    "skill/aikit/skillset-package-authoring",
+    "skill/aikit/skillset-package-export",
+):
+    if required not in extension_members:
+        raise SystemExit(f"aikit:extension-developer: member missing: {required}")
+if skill_forms.get("skill/aikit/skillset-package-export") != "method":
+    raise SystemExit("skillset-package-export must be METHOD:-classified")
+if skill_forms.get("skill/aikit/skillset-package-authoring") != "skill":
+    raise SystemExit("skillset-package-authoring must be an ordinary Skill")
 
 fixture = ROOT / "registry/fixtures/minimal-authored-skill"
 fdata = tomllib.loads((fixture / "manifest.toml").read_text(encoding="utf-8"))

@@ -171,6 +171,11 @@ pub enum Command {
     Jobs(JobsArgs),
     /// Discover Methods: skills whose description carries the METHOD: prefix.
     Method(MethodArgs),
+    /// Read praxis: list Skills by form (Skill / Method / Methodology) and
+    /// disclose an Agent's carried, selected and operative praxis.
+    Praxis(PraxisCmd),
+    /// A2A interoperability projections (the published Agent Card).
+    A2a(A2aCmd),
     /// Authorise and read versioned Routine invocation evidence.
     Routine(RoutineCmd),
     /// Invoke or validate the general typed Jev decision capability.
@@ -1563,6 +1568,9 @@ pub enum SetSub {
     Rename(SetRenameArgs),
     /// Move a writable set into Procedure-owned recovery storage.
     Delete(SetDeleteArgs),
+    /// Export the set as a native agent package (openai | codex | claude | pi).
+    /// The set stays the source; the package is a target projection of it.
+    Package(crate::skillset_package_cli::SetPackageCmd),
 }
 
 #[derive(Debug, Args)]
@@ -1591,8 +1599,13 @@ pub struct SetCreateArgs {
 pub struct SetMemberArgs {
     #[arg(value_name = "NAME")]
     pub name: String,
-    #[arg(value_name = "IDS", required = true)]
+    #[arg(value_name = "IDS", required_unless_present = "children")]
     pub ids: Vec<String>,
+    /// Carry another set by reference (a home set name or a registry semantic
+    /// ref such as `central:documentation`). Repeatable. The referenced set is
+    /// shared, never copied into this set's members. `set add` only.
+    #[arg(long = "child", value_name = "SET_REF")]
+    pub children: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -2706,6 +2719,60 @@ pub enum MethodCommand {
         /// MethodProofInput JSON. Prefix a path with @ to read a file.
         #[arg(long = "proof-json", value_name = "JSON|@FILE")]
         proof_json: String,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct PraxisCmd {
+    #[command(subcommand)]
+    pub command: PraxisSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PraxisSub {
+    /// List catalogued Skills with their praxis form and effective state.
+    List {
+        /// Only this form: skill, method or methodology.
+        #[arg(long, value_name = "FORM")]
+        form: Option<String>,
+        /// Only Skills whose name or payload contains this substring.
+        filter: Option<String>,
+    },
+    /// Disclose an Agent's praxis (`aikit.agent-praxis-disclosure/v1`) from its
+    /// Central AgentProfile, resolved SkillSets and optional activity evidence.
+    Disclose {
+        /// `central.agent-profile/v1` JSON (as `agent-profile.read` returns it,
+        /// or wrapped in its action envelope). Prefix a path with @ or pass a path.
+        #[arg(long = "profile-json", value_name = "JSON|@FILE")]
+        profile_json: String,
+        /// `aikit.praxis-activity/v1` evidence of what actually happened.
+        #[arg(long = "activity-json", value_name = "JSON|@FILE")]
+        activity_json: Option<String>,
+        /// Skills selected for the current act. Repeatable.
+        #[arg(long = "select", value_name = "SKILL")]
+        select: Vec<String>,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct A2aCmd {
+    #[command(subcommand)]
+    pub command: A2aSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum A2aSub {
+    /// Project an A2A v1.0.1 Agent Card from an `oi.agent-world-participation/v1`
+    /// reading. Only publicly disclosed capabilities become card skills.
+    Card {
+        #[arg(long = "participation-json", value_name = "JSON|@FILE")]
+        participation_json: String,
+        /// The A2A interface endpoint the Agent actually serves.
+        #[arg(long = "interface-url", value_name = "URL")]
+        interface_url: String,
+        /// Write the card here (e.g. `<site>/.well-known/agent-card.json`).
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
     },
 }
 
