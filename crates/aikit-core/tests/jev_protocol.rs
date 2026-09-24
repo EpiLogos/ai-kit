@@ -1,4 +1,6 @@
-use aikit_core::jev::{JevLimits, JevRequest, JevResponse, JevTariff, TokenUsage};
+use aikit_core::jev::{
+    estimated_input_tokens, JevLimits, JevRequest, JevResponse, JevTariff, TokenUsage,
+};
 use serde_json::{json, Value};
 
 fn request() -> JevRequest {
@@ -166,4 +168,33 @@ fn reserve_spend_before_an_attempt_and_do_not_overflow_tariff_arithmetic() {
             output_tokens: u64::MAX
         })
         .is_err());
+}
+
+#[test]
+fn a_request_over_the_declared_input_ceiling_is_refused_before_sending() {
+    let mut limits: JevLimits = serde_json::from_value(json!({
+        "timeout_ms": 1000,
+        "max_attempts": 1,
+        "max_total_reserved_microusd": 5000,
+        "tariff": {
+            "model_version": "jev-1.13.0",
+            "source": "observed provider ceiling",
+            "max_input_tokens_per_attempt": 32_768,
+            "max_output_tokens_per_attempt": 4_096,
+            "input_microusd_per_million_tokens": 42_000,
+            "output_microusd_per_million_tokens": 0
+        }
+    }))
+    .unwrap();
+    let small = request();
+    assert!(limits.validate(&small).is_ok());
+    // ~100 KB of state is ~40k estimated tokens: over a 32k ceiling.
+    let mut large = request();
+    large.state = json!({"capability_matrix": "x".repeat(100_000)});
+    let error = limits.validate(&large).unwrap_err();
+    assert_eq!(error.code(), "jev.request_over_input_ceiling");
+    assert!(estimated_input_tokens(&large) > 32_768);
+    // A ceiling that fits admits the same request.
+    limits.tariff.max_input_tokens_per_attempt = 64_000;
+    assert!(limits.validate(&large).is_ok());
 }
