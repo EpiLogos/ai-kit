@@ -1623,6 +1623,18 @@ pub fn join(owners: &Owners<'_>, input: &JoinInput, reads: &AikitReads<'_>) -> J
         let mut notes: Vec<String> = Vec::new();
         let mut owner_refusal: Option<Facet> = None;
         let mut work_child: Option<(String, String)> = None;
+        if facets.current_work.state == FacetState::Ambiguous {
+            owner_refusal = Some(Facet::ambiguous(
+                child_source,
+                "Factory current work is ambiguous; refusing to choose a Position child NOW",
+                facets.current_work.value.clone().unwrap_or(Value::Null),
+            ));
+        } else if facets.current_work.state == FacetState::Unavailable {
+            owner_refusal = Some(Facet::unavailable(
+                child_source,
+                "Factory current work is unavailable; refusing to infer a child NOW from Position alone",
+            ));
+        }
         if let (Some(state), Some(run)) = (
             &trail.factory_state,
             identity.current_work_refs.get("run_ref"),
@@ -1637,23 +1649,20 @@ pub fn join(owners: &Owners<'_>, input: &JoinInput, reads: &AikitReads<'_>) -> J
                 position_ref,
             ]);
             match inhabitation.ok() {
-                Some(data) => {
-                    match exact_position_entry(data, run, position_ref) {
-                        Ok(Some((run_entry, entry))) => {
-                            if let (Some(custody_ref), Some(work_ref)) = (
-                                identity.current_work_refs.get("custody_ref"),
-                                identity.current_work_refs.get("work_ref"),
-                            ) {
-                                let matches = array(entry, &["custody"])
-                                    .into_iter()
-                                    .filter(|custody| {
-                                        pick(custody, &["custody_ref"]).as_deref()
-                                            == Some(custody_ref)
-                                            && pick(custody, &["work_ref"]).as_deref()
-                                                == Some(work_ref)
-                                    })
-                                    .collect::<Vec<_>>();
-                                match matches.as_slice() {
+                Some(data) => match exact_position_entry(data, run, position_ref) {
+                    Ok(Some((run_entry, entry))) => {
+                        if let (Some(custody_ref), Some(work_ref)) = (
+                            identity.current_work_refs.get("custody_ref"),
+                            identity.current_work_refs.get("work_ref"),
+                        ) {
+                            let matches = array(entry, &["custody"])
+                                .into_iter()
+                                .filter(|custody| {
+                                    pick(custody, &["custody_ref"]).as_deref() == Some(custody_ref)
+                                        && pick(custody, &["work_ref"]).as_deref() == Some(work_ref)
+                                })
+                                .collect::<Vec<_>>();
+                            match matches.as_slice() {
                                     [custody] => {
                                         if pick(custody, &["state"]).as_deref() != Some("in-progress") {
                                             owner_refusal = Some(Facet::unavailable(child_source, "Factory custody changed after current-work selected it; refusing a stale work child NOW"));
@@ -1679,56 +1688,44 @@ pub fn join(owners: &Owners<'_>, input: &JoinInput, reads: &AikitReads<'_>) -> J
                                         }
                                         }
                                     }
-                                    [] if entry.get("child_now_ref").is_none() && entry.get("custody").is_none() =>
-                                        notes.push("older Factory response carries no custody/child-NOW facet".into()),
                                     [] => owner_refusal = Some(Facet::unavailable(child_source, "Factory inhabitation does not carry the selected custody and work")),
                                     _ => owner_refusal = Some(Facet::ambiguous(child_source, "Factory inhabitation repeats the selected custody and work", json!(matches))),
                                 }
-                            } else {
-                                owner_refusal = Some(Facet::unavailable(
-                                    child_source,
-                                    "Factory current work lacks an exact custody or work ref",
-                                ));
-                            }
-                            if work_child.is_none() && owner_refusal.is_none() {
-                                let placements = array(run_entry, &["occupants"])
-                                    .into_iter()
-                                    .filter(|occupant| {
-                                        occupant["current_attempt"].as_bool() == Some(true)
-                                            && occupant["participant"]["position_ref"]["state"]
-                                                == "present"
-                                            && occupant["participant"]["position_ref"]["value"]
-                                                == *position_ref
-                                    })
-                                    .filter_map(|occupant| {
-                                        let now = &occupant["placement"]["now_ref"];
-                                        (now["state"] == "present")
-                                            .then(|| pick(now, &["value"]))
-                                            .flatten()
-                                    })
-                                    .collect::<Vec<_>>();
-                                match placements.as_slice() {
+                        } else {
+                            owner_refusal = Some(Facet::unavailable(
+                                child_source,
+                                "Factory current work lacks an exact custody or work ref",
+                            ));
+                        }
+                        if work_child.is_none() && owner_refusal.is_none() {
+                            let placements = array(run_entry, &["occupants"])
+                                .into_iter()
+                                .filter(|occupant| {
+                                    occupant["current_attempt"].as_bool() == Some(true)
+                                        && occupant["participant"]["position_ref"]["state"]
+                                            == "present"
+                                        && occupant["participant"]["position_ref"]["value"]
+                                            == *position_ref
+                                })
+                                .filter_map(|occupant| {
+                                    let now = &occupant["placement"]["now_ref"];
+                                    (now["state"] == "present")
+                                        .then(|| pick(now, &["value"]))
+                                        .flatten()
+                                })
+                                .collect::<Vec<_>>();
+                            match placements.as_slice() {
                                     [now_ref] => candidates.push((now_ref.clone(), "Factory current Attempt placement NOW")),
                                     [] => notes.push("Factory holds no current Attempt placement NOW for this Position".into()),
                                     _ => owner_refusal = Some(Facet::ambiguous(child_source, "multiple current Attempt placement NOWs name this Position", json!(placements))),
                                 }
-                                // Older Factory readings carried a Position placement directly.
-                                if candidates.is_empty() && entry.get("child_now_ref").is_none() {
-                                    if let Some(now_ref) =
-                                        pick(entry, &["placement_now_ref", "placementNowRef"])
-                                    {
-                                        candidates.push((now_ref, "factory development inhabitation (legacy placement NOW)"));
-                                    }
-                                }
-                            }
-                        }
-                        Ok(None) => notes
-                            .push("Factory has no row for the selected Run and Position".into()),
-                        Err(reason) => {
-                            owner_refusal = Some(Facet::unavailable(child_source, reason))
                         }
                     }
-                }
+                    Ok(None) => {
+                        notes.push("Factory has no row for the selected Run and Position".into())
+                    }
+                    Err(reason) => owner_refusal = Some(Facet::unavailable(child_source, reason)),
+                },
                 None => notes.push(inhabitation.describe()),
             }
         }
@@ -1736,7 +1733,7 @@ pub fn join(owners: &Owners<'_>, input: &JoinInput, reads: &AikitReads<'_>) -> J
         let mut rows: Vec<Value> = Vec::new();
         if candidates.is_empty()
             && owner_refusal.is_none()
-            && !identity.current_work_refs.contains_key("run_ref")
+            && identity.current_work_outcome.as_deref() == Some("none")
         {
             if let Some(root) = &root_now {
                 let children = owners.ctrl("central.now.children", json!({ "now_ref": root }));
@@ -2785,11 +2782,26 @@ pub(crate) mod tests {
             )
             .on(
                 "development inhabitation",
-                &json!({"schema": "factory.inhabitation-reading/v1", "runs": [{"run_ref": "run:r1", "positions": [{"position_ref": POSITION, "placement_now_ref": "central:now:control:root:child1", "return_address": "return:r-unit"}]}]}).to_string(),
+                &json!({"schema":"factory.inhabitation-reading/v1",
+                    "central_project_ref":{"state":"present","value":"O-I"},
+                    "filter":{"run_ref":"run:r1","position_ref":POSITION},
+                    "runs":[{"run_ref":"run:r1","positions":[{"position_ref":POSITION,
+                        "custody":[{"custody_ref":"factory:custody:c1","work_ref":"work:w1",
+                            "state":"in-progress","child_now_ref":{"state":"present",
+                                "value":"central:now:project:O-I:child1",
+                                "source":"factory.sensing-state/v1:signal.work:work:w1:work"}}]}],
+                        "occupants":[]}]}).to_string(),
             )
-            .on(
+            .sequence(
                 "central.now.read",
-                &ok(json!({"record": {"now_ref": "central:now:control:root:rootnow", "lifecycle": "active"}, "revision": {"revision": "central.content-fnv1a64/v1:10:aa"}})),
+                &[
+                    &ok(json!({"record": {"now_ref": "central:now:control:root:rootnow", "lifecycle": "active"}, "revision": {"revision": "central.content-fnv1a64/v1:10:aa"}})),
+                    &ok(json!({"schema":"central.now-reading/v1",
+                        "record":{"schema":"central.now-clearing/v1","now_ref":"central:now:project:O-I:child1",
+                            "scope_ref":"project:O-I","task_ref":"work:w1","source_refs":["work:w1"],
+                            "horizon":"child","lifecycle":"active"},
+                        "revision":{"revision":"central.content-fnv1a64/v1:11:bb"}})),
+                ],
             )
             .on(
                 "central.position.list",
@@ -2874,7 +2886,7 @@ pub(crate) mod tests {
         assert_eq!(f.child_now.state, FacetState::Present);
         assert_eq!(
             r.identity.child_now_ref.as_deref(),
-            Some("central:now:control:root:child1")
+            Some("central:now:project:O-I:child1")
         );
         assert_eq!(f.peers.state, FacetState::Present);
         let peers = f.peers.value.as_ref().unwrap()["peers"].as_array().unwrap();
@@ -3269,6 +3281,34 @@ pub(crate) mod tests {
             joined.reading.facets.child_now.state,
             FacetState::Unavailable
         );
+        assert!(joined.reading.identity.child_now_ref.is_none());
+        assert!(runner
+            .call_lines()
+            .iter()
+            .all(|line| !line.contains("central.now.children")));
+    }
+
+    #[test]
+    fn ambiguous_current_work_never_chooses_a_single_root_child() {
+        let runner = owner_fixture()
+            .on("development current-work", &json!({
+                "schema":"factory.current-work/v1", "outcome":"ambiguous",
+                "candidates":[{"work_ref":"work:a"},{"work_ref":"work:b"}],
+                "considered":2, "basis":"two current work nodes"
+            }).to_string())
+            .on("central.now.children", &ok(json!({"children":[
+                {"now_ref":"central:now:project:O-I:only-one", "participant_refs":[POSITION], "revision":"r1"}
+            ]})));
+        let joined = join(
+            &owners(&runner),
+            &env_input(ReadingDepth::Lean),
+            &AikitReads::default(),
+        );
+        assert_eq!(
+            joined.reading.facets.current_work.state,
+            FacetState::Ambiguous
+        );
+        assert_eq!(joined.reading.facets.child_now.state, FacetState::Ambiguous);
         assert!(joined.reading.identity.child_now_ref.is_none());
         assert!(runner
             .call_lines()
