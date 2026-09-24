@@ -110,6 +110,23 @@ mod gitnexus_budget_tests {
     }
 }
 
+/// One project's GitNexus code-index degradation: the binary was present and
+/// index-capable, but building that project's index failed. Held per project
+/// so a scoped reply carries only its own scope's line and `knowledge status`
+/// names every project — the same discipline `authored_pending` and the
+/// per-project anchor lines already follow.
+struct ProjectCodeDegradation {
+    /// Work-relative project display, e.g. `Work/demo`.
+    project: String,
+    /// The full disclosure line, already naming the project and the reason.
+    message: String,
+}
+
+struct ProjectOwnedAbsence {
+    project: String,
+    message: String,
+}
+
 pub(super) struct KnowledgeRuntime {
     wiki: Option<SqliteWikiProvider>,
     material: Vec<SourceMaterial>,
@@ -131,10 +148,24 @@ pub(super) struct KnowledgeRuntime {
     /// scoped queries to keep another project's repo hits out of their
     /// results.
     work_repo_scopes: BTreeMap<String, String>,
+    /// `central:source:project:<project_id>:` prefix → `Work/<name>` for
+    /// canonical owner refs returned by Central's project file map.
+    central_project_source_scopes: BTreeMap<String, String>,
     central_expected: bool,
+    /// `source:project-code:<project_id>` → `Work/<name>` for real CodeIndex
+    /// hits whose public resource refs are opaque code digests.
+    code_source_scopes: BTreeMap<String, String>,
+    /// Parallel to `code`: the discovered Project owning each native index.
+    /// Select providers before a scoped query so search failures cannot name
+    /// another Project in the reply's diagnostic lines.
+    code_project_scopes: Vec<String>,
     /// One code-index provider per discovered project; unavailable ones are
     /// kept so the absence is per project, never a global "provider absent".
     code: Vec<GitNexusCodeIndexProvider<SystemRunner>>,
+    /// Per-project code-index degradations, kept out of the global per-query
+    /// `absences` so another project's code state never leaks into a scoped
+    /// reply; a reply carries only its own scope's, and status carries all.
+    code_degradations: Vec<ProjectCodeDegradation>,
     project_map: ProjectMap,
     absences: Vec<String>,
     /// Informational per-project and per-pool disclosure lines (anchor
@@ -145,6 +176,9 @@ pub(super) struct KnowledgeRuntime {
     /// replies carry at most their own scope's rollup; status carries every
     /// project plus per-target detail.
     authored_pending: Vec<ProjectAuthoredPending>,
+    /// Materialisation failures are attributed by their native producer;
+    /// scoped replies show their own Project, while status shows the World.
+    project_absences: Vec<ProjectOwnedAbsence>,
     /// Authored edge ref → Work-relative project display, for scoped queries
     /// to keep another project's authored edges out of their results.
     authored_edge_projects: BTreeMap<String, String>,
@@ -158,6 +192,30 @@ pub(super) struct KnowledgeRuntime {
 }
 
 impl KnowledgeRuntime {
+    /// Canonical Source refs retain Project ownership regardless of whether
+    /// the caller reaches them through SourcePool or ProjectMap.
+    fn source_belongs_to_scope(&self, resource: &str, display: &str) -> bool {
+        if resource.starts_with("source:project:") {
+            return self.work_repo_scopes.iter().any(|(prefix, project)| {
+                resource.starts_with(prefix.as_str()) && project == display
+            });
+        }
+        if resource.starts_with("central:source:project:") {
+            return self
+                .central_project_source_scopes
+                .iter()
+                .any(|(prefix, project)| {
+                    resource.starts_with(prefix.as_str()) && project == display
+                });
+        }
+        if let Some(rest) = resource.strip_prefix("central:source:control:root:Work/") {
+            return rest
+                .split_once('/')
+                .is_some_and(|(project, _)| format!("Work/{project}") == display);
+        }
+        true
+    }
+
     /// Flow cognition (W1.4/W1.5) reads identity and material through these
     /// same owners; it creates no second wiki or source-pool access path.
     pub(super) fn wiki_index(&self) -> Option<&SemanticWikiIndex> {
@@ -173,6 +231,10 @@ impl KnowledgeRuntime {
         let Some(key) = explicit_scope else {
             return self.current_project.clone();
         };
+        let key = key.trim();
+        if key.is_empty() || key.contains("..") {
+            return None;
+        }
         if let Some(pending) = self
             .authored_pending
             .iter()
@@ -184,10 +246,6 @@ impl KnowledgeRuntime {
             if display_matches_key(current, key) {
                 return Some(current.clone());
             }
-        }
-        let key = key.trim();
-        if key.contains("..") {
-            return None;
         }
         if let Some(rest) = key.strip_prefix("Work/") {
             return (!rest.is_empty() && !rest.contains('/')).then(|| key.to_owned());
@@ -211,6 +269,21 @@ impl KnowledgeRuntime {
         self.central.as_ref().map(|p| p as &dyn SourcePoolProvider)
     }
     fn application(&self, context: FamiliarityContext) -> KnowledgeApplication<'_> {
+        self.application_with_project_scope(
+            context,
+            None,
+            self.now_field.as_ref(),
+            self.work_repos.as_ref(),
+        )
+    }
+
+    fn application_with_project_scope<'a>(
+        &'a self,
+        context: FamiliarityContext,
+        scoped_project: Option<&str>,
+        now_field: Option<&'a NowFieldSourcePoolProvider<SystemRunner>>,
+        work_repos: Option<&'a WorkReposSourcePoolProvider<SystemRunner>>,
+    ) -> KnowledgeApplication<'a> {
         let mut application =
             KnowledgeApplication::new(context).with_project_map(&self.project_map);
         if let Some(provider) = &self.wiki {
@@ -219,12 +292,12 @@ impl KnowledgeRuntime {
         if let Some(provider) = &self.central {
             application = application.with_source_pool(provider, provider.descriptors());
         }
-        if let Some(provider) = &self.now_field {
+        if let Some(provider) = now_field {
             // The NOW field is live owner ground searched in place; its
             // roster carries identity only, and reads go back to the file.
             application = application.with_source_pool(provider, &self.now_field_roster);
         }
-        if let Some(provider) = &self.work_repos {
+        if let Some(provider) = work_repos {
             // Live Work-repos search slots in after NOW-field and before the
             // native shard baseline (addendum A-1): existing pools keep
             // priority on material they already carry, and the live pool's
@@ -238,8 +311,10 @@ impl KnowledgeRuntime {
         if let Some(provider) = &self.bkmr_stores {
             application = application.with_source_pool(provider, &[]);
         }
-        for provider in &self.code {
-            application = application.with_code(provider);
+        for (provider, project) in self.code.iter().zip(&self.code_project_scopes) {
+            if scoped_project.is_none_or(|scope| scope == project) {
+                application = application.with_code(provider);
+            }
         }
         application
     }
@@ -271,6 +346,7 @@ impl Service {
         &self,
         operation: impl FnOnce(&KnowledgeRuntime, KnowledgeApplication<'_>) -> Result<T>,
     ) -> Result<T> {
+        self.ensure_knowledge_project_scope()?;
         let owner_backed = self
             .knowledge_runtime
             .borrow()
@@ -310,10 +386,89 @@ impl Service {
         // The scope that governs this reply's disclosure: an explicit `:`
         // scope in the expression, else the invocation's own project.
         let explicit_scope = expression_scope_project(expression).map(str::to_owned);
-        let mut result = self.with_knowledge(|runtime, application| {
+        let mut result = self.with_knowledge(|runtime, _application| {
             let scoped_display = runtime.scoped_project_display(explicit_scope.as_deref());
-            let mut result = application.resolve(expression, candidate_limit);
+            if explicit_scope.is_some() && scoped_display.is_none() {
+                return Err(aikit_core::AikitError::new(
+                    "knowledge.scope_invalid",
+                    "Explicit Project scope is invalid or cannot be resolved",
+                ));
+            }
+            let discovered_project = scoped_display.as_deref().and_then(|display| {
+                runtime
+                    .work_repos
+                    .as_ref()?
+                    .projects()
+                    .iter()
+                    .find(|project| format!("Work/{}", project.name) == display)
+            });
+            // The root NOW provider includes every Work project, but a
+            // Project-scoped reply may only query its own NOW files plus
+            // common Control records. Selecting globs before ripgrep also
+            // prevents sibling read failures from surfacing as absences.
+            let mut scoped_provider_absences = Vec::new();
+            let scoped_now_field = match (scoped_display.as_deref(), runtime.now_field.as_ref()) {
+                (Some(_), Some(provider)) => {
+                    let scope = provider
+                        .scope()
+                        .for_project(discovered_project.map(|p| p.name.as_str()));
+                    match NowFieldSourcePoolProvider::connect(
+                        aikit_adapters::now_field::default_runner(&scope.central_root),
+                        aikit_adapters::ripgrep::executable(),
+                        scope,
+                    ) {
+                        Ok(provider) => Some(provider),
+                        Err(error) => {
+                            scoped_provider_absences
+                                .push(format!("NOW-field scoped search unavailable: {error}"));
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
+            let now_field = if scoped_display.is_some() {
+                scoped_now_field.as_ref()
+            } else {
+                runtime.now_field.as_ref()
+            };
+            // A Work-repos search can fail before producing any hits. Search
+            // only the resolved Project at the provider boundary so another
+            // repo's ripgrep failure cannot appear in this reply's absences.
+            // The root World deliberately retains the broad native provider.
+            let scoped_work_repos = discovered_project.map(|project| {
+                WorkReposSourcePoolProvider::connect(
+                    SystemRunner::new().with_env_removed("RIPGREP_CONFIG_PATH"),
+                    aikit_adapters::ripgrep::executable(),
+                    vec![project.clone()],
+                )
+            });
+            let work_repos = if scoped_display.is_some() {
+                scoped_work_repos.as_ref()
+            } else {
+                runtime.work_repos.as_ref()
+            };
+            let mut result = runtime
+                .application_with_project_scope(
+                    self.knowledge_context(),
+                    scoped_display.as_deref(),
+                    now_field,
+                    work_repos,
+                )
+                .resolve(expression, candidate_limit);
+            result.absences.extend(scoped_provider_absences);
             result.absences.extend(runtime.absences.clone());
+            result.absences.extend(
+                runtime
+                    .project_absences
+                    .iter()
+                    .filter(|absence| {
+                        scoped_display
+                            .as_deref()
+                            .is_none_or(|project| project == absence.project)
+                    })
+                    .map(|absence| absence.message.clone()),
+            );
             // Pending authored relations are scoped: a query sees its own
             // scope's rollup; other projects' pendings stay with
             // `knowledge status`.
@@ -325,40 +480,50 @@ impl Service {
             }) {
                 result.absences.push(pending.rollup_line());
             }
+            // Code-index degradations are scoped the same way: a reply carries
+            // only its own scope's line, never another project's — the leak
+            // this fix closes. Every project's degradation stays in
+            // `knowledge status`.
+            if let Some(display) = scoped_display.as_deref() {
+                for degradation in &runtime.code_degradations {
+                    if degradation.project == display {
+                        result.absences.push(degradation.message.clone());
+                    }
+                }
+            }
             // A scoped query keeps another project's compiled authored edges
             // — and its compiled folder subjects — out of its results;
             // unattributable material passes through. Work-repo hits carry
             // their project in the ref itself (`source:project:<id>:…`), so
             // the same discipline applies to them.
-            if explicit_scope.is_some() {
-                if let Some(display) = &scoped_display {
-                    let attributed_to_other_project =
-                        |attribution: &BTreeMap<String, String>, resource: &str| {
-                            attribution
-                                .get(resource)
-                                .is_some_and(|project| project != display)
-                        };
-                    let repo_hit_of_other_project = |resource: &str| {
-                        runtime.work_repo_scopes.iter().any(|(prefix, project)| {
-                            resource.starts_with(prefix.as_str()) && project != display
-                        })
+            if let Some(display) = &scoped_display {
+                let attributed_to_other_project =
+                    |attribution: &BTreeMap<String, String>, resource: &str| {
+                        attribution
+                            .get(resource)
+                            .is_some_and(|project| project != display)
                     };
-                    result.hits.retain(|hit| match &hit.address {
-                        aikit_core::KnowledgeAddress::Wiki(resource) => {
-                            !attributed_to_other_project(
-                                &runtime.authored_edge_projects,
-                                resource.as_str(),
-                            ) && !attributed_to_other_project(
-                                &runtime.folder_subject_projects,
-                                resource.as_str(),
-                            )
-                        }
-                        aikit_core::KnowledgeAddress::Source(_) => {
-                            !repo_hit_of_other_project(hit.resource.as_str())
-                        }
+                result.hits.retain(|hit| {
+                    let resource = hit.resource.as_str();
+                    // A Source ref may surface through SourcePool or a
+                    // ProjectMap endpoint. The address wrapper does not
+                    // change which Project owns it.
+                    if !runtime.source_belongs_to_scope(resource, display) {
+                        return false;
+                    }
+                    if attributed_to_other_project(&runtime.authored_edge_projects, resource)
+                        || attributed_to_other_project(&runtime.folder_subject_projects, resource)
+                    {
+                        return false;
+                    }
+                    match &hit.address {
+                        aikit_core::KnowledgeAddress::Code(reference) => runtime
+                            .code_source_scopes
+                            .get(reference.source.as_str())
+                            .is_some_and(|project| project == display),
                         _ => true,
-                    });
-                }
+                    }
+                });
             }
             Ok(result)
         })?;
@@ -494,13 +659,19 @@ impl Service {
             .project_root
             .as_deref()
             .unwrap_or(&self.invocation_cwd);
-        let central_root = root.ancestors().find(|candidate| {
-            candidate.join("Control").is_dir() && candidate.join("Work").is_dir()
-        })?;
+        let central_root = self.knowledge_central_root(root)?;
         Some(format!(
             "Work/{}",
             self.invocation_project_member(central_root, root)?
         ))
+    }
+
+    fn knowledge_central_root<'a>(&'a self, root: &'a Path) -> Option<&'a Path> {
+        self.knowledge_central_root.as_deref().or_else(|| {
+            root.ancestors().find(|candidate| {
+                candidate.join("Control").is_dir() && candidate.join("Work").is_dir()
+            })
+        })
     }
 
     /// The Work member this invocation's project context belongs to, read from
@@ -517,11 +688,95 @@ impl Service {
     /// canonical while the cwd keeps its invoked spelling (or the reverse);
     /// an unreadable path names nothing rather than guessing.
     fn invocation_project_member(&self, central_root: &Path, root: &Path) -> Option<String> {
-        work_member(central_root, root).or_else(|| {
-            let cwd = std::fs::canonicalize(&self.invocation_cwd).ok()?;
-            let central = std::fs::canonicalize(central_root).ok()?;
-            work_member(&central, &cwd)
-        })
+        work_member(central_root, root)
+            .or_else(|| {
+                let cwd = std::fs::canonicalize(&self.invocation_cwd).ok()?;
+                let central = std::fs::canonicalize(central_root).ok()?;
+                work_member(&central, &cwd)
+            })
+            .or_else(|| {
+                self.external_project_member(central_root, &self.invocation_cwd)
+                    .ok()
+                    .flatten()
+            })
+    }
+
+    /// A real checkout outside `Work/` can still be the same Project. Resolve
+    /// its ProjectCentral identity against discovered World manifests rather
+    /// than treating its location as authority to search the whole World.
+    fn external_project_member(&self, central_root: &Path, root: &Path) -> Result<Option<String>> {
+        let root = root.canonicalize().map_err(|error| {
+            aikit_core::AikitError::new("knowledge.project_scope_unresolved", error.to_string())
+        })?;
+        let central_root = central_root.canonicalize().map_err(|error| {
+            aikit_core::AikitError::new("knowledge.project_scope_unresolved", error.to_string())
+        })?;
+        if root == central_root
+            || root.starts_with(central_root.join("Control"))
+            || root.starts_with(central_root.join("Work"))
+        {
+            return Ok(None);
+        }
+        let project_root = root
+            .ancestors()
+            .take_while(|path| *path != central_root)
+            .find(|path| {
+                path.join("ProjectCentral/project.json").is_file() || path.join(".git").exists()
+            });
+        let Some(project_root) = project_root else {
+            if self.knowledge_central_root.is_some()
+                || root.starts_with(central_root.join("worktrees"))
+            {
+                return Err(aikit_core::AikitError::new(
+                    "knowledge.project_scope_unresolved",
+                    format!(
+                        "{} has no ProjectCentral identity in the configured Central World",
+                        root.display()
+                    ),
+                ));
+            }
+            return Ok(None);
+        };
+        let binding = aikit_adapters::ProjectCentralFilesystemBinding::inspect(project_root, None)
+            .map_err(|error| {
+                aikit_core::AikitError::new(
+                    "knowledge.project_scope_unresolved",
+                    format!(
+                        "cannot resolve ProjectCentral identity at {}: {error}",
+                        project_root.display()
+                    ),
+                )
+            })?;
+        let project_id = &binding.semantic.project_id;
+        let matches: Vec<_> = discover_work_projects(&central_root)
+            .into_iter()
+            .filter_map(|entry| match entry {
+                aikit_adapters::work_repos::WorkProjectEntry::Project(project)
+                    if project.project_id == *project_id =>
+                {
+                    Some(project.name)
+                }
+                _ => None,
+            })
+            .collect();
+        match matches.as_slice() {
+            [name] => Ok(Some(name.clone())),
+            _ => Err(aikit_core::AikitError::new(
+                "knowledge.project_scope_unresolved",
+                format!(
+                    "ProjectCentral identity {project_id} at {} matches {} discovered Work Projects; Knowledge refuses a broad query",
+                    project_root.display(),
+                    matches.len()
+                ),
+            )),
+        }
+    }
+
+    fn ensure_knowledge_project_scope(&self) -> Result<()> {
+        if let Some(central_root) = self.knowledge_central_root(&self.invocation_cwd) {
+            self.external_project_member(central_root, &self.invocation_cwd)?;
+        }
+        Ok(())
     }
 
     /// The bare Work name used as the lowered scope key (`demo` for
@@ -624,6 +879,8 @@ impl Service {
         }
         let found =
             self.knowledge_search(query, max_nodes.saturating_add(max_edges).saturating_add(1))?;
+        let expression =
+            parse_or_search_expression_in_scope(query, self.knowledge_scope_project().as_deref())?;
         self.with_knowledge(|runtime, _| {
             let objects: Vec<_> = runtime
                 .wiki_index()
@@ -635,7 +892,14 @@ impl Service {
                         .collect()
                 })
                 .unwrap_or_default();
-            let material = runtime.document_material();
+            let mut material = runtime.document_material();
+            if let Some(display) =
+                runtime.scoped_project_display(expression_scope_project(&expression))
+            {
+                material.retain(|item| {
+                    runtime.source_belongs_to_scope(item.binding.source.as_str(), &display)
+                });
+            }
             let mut hits = found.hits.clone();
             if query.trim().is_empty() {
                 for item in &material {
@@ -742,8 +1006,20 @@ impl Service {
         let mut frame = self.with_knowledge(|runtime, application| {
             let mut frame = application.context_pack(query, addresses);
             frame.absences.extend(runtime.absences.clone());
-            // A frame carries its own project's pending rollup, never other
-            // projects'.
+            frame.absences.extend(
+                runtime
+                    .project_absences
+                    .iter()
+                    .filter(|absence| {
+                        runtime
+                            .current_project
+                            .as_deref()
+                            .is_none_or(|project| project == absence.project)
+                    })
+                    .map(|absence| absence.message.clone()),
+            );
+            // A frame carries its own project's pending rollup and code-index
+            // degradation, never other projects'.
             if let Some(current) = &runtime.current_project {
                 if let Some(pending) = runtime
                     .authored_pending
@@ -751,6 +1027,11 @@ impl Service {
                     .find(|pending| &pending.project == current)
                 {
                     frame.absences.push(pending.rollup_line());
+                }
+                for degradation in &runtime.code_degradations {
+                    if &degradation.project == current {
+                        frame.absences.push(degradation.message.clone());
+                    }
                 }
             }
             Ok(frame)
@@ -799,6 +1080,12 @@ impl Service {
         self.with_knowledge(|runtime, application| {
             let mut status = application.status();
             status.absences.extend(runtime.absences.clone());
+            status.absences.extend(
+                runtime
+                    .project_absences
+                    .iter()
+                    .map(|absence| absence.message.clone()),
+            );
             // Notes are the loud per-project surface: anchor state, map
             // freshness, pool posture — state, not per-query failures.
             status.notes.extend(runtime.status_notes.clone());
@@ -806,6 +1093,11 @@ impl Service {
             // rollup and the full per-target detail.
             for pending in &runtime.authored_pending {
                 status.absences.push(pending.rollup_line());
+            }
+            // Likewise every project's code-index degradation: a scoped reply
+            // carries only its own, but the diagnostic surface names all.
+            for degradation in &runtime.code_degradations {
+                status.absences.push(degradation.message.clone());
             }
             status.authored_pending = runtime.authored_pending.clone();
             Ok(status)
@@ -827,11 +1119,10 @@ impl Service {
         let mut work_projects: Vec<WorkRepoProject> = Vec::new();
         let mut wiki_registers = Vec::new();
         let mut authored_pending = Vec::new();
+        let mut project_absences = Vec::new();
         let mut authored_edge_projects = BTreeMap::new();
         let mut folder_subject_projects = BTreeMap::new();
-        let central_root = root.ancestors().find(|candidate| {
-            candidate.join("Control").is_dir() && candidate.join("Work").is_dir()
-        });
+        let central_root = self.knowledge_central_root(root);
         let mut discovered = discover_material(
             root,
             self.home.root(),
@@ -866,6 +1157,12 @@ impl Service {
             // (project spaces + the Central root composition), origin Compiled.
             let matrices = aikit_adapters::capability_matrix::compile_world_matrices(central_root);
             absences.extend(matrices.absences);
+            project_absences.extend(matrices.project_absences.into_iter().map(|absence| {
+                ProjectOwnedAbsence {
+                    project: absence.project,
+                    message: absence.message,
+                }
+            }));
             aikit_adapters::central_entities::adopt_into(&mut discovered.wiki, matrices.objects);
             // CASE 19 / W10 V9.4: authored Markdown under each project's
             // ProjectCentral/user/** compiles its explicit [[wikilinks]]
@@ -876,7 +1173,12 @@ impl Service {
                 aikit_adapters::projectcentral_authored_wiki::compile_world_authored_wiki(
                     central_root,
                 );
-            absences.extend(authored_wiki.absences);
+            project_absences.extend(authored_wiki.absences.into_iter().map(|absence| {
+                ProjectOwnedAbsence {
+                    project: absence.project,
+                    message: absence.message,
+                }
+            }));
             authored_pending = authored_wiki.pending;
             authored_edge_projects = authored_wiki.edge_projects;
             aikit_adapters::central_entities::adopt_into(
@@ -1066,7 +1368,10 @@ impl Service {
                         work_projects.push(project);
                     }
                     aikit_adapters::work_repos::WorkProjectEntry::Absence { name, reason } => {
-                        absences.push(format!("Work/{name} {reason}"));
+                        project_absences.push(ProjectOwnedAbsence {
+                            project: format!("Work/{name}"),
+                            message: format!("Work/{name} {reason}"),
+                        });
                     }
                 }
             }
@@ -1178,6 +1483,24 @@ impl Service {
             .map(|project| {
                 (
                     format!("source:project:{}:", project.project_id),
+                    format!("Work/{}", project.name),
+                )
+            })
+            .collect();
+        let central_project_source_scopes: BTreeMap<String, String> = work_projects
+            .iter()
+            .map(|project| {
+                (
+                    format!("central:source:project:{}:", project.project_id),
+                    format!("Work/{}", project.name),
+                )
+            })
+            .collect();
+        let code_source_scopes: BTreeMap<String, String> = work_projects
+            .iter()
+            .map(|project| {
+                (
+                    format!("source:project-code:{}", project.project_id),
                     format!("Work/{}", project.name),
                 )
             })
@@ -1327,6 +1650,20 @@ impl Service {
             .map(|n| n.get().clamp(1, MAX_GITNEXUS_PARALLELISM))
             .unwrap_or(2);
         let mut code = Vec::with_capacity(work_projects.len());
+        let mut code_project_scopes = Vec::with_capacity(work_projects.len());
+        let mut code_degradations: Vec<ProjectCodeDegradation> = Vec::new();
+        // The binary is a seam: `AIKIT_GITNEXUS_BIN` (resolved through the
+        // process environment at `Service::open`) overrides the PATH lookup,
+        // so a test — and an operator — pins code intelligence to a known
+        // binary instead of depending on whatever the host happens to have.
+        let gitnexus_binary = self.gitnexus_binary.clone();
+        // `gitnexus analyze` records each indexed repo in one global
+        // `registry.json` by an unlocked read-modify-write, and `query --repo`
+        // resolves the repo name through that registry. Two concurrent
+        // analyses can each write back their own copy, silently dropping the
+        // other repo's entry so its code never surfaces. Probes and adoption
+        // stay parallel; the registry-writing index step runs one at a time.
+        let index_lock = std::sync::Mutex::new(());
         let mut gitnexus_unavailable: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut project_sources = Vec::with_capacity(work_projects.len());
         for project in &work_projects {
@@ -1344,15 +1681,27 @@ impl Service {
                     .map(|(project, source)| {
                         let project = project.clone();
                         let source = source.clone();
+                        let binary = gitnexus_binary.clone();
+                        let index_lock = &index_lock;
                         scope.spawn(move || {
-                            let mut provider = GitNexusCodeIndexProvider::new(
-                                SystemRunner::new()
-                                    .with_cwd(&project.root)
-                                    .with_timeout(code_budget),
-                                project.project_id.clone(),
-                                source,
-                                None,
-                            );
+                            let runner = SystemRunner::new()
+                                .with_cwd(&project.root)
+                                .with_timeout(code_budget);
+                            let mut provider = match binary.as_deref() {
+                                Some(binary) => GitNexusCodeIndexProvider::with_binary(
+                                    runner,
+                                    binary,
+                                    project.project_id.clone(),
+                                    source,
+                                    None,
+                                ),
+                                None => GitNexusCodeIndexProvider::new(
+                                    runner,
+                                    project.project_id.clone(),
+                                    source,
+                                    None,
+                                ),
+                            };
                             let status = provider.status();
                             // A query reads the existing derived index; it
                             // never re-indexes one that exists (that made
@@ -1363,6 +1712,9 @@ impl Service {
                             let adopted = provider.adopt_existing_index(&project.root);
                             let index_error =
                                 if status.available && status.capabilities.index && !adopted {
+                                    let _registry = index_lock
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                                     provider.index(&project.root, false).err()
                                 } else {
                                     None
@@ -1386,10 +1738,16 @@ impl Service {
                     // index failure: `error` already names the budget it
                     // violated (`mux.command_timeout`), so the project is
                     // disclosed as degraded, never silently dropped.
-                    absences.push(format!(
-                        "GitNexus CodeIndex degraded for Work/{}: {error}",
-                        project.name
-                    ));
+                    // Per-project code state, scoped like `authored_pending`:
+                    // never the global per-query absence that leaked another
+                    // project's code degradation into a scoped reply.
+                    code_degradations.push(ProjectCodeDegradation {
+                        project: format!("Work/{}", project.name),
+                        message: format!(
+                            "GitNexus CodeIndex degraded for Work/{}: {error}",
+                            project.name
+                        ),
+                    });
                 }
                 let status = provider.status();
                 if !status.available {
@@ -1411,6 +1769,7 @@ impl Service {
                         .push(format!("Work/{}", project.name));
                 }
                 code.push(provider);
+                code_project_scopes.push(format!("Work/{}", project.name));
             }
         }
         for (reason, projects) in gitnexus_unavailable {
@@ -1448,12 +1807,17 @@ impl Service {
             now_field_roster,
             work_repos,
             work_repo_scopes,
+            central_project_source_scopes,
             central_expected: central_root.is_some(),
+            code_source_scopes,
+            code_project_scopes,
             code,
+            code_degradations,
             project_map,
             absences,
             status_notes,
             authored_pending,
+            project_absences,
             authored_edge_projects,
             folder_subject_projects,
             current_project,

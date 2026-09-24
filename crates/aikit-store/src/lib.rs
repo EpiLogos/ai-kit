@@ -70,6 +70,7 @@ pub mod now_context;
 pub mod procedure;
 pub mod procedure_history;
 pub mod registry;
+pub mod registry_skillsets;
 pub mod routine_credentials;
 pub mod routine_invocation;
 pub mod routine_store;

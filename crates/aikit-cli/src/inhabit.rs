@@ -7,6 +7,11 @@
 //! is exec'd with the two identity variables added to the environment it
 //! already carries. Leaving is explicit: nothing is released when the harness
 //! exits — `aikit inhabit --release` ends the tenure this body holds.
+//!
+//! When the inhabiting Agent orchestrates a Central agent set, its team rides
+//! along into a Claude Code harness as session subagents
+//! ([`crate::inhabit_team`]); the team is resolved whole before anything is
+//! claimed and removed when the tenure is released.
 
 use std::path::{Path, PathBuf};
 
@@ -14,6 +19,7 @@ use aikit_core::{AikitError, Result};
 use aikit_store::home::AikitHome;
 use serde_json::{json, Value};
 
+use crate::inhabit_team::{HarnessTarget, TeamOutcome};
 use crate::inhabitation::{pick, Answer, Owners, GENERATION_VAR, POSITION_VAR};
 
 /// A three-part refusal: the current state, what did not happen, and the exact
@@ -47,6 +53,10 @@ pub struct InhabitRequest {
     pub harness_composition: Option<String>,
     pub model: Option<String>,
     pub cwd: PathBuf,
+    /// The harness argv after `--`; empty when only the exports are asked.
+    pub harness_argv: Vec<String>,
+    /// Launch without the Agent's agent-set team (`--no-team`).
+    pub no_team: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +65,8 @@ pub struct Claimed {
     pub generation_ref: String,
     pub env: Vec<(String, String)>,
     pub claim: Value,
+    /// The Agent's agent-set team, resolved before the claim.
+    pub team: TeamOutcome,
 }
 
 fn owner_refusal(code: &'static str, answer: &Answer, consequence: &str) -> AikitError {
@@ -201,6 +213,10 @@ pub fn claim(
         "central.world.here",
         json!({ "cwd": request.cwd.display().to_string() }),
     );
+    let here_root = here
+        .ok()
+        .and_then(|data| pick(&data["local_world"], &["root"]))
+        .map(PathBuf::from);
     let (project, workcell) = match here.ok() {
         Some(data) => (
             pick(&data["project_world"], &["name"]),
@@ -285,6 +301,34 @@ pub fn claim(
             }
         }
     };
+
+    // The team is resolved whole before anything is claimed: a member that
+    // cannot be projected refuses here, with no tenure opened.
+    let central_root = owners.central_root.clone().or(here_root);
+    // The team's skills come from AIKit's own catalogue; an unreadable
+    // catalogue leaves every member skill disclosed as missing, never refused.
+    let catalog = home
+        .as_ref()
+        .and_then(|home| crate::inhabit_team::CatalogSkills::load(home).ok());
+    let team = crate::inhabit_team::resolve(
+        owners,
+        central_root.as_deref(),
+        &agent,
+        &HarnessTarget::from_argv(&request.harness_argv),
+        request.no_team,
+        &base,
+        catalog
+            .as_ref()
+            .map(|catalog| catalog as &dyn crate::inhabit_team::SkillSource),
+    )?;
+    if matches!(team, TeamOutcome::Planned { .. }) && home.is_none() {
+        return Err(refusal(
+            "inhabit.team_home_unresolved",
+            format!("{agent} orchestrates an agent set, and no AIKit home could be resolved to write its team into."),
+            "Nothing was claimed and no harness was started.",
+            format!("Set AIKIT_HOME (or HOME), or launch without the team: {base} --no-team -- <harness argv>"),
+        ));
+    }
 
     let mut expectation: Vec<String> = Vec::new();
     match request.mode {
@@ -378,6 +422,7 @@ pub fn claim(
         position_ref: position,
         generation_ref,
         claim: data,
+        team,
     })
 }
 
@@ -419,6 +464,7 @@ pub fn attach(
         position_ref,
         generation_ref: generation,
         claim: verified,
+        team: TeamOutcome::None,
     })
 }
 
@@ -464,8 +510,10 @@ fn held_generation(
 
 /// End the tenure this body holds. The generation comes from `--generation`
 /// or the stamped `OI_OCCUPANT_GENERATION`; a body that holds nothing refuses.
+/// End the tenure this body holds, and remove the team projected for it.
 pub fn release(
     owners: &Owners<'_>,
+    home: Option<&AikitHome>,
     position: &str,
     generation: Option<&str>,
     reason: &str,
@@ -487,10 +535,21 @@ pub fn release(
         "--reason",
         reason,
     ]);
-    answer
-        .ok()
-        .cloned()
-        .ok_or_else(|| owner_refusal("inhabit.release_refused", &answer, "Nothing was released."))
+    let mut released = answer.ok().cloned().ok_or_else(|| {
+        owner_refusal("inhabit.release_refused", &answer, "Nothing was released.")
+    })?;
+    // The tenure is over; its team leaves with it. A removal that fails is
+    // reported beside the release, never as a failed release.
+    if let Some(home) = home {
+        match crate::inhabit_team::remove(home, &generation) {
+            Ok(Some(removed)) => released["team_projection"] = removed,
+            Ok(None) => {}
+            Err(error) => {
+                released["team_projection"] = json!({ "error": error.to_string() });
+            }
+        }
+    }
+    Ok(released)
 }
 
 /// Replace this process with the harness, its environment extended by the

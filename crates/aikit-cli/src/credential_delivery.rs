@@ -115,7 +115,10 @@ pub(crate) fn credential_resolved(
             secret,
         ));
     }
-    let native = NativeSecureStoreProvider::new();
+    // Eligibility must use the same persisted binding that `credential
+    // explain` reads. A fresh provider has no bound credential metadata and
+    // therefore cannot select the OS store, even when its key is present.
+    let native = NativeSecureStoreProvider::with_binding(stored.as_ref());
     let environment = use_
         .from_env
         .as_ref()
@@ -163,4 +166,86 @@ pub(crate) fn credential_resolved(
         json!({"resolution":resolution,"binding":stored,"delivery":"process-env", "secret_persisted":false}),
         secret,
     ))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod native_store_tests {
+    use super::{credential, ModelCredential};
+    use aikit_adapters::NativeSecureStoreProvider;
+    use aikit_core::credential::{
+        CredentialRef, SecretProvider, SecretRequirementRef, SecretValue,
+    };
+    use aikit_core::ResourceRef;
+    use aikit_store::{AikitHome, CredentialBindingStore};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct BoundCredential<'a> {
+        provider: &'a NativeSecureStoreProvider,
+        credential: CredentialRef,
+    }
+
+    impl Drop for BoundCredential<'_> {
+        fn drop(&mut self) {
+            self.provider
+                .delete(&self.credential)
+                .expect("remove the native test credential");
+        }
+    }
+
+    #[test]
+    fn bound_native_credential_is_selected_for_plan_and_delivered_from_keychain() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path());
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let credential_ref = CredentialRef::new(format!(
+            "credential:test/delivery/{}-{nonce}",
+            std::process::id()
+        ))
+        .unwrap();
+        let native = NativeSecureStoreProvider::new();
+        let secret = SecretValue::new(format!("native-delivery-test-{nonce}")).unwrap();
+        let binding = native
+            .bind(&credential_ref, &secret)
+            .expect("bind real Keychain item");
+        let _cleanup = BoundCredential {
+            provider: &native,
+            credential: credential_ref.clone(),
+        };
+        CredentialBindingStore::new(&home).save(&binding).unwrap();
+
+        let use_ = ModelCredential {
+            requirement_ref: SecretRequirementRef::new(format!(
+                "secret-requirement:test/delivery/{}-{nonce}",
+                std::process::id()
+            ))
+            .unwrap(),
+            credential_ref,
+            target_env: "TEST_MODEL_API_KEY".into(),
+            from_env: None,
+        };
+        let session = ResourceRef::parse("agent-session/native-credential-delivery-test").unwrap();
+        let (plan, planned_secret) = credential(&home, &session, &use_, false).unwrap();
+        assert!(
+            planned_secret.is_none(),
+            "planning must not read key material"
+        );
+        assert_eq!(
+            plan["binding"]["provider_ref"].as_str(),
+            Some(binding.provider_ref.as_str())
+        );
+        assert!(plan["resolution"]["selected_provider_ref"].is_string());
+
+        let (delivery, delivered_secret) = credential(&home, &session, &use_, true).unwrap();
+        assert_eq!(
+            delivery, plan,
+            "plan and delivery must select the same provider"
+        );
+        assert!(
+            delivered_secret.unwrap().expose() == secret.expose(),
+            "native delivery must return the bound credential"
+        );
+    }
 }

@@ -171,6 +171,11 @@ pub enum Command {
     Jobs(JobsArgs),
     /// Discover Methods: skills whose description carries the METHOD: prefix.
     Method(MethodArgs),
+    /// Read praxis: list Skills by form (Skill / Method / Methodology) and
+    /// disclose an Agent's carried, selected and operative praxis.
+    Praxis(PraxisCmd),
+    /// A2A interoperability projections (the published Agent Card).
+    A2a(A2aCmd),
     /// Authorise and read versioned Routine invocation evidence.
     Routine(RoutineCmd),
     /// Invoke or validate the general typed Jev decision capability.
@@ -254,6 +259,10 @@ pub struct InhabitArgs {
     pub harness_composition: Option<String>,
     #[arg(long, value_name = "REF")]
     pub model: Option<String>,
+    /// Launch without projecting the members of an agent set this Agent
+    /// orchestrates as the harness's subagents.
+    #[arg(long = "no-team", conflicts_with = "release")]
+    pub no_team: bool,
     /// The harness argv to exec after the claim (after `--`). Without one the
     /// claim is printed with the variables to export.
     #[arg(last = true, value_name = "HARNESS_ARGV")]
@@ -370,15 +379,47 @@ pub struct GatewayServeArgs {
     /// Bearer token for the WebSocket carrier, or `AIKIT_GATEWAY_TOKEN`.
     #[arg(long = "ws-token", value_name = "TOKEN")]
     pub websocket_token: Option<String>,
-    /// Unix-domain socket path for the same-host carrier.
-    #[arg(long = "unix", value_name = "PATH")]
-    pub unix_socket: Option<std::path::PathBuf>,
+    /// Where the WebSocket bearer token lives: `file:/abs/path` (owner-only,
+    /// chmod 600) or a keychain/pass/op/varlock ref. Read once at start.
+    #[arg(
+        long = "ws-token-location",
+        value_name = "LOCATION",
+        conflicts_with = "websocket_token"
+    )]
+    pub websocket_token_location: Option<String>,
+    /// Serve the same-host Unix-domain carrier: at PATH, or with no value at
+    /// this home's well-known socket. Name it beside --ws so local inbox,
+    /// send and turn delivery keep reaching the service.
+    #[arg(long = "unix", value_name = "PATH", num_args = 0..=1)]
+    pub unix_socket: Option<Option<std::path::PathBuf>>,
     /// Persist semantic state across restarts to this file.
     #[arg(long = "state-file", value_name = "PATH")]
     pub state_file: Option<std::path::PathBuf>,
     /// Semantic gateway ref, or `AIKIT_GATEWAY_REF`.
     #[arg(long = "gateway-ref", value_name = "REF")]
     pub gateway_ref: Option<String>,
+}
+
+/// `aikit gateway install-service` — what the kept-alive service serves.
+#[derive(Debug, Args)]
+pub struct GatewayInstallArgs {
+    /// Also serve the authenticated WebSocket carrier at `HOST:PORT`, for
+    /// other Workcells to relay through. Requires --ws-token-location.
+    #[arg(long = "ws", value_name = "HOST:PORT", requires = "token_location")]
+    pub websocket_bind: Option<String>,
+    /// Where the WebSocket bearer token lives (`file:/abs/path`, owner-only).
+    #[arg(
+        long = "ws-token-location",
+        value_name = "LOCATION",
+        requires = "websocket_bind"
+    )]
+    pub token_location: Option<String>,
+    /// `AIKIT_GATEWAY_REF` for the service (e.g. agency-gateway/omarchy).
+    #[arg(long = "gateway-ref", value_name = "REF")]
+    pub gateway_ref: Option<String>,
+    /// `AIKIT_WORKCELL_REF` for the service (e.g. workcell:omarchy).
+    #[arg(long = "workcell-ref", value_name = "REF")]
+    pub workcell_ref: Option<String>,
 }
 
 /// `aikit gateway <query>` — one command against a running gateway.
@@ -894,10 +935,11 @@ pub enum GatewaySub {
     /// Run exactly one dispatcher pass: resolve occurrences, admit due items,
     /// dispatch, record outcomes, exit. No gateway required.
     Tick,
-    /// Install the macOS user LaunchAgent that keeps the gateway (and the
-    /// dispatcher tick) alive across restart, sleep and reboot.
-    InstallService,
-    /// Remove the LaunchAgent.
+    /// Install the user service that keeps the gateway (the dispatcher tick
+    /// and the relay pass) alive across restart, sleep and reboot: a macOS
+    /// LaunchAgent or a Linux systemd user unit.
+    InstallService(GatewayInstallArgs),
+    /// Remove the installed gateway service.
     UninstallService,
     /// Negotiate protocol versions with a running gateway.
     Protocol(GatewayQueryArgs),
@@ -1563,6 +1605,9 @@ pub enum SetSub {
     Rename(SetRenameArgs),
     /// Move a writable set into Procedure-owned recovery storage.
     Delete(SetDeleteArgs),
+    /// Export the set as a native agent package (openai | codex | claude | pi).
+    /// The set stays the source; the package is a target projection of it.
+    Package(crate::skillset_package_cli::SetPackageCmd),
 }
 
 #[derive(Debug, Args)]
@@ -1591,8 +1636,13 @@ pub struct SetCreateArgs {
 pub struct SetMemberArgs {
     #[arg(value_name = "NAME")]
     pub name: String,
-    #[arg(value_name = "IDS", required = true)]
+    #[arg(value_name = "IDS", required_unless_present = "children")]
     pub ids: Vec<String>,
+    /// Carry another set by reference (a home set name or a registry semantic
+    /// ref such as `central:documentation`). Repeatable. The referenced set is
+    /// shared, never copied into this set's members. `set add` only.
+    #[arg(long = "child", value_name = "SET_REF")]
+    pub children: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -2706,6 +2756,60 @@ pub enum MethodCommand {
         /// MethodProofInput JSON. Prefix a path with @ to read a file.
         #[arg(long = "proof-json", value_name = "JSON|@FILE")]
         proof_json: String,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct PraxisCmd {
+    #[command(subcommand)]
+    pub command: PraxisSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PraxisSub {
+    /// List catalogued Skills with their praxis form and effective state.
+    List {
+        /// Only this form: skill, method or methodology.
+        #[arg(long, value_name = "FORM")]
+        form: Option<String>,
+        /// Only Skills whose name or payload contains this substring.
+        filter: Option<String>,
+    },
+    /// Disclose an Agent's praxis (`aikit.agent-praxis-disclosure/v1`) from its
+    /// Central AgentProfile, resolved SkillSets and optional activity evidence.
+    Disclose {
+        /// `central.agent-profile/v1` JSON (as `agent-profile.read` returns it,
+        /// or wrapped in its action envelope). Prefix a path with @ or pass a path.
+        #[arg(long = "profile-json", value_name = "JSON|@FILE")]
+        profile_json: String,
+        /// `aikit.praxis-activity/v1` evidence of what actually happened.
+        #[arg(long = "activity-json", value_name = "JSON|@FILE")]
+        activity_json: Option<String>,
+        /// Skills selected for the current act. Repeatable.
+        #[arg(long = "select", value_name = "SKILL")]
+        select: Vec<String>,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct A2aCmd {
+    #[command(subcommand)]
+    pub command: A2aSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum A2aSub {
+    /// Project an A2A v1.0.1 Agent Card from an `oi.agent-world-participation/v1`
+    /// reading. Only publicly disclosed capabilities become card skills.
+    Card {
+        #[arg(long = "participation-json", value_name = "JSON|@FILE")]
+        participation_json: String,
+        /// The A2A interface endpoint the Agent actually serves.
+        #[arg(long = "interface-url", value_name = "URL")]
+        interface_url: String,
+        /// Write the card here (e.g. `<site>/.well-known/agent-card.json`).
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
     },
 }
 

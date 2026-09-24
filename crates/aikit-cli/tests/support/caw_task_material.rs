@@ -182,6 +182,56 @@ fn await_delivery(w: &World, id: &str) {
 }
 
 #[test]
+#[ignore = "requires exact source-built Central, Workcell control service and Actuation; mandatory CAW lane"]
+fn hosted_pending_task_cannot_abort_uncertain_native_demand() {
+    let w = World::new(true);
+    let ready = w.prepare();
+    let host = NativeHost::new(&w, true, false);
+    let mut hosted = host.input(&w, false);
+    hosted["selected_directories"] = json!([w.root.join("Work/demo/src/missing-native-directory")]);
+    let failure = w.command(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        hosted.to_string(),
+        "--expected-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(
+        !failure.status.success(),
+        "actual selected directory validation must refuse"
+    );
+    let pending = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(pending["ready"], false);
+    assert!(pending["request"]["material_host"].is_object());
+    let refused = w.command(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr)
+        .contains("Hosted preparation may have uncertain effects"));
+    assert_eq!(
+        w.cli(&[
+            "encounter-task-read".into(),
+            "--agent-session".into(),
+            "agent-session/task".into()
+        ]),
+        pending
+    );
+}
+
+#[test]
 #[ignore = "requires source-built native owners and positive Landlock; mandatory CAW lane"]
 fn persistent_storage_reentry_and_release_govern_real_turns_without_duplicate_work() {
     let mut w = World::new(true);

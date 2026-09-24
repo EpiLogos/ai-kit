@@ -33,6 +33,7 @@ pub use agency::mint::{
     mint_from_cli, mint_per_project_agency, mint_request_document, REQUIRED_MINTED_ACTIONS,
 };
 pub use agency::model::EncounterModelOpen;
+pub(crate) use agency::model::PreparedModel;
 pub use agency::{
     EncounterA2aFraming, EncounterAddressedTurn, EncounterAgencyBinding, EncounterContextPacket,
     EncounterGroupRecipient,
@@ -440,6 +441,7 @@ struct Resident {
     cwd: PathBuf,
     argv: Vec<String>,
     model: Option<agency::model::PreparedModel>,
+    body_basis: Value,
     now_context: Option<EncounterNowContextConfig>,
 }
 impl Resident {
@@ -744,7 +746,8 @@ impl EncounterService {
             phase,
             resident.required_context.as_ref(),
         )?;
-        let model = agency::model::prepare(&self.home, session, &current)?;
+        let (model_provider, _) = self.selected_model_provider(session, &current, &resident.cwd)?;
+        let model = agency::model::prepare(&self.home, session, &model_provider)?;
         if model != resident.model {
             return Err(error(
                 "Resident model policy/catalogue/credential/Agency basis changed; explicit re-resolution is required",
@@ -1026,7 +1029,7 @@ impl EncounterService {
                 ));
             }
             self.check_resident_context(&agent_session, held, "resident-open")?;
-            let receipt = json!({"agent_session":agent_session,"native_session_id":held.lane.binding().native_session_id,"model_observation":held.lane.binding().model_observation,"model_selection":held.model,"resident":true});
+            let receipt = json!({"agent_session":agent_session,"native_session_id":held.lane.binding().native_session_id,"model_observation":held.lane.binding().model_observation,"provider":held.provider,"protocol":held.protocol,"body_basis":held.body_basis,"model_selection":held.model,"resident":true});
             drop(residents);
             drop(agency_lock);
             // An already-resident open is a readiness moment too: queued
@@ -1092,10 +1095,17 @@ impl EncounterService {
             "before-provider-start",
             configured.required_context.as_ref(),
         )?;
+        let (body_provider, task_bound) =
+            self.selected_model_provider(&agent_session, &configured, &cwd)?;
         if let Some(target) = model_target {
-            agency::model::validate_target(&self.home, &agent_session, &configured, target)?;
+            agency::model::validate_target(
+                &self.home,
+                &agent_session,
+                &configured,
+                &body_provider,
+                target,
+            )?;
         }
-        self.check_task_launch(&agent_session, &configured, &cwd)?;
         let connection = ResourceRef::parse(format!(
             "connection/encounter-{}",
             blake3::hash(agent_session.as_str().as_bytes()).to_hex()
@@ -1123,8 +1133,7 @@ impl EncounterService {
             self.permissions.clone(),
             generation.clone(),
         )));
-        let model = agency::model::prepare(&self.home, &agent_session, &configured)?;
-        let task_bound = self.is_task_bound(&agent_session)?;
+        let model = agency::model::prepare(&self.home, &agent_session, &body_provider)?;
         if configured.protocol == EncounterProtocol::PrimeRpc
             && (configured.body_ref.is_none() || configured.body_revision.is_none())
         {
@@ -1470,11 +1479,51 @@ impl EncounterService {
         let model_reading = serde_json::to_value(&model).map_err(error)?;
         let body_ref = configured.body_ref.clone();
         let body_revision = configured.body_revision.clone();
+        let owner_launcher_argv_digest = blake3::hash(
+            serde_json::to_string(&configured.argv)
+                .expect("argv JSON")
+                .as_bytes(),
+        )
+        .to_hex()
+        .to_string();
+        let effective_launch_argv_digest = blake3::hash(
+            serde_json::to_string(&launch_argv)
+                .expect("launch argv JSON")
+                .as_bytes(),
+        )
+        .to_hex()
+        .to_string();
+        let provider_argv_digest = blake3::hash(
+            serde_json::to_string(&body_provider.argv)
+                .expect("argv JSON")
+                .as_bytes(),
+        )
+        .to_hex()
+        .to_string();
+        // A profile-derived ACP launcher may start with a bridge executable
+        // (`npx` for Codex). Bind the body to the validated declared profile,
+        // not to that executable's basename.
+        let harness_profile = agency::model::declared_provider_profile(&body_provider)?
+            .map(|profile| profile.slug.clone());
+        let body_basis = json!({
+            "schema":"aikit.resident-body-basis/v1",
+            "provider_id":body_provider.id,
+            "protocol":body_provider.protocol,
+            "provider_argv_digest":provider_argv_digest,
+            "owner_launcher_provider_id":configured.id,
+            "owner_launcher_argv_digest":owner_launcher_argv_digest,
+            "effective_launch_argv_digest":effective_launch_argv_digest,
+            "harness_profile":harness_profile,
+            "task_bound":task_bound,
+            "cwd":cwd,
+            "required_context":configured.required_context,
+            "model_basis_digest":model.as_ref().map(PreparedModel::fingerprint).transpose()?,
+        });
         if let Some((dispatch, receipt)) = &selected_configuration {
             self.store.append(&agent_session,&json!({"kind":"selected-model-configured","agent_session":agent_session,"native_session_id":receipt.native_session_id,"provider":provider,"dispatch":dispatch,"previous_model_observation":receipt.previous,"model_observation":receipt.current,"standing":"provider-confirmed-session-configuration-under-the-durable-model-policy"}))?;
         }
         let opened_mode_observation = lane.binding().mode_observation.clone();
-        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":blake3::hash(serde_json::to_string(&configured.argv).expect("argv JSON").as_bytes()).to_hex().to_string(),"now_context_config_digest":blake3::hash(serde_json::to_vec(&configured.now_context).expect("NOW config JSON").as_slice()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"mode_observation":opened_mode_observation,"model_selection":model_reading,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-resume"} else {"new-native-session"},"composed_tools_route":if mcp_native_fallback.is_some() {"harness-native-mcp-config-seam"} else {"session-wire-or-none"},"mcp_native_fallback_reason":mcp_native_fallback.as_ref().map(|(reason, _)| reason.clone())}))?;
+        self.store.append(&agent_session,&json!({"kind":"binding","space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":owner_launcher_argv_digest,"body_basis":body_basis,"now_context_config_digest":blake3::hash(serde_json::to_vec(&configured.now_context).expect("NOW config JSON").as_slice()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"mode_observation":opened_mode_observation,"model_selection":model_reading,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-resume"} else {"new-native-session"},"composed_tools_route":if mcp_native_fallback.is_some() {"harness-native-mcp-config-seam"} else {"session-wire-or-none"},"mcp_native_fallback_reason":mcp_native_fallback.as_ref().map(|(reason, _)| reason.clone())}))?;
         // The owner drains transport delivery; durable cursor readers are
         // independent views of the same canonical journal.
         let drain = lane.clone();
@@ -1556,6 +1605,8 @@ impl EncounterService {
             .identity(&agent_session)
             .ok()
             .and_then(|identity| identity.binding.mode_observation);
+        let receipt_provider = provider.clone();
+        let receipt_protocol = configured.protocol;
         residents.insert(
             agent_session.clone(),
             Arc::new(Resident {
@@ -1573,6 +1624,7 @@ impl EncounterService {
                 cwd,
                 argv: configured.argv,
                 model,
+                body_basis: body_basis.clone(),
                 now_context: configured.now_context,
             }),
         );
@@ -1580,7 +1632,7 @@ impl EncounterService {
         drop(agency_lock);
         // The resident just became ready: this is the moment queued durable
         // deliveries wait for. Drain before answering the open.
-        let mut receipt = json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"mode_observation":mode_observation,"model_selection":model_reading,"body_ref":configured.body_ref,"body_revision":configured.body_revision,"resident":true,"inference_observed":false});
+        let mut receipt = json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"mode_observation":mode_observation,"model_selection":model_reading,"provider":receipt_provider,"protocol":receipt_protocol,"body_basis":body_basis,"body_ref":configured.body_ref,"body_revision":configured.body_revision,"resident":true,"inference_observed":false});
         if let Some((reason, projection)) = &mcp_native_fallback {
             // The composed tool surface does not ride this session's wire: the
             // open outcome names the harness's native MCP configuration seam
@@ -1969,6 +2021,7 @@ impl EncounterService {
                 self.require_attached(&agent_session)?;
                 let resident = self.resident(&agent_session)?;
                 let _operation = resident.operations.lock().map_err(error)?;
+                let _agency_lock = self.lock_agency(&agent_session)?;
                 self.check_resident_context(&agent_session, &resident, "native-model-read")?;
                 let identity = resident.host.identity(&agent_session)?;
                 Ok(json!({
@@ -2007,6 +2060,7 @@ impl EncounterService {
                 }
                 let resident = self.resident(&agent_session)?;
                 let _operation = resident.operations.lock().map_err(error)?;
+                let _agency_lock = self.lock_agency(&agent_session)?;
                 self.check_resident_context(&agent_session, &resident, "native-model-select")?;
                 let observed = resident.host.identity(&agent_session)?;
                 if expected_native_session_id
@@ -2060,6 +2114,7 @@ impl EncounterService {
                 self.require_attached(&agent_session)?;
                 let resident = self.resident(&agent_session)?;
                 let _operation = resident.operations.lock().map_err(error)?;
+                let _agency_lock = self.lock_agency(&agent_session)?;
                 self.check_resident_context(&agent_session, &resident, "native-mode-read")?;
                 let identity = resident.host.identity(&agent_session)?;
                 Ok(json!({
@@ -2087,6 +2142,7 @@ impl EncounterService {
                 }
                 let resident = self.resident(&agent_session)?;
                 let _operation = resident.operations.lock().map_err(error)?;
+                let _agency_lock = self.lock_agency(&agent_session)?;
                 self.check_resident_context(&agent_session, &resident, "native-mode-select")?;
                 let observed = resident.host.identity(&agent_session)?;
                 if expected_native_session_id

@@ -35,10 +35,44 @@ use serde_json::{json, Map, Value};
 
 use crate::gateway_communique::{
     Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForwardOutcome, CommuniqueJournal,
+    CommuniqueRouting,
 };
 
 pub const AGENCY_GATEWAY_VERSION: &str = "aikit.agency-gateway/v1";
 pub const ACTUATION_STREAM_SCHEMA: &str = "actuation.stream/v1";
+pub const GATEWAY_OCCUPANCY_READING_SCHEMA: &str = "aikit.gateway-occupancy-reading/v1";
+
+/// A serving gateway's answer to "who occupies this Position on your
+/// Workcell" (or, with no Position, the whole listing). The gateway keeps no
+/// occupancy: the answer is its own Workcell's Actuation read at the moment of
+/// asking, returned verbatim beside the gateway and Workcell that answered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GatewayOccupancyReading {
+    pub schema: String,
+    /// The Position asked about; `None` when the whole listing was asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_ref: Option<String>,
+    pub gateway_ref: String,
+    /// The Workcell this gateway serves; `None` when it cannot say.
+    #[serde(default)]
+    pub workcell_ref: Option<String>,
+    pub workcell_basis: String,
+    /// Actuation's document, verbatim: `actuation.position-occupancy/v1` for
+    /// one Position, `actuation.position-occupancy-listing/v1` for the listing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occupancy: Option<Value>,
+    /// Set when this Workcell's Actuation could not answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<GatewayOwnerUnavailable>,
+    pub read_at_unix_ms: u64,
+}
+
+/// An owner that could not answer: the exact command and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayOwnerUnavailable {
+    pub command: String,
+    pub reason: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1214,7 +1248,19 @@ pub enum GatewayCommand {
     RecordCommuniqueForward {
         communique_ref: String,
         outcome: CommuniqueForwardOutcome,
+        /// The remote occupancy answer this relay followed, when it did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        routing: Option<CommuniqueRouting>,
     },
+    /// Who occupies this Position on the serving gateway's Workcell. Answered
+    /// by the service from its own Workcell's Actuation; the kernel holds no
+    /// occupancy and refuses it.
+    OccupancyRead {
+        position_ref: String,
+    },
+    /// Every Position's occupancy on the serving gateway's Workcell, the same
+    /// way.
+    OccupancyList,
     Shutdown,
 }
 
@@ -1240,7 +1286,19 @@ impl GatewayCommand {
                 | Self::ReadCommunique { .. }
                 | Self::CommuniqueCounts
                 | Self::CommuniqueForwardQueue
+                | Self::OccupancyRead { .. }
+                | Self::OccupancyList
         )
+    }
+
+    /// The Position an occupancy query asks about: `Some(Some(P))` for one
+    /// Position, `Some(None)` for the listing, `None` for any other command.
+    pub fn occupancy_query(&self) -> Option<Option<&str>> {
+        match self {
+            Self::OccupancyRead { position_ref } => Some(Some(position_ref.as_str())),
+            Self::OccupancyList => Some(None),
+            _ => None,
+        }
     }
 }
 
@@ -1309,6 +1367,9 @@ pub enum GatewayResponse {
     },
     CommuniqueCounts {
         counts: Vec<CommuniqueCount>,
+    },
+    Occupancy {
+        reading: GatewayOccupancyReading,
     },
     Shutdown,
 }
@@ -1467,11 +1528,19 @@ pub fn execute_gateway_command(
         GatewayCommand::RecordCommuniqueForward {
             communique_ref,
             outcome,
+            routing,
         } => Ok(GatewayResponse::CommuniqueRecord {
             communique: gateway
                 .communiques
-                .record_forward(&communique_ref, outcome)?,
+                .record_forward(&communique_ref, outcome, routing)?,
         }),
+        GatewayCommand::OccupancyRead { .. } | GatewayCommand::OccupancyList => {
+            Err(AikitError::new(
+                "agency_gateway.occupancy_not_served",
+                "this gateway holds no occupancy; only a running gateway service answers occupancy \
+                 queries, from its own Workcell's Actuation",
+            ))
+        }
         GatewayCommand::Shutdown => Ok(GatewayResponse::Shutdown),
     }
 }
