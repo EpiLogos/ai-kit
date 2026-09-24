@@ -1539,7 +1539,8 @@ pub fn join(owners: &Owners<'_>, input: &JoinInput, reads: &AikitReads<'_>) -> J
                 Some(root) => match pick(root, &["state"]).as_deref() {
                     Some("present") => match pick(root, &["now_ref"]) {
                         Some(now_ref) => {
-                            let (facet, revision) = read_now(owners, &now_ref, root_source, "root");
+                            let (facet, revision) =
+                                read_now(owners, &now_ref, root_source, "root", None);
                             identity.root_now_ref = Some(now_ref.clone());
                             identity.root_now_revision = revision;
                             facets.root_now = facet;
@@ -1692,7 +1693,13 @@ pub fn join(owners: &Owners<'_>, input: &JoinInput, reads: &AikitReads<'_>) -> J
                             ),
                             Some(revision),
                         ),
-                        None => read_now(owners, &now_ref, source, "child"),
+                        None => read_now(
+                            owners,
+                            &now_ref,
+                            source,
+                            "child",
+                            trail.project_name.as_deref(),
+                        ),
                     };
                 identity.child_now_ref = Some(now_ref);
                 identity.child_now_revision = revision;
@@ -2073,8 +2080,16 @@ fn read_now(
     now_ref: &str,
     source: &str,
     horizon: &str,
+    project: Option<&str>,
 ) -> (Facet, Option<String>) {
-    let read = owners.ctrl("central.now.read", json!({ "now_ref": now_ref }));
+    // A Project-scope NOW (`central:now:project:…`) is read in its Project.
+    let input = match project {
+        Some(project) if now_ref.starts_with("central:now:project:") => {
+            json!({ "now_ref": now_ref, "project": project })
+        }
+        _ => json!({ "now_ref": now_ref }),
+    };
+    let read = owners.ctrl("central.now.read", input);
     match read.ok() {
         Some(data) => {
             let revision = data
