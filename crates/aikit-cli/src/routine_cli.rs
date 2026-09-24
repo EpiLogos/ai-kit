@@ -22,9 +22,12 @@ use aikit_store::{ForeignAdoption, RoutineStore, StoredRoutine};
 
 use crate::routine_dispatch::{
     CatalogMethodResolver, CtrlOccurrenceSource, MethodResolver, OccurrenceSource,
-    ResidentEncounterRunner, RoutineDispatcher, AIKIT_GATEWAY_PROVIDER,
+    ResidentEncounterRunner, RoutineDispatcher, RoutineRunner, AIKIT_GATEWAY_PROVIDER,
+    TICK_INTERVAL_MS,
 };
-use crate::routine_native::{MethodSelectedRunner, NativeActionRunner};
+use crate::routine_native::{
+    FactoryMethodBinding, MethodSelectedRunner, NativeActionRunner, NativeBody,
+};
 
 /// The trigger a create call declares: either a full `aikit.time-schedule/v1`
 /// record or a plain RoutineTrigger.
@@ -852,18 +855,170 @@ pub struct GatewayDispatcherTick {
 
 impl aikit_adapters::GatewayTick for GatewayDispatcherTick {
     fn tick(&self) -> aikit_core::Result<Value> {
-        let report = self.dispatcher.tick(now_unix_ms())?;
-        serde_json::to_value(report)
-            .map_err(|error| AikitError::new("cli.routine_json_failed", error.to_string()))
+        gateway_pass(&self.dispatcher, now_unix_ms())
     }
 }
 
 /// One dispatcher pass for `aikit gateway tick` (A-4).
 pub fn gateway_tick(home: &aikit_store::AikitHome) -> Result<Value> {
     let dispatcher = production_dispatcher(home.clone())?;
-    let report = dispatcher.tick(now_unix_ms())?;
-    serde_json::to_value(report)
-        .map_err(|error| AikitError::new("cli.routine_json_failed", error.to_string()))
+    gateway_pass(&dispatcher, now_unix_ms())
+}
+
+fn gateway_pass(dispatcher: &ProductionDispatcher, now: i64) -> Result<Value> {
+    let report = dispatcher.tick(now)?;
+    let mut value = serde_json::to_value(report)
+        .map_err(|error| AikitError::new("cli.routine_json_failed", error.to_string()))?;
+    let resolver = CatalogMethodResolver {
+        home: dispatcher.home().clone(),
+    };
+    let runner = NativeActionRunner::from_env(dispatcher.home().clone(), PathBuf::new());
+    let changes = factory_change_pass(dispatcher, &resolver, now, |binding| {
+        observe_factory_change(dispatcher.home(), &runner, binding)
+    });
+    value["factory_changes"] = changes;
+    Ok(value)
+}
+
+/// A read of each enabled, project-bound Factory event Routine's native owner
+/// cursor. The scheduled Routine remains the recovery and cadence fallback;
+/// this pass admits an event only when the owner cursor differs from Redis.
+/// No probe result is treated as an authority grant: event_pass revalidates
+/// Method, proof, Routine state and action authority before native execution.
+pub fn factory_change_pass<O, M, R, F>(
+    dispatcher: &RoutineDispatcher<O, M, R>,
+    resolver: &M,
+    now: i64,
+    mut observe: F,
+) -> Value
+where
+    O: OccurrenceSource,
+    M: MethodResolver,
+    R: RoutineRunner,
+    F: FnMut(&FactoryMethodBinding) -> Result<Option<Value>>,
+{
+    let mut considered = Vec::new();
+    let mut changed = Vec::new();
+    let mut dispatched = Vec::new();
+    let mut failures = Vec::new();
+    let records = match RoutineStore::new(dispatcher.home().clone()).list() {
+        Ok(records) => records,
+        Err(error) => {
+            return json!({"considered":considered,"changed":changed,"dispatched":dispatched,"failures":[error.to_string()]})
+        }
+    };
+    let mut project_counts = std::collections::BTreeMap::<String, usize>::new();
+    for record in &records {
+        if record.routine.state == RoutineState::Enabled {
+            if let RoutineTrigger::Event { event_ref } = &record.routine.trigger {
+                if let Some(project) =
+                    event_ref.strip_prefix("aikit.routine-event/v1:factory:field-changed:")
+                {
+                    *project_counts.entry(project.to_owned()).or_default() += 1;
+                }
+            }
+        }
+    }
+    for record in records {
+        if record.routine.state != RoutineState::Enabled {
+            continue;
+        }
+        let RoutineTrigger::Event { event_ref } = &record.routine.trigger else {
+            continue;
+        };
+        if !event_ref.starts_with("aikit.routine-event/v1:factory:field-changed:") {
+            continue;
+        }
+        let native = match resolver.native_method(&record.routine.method) {
+            Ok(Some(native)) if native.body == NativeBody::FactoryFieldRefresh => native,
+            Ok(_) => continue,
+            Err(error) => {
+                failures.push(format!("{}: {error}", record.routine.id));
+                continue;
+            }
+        };
+        let Some(binding) = native.factory else {
+            failures.push(format!(
+                "{}: Factory Method has no binding",
+                record.routine.id
+            ));
+            continue;
+        };
+        let expected_event = format!(
+            "aikit.routine-event/v1:factory:field-changed:{}",
+            binding.project_world_ref
+        );
+        if *event_ref != expected_event {
+            failures.push(format!(
+                "{}: Factory change trigger does not match bound ProjectWorld",
+                record.routine.id
+            ));
+            continue;
+        }
+        if project_counts
+            .get(&binding.project_world_ref)
+            .copied()
+            .unwrap_or(0)
+            != 1
+        {
+            failures.push(format!(
+                "{}: more than one Factory change Routine is enabled for {}",
+                record.routine.id, binding.project_world_ref
+            ));
+            continue;
+        }
+        considered.push(binding.project_world_ref.clone());
+        let field = match observe(&binding) {
+            Ok(Some(field)) => field,
+            Ok(None) => continue,
+            Err(error) => {
+                failures.push(format!("{}: {error}", record.routine.id));
+                continue;
+            }
+        };
+        changed.push(binding.project_world_ref.clone());
+        // A stable bucket suppresses duplicate gateway ticks in one interval.
+        // A failed admission/publication or Redis loss can retry on the next
+        // bucket even when the owner cursor itself has not changed again.
+        let packet = json!({
+            "project_world_ref": binding.project_world_ref,
+            "owner_cursor": field.get("cursor"),
+            "source_revision": field.get("source_revision"),
+            "observed_bucket_unix_ms": now.div_euclid(TICK_INTERVAL_MS) * TICK_INTERVAL_MS,
+        });
+        match dispatcher.event_pass("factory", "field-changed", &packet, now) {
+            Ok(records) => dispatched.extend(records),
+            Err(error) => failures.push(format!("{}: {error}", record.routine.id)),
+        }
+    }
+    json!({"considered":considered,"changed":changed,"dispatched":dispatched,"failures":failures})
+}
+
+/// Returns a changed native field, or no event when Redis already carries its
+/// cursor. An absent Redis projection is a change even if an earlier event
+/// admitted the same owner cursor before the loss.
+pub fn observe_factory_change(
+    home: &aikit_store::AikitHome,
+    runner: &NativeActionRunner,
+    binding: &FactoryMethodBinding,
+) -> Result<Option<Value>> {
+    let field = runner.observe_factory_field(binding)?;
+    let redis_path =
+        crate::inhabitation::world_redis_config_path(None, Some(home)).ok_or_else(|| {
+            AikitError::new(
+                "routine.factory_redis_unavailable",
+                "Redis World config unavailable",
+            )
+        })?;
+    let redis = crate::inhabitation::open_world_store(&redis_path)?;
+    let hot = redis
+        .store
+        .read_factory_sensing(&binding.project_world_ref, redis.secret.as_ref())?;
+    if hot.as_ref().and_then(|p| p.field.get("cursor")) == field.get("cursor") {
+        Ok(None)
+    } else {
+        Ok(Some(field))
+    }
 }
 
 #[cfg(test)]

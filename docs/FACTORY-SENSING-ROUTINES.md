@@ -44,6 +44,28 @@ The Project policy must enable `workflows.collect` and
 `every:<milliseconds>`, `cron:<five fields>`, or `daily:<HH:MM>`. A disabled
 workflow, changed cadence or policy edit during a run refuses publication.
 
+For change-triggered refresh, enable a companion Event Routine using the same
+bound `factory-field-refresh` Method and only
+`factory:action/telemetry.field` authority. Its trigger is exact to the
+ProjectWorld:
+
+```json
+{"kind":"event","event_ref":"aikit.routine-event/v1:factory:field-changed:project:Example"}
+```
+
+Every gateway tick reads that Project's bounded native Factory field with a
+five-second probe limit. Factory's field cursor covers its current sensing,
+custody, Attempt and work state, plus the bounded native Position occupancy
+reading. A changed cursor, or a missing Redis projection, passes a scoped
+observation through the existing Routine proof and authority gate. The native
+run requires exactly one enabled scheduled refresh Routine on that same Method
+revision and checks its saved cadence against current policy before reading
+Factory again and publishing with Redis compare-and-swap. The
+scheduled refresh remains enabled at the policy's exact cadence as a recovery
+fallback. Failed publication and Redis loss are retried on the next gateway
+tick bucket; an unchanged owner/hot cursor dispatches nothing. A disabled
+companion or disabled policy stops change dispatch.
+
 The runner reads the Project's Redis version **before** running Factory or
 reading its field. It requires Factory's field schema, project, source
 revision, sensing sequence and observation time, then publishes with

@@ -558,12 +558,50 @@ fn previous_civil_day(date: &str) -> Option<String> {
 }
 
 impl NativeActionRunner {
-    fn factory_policy_cadence(
-        run: &Run<'_>,
+    /// Read the bound Factory owner field for a gateway change observation.
+    /// This is read-only; the admitted native Routine re-reads before publish.
+    pub fn observe_factory_field(&self, binding: &FactoryMethodBinding) -> Result<Value> {
+        Self::factory_policy_enabled(binding, false)?;
+        let mut process = SystemRunner::new().with_timeout(std::time::Duration::from_secs(5));
+        process = process.with_env_removed("CENTRAL_NATIVE_TOKEN");
+        let output = process.run(&[
+            self.factory.clone(),
+            "telemetry".into(),
+            "field".into(),
+            binding.state.display().to_string(),
+            "--policy".into(),
+            binding.policy.display().to_string(),
+            "--json".into(),
+        ])?;
+        if output.status != 0 {
+            return Err(AikitError::new(
+                "routine.factory_field_failed",
+                format!(
+                    "Factory owner field exited {}: {}",
+                    output.status,
+                    output.stderr.trim()
+                ),
+            ));
+        }
+        let field: Value = serde_json::from_str(&output.stdout)
+            .map_err(|error| AikitError::new("routine.factory_field_invalid", error.to_string()))?;
+        if field.get("schema").and_then(Value::as_str) != Some("factory.telemetry-field/v1")
+            || field.get("project_world_ref").and_then(Value::as_str)
+                != Some(binding.project_world_ref.as_str())
+            || field.get("cursor").and_then(Value::as_str).is_none()
+        {
+            return Err(AikitError::new(
+                "routine.factory_field_invalid",
+                "Factory owner field lacks the bound ProjectWorld, schema or cursor",
+            ));
+        }
+        Ok(field)
+    }
+
+    fn factory_policy_enabled(
         binding: &FactoryMethodBinding,
         collect: bool,
-    ) -> Result<String> {
-        use aikit_core::schedule::ScheduleShape;
+    ) -> Result<(Value, String)> {
         let metadata = std::fs::symlink_metadata(&binding.policy).map_err(|error| {
             AikitError::new(
                 "routine.factory_policy_unavailable",
@@ -609,6 +647,17 @@ impl NativeActionRunner {
                 ),
             ));
         }
+        Ok((policy, format!("blake3:{}", blake3::hash(&bytes).to_hex())))
+    }
+
+    fn factory_policy_cadence(
+        run: &Run<'_>,
+        binding: &FactoryMethodBinding,
+        collect: bool,
+    ) -> Result<String> {
+        use aikit_core::schedule::ScheduleShape;
+        let (policy, revision) = Self::factory_policy_enabled(binding, collect)?;
+        let workflow = if collect { "collect" } else { "field-refresh" };
         let declared = policy
             .pointer(&format!("/workflows/{workflow}/schedule"))
             .and_then(Value::as_str)
@@ -618,12 +667,51 @@ impl NativeActionRunner {
                     format!("{} lacks the {workflow} cadence", binding.policy.display()),
                 )
             })?;
-        let saved = run.request.time_schedule.as_ref().ok_or_else(|| {
-            AikitError::new(
-                "routine.factory_schedule_missing",
-                "Factory native Routine must have a saved AIKit schedule",
-            )
-        })?;
+        let saved = if let Some(saved) = run.request.time_schedule.clone() {
+            saved
+        } else {
+            let packet = run.request.observation_payload.as_ref();
+            let admitted_change = !collect
+                && packet.and_then(|v| v.get("schema")).and_then(Value::as_str)
+                    == Some("aikit.routine-event-observation/v1")
+                && packet.and_then(|v| v.get("client")).and_then(Value::as_str) == Some("factory")
+                && packet.and_then(|v| v.get("kind")).and_then(Value::as_str)
+                    == Some("field-changed")
+                && packet
+                    .and_then(|v| v.pointer("/payload/project_world_ref"))
+                    .and_then(Value::as_str)
+                    == Some(binding.project_world_ref.as_str());
+            if !admitted_change {
+                return Err(AikitError::new(
+                    "routine.factory_schedule_missing",
+                    "Factory native Routine needs a saved schedule or a project-matched Factory change event",
+                ));
+            }
+            let companions = aikit_store::RoutineStore::new(run.runner.home.clone())
+                .list()?
+                .into_iter()
+                .filter(|record| {
+                    record.routine.state == aikit_core::resource::routine::RoutineState::Enabled
+                        && matches!(
+                            record.routine.trigger,
+                            aikit_core::resource::routine::RoutineTrigger::Schedule { .. }
+                        )
+                        && record.routine.method == run.request.method_ref
+                        && record.routine.method_revision == run.request.method_revision
+                        && record.time_schedule.is_some()
+                })
+                .collect::<Vec<_>>();
+            if companions.len() != 1 {
+                return Err(AikitError::new(
+                    "routine.factory_schedule_missing",
+                    "Factory change event needs exactly one enabled scheduled field-refresh Routine on the same Method revision",
+                ));
+            }
+            companions[0]
+                .time_schedule
+                .clone()
+                .expect("filtered schedule")
+        };
         let actual = match &saved.schedule {
             ScheduleShape::Every { interval_ms } => format!("every:{interval_ms}"),
             ScheduleShape::Cron { expression } => format!("cron:{expression}"),
@@ -638,7 +726,7 @@ impl NativeActionRunner {
         if declared != actual {
             return Err(AikitError::new("routine.factory_cadence_changed", format!("{workflow} policy cadence {declared} differs from saved Routine schedule {actual}; reprove and update the Routine")));
         }
-        Ok(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
+        Ok(revision)
     }
 
     fn factory_sensing(&self, run: &mut Run<'_>, collect: bool) -> (RunStatus, Value) {
