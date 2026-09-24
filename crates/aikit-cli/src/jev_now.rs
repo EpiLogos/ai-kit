@@ -1065,6 +1065,17 @@ fn factory_evidence(config: &FactoryPrepare) -> Result<FactoryEvidence> {
     })
 }
 
+/// `central.now.read` input: a Project-scope NOW (`central:now:project:…`)
+/// is read in that Project's scope, a root NOW in the root register.
+fn now_read_input(now_ref: &str, project: Option<&str>) -> Value {
+    match project {
+        Some(project) if now_ref.starts_with("central:now:project:") => {
+            json!({"now_ref": now_ref, "project": project})
+        }
+        _ => json!({"now_ref": now_ref}),
+    }
+}
+
 pub(crate) fn extract_now_source_refs(data: &Value) -> Vec<String> {
     data["record"]["source_refs"]
         .as_array()
@@ -1089,7 +1100,7 @@ fn read_exact_sources(
         &ctrl,
         &config.root,
         "central.now.read",
-        &json!({"now_ref":now_ref}),
+        &now_read_input(now_ref.as_str(), config.project.as_deref()),
     )?;
     let mut refs: BTreeSet<String> = extract_now_source_refs(&now).into_iter().collect();
     refs.extend(config.source_refs.iter().cloned());
@@ -1806,5 +1817,20 @@ mod tests {
             .unwrap();
         let error = revalidate_matrix(&config, &evidence).unwrap_err();
         assert_eq!(error.code(), "now_context.matrix_stale");
+    }
+    #[test]
+    fn a_project_scope_now_is_read_in_its_project() {
+        assert_eq!(
+            now_read_input("central:now:project:O-I:abc", Some("O-I")),
+            json!({"now_ref": "central:now:project:O-I:abc", "project": "O-I"})
+        );
+        assert_eq!(
+            now_read_input("central:now:control:root:abc", Some("O-I")),
+            json!({"now_ref": "central:now:control:root:abc"})
+        );
+        assert_eq!(
+            now_read_input("central:now:project:O-I:abc", None),
+            json!({"now_ref": "central:now:project:O-I:abc"})
+        );
     }
 }

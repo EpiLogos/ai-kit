@@ -1453,6 +1453,12 @@ pub fn join(owners: &Owners<'_>, input: &JoinInput, reads: &AikitReads<'_>) -> J
                                     data.clone(),
                                 )
                                 .because(basis);
+                                // The occupant acts on its own custody through Factory.
+                                if let Some(custody) = refs.get("custody_ref") {
+                                    facets.current_work = facets.current_work.clone().with_next(format!(
+                                        "factory development custody update {state} --custody {custody} --state completed|blocked|released --reason <why>"
+                                    ));
+                                }
                             }
                             "ambiguous" => {
                                 facets.current_work = Facet::ambiguous(
@@ -1533,7 +1539,8 @@ pub fn join(owners: &Owners<'_>, input: &JoinInput, reads: &AikitReads<'_>) -> J
                 Some(root) => match pick(root, &["state"]).as_deref() {
                     Some("present") => match pick(root, &["now_ref"]) {
                         Some(now_ref) => {
-                            let (facet, revision) = read_now(owners, &now_ref, root_source, "root");
+                            let (facet, revision) =
+                                read_now(owners, &now_ref, root_source, "root", None);
                             identity.root_now_ref = Some(now_ref.clone());
                             identity.root_now_revision = revision;
                             facets.root_now = facet;
@@ -1686,7 +1693,13 @@ pub fn join(owners: &Owners<'_>, input: &JoinInput, reads: &AikitReads<'_>) -> J
                             ),
                             Some(revision),
                         ),
-                        None => read_now(owners, &now_ref, source, "child"),
+                        None => read_now(
+                            owners,
+                            &now_ref,
+                            source,
+                            "child",
+                            trail.project_name.as_deref(),
+                        ),
                     };
                 identity.child_now_ref = Some(now_ref);
                 identity.child_now_revision = revision;
@@ -2067,8 +2080,16 @@ fn read_now(
     now_ref: &str,
     source: &str,
     horizon: &str,
+    project: Option<&str>,
 ) -> (Facet, Option<String>) {
-    let read = owners.ctrl("central.now.read", json!({ "now_ref": now_ref }));
+    // A Project-scope NOW (`central:now:project:…`) is read in its Project.
+    let input = match project {
+        Some(project) if now_ref.starts_with("central:now:project:") => {
+            json!({ "now_ref": now_ref, "project": project })
+        }
+        _ => json!({ "now_ref": now_ref }),
+    };
+    let read = owners.ctrl("central.now.read", input);
     match read.ok() {
         Some(data) => {
             let revision = data
@@ -2175,6 +2196,11 @@ pub const LEAN_ENTRY_MAX_CHARS: usize = 2_000;
 
 /// The SessionStart lean entry: World, Position, occupant, work, NOW, body and
 /// context pointers and the faculties — replacing the historical NOW dump.
+/// Factory answered for this Position and it holds nothing in progress.
+fn identity_holds_no_work(reading: &InhabitationReading) -> bool {
+    reading.identity.current_work_outcome.as_deref() == Some("none")
+}
+
 pub fn render_lean_entry(reading: &InhabitationReading, project: Option<&str>) -> String {
     let f = &reading.facets;
     let value_line = |facet: &Facet| -> String {
@@ -2217,7 +2243,17 @@ pub fn render_lean_entry(reading: &InhabitationReading, project: Option<&str>) -
             f.agent.summary.as_deref().unwrap_or("-"),
             f.agency.summary.as_deref().unwrap_or("-")
         ),
-        format!("Current work: {}", value_line(&f.current_work)),
+        format!(
+            "Current work: {}{}",
+            value_line(&f.current_work),
+            if let Some(next) = f.current_work.next.as_deref().filter(|_| f.current_work.is_present()) {
+                format!(" · update it: {next}")
+            } else if identity_holds_no_work(reading) {
+                " — this Position holds no custody: other actors' NOW handoffs are not its work; check `aikit gateway inbox`, or ask for work to be commissioned".to_owned()
+            } else {
+                String::new()
+            }
+        ),
         format!(
             "NOW: root {} · child {}",
             value_line(&f.root_now),
@@ -2643,6 +2679,12 @@ pub(crate) mod tests {
         assert_eq!(f.body.state, FacetState::Present);
         assert_eq!(f.workcell.state, FacetState::Present);
         assert_eq!(f.current_work.state, FacetState::Present);
+        let update = f.current_work.next.as_deref().unwrap_or_default();
+        assert!(
+            update.contains("factory development custody update")
+                && update.contains("--custody factory:custody:c1"),
+            "the occupant is told how to act on its own custody: {update}"
+        );
         assert_eq!(f.root_now.state, FacetState::Present);
         assert_eq!(f.child_now.state, FacetState::Present);
         assert_eq!(

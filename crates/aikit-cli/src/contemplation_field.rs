@@ -1074,7 +1074,19 @@ fn read_now(request: &FieldRequest) -> Result<Option<Value>> {
         &ctrl,
         root,
         "central.now.read",
-        &json!({"now_ref": now_ref}),
+        &match request
+            .projectcentral
+            .as_deref()
+            .and_then(|pc| pc.parent())
+            .and_then(|project| project.file_name())
+            .and_then(|name| name.to_str())
+        {
+            // A Project-scope NOW is read in its Project.
+            Some(project) if now_ref.starts_with("central:now:project:") => {
+                json!({"now_ref": now_ref, "project": project})
+            }
+            _ => json!({"now_ref": now_ref}),
+        },
     )?;
     let source_refs = extract_now_source_refs(&data);
     Ok(Some(json!({

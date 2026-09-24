@@ -32,7 +32,9 @@ const MAX_RENDERED_CHARS: usize = 9_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CentralDayPointer {
     pub day_ref: String,
-    pub revision: String,
+    /// `None` when the Day is open but its document is not yet written (an
+    /// environmental rollover opens the Day; the person writes it).
+    pub revision: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -112,10 +114,16 @@ impl CentralTemporalGround {
         }
 
         lines.push(match &self.day {
-            Some(day) => format!(
-                "Day: {} @ {} (read it with `ctrl --json action run {DAY_READ_ACTION} '{{}}'`)",
-                day.day_ref, day.revision
+            Some(CentralDayPointer {
+                day_ref,
+                revision: Some(revision),
+            }) => format!(
+                "Day: {day_ref} @ {revision} (read it with `ctrl --json action run {DAY_READ_ACTION} '{{}}'`)"
             ),
+            Some(CentralDayPointer {
+                day_ref,
+                revision: None,
+            }) => format!("Day: {day_ref} (open; its document is not yet written)"),
             None => "Day: no open root Day".to_owned(),
         });
 
@@ -147,7 +155,10 @@ pub fn read_central_temporal_ground<R: CommandRunner>(
         .and_then(|day| {
             Some(CentralDayPointer {
                 day_ref: day.get("day_ref")?.as_str()?.to_owned(),
-                revision: day.get("revision")?.as_str()?.to_owned(),
+                revision: day
+                    .get("revision")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
             })
         });
 
@@ -324,6 +335,31 @@ mod tests {
         .unwrap();
         assert!(ground.day.is_none());
         assert!(ground.render().contains("Day: no open root Day"));
+    }
+
+    #[test]
+    fn an_open_day_without_a_written_document_is_still_open() {
+        let now = success(json!({"exists": true}));
+        let day = success(json!({
+            "day_ref": "central:day:control:root:2026-09-24",
+            "document": null,
+            "document_state": "uninitialised"
+        }));
+        let runner = ScriptedRunner::new()
+            .on(NOW_INSPECT_ACTION, &now)
+            .on(DAY_READ_ACTION, &day);
+        let ground = read_central_temporal_ground(
+            &runner,
+            Path::new("/home/me/Central"),
+            Path::new("/home/me/Central/Work/example"),
+        )
+        .unwrap()
+        .unwrap();
+        let rendered = ground.render();
+        assert!(rendered.contains(
+            "Day: central:day:control:root:2026-09-24 (open; its document is not yet written)"
+        ));
+        assert!(!rendered.contains("no open root Day"));
     }
 
     #[test]

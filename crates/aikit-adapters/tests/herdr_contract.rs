@@ -875,7 +875,9 @@ fn focusing_a_surface_is_withheld_because_herdr_pane_focus_is_neighbour_relative
     // Installed Herdr has no absolute pane focus: `herdr pane focus` navigates
     // to a *neighbour* (`--direction left|right|up|down`), so the only command
     // that looks like pane focus would silently move the operator somewhere
-    // they did not ask to go. The provider withholds instead.
+    // they did not ask to go. Unless the provider can observe that the pane is
+    // its workspace's own focused pane (then `workspace focus` is exact), it
+    // withholds instead. Here no snapshot can be read, so nothing is proven.
     let runner = Arc::new(ScriptedRunner::new());
     let mut provider = HerdrWorkingEnvironment::new(runner.clone(), r("provider/herdr"))
         .bind_surface(r("surface/reference/root"), "w1:p1");
@@ -890,8 +892,11 @@ fn focusing_a_surface_is_withheld_because_herdr_pane_focus_is_neighbour_relative
         "the refusal names the real provider limitation and the pane: {message}"
     );
     assert!(
-        runner.calls().is_empty(),
-        "a withheld operation must not reach the provider: {:?}",
+        !runner
+            .call_lines()
+            .iter()
+            .any(|line| line.contains("focus")),
+        "a withheld operation never issues a focus to the provider: {:?}",
         runner.calls()
     );
 
