@@ -195,6 +195,38 @@ impl World {
             self.prepare_input().to_string(),
         ])
     }
+    fn attach_second_session_with_same_native_agency(&self) {
+        let space = SessionSpaceRef::parse("session-space/task").unwrap();
+        let store = SessionSpaceApplicationStore::new(self.home.clone());
+        store
+            .apply(
+                &store
+                    .stage(
+                        Some(&space),
+                        SessionSpaceMutation::AttachAgentSession {
+                            attachment: SessionSpaceAgentAttachmentIntent {
+                                agent_session: r("agent-session/other"),
+                                purpose: Some("Native shared-history boundary".into()),
+                                provenance: vec!["native-test".into()],
+                            },
+                        },
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        let existing = self.home.state().join("encounter-agencies").join(format!(
+            "{}.json",
+            blake3::hash(b"agent-session/task").to_hex()
+        ));
+        let actual_binding: Value = serde_json::from_slice(&fs::read(existing).unwrap()).unwrap();
+        self.cli(&[
+            "encounter-agency-configure".into(),
+            "--agent-session".into(),
+            "agent-session/other".into(),
+            "--binding-json".into(),
+            actual_binding.to_string(),
+        ]);
+    }
     fn start(&mut self) {
         self.start_with_pi_config_ambient(None);
     }
@@ -542,80 +574,786 @@ fn missing_task_authority_refuses_before_now_allocation() {
     assert!(!w.root.join("Control/agents/now").exists());
 }
 
+#[test]
+#[ignore = "requires exact source-built Central, Workcell and Actuation; mandatory CAW lane"]
+fn refused_central_source_amendment_keeps_ready_task_and_same_now() {
+    let w = World::new(true);
+    let ready = w.prepare();
+    let before = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(before, ready);
+    let mut amended = w.prepare_input();
+    amended["central"]["source_refs"] = json!(["source/agency", "source/new-skill"]);
+    let refused = w.command(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        amended.to_string(),
+        "--expected-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("allocation identity is immutable"));
+    let after = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(after, before, "refusal must not publish pending over ready");
+    let retried = w.cli(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        w.prepare_input().to_string(),
+        "--expected-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert_eq!(retried["ready"], true);
+    assert_ne!(retried["revision"], ready["revision"]);
+    assert_eq!(
+        retried["allocation"]["allocation"]["now_ref"],
+        ready["allocation"]["allocation"]["now_ref"]
+    );
+    assert_eq!(
+        retried["allocation"]["allocation"]["record"]["task_ref"],
+        ready["allocation"]["allocation"]["record"]["task_ref"]
+    );
+}
+
+#[test]
+#[ignore = "requires exact source-built Central, Workcell and Actuation; mandatory CAW lane"]
+fn unhosted_pending_abort_revalidates_ready_with_fresh_revision_and_stale_cas_refuses() {
+    let mut w = World::new(true);
+    let ready = w.prepare();
+    let mut invalid = w.prepare_input();
+    invalid["selected_directories"] =
+        json!([w.root.join("Work/demo/src/missing-native-directory")]);
+    let failed = w.command(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        invalid.to_string(),
+        "--expected-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(
+        !failed.status.success(),
+        "a nonexistent selected directory must fail the actual owner boundary"
+    );
+    let pending = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(pending["ready"], false);
+    assert_eq!(
+        pending["request"]["central"]["task_ref"],
+        ready["request"]["central"]["task_ref"]
+    );
+    w.attach_second_session_with_same_native_agency();
+    let other_ready = w.cli(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/other".into(),
+        "--request-json".into(),
+        w.prepare_input().to_string(),
+    ]);
+    let other_failed = w.command(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/other".into(),
+        "--request-json".into(),
+        invalid.to_string(),
+        "--expected-revision".into(),
+        other_ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!other_failed.status.success());
+    let foreign_history = w.command(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        other_ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(
+        !foreign_history.status.success(),
+        "another AgentSession's real native ready record is not this session's recovery target"
+    );
+    assert_eq!(
+        w.cli(&[
+            "encounter-task-read".into(),
+            "--agent-session".into(),
+            "agent-session/task".into()
+        ]),
+        pending
+    );
+    let history = w.home.state().join("encounter-tasks/history");
+    let same_revision_history: Vec<Value> = fs::read_dir(&history)
+        .unwrap()
+        .map(|item| serde_json::from_slice(&fs::read(item.unwrap().path()).unwrap()).unwrap())
+        .filter(|record: &Value| record["revision"] == ready["revision"])
+        .collect();
+    assert_eq!(
+        same_revision_history
+            .iter()
+            .filter(|record| record["ready"] == true)
+            .count(),
+        1,
+        "exactly one ready history reading may be restored"
+    );
+    assert!(
+        same_revision_history
+            .iter()
+            .any(|record| record["ready"] == false),
+        "the native pending journal legitimately shares its revision with ready"
+    );
+    let entry = fs::read_dir(&history)
+        .unwrap()
+        .map(|item| item.unwrap().path())
+        .find(|path| {
+            serde_json::from_slice::<Value>(&fs::read(path).unwrap()).is_ok_and(|record| {
+                record["revision"] == ready["revision"] && record["ready"] == true
+            })
+        })
+        .expect("the actual earlier ready record is retained in native history");
+    let original = fs::read(&entry).unwrap();
+    fs::write(&entry, b"corrupt native history bytes").unwrap();
+    let corrupted = w.command(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!corrupted.status.success());
+    fs::remove_file(&entry).unwrap();
+    std::os::unix::fs::symlink(w.root.join("agency.json"), &entry).unwrap();
+    let redirected = w.command(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!redirected.status.success());
+    fs::remove_file(&entry).unwrap();
+    fs::write(&entry, original).unwrap();
+    let stale = w.command(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!stale.status.success());
+    assert_eq!(
+        w.cli(&[
+            "encounter-task-read".into(),
+            "--agent-session".into(),
+            "agent-session/task".into()
+        ]),
+        pending
+    );
+    let restored = w.cli(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert_eq!(restored["status"], "restored");
+    let resumed = &restored["record"];
+    assert_eq!(resumed["ready"], true);
+    assert_ne!(resumed["revision"], ready["revision"]);
+    assert_ne!(resumed["revision"], pending["revision"]);
+    assert_eq!(
+        resumed["allocation"]["allocation"]["now_ref"],
+        ready["allocation"]["allocation"]["now_ref"]
+    );
+    assert_eq!(
+        resumed["request"]["central"]["task_ref"],
+        ready["request"]["central"]["task_ref"]
+    );
+    assert_eq!(
+        resumed["launcher"]["argv"].as_array().unwrap().last(),
+        Some(&resumed["revision"])
+    );
+    w.start();
+    assert_eq!(w.open(resumed, &w.root.join("Work/demo/src"))["ok"], true);
+    let repeated = w.command(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(
+        !repeated.status.success(),
+        "stale abort cannot overwrite the restored live body"
+    );
+}
+
+#[test]
+#[ignore = "requires exact source-built Central, Workcell and Actuation; mandatory CAW lane"]
+fn expired_unhosted_ready_is_reprepared_with_same_native_now_and_fresh_lease() {
+    let mut w = World::new(true);
+    let policy_path = w.root.join("Control/user/placement.json");
+    let mut policy: Value = serde_json::from_slice(&fs::read(&policy_path).unwrap()).unwrap();
+    policy["lease_seconds"] = json!(10);
+    fs::write(&policy_path, policy.to_string()).unwrap();
+    let ready = w.prepare();
+    let old_expiry = ready["allocation"]["allocation"]["policy"]["expires_at_unix_seconds"]
+        .as_u64()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        <= old_expiry
+    {
+        assert!(
+            Instant::now() < deadline,
+            "real short native lease did not expire"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let mut invalid = w.prepare_input();
+    invalid["selected_directories"] =
+        json!([w.root.join("Work/demo/src/missing-native-directory")]);
+    let refused = w.command(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        invalid.to_string(),
+        "--expected-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!refused.status.success());
+    let pending = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(pending["ready"], false);
+    let restored = w.cli(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    let resumed = &restored["record"];
+    assert_eq!(resumed["ready"], true);
+    assert_ne!(resumed["revision"], ready["revision"]);
+    assert_eq!(
+        resumed["allocation"]["allocation"]["now_ref"],
+        ready["allocation"]["allocation"]["now_ref"]
+    );
+    assert_eq!(
+        resumed["allocation"]["allocation"]["source"]["ref"],
+        ready["allocation"]["allocation"]["source"]["ref"]
+    );
+    assert_eq!(
+        resumed["allocation"]["allocation"]["policy"]["revision"],
+        ready["allocation"]["allocation"]["policy"]["revision"]
+    );
+    assert!(
+        resumed["allocation"]["allocation"]["policy"]["expires_at_unix_seconds"]
+            .as_u64()
+            .unwrap()
+            > old_expiry,
+        "recovery must obtain a fresh finite native lease"
+    );
+    for key in ["writable_paths", "protected_paths", "required_coverage"] {
+        assert_eq!(resumed["requirements"][key], ready["requirements"][key]);
+    }
+    w.start();
+    assert_eq!(w.open(resumed, &w.root.join("Work/demo/src"))["ok"], true);
+}
+
+#[test]
+#[ignore = "requires exact source-built Central, Workcell and Actuation; mandatory CAW lane"]
+fn pending_abort_refuses_changed_native_placement_policy_and_remains_recoverable() {
+    let w = World::new(true);
+    let ready = w.prepare();
+    let mut invalid = w.prepare_input();
+    invalid["selected_directories"] =
+        json!([w.root.join("Work/demo/src/missing-native-directory")]);
+    let refused = w.command(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        invalid.to_string(),
+        "--expected-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!refused.status.success());
+    let pending = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    let policy_path = w.root.join("Control/user/placement.json");
+    let original = fs::read(&policy_path).unwrap();
+    let mut changed: Value = serde_json::from_slice(&original).unwrap();
+    changed["lease_seconds"] = json!(301);
+    fs::write(&policy_path, changed.to_string()).unwrap();
+    let command = |expected_revision: &str| {
+        vec![
+            "encounter-task-abort".into(),
+            "--agent-session".into(),
+            "agent-session/task".into(),
+            "--expected-revision".into(),
+            expected_revision.into(),
+            "--restore-revision".into(),
+            ready["revision"].as_str().unwrap().into(),
+        ]
+    };
+    let rejected = w.command(&command(pending["revision"].as_str().unwrap()));
+    assert!(
+        !rejected.status.success(),
+        "changed policy cannot renew the old task authority"
+    );
+    let still_pending = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(still_pending["ready"], false);
+    assert_ne!(still_pending["revision"], pending["revision"]);
+    assert_eq!(
+        still_pending["request"], ready["request"],
+        "pending recovery is bound to the original request"
+    );
+    fs::write(&policy_path, original).unwrap();
+    let stale = w.command(&command(pending["revision"].as_str().unwrap()));
+    assert!(
+        !stale.status.success(),
+        "the first pending CAS was consumed by the recovery journal"
+    );
+    let recovered = w.cli(&command(still_pending["revision"].as_str().unwrap()));
+    assert_eq!(recovered["record"]["ready"], true);
+    assert_eq!(
+        recovered["record"]["allocation"]["allocation"]["now_ref"],
+        ready["allocation"]["allocation"]["now_ref"]
+    );
+}
+
+#[test]
+#[ignore = "requires exact source-built Central, Workcell and Actuation; mandatory CAW lane"]
+fn first_pending_preparation_remains_bound_to_same_native_request() {
+    let w = World::new(true);
+    let directory = w.root.join("Work/demo/src/selected-after-failure");
+    let mut request = w.prepare_input();
+    request["selected_directories"] = json!([directory]);
+    let failed = w.command(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        request.to_string(),
+    ]);
+    assert!(!failed.status.success());
+    let pending = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(pending["ready"], false);
+    let replacement = w.command(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        w.prepare_input().to_string(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!replacement.status.success());
+    let abort = w.command(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        "task-binding/nonexistent".into(),
+    ]);
+    assert!(
+        !abort.status.success(),
+        "no earlier ready body may be invented"
+    );
+    assert_eq!(
+        w.cli(&[
+            "encounter-task-read".into(),
+            "--agent-session".into(),
+            "agent-session/task".into(),
+        ]),
+        pending
+    );
+    fs::create_dir(&directory).unwrap();
+    let recovered = w.cli(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        request.to_string(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+    ]);
+    assert_eq!(recovered["ready"], true);
+    assert_eq!(
+        recovered["request"]["central"],
+        pending["request"]["central"]
+    );
+    assert_eq!(
+        recovered["allocation"]["allocation"]["record"]["task_ref"],
+        "task:native-joined"
+    );
+}
+
 #[path = "support/caw_task_material.rs"]
 mod material;
 
 #[test]
 #[ignore = "requires exact native Central, Actuation and Workcell executables; mandatory prepared-run lane"]
 fn native_prepared_run_preserves_authority_and_existing_worktree() {
-    use sha2::{Digest,Sha256};
-    let w=World::new(true);
-    let recognise_cleanup_authority=|world:&World| {
-        let path=world.root.join("Control/relations/source-relations.json");
-        let mut source:Value=serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    use sha2::{Digest, Sha256};
+    let w = World::new(true);
+    let recognise_cleanup_authority = |world: &World| {
+        let path = world.root.join("Control/relations/source-relations.json");
+        let mut source: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         source["relations"].as_array_mut().unwrap().push(json!({
             "ref":"central:source:control:root:Control/user/native-action-authority.json",
             "path":"Control/user/native-action-authority.json", "roles":["native-action-authority"],
             "provenance":"human-adopted", "standing":"architecture-contract", "treatment":"projectcentral-user",
             "recognition":"controlled-test-only", "recorded_at_unix_seconds":1
         }));
-        fs::write(path,source.to_string()).unwrap();
+        fs::write(path, source.to_string()).unwrap();
     };
     recognise_cleanup_authority(&w);
-    let binary=PathBuf::from(std::env::var_os("AIKIT_CAW_WORKCELL_BIN").expect("native Workcell required"));
-    let state=w.root.join("Work/demo/material");
-    let repository=w.root.join("Work/demo/src");
-    let git=|args:&[&str]|{
-        let out=Command::new("git").arg("-C").arg(&repository).args(args).output().unwrap();
-        assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
+    let binary = PathBuf::from(
+        std::env::var_os("AIKIT_CAW_WORKCELL_BIN").expect("native Workcell required"),
+    );
+    let state = w.root.join("Work/demo/material");
+    let repository = w.root.join("Work/demo/src");
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     };
-    git(&["init","--template="]);git(&["config","user.name","Native task test"]);git(&["config","user.email","native@example.invalid"]);git(&["config","commit.gpgsign","false"]);
-    fs::write(repository.join("readme"),"native material\n").unwrap();git(&["add","readme"]);git(&["commit","-m","native material"]);
-    let workcell=|args:&[String]|{
-        let out=Command::new(&binary).arg("--state-root").arg(&state).arg("--json").args(args).output().unwrap();
-        assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    git(&["init", "--template="]);
+    git(&["config", "user.name", "Native task test"]);
+    git(&["config", "user.email", "native@example.invalid"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    fs::write(repository.join("readme"), "native material\n").unwrap();
+    git(&["add", "readme"]);
+    git(&["commit", "-m", "native material"]);
+    let workcell = |args: &[String]| {
+        let out = Command::new(&binary)
+            .arg("--state-root")
+            .arg(&state)
+            .arg("--json")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
     };
-    let started=workcell(&["--workspace-source".into(),repository.display().to_string(),"run".into(),"start".into(),"--run".into(),"native-task".into(),"--extension".into(),"branch_law=aikit".into(),"--workspace".into(),"writable".into()]);
-    struct Release {binary:PathBuf,state:PathBuf}
-    impl Drop for Release {fn drop(&mut self){let _=Command::new(&self.binary).arg("--state-root").arg(&self.state).args(["--json","run","release","--run","native-task"]).output();}}
-    let _release=Release{binary:binary.clone(),state:state.clone()};
-    let worktree=started["run"]["material_refs"].as_array().unwrap().iter().find_map(|r|r.as_str()?.strip_prefix("workspace:git-worktree:")).map(|key|state.join("workspaces").join(key)).unwrap().canonicalize().unwrap();
+    let started = workcell(&[
+        "--workspace-source".into(),
+        repository.display().to_string(),
+        "run".into(),
+        "start".into(),
+        "--run".into(),
+        "native-task".into(),
+        "--extension".into(),
+        "branch_law=aikit".into(),
+        "--workspace".into(),
+        "writable".into(),
+    ]);
+    struct Release {
+        binary: PathBuf,
+        state: PathBuf,
+    }
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = Command::new(&self.binary)
+                .arg("--state-root")
+                .arg(&self.state)
+                .args(["--json", "run", "release", "--run", "native-task"])
+                .output();
+        }
+    }
+    let _release = Release {
+        binary: binary.clone(),
+        state: state.clone(),
+    };
+    let worktree = started["run"]["material_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|r| r.as_str()?.strip_prefix("workspace:git-worktree:"))
+        .map(|key| state.join("workspaces").join(key))
+        .unwrap()
+        .canonicalize()
+        .unwrap();
     fs::write(w.root.join("Control/user/native-action-authority.json"),json!({"schema":"central.native-action-authority/v1","scope_ref":"control:root","grants":[{"principal_ref":"agent:existing-1","actor_kind":"agent","token_sha256":format!("{:x}",Sha256::digest(b"native-run-cleanup-authority-proof-20260924")),"scope_refs":["control:root"],"actions":["central.now.lifecycle"],"expires_at_unix_seconds":u64::MAX}]}).to_string()).unwrap();
-    let mut request=w.prepare_input();request["cwd"]=json!(worktree);request["selected_directories"]=json!([worktree]);
-    request["prepared_run_scope"]=json!({"run_slug":"native-task","expected_demand_digest":started["run"]["demand_digest"]});
-    request.as_object_mut().unwrap().remove("workcell_boundary_bin");
-    let mut paths=vec![binary.parent().unwrap().to_path_buf()];paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-    let configure=|world:&World,request:&Value|Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
-        .env("AIKIT_HOME",world.home.root()).env("WORKCELL_HOME",&state).env("PATH",std::env::join_paths(&paths).unwrap())
-        .env("OI_ACTUATION_BIN",std::env::var_os("AIKIT_CAW_ACTUATION_BIN").unwrap()).env("CENTRAL_NATIVE_TOKEN","native-run-cleanup-authority-proof-20260924")
-        .arg("-C").arg(&world.root).args(["encounter-task-configure","--agent-session","agent-session/task","--request-json"]).arg(request.to_string()).output().unwrap();
-    let mut stale=request.clone();stale["prepared_run_scope"]["expected_demand_digest"]=json!("sha256:stale");
-    assert!(!configure(&w,&stale).status.success(),"stale demand must refuse before allocation");
+    let mut request = w.prepare_input();
+    request["cwd"] = json!(worktree);
+    request["selected_directories"] = json!([worktree]);
+    request["prepared_run_scope"] =
+        json!({"run_slug":"native-task","expected_demand_digest":started["run"]["demand_digest"]});
+    request
+        .as_object_mut()
+        .unwrap()
+        .remove("workcell_boundary_bin");
+    let mut paths = vec![binary.parent().unwrap().to_path_buf()];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+    let configure = |world: &World, request: &Value| {
+        Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
+            .env("AIKIT_HOME", world.home.root())
+            .env("WORKCELL_HOME", &state)
+            .env("PATH", std::env::join_paths(&paths).unwrap())
+            .env(
+                "OI_ACTUATION_BIN",
+                std::env::var_os("AIKIT_CAW_ACTUATION_BIN").unwrap(),
+            )
+            .env(
+                "CENTRAL_NATIVE_TOKEN",
+                "native-run-cleanup-authority-proof-20260924",
+            )
+            .arg("-C")
+            .arg(&world.root)
+            .args([
+                "encounter-task-configure",
+                "--agent-session",
+                "agent-session/task",
+                "--request-json",
+            ])
+            .arg(request.to_string())
+            .output()
+            .unwrap()
+    };
+    let mut stale = request.clone();
+    stale["prepared_run_scope"]["expected_demand_digest"] = json!("sha256:stale");
+    assert!(
+        !configure(&w, &stale).status.success(),
+        "stale demand must refuse before allocation"
+    );
     // A real boundary refusal after allocation closes only that new NOW.
-    let other=World::new(true);
+    let other = World::new(true);
     recognise_cleanup_authority(&other);
-    fs::copy(w.root.join("Control/user/native-action-authority.json"),other.root.join("Control/user/native-action-authority.json")).unwrap();
-    let mut wrong=other.prepare_input();wrong["prepared_run_scope"]=request["prepared_run_scope"].clone();
-    wrong.as_object_mut().unwrap().remove("workcell_boundary_bin");
-    let refusal=configure(&other,&wrong);assert!(!refusal.status.success());
-    let retained=other.cli(&["encounter-task-read".into(),"--agent-session".into(),"agent-session/task".into()]);
-    assert_eq!(retained["ready"],false);assert_eq!(retained["cleanup"]["state"],"confirmed","{retained}");
-    assert_eq!(retained["cleanup"]["receipt"]["record"]["lifecycle"],"closed");
-    assert!(worktree.is_dir(),"failure cleanup must not delete a pre-existing run worktree");
-    let out=configure(&w,&request);assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
-    let record:Value=serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(record["ready"],true);assert_eq!(record["request"]["cwd"],json!(worktree));
-    assert_eq!(record["prepared_run"]["scope"]["prepared_write_boundary"],record["inspection"]);
-    assert_eq!(record["prepared_run"]["scope"]["agency"]["admission"]["status"],"actualised");
-    assert_eq!(record["prepared_run"]["scope"]["agency"]["admission"]["differentiated_binding"]["agency_ref"],"agency:project:delegation");
-    assert_eq!(record["requirements"]["authority_ref"],"authority:project:delegation");
-    assert_eq!(record["requirements"]["writable_paths"].as_array().unwrap().len(),2,"only native NOW and selected existing worktree");
-    assert_eq!(workcell(&["run".into(),"list".into(),"--full".into()])["runs"].as_array().unwrap().len(),1);
+    fs::copy(
+        w.root.join("Control/user/native-action-authority.json"),
+        other.root.join("Control/user/native-action-authority.json"),
+    )
+    .unwrap();
+    let mut wrong = other.prepare_input();
+    wrong["prepared_run_scope"] = request["prepared_run_scope"].clone();
+    wrong
+        .as_object_mut()
+        .unwrap()
+        .remove("workcell_boundary_bin");
+    let refusal = configure(&other, &wrong);
+    assert!(!refusal.status.success());
+    let retained = other.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(retained["ready"], false);
+    assert_eq!(retained["cleanup"]["state"], "confirmed", "{retained}");
+    assert_eq!(
+        retained["cleanup"]["receipt"]["record"]["lifecycle"],
+        "closed"
+    );
+    assert!(
+        worktree.is_dir(),
+        "failure cleanup must not delete a pre-existing run worktree"
+    );
+    let out = configure(&w, &request);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let record: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(record["ready"], true);
+    assert_eq!(record["request"]["cwd"], json!(worktree));
+    assert_eq!(
+        record["prepared_run"]["scope"]["prepared_write_boundary"],
+        record["inspection"]
+    );
+    assert_eq!(
+        record["prepared_run"]["scope"]["agency"]["admission"]["status"],
+        "actualised"
+    );
+    assert_eq!(
+        record["prepared_run"]["scope"]["agency"]["admission"]["differentiated_binding"]
+            ["agency_ref"],
+        "agency:project:delegation"
+    );
+    assert_eq!(
+        record["requirements"]["authority_ref"],
+        "authority:project:delegation"
+    );
+    assert_eq!(
+        record["requirements"]["writable_paths"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "only native NOW and selected existing worktree"
+    );
+    assert_eq!(
+        workcell(&["run".into(), "list".into(), "--full".into()])["runs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     // Revoke the exact source after preparation: even an unchanged run name
     // cannot authorize another provider launch.
-    fs::write(w.root.join("agency.json"),"{}").unwrap();
-    let refused=Command::new(env!("CARGO_BIN_EXE_aikit-session-space")).env("AIKIT_HOME",w.home.root()).current_dir(&worktree)
-        .args(["encounter-task-exec","--agent-session","agent-session/task","--expected-revision",record["revision"].as_str().unwrap()]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).output().unwrap();
-    assert!(!refused.status.success(),"changed Agency must refuse before provider execution");
+    let agency_before_revocation = fs::read(w.root.join("agency.json")).unwrap();
+    fs::write(w.root.join("agency.json"), "{}").unwrap();
+    let refused = Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
+        .env("AIKIT_HOME", w.home.root())
+        .current_dir(&worktree)
+        .args([
+            "encounter-task-exec",
+            "--agent-session",
+            "agent-session/task",
+            "--expected-revision",
+            record["revision"].as_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        !refused.status.success(),
+        "changed Agency must refuse before provider execution"
+    );
+    assert!(!w.root.join("Work/demo/src/protocol.log").exists());
+
+    // Restore the exact admitted test source, then make a real failed
+    // amendment to this ready prepared-run task. The generic unhosted abort
+    // must not restore around Workcell's retained run authority, even though
+    // the requested ready revision exists in this same native task history.
+    fs::write(w.root.join("agency.json"), agency_before_revocation).unwrap();
+    let run_before = workcell(&[
+        "run".into(),
+        "show".into(),
+        "--run".into(),
+        "native-task".into(),
+    ]);
+    let mut missing = request.clone();
+    missing["selected_directories"] = json!([worktree.join("missing-native-directory")]);
+    let amendment = Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
+        .env("AIKIT_HOME", w.home.root())
+        .env("WORKCELL_HOME", &state)
+        .env("PATH", std::env::join_paths(&paths).unwrap())
+        .env(
+            "OI_ACTUATION_BIN",
+            std::env::var_os("AIKIT_CAW_ACTUATION_BIN").unwrap(),
+        )
+        .env(
+            "CENTRAL_NATIVE_TOKEN",
+            "native-run-cleanup-authority-proof-20260924",
+        )
+        .arg("-C")
+        .arg(&w.root)
+        .args([
+            "encounter-task-configure",
+            "--agent-session",
+            "agent-session/task",
+            "--request-json",
+        ])
+        .arg(missing.to_string())
+        .args(["--expected-revision", record["revision"].as_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        !amendment.status.success(),
+        "the actual missing directory must refuse after journalling pending"
+    );
+    let pending = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(pending["ready"], false);
+    assert!(pending["prepared_run"].is_object());
+    assert_eq!(
+        pending["request"]["prepared_run_scope"],
+        request["prepared_run_scope"]
+    );
+    let aborted = w.command(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        record["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!aborted.status.success());
+    assert!(String::from_utf8_lossy(&aborted.stderr)
+        .contains("Prepared-run preparation may have uncertain effects"));
+    assert_eq!(
+        w.cli(&[
+            "encounter-task-read".into(),
+            "--agent-session".into(),
+            "agent-session/task".into()
+        ]),
+        pending,
+        "abort must retain the exact pending task for native Workcell recovery"
+    );
+    let run_after = workcell(&[
+        "run".into(),
+        "show".into(),
+        "--run".into(),
+        "native-task".into(),
+    ]);
+    assert_eq!(run_after["run"], run_before["run"]);
+    assert_eq!(run_after["run_revision"], run_before["run_revision"]);
+    assert!(worktree.is_dir());
     assert!(!w.root.join("Work/demo/src/protocol.log").exists());
 }

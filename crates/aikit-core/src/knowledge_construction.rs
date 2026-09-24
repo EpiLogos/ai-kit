@@ -4,9 +4,10 @@
 //! graph. Membership and role belong to a participation; sources, native
 //! edges and Expression/Scene/Palace references remain independently owned.
 //! This module performs no I/O. Central (or the native CLI) owns atomic save.
+#[cfg(test)]
+use crate::knowledge_facets::TECHNE_FACET_EXTENSION;
 use crate::knowledge_facets::{
-    parse_facets_from_extensions, read_source_selector, write_facets_to_extensions, PlaceFacet,
-    TechneFacets, TemporalFacet, TECHNE_FACET_EXTENSION,
+    read_source_selector, write_facets_to_extensions, PlaceFacet, TechneFacets, TemporalFacet,
 };
 use crate::knowledge_wiki_write::{apply_wiki_mutation, WikiDocument, WikiMutationLedger};
 use crate::resource::ResourceRef;
@@ -189,15 +190,32 @@ pub enum Change {
         composition: CompositionReference,
     },
     PlaceSet {
-        participation_ref: ResourceRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participation_ref: Option<ResourceRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<FactTarget>,
         places: Vec<PlaceFacet>,
     },
-    /// Existing temporal facts of one participation. The enclosing frame CAS
-    /// protects the exact membership; this introduces no independent clock or
-    /// participation identity/revision.
     TemporalSet {
-        participation_ref: ResourceRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participation_ref: Option<ResourceRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<FactTarget>,
         temporal: Vec<TemporalFacet>,
+    },
+}
+/// The enclosing frame CAS always applies. A source-node edit additionally
+/// names its own exact basis; it never treats a participation as the source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FactTarget {
+    Participation {
+        participation_ref: ResourceRef,
+    },
+    Whole,
+    Node {
+        node_ref: ResourceRef,
+        expected_revision: u64,
     },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -352,6 +370,54 @@ fn native_put(
         }
     }
     Ok(())
+}
+fn apply_facts(
+    doc: &mut WikiDocument,
+    ledger: &mut WikiMutationLedger,
+    original: &WikiDocument,
+    frame: &mut WikiFrame,
+    legacy: Option<&ResourceRef>,
+    target: Option<&FactTarget>,
+    change: crate::knowledge_wiki_facts::Change,
+) -> Result<()> {
+    let legacy_target;
+    let target = match (legacy, target) {
+        (Some(reference), None) => { legacy_target = FactTarget::Participation { participation_ref: reference.clone() }; &legacy_target },
+        (None, Some(target)) => target,
+        _ => return Err(err("name exactly one native fact target; legacy participation_ref and target cannot be combined")),
+    };
+    match target {
+        FactTarget::Participation { participation_ref } => {
+            let index = member_index(frame, participation_ref)?;
+            crate::knowledge_wiki_facts::replace(
+                &mut frame.constellations[0].members[index].extensions,
+                &change,
+            )
+        }
+        FactTarget::Whole => crate::knowledge_wiki_facts::replace(&mut frame.extensions, &change),
+        FactTarget::Node {
+            node_ref,
+            expected_revision,
+        } => {
+            match original.object(node_ref) {
+                Some(WikiObject::Node(node)) if node.revision == *expected_revision => (),
+                _ => {
+                    return Err(AikitError::new(
+                        "knowledge.constellation_revision_conflict",
+                        "the exact source node changed or is absent",
+                    ))
+                }
+            }
+            let Some(WikiObject::Node(node)) = doc.object(node_ref) else {
+                return Err(err("native node is absent"));
+            };
+            let mut node = node.clone();
+            let revision = node.revision;
+            crate::knowledge_wiki_facts::require_writable(&node.extensions)?;
+            crate::knowledge_wiki_facts::replace(&mut node.extensions, &change)?;
+            native_put(doc, ledger, WikiObject::Node(node), Some(revision))
+        }
+    }
 }
 /// Read a whole without acquiring publication or mutation authority.
 pub fn inspect(input: &str, reference: &ResourceRef) -> Result<Value> {
@@ -736,46 +802,46 @@ pub fn apply(input: &str, request: &Request) -> Result<Applied> {
                         meta.compositions.push(composition.clone());
                     }
                 }
-                Change::TemporalSet { participation_ref, temporal } => {
-                    let index = member_index(&frame, participation_ref)?;
-                    if temporal.len() > 256 {
-                        return Err(err("a participation accepts at most 256 temporal facts"));
-                    }
-                    if temporal.iter().any(|facet| facet.source_ref.as_deref().is_none_or(|source| source.trim().is_empty())) {
-                        return Err(err("a temporal fact requires a native source basis, not an inferred timestamp"));
-                    }
-                    let extensions = &mut frame.constellations[0].members[index].extensions;
-                    let mut facets = parse_facets_from_extensions(extensions)?;
-                    facets.temporal = temporal.clone();
-                    extensions.remove(TECHNE_FACET_EXTENSION);
-                    write_facets_to_extensions(extensions, &facets)?;
+                Change::TemporalSet {
+                    participation_ref,
+                    target,
+                    temporal,
+                } => {
+                    apply_facts(
+                        doc,
+                        ledger,
+                        &original,
+                        &mut frame,
+                        participation_ref.as_ref(),
+                        target.as_ref(),
+                        crate::knowledge_wiki_facts::Change::TemporalSet {
+                            temporal: temporal.clone(),
+                        },
+                    )?;
                 }
                 Change::PlaceSet {
                     participation_ref,
+                    target,
                     places,
                 } => {
-                    let index = member_index(&frame, participation_ref)?;
-                    if places
-                        .iter()
-                        .any(|p| p.source_ref.as_deref().is_none_or(str::is_empty))
-                    {
-                        return Err(err(
-                            "a place requires a native source basis, not invented coordinates",
-                        ));
-                    }
-                    let extensions = &mut frame.constellations[0].members[index].extensions;
-                    let mut facets = parse_facets_from_extensions(extensions)?;
-                    facets.spatial = places.clone();
-                    extensions.remove(TECHNE_FACET_EXTENSION);
-                    write_facets_to_extensions(extensions, &facets)?;
+                    apply_facts(
+                        doc,
+                        ledger,
+                        &original,
+                        &mut frame,
+                        participation_ref.as_ref(),
+                        target.as_ref(),
+                        crate::knowledge_wiki_facts::Change::PlaceSet {
+                            places: places.clone(),
+                        },
+                    )?;
                 }
             }
         }
         validate_construction(doc, &frame, &meta)?;
         if request.expected_revision > 0 && !ledger.outcome().changed {
             let previous = frame_of(doc, &request.frame_ref)?;
-            if core_metadata(&previous)? == meta && previous.constellations == frame.constellations
-            {
+            if core_metadata(&previous)? == meta && previous == frame {
                 return Ok(());
             }
         }
