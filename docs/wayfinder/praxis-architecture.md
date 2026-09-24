@@ -67,6 +67,33 @@ Codex, Claude Code and Pi without re-authoring its praxis.
 - **Guardian set is three members** — owner ruling 2026-09-17; operative O:I
   prose reconciled to the manifest.
 
+## Landed (2026-09-24)
+
+| Owner | PR | Merge |
+| --- | --- | --- |
+| AIKit | EpiLogos/ai-kit#436 | `7568aee3` |
+| Central | EpiLogos/Central#225 | `b3c867d4` |
+| O:I | EpiLogos/O-I#513 | `3b16acdd` |
+| Factory | EpiLogos/Factory#270 | `f9737da6` |
+
+Control personal ground: `wayfinder` → `METHODOLOGY:`; `grilling`,
+`prototype` adopted as `METHOD:` (source `personal` promoted `a8e694c1`).
+Central source promoted `8904e6e7`; `aikit` reinstalled from main.
+
+Live evidence on the owner's machine:
+
+- `aikit praxis list --form methodology` → `skill/central/docs-methodology`,
+  `skill/personal/wayfinder`.
+- `aikit set package export central:documentation` (21 members):
+  `claude plugin validate --strict` exit 0; Pi RPC discovered 21/21 Skills;
+  Codex disposable marketplace install enabled with all Skills cached;
+  every receipt `source_unchanged: true`, source revision
+  `sha256:83b2d55a…`.
+- `oi agent participation --agent agent/oh-i --world project:Factory`:
+  citizenship 2 established · 4 partial · 5 absent · 0 unavailable; the
+  human card and an A2A card (0 public skills, no public disclosure source)
+  derive from the same reading.
+
 ## Not yet specified
 
 - A production source for **public capability disclosure**: today the
@@ -77,6 +104,10 @@ Codex, Claude Code and Pi without re-authoring its praxis.
 - **Serving** the A2A card at `/.well-known/agent-card.json` from a live
   Agent endpoint (needs an exposed A2A server binding; O:I's A2A work is
   consumer-side today).
+- **Installed `oi`** predates O-I#513 until the next managed update; the
+  merged commands are proven from a build of `origin/main`.
+- **Actuation grant listing**: authority reads as partial because
+  Actuation exposes no listing of an Agency's grants.
 - **Skill `invoked` evidence from hooks**: the activity contract exists; a
   hook reading that emits it from harness Skill-tool events does not.
 - Cradle creator: progressive card derivation *before* acceptance (from the
