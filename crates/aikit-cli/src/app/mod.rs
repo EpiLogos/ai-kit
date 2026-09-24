@@ -265,6 +265,9 @@ pub struct Service {
     descriptor: ContextDescriptor,
     project: Option<DiscoveredProject>,
     central_meta_root: Option<PathBuf>,
+    /// An explicitly configured Central World remains the Knowledge owner for
+    /// a real Project worktree even when that checkout lives outside Work/.
+    knowledge_central_root: Option<PathBuf>,
     layers: Vec<ScopeLayer>,
     trust: TrustSnapshot,
     policy: ManagedPolicy,
@@ -407,6 +410,10 @@ impl Service {
         let project =
             discover::discover_project_with_home_excluding(&home, cwd, &additional_stores)?;
         let (project, central_meta_root) = root_context::discover(cwd, &env, project)?;
+        let knowledge_central_root = env("CENTRAL_ROOT")
+            .filter(|value| !value.is_empty())
+            .and_then(|value| PathBuf::from(value).canonicalize().ok())
+            .filter(|root| root.join("Control").is_dir() && root.join("Work").is_dir());
         let project_root = project.as_ref().map(|p| p.root.clone());
 
         let descriptor = match &project_root {
@@ -440,6 +447,7 @@ impl Service {
             descriptor,
             project,
             central_meta_root,
+            knowledge_central_root,
             layers,
             trust,
             policy,

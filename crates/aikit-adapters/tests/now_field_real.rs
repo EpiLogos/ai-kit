@@ -20,6 +20,10 @@ fn write(path: &PathBuf, contents: &str) {
 #[test]
 fn the_now_field_answers_from_its_authorised_scope_only() {
     if !ripgrep::available() {
+        assert!(
+            std::env::var_os("AIKIT_REQUIRE_RIPGREP_REAL").is_none(),
+            "real NOW-field conformance requires ripgrep"
+        );
         eprintln!("ripgrep is not installed; the real-scope acceptance test skipped");
         return;
     }
@@ -131,4 +135,225 @@ fn the_now_field_answers_from_its_authorised_scope_only() {
         regex_hits.is_empty(),
         "the marked subtree must not leak through an explicit regex either"
     );
+}
+
+#[test]
+fn project_scope_uses_literal_work_name_and_keeps_common_control_with_real_ripgrep() {
+    if !ripgrep::available() {
+        assert!(
+            std::env::var_os("AIKIT_REQUIRE_RIPGREP_REAL").is_none(),
+            "real NOW-field conformance requires ripgrep"
+        );
+        return;
+    }
+    let ground = tempfile::TempDir::new().expect("temp ground");
+    let root = ground.path().to_path_buf();
+    write(
+        &root.join("Work/fee*box/ProjectCentral/now/agents/own.json"),
+        "literalGlobNeedle\n",
+    );
+    write(
+        &root.join("Work/feeeeeebox/ProjectCentral/now/agents/sibling.json"),
+        "literalGlobNeedle\n",
+    );
+    write(
+        &root.join("Control/agents/now/clearings/common/note.json"),
+        "literalGlobNeedle\n",
+    );
+    let broad = NowFieldScope::standard(&root);
+    let provider = NowFieldSourcePoolProvider::connect(
+        aikit_adapters::now_field::default_runner(&root),
+        ripgrep::executable(),
+        broad.for_project(Some("fee*box")),
+    )
+    .expect("scoped provider connects");
+    let hits = provider
+        .search("literalGlobNeedle", SourceSearchMode::Fulltext, &[], 20)
+        .expect("real scoped ripgrep search");
+    let refs: Vec<&str> = hits.iter().map(|hit| hit.source.as_str()).collect();
+    assert!(refs
+        .contains(&"central:source:control:root:Work/fee*box/ProjectCentral/now/agents/own.json"));
+    assert!(
+        refs.contains(&"central:source:control:root:Control/agents/now/clearings/common/note.json")
+    );
+    assert!(!refs
+        .iter()
+        .any(|source| source.contains("Work/feeeeeebox/")));
+    let sibling = aikit_core::SourceRef::parse(
+        "central:source:control:root:Work/feeeeeebox/ProjectCentral/now/agents/sibling.json",
+    )
+    .unwrap();
+    assert_eq!(
+        provider.read(&sibling).unwrap_err().code(),
+        "now_field.source_unauthorised"
+    );
+
+    let unknown = NowFieldSourcePoolProvider::connect(
+        aikit_adapters::now_field::default_runner(&root),
+        ripgrep::executable(),
+        broad.for_project(None),
+    )
+    .expect("Control-only provider connects");
+    let unknown_refs: Vec<String> = unknown
+        .search("literalGlobNeedle", SourceSearchMode::Fulltext, &[], 20)
+        .unwrap()
+        .into_iter()
+        .map(|hit| hit.source.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        unknown_refs,
+        vec!["central:source:control:root:Control/agents/now/clearings/common/note.json"]
+    );
+
+    let own = aikit_core::SourceRef::parse(
+        "central:source:control:root:Work/fee*box/ProjectCentral/now/agents/own.json",
+    )
+    .unwrap();
+    let common = aikit_core::SourceRef::parse(
+        "central:source:control:root:Control/agents/now/clearings/common/note.json",
+    )
+    .unwrap();
+    let traversal = aikit_core::SourceRef::parse(
+        "central:source:control:root:Work/fee*box/ProjectCentral/now/agents/../../../../feeeeeebox/ProjectCentral/now/agents/sibling.json",
+    )
+    .unwrap();
+    assert!(aikit_adapters::now_field::glob_match(
+        "Work/fee\\*box/ProjectCentral/now/**/*.json",
+        "Work/fee*box/ProjectCentral/now/agents/../../../../feeeeeebox/ProjectCentral/now/agents/sibling.json"
+    ));
+    assert_eq!(
+        provider.read(&traversal).unwrap_err().code(),
+        "now_field.source_unauthorised",
+        "a syntactically eligible ref must not traverse into a sibling Project"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let link = root.join("Work/fee*box/ProjectCentral/now/agents/linked.json");
+        symlink(
+            root.join("Work/feeeeeebox/ProjectCentral/now/agents/sibling.json"),
+            &link,
+        )
+        .unwrap();
+        let link_ref = aikit_core::SourceRef::parse(
+            "central:source:control:root:Work/fee*box/ProjectCentral/now/agents/linked.json",
+        )
+        .unwrap();
+        assert_eq!(
+            provider.read(&link_ref).unwrap_err().code(),
+            "now_field.source_unauthorised",
+            "a direct owner read must not follow a symlink into a sibling Project"
+        );
+        assert!(!provider
+            .search("literalGlobNeedle", SourceSearchMode::Fulltext, &[], 20)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.source == link_ref));
+        fs::remove_file(link).unwrap();
+    }
+    // Ripgrep's `**` has no eight-level cap. A marker below that old walk
+    // limit must still be discovered before the real provider searches it.
+    let deep_root = root.join("Work/fee*box/ProjectCentral/now/deep");
+    let deep_dir = (0..10).fold(deep_root.clone(), |path, level| {
+        path.join(format!("l{level}"))
+    });
+    let deep_file = deep_dir.join("private.json");
+    write(&deep_file, "literalGlobNeedle\n");
+    fs::write(deep_dir.join(".no-agent-retrieval"), b"").unwrap();
+    let deep_scope = NowFieldScope::standard(&root).for_project(Some("fee*box"));
+    assert!(deep_scope
+        .pruned
+        .iter()
+        .any(|path| path == deep_dir.strip_prefix(&root).unwrap().to_str().unwrap()));
+    let deep_provider = NowFieldSourcePoolProvider::connect(
+        aikit_adapters::now_field::default_runner(&root),
+        ripgrep::executable(),
+        deep_scope,
+    )
+    .unwrap();
+    let deep_ref = aikit_core::SourceRef::parse(format!(
+        "central:source:control:root:{}",
+        deep_file.strip_prefix(&root).unwrap().display()
+    ))
+    .unwrap();
+    assert!(!deep_provider
+        .search("literalGlobNeedle", SourceSearchMode::Fulltext, &[], 20)
+        .unwrap()
+        .iter()
+        .any(|hit| hit.source == deep_ref));
+    assert_eq!(
+        deep_provider.read(&deep_ref).unwrap_err().code(),
+        "now_field.source_unauthorised"
+    );
+    fs::remove_dir_all(deep_root).unwrap();
+
+    for (marked_dir, own_visible) in [
+        ("Work", false),
+        ("Work/fee*box", false),
+        ("Work/fee*box/ProjectCentral", false),
+        ("Control", true),
+    ] {
+        let marker = root.join(marked_dir).join(".no-agent-retrieval");
+        fs::write(&marker, b"").expect("mark an ancestor of an authorised record");
+        if marked_dir == "Work" {
+            let live_refs: Vec<String> = provider
+                .search("literalGlobNeedle", SourceSearchMode::Fulltext, &[], 20)
+                .expect("a newly added marker must fence an attached provider")
+                .into_iter()
+                .map(|hit| hit.source.as_str().to_owned())
+                .collect();
+            assert_eq!(live_refs, vec![common.as_str().to_owned()]);
+            assert_eq!(
+                provider.read(&own).unwrap_err().code(),
+                "now_field.source_unauthorised"
+            );
+        }
+        let marked = NowFieldScope::standard(&root).for_project(Some("fee*box"));
+        assert!(
+            marked.pruned.iter().any(|path| path == marked_dir),
+            "marker at {marked_dir} must be carried into ripgrep exclusions"
+        );
+        let marked_provider = NowFieldSourcePoolProvider::connect(
+            aikit_adapters::now_field::default_runner(&root),
+            ripgrep::executable(),
+            marked,
+        )
+        .expect("marked provider connects");
+        let expected = if own_visible {
+            own.as_str()
+        } else {
+            common.as_str()
+        };
+        let refs: Vec<String> = marked_provider
+            .search("literalGlobNeedle", SourceSearchMode::Fulltext, &[], 20)
+            .expect("real ripgrep honours ancestor marker")
+            .into_iter()
+            .map(|hit| hit.source.as_str().to_owned())
+            .collect();
+        assert_eq!(
+            refs,
+            vec![expected.to_owned()],
+            "search crossed marker at {marked_dir}"
+        );
+        let regex_refs: Vec<String> = marked_provider
+            .search_regex("literalGlobNeedle", &[], 20)
+            .expect("real regex ripgrep honours ancestor marker")
+            .into_iter()
+            .map(|hit| hit.source.as_str().to_owned())
+            .collect();
+        assert_eq!(regex_refs, vec![expected.to_owned()]);
+        let withheld = if own_visible { &common } else { &own };
+        assert_eq!(
+            marked_provider.read(withheld).unwrap_err().code(),
+            "now_field.source_unauthorised",
+            "direct owner read crossed marker at {marked_dir}"
+        );
+        assert!(marked_provider.descriptors().iter().all(|material| material
+            .binding
+            .source
+            .as_str()
+            != withheld.as_str()));
+        fs::remove_file(marker).unwrap();
+    }
 }
