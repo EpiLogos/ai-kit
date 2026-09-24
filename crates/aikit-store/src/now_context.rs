@@ -17,6 +17,7 @@ pub const NOW_REDIS_CONFIG_SCHEMA: &str = "aikit.redis-now-config/v1";
 pub const NOW_PREPARED_SCHEMA: &str = "aikit.prepared-now-context/v1";
 pub const NOW_DELIVERY_SCHEMA: &str = "aikit.now-context-delivery/v1";
 pub const WORLD_PROJECTION_SCHEMA: &str = "aikit.world-projection/v1";
+pub const FACTORY_SENSING_PROJECTION_SCHEMA: &str = "aikit.factory-sensing-projection/v1";
 const MAX_WORLD_STRING: usize = 1024;
 const MAX_WORLD_ENTRIES: usize = 512;
 const MAX_JSON: usize = 1024 * 1024;
@@ -552,6 +553,153 @@ impl WorldProjection {
     }
 }
 
+/// A bounded hot copy of Factory's read-only project field. Factory remains the
+/// owner of every signal and source revision; this value can be rebuilt after
+/// Redis loss without changing their identity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FactorySensingProjection {
+    pub schema: String,
+    pub project_world_ref: String,
+    pub version: u64,
+    pub source_revision: String,
+    pub field: serde_json::Value,
+    pub published_at_unix_ms: u64,
+}
+
+impl FactorySensingProjection {
+    pub fn validate(&self) -> Result<()> {
+        let invalid = || {
+            fail(
+                "factory_sensing.invalid",
+                "Factory sensing projection must be a bounded, project-matched native field",
+            )
+        };
+        if self.schema != FACTORY_SENSING_PROJECTION_SCHEMA
+            || self.version == 0
+            || !bounded(&self.project_world_ref, MAX_WORLD_STRING)
+            || !bounded(&self.source_revision, 128)
+            || self.field.get("schema").and_then(serde_json::Value::as_str)
+                != Some("factory.telemetry-field/v1")
+            || self
+                .field
+                .get("project_world_ref")
+                .and_then(serde_json::Value::as_str)
+                != Some(self.project_world_ref.as_str())
+            || self
+                .field
+                .get("source_revision")
+                .and_then(serde_json::Value::as_str)
+                != Some(self.source_revision.as_str())
+            || self
+                .field
+                .get("source_sequence")
+                .and_then(serde_json::Value::as_u64)
+                .is_none()
+            || self
+                .field
+                .get("cursor")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|v| !bounded(v, 128))
+            || self
+                .field
+                .get("observed_at_unix_ms")
+                .and_then(serde_json::Value::as_i64)
+                .is_none()
+            || self
+                .field
+                .get("signals")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(|v| v.len() > 100)
+            || self
+                .field
+                .get("coverage")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(|v| v.len() > 100)
+            || self
+                .field
+                .get("absences")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(|v| v.len() > 100)
+            || self
+                .field
+                .get("truncated")
+                .and_then(serde_json::Value::as_bool)
+                .is_none()
+            || self
+                .field
+                .get("counts")
+                .and_then(serde_json::Value::as_object)
+                .is_none_or(|v| v.len() > 100)
+        {
+            return Err(invalid());
+        }
+        let field = self.field.as_object().ok_or_else(invalid)?;
+        const ALLOWED: &[&str] = &[
+            "schema",
+            "project_world_ref",
+            "source_revision",
+            "source_sequence",
+            "observed_at_unix_ms",
+            "signals",
+            "coverage",
+            "owner_basis",
+            "absences",
+            "cursor",
+            "counts",
+            "truncated",
+        ];
+        if field.keys().any(|key| !ALLOWED.contains(&key.as_str()))
+            || field
+                .get("owner_basis")
+                .and_then(serde_json::Value::as_object)
+                .is_none()
+            || self.field["signals"].as_array().is_none_or(|signals| {
+                signals.iter().any(|signal| {
+                    signal
+                        .get("signal_ref")
+                        .and_then(serde_json::Value::as_str)
+                        .is_none_or(|v| !bounded(v, MAX_WORLD_STRING))
+                        || signal
+                            .get("summary")
+                            .and_then(serde_json::Value::as_str)
+                            .is_none_or(|v| !bounded(v, 4096))
+                        || signal
+                            .get("source_refs")
+                            .and_then(serde_json::Value::as_array)
+                            .is_none_or(|refs| {
+                                refs.len() > 32
+                                    || refs.iter().any(|r| {
+                                        r.as_str().is_none_or(|v| !bounded(v, MAX_WORLD_STRING))
+                                    })
+                            })
+                })
+            })
+            || self.field["coverage"].as_array().is_none_or(|coverage| {
+                coverage.iter().any(|row| {
+                    row.get("source_ref")
+                        .and_then(serde_json::Value::as_str)
+                        .is_none_or(|v| !bounded(v, MAX_WORLD_STRING))
+                        || !matches!(
+                            row.get("state").and_then(serde_json::Value::as_str),
+                            Some("complete" | "empty" | "unavailable" | "truncated")
+                        )
+                        || row.get("cursor").is_some_and(|cursor| {
+                            !cursor.is_null()
+                                && cursor
+                                    .as_str()
+                                    .is_none_or(|v| !bounded(v, MAX_WORLD_STRING))
+                        })
+                })
+            })
+            || serde_json::to_vec(&self.field).map_or(true, |bytes| bytes.len() > 256 * 1024)
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedisNowStatus {
     pub available: bool,
@@ -1082,6 +1230,131 @@ impl RedisNowStore {
         let _ = self.command(
             secret,
             vec![b"DEL".to_vec(), world.into_bytes(), meta.into_bytes()],
+        )?;
+        Ok(())
+    }
+    fn factory_sensing_keys(&self, project_world_ref: &str) -> [String; 2] {
+        [
+            self.world_key("factory-sensing", project_world_ref),
+            self.world_key("factory-sensing-meta", project_world_ref),
+        ]
+    }
+    pub fn factory_sensing_version(
+        &self,
+        project_world_ref: &str,
+        secret: Option<&SecretValue>,
+    ) -> Result<u64> {
+        let [_, meta] = self.factory_sensing_keys(project_world_ref);
+        match self.command(secret, vec![b"GET".to_vec(), meta.into_bytes()])? {
+            Resp::Bulk(None) => Ok(0),
+            value => {
+                let raw = bulk_utf8(value)?;
+                let meta: serde_json::Value = serde_json::from_str(&raw)
+                    .map_err(|e| fail("now_context.redis_corrupt", e.to_string()))?;
+                meta.get("version")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| {
+                        fail(
+                            "now_context.redis_corrupt",
+                            "Factory sensing metadata has no version",
+                        )
+                    })
+            }
+        }
+    }
+    pub fn publish_factory_sensing(
+        &self,
+        projection: &FactorySensingProjection,
+        expected_version: u64,
+        secret: Option<&SecretValue>,
+    ) -> Result<u64> {
+        projection.validate()?;
+        if projection.version
+            != expected_version.checked_add(1).ok_or_else(|| {
+                fail(
+                    "now_context.version_exhausted",
+                    "Factory sensing projection version exhausted",
+                )
+            })?
+        {
+            return Err(fail(
+                "now_context.version_invalid",
+                "Factory sensing projection version must be exactly expected + 1",
+            ));
+        }
+        let [field, meta] = self.factory_sensing_keys(&projection.project_world_ref);
+        let body = serde_json::to_vec(projection)
+            .map_err(|e| fail("now_context.encode", e.to_string()))?;
+        let source_sequence = projection.field["source_sequence"]
+            .as_u64()
+            .ok_or_else(|| {
+                fail(
+                    "factory_sensing.invalid",
+                    "native source sequence is required",
+                )
+            })?;
+        let observed_at_unix_ms = projection.field["observed_at_unix_ms"]
+            .as_i64()
+            .ok_or_else(|| {
+                fail(
+                    "factory_sensing.invalid",
+                    "Factory field observation time is missing",
+                )
+            })?;
+        let meta_body = serde_json::to_vec(&serde_json::json!({"version":projection.version,"source_revision":projection.source_revision,"source_sequence":source_sequence,"observed_at_unix_ms":observed_at_unix_ms})).map_err(|e| fail("now_context.encode", e.to_string()))?;
+        // The version check alone is vulnerable to ABA after Redis loss: a
+        // pre-loss publisher can have the same expected version as a newer
+        // post-loss projection. The owner sequence and observed time guard the
+        // current project field even across that version collision.
+        let script = r#"local m=redis.call('GET',KEYS[1]); local v=0; if m then local ok,o=pcall(cjson.decode,m); if not ok or not o.version or not o.source_sequence or not o.observed_at_unix_ms then return redis.error_reply('CORRUPT') end; v=tonumber(o.version); local old_seq=tonumber(o.source_sequence); local new_seq=tonumber(ARGV[6]); local old_time=tonumber(o.observed_at_unix_ms); local new_time=tonumber(ARGV[7]); if new_seq<old_seq or new_time<=old_time then return redis.error_reply('STALE_SOURCE') end end; if v~=tonumber(ARGV[1]) then return redis.error_reply('STALE') end; redis.call('SET',KEYS[2],ARGV[2],'EX',ARGV[3]); redis.call('SET',KEYS[1],ARGV[4],'EX',ARGV[3]); return tonumber(ARGV[5])"#;
+        map_eval_version(self.command(
+            secret,
+            vec![
+                b"EVAL".to_vec(),
+                script.as_bytes().to_vec(),
+                b"2".to_vec(),
+                meta.into_bytes(),
+                field.into_bytes(),
+                expected_version.to_string().into_bytes(),
+                body,
+                self.config.prepared_ttl_seconds.to_string().into_bytes(),
+                meta_body,
+                projection.version.to_string().into_bytes(),
+                source_sequence.to_string().into_bytes(),
+                observed_at_unix_ms.to_string().into_bytes(),
+            ],
+        ))
+    }
+    pub fn read_factory_sensing(
+        &self,
+        project_world_ref: &str,
+        secret: Option<&SecretValue>,
+    ) -> Result<Option<FactorySensingProjection>> {
+        let [field, _] = self.factory_sensing_keys(project_world_ref);
+        let raw = match self.command(secret, vec![b"GET".to_vec(), field.into_bytes()])? {
+            Resp::Bulk(None) => return Ok(None),
+            value => bulk_utf8(value)?,
+        };
+        let projection: FactorySensingProjection = serde_json::from_str(&raw)
+            .map_err(|e| fail("now_context.redis_corrupt", e.to_string()))?;
+        projection.validate()?;
+        if projection.project_world_ref != project_world_ref {
+            return Err(fail(
+                "now_context.redis_corrupt",
+                "Factory sensing project key and payload disagree",
+            ));
+        }
+        Ok(Some(projection))
+    }
+    pub fn delete_factory_sensing(
+        &self,
+        project_world_ref: &str,
+        secret: Option<&SecretValue>,
+    ) -> Result<()> {
+        let [field, meta] = self.factory_sensing_keys(project_world_ref);
+        let _ = self.command(
+            secret,
+            vec![b"DEL".to_vec(), field.into_bytes(), meta.into_bytes()],
         )?;
         Ok(())
     }

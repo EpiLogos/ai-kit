@@ -237,3 +237,115 @@ fn redis_world_projection_is_cas_versioned_refs_only_and_survives_loss() {
     );
     store.delete_world(subject, None).unwrap();
 }
+
+#[test]
+fn factory_sensing_is_project_scoped_cas_guarded_and_rebuildable() {
+    let Ok(address) = std::env::var("AIKIT_TEST_REDIS_ADDR") else {
+        eprintln!("AIKIT_TEST_REDIS_ADDR absent; real Redis integration is exercised by the dedicated workflow");
+        return;
+    };
+    use aikit_store::now_context::{FactorySensingProjection, FACTORY_SENSING_PROJECTION_SCHEMA};
+    let store = RedisNowStore::new(config(address)).unwrap();
+    let field = |project: &str, revision: &str| {
+        let sequence: u64 = revision[revision.len() - 1..].parse().unwrap();
+        serde_json::json!({
+            "schema": "factory.telemetry-field/v1",
+            "project_world_ref": project,
+            "source_revision": revision,
+            "source_sequence": sequence,
+            "observed_at_unix_ms": sequence * 10,
+            "signals": [{"signal_ref":"factory:signal:s1", "source_refs":["factory:attempt:a1"],
+                "classification":"verified-defect", "disposition":"investigate", "summary":"Attempt failed",
+                "updated_at_unix_ms": 10}],
+            "coverage": [], "owner_basis": {}, "absences": [], "cursor": revision,
+            "counts": {"signals": 1}, "truncated": false
+        })
+    };
+    let projection = |project: &str, revision: &str, version| FactorySensingProjection {
+        schema: FACTORY_SENSING_PROJECTION_SCHEMA.into(),
+        project_world_ref: project.into(),
+        version,
+        source_revision: revision.into(),
+        field: field(project, revision),
+        published_at_unix_ms: 11,
+    };
+    let a = "project:Alpha";
+    let b = "project:Beta";
+    assert_eq!(store.factory_sensing_version(a, None).unwrap(), 0);
+    let a1 = projection(a, "blake3:a1", 1);
+    let b1 = projection(b, "blake3:b1", 1);
+    let mut missing_sequence = a1.clone();
+    missing_sequence
+        .field
+        .as_object_mut()
+        .unwrap()
+        .remove("source_sequence");
+    assert_eq!(
+        store
+            .publish_factory_sensing(&missing_sequence, 0, None)
+            .unwrap_err()
+            .code(),
+        "factory_sensing.invalid"
+    );
+    assert_eq!(store.publish_factory_sensing(&a1, 0, None).unwrap(), 1);
+    assert_eq!(store.publish_factory_sensing(&b1, 0, None).unwrap(), 1);
+    assert_eq!(
+        store.read_factory_sensing(a, None).unwrap(),
+        Some(a1.clone())
+    );
+    assert_eq!(store.read_factory_sensing(b, None).unwrap(), Some(b1));
+    assert_eq!(
+        store
+            .publish_factory_sensing(&a1, 0, None)
+            .unwrap_err()
+            .code(),
+        "now_context.stale"
+    );
+    let a2 = projection(a, "blake3:a2", 2);
+    assert_eq!(store.publish_factory_sensing(&a2, 1, None).unwrap(), 2);
+    let mut crossed = projection(a, "blake3:a3", 3);
+    crossed.field["project_world_ref"] = serde_json::json!(b);
+    assert_eq!(
+        store
+            .publish_factory_sensing(&crossed, 2, None)
+            .unwrap_err()
+            .code(),
+        "factory_sensing.invalid"
+    );
+    store.delete_factory_sensing(a, None).unwrap();
+    assert_eq!(store.read_factory_sensing(a, None).unwrap(), None);
+    assert_eq!(store.publish_factory_sensing(&a1, 0, None).unwrap(), 1);
+    assert_eq!(
+        store
+            .read_factory_sensing(a, None)
+            .unwrap()
+            .unwrap()
+            .source_revision,
+        "blake3:a1"
+    );
+    // After loss the version restarts. A pre-loss publisher that captured
+    // expected version 1 must not overwrite a newer post-loss version 1.
+    store.delete_factory_sensing(a, None).unwrap();
+    let fresh = projection(a, "blake3:a3", 1);
+    assert_eq!(store.publish_factory_sensing(&fresh, 0, None).unwrap(), 1);
+    let stale_pre_loss = projection(a, "blake3:a2", 2);
+    assert_eq!(
+        store
+            .publish_factory_sensing(&stale_pre_loss, 1, None)
+            .unwrap_err()
+            .code(),
+        "now_context.stale"
+    );
+    assert_eq!(store.read_factory_sensing(a, None).unwrap(), Some(fresh));
+    let mut older_observation = projection(a, "blake3:a4", 2);
+    older_observation.field["observed_at_unix_ms"] = serde_json::json!(29);
+    assert_eq!(
+        store
+            .publish_factory_sensing(&older_observation, 1, None)
+            .unwrap_err()
+            .code(),
+        "now_context.stale"
+    );
+    store.delete_factory_sensing(a, None).unwrap();
+    store.delete_factory_sensing(b, None).unwrap();
+}
