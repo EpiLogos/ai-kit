@@ -63,20 +63,57 @@ body can never pose as the header around it.
 
 - The recipient Position must exist in Central. An unknown ref or handle is
   refused and nothing is recorded; the refusal names `aikit gateway who --json`.
-- Occupied: `pending`, delivered at that occupant's next turn.
-- Vacant: `held`, with a three-part notice. It is delivered to whichever
-  occupant claims the Position next.
-- Occupied on another Workcell: relayed through that Workcell's gateway over
-  the authenticated WebSocket carrier, using a declared endpoint (`aikit
-  gateway remote add`, token by location only). No endpoint declared: refused
-  before recording, naming the exact `remote add` command. Endpoint down: the
-  Communique is recorded here, queued, and the sender is not blocked. The
-  relay pass (`aikit gateway forward`, and every gateway service tick) sends it
-  once the remote answers. Once relayed, delivery is recorded by the receiving
-  gateway, and the sender's copy shows `forward.state: forwarded`.
+
+Each Workcell's Actuation keeps its own occupancy ledger, so "who occupies
+this Position" has one answer per Workcell. The gateway keeps no copy of any
+of them. It routes in this order:
+
+1. **This Workcell's ledger first** (`actuation occupancy read`).
+   - A current tenure on this Workcell: `pending`, delivered at that
+     occupant's next turn.
+   - A current tenure that this ledger places on another Workcell: relayed
+     to that Workcell's declared gateway (below). No endpoint declared:
+     refused before recording, naming the exact `remote add` command.
+2. **No current tenure here: ask every declared remote.** Each remote gateway
+   answers `occupancy-read` (over its authenticated WebSocket, or its Unix
+   socket) from its own Workcell's Actuation, at the moment of asking, with
+   its `gateway_ref` and `workcell_ref`. Remotes are asked in parallel, each
+   bounded to 2 seconds.
+   - Exactly one reports a current tenure: `pending`, relayed there. The
+     Communique records the route it took in `routing`: the remote's
+     `workcell_ref`, `gateway_ref`, the `generation_ref` it reported, and a
+     plain-words `basis`.
+   - More than one reports a current tenure: refused before recording
+     (`gateway.occupancy_ambiguous`), naming each Workcell and generation.
+     The gateway does not choose between two occupants of one address.
+   - None does, or none could be asked: `held`, with a three-part notice
+     naming which Workcells answered vacant and which could not be asked
+     (unreachable, refused, or their Actuation unavailable).
+3. **Actuation here could not answer**: `pending` here, not relayed, with a
+   three-part notice.
+
+A relay whose remote is down leaves the Communique recorded here and queued;
+the sender is not blocked. The relay pass (`aikit gateway forward`, and every
+gateway service tick) re-resolves every undelivered Communique the same way,
+asking each declared remote for its whole listing (`occupancy-list`) once per
+pass. So a `held` Communique reaches a recipient who occupies later on another
+machine, a `pending` one follows an occupant whose address moved to another
+Workcell, and one queued for a remote that was down is retried. What a
+predecessor already received is never sent again. Once relayed, delivery is
+recorded by the receiving gateway, the sender's copy shows `forward.state:
+forwarded`, and the sender's attribution travels unchanged.
 
 This home's Workcell is `AIKIT_WORKCELL_REF` when set, otherwise the Workcell
-`central.world.here` declares current.
+`central.world.here` declares current. The gateway service answers peers'
+occupancy questions with the same Workcell identity.
+
+`who` overlays the remotes too. A Position vacant in this ledger but occupied
+on a reachable remote shows that occupancy, with `occupancy.workcell_ref` and
+`occupancy.observed_via: "gateway:<gateway_ref>"`. Rows read from this ledger
+carry `observed_via: "local"`. Two Workcells claiming one Position show
+`state: unavailable` with both `claims` and an absence. `data.remotes` lists
+every declared remote as `{workcell_ref, gateway_ref, status: reachable |
+unreachable, detail}`.
 
 ### Delivery at the turn boundary
 
@@ -156,9 +193,19 @@ civil-time policy must say `automatic_day_rollover: true`, and
 - `crates/aikit-cli/tests/gateway_contact.rs`: the real binary and gateway.
   Covers same-Workcell send, inbox and ack; turn-boundary delivery; vacant →
   held → next claim; occupant replacement; unknown and forged attribution;
-  delegation into custody; the population reading; a missing owner. Across two
-  AIKit homes and two gateways: relay, and a remote that is down and receives
-  later.
+  delegation into custody; the population reading; a missing owner. Across
+  AIKit homes that each keep their own occupancy ledger (the fixture's
+  `FIXTURE_OCCUPANCY`) and their own gateway: a Position occupied only on B is
+  reached from A through B's occupancy answer, and B's reply reaches A the same
+  way; B down leaves the Communique held at A until a relay pass finds B's
+  occupant; an occupant whose address moves from A to B receives what it never
+  had and nothing twice; two Workcells claiming one Position are refused as
+  ambiguous; `who` shows occupancy observed through a remote gateway; a tenure
+  A's own ledger places on B is relayed, retried after B was down, or refused
+  when B is undeclared.
+- `crates/aikit-adapters/src/gateway_service.rs`: the occupancy query is
+  answered by the service's owner hook on every ask (nothing cached), writes
+  no gateway state, and the kernel alone refuses it.
 - `crates/aikit-cli/tests/routine_native_day.rs`: a disposable Central root with
   the real `ctrl`. An occurrence falls due, one `gateway tick` runs, the Day
   opens and the NOW fields roll, using native Actions only. With Central #217

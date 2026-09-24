@@ -138,11 +138,12 @@ pub use factory_run_thought_authored_wiki::{
 };
 pub use flow_authored_wiki::{standing_flow_authored_wiki_source, FLOW_AUTHORED_WIKI_VERSION};
 pub use gateway_client::{
-    gateway_command, gateway_request, GatewayCarrierTarget, GATEWAY_CLIENT_VERSION,
+    gateway_command, gateway_command_within, gateway_request, GatewayCarrierTarget,
+    GATEWAY_CLIENT_VERSION,
 };
 pub use gateway_communique::{
     Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForward, CommuniqueForwardOutcome,
-    CommuniqueJournal, CommuniqueState, CommuniqueTransition, SenderAttribution,
+    CommuniqueJournal, CommuniqueRouting, CommuniqueState, CommuniqueTransition, SenderAttribution,
     COMMUNIQUE_REF_PREFIX, COMMUNIQUE_SCHEMA, MAX_COMMUNIQUE_BODY_BYTES,
 };
 pub use gateway_connector::{
@@ -159,15 +160,17 @@ pub use gateway_runtime::{
     GatewayCommand, GatewayDiscovery, GatewayEcology, GatewayEcologyAgency, GatewayEcologySession,
     GatewayEcologyStream, GatewayEcologySurface, GatewayErrorEnvelope, GatewayForkOrigin,
     GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult, GatewayInvocationMode,
-    GatewayReplay, GatewayRequestEnvelope, GatewayResponse, GatewayResponseEnvelope,
-    GatewaySnapshot, GatewayStatus, GatewayStreamEvent, GatewayStreamJournal,
-    ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA, AGENCY_GATEWAY_VERSION,
-    GATEWAY_ECOLOGY_AUTHORITY_LAW, GATEWAY_INVOCATION_MODES,
+    GatewayOccupancyReading, GatewayOwnerUnavailable, GatewayReplay, GatewayRequestEnvelope,
+    GatewayResponse, GatewayResponseEnvelope, GatewaySnapshot, GatewayStatus, GatewayStreamEvent,
+    GatewayStreamJournal, ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA,
+    AGENCY_GATEWAY_VERSION, GATEWAY_ECOLOGY_AUTHORITY_LAW, GATEWAY_INVOCATION_MODES,
+    GATEWAY_OCCUPANCY_READING_SCHEMA,
 };
 pub use gateway_service::{
     acquire_gateway_state_lock, execute_against_state_file, persist_gateway_state,
-    restore_gateway_state, run_gateway_service, run_gateway_service_with_ticks,
-    GatewayServiceConfig, GatewayStateLock, GatewayTick, GatewayTickLoop,
+    restore_gateway_state, run_gateway_service, run_gateway_service_with_hooks,
+    run_gateway_service_with_ticks, GatewayOccupancyReader, GatewayServiceConfig,
+    GatewayServiceHooks, GatewayStateLock, GatewayTick, GatewayTickLoop,
     DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION,
 };
 pub use harness_disclosure::{
