@@ -183,8 +183,15 @@ impl World {
         ])
     }
     fn start(&mut self) {
+        self.start_with_pi_config_ambient(None);
+    }
+    fn start_with_pi_config_ambient(&mut self, ambient_pi_config: Option<&Path>) {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_aikit-session-space"));
+        if let Some(path) = ambient_pi_config {
+            command.env("PI_CODING_AGENT_DIR", path);
+        }
         self.child = Some(
-            Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
+            command
                 .env("AIKIT_HOME", self.home.root())
                 .env("WORKCELL_CONTROL_TOKEN", "controlled-caw-material-token")
                 .env("CENTRAL_NATIVE_TOKEN", "CONTROLLED_MUST_NOT_REACH_PROVIDER")
@@ -239,6 +246,84 @@ impl World {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+}
+
+fn prepare_actual_pi_task(world: &World) -> Value {
+    let pi = PathBuf::from(std::env::var_os("AIKIT_CAW_PI_BIN").expect("actual Pi required"));
+    assert_eq!(pi.file_name().and_then(|name| name.to_str()), Some("pi"));
+    let mut request = world.prepare_input();
+    request["provider"] = json!({
+        "id":"native-pi-task",
+        "label":"Actual Pi RPC protected task startup",
+        "protocol":"pi-rpc",
+        "argv":[pi,"--mode","rpc","--no-extensions","--session-dir",
+            world.root.join("Work/demo/src/pi-sessions"),
+            "--provider","openrouter","--model","cohere/north-mini-code:free"]
+    });
+    let prepared = world.cli(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        request.to_string(),
+    ]);
+    assert_eq!(prepared["ready"], true);
+    world.cli(&[
+        "encounter-configure".into(),
+        "--provider-json".into(),
+        request["provider"].to_string(),
+    ]);
+    prepared
+}
+
+#[test]
+#[ignore = "requires source-built Central, Workcell, Actuation and actual pinned Pi; mandatory CAW lane"]
+fn real_pi_task_startup_uses_allocated_now_instead_of_ambient_config() {
+    let mut world = World::new(true);
+    let ambient = world.root.join("ambient-outside-task");
+    let prepared = prepare_actual_pi_task(&world);
+    world.start_with_pi_config_ambient(Some(&ambient));
+    let opened = world.open(&prepared, &world.root.join("Work/demo/src"));
+    assert_eq!(opened["ok"], true, "{opened}");
+    assert_eq!(opened["data"]["inference_observed"], false);
+    assert_eq!(
+        opened["data"]["model_observation"]["current_model_id"], "cohere/north-mini-code:free",
+        "the actual Pi get_state must confirm the selected free model"
+    );
+    let now = PathBuf::from(
+        prepared["allocation"]["allocation"]["writable_destination"]
+            .as_str()
+            .unwrap(),
+    );
+    assert!(prepared["requirements"]["writable_paths"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(now)));
+    assert!(now.join("pi-agent").is_dir());
+    assert!(
+        !ambient.exists(),
+        "ambient Pi config escaped the task grant"
+    );
+    println!("ACTUAL_PI_TASK_STARTUP_INSIDE_NATIVE_NOW_WORKCELL");
+}
+
+#[test]
+#[ignore = "requires source-built Central, Workcell, Actuation and actual pinned Pi; mandatory CAW lane"]
+fn real_pi_task_refuses_redirected_allocated_config_directory() {
+    let mut world = World::new(true);
+    let prepared = prepare_actual_pi_task(&world);
+    let now = PathBuf::from(
+        prepared["allocation"]["allocation"]["writable_destination"]
+            .as_str()
+            .unwrap(),
+    );
+    let outside = world.root.join("outside-task-pi-config");
+    fs::create_dir(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, now.join("pi-agent")).unwrap();
+    world.start();
+    let refused = world.open(&prepared, &world.root.join("Work/demo/src"));
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
 }
 impl Drop for World {
     fn drop(&mut self) {
