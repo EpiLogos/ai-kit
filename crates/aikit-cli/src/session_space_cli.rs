@@ -120,6 +120,16 @@ enum Command {
         #[arg(long)]
         agent_session: String,
     },
+    /// Restore an exact prior ready task after failed unhosted preparation.
+    /// Hosted pending work requires recovery of the same Workcell demand.
+    EncounterTaskAbort {
+        #[arg(long)]
+        agent_session: String,
+        #[arg(long)]
+        expected_revision: String,
+        #[arg(long)]
+        restore_revision: String,
+    },
     /// Internal native protocol launch; emits no wrapper bytes to stdout.
     EncounterTaskExec {
         #[arg(long)]
@@ -370,6 +380,18 @@ fn run(cli: Cli) -> Result<()> {
                 &aikit_core::ResourceRef::parse(agent_session)?,
             )?)
         }
+        Command::EncounterTaskAbort {
+            agent_session,
+            expected_revision,
+            restore_revision,
+        } => emit(
+            &crate::encounter_service::EncounterService::abort_task_preparation(
+                service.home(),
+                &aikit_core::ResourceRef::parse(agent_session)?,
+                &aikit_core::SourceRevision::parse(expected_revision)?,
+                &aikit_core::SourceRevision::parse(restore_revision)?,
+            )?,
+        ),
         Command::EncounterTaskExec {
             agent_session,
             expected_revision,
