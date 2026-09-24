@@ -83,6 +83,13 @@ fn has_larch_project_source(result: &aikit_core::KnowledgeSearchResult) -> bool 
         .any(|hit| hit.resource.as_str().starts_with("source:project:larch:"))
 }
 
+fn code_query_failed_for(result: &aikit_core::KnowledgeSearchResult, project: &str) -> bool {
+    result.absences.iter().any(|absence| {
+        absence.starts_with("ProjectMap code search degraded:")
+            && absence.contains(&format!("--repo {project}"))
+    })
+}
+
 #[test]
 fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     let binary = std::env::var("AIKIT_GITNEXUS_BIN").unwrap_or_else(|_| "gitnexus".into());
@@ -202,6 +209,28 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         "cedar resolve leaked larch Source/ProjectMap material"
     );
 
+    // An empty subject reaches the real GitNexus query command after both
+    // repositories indexed, and GitNexus refuses it. The failure itself must
+    // stay scoped: silently dropping cedar's own error would be false health.
+    let own_failure = service.knowledge_search("", 256).unwrap();
+    assert!(
+        code_query_failed_for(&own_failure, "cedar"),
+        "cedar's real GitNexus query failure was lost: {:?}",
+        own_failure.absences
+    );
+    assert!(
+        !code_query_failed_for(&own_failure, "larch"),
+        "cedar search disclosed larch's real GitNexus query failure"
+    );
+    let direct_failure = service
+        .knowledge_resolve(&parse_or_search_expression("").unwrap(), 256)
+        .unwrap();
+    assert!(code_query_failed_for(&direct_failure, "cedar"));
+    assert!(!code_query_failed_for(&direct_failure, "larch"));
+    let cross_failure = service.knowledge_search(": larch", 256).unwrap();
+    assert!(code_query_failed_for(&cross_failure, "larch"));
+    assert!(!code_query_failed_for(&cross_failure, "cedar"));
+
     // An unknown but syntactically valid Project names an empty Project
     // view. It cannot become a broad all-Projects query.
     let unknown = service
@@ -239,4 +268,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         .unwrap();
     assert!(has_larch_code(&global_direct));
     assert!(has_larch_project_source(&global_direct));
+    let root_failure = root_service.knowledge_search("", 256).unwrap();
+    assert!(code_query_failed_for(&root_failure, "cedar"));
+    assert!(code_query_failed_for(&root_failure, "larch"));
 }

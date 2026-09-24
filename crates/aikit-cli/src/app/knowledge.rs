@@ -80,6 +80,10 @@ pub(super) struct KnowledgeRuntime {
     /// `source:project-code:<project_id>` → `Work/<name>` for real CodeIndex
     /// hits whose public resource refs are opaque code digests.
     code_source_scopes: BTreeMap<String, String>,
+    /// Parallel to `code`: the discovered Project owning each native index.
+    /// Select providers before a scoped query so search failures cannot name
+    /// another Project in the reply's diagnostic lines.
+    code_project_scopes: Vec<String>,
     /// One code-index provider per discovered project; unavailable ones are
     /// kept so the absence is per project, never a global "provider absent".
     code: Vec<GitNexusCodeIndexProvider<SystemRunner>>,
@@ -163,6 +167,14 @@ impl KnowledgeRuntime {
         self.central.as_ref().map(|p| p as &dyn SourcePoolProvider)
     }
     fn application(&self, context: FamiliarityContext) -> KnowledgeApplication<'_> {
+        self.application_with_code_scope(context, None)
+    }
+
+    fn application_with_code_scope(
+        &self,
+        context: FamiliarityContext,
+        scoped_project: Option<&str>,
+    ) -> KnowledgeApplication<'_> {
         let mut application =
             KnowledgeApplication::new(context).with_project_map(&self.project_map);
         if let Some(provider) = &self.wiki {
@@ -190,8 +202,10 @@ impl KnowledgeRuntime {
         if let Some(provider) = &self.bkmr_stores {
             application = application.with_source_pool(provider, &[]);
         }
-        for provider in &self.code {
-            application = application.with_code(provider);
+        for (provider, project) in self.code.iter().zip(&self.code_project_scopes) {
+            if scoped_project.is_none_or(|scope| scope == project) {
+                application = application.with_code(provider);
+            }
         }
         application
     }
@@ -262,7 +276,7 @@ impl Service {
         // The scope that governs this reply's disclosure: an explicit `:`
         // scope in the expression, else the invocation's own project.
         let explicit_scope = expression_scope_project(expression).map(str::to_owned);
-        let mut result = self.with_knowledge(|runtime, application| {
+        let mut result = self.with_knowledge(|runtime, _application| {
             let scoped_display = runtime.scoped_project_display(explicit_scope.as_deref());
             if explicit_scope.is_some() && scoped_display.is_none() {
                 return Err(aikit_core::AikitError::new(
@@ -270,7 +284,9 @@ impl Service {
                     "Explicit Project scope is invalid or cannot be resolved",
                 ));
             }
-            let mut result = application.resolve(expression, candidate_limit);
+            let mut result = runtime
+                .application_with_code_scope(self.knowledge_context(), scoped_display.as_deref())
+                .resolve(expression, candidate_limit);
             result.absences.extend(runtime.absences.clone());
             // Pending authored relations are scoped: a query sees its own
             // scope's rollup; other projects' pendings stay with
@@ -1299,6 +1315,7 @@ impl Service {
         // global "provider absent"; unavailable projects share one grouped
         // line per distinct reason.
         let mut code = Vec::new();
+        let mut code_project_scopes = Vec::new();
         let mut code_degradations: Vec<ProjectCodeDegradation> = Vec::new();
         let mut gitnexus_unavailable: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for project in &work_projects {
@@ -1353,6 +1370,7 @@ impl Service {
                     .push(format!("Work/{}", project.name));
             }
             code.push(provider);
+            code_project_scopes.push(format!("Work/{}", project.name));
         }
         for (reason, projects) in gitnexus_unavailable {
             // A status note, not a per-query absence: capability state is the
@@ -1391,6 +1409,7 @@ impl Service {
             work_repo_scopes,
             central_expected: central_root.is_some(),
             code_source_scopes,
+            code_project_scopes,
             code,
             code_degradations,
             project_map,

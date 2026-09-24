@@ -9,7 +9,11 @@
 //! is the exact inverse and refuses when nothing is installed.
 
 use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::time::Duration;
 
 use aikit_core::{AikitError, Result};
 use serde_json::{json, Value};
@@ -258,9 +262,107 @@ pub fn is_installed(home_dir: &std::path::Path) -> bool {
     plist_path(home_dir).exists()
 }
 
+/// Clear a socket left by an exited default Gateway before launchd starts its
+/// replacement. The Gateway's native state lock excludes owners using this
+/// state file, and a live Unix connection also protects custom-state owners.
+/// Other files at this path are never treated as stale sockets.
+#[cfg(unix)]
+fn clear_stale_gateway_socket(home: &aikit_store::AikitHome) -> Result<bool> {
+    use std::os::unix::{fs::FileTypeExt, fs::MetadataExt, net::UnixStream};
+
+    let socket = home.gateway_socket();
+    let metadata = match std::fs::symlink_metadata(&socket) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(AikitError::new(
+                "gateway.service_install_socket_unreadable",
+                format!("inspect Gateway socket {}: {error}", socket.display()),
+            ));
+        }
+    };
+    if !metadata.file_type().is_socket() {
+        return Err(AikitError::new(
+            "gateway.service_install_conflict",
+            format!(
+                "refusing to replace a non-socket Gateway path at {}",
+                socket.display()
+            ),
+        ));
+    }
+
+    // A resident Gateway using this state file holds the lock for its
+    // lifetime. Holding it here excludes that native owner starting between
+    // the lstat and unlink; the connection probe covers custom-state owners.
+    let _lock = aikit_adapters::acquire_gateway_state_lock(
+        &home.gateway_state(),
+        Duration::from_millis(200),
+        "Gateway LaunchAgent socket inspection",
+    )
+    .map_err(|error| {
+        AikitError::new(
+            "gateway.service_install_conflict",
+            format!("Gateway owner state is active; refusing socket cleanup: {error}"),
+        )
+    })?;
+    match UnixStream::connect(&socket) {
+        Ok(_) => {
+            return Err(AikitError::new(
+                "gateway.service_install_conflict",
+                format!(
+                    "a Gateway is answering at {}; stop it before installation",
+                    socket.display()
+                ),
+            ));
+        }
+        Err(error) if error.kind() == ErrorKind::ConnectionRefused => {}
+        Err(error) => {
+            return Err(AikitError::new(
+                "gateway.service_install_conflict",
+                format!(
+                    "cannot prove Gateway socket {} is stale: {error}",
+                    socket.display()
+                ),
+            ));
+        }
+    }
+    let current = std::fs::symlink_metadata(&socket).map_err(|error| {
+        AikitError::new(
+            "gateway.service_install_conflict",
+            format!(
+                "Gateway socket {} changed during inspection: {error}",
+                socket.display()
+            ),
+        )
+    })?;
+    if !current.file_type().is_socket()
+        || current.dev() != metadata.dev()
+        || current.ino() != metadata.ino()
+    {
+        return Err(AikitError::new(
+            "gateway.service_install_conflict",
+            format!(
+                "Gateway socket {} changed during inspection",
+                socket.display()
+            ),
+        ));
+    }
+    std::fs::remove_file(&socket).map_err(|error| {
+        AikitError::new(
+            "gateway.service_install_socket_cleanup_failed",
+            format!(
+                "remove proven stale Gateway socket {}: {error}",
+                socket.display()
+            ),
+        )
+    })?;
+    Ok(true)
+}
+
 /// Install the LaunchAgent: write the plist, then bootstrap it into the user's
 /// GUI domain. A gateway already answering at the default socket is refused —
-/// KeepAlive would fight it over the endpoint.
+/// KeepAlive would fight it over the endpoint. A proven stale socket from an
+/// exited owner is cleared under the native Gateway state lock.
 pub fn install(home_dir: &std::path::Path, home: &aikit_store::AikitHome) -> Result<Value> {
     assert_macos()?;
     let running = std::env::current_exe().map_err(|error| {
@@ -284,17 +386,10 @@ pub fn install(home_dir: &std::path::Path, home: &aikit_store::AikitHome) -> Res
         })
         .unwrap_or(running);
     let environment = ServiceEnvironment::discover(home_dir, home)?;
-    let socket = home.gateway_socket();
-    if socket.exists() {
-        return Err(AikitError::new(
-            "gateway.service_install_conflict",
-            format!(
-                "a gateway is already answering at {}; stop it (`aikit gateway serve` owns that \
-                 socket) before installing the persistent service",
-                socket.display()
-            ),
-        ));
-    }
+    #[cfg(unix)]
+    let stale_socket_removed = clear_stale_gateway_socket(home)?;
+    #[cfg(not(unix))]
+    let stale_socket_removed = false;
     let plist = plist_path(home_dir);
     let log = log_path(home_dir);
     if let Some(parent) = plist.parent() {
@@ -336,6 +431,7 @@ pub fn install(home_dir: &std::path::Path, home: &aikit_store::AikitHome) -> Res
         "binary": binary.display().to_string(),
         "native_owners": environment.values.iter().filter(|(key, _)| matches!(key.as_str(), "CENTRAL_CTRL_BIN" | "FACTORY_BIN" | "ACTUATION_BIN")).map(|(key, value)| (key.clone(), value.clone())).collect::<BTreeMap<_, _>>(),
         "aikit_home": home.root().display().to_string(),
+        "stale_socket_removed": stale_socket_removed,
         "central_root": environment.values["AIKIT_CENTRAL_ROOT"],
         "note": "launchd keeps `aikit gateway serve` alive; the Routine dispatcher ticks every 30 seconds",
     }))
@@ -425,5 +521,67 @@ mod tests {
         #[cfg(not(target_os = "macos"))]
         assert_eq!(error.code(), "gateway.service_install_unsupported");
         assert!(!is_installed(dir.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installer_socket_boundary_preserves_live_and_other_paths_but_clears_real_stale_socket() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::{UnixListener, UnixStream};
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = aikit_store::AikitHome::at(dir.path());
+        std::fs::create_dir_all(home.state()).unwrap();
+        let socket = home.gateway_socket();
+
+        let listener = UnixListener::bind(&socket).unwrap();
+        let conflict = clear_stale_gateway_socket(&home).unwrap_err();
+        assert_eq!(conflict.code(), "gateway.service_install_conflict");
+        assert!(
+            UnixStream::connect(&socket).is_ok(),
+            "live listener must remain reachable"
+        );
+        drop(listener);
+
+        let owner_lock = aikit_adapters::acquire_gateway_state_lock(
+            &home.gateway_state(),
+            Duration::from_millis(100),
+            "real lock regression test",
+        )
+        .unwrap();
+        let conflict = clear_stale_gateway_socket(&home).unwrap_err();
+        assert_eq!(conflict.code(), "gateway.service_install_conflict");
+        assert!(
+            socket.exists(),
+            "a held native owner lock preserves the socket"
+        );
+        drop(owner_lock);
+
+        assert!(
+            clear_stale_gateway_socket(&home).unwrap(),
+            "closed real Unix listener leaves a stale path"
+        );
+        assert!(!socket.exists());
+        assert!(
+            !clear_stale_gateway_socket(&home).unwrap(),
+            "a missing socket needs no cleanup"
+        );
+
+        std::fs::write(&socket, b"owner material").unwrap();
+        let conflict = clear_stale_gateway_socket(&home).unwrap_err();
+        assert_eq!(conflict.code(), "gateway.service_install_conflict");
+        assert_eq!(std::fs::read(&socket).unwrap(), b"owner material");
+
+        std::fs::remove_file(&socket).unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, b"symlink target").unwrap();
+        symlink(&target, &socket).unwrap();
+        let conflict = clear_stale_gateway_socket(&home).unwrap_err();
+        assert_eq!(conflict.code(), "gateway.service_install_conflict");
+        assert!(std::fs::symlink_metadata(&socket)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&target).unwrap(), b"symlink target");
     }
 }
