@@ -27,6 +27,7 @@ EXPECTED_SKILLS = {
     "skill/aikit/experience-campaign",
     "skill/aikit/named-praxis",
     "skill/aikit/session-continuity",
+    "skill/aikit/central-day-rollover",
 }
 EXPECTED_GUIDANCE = {
     "guidance/aikit/living-project-collaboration",

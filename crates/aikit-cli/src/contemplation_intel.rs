@@ -819,10 +819,33 @@ fn describe_answer(answer: &Answer, threshold: f64) -> (bool, f64, Value) {
 // ---------------------------------------------------------------------
 
 const EVIDENCE_GRADE_LAW: &str =
-    "O:I grade law: automation earns at most D/C. D = a declared test_ref exists but was not proven \
-     to exist at head; C = the declared test_ref exists at head and is automatically checkable. P \
-     (peer), M (maintainer) and H (human) grades require review beyond what this automated selection \
-     can claim.";
+    "O:I grade law (O-I scripts/experience_map.py, #201): D = deterministic (autonomous/CI); \
+     C = cross-product conformance, and only when the receipt itself carries live/native or \
+     real-kernel-bridge standing; P = real provider/harness; M = physical/material; H = human \
+     UX/Recognition. Automation earns at most D, or C with such a receipt; P, M and H are never \
+     earned by automation. A declared test existing at head is not evidence: nothing is earned \
+     until the test is executed and its receipt names the revision it ran against.";
+
+/// How a declared test_ref is run, or that it is not an executable test.
+fn test_invocation(test_ref: &str) -> Value {
+    let parts: Vec<&str> = test_ref.split('/').collect();
+    let (kind, command) = match parts.as_slice() {
+        ["crates", krate, "tests", file] if file.ends_with(".rs") => (
+            "cargo-integration-test",
+            Some(format!(
+                "cargo test -p {krate} --test {}",
+                file.trim_end_matches(".rs")
+            )),
+        ),
+        ["crates", krate, "src", ..] if test_ref.ends_with(".rs") => (
+            "cargo-unit-tests",
+            Some(format!("cargo test -p {krate} --lib")),
+        ),
+        _ if test_ref.ends_with(".py") => ("python-script", Some(format!("python3 {test_ref}"))),
+        _ => ("evidence-document", None),
+    };
+    json!({"kind": kind, "command": command})
+}
 
 fn capability_row<'a>(field: &'a Value, id: &str) -> Option<&'a Value> {
     field["matrix"]["capabilities"]
@@ -926,23 +949,33 @@ pub fn now_test_selection(args: NowTestSelectionArgs) -> Result<Value> {
             .cloned()
             .unwrap_or_default();
         let any_exists = known_tests.iter().any(|t| t["exists_at_head"] == true);
-        let grade = if declared_test_refs.is_empty() {
-            "D"
-        } else if any_exists {
-            "C"
-        } else {
-            "D"
-        };
         missing_evidence_grades.push(json!({
             "capability_id": id,
-            "grade": grade,
+            "earned_grade": Value::Null,
+            "earned_basis": "no execution receipt is part of the field; declared tests existing at head earn nothing",
+            "automation_ceiling": "D (C only with a receipt carrying live/native standing)",
+            // The field checks existence only for explicit/derived capabilities;
+            // for a candidate it was never assessed, which is not "missing".
+            "declared_tests_exist_at_head": if known_tests.is_empty() && !declared_test_refs.is_empty() { Value::Null } else { json!(any_exists) },
             "declared_test_refs": declared_test_refs,
             "known_tests_at_head": known_tests,
         }));
+        if known_tests.is_empty() {
+            for test_ref in declared_test_refs.iter().filter_map(Value::as_str) {
+                required_tests.push(json!({
+                    "capability_id": id,
+                    "test_ref": test_ref,
+                    "invocation": test_invocation(test_ref),
+                    "exists_at_head": Value::Null,
+                    "reason": format!("{label} capability: declared test, existence at head not assessed by the field"),
+                }));
+            }
+        }
         for test in &known_tests {
             required_tests.push(json!({
                 "capability_id": id,
                 "test_ref": test["test_ref"],
+                "invocation": test_invocation(test["test_ref"].as_str().unwrap_or_default()),
                 "exists_at_head": test["exists_at_head"],
                 "reason": if test["exists_at_head"] == true { "re-run: the capability is affected by this change" } else { "create: the capability declares this test but it does not exist at head" },
             }));
@@ -1077,12 +1110,15 @@ pub fn now_test_selection(args: NowTestSelectionArgs) -> Result<Value> {
 
     let markdown = render_markdown(
         &field,
-        &affected_capabilities,
-        &required_skills,
-        &missing_evidence_grades,
-        disposition,
-        disposition_rule,
-        &telos_concern,
+        &SelectionReading {
+            affected_capabilities: &affected_capabilities,
+            required_skills: &required_skills,
+            missing_evidence_grades: &missing_evidence_grades,
+            required_tests: &required_tests,
+            disposition,
+            disposition_rule,
+            telos_concern: &telos_concern,
+        },
     );
 
     Ok(json!({
@@ -1109,15 +1145,27 @@ pub fn now_test_selection(args: NowTestSelectionArgs) -> Result<Value> {
     }))
 }
 
-fn render_markdown(
-    field: &Value,
-    affected_capabilities: &[Value],
-    required_skills: &[Value],
-    missing_evidence_grades: &[Value],
-    disposition: &str,
-    disposition_rule: &str,
-    telos_concern: &str,
-) -> String {
+/// The already-computed parts of a test selection the Markdown reading renders.
+struct SelectionReading<'a> {
+    affected_capabilities: &'a [Value],
+    required_skills: &'a [Value],
+    missing_evidence_grades: &'a [Value],
+    required_tests: &'a [Value],
+    disposition: &'a str,
+    disposition_rule: &'a str,
+    telos_concern: &'a str,
+}
+
+fn render_markdown(field: &Value, reading: &SelectionReading<'_>) -> String {
+    let SelectionReading {
+        affected_capabilities,
+        required_skills,
+        missing_evidence_grades,
+        required_tests,
+        disposition,
+        disposition_rule,
+        telos_concern,
+    } = *reading;
     let mut out = String::new();
     out.push_str("# Test selection\n\n");
     out.push_str(&format!("**Telos/UX concern:** {telos_concern}\n\n"));
@@ -1149,15 +1197,46 @@ fn render_markdown(
             capability["need"].as_str().unwrap_or(""),
         ));
     }
-    out.push_str("\n## Missing evidence grades\n\n");
-    for grade in missing_evidence_grades {
+    out.push_str("\n## Tests now required (run each; account for every one)\n\n");
+    for test in required_tests {
+        let command = test["invocation"]["command"].as_str();
         out.push_str(&format!(
-            "- `{}`: grade {}\n",
-            grade["capability_id"].as_str().unwrap_or("?"),
-            grade["grade"].as_str().unwrap_or("?"),
+            "- `{}` → {}{}\n",
+            test["capability_id"].as_str().unwrap_or("?"),
+            match command {
+                Some(c) => format!("`{c}`"),
+                None => format!(
+                    "`{}` (evidence document, not executable)",
+                    test["test_ref"].as_str().unwrap_or("?")
+                ),
+            },
+            match test["exists_at_head"].as_bool() {
+                Some(true) => "",
+                Some(false) => " — **missing at head**",
+                None => " — existence not assessed (candidate capability)",
+            },
         ));
     }
-    out.push_str(&format!("\n{EVIDENCE_GRADE_LAW}\n"));
+    out.push_str("\n## Negative controls (per implicated capability)\n\n");
+    out.push_str("For each capability run at least one: disconnected producer (the test must fail without the \
+real producer), stale (fails against the pre-change revision), wrong subject (does not pass on an \
+unrelated subject). A control you cannot run is reported as blocked with the reason.\n\n");
+    out.push_str("## Evidence earned so far\n\n");
+    for grade in missing_evidence_grades {
+        out.push_str(&format!(
+            "- `{}`: none yet (declared tests at head: {})\n",
+            grade["capability_id"].as_str().unwrap_or("?"),
+            match grade["declared_tests_exist_at_head"].as_bool() {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => "not assessed",
+            },
+        ));
+    }
+    out.push_str(&format!("\n{EVIDENCE_GRADE_LAW}\n\n"));
+    out.push_str("**Completion:** every required test and control is accounted as passed / failed / \
+blocked / unavailable with the exact command and the revision it ran against. A green subset is not \
+completion.\n");
     out
 }
 
@@ -1775,6 +1854,88 @@ mod tests {
     }
 
     #[test]
+    fn declared_tests_map_to_runnable_commands_or_are_named_evidence_documents() {
+        assert_eq!(
+            test_invocation("crates/aikit-cli/tests/adopt_command.rs")["command"],
+            "cargo test -p aikit-cli --test adopt_command"
+        );
+        assert_eq!(
+            test_invocation("crates/aikit-core/src/routine.rs")["command"],
+            "cargo test -p aikit-core --lib"
+        );
+        assert_eq!(
+            test_invocation("scripts/jev-redis/joined_proof.py")["kind"],
+            "python-script"
+        );
+        let doc = test_invocation("schemas/aikit.routine-invocation-evidence.v1.schema.json");
+        assert_eq!(doc["kind"], "evidence-document");
+        assert!(doc["command"].is_null());
+    }
+
+    #[test]
+    fn an_existing_test_file_earns_no_grade_and_the_law_is_quoted_exactly() {
+        let out = run_selection(&fixture_field(), None);
+        for row in out["missing_evidence_grades"].as_array().unwrap() {
+            assert!(row["earned_grade"].is_null(), "{row}");
+        }
+        let law = out["evidence_grade_law"].as_str().unwrap();
+        assert!(law.contains("C = cross-product conformance"));
+        assert!(law.contains("P = real provider/harness"));
+        assert!(
+            !law.contains("peer"),
+            "P is not 'peer' in the O:I grade law"
+        );
+    }
+
+    #[test]
+    fn a_selected_candidate_capabilitys_declared_tests_are_required_and_unassessed() {
+        let mut field = fixture_field();
+        field["matrix"]["capabilities"][2]["test_refs"] =
+            json!(["crates/demo/tests/candidate_b.rs"]);
+        let dir = tempfile::tempdir().unwrap();
+        let field_path = dir.path().join("field.json");
+        std::fs::write(&field_path, serde_json::to_vec(&field).unwrap()).unwrap();
+        let (_, digest) = file_digest(&field_path, "field", MAX_FIELD_BYTES).unwrap();
+        let decision_path = dir.path().join("decision.json");
+        std::fs::write(
+            &decision_path,
+            serde_json::to_vec(&json!({
+                "field_basis_digest": digest,
+                "selected": {"capability-implicated": [{"capability_id": "cap.candidate.b"}]},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let out = now_test_selection(NowTestSelectionArgs {
+            field: field_path,
+            decision: Some(decision_path),
+        })
+        .unwrap();
+        let required: Vec<&Value> = out["tests_now_required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["capability_id"] == "cap.candidate.b")
+            .collect();
+        assert_eq!(required.len(), 1, "{out}");
+        assert!(required[0]["exists_at_head"].is_null());
+        assert_eq!(
+            required[0]["invocation"]["command"],
+            "cargo test -p demo --test candidate_b"
+        );
+        let grade = out["missing_evidence_grades"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["capability_id"] == "cap.candidate.b")
+            .unwrap();
+        assert!(
+            grade["declared_tests_exist_at_head"].is_null(),
+            "not assessed is not missing"
+        );
+    }
+
+    #[test]
     fn a_noul_exactly_at_the_threshold_is_not_selected() {
         let (selected, _, _) = describe_answer(&Answer::Noul { noul: 0.5 }, 0.5);
         assert!(!selected);
@@ -1784,6 +1945,12 @@ mod tests {
 
     #[test]
     fn evidence_grade_never_claims_above_c() {
-        assert!(EVIDENCE_GRADE_LAW.contains("at most D/C"));
+        assert!(EVIDENCE_GRADE_LAW.contains("Automation earns at most D, or C with such a receipt"));
+        assert!(
+            EVIDENCE_GRADE_LAW.contains(
+                "never \
+     earned by automation"
+            ) || EVIDENCE_GRADE_LAW.contains("never earned by automation")
+        );
     }
 }

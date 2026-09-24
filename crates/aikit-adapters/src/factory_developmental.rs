@@ -514,17 +514,32 @@ fn validate_commission_receipt(
         ));
     }
     let request_body = object(request, "Commission request")?;
-    let composition = value_object(
+    // Factory's Commission basis is exactly one of Central composition
+    // evidence or a directly authored participant basis
+    // (`participantRequirements`, factory/src/commission.rs). A receipt for
+    // either is a valid Factory receipt; only a composition must keep its
+    // non-authoritative membership standing.
+    match (
+        request_body.get("centralComposition"),
         request_body
-            .get("centralComposition")
-            .ok_or_else(|| missing("centralComposition"))?,
-        "centralComposition",
-    )?;
-    require_equal(
-        text(composition, "authorityStanding")?,
-        "membership-non-authoritative",
-        "centralComposition.authorityStanding",
-    )?;
+            .get("participantRequirements")
+            .and_then(Value::as_array)
+            .filter(|requirements| !requirements.is_empty()),
+    ) {
+        (Some(composition), None) => {
+            let composition = value_object(composition, "centralComposition")?;
+            require_equal(
+                text(composition, "authorityStanding")?,
+                "membership-non-authoritative",
+                "centralComposition.authorityStanding",
+            )?;
+        }
+        (None, Some(_)) => {}
+        _ => return Err(error(
+            "factory.commission_invalid_receipt",
+            "a Commission carries exactly one of centralComposition and participantRequirements",
+        )),
+    }
     let root_act = value_object(
         request_body
             .get("rootAct")
@@ -1096,6 +1111,67 @@ mod tests {
                 other => return Err(error("test.unexpected_operation", other)),
             };
             Ok(Output::success(serde_json::to_string(&value).unwrap()))
+        }
+    }
+
+    fn commission_receipt(request: Value) -> Value {
+        serde_json::json!({
+            "contract": COMMISSION_RECEIPT,
+            "status": "applied",
+            "commission": {
+                "contract": "factory.commission/v1",
+                "revision": 1,
+                "projectRef": "project:01ARZ3NDEKTSV4RRFFQ69G5FAW",
+                "journeyRef": "journey:01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "runRef": "run:01ARZ3NDEKTSV4RRFFQ69G5FAR",
+                "request": request
+            }
+        })
+    }
+
+    fn commission_request(basis: Value) -> Value {
+        let mut request = serde_json::json!({
+            "contract": COMMISSION_REQUEST,
+            "requestRef": "commission-request:basis",
+            "rootAct": {"standing": "commissioned-not-executed"}
+        });
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(basis.as_object().unwrap().clone());
+        request
+    }
+
+    #[test]
+    fn a_receipt_on_either_factory_commission_basis_is_accepted_and_neither_or_both_refused() {
+        let composed = commission_request(serde_json::json!({
+            "centralComposition": {"authorityStanding": "membership-non-authoritative"}
+        }));
+        let authored = commission_request(serde_json::json!({
+            "participantRequirements": [{"ref": "agent/factory-guardian"}]
+        }));
+        for request in [&composed, &authored] {
+            let project = validate_commission_receipt(
+                &commission_receipt(request.clone()),
+                request,
+                "commission-request:basis",
+            )
+            .unwrap();
+            assert_eq!(project, "project:01ARZ3NDEKTSV4RRFFQ69G5FAW");
+        }
+        let neither = commission_request(serde_json::json!({}));
+        let both = commission_request(serde_json::json!({
+            "centralComposition": {"authorityStanding": "membership-non-authoritative"},
+            "participantRequirements": [{"ref": "agent/factory-guardian"}]
+        }));
+        for request in [&neither, &both] {
+            let refused = validate_commission_receipt(
+                &commission_receipt(request.clone()),
+                request,
+                "commission-request:basis",
+            )
+            .unwrap_err();
+            assert_eq!(refused.code(), "factory.commission_invalid_receipt");
         }
     }
 

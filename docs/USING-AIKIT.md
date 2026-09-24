@@ -220,6 +220,59 @@ AIKit capability grant. The `aikit-gateway` binary remains the minimal
 stdio/serve body for Workcell materialisation; the CLI group is the same
 protocol with the product's JSON envelope.
 
+The gateway is also the contact plane between World Positions: `aikit gateway
+who | send | inbox | conversation | delegate | forward | remote` read the
+population, send Communiques that are delivered at the recipient occupant's
+next turn, and relay them to other Workcells' gateways. The service's tick also
+fires native-body Routines such as the environmental DAY rollover. See
+[GATEWAY-CONTACT-AND-DAY.md](GATEWAY-CONTACT-AND-DAY.md).
+
+## World inhabitation: whoami, refocus, inhabit
+
+O:I's World-inhabitation contract (`O-I/docs/contracts/WORLD-INHABITATION-V1.md`)
+gives a body an address: a **Position** defined by Central, held by an
+**occupant generation** that Actuation records, carrying work that Factory holds
+in custody. AIKit joins those owners; it stores none of their facts.
+
+```sh
+aikit inhabit --position @aikit-guardian --reason "steward AIKit" -- claude
+aikit whoami                  # compact block; --json compact; --full everything
+aikit refocus                 # trace current work back to ProjectCentral ground
+aikit inhabit --release --position @aikit-guardian
+```
+
+`aikit inhabit` resolves the Position (`central.position.read`, or an `@handle`
+through `central.position.list`), defaults `--agent` to the Position's single
+eligible Agent and `--agency` to the Agent's single admitted AIKit agency,
+claims the tenure with `actuation occupancy claim` (`--expect-vacant` by
+default; `--handover` expects the current generation; `--fresh` replaces it),
+then execs the harness with `OI_POSITION_REF` and `OI_OCCUPANT_GENERATION`
+added to its environment. Nothing is released when the harness exits; leaving
+is `--release`, which ends the generation the body holds.
+
+`aikit whoami` (`aikit.inhabitation-reading/v1`) resolves the Position from
+`--position`, then the stamped `OI_POSITION_REF` (verified with
+`actuation occupancy verify`), then the one open tenure naming the current
+AgentSession (`--agent-session` / `AIKIT_SESSION_ID`), else reports it absent.
+Every facet — World, Project World, Position, occupancy, Agent, Agency,
+AgentSession, SessionSpace, body, Workcell, root and child NOW, current work,
+peers, prepared context, authority, working Surface, Return — is
+`present | absent | ambiguous | unavailable | not-attempted` with the source
+that answered. A missing or failing owner verb is `unavailable` with the exact
+command and its error; each owner call is bounded (the shared probe budget).
+`--publish` / `--rebuild` write the Redis World projection and `--hot` reads it
+first (see `docs/JEV-REDIS-NOW.md`).
+
+Hooks use the same reading. At SessionStart, a body whose occupancy resolves
+gets a lean inhabitation block (under 2,000 characters) **instead of** the
+historical Central NOW/Flow dump, with pointers to read it on demand; a body
+with no resolvable occupancy gets exactly the previous floor. Refocus is
+delivered at fresh occupancy, after compaction (SessionStart `compact`
+directly; PreCompact/PostCompact/Stop only mark it pending), when the current
+work changes, and after `AIKIT_REFOCUS_PROMPTS` prompts (default 40) — never
+every turn. It is recorded as delivered only after the hook output carrying it
+was written. `AIKIT_INHABITATION_HOOKS=off` disables both.
+
 ## What “working” means
 
 At minimum, all of these should succeed:

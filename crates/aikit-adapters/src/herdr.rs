@@ -91,6 +91,19 @@ pub struct HerdrSnapshot {
     pub workspace_ids: Vec<String>,
     pub pane_ids: Vec<String>,
     pub agents: Vec<HerdrAgentObservation>,
+    /// Each tab layout's workspace and its own focused pane, as Herdr reports
+    /// them (`layouts[]`). Lets a surface bound to a workspace's focused pane
+    /// be focused exactly through `workspace focus`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layouts: Vec<HerdrLayoutFocus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HerdrLayoutFocus {
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused_pane_id: Option<String>,
+    pub pane_ids: Vec<String>,
 }
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
@@ -204,6 +217,19 @@ pub fn parse_herdr_snapshot(raw: &str) -> Result<HerdrSnapshot> {
         workspace_ids: object_ids(snapshot, "workspaces", "workspace_id"),
         pane_ids: object_ids(snapshot, "panes", "pane_id"),
         agents,
+        layouts: snapshot
+            .get("layouts")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|layout| {
+                Some(HerdrLayoutFocus {
+                    workspace_id: string_field(layout, "workspace_id")?,
+                    focused_pane_id: string_field(layout, "focused_pane_id"),
+                    pane_ids: object_ids(layout, "panes", "pane_id"),
+                })
+            })
+            .collect(),
     })
 }
 
@@ -398,7 +424,7 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
         let cwd = self.create_cwd.clone().ok_or_else(|| {
             AikitError::new(
                 "herdr.workspace_absent",
-                "configured Herdr workspace is absent and no create cwd was supplied",
+                "configured Herdr workspace is absent and no create cwd was supplied: set the working-surface plan's `root` (the directory Herdr creates the workspace in) and re-bind it",
             )
         })?;
         let mut argv = vec![
@@ -776,9 +802,21 @@ impl<R: CommandRunner> WorkingEnvironmentProvider for HerdrWorkingEnvironment<R>
         // Installed Herdr has no absolute pane focus: `herdr pane focus` is
         // neighbour-relative navigation (`--direction left|right|up|down`), so
         // the only available command would silently move the operator to a
-        // neighbour of the bound pane. Withhold the surface-level operation
-        // rather than focus something else; `focus_workspace` remains the
-        // supported coarse route.
+        // neighbour of the bound pane. When the bound pane is its workspace's
+        // own focused pane, `workspace focus` lands exactly on it; otherwise
+        // withhold the surface-level operation rather than focus something else.
+        // Observing is not acting: an unreadable snapshot proves nothing and
+        // falls through to the withheld refusal.
+        let exact_workspace = self.snapshot().ok().and_then(|snapshot| {
+            snapshot
+                .layouts
+                .into_iter()
+                .find(|layout| layout.focused_pane_id.as_deref() == Some(pane.as_str()))
+        });
+        if let Some(layout) = exact_workspace {
+            self.run(&["workspace", "focus", &layout.workspace_id])?;
+            return Ok(());
+        }
         Err(AikitError::new(
             "herdr.surface_focus_unsupported",
             format!(
@@ -830,6 +868,52 @@ mod tests {
         assert_eq!(snapshot.focused_pane_id.as_deref(), Some("w1:p2"));
         assert_eq!(snapshot.agents[0].status, HerdrAgentStatus::Blocked);
         assert_eq!(snapshot.agents[0].pane_id, "w1:p2");
+    }
+
+    #[test]
+    fn a_surface_that_is_its_workspaces_focused_pane_is_focused_through_the_workspace() {
+        let snapshot = |focused: &str| {
+            format!(
+                r#"{{"id":"s","result":{{"type":"session_snapshot","snapshot":{{
+                  "version":"0.9.1","protocol":8,"focused_workspace_id":"w2","focused_pane_id":"w2:p1",
+                  "workspaces":[{{"workspace_id":"w2"}},{{"workspace_id":"w9"}}],"tabs":[],
+                  "panes":[{{"pane_id":"w2:p1"}},{{"pane_id":"w9:p1"}},{{"pane_id":"w9:p2"}}],
+                  "layouts":[
+                    {{"workspace_id":"w2","tab_id":"w2:t1","focused_pane_id":"w2:p1","panes":[{{"pane_id":"w2:p1"}}]}},
+                    {{"workspace_id":"w9","tab_id":"w9:t1","focused_pane_id":"{focused}","panes":[{{"pane_id":"w9:p1"}},{{"pane_id":"w9:p2"}}]}}
+                  ],"agents":[]}}}}}}"#
+            )
+        };
+        let surface = r("surface/terminal/guardian/shell");
+
+        // Bound pane is w9's focused pane: focusing w9 lands exactly on it.
+        let runner = Arc::new(
+            ScriptedRunner::new()
+                .on("api snapshot", &snapshot("w9:p1"))
+                .on("workspace focus w9", "{}"),
+        );
+        let mut provider = HerdrWorkingEnvironment::new(runner.clone(), r("provider/herdr"));
+        provider
+            .surface_bindings
+            .insert(surface.clone(), "w9:p1".into());
+        provider.focus_surface(&surface).unwrap();
+        assert!(runner
+            .call_lines()
+            .iter()
+            .any(|line| line.contains("workspace focus w9")));
+
+        // Bound pane is not its workspace's focused pane: refused, nothing moved.
+        let runner = Arc::new(ScriptedRunner::new().on("api snapshot", &snapshot("w9:p2")));
+        let mut provider = HerdrWorkingEnvironment::new(runner.clone(), r("provider/herdr"));
+        provider
+            .surface_bindings
+            .insert(surface.clone(), "w9:p1".into());
+        let error = provider.focus_surface(&surface).unwrap_err();
+        assert_eq!(error.code(), "herdr.surface_focus_unsupported");
+        assert!(!runner
+            .call_lines()
+            .iter()
+            .any(|line| line.contains("focus")));
     }
 
     #[test]

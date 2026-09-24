@@ -1,10 +1,14 @@
 //! Central temporal-ground adapter.
 //!
-//! Central owns ProjectCentral NOW/DAY/Flow. AIKit consumes that owner surface
+//! Central owns ProjectCentral NOW and the Day. AIKit consumes that owner surface
 //! through `ctrl --json action run ...`; it does not parse Central's files or mint
 //! a parallel temporal model. The provider is deliberately a normal external
 //! process adapter so scripted argv tests and real-binary conformance use the same
 //! call path.
+//!
+//! The legacy Flow store (`projectcentral.flow.*`) was retired by Central #177;
+//! the Day is the integrated writing medium that replaced it, and it is named
+//! here by reference (`central.day.read` → day ref + revision), never inlined.
 
 use std::path::{Component, Path};
 
@@ -14,33 +18,30 @@ use serde_json::{json, Value};
 use crate::runner::{CommandRunner, Output};
 
 pub const NOW_INSPECT_ACTION: &str = "projectcentral.now.inspect";
-pub const FLOW_LIST_ACTION: &str = "projectcentral.flow.list";
-pub const FLOW_READ_ACTION: &str = "projectcentral.flow.read";
+pub const DAY_READ_ACTION: &str = "central.day.read";
 pub const CENTRAL_TEMPORAL_PROVIDER_VERSION: &str = "aikit.central-temporal/v1";
 
 const MAX_ACTIVE_ITEMS: usize = 8;
 const MAX_HUMAN_REFS: usize = 8;
 const MAX_DAY_REFS: usize = 3;
-const MAX_ACTIVE_FLOWS: usize = 3;
 const MAX_ITEM_RESULT_CHARS: usize = 600;
-const MAX_FLOW_CONTENT_CHARS: usize = 2_400;
 const MAX_RENDERED_CHARS: usize = 9_000;
 
+/// The current root Day, by reference. `None` when Central has no open Day or
+/// the read failed: the floor says so rather than inventing one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CentralFlowGround {
-    pub flow_ref: String,
-    pub revision: String,
-    pub lifecycle: String,
-    pub privacy: String,
-    pub title: Option<String>,
-    pub content: String,
+pub struct CentralDayPointer {
+    pub day_ref: String,
+    /// `None` when the Day is open but its document is not yet written (an
+    /// environmental rollover opens the Day; the person writes it).
+    pub revision: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CentralTemporalGround {
     pub project: String,
     pub now: Value,
-    pub flows: Vec<CentralFlowGround>,
+    pub day: Option<CentralDayPointer>,
 }
 
 impl CentralTemporalGround {
@@ -112,17 +113,19 @@ impl CentralTemporalGround {
             }
         }
 
-        for flow in &self.flows {
-            let title = flow.title.as_deref().unwrap_or("untitled");
-            lines.push(format!(
-                "active Flow {} @ {} [{}; privacy={}]: {}",
-                flow.flow_ref, flow.revision, flow.lifecycle, flow.privacy, title
-            ));
-            let content = bounded(&flow.content, MAX_FLOW_CONTENT_CHARS);
-            if !content.is_empty() {
-                lines.push(content);
-            }
-        }
+        lines.push(match &self.day {
+            Some(CentralDayPointer {
+                day_ref,
+                revision: Some(revision),
+            }) => format!(
+                "Day: {day_ref} @ {revision} (read it with `ctrl --json action run {DAY_READ_ACTION} '{{}}'`)"
+            ),
+            Some(CentralDayPointer {
+                day_ref,
+                revision: None,
+            }) => format!("Day: {day_ref} (open; its document is not yet written)"),
+            None => "Day: no open root Day".to_owned(),
+        });
 
         bounded(&lines.join("\n"), MAX_RENDERED_CHARS)
     }
@@ -145,67 +148,21 @@ pub fn read_central_temporal_ground<R: CommandRunner>(
         NOW_INSPECT_ACTION,
         json!({"project": project}),
     )?;
-    let flow_list = action(
-        runner,
-        central_root,
-        FLOW_LIST_ACTION,
-        json!({"project": project}),
-    )?;
-    let mut flows = Vec::new();
-    if let Some(records) = flow_list.get("flows").and_then(Value::as_array) {
-        for record in records
-            .iter()
-            .filter(|record| record.get("lifecycle").and_then(Value::as_str) == Some("active"))
-            .take(MAX_ACTIVE_FLOWS)
-        {
-            let Some(flow_ref) = record.get("flow_ref").and_then(Value::as_str) else {
-                continue;
-            };
-            let reading = action(
-                runner,
-                central_root,
-                FLOW_READ_ACTION,
-                json!({"project": project, "flow_ref": flow_ref}),
-            )?;
-            let Some(flow) = reading.get("flow") else {
-                continue;
-            };
-            flows.push(CentralFlowGround {
-                flow_ref: flow
-                    .get("flow_ref")
+    // The Day is a pointer, and optional: a world with no open Day (or an
+    // older Central) still gets its NOW ground.
+    let day = action(runner, central_root, DAY_READ_ACTION, json!({}))
+        .ok()
+        .and_then(|day| {
+            Some(CentralDayPointer {
+                day_ref: day.get("day_ref")?.as_str()?.to_owned(),
+                revision: day
+                    .get("revision")
                     .and_then(Value::as_str)
-                    .unwrap_or(flow_ref)
-                    .to_owned(),
-                revision: flow
-                    .get("current_revision")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_owned(),
-                lifecycle: flow
-                    .get("lifecycle")
-                    .and_then(Value::as_str)
-                    .unwrap_or("active")
-                    .to_owned(),
-                privacy: flow
-                    .get("privacy")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_owned(),
-                title: flow.get("title").and_then(Value::as_str).map(str::to_owned),
-                content: reading
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned(),
-            });
-        }
-    }
+                    .map(str::to_owned),
+            })
+        });
 
-    Ok(Some(CentralTemporalGround {
-        project,
-        now,
-        flows,
-    }))
+    Ok(Some(CentralTemporalGround { project, now, day }))
 }
 
 fn action<R: CommandRunner>(
@@ -316,29 +273,22 @@ mod tests {
     }
 
     #[test]
-    fn owner_actions_supply_now_and_only_active_flow_content() {
+    fn owner_actions_supply_now_and_the_day_by_reference_only() {
         let now = success(json!({
             "exists": true,
             "human_scratch": ["ProjectCentral/now/user/current.md"],
             "active_items": [{"id":"h1","kind":"handoff","actor":"agent:Epii","status":"active","subject":"Current work","result":"continue from live state"}],
             "day_records": ["ProjectCentral/now/day/2026-09-01.md"]
         }));
-        let list = success(json!({
-            "flows": [
-                {"flow_ref":"central:flow:active","lifecycle":"active"},
-                {"flow_ref":"central:flow:dormant","lifecycle":"dormant"}
-            ],
-            "automatic_agent_or_model_invocation": false
-        }));
-        let read = success(json!({
-            "flow": {"flow_ref":"central:flow:active","current_revision":"rev-b","lifecycle":"active","privacy":"project","title":"Current flow"},
-            "content":"state B",
+        let day = success(json!({
+            "day_ref": "central:day:control:root:2026-09-23",
+            "revision": "central.content-fnv1a64/v1:1:abc",
+            "content": "THE WHOLE DAY DOCUMENT",
             "automatic_agent_or_model_invocation": false
         }));
         let runner = ScriptedRunner::new()
             .on(NOW_INSPECT_ACTION, &now)
-            .on(FLOW_LIST_ACTION, &list)
-            .on(FLOW_READ_ACTION, &read);
+            .on(DAY_READ_ACTION, &day);
 
         let ground = read_central_temporal_ground(
             &runner,
@@ -349,32 +299,78 @@ mod tests {
         .unwrap();
 
         assert_eq!(ground.project, "example");
-        assert_eq!(ground.flows.len(), 1);
-        assert_eq!(ground.flows[0].revision, "rev-b");
-        assert!(ground.render().contains("state B"));
+        let rendered = ground.render();
+        assert!(rendered.contains("central:day:control:root:2026-09-23"));
+        assert!(
+            !rendered.contains("THE WHOLE DAY DOCUMENT"),
+            "a pointer, never the body"
+        );
+        assert!(
+            !runner
+                .call_lines()
+                .iter()
+                .any(|line| line.contains("projectcentral.flow.")),
+            "the retired Flow store is never called"
+        );
         assert!(runner
             .call_lines()
             .iter()
             .all(|line| line.contains("--json --root /home/me/Central action run")));
-        assert!(!runner
-            .call_lines()
-            .iter()
-            .any(|line| line.contains("central:flow:dormant") && line.contains(FLOW_READ_ACTION)));
+    }
+
+    #[test]
+    fn a_missing_day_is_said_not_fatal() {
+        let now = success(json!({"exists": true}));
+        let runner = ScriptedRunner::new().on(NOW_INSPECT_ACTION, &now).failing(
+            DAY_READ_ACTION,
+            1,
+            "no DayRef or current today pointer",
+        );
+        let ground = read_central_temporal_ground(
+            &runner,
+            Path::new("/home/me/Central"),
+            Path::new("/home/me/Central/Work/example"),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(ground.day.is_none());
+        assert!(ground.render().contains("Day: no open root Day"));
+    }
+
+    #[test]
+    fn an_open_day_without_a_written_document_is_still_open() {
+        let now = success(json!({"exists": true}));
+        let day = success(json!({
+            "day_ref": "central:day:control:root:2026-09-24",
+            "document": null,
+            "document_state": "uninitialised"
+        }));
+        let runner = ScriptedRunner::new()
+            .on(NOW_INSPECT_ACTION, &now)
+            .on(DAY_READ_ACTION, &day);
+        let ground = read_central_temporal_ground(
+            &runner,
+            Path::new("/home/me/Central"),
+            Path::new("/home/me/Central/Work/example"),
+        )
+        .unwrap()
+        .unwrap();
+        let rendered = ground.render();
+        assert!(rendered.contains(
+            "Day: central:day:control:root:2026-09-24 (open; its document is not yet written)"
+        ));
+        assert!(!rendered.contains("no open root Day"));
     }
 
     #[test]
     fn rendered_ground_is_bounded_and_non_authorising() {
         let ground = CentralTemporalGround {
             project: "example".into(),
-            now: json!({"exists": true}),
-            flows: vec![CentralFlowGround {
-                flow_ref: "central:flow:one".into(),
-                revision: "rev-1".into(),
-                lifecycle: "active".into(),
-                privacy: "project".into(),
-                title: None,
-                content: "x".repeat(20_000),
-            }],
+            now: json!({"exists": true, "active_items": (0..20).map(|i| json!({
+                "id": format!("h{i}"), "kind": "handoff", "actor": "agent", "status": "active",
+                "subject": "s", "result": "x".repeat(2_000)
+            })).collect::<Vec<_>>()}),
+            day: None,
         };
         let rendered = ground.render();
         assert!(rendered.chars().count() <= MAX_RENDERED_CHARS);

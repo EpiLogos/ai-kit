@@ -1,9 +1,15 @@
 //! Causal temporal re-grounding for Agent lifecycle hooks.
 //!
-//! Central owns NOW/DAY/Flow; AIKit owns the lifecycle delivery plane. This module
-//! composes those existing responsibilities by reading Central afresh for every
-//! session-start, prompt-turn and pre-compaction event, then returning the bounded
-//! owner reading through AIKit's existing hook injection channel.
+//! Central owns NOW and the Day; AIKit owns the lifecycle delivery plane. This
+//! module composes those existing responsibilities by reading Central afresh for
+//! every session-start, prompt-turn and pre-compaction event, then returning the
+//! bounded owner reading through AIKit's existing hook injection channel.
+//!
+//! A prompt turn carries the ground only when it changed since this session
+//! last received it ([`FloorLedger`]): re-reading is causal, re-sending the
+//! same ground every turn is not. A body occupying a World Position gets no
+//! prompt-turn floor at all — its lean entry, Refocus and `aikit whoami` carry
+//! orientation, so no historical NOW strap rides its turns.
 
 use std::path::{Path, PathBuf};
 
@@ -30,6 +36,7 @@ pub fn reground<R: CommandRunner>(
     project_root: Option<&Path>,
     central_root: Option<&Path>,
     runner: &R,
+    ledger: Option<&FloorLedger>,
 ) {
     if !event_needs_reground(&event.kind) {
         return;
@@ -39,13 +46,93 @@ pub fn reground<R: CommandRunner>(
     };
 
     match read_central_temporal_ground(runner, central_root, project_root) {
-        Ok(Some(ground)) => decision.injected.insert(0, ground.render()),
+        Ok(Some(ground)) => {
+            let rendered = ground.render();
+            if let (Some(ledger), Some(session)) =
+                (ledger, crate::refocus::hook_session(&event.payload))
+            {
+                let digest = blake3::hash(rendered.as_bytes()).to_hex().to_string();
+                if event.kind == HookEventKind::UserPromptSubmit
+                    && ledger.last(&session).as_deref() == Some(digest.as_str())
+                {
+                    return;
+                }
+                ledger.record(&session, &digest);
+            }
+            decision.injected.insert(0, rendered)
+        }
         Ok(None) => {}
         Err(error) => decision.warnings.push(format!(
             "Central temporal re-grounding unavailable for this turn: {}",
             error.message()
         )),
     }
+}
+
+/// The lifecycle floor. With a lean World-inhabitation entry (a Position
+/// occupancy resolved for this body) the entry replaces the historical NOW
+/// ground at SessionStart and names where to read it on demand; an occupied
+/// body's prompt turns carry no floor (Refocus owns their re-orientation).
+/// Every other body re-grounds as before, prompt turns only on change.
+#[allow(clippy::too_many_arguments)]
+pub fn session_floor<R: CommandRunner>(
+    decision: &mut HookDecision,
+    event: &HookEvent,
+    project_root: Option<&Path>,
+    central_root: Option<&Path>,
+    runner: &R,
+    lean_entry: Option<&str>,
+    occupied: bool,
+    ledger: Option<&FloorLedger>,
+) {
+    match lean_entry {
+        Some(entry) if event.kind == HookEventKind::SessionStart => {
+            decision.injected.insert(0, entry.to_owned())
+        }
+        _ if occupied && event.kind == HookEventKind::UserPromptSubmit => {}
+        _ => reground(decision, event, project_root, central_root, runner, ledger),
+    }
+}
+
+/// Per-session record of the last Central ground a turn carried. A prompt turn
+/// whose ground is byte-identical to what this session already received is
+/// skipped. The record is advisory orientation state, not delivery evidence.
+#[derive(Debug, Clone)]
+pub struct FloorLedger {
+    dir: PathBuf,
+}
+
+impl FloorLedger {
+    pub fn in_state(state: &Path) -> Self {
+        Self {
+            dir: state.join("temporal-floor"),
+        }
+    }
+
+    fn path(&self, session: &str) -> PathBuf {
+        self.dir.join(format!(
+            "{}.digest",
+            blake3::hash(session.as_bytes()).to_hex()
+        ))
+    }
+
+    pub fn last(&self, session: &str) -> Option<String> {
+        std::fs::read_to_string(self.path(session))
+            .ok()
+            .map(|digest| digest.trim().to_owned())
+    }
+
+    pub fn record(&self, session: &str, digest: &str) {
+        if std::fs::create_dir_all(&self.dir).is_ok() {
+            let _ = std::fs::write(self.path(session), digest);
+        }
+    }
+}
+
+/// Whether this process is a body stamped into a World Position occupancy
+/// (`aikit inhabit` exports `OI_POSITION_REF` into the harness).
+pub fn process_is_occupied() -> bool {
+    std::env::var_os("OI_POSITION_REF").is_some_and(|value| !value.is_empty())
 }
 
 /// Resolve the Central root without teaching AIKit Central's internal file
@@ -124,43 +211,225 @@ mod tests {
         assert!(!event_needs_reground(&HookEventKind::PostToolUse));
     }
 
+    fn day() -> String {
+        success(json!({"day_ref":"central:day:control:root:2026-09-23","revision":"rev-day"}))
+    }
+
+    fn now_with(subject: &str) -> String {
+        success(json!({
+            "exists": true,
+            "active_items": [{"id":"h1","kind":"handoff","actor":"agent","status":"active","subject":subject}],
+            "human_scratch": [], "day_records": []
+        }))
+    }
+
     #[test]
-    fn next_prompt_reads_changed_flow_revision_instead_of_reusing_session_start() {
-        let now =
-            success(json!({"exists":true,"active_items":[],"human_scratch":[],"day_records":[]}));
-        let list = success(json!({
-            "flows":[{"flow_ref":"central:flow:work","lifecycle":"active"}],
-            "automatic_agent_or_model_invocation":false
-        }));
-        let read_a = success(json!({
-            "flow":{"flow_ref":"central:flow:work","current_revision":"rev-a","lifecycle":"active","privacy":"project","title":"Work"},
-            "content":"state A",
-            "automatic_agent_or_model_invocation":false
-        }));
-        let read_b = success(json!({
-            "flow":{"flow_ref":"central:flow:work","current_revision":"rev-b","lifecycle":"active","privacy":"project","title":"Work"},
-            "content":"state B",
-            "automatic_agent_or_model_invocation":false
-        }));
+    fn next_prompt_reads_changed_now_instead_of_reusing_session_start() {
+        let (a, b) = (now_with("state A"), now_with("state B"));
         let runner = ScriptedRunner::new()
-            .sequence("projectcentral.now.inspect", &[&now, &now])
-            .sequence("projectcentral.flow.list", &[&list, &list])
-            .sequence("projectcentral.flow.read", &[&read_a, &read_b]);
+            .sequence("projectcentral.now.inspect", &[&a, &b])
+            .on("central.day.read", &day());
         let central = Path::new("/home/me/Central");
         let project = Path::new("/home/me/Central/Work/example");
 
         let start = HookEvent::new("claude", HookEventKind::SessionStart, json!({}));
         let mut first = decision(HookEventKind::SessionStart);
-        reground(&mut first, &start, Some(project), Some(central), &runner);
-        assert!(first.injected_text().contains("rev-a"));
+        reground(
+            &mut first,
+            &start,
+            Some(project),
+            Some(central),
+            &runner,
+            None,
+        );
         assert!(first.injected_text().contains("state A"));
+        assert!(first
+            .injected_text()
+            .contains("central:day:control:root:2026-09-23"));
 
         let prompt = HookEvent::new("claude", HookEventKind::UserPromptSubmit, json!({}));
         let mut second = decision(HookEventKind::UserPromptSubmit);
-        reground(&mut second, &prompt, Some(project), Some(central), &runner);
-        assert!(second.injected_text().contains("rev-b"));
+        reground(
+            &mut second,
+            &prompt,
+            Some(project),
+            Some(central),
+            &runner,
+            None,
+        );
         assert!(second.injected_text().contains("state B"));
         assert!(!second.injected_text().contains("state A"));
+        assert!(!runner
+            .call_lines()
+            .iter()
+            .any(|line| line.contains("projectcentral.flow.")));
+    }
+
+    #[test]
+    fn a_prompt_turn_carries_the_ground_only_when_it_changed() {
+        let temp = tempfile::tempdir().unwrap();
+        let ledger = FloorLedger::in_state(temp.path());
+        let (a, b) = (now_with("state A"), now_with("state B"));
+        let runner = ScriptedRunner::new()
+            .sequence("projectcentral.now.inspect", &[&a, &a, &a, &b])
+            .on("central.day.read", &day());
+        let central = Path::new("/home/me/Central");
+        let project = Path::new("/home/me/Central/Work/example");
+        let session = json!({"session_id": "sess-1"});
+
+        let start = HookEvent::new("claude", HookEventKind::SessionStart, session.clone());
+        let mut first = decision(HookEventKind::SessionStart);
+        reground(
+            &mut first,
+            &start,
+            Some(project),
+            Some(central),
+            &runner,
+            Some(&ledger),
+        );
+        assert!(first.injected_text().contains("state A"));
+
+        // Same ground: the prompt turn is silent, twice.
+        for _ in 0..2 {
+            let prompt = HookEvent::new("claude", HookEventKind::UserPromptSubmit, session.clone());
+            let mut turn = decision(HookEventKind::UserPromptSubmit);
+            reground(
+                &mut turn,
+                &prompt,
+                Some(project),
+                Some(central),
+                &runner,
+                Some(&ledger),
+            );
+            assert!(turn.injected.is_empty(), "unchanged ground is not re-sent");
+        }
+
+        // Changed ground: delivered once.
+        let prompt = HookEvent::new("claude", HookEventKind::UserPromptSubmit, session.clone());
+        let mut changed = decision(HookEventKind::UserPromptSubmit);
+        reground(
+            &mut changed,
+            &prompt,
+            Some(project),
+            Some(central),
+            &runner,
+            Some(&ledger),
+        );
+        assert!(changed.injected_text().contains("state B"));
+
+        // Another session starts from nothing.
+        let other = HookEvent::new(
+            "claude",
+            HookEventKind::UserPromptSubmit,
+            json!({"session_id": "sess-2"}),
+        );
+        let runner = ScriptedRunner::new()
+            .on("projectcentral.now.inspect", &b)
+            .on("central.day.read", &day());
+        let mut fresh = decision(HookEventKind::UserPromptSubmit);
+        reground(
+            &mut fresh,
+            &other,
+            Some(project),
+            Some(central),
+            &runner,
+            Some(&ledger),
+        );
+        assert!(fresh.injected_text().contains("state B"));
+    }
+
+    fn handoff_runner() -> ScriptedRunner {
+        let now = success(json!({
+            "exists": true,
+            "active_items": [{"id": "h1", "kind": "handoff", "actor": "agent", "status": "active",
+                              "subject": "historical handoff", "result": "a long historical NOW dump"}],
+            "human_scratch": [], "day_records": []
+        }));
+        ScriptedRunner::new()
+            .on("projectcentral.now.inspect", &now)
+            .on("central.day.read", &day())
+    }
+
+    #[test]
+    fn a_lean_entry_replaces_the_historical_floor_at_session_start_only() {
+        let central = Path::new("/home/me/Central");
+        let project = Path::new("/home/me/Central/Work/example");
+        let start = HookEvent::new("claude", HookEventKind::SessionStart, json!({}));
+
+        let runner = handoff_runner();
+        let mut lean = decision(HookEventKind::SessionStart);
+        session_floor(
+            &mut lean,
+            &start,
+            Some(project),
+            Some(central),
+            &runner,
+            Some("[O:I World inhabitation — lean entry]"),
+            true,
+            None,
+        );
+        assert_eq!(
+            lean.injected,
+            vec!["[O:I World inhabitation — lean entry]".to_owned()]
+        );
+        assert!(!lean.injected_text().contains("historical handoff"));
+        assert!(runner.calls().is_empty(), "the dump is not even read");
+
+        // Without an occupancy the floor is byte-identical to the re-ground.
+        let runner = handoff_runner();
+        let mut unchanged = decision(HookEventKind::SessionStart);
+        session_floor(
+            &mut unchanged,
+            &start,
+            Some(project),
+            Some(central),
+            &runner,
+            None,
+            false,
+            None,
+        );
+        let mut direct = decision(HookEventKind::SessionStart);
+        reground(
+            &mut direct,
+            &start,
+            Some(project),
+            Some(central),
+            &handoff_runner(),
+            None,
+        );
+        assert_eq!(unchanged.injected, direct.injected);
+        assert!(unchanged.injected_text().contains("historical handoff"));
+
+        // An occupied body's prompt turn carries no historical floor…
+        let prompt = HookEvent::new("claude", HookEventKind::UserPromptSubmit, json!({}));
+        let runner = handoff_runner();
+        let mut occupied = decision(HookEventKind::UserPromptSubmit);
+        session_floor(
+            &mut occupied,
+            &prompt,
+            Some(project),
+            Some(central),
+            &runner,
+            None,
+            true,
+            None,
+        );
+        assert!(occupied.injected.is_empty());
+        assert!(runner.calls().is_empty(), "the dump is not even read");
+
+        // …while an unoccupied body's prompt turn re-grounds as before.
+        let mut turn = decision(HookEventKind::UserPromptSubmit);
+        session_floor(
+            &mut turn,
+            &prompt,
+            Some(project),
+            Some(central),
+            &handoff_runner(),
+            None,
+            false,
+            None,
+        );
+        assert!(turn.injected_text().contains("historical handoff"));
     }
 
     #[test]
@@ -175,6 +444,7 @@ mod tests {
             Some(Path::new("/home/me/Central/Work/example")),
             Some(Path::new("/home/me/Central")),
             &runner,
+            None,
         );
         assert!(result.allowed);
         assert!(result.injected.is_empty());

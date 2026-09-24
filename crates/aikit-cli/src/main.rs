@@ -295,6 +295,426 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Mux(c)) => cmd_mux(cwd, c),
         Some(Command::Shell(c)) => cmd_shell(c),
         Some(Command::Gateway(c)) => cmd_gateway(c),
+        Some(Command::Whoami(a)) => cmd_whoami(cwd, a, json_mode),
+        Some(Command::Refocus(a)) => cmd_refocus(cwd, a, json_mode),
+        Some(Command::Inhabit(a)) => cmd_inhabit(cwd, a, json_mode),
+    }
+}
+
+fn cmd_inhabit(cwd: &std::path::Path, args: InhabitArgs, json_mode: bool) -> Result<Reply> {
+    use aikit_cli::inhabit::{self, ClaimMode, InhabitRequest};
+    use aikit_cli::inhabitation as inh;
+
+    let runner = aikit_adapters::runner::SystemRunner::new();
+    let owners = inh::Owners::new(
+        &runner,
+        inh::OwnerBins::from_env(),
+        whoami_owners_root(cwd),
+        aikit_core::probe::probe_budget(),
+        std::time::Duration::from_secs(60),
+    );
+    let envelope = |data: Value| Reply::Data {
+        context: json::EnvelopeContext {
+            context_id: None,
+            session_id: None,
+            project_root: None,
+        },
+        data,
+        warnings: vec![],
+        exit_code: json::EXIT_OK,
+    };
+    if args.release {
+        let reason = args
+            .reason
+            .clone()
+            .unwrap_or_else(|| "explicit release by the occupant (aikit inhabit --release)".into());
+        let released = inhabit::release(
+            &owners,
+            &args.position,
+            args.generation.as_deref(),
+            &reason,
+            cwd,
+        )?;
+        return Ok(if json_mode {
+            envelope(released)
+        } else {
+            Reply::Text(format!(
+                "released {} generation {}",
+                released["position_ref"].as_str().unwrap_or(&args.position),
+                released["generation"]
+                    .as_str()
+                    .or_else(|| released["tenure"]["generation_ref"].as_str())
+                    .unwrap_or("?")
+            ))
+        });
+    }
+    if args.attach {
+        let attached = inhabit::attach(&owners, &args.position, args.generation.as_deref(), cwd)?;
+        if args.command.is_empty() {
+            let exports = attached
+                .env
+                .iter()
+                .map(|(key, value)| format!("export {key}={value}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Ok(if json_mode {
+                let mut data = attached.claim.clone();
+                data["exports"] = Value::from(exports);
+                envelope(data)
+            } else {
+                Reply::Text(format!(
+                    "{} is still held by generation {}\n{exports}",
+                    attached.position_ref, attached.generation_ref
+                ))
+            });
+        }
+        eprintln!(
+            "aikit inhabit: continuing {} as generation {} (verified current) — launching `{}`",
+            attached.position_ref,
+            attached.generation_ref,
+            args.command.join(" ")
+        );
+        return Err(inhabit::exec_harness(&args.command, &attached));
+    }
+    let reason = args.reason.clone().ok_or_else(|| {
+        inhabit::refusal(
+            "inhabit.reason_required",
+            "A tenure opens with a stated reason, and none was given.".into(),
+            "Nothing was claimed.",
+            format!(
+                "aikit inhabit --position {} --reason <why> -- <harness argv>",
+                args.position
+            ),
+        )
+    })?;
+    let home = AikitHome::discover().ok();
+    let request = InhabitRequest {
+        position: args.position.clone(),
+        agent: args.agent.clone(),
+        agency: args.agency.clone(),
+        mode: if args.handover {
+            ClaimMode::Handover
+        } else if args.fresh {
+            ClaimMode::Fresh
+        } else {
+            ClaimMode::Vacant
+        },
+        reason,
+        agent_session: args.agent_session.clone(),
+        session_space: args.session_space.clone(),
+        harness_composition: args.harness_composition.clone(),
+        model: args.model.clone(),
+        cwd: cwd.to_path_buf(),
+    };
+    let claimed = inhabit::claim(&owners, home.as_ref(), &request)?;
+    if args.command.is_empty() {
+        let exports = claimed
+            .env
+            .iter()
+            .map(|(key, value)| format!("export {key}={value}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Ok(if json_mode {
+            let mut data = claimed.claim.clone();
+            data["exports"] = Value::from(exports);
+            envelope(data)
+        } else {
+            Reply::Text(format!(
+                "claimed {} as generation {} (release: aikit inhabit --release --position {})\n{exports}",
+                claimed.position_ref, claimed.generation_ref, claimed.position_ref
+            ))
+        });
+    }
+    // The harness owns stdout from here on; the claim is announced on stderr.
+    eprintln!(
+        "aikit inhabit: {} held by generation {} — launching `{}` (leaving is explicit: aikit inhabit --release --position {})",
+        claimed.position_ref,
+        claimed.generation_ref,
+        args.command.join(" "),
+        claimed.position_ref
+    );
+    Err(inhabit::exec_harness(&args.command, &claimed))
+}
+
+fn whoami_owners_root(cwd: &std::path::Path) -> Option<PathBuf> {
+    aikit_cli::temporal::central_root_enclosing(Some(cwd))
+}
+
+fn cmd_whoami(cwd: &std::path::Path, args: WhoamiArgs, json_mode: bool) -> Result<Reply> {
+    use aikit_cli::inhabitation as inh;
+    use aikit_core::inhabitation::{HotProvenance, ReadingDepth};
+
+    let depth = if args.full {
+        ReadingDepth::Full
+    } else {
+        ReadingDepth::Standard
+    };
+    let mut input = inh::JoinInput::from_process(cwd.to_path_buf(), depth);
+    input.position_flag = args.position.clone();
+    if let Some(session) = &args.agent_session {
+        input
+            .agent_sessions
+            .insert(0, ("--agent-session".to_owned(), session.clone()));
+    }
+    let home_for_redis = AikitHome::discover().ok();
+    let redis_path =
+        inh::world_redis_config_path(args.redis_config.clone(), home_for_redis.as_ref());
+    let store = redis_path.as_deref().map(inh::open_world_store);
+    let publishing = args.publish || args.rebuild;
+    if publishing && store.is_none() {
+        return Err(AikitError::new(
+            "inhabitation.redis_config_missing",
+            format!(
+                "--publish/--rebuild write the Redis World projection, but no Redis NOW material is configured. \
+                 Nothing was published. Pass --redis-config <aikit.redis-now-config/v1 file> or set {}.",
+                inh::REDIS_CONFIG_VAR
+            ),
+        ));
+    }
+    let mut store_error: Option<String> = None;
+    let store = match store {
+        Some(Ok(store)) => Some(store),
+        Some(Err(error)) if publishing => return Err(error),
+        Some(Err(error)) => {
+            store_error = Some(format!(
+                "the Redis NOW material configuration is unusable: {}",
+                error.message()
+            ));
+            None
+        }
+        None => None,
+    };
+
+    // --hot: the projection first, live joins as the fallback.
+    let mut hot_note: Option<HotProvenance> = None;
+    if args.hot {
+        let subject = input
+            .position_flag
+            .clone()
+            .or_else(|| input.env_position.clone())
+            .or_else(|| input.agent_sessions.first().map(|(_, id)| id.clone()));
+        match (&store, subject) {
+            (Some(_), Some(subject)) if subject.starts_with('@') => {
+                hot_note = Some(HotProvenance {
+                    state: "absent".into(),
+                    version: None,
+                    age_ms: None,
+                    basis_digest: None,
+                    reason: Some(format!(
+                        "the World projection is keyed by the full Position ref, not {subject}; live joins below (pass --position central:position:… for a hot read)"
+                    )),
+                })
+            }
+            (Some(store), Some(subject)) => match inh::WorldStore::read(store, &subject) {
+                Ok(Some(projection)) => {
+                    let reading = inh::reading_from_projection(&projection, inh::now_ms());
+                    return Ok(whoami_reply(&reading, args.full, json_mode, None));
+                }
+                Ok(None) => {
+                    hot_note = Some(HotProvenance {
+                        state: "absent".into(),
+                        version: None,
+                        age_ms: None,
+                        basis_digest: None,
+                        reason: Some(format!(
+                            "no World projection for {subject}; live joins below"
+                        )),
+                    })
+                }
+                Err(error) => {
+                    hot_note = Some(HotProvenance {
+                        state: "unavailable".into(),
+                        version: None,
+                        age_ms: None,
+                        basis_digest: None,
+                        reason: Some(format!("{}; live joins below", error.message())),
+                    })
+                }
+            },
+            (None, _) => {
+                hot_note = Some(HotProvenance {
+                    state: "unavailable".into(),
+                    version: None,
+                    age_ms: None,
+                    basis_digest: None,
+                    reason: Some(format!(
+                        "{}; live joins below",
+                        store_error.clone().unwrap_or_else(|| format!(
+                            "no Redis NOW material configured (--redis-config or {})",
+                            inh::REDIS_CONFIG_VAR
+                        ))
+                    )),
+                })
+            }
+            (Some(_), None) => {
+                hot_note = Some(HotProvenance {
+                    state: "absent".into(),
+                    version: None,
+                    age_ms: None,
+                    basis_digest: None,
+                    reason: Some(
+                        "no Position or AgentSession to key the projection by; live joins below"
+                            .into(),
+                    ),
+                })
+            }
+        }
+    }
+
+    let runner = aikit_adapters::runner::SystemRunner::new();
+    let owners = inh::Owners::new(
+        &runner,
+        inh::OwnerBins::from_env(),
+        whoami_owners_root(cwd),
+        aikit_core::probe::probe_budget(),
+        std::time::Duration::from_secs(90),
+    );
+    let home = AikitHome::discover().ok();
+    let prepared_reader = store.as_ref().map(|store| {
+        move |participant: &str| -> Result<Option<Value>> {
+            let participant = aikit_core::ResourceRef::parse(participant)?;
+            store
+                .store
+                .prepared_meta(&participant, store.secret.as_ref())
+        }
+    });
+    let compose = || -> Result<Value> { Service::discover(cwd)?.compose_plan() };
+    let reads = inh::AikitReads {
+        home: home.as_ref(),
+        prepared: prepared_reader
+            .as_ref()
+            .map(|reader| reader as &dyn Fn(&str) -> Result<Option<Value>>),
+        prepared_absent_reason: store_error,
+        compose: args.full.then_some(&compose as &dyn Fn() -> Result<Value>),
+    };
+    let joined = inh::join(&owners, &input, &reads);
+    let mut reading = joined.reading;
+    reading.hot = hot_note;
+
+    let publication = if publishing {
+        let store = store.as_ref().ok_or_else(|| {
+            AikitError::new("inhabitation.redis_config_missing", "no Redis World store")
+        })?;
+        let subject = inh::projection_subject(&reading, &input).ok_or_else(|| {
+            AikitError::new(
+                "inhabitation.projection_subject_missing",
+                "No Position or AgentSession resolved to key the World projection by. \
+                 Nothing was published. Pass --position <ref> or --agent-session <ref>.",
+            )
+        })?;
+        Some(inh::publish(store, &reading, &subject)?)
+    } else {
+        None
+    };
+    Ok(whoami_reply(&reading, args.full, json_mode, publication))
+}
+
+fn whoami_reply(
+    reading: &aikit_core::inhabitation::InhabitationReading,
+    full: bool,
+    json_mode: bool,
+    publication: Option<Value>,
+) -> Reply {
+    if json_mode {
+        let mut data = if full {
+            serde_json::to_value(reading).unwrap_or(Value::Null)
+        } else {
+            reading.compact()
+        };
+        if let Some(publication) = publication {
+            data["publication"] = publication;
+        }
+        Reply::Data {
+            context: json::EnvelopeContext {
+                context_id: None,
+                session_id: None,
+                project_root: None,
+            },
+            data,
+            warnings: vec![],
+            exit_code: json::EXIT_OK,
+        }
+    } else {
+        let mut text = aikit_cli::inhabitation::render_text(reading);
+        if full {
+            text.push_str("\n\nfull reading:\n");
+            text.push_str(&json::pretty(
+                &serde_json::to_value(reading).unwrap_or(Value::Null),
+            ));
+        }
+        if let Some(publication) = publication {
+            text.push_str(&format!(
+                "\nWorld projection: {} {} v{} ({})",
+                publication["state"].as_str().unwrap_or("?"),
+                publication["subject"].as_str().unwrap_or("?"),
+                publication["version"],
+                publication["basis_digest"].as_str().unwrap_or("?")
+            ));
+        }
+        Reply::Text(text)
+    }
+}
+
+fn cmd_refocus(cwd: &std::path::Path, args: RefocusArgs, json_mode: bool) -> Result<Reply> {
+    use aikit_cli::inhabitation as inh;
+    use aikit_core::inhabitation::{ReadingDepth, RefocusTrigger};
+
+    let trigger = RefocusTrigger::parse(&args.trigger).unwrap_or(RefocusTrigger::Explicit);
+    let mut input = inh::JoinInput::from_process(cwd.to_path_buf(), ReadingDepth::Standard);
+    input.position_flag = args.position.clone();
+    if let Some(session) = &args.agent_session {
+        input
+            .agent_sessions
+            .insert(0, ("--agent-session".to_owned(), session.clone()));
+    }
+    let runner = aikit_adapters::runner::SystemRunner::new();
+    let owners = inh::Owners::new(
+        &runner,
+        inh::OwnerBins::from_env(),
+        whoami_owners_root(cwd),
+        aikit_core::probe::probe_budget(),
+        std::time::Duration::from_secs(90),
+    );
+    let home = AikitHome::discover().ok();
+    let joined = inh::join(
+        &owners,
+        &input,
+        &inh::AikitReads {
+            home: home.as_ref(),
+            ..inh::AikitReads::default()
+        },
+    );
+    // Changed sources compare against this occupant's last hook delivery,
+    // read only: an explicit Refocus is printed, never recorded.
+    let previous = match (
+        home.as_ref(),
+        input.agent_sessions.first(),
+        joined.reading.occupant_generation.as_deref(),
+    ) {
+        (Some(home), Some((_, session)), Some(generation)) => {
+            aikit_cli::refocus::RefocusStore::for_home(home)
+                .load(session, generation)
+                .and_then(|state| state.delivered)
+        }
+        _ => None,
+    };
+    let reading = aikit_cli::refocus::build(&owners, &joined, trigger, previous.as_ref(), 0);
+    let text = reading.render(false);
+    if json_mode {
+        let mut data = serde_json::to_value(&reading).unwrap_or(Value::Null);
+        data["text"] = Value::from(text);
+        Ok(Reply::Data {
+            context: json::EnvelopeContext {
+                context_id: None,
+                session_id: None,
+                project_root: None,
+            },
+            data,
+            warnings: vec![],
+            exit_code: json::EXIT_OK,
+        })
+    } else {
+        Ok(Reply::Text(text))
     }
 }
 
@@ -433,6 +853,17 @@ fn cmd_routine(command: RoutineCmd) -> Result<Reply> {
             proof_json,
         } => routine_cli::reprove(&home, &routine_ref, &proof_json)?,
         RoutineSub::Delete { routine_ref } => routine_cli::delete(&home, &routine_ref)?,
+        RoutineSub::Credential {
+            routine_ref,
+            env,
+            location,
+            clear,
+        } => routine_cli::credential(
+            &home,
+            &routine_ref,
+            &env,
+            if clear { None } else { location.as_deref() },
+        )?,
         RoutineSub::ImportForeign {
             provider,
             job_id,
@@ -553,6 +984,55 @@ fn parse_structured_json<T: serde::de::DeserializeOwned>(raw: &str, label: &str)
     })
 }
 
+/// The seams every gateway-contact verb composes: the real owner CLIs, this
+/// home's gateway (its carrier, or its state file when no service runs), and
+/// the working directory Central reads World placement from.
+fn contact_seams(
+    home: &AikitHome,
+    carrier: &GatewayQueryArgs,
+) -> Result<(
+    aikit_cli::gateway_owners::ProcessOwners,
+    aikit_cli::gateway_contact::LocalGateway,
+    PathBuf,
+)> {
+    let target = aikit_cli::gateway_ops::carrier_target(home, carrier)?;
+    let cwd = std::env::current_dir()
+        .map_err(|error| AikitError::new("cli.cwd_unavailable", format!("no cwd: {error}")))?;
+    Ok((
+        aikit_cli::gateway_owners::ProcessOwners::from_env(),
+        aikit_cli::gateway_contact::LocalGateway::for_home(home, target),
+        cwd,
+    ))
+}
+
+fn gateway_data(data: Value) -> Result<Reply> {
+    Ok(Reply::Data {
+        context: EnvelopeContext::default(),
+        data,
+        warnings: vec![],
+        exit_code: json::EXIT_OK,
+    })
+}
+
+fn read_body_file(path: &std::path::Path) -> Result<String> {
+    use std::io::Read as _;
+    let mut body = String::new();
+    let read = if path.as_os_str() == "-" {
+        std::io::stdin().read_to_string(&mut body).map(|_| ())
+    } else {
+        std::fs::read_to_string(path).map(|text| body = text)
+    };
+    read.map_err(|error| {
+        aikit_cli::gateway_contact::three_part(
+            "gateway.body_unreadable",
+            format!("The body file {} cannot be read: {error}.", path.display()),
+            "Nothing was sent; no Communique was recorded.",
+            "Pass a readable file with --body-file PATH, or the words with --body TEXT.",
+        )
+    })?;
+    Ok(body)
+}
+
 /// The Agency Gateway front door: run the service, or query a running one.
 /// Gateway commands address an external service, so they carry no resolved
 /// context — the envelope context stays empty rather than pretending a scope.
@@ -578,21 +1058,45 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
             // The Routine dispatcher ticks beside the carriers. A dispatcher
             // that cannot be built (no Central root to resolve time against)
             // degrades the service to carriers-only, said in plain words.
-            let ticks = match production_dispatcher(home.clone()) {
-                Ok(dispatcher) => Some(GatewayTickLoop {
-                    interval: std::time::Duration::from_millis(
-                        aikit_cli::routine_dispatch::TICK_INTERVAL_MS as u64,
-                    ),
-                    hook: Box::new(GatewayDispatcherTick { dispatcher }),
-                }),
-                Err(error) => {
-                    eprintln!(
-                        "warning: the Routine dispatcher is not running with this gateway: \
-                         {error}; scheduled automations will not fire"
-                    );
-                    None
-                }
+            let dispatcher: Option<Box<dyn aikit_adapters::GatewayTick>> =
+                match production_dispatcher(home.clone()) {
+                    Ok(dispatcher) => Some(Box::new(GatewayDispatcherTick { dispatcher })),
+                    Err(error) => {
+                        eprintln!(
+                            "warning: the Routine dispatcher is not running with this gateway: \
+                             {error}; scheduled automations will not fire"
+                        );
+                        None
+                    }
+                };
+            // The relay pass reaches this very service through the carrier it
+            // exposes, exactly as any other client would.
+            #[cfg(unix)]
+            let own_carrier = match (&config.unix_socket, &config.websocket_bind) {
+                (Some(path), _) => aikit_adapters::GatewayCarrierTarget::UnixSocket(path.clone()),
+                (None, Some(bind)) => aikit_adapters::GatewayCarrierTarget::websocket(
+                    bind.clone(),
+                    config.websocket_bearer_token.clone().unwrap_or_default(),
+                ),
+                (None, None) => unreachable!("serve_config validated a carrier"),
             };
+            #[cfg(not(unix))]
+            let own_carrier = aikit_adapters::GatewayCarrierTarget::websocket(
+                config.websocket_bind.clone().unwrap_or_default(),
+                config.websocket_bearer_token.clone().unwrap_or_default(),
+            );
+            let ticks = Some(GatewayTickLoop {
+                interval: std::time::Duration::from_millis(
+                    aikit_cli::routine_dispatch::TICK_INTERVAL_MS as u64,
+                ),
+                hook: Box::new(aikit_cli::gateway_contact::GatewayServiceTick {
+                    dispatcher,
+                    relay: aikit_cli::gateway_contact::CommuniqueRelayTick {
+                        home: home.clone(),
+                        target: own_carrier,
+                    },
+                }),
+            });
             aikit_adapters::run_gateway_service_with_ticks(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
@@ -629,6 +1133,103 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 exit_code: json::EXIT_OK,
             })
         }
+        GatewaySub::Who(a) => {
+            let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
+            gateway_data(aikit_cli::gateway_contact::who(
+                &owners,
+                &gateway,
+                &cwd,
+                a.project_world.as_deref(),
+            )?)
+        }
+        GatewaySub::Send(a) => {
+            let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
+            let body = match (a.body, a.body_file) {
+                (Some(body), _) => body,
+                (None, Some(path)) => read_body_file(&path)?,
+                (None, None) => {
+                    return Err(aikit_cli::gateway_contact::three_part(
+                        "gateway.empty_body",
+                        "Neither --body nor --body-file was provided.",
+                        "Nothing was sent; no Communique was recorded.",
+                        "Pass the words with --body TEXT or --body-file PATH (- for stdin).",
+                    ))
+                }
+            };
+            gateway_data(aikit_cli::gateway_contact::send(
+                &home,
+                &owners,
+                &gateway,
+                &cwd,
+                aikit_cli::gateway_contact::SendRequest {
+                    to: &a.to,
+                    body,
+                    reply_to: a.reply_to,
+                    from_position: a.from_position.as_deref(),
+                    project_world: a.project_world.as_deref(),
+                },
+            )?)
+        }
+        GatewaySub::Inbox(a) => {
+            let (owners, gateway, _) = contact_seams(&home, &a.carrier)?;
+            gateway_data(aikit_cli::gateway_contact::inbox(
+                &owners,
+                &gateway,
+                a.position.as_deref(),
+                a.ack,
+            )?)
+        }
+        GatewaySub::Conversation(a) => {
+            let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
+            gateway_data(aikit_cli::gateway_contact::conversation(
+                &owners,
+                &gateway,
+                &cwd,
+                a.position.as_deref(),
+                &a.with,
+                a.project_world.as_deref(),
+            )?)
+        }
+        GatewaySub::Delegate(a) => {
+            let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
+            gateway_data(aikit_cli::gateway_contact::delegate(
+                &owners,
+                &gateway,
+                &cwd,
+                aikit_cli::gateway_contact::DelegateRequest {
+                    communique_ref: &a.communique,
+                    work_ref: &a.work,
+                    run_ref: a.run,
+                    journey_ref: a.journey,
+                    workflow_unit_ref: a.workflow_unit,
+                    reason: &a.reason,
+                },
+            )?)
+        }
+        GatewaySub::Forward(a) => {
+            let (owners, gateway, cwd) = contact_seams(&home, &a)?;
+            gateway_data(aikit_cli::gateway_contact::forward_pass(
+                &home, &owners, &gateway, &cwd,
+            )?)
+        }
+        GatewaySub::Remote(remote) => gateway_data(match remote.command {
+            GatewayRemoteSub::Add {
+                workcell,
+                websocket_bind,
+                websocket_path,
+                token_location,
+            } => aikit_cli::gateway_contact::remote_add(
+                &home,
+                &workcell,
+                &websocket_bind,
+                &websocket_path,
+                &token_location,
+            )?,
+            GatewayRemoteSub::List => aikit_cli::gateway_contact::remote_list(&home)?,
+            GatewayRemoteSub::Remove { workcell } => {
+                aikit_cli::gateway_contact::remote_remove(&home, &workcell)?
+            }
+        }),
         query => {
             let command = match query {
                 GatewaySub::Protocol(_) => aikit_adapters::GatewayCommand::Protocol,
@@ -639,7 +1240,14 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 GatewaySub::Serve(_)
                 | GatewaySub::Tick
                 | GatewaySub::InstallService
-                | GatewaySub::UninstallService => unreachable!("handled above"),
+                | GatewaySub::UninstallService
+                | GatewaySub::Who(_)
+                | GatewaySub::Send(_)
+                | GatewaySub::Inbox(_)
+                | GatewaySub::Conversation(_)
+                | GatewaySub::Delegate(_)
+                | GatewaySub::Forward(_)
+                | GatewaySub::Remote(_) => unreachable!("handled above"),
             };
             let args = match query {
                 GatewaySub::Protocol(a)
@@ -650,7 +1258,14 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 GatewaySub::Serve(_)
                 | GatewaySub::Tick
                 | GatewaySub::InstallService
-                | GatewaySub::UninstallService => unreachable!("handled above"),
+                | GatewaySub::UninstallService
+                | GatewaySub::Who(_)
+                | GatewaySub::Send(_)
+                | GatewaySub::Inbox(_)
+                | GatewaySub::Conversation(_)
+                | GatewaySub::Delegate(_)
+                | GatewaySub::Forward(_)
+                | GatewaySub::Remote(_) => unreachable!("handled above"),
             };
             let target = aikit_cli::gateway_ops::carrier_target(&home, &args)?;
             let response =
@@ -3712,7 +4327,7 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd, json_mode: bool) -> Result<Reply>
 
     let payload: Value = read_stdin_json();
     let event: HookEvent = hook::normalize(&a.client, &a.event, payload);
-    let decision = service.dispatch_hook(&event)?;
+    let (decision, refocus) = service.dispatch_hook_inhabited(&event)?;
 
     // The event-trigger pass (parent §5): Enabled Event Routines whose
     // event_ref matches this (client, kind) observe the event and pass through
@@ -3798,6 +4413,8 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd, json_mode: bool) -> Result<Reply>
     // verdict in its exit status; plain mode speaks the harness protocol
     // itself (see `hook::translate_verdict`).
     let verdict = hook::translate_decision(&a.client, &a.event, a.decision_json, &decision);
+    // A `--json` inspection is not a turn: staged Communiques stay undelivered.
+    let staged_communiques = aikit_cli::communique_turn::take_staged_delivery();
 
     if json_mode {
         Ok(Reply::Data {
@@ -3810,10 +4427,39 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd, json_mode: bool) -> Result<Reply>
         if let Some(message) = verdict.stderr {
             eprintln!("{message}");
         }
-        if let Some(document) = verdict.stdout {
-            Ok(Reply::Text(document))
-        } else {
-            Ok(Reply::Status(verdict.exit_code))
+        match verdict.stdout {
+            // One write carries both turn deliveries. Each is recorded only
+            // after that write succeeded — a Refocus that was not carried, or
+            // Communiques never written, stay undelivered.
+            Some(document) => {
+                let mut out = std::io::stdout().lock();
+                if let Err(error) = aikit_cli::refocus::write_then_commit(&mut out, &document, None)
+                {
+                    eprintln!(
+                        "the hook document could not be written ({error}); no Refocus or Communique was marked delivered"
+                    );
+                    return Ok(Reply::Status(verdict.exit_code));
+                }
+                drop(out);
+                if let Some(commit) = refocus.as_ref().filter(|c| c.carried_by(&document)) {
+                    if let Err(error) = commit.commit() {
+                        eprintln!("refocus delivery not recorded: {error}");
+                    }
+                }
+                if let Some(delivery) = staged_communiques {
+                    let gateway =
+                        aikit_cli::gateway_contact::LocalGateway::default_for(service.home());
+                    if let Err(error) = aikit_cli::communique_turn::commit_staged_delivery(
+                        &delivery, &document, &gateway,
+                    ) {
+                        eprintln!(
+                            "warning: Communiques were shown this turn but could not be marked delivered: {error}"
+                        );
+                    }
+                }
+                Ok(Reply::Status(verdict.exit_code))
+            }
+            None => Ok(Reply::Status(verdict.exit_code)),
         }
     }
 }
