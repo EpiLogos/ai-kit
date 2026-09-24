@@ -225,19 +225,26 @@ pub struct InhabitArgs {
     #[arg(long, value_name = "AGENCY_REF")]
     pub agency: Option<String>,
     /// Take over from the current occupant (continuity handover).
-    #[arg(long, conflicts_with_all = ["fresh", "release"])]
+    #[arg(long, conflicts_with_all = ["fresh", "release", "attach"])]
     pub handover: bool,
     /// Replace any current occupant with a fresh one.
-    #[arg(long, conflicts_with = "release")]
+    #[arg(long, conflicts_with_all = ["release", "attach"])]
     pub fresh: bool,
     /// Why this tenure opens (or ends, with --release).
     #[arg(long)]
     pub reason: Option<String>,
     /// End the tenure this body holds instead of claiming one.
-    #[arg(long, conflicts_with_all = ["agent", "agency"])]
+    #[arg(long, conflicts_with_all = ["agent", "agency", "attach"])]
     pub release: bool,
-    /// With --release: the generation to end (defaults to `OI_OCCUPANT_GENERATION`).
-    #[arg(long, requires = "release", value_name = "GENERATION_REF")]
+    /// Continue the tenure this occupant already holds (e.g. resuming its
+    /// harness session): verify the generation is still current, then exec the
+    /// harness stamped with it. Nothing is claimed; a superseded generation is
+    /// refused.
+    #[arg(long, conflicts_with_all = ["agent", "agency"])]
+    pub attach: bool,
+    /// With --release or --attach: the generation held (defaults to
+    /// `OI_OCCUPANT_GENERATION`).
+    #[arg(long, value_name = "GENERATION_REF")]
     pub generation: Option<String>,
     #[arg(long = "agent-session", value_name = "REF")]
     pub agent_session: Option<String>,

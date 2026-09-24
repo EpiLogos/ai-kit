@@ -381,6 +381,87 @@ pub fn claim(
     })
 }
 
+/// Continue the tenure this occupant already holds: the generation (flag or
+/// stamped env) must still be the Position's current one, verified by
+/// Actuation. Returns the stamps to exec the harness with; claims nothing.
+pub fn attach(
+    owners: &Owners<'_>,
+    position: &str,
+    generation: Option<&str>,
+    cwd: &Path,
+) -> Result<Claimed> {
+    let position_ref = position_ref_for(owners, position, cwd)?;
+    let generation = held_generation(
+        &position_ref,
+        generation,
+        "Nothing was launched.",
+        "--attach",
+    )?;
+    let answer = owners.occupancy(&[
+        "verify",
+        "--position",
+        &position_ref,
+        "--generation",
+        &generation,
+    ]);
+    let verified = answer.ok().cloned().ok_or_else(|| {
+        owner_refusal(
+            "inhabit.attach_refused",
+            &answer,
+            "Nothing was launched; a superseded or unknown generation holds no standing.",
+        )
+    })?;
+    Ok(Claimed {
+        env: vec![
+            (POSITION_VAR.to_owned(), position_ref.clone()),
+            (GENERATION_VAR.to_owned(), generation.clone()),
+        ],
+        position_ref,
+        generation_ref: generation,
+        claim: verified,
+    })
+}
+
+fn position_ref_for(owners: &Owners<'_>, position: &str, cwd: &Path) -> Result<String> {
+    if !position.starts_with('@') {
+        return Ok(position.to_owned());
+    }
+    let here = owners.ctrl(
+        "central.world.here",
+        json!({ "cwd": cwd.display().to_string() }),
+    );
+    let project = here
+        .ok()
+        .and_then(|data| pick(&data["project_world"], &["name"]));
+    Ok(resolve_position(owners, position, project.as_deref())?.0)
+}
+
+/// The generation this body holds for `position_ref`: the flag, else the
+/// stamped `OI_OCCUPANT_GENERATION` when it was stamped for this Position.
+fn held_generation(
+    position_ref: &str,
+    generation: Option<&str>,
+    consequence: &str,
+    verb: &str,
+) -> Result<String> {
+    if let Some(generation) = generation {
+        return Ok(generation.to_owned());
+    }
+    let stamped_position = std::env::var(POSITION_VAR).ok();
+    match std::env::var(GENERATION_VAR)
+        .ok()
+        .filter(|g| !g.trim().is_empty())
+    {
+        Some(generation) if stamped_position.as_deref() == Some(position_ref) => Ok(generation),
+        _ => Err(refusal(
+            "inhabit.no_held_generation",
+            format!("This body carries no occupant generation stamped for {position_ref}."),
+            consequence,
+            format!("aikit inhabit {verb} --position {position_ref} --generation <the generation you hold>"),
+        )),
+    }
+}
+
 /// End the tenure this body holds. The generation comes from `--generation`
 /// or the stamped `OI_OCCUPANT_GENERATION`; a body that holds nothing refuses.
 pub fn release(
@@ -390,33 +471,13 @@ pub fn release(
     reason: &str,
     cwd: &Path,
 ) -> Result<Value> {
-    let position_ref = if position.starts_with('@') {
-        let here = owners.ctrl(
-            "central.world.here",
-            json!({ "cwd": cwd.display().to_string() }),
-        );
-        let project = here
-            .ok()
-            .and_then(|data| pick(&data["project_world"], &["name"]));
-        resolve_position(owners, position, project.as_deref())?.0
-    } else {
-        position.to_owned()
-    };
-    let stamped_position = std::env::var(POSITION_VAR).ok();
-    let generation = match generation {
-        Some(generation) => generation.to_owned(),
-        None => match std::env::var(GENERATION_VAR).ok().filter(|g| !g.trim().is_empty()) {
-            Some(generation) if stamped_position.as_deref() == Some(position_ref.as_str()) => generation,
-            _ => {
-                return Err(refusal(
-                    "inhabit.no_held_generation",
-                    format!("This body carries no occupant generation stamped for {position_ref}."),
-                    "Nothing was released.",
-                    format!("aikit inhabit --release --position {position_ref} --generation <the generation you hold>"),
-                ))
-            }
-        },
-    };
+    let position_ref = position_ref_for(owners, position, cwd)?;
+    let generation = held_generation(
+        &position_ref,
+        generation,
+        "Nothing was released.",
+        "--release",
+    )?;
     let answer = owners.occupancy(&[
         "release",
         "--position",

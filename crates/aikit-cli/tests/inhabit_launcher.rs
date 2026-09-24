@@ -54,6 +54,11 @@ case "$2" in
   claim) echo '{{"ok":true,"verb":"claim","position_ref":"{POSITION}","generation":4,"env":{{"OI_POSITION_REF":"{POSITION}","OI_OCCUPANT_GENERATION":"{CLAIMED}"}}}}' ;;
   read) echo '{{"schema":"actuation.position-occupancy/v1","position_ref":"{POSITION}","state":"occupied","current":{{"generation_ref":"{HELD}","generation_ordinal":3}},"generations":[]}}' ;;
   release) echo '{{"ok":true,"verb":"release","position_ref":"{POSITION}","generation":3,"tenure":{{"generation_ref":"{HELD}"}}}}' ;;
+  verify)
+    case "$*" in
+      *"{HELD}"*) echo '{{"ok":true,"verb":"verify","position_ref":"{POSITION}","current":true}}' ;;
+      *) echo '{{"ok":false,"error":{{"code":"occupancy.superseded","fact":"superseded","consequence":"nothing","action":"actuation occupancy read --position {POSITION}"}}}}'; exit 2 ;;
+    esac ;;
   *) echo "actuation: unknown command $2" >&2; exit 2 ;;
 esac
 "#,
@@ -281,4 +286,50 @@ fn without_a_harness_the_claim_prints_the_exports() {
         stdout.contains(&format!("export OI_OCCUPANT_GENERATION={CLAIMED}")),
         "{stdout}"
     );
+}
+
+#[test]
+fn attach_continues_only_the_current_generation_and_claims_nothing() {
+    let world = world();
+    let output = world.run(
+        &args(&["inhabit", "--attach", "--position", POSITION]),
+        &[
+            ("OI_POSITION_REF", POSITION),
+            ("OI_OCCUPANT_GENERATION", HELD),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(&format!("POS={POSITION}")), "{stdout}");
+    assert!(stdout.contains(&format!("GEN={HELD}")), "{stdout}");
+    assert!(stdout.contains("KEEP=session-env-survives"), "{stdout}");
+    let calls = world.actuation_calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(calls[0].starts_with(&format!(
+        "occupancy verify --position {POSITION} --generation {HELD}"
+    )));
+
+    // A superseded generation is refused and nothing is launched.
+    let output = world.run(
+        &args(&[
+            "inhabit",
+            "--attach",
+            "--position",
+            POSITION,
+            "--generation",
+            CLAIMED,
+        ]),
+        &[],
+    );
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("POS="));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Nothing was launched"));
+    assert!(world
+        .actuation_calls()
+        .iter()
+        .all(|call| !call.contains(" claim ")));
 }
