@@ -195,6 +195,38 @@ impl World {
             self.prepare_input().to_string(),
         ])
     }
+    fn attach_second_session_with_same_native_agency(&self) {
+        let space = SessionSpaceRef::parse("session-space/task").unwrap();
+        let store = SessionSpaceApplicationStore::new(self.home.clone());
+        store
+            .apply(
+                &store
+                    .stage(
+                        Some(&space),
+                        SessionSpaceMutation::AttachAgentSession {
+                            attachment: SessionSpaceAgentAttachmentIntent {
+                                agent_session: r("agent-session/other"),
+                                purpose: Some("Native shared-history boundary".into()),
+                                provenance: vec!["native-test".into()],
+                            },
+                        },
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        let existing = self.home.state().join("encounter-agencies").join(format!(
+            "{}.json",
+            blake3::hash(b"agent-session/task").to_hex()
+        ));
+        let actual_binding: Value = serde_json::from_slice(&fs::read(existing).unwrap()).unwrap();
+        self.cli(&[
+            "encounter-agency-configure".into(),
+            "--agent-session".into(),
+            "agent-session/other".into(),
+            "--binding-json".into(),
+            actual_binding.to_string(),
+        ]);
+    }
     fn start(&mut self) {
         self.start_with_pi_config_ambient(None);
     }
@@ -540,6 +572,467 @@ fn missing_task_authority_refuses_before_now_allocation() {
     ]);
     assert!(!result.status.success());
     assert!(!w.root.join("Control/agents/now").exists());
+}
+
+#[test]
+#[ignore = "requires exact source-built Central, Workcell and Actuation; mandatory CAW lane"]
+fn refused_central_source_amendment_keeps_ready_task_and_same_now() {
+    let w = World::new(true);
+    let ready = w.prepare();
+    let before = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(before, ready);
+    let mut amended = w.prepare_input();
+    amended["central"]["source_refs"] = json!(["source/agency", "source/new-skill"]);
+    let refused = w.command(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        amended.to_string(),
+        "--expected-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("allocation identity is immutable"));
+    let after = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(after, before, "refusal must not publish pending over ready");
+    let retried = w.cli(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        w.prepare_input().to_string(),
+        "--expected-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert_eq!(retried["ready"], true);
+    assert_ne!(retried["revision"], ready["revision"]);
+    assert_eq!(
+        retried["allocation"]["allocation"]["now_ref"],
+        ready["allocation"]["allocation"]["now_ref"]
+    );
+    assert_eq!(
+        retried["allocation"]["allocation"]["record"]["task_ref"],
+        ready["allocation"]["allocation"]["record"]["task_ref"]
+    );
+}
+
+#[test]
+#[ignore = "requires exact source-built Central, Workcell and Actuation; mandatory CAW lane"]
+fn unhosted_pending_abort_revalidates_ready_with_fresh_revision_and_stale_cas_refuses() {
+    let mut w = World::new(true);
+    let ready = w.prepare();
+    let mut invalid = w.prepare_input();
+    invalid["selected_directories"] =
+        json!([w.root.join("Work/demo/src/missing-native-directory")]);
+    let failed = w.command(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        invalid.to_string(),
+        "--expected-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(
+        !failed.status.success(),
+        "a nonexistent selected directory must fail the actual owner boundary"
+    );
+    let pending = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(pending["ready"], false);
+    assert_eq!(
+        pending["request"]["central"]["task_ref"],
+        ready["request"]["central"]["task_ref"]
+    );
+    w.attach_second_session_with_same_native_agency();
+    let other_ready = w.cli(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/other".into(),
+        "--request-json".into(),
+        w.prepare_input().to_string(),
+    ]);
+    let other_failed = w.command(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/other".into(),
+        "--request-json".into(),
+        invalid.to_string(),
+        "--expected-revision".into(),
+        other_ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!other_failed.status.success());
+    let foreign_history = w.command(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        other_ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(
+        !foreign_history.status.success(),
+        "another AgentSession's real native ready record is not this session's recovery target"
+    );
+    assert_eq!(
+        w.cli(&[
+            "encounter-task-read".into(),
+            "--agent-session".into(),
+            "agent-session/task".into()
+        ]),
+        pending
+    );
+    let history = w.home.state().join("encounter-tasks/history");
+    let same_revision_history: Vec<Value> = fs::read_dir(&history)
+        .unwrap()
+        .map(|item| serde_json::from_slice(&fs::read(item.unwrap().path()).unwrap()).unwrap())
+        .filter(|record: &Value| record["revision"] == ready["revision"])
+        .collect();
+    assert_eq!(
+        same_revision_history
+            .iter()
+            .filter(|record| record["ready"] == true)
+            .count(),
+        1,
+        "exactly one ready history reading may be restored"
+    );
+    assert!(
+        same_revision_history
+            .iter()
+            .any(|record| record["ready"] == false),
+        "the native pending journal legitimately shares its revision with ready"
+    );
+    let entry = fs::read_dir(&history)
+        .unwrap()
+        .map(|item| item.unwrap().path())
+        .find(|path| {
+            serde_json::from_slice::<Value>(&fs::read(path).unwrap()).is_ok_and(|record| {
+                record["revision"] == ready["revision"] && record["ready"] == true
+            })
+        })
+        .expect("the actual earlier ready record is retained in native history");
+    let original = fs::read(&entry).unwrap();
+    fs::write(&entry, b"corrupt native history bytes").unwrap();
+    let corrupted = w.command(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!corrupted.status.success());
+    fs::remove_file(&entry).unwrap();
+    std::os::unix::fs::symlink(w.root.join("agency.json"), &entry).unwrap();
+    let redirected = w.command(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!redirected.status.success());
+    fs::remove_file(&entry).unwrap();
+    fs::write(&entry, original).unwrap();
+    let stale = w.command(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!stale.status.success());
+    assert_eq!(
+        w.cli(&[
+            "encounter-task-read".into(),
+            "--agent-session".into(),
+            "agent-session/task".into()
+        ]),
+        pending
+    );
+    let restored = w.cli(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert_eq!(restored["status"], "restored");
+    let resumed = &restored["record"];
+    assert_eq!(resumed["ready"], true);
+    assert_ne!(resumed["revision"], ready["revision"]);
+    assert_ne!(resumed["revision"], pending["revision"]);
+    assert_eq!(
+        resumed["allocation"]["allocation"]["now_ref"],
+        ready["allocation"]["allocation"]["now_ref"]
+    );
+    assert_eq!(
+        resumed["request"]["central"]["task_ref"],
+        ready["request"]["central"]["task_ref"]
+    );
+    assert_eq!(
+        resumed["launcher"]["argv"].as_array().unwrap().last(),
+        Some(&resumed["revision"])
+    );
+    w.start();
+    assert_eq!(w.open(resumed, &w.root.join("Work/demo/src"))["ok"], true);
+    let repeated = w.command(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(
+        !repeated.status.success(),
+        "stale abort cannot overwrite the restored live body"
+    );
+}
+
+#[test]
+#[ignore = "requires exact source-built Central, Workcell and Actuation; mandatory CAW lane"]
+fn expired_unhosted_ready_is_reprepared_with_same_native_now_and_fresh_lease() {
+    let mut w = World::new(true);
+    let policy_path = w.root.join("Control/user/placement.json");
+    let mut policy: Value = serde_json::from_slice(&fs::read(&policy_path).unwrap()).unwrap();
+    policy["lease_seconds"] = json!(10);
+    fs::write(&policy_path, policy.to_string()).unwrap();
+    let ready = w.prepare();
+    let old_expiry = ready["allocation"]["allocation"]["policy"]["expires_at_unix_seconds"]
+        .as_u64()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        <= old_expiry
+    {
+        assert!(
+            Instant::now() < deadline,
+            "real short native lease did not expire"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let mut invalid = w.prepare_input();
+    invalid["selected_directories"] =
+        json!([w.root.join("Work/demo/src/missing-native-directory")]);
+    let refused = w.command(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        invalid.to_string(),
+        "--expected-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!refused.status.success());
+    let pending = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(pending["ready"], false);
+    let restored = w.cli(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    let resumed = &restored["record"];
+    assert_eq!(resumed["ready"], true);
+    assert_ne!(resumed["revision"], ready["revision"]);
+    assert_eq!(
+        resumed["allocation"]["allocation"]["now_ref"],
+        ready["allocation"]["allocation"]["now_ref"]
+    );
+    assert_eq!(
+        resumed["allocation"]["allocation"]["source"]["ref"],
+        ready["allocation"]["allocation"]["source"]["ref"]
+    );
+    assert_eq!(
+        resumed["allocation"]["allocation"]["policy"]["revision"],
+        ready["allocation"]["allocation"]["policy"]["revision"]
+    );
+    assert!(
+        resumed["allocation"]["allocation"]["policy"]["expires_at_unix_seconds"]
+            .as_u64()
+            .unwrap()
+            > old_expiry,
+        "recovery must obtain a fresh finite native lease"
+    );
+    for key in ["writable_paths", "protected_paths", "required_coverage"] {
+        assert_eq!(resumed["requirements"][key], ready["requirements"][key]);
+    }
+    w.start();
+    assert_eq!(w.open(resumed, &w.root.join("Work/demo/src"))["ok"], true);
+}
+
+#[test]
+#[ignore = "requires exact source-built Central, Workcell and Actuation; mandatory CAW lane"]
+fn pending_abort_refuses_changed_native_placement_policy_and_remains_recoverable() {
+    let w = World::new(true);
+    let ready = w.prepare();
+    let mut invalid = w.prepare_input();
+    invalid["selected_directories"] =
+        json!([w.root.join("Work/demo/src/missing-native-directory")]);
+    let refused = w.command(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        invalid.to_string(),
+        "--expected-revision".into(),
+        ready["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!refused.status.success());
+    let pending = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    let policy_path = w.root.join("Control/user/placement.json");
+    let original = fs::read(&policy_path).unwrap();
+    let mut changed: Value = serde_json::from_slice(&original).unwrap();
+    changed["lease_seconds"] = json!(301);
+    fs::write(&policy_path, changed.to_string()).unwrap();
+    let command = |expected_revision: &str| {
+        vec![
+            "encounter-task-abort".into(),
+            "--agent-session".into(),
+            "agent-session/task".into(),
+            "--expected-revision".into(),
+            expected_revision.into(),
+            "--restore-revision".into(),
+            ready["revision"].as_str().unwrap().into(),
+        ]
+    };
+    let rejected = w.command(&command(pending["revision"].as_str().unwrap()));
+    assert!(
+        !rejected.status.success(),
+        "changed policy cannot renew the old task authority"
+    );
+    let still_pending = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(still_pending["ready"], false);
+    assert_ne!(still_pending["revision"], pending["revision"]);
+    assert_eq!(
+        still_pending["request"], ready["request"],
+        "pending recovery is bound to the original request"
+    );
+    fs::write(&policy_path, original).unwrap();
+    let stale = w.command(&command(pending["revision"].as_str().unwrap()));
+    assert!(
+        !stale.status.success(),
+        "the first pending CAS was consumed by the recovery journal"
+    );
+    let recovered = w.cli(&command(still_pending["revision"].as_str().unwrap()));
+    assert_eq!(recovered["record"]["ready"], true);
+    assert_eq!(
+        recovered["record"]["allocation"]["allocation"]["now_ref"],
+        ready["allocation"]["allocation"]["now_ref"]
+    );
+}
+
+#[test]
+#[ignore = "requires exact source-built Central, Workcell and Actuation; mandatory CAW lane"]
+fn first_pending_preparation_remains_bound_to_same_native_request() {
+    let w = World::new(true);
+    let directory = w.root.join("Work/demo/src/selected-after-failure");
+    let mut request = w.prepare_input();
+    request["selected_directories"] = json!([directory]);
+    let failed = w.command(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        request.to_string(),
+    ]);
+    assert!(!failed.status.success());
+    let pending = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(pending["ready"], false);
+    let replacement = w.command(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        w.prepare_input().to_string(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!replacement.status.success());
+    let abort = w.command(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        "task-binding/nonexistent".into(),
+    ]);
+    assert!(
+        !abort.status.success(),
+        "no earlier ready body may be invented"
+    );
+    assert_eq!(
+        w.cli(&[
+            "encounter-task-read".into(),
+            "--agent-session".into(),
+            "agent-session/task".into(),
+        ]),
+        pending
+    );
+    fs::create_dir(&directory).unwrap();
+    let recovered = w.cli(&[
+        "encounter-task-configure".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--request-json".into(),
+        request.to_string(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+    ]);
+    assert_eq!(recovered["ready"], true);
+    assert_eq!(
+        recovered["request"]["central"],
+        pending["request"]["central"]
+    );
+    assert_eq!(
+        recovered["allocation"]["allocation"]["record"]["task_ref"],
+        "task:native-joined"
+    );
 }
 
 #[path = "support/caw_task_material.rs"]
