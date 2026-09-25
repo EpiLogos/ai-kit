@@ -9,7 +9,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, repair/65-native-pi-model-controls]
   pull_request:
 
 permissions:

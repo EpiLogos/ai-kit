@@ -67,6 +67,32 @@ pub struct WorkingSurfaceResult {
     pub refreshed_binding: Option<SessionSpaceWorkingSurfaceBinding>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkingSurfaceCapture {
+    pub schema: &'static str,
+    pub space: SessionSpaceRef,
+    pub binding: ResourceRef,
+    pub surface: ResourceRef,
+    pub agent_session: ResourceRef,
+    pub provider: ResourceRef,
+    pub plan_name: String,
+    pub observed_at_unix_ms: u64,
+    pub capture: working_environment_field::WorkingEnvironmentCapture,
+}
+
+/// Read-only capture never opens a missing place or changes binding state.
+pub fn capture(state: &SessionSpaceAuthoredState, binding_ref: &ResourceRef, lines: u16) -> Result<WorkingSurfaceCapture> {
+    let bound = binding(state, binding_ref)?;
+    let capture = working_environment_field::capture(&bound.plan, &bound.provider, &bound.surface, lines)?;
+    Ok(WorkingSurfaceCapture {
+        schema:"aikit.session-space-working-surface-capture/v1",
+        space:state.id().clone(),binding:bound.binding.clone(),surface:bound.surface.clone(),
+        agent_session:bound.agent_session.clone(),provider:bound.provider.clone(),plan_name:bound.plan.name.clone(),
+        observed_at_unix_ms:std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+        capture,
+    })
+}
+
 fn binding<'a>(
     state: &'a SessionSpaceAuthoredState,
     binding: &ResourceRef,

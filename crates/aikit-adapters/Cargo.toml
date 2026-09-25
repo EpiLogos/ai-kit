@@ -9,6 +9,7 @@ description = "AIKit adapters: multiplexers (tmux, cmux, plain), agent clients (
 
 [dependencies]
 tempfile = { workspace = true }
+rusqlite = { version = "0.37", features = ["bundled", "backup"] }
 aikit-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

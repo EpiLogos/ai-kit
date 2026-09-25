@@ -27,6 +27,14 @@ impl Rig {
         Self::build(mode, None)
     }
     fn build(mode: &str, default_modes: Option<serde_json::Value>) -> Self {
+        Self::settings(mode, default_modes, None, true)
+    }
+    fn settings(
+        mode: &str,
+        default_modes: Option<serde_json::Value>,
+        default_models: Option<serde_json::Value>,
+        open: bool,
+    ) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let home = AikitHome::at(temp.path().join("aikit"));
         let store = SessionSpaceApplicationStore::new(home.clone());
@@ -74,6 +82,7 @@ impl Rig {
                     "-u".into(),
                     script.display().to_string(),
                     mode.into(),
+                    temp.path().join("native-model.json").display().to_string(),
                 ],
                 body_ref: None,
                 body_revision: None,
@@ -94,6 +103,13 @@ impl Rig {
             )
             .unwrap();
         }
+        if let Some(defaults) = default_models {
+            aikit_cli::model_defaults::write(
+                &home,
+                &aikit_cli::model_defaults::from_value(&defaults).unwrap(),
+            )
+            .unwrap();
+        }
         let service = EncounterService::new(home.clone()).unwrap();
         let rig = Self {
             temp,
@@ -102,7 +118,9 @@ impl Rig {
             space,
             session,
         };
-        rig.service.apply(rig.open(false)).unwrap();
+        if open {
+            rig.service.apply(rig.open(false)).unwrap();
+        }
         rig
     }
     fn open(&self, resume: bool) -> EncounterRequest {
@@ -621,4 +639,138 @@ fn launch_facts_see_through_a_declared_sandbox_and_expose_only_basenames() {
         provider_launch_facts(EncounterProtocol::Acp, &node),
         serde_json::json!({"protocol":"acp","command":"node","entry":"index.js","sandboxed":false})
     );
+}
+
+#[test]
+fn configured_model_default_selects_and_confirms_the_native_model() {
+    let rig = Rig::settings(
+        "normal",
+        None,
+        Some(serde_json::json!({"controlled":{"model_id":"test/b","model_name":"B"}})),
+        false,
+    );
+    let opened = rig.service.apply(rig.open(false)).unwrap();
+    assert_eq!(opened["model_observation"]["current_model_id"], "test/b");
+    assert_eq!(
+        rig.model()["model_observation"]["current_model_id"],
+        "test/b"
+    );
+    assert!(rig
+        .journal()
+        .iter()
+        .any(|row| row["event"]["kind"] == "native-model-default-confirmed"));
+    aikit_cli::model_defaults::write(
+        &rig.home,
+        &aikit_cli::model_defaults::from_value(
+            &serde_json::json!({"controlled":{"model_id":"test/a"}}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        rig.model()["model_observation"]["current_model_id"],
+        "test/b",
+        "changing a preference must not mutate the resident"
+    );
+    assert!(!rig
+        .journal()
+        .iter()
+        .any(|row| row["event"]["kind"] == "prompt"));
+    rig.stop();
+}
+
+#[test]
+fn model_default_does_not_replace_the_model_on_native_resume() {
+    let mut rig = Rig::settings(
+        "retained-model",
+        None,
+        Some(serde_json::json!({"controlled":{"model_id":"test/b"}})),
+        true,
+    );
+    assert_eq!(
+        rig.model()["model_observation"]["current_model_id"],
+        "test/b"
+    );
+    aikit_cli::model_defaults::write(
+        &rig.home,
+        &aikit_cli::model_defaults::from_value(
+            &serde_json::json!({"controlled":{"model_id":"test/a"}}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    rig.stop();
+    rig.service = EncounterService::new(rig.home.clone()).unwrap();
+    let resumed = rig.service.apply(rig.open(true)).unwrap();
+    assert_eq!(resumed["native_session_id"], "controlled-native");
+    assert_eq!(
+        rig.model()["model_observation"]["current_model_id"],
+        "test/b"
+    );
+    assert_eq!(
+        rig.journal()
+            .iter()
+            .filter(|row| row["event"]["kind"] == "native-model-default-confirmed")
+            .count(),
+        1
+    );
+    assert!(!rig
+        .journal()
+        .iter()
+        .any(|row| row["event"]["kind"] == "prompt"));
+    rig.stop();
+}
+
+#[test]
+fn model_default_refuses_unadvertised_or_unconfirmed_selection() {
+    for (mode, model) in [("normal", "not-advertised"), ("lost-model-ack", "test/b")] {
+        let rig = Rig::settings(
+            mode,
+            None,
+            Some(serde_json::json!({"controlled":{"model_id":model}})),
+            false,
+        );
+        let failure = rig.service.apply(rig.open(false)).unwrap_err();
+        assert!(!failure.message().is_empty());
+        assert!(rig
+            .journal()
+            .iter()
+            .any(|row| row["event"]["kind"] == "native-model-default-refused"
+                && row["event"]["cleanup_confirmed"] == true));
+        rig.stop();
+    }
+}
+
+#[test]
+#[ignore = "requires installed Pi; reads native state only, never sends a prompt"]
+fn installed_pi_launch_default_is_confirmed_without_inference() {
+    let model = std::env::var("AIKIT_TEST_PI_MODEL").expect("native observed Pi model ID");
+    let provider = std::env::var("AIKIT_TEST_PI_PROVIDER").expect("native observed Pi provider");
+    let executable = std::env::var("AIKIT_TEST_PI_BIN").unwrap_or_else(|_| "pi".into());
+    let rig = Rig::settings(
+        "normal",
+        None,
+        Some(serde_json::json!({"controlled":{"model_id":model,"native_provider":provider}})),
+        false,
+    );
+    let native:EncounterProvider=serde_json::from_value(serde_json::json!({"id":"controlled","label":"Installed Pi","protocol":"pi-rpc","argv":[executable,"--mode","rpc","--no-session"]})).unwrap();
+    EncounterService::configure(&rig.home, native).unwrap();
+    let opened = rig.service.apply(rig.open(false)).unwrap();
+    assert_eq!(opened["model_observation"]["current_model_id"], model);
+    assert_eq!(opened["model_observation"]["native_provider"], provider);
+    assert_eq!(opened["inference_observed"], false);
+    let reading = rig.model();
+    assert_eq!(
+        reading["model_controls"]["model_selection"], false,
+        "Pi is still launch-owned"
+    );
+    assert!(rig
+        .journal()
+        .iter()
+        .any(|row| row["event"]["kind"] == "native-model-default-confirmed"));
+    assert!(!rig
+        .journal()
+        .iter()
+        .any(|row| row["event"]["kind"] == "prompt"));
+    rig.stop();
 }

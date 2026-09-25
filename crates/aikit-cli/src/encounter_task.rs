@@ -20,6 +20,8 @@ use std::{
 
 #[path = "encounter_task_material.rs"]
 mod material;
+#[path = "encounter_task_run.rs"]
+mod prepared_run;
 use material::{MaterialBinding, MaterialHost};
 
 const WRITE_ACTION: &str = "action/aikit/encounter-task";
@@ -31,7 +33,10 @@ struct TaskRequest {
     provider: EncounterProvider,
     cwd: PathBuf,
     selected_directories: Vec<PathBuf>,
+    #[serde(default)]
     workcell_boundary_bin: PathBuf,
+    #[serde(default)]
+    prepared_run_scope: Option<prepared_run::Request>,
     authority_ref: ResourceRef,
     /// A hosted arrangement must prepare/observe this native owner; omission
     /// keeps the explicitly unhosted protected-process mode, not fake hosting.
@@ -52,6 +57,10 @@ struct TaskRecord {
     launcher: EncounterProvider,
     #[serde(default)]
     material: Option<MaterialBinding>,
+    #[serde(default)]
+    prepared_run: Option<prepared_run::Binding>,
+    #[serde(default)]
+    cleanup: Option<Value>,
 }
 /// Finite native-owner requests, not protocol/session lifetime. Partial effects
 /// stay uncertain on timeout; the durable task key is never replaced for retry.
@@ -378,6 +387,22 @@ fn validate(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Res
             "Material path identity changed; prepare an explicit new binding",
         ));
     }
+    match (&record.request.prepared_run_scope, &record.prepared_run) {
+        (Some(request), Some(run)) => {
+            if record.request.workcell_boundary_bin != run.boundary_executable
+                || run.scope["prepared_write_boundary"] != fresh
+            {
+                return Err(error("Prepared run execution boundary changed"));
+            }
+            run.revalidate(request)?;
+        }
+        (None, None) => {}
+        _ => {
+            return Err(error(
+                "The prepared run binding is missing; no material fallback",
+            ))
+        }
+    }
     match (&record.request.material_host, &record.material) {
         (Some(host), Some(binding)) if host == &binding.host => {
             binding.validate(task)?;
@@ -439,71 +464,134 @@ fn prepare_published(
 ) -> Result<TaskRecord> {
     let owner = NativeCentralPlacement::new(OwnerRunner);
     let task = owner.allocate(&record.request.central)?;
-    if let Some(previous) = restore {
-        let old = previous
-            .allocation
-            .as_ref()
-            .ok_or_else(|| error("Recovery target lacks native Central allocation"))?;
-        if task.allocation["policy"]["revision"] != old.allocation["policy"]["revision"]
-            || task.allocation["now_ref"] != old.allocation["now_ref"]
-            || task.allocation["source"]["ref"] != old.allocation["source"]["ref"]
-            || task.allocation["record"]["task_ref"] != old.allocation["record"]["task_ref"]
-        {
-            return Err(error(
+    // Retain allocation before subsequent effects so refusal and cleanup
+    // cannot erase the exact native resource identity.
+    record.allocation = Some(task.clone());
+    publish(home, session, &record)?;
+    let prepared: Result<Value> = (|| {
+        if let Some(previous) = restore {
+            let old = previous
+                .allocation
+                .as_ref()
+                .ok_or_else(|| error("Recovery target lacks native Central allocation"))?;
+            if task.allocation["policy"]["revision"] != old.allocation["policy"]["revision"]
+                || task.allocation["now_ref"] != old.allocation["now_ref"]
+                || task.allocation["source"]["ref"] != old.allocation["source"]["ref"]
+                || task.allocation["record"]["task_ref"] != old.allocation["record"]["task_ref"]
+            {
+                return Err(error(
                 "Native Central task or placement policy changed; recovery cannot widen the historical allocation",
             ));
+            }
         }
-    }
-    let binding = read_binding(home, session)?.ok_or_else(|| error("Agency disappeared"))?;
-    if task.allocation["policy"]["scope_ref"] != json!(binding.world_ref) {
-        return Err(error("Central task scope differs from the native Agency World; an explicit owner-backed relation is required"));
-    }
-    record.cwd_anchor =
-        Some(owner.validate_write(&task, &record.request.cwd)?["destination_anchor"].clone());
-    let requirements = owner.write_boundary_requirements(
-        &task,
-        &record.request.authority_ref,
-        &record.request.selected_directories,
-    )?;
-    if let Some(previous) = restore {
-        let old = previous
-            .requirements
-            .as_ref()
-            .ok_or_else(|| error("Recovery target lacks native material requirements"))?;
-        if ["writable_paths", "protected_paths", "required_coverage"]
-            .iter()
-            .any(|key| requirements[*key] != old[*key])
-        {
-            return Err(error(
+        let binding = read_binding(home, session)?.ok_or_else(|| error("Agency disappeared"))?;
+        if task.allocation["policy"]["scope_ref"] != json!(binding.world_ref) {
+            return Err(error("Central task scope differs from the native Agency World; an explicit owner-backed relation is required"));
+        }
+        record.cwd_anchor =
+            Some(owner.validate_write(&task, &record.request.cwd)?["destination_anchor"].clone());
+        let requirements = owner.write_boundary_requirements(
+            &task,
+            &record.request.authority_ref,
+            &record.request.selected_directories,
+        )?;
+        if let Some(previous) = restore {
+            let old = previous
+                .requirements
+                .as_ref()
+                .ok_or_else(|| error("Recovery target lacks native material requirements"))?;
+            if ["writable_paths", "protected_paths", "required_coverage"]
+                .iter()
+                .any(|key| requirements[*key] != old[*key])
+            {
+                return Err(error(
                 "Native material boundary changed; recovery cannot widen the historical protection",
             ));
+            }
         }
-    }
-    record.inspection = Some(inspect(&record.request, &requirements)?);
-    if let Some(host) = &record.request.material_host {
-        record.material = Some(host.prepare(
-            &task,
-            json!({
-                "agent":binding.agent_ref, "agency":binding.agency_ref,
-                "world_binding":binding.world_binding_ref, "world":binding.world_ref,
-                "agent_session":session, "task":task.request.task_ref,
-                "now":task.allocation["now_ref"], "source":task.allocation["source"]["ref"],
-                "now_revision":task.allocation["revision"]["revision"],
-                "policy_revision":task.allocation["policy"]["revision"],
-                "authority":record.request.authority_ref
-            }),
-        )?);
-    }
+        record.inspection = Some(
+            if let (Some(run), Some(request)) =
+                (&mut record.prepared_run, &record.request.prepared_run_scope)
+            {
+                let scope=run.prepare(request,&record.request.cwd,&requirements,&json!({"agency_ref":binding.agency_ref,"source":binding.agency_source.path,"revision":binding.agency_source.revision,"digest":binding.agency_source.content_digest}))?;
+                let current = inspect(&record.request, &requirements)?;
+                if scope != current {
+                    return Err(error(
+                        "Prepared run boundary differs from native executable inspection",
+                    ));
+                }
+                scope
+            } else {
+                inspect(&record.request, &requirements)?
+            },
+        );
+        if let Some(host) = &record.request.material_host {
+            record.material = Some(host.prepare(
+                &task,
+                json!({
+                    "agent":binding.agent_ref, "agency":binding.agency_ref,
+                    "world_binding":binding.world_binding_ref, "world":binding.world_ref,
+                    "agent_session":session, "task":task.request.task_ref,
+                    "now":task.allocation["now_ref"], "source":task.allocation["source"]["ref"],
+                    "now_revision":task.allocation["revision"]["revision"],
+                    "policy_revision":task.allocation["policy"]["revision"],
+                    "authority":record.request.authority_ref
+                }),
+            )?);
+        }
+        Ok(requirements)
+    })();
+    let requirements = match prepared {
+        Ok(requirements) => requirements,
+        Err(reason) => {
+            record.cleanup = Some(
+                match if record.request.prepared_run_scope.is_some() {
+                    owner.close_new_allocation(&task)
+                } else {
+                    Ok(None)
+                } {
+                    Ok(receipt) => json!({"state":"confirmed","receipt":receipt}),
+                    Err(cleanup) => json!({"state":"unconfirmed","reason":cleanup.to_string()}),
+                },
+            );
+            publish(home, session, &record)?;
+            return Err(reason.with(
+                "cleanup",
+                record.cleanup.as_ref().expect("cleanup").to_string(),
+            ));
+        }
+    };
     record.allocation = Some(task);
     record.requirements = Some(requirements);
-    // Configuration does not retrofit an existing resident with Workcell
-    // protection. The fresh launcher is checked again at its prompt boundary.
-    EncounterService::configure(home, record.launcher.clone())?;
-    record.ready = true;
-    validate(home, session, &record)?;
+    // Configuration is independent from the resident. Changing this does
+    // not pretend to retrofit an existing process with Landlock.
+    let finish: Result<()> = (|| {
+        EncounterService::configure(home, record.launcher.clone())?;
+        record.ready = true;
+        validate(home, session, &record)
+    })();
+    if let Err(reason) = finish {
+        record.ready = false;
+        if record.request.prepared_run_scope.is_some() {
+            record.cleanup = Some(
+                match owner
+                    .close_new_allocation(record.allocation.as_ref().expect("allocated task"))
+                {
+                    Ok(receipt) => json!({"state":"confirmed","receipt":receipt}),
+                    Err(cleanup) => json!({"state":"unconfirmed","reason":cleanup.to_string()}),
+                },
+            );
+        }
+        publish(home, session, &record)?;
+        return Err(reason.with(
+            "cleanup",
+            record.cleanup.as_ref().unwrap_or(&Value::Null).to_string(),
+        ));
+    }
     publish(home, session, &record)?;
     Ok(record)
 }
+
 impl EncounterService {
     /// Owner-only CAS. A pending record is durable before allocating NOW; any
     /// failed preparation remains blocking, not an unconfined fallback.
@@ -513,7 +601,7 @@ impl EncounterService {
         input: Value,
         expected: Option<&SourceRevision>,
     ) -> Result<Value> {
-        let request: TaskRequest = serde_json::from_value(input).map_err(error)?;
+        let mut request: TaskRequest = serde_json::from_value(input).map_err(error)?;
         crate::encounter_profile_provider::ensure_connection_facts_reachable(&request.provider)?;
         // Resolve and validate the declared body before journalling a pending
         // task or allocating its NOW. The raw request remains the immutable
@@ -539,6 +627,18 @@ impl EncounterService {
             return Err(error("Task cwd must be an existing canonical directory"));
         }
         let agency_revision = authority(home, session, &request)?;
+        let prepared_run = if let Some(run) = &request.prepared_run_scope {
+            if request.material_host.is_some() {
+                return Err(error(
+                    "An existing prepared run cannot also allocate another material host",
+                ));
+            }
+            let binding = prepared_run::Binding::resolve(run)?;
+            request.workcell_boundary_bin = binding.boundary_executable.clone();
+            Some(binding)
+        } else {
+            None
+        };
         if let Some(host) = &request.material_host {
             host.preflight()?;
         }
@@ -554,6 +654,13 @@ impl EncounterService {
         {
             return Err(error(
                 "A hosted task cannot silently drop its material requirement",
+            ));
+        }
+        if current.as_ref().is_some_and(|c| {
+            c.request.prepared_run_scope.is_some() && request.prepared_run_scope.is_none()
+        }) {
+            return Err(error(
+                "A task cannot silently drop its existing prepared run",
             ));
         }
         if current
@@ -609,6 +716,8 @@ impl EncounterService {
             cwd_anchor: None,
             launcher,
             material: None,
+            prepared_run,
+            cleanup: None,
         };
         publish(home, session, &record)?;
         serde_json::to_value(prepare_published(home, session, record, None)?).map_err(error)
@@ -646,11 +755,18 @@ impl EncounterService {
                 "Hosted preparation may have uncertain effects; recover the same request through its native Workcell demand",
             ));
         }
+        if current.request.prepared_run_scope.is_some() || current.prepared_run.is_some() {
+            return Err(error(
+                "Prepared-run preparation may have uncertain effects; recover the same request through its native Workcell run",
+            ));
+        }
         let mut prior = historical_ready(home, session, restore)?;
         if prior.schema != "aikit.encounter-task/v1"
             || !prior.ready
             || prior.request.material_host.is_some()
             || prior.material.is_some()
+            || prior.request.prepared_run_scope.is_some()
+            || prior.prepared_run.is_some()
             || prior.request.central.task_ref != current.request.central.task_ref
             || prior.request.central.central_root != current.request.central.central_root
             || prior.request.central.project != current.request.central.project
@@ -676,6 +792,7 @@ impl EncounterService {
         prior.inspection = None;
         prior.cwd_anchor = None;
         prior.material = None;
+        prior.cleanup = None;
         publish(home, session, &prior)?;
         let prior = prepare_published(home, session, prior, Some(&historical))?;
         Ok(json!({
@@ -788,8 +905,12 @@ impl EncounterService {
                 "Prepared task body protocol differs from its Workcell launcher",
             ));
         }
-        let (model_argv, model_environment) =
+        let (mut model_argv, model_environment) =
             super::model::execution(home, session, &resolved_body)?;
+        if resolved_body.model_policy.is_none() {
+            let default = crate::model_defaults::for_session(home, session, &resolved_body)?;
+            model_argv = crate::model_defaults::launch_argv(&resolved_body, default.as_ref())?;
+        }
         let mut command = Command::new(&record.request.workcell_boundary_bin);
         command
             .args([

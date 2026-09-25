@@ -25,6 +25,9 @@ pub enum ResourceKind {
     ContextSource,
     Model,
     Harness,
+    /// The actual native connection selected for an operative run. Presence
+    /// in a reading confers no connection authority or liveness claim.
+    Connection,
     /// Addressable composable runtime unit. A Component may expose powers or
     /// Surfaces but never becomes their semantic identity merely by providing them.
     Component,
@@ -62,6 +65,7 @@ impl ResourceKind {
             Self::ContextSource => "context-source",
             Self::Model => "model",
             Self::Harness => "harness",
+            Self::Connection => "connection",
             Self::Component => "component",
             Self::Contract => "contract",
             Self::Surface => "surface",

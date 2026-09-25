@@ -1,0 +1,110 @@
+{
+  "column_axis": [],
+  "constraints": {
+    "asserts_relations": false,
+    "creates_members": false,
+    "fixed_local_slots": true,
+    "frame": "normalized-local",
+    "partial_occupancy": true,
+    "unique_addresses": true,
+    "whole_transform": "presentation-only"
+  },
+  "embedding": "normalized-sixfold-ring/v1",
+  "geometry_version": "1.1.0",
+  "owner": "ql-core",
+  "row_axis": [],
+  "schema": "ql.shape-presentation/v1",
+  "shape_ref": "ql:shape:1.0.0:constellation:sixfold",
+  "sites": [
+    {
+      "address": {
+        "coordinate": {
+          "face": "direct",
+          "position": 0
+        },
+        "kind": "position"
+      },
+      "xyz": [
+        0.0,
+        -1.0,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "coordinate": {
+          "face": "direct",
+          "position": 1
+        },
+        "kind": "position"
+      },
+      "xyz": [
+        0.8660254037844386,
+        -0.5,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "coordinate": {
+          "face": "direct",
+          "position": 2
+        },
+        "kind": "position"
+      },
+      "xyz": [
+        0.8660254037844386,
+        0.5,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "coordinate": {
+          "face": "direct",
+          "position": 3
+        },
+        "kind": "position"
+      },
+      "xyz": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "coordinate": {
+          "face": "direct",
+          "position": 4
+        },
+        "kind": "position"
+      },
+      "xyz": [
+        -0.8660254037844386,
+        0.5,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "coordinate": {
+          "face": "direct",
+          "position": 5
+        },
+        "kind": "position"
+      },
+      "xyz": [
+        -0.8660254037844386,
+        -0.5,
+        0.0
+      ]
+    }
+  ],
+  "source_refs": [
+    "docs/geometry/GEOMETRY-CONSTELLATION-WAYFINDER.md",
+    "docs/geometry/CANONICAL-CONSTELLATION-RESOLUTION.md",
+    "crates/ql-core/src/shape.rs"
+  ],
+  "standing": "numerical presentation convention; not a semantic metric"
+}

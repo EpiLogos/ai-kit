@@ -152,9 +152,11 @@ impl World {
         }
         let bytes = serde_json::to_vec(&source).unwrap();
         fs::write(&path, &bytes).unwrap();
+        let path = path.canonicalize().unwrap();
         let context = self.temp.path().join(format!("{id}-context.md"));
         let text = format!("SELECTED_CONTEXT_{id}\n");
         fs::write(&context, &text).unwrap();
+        let context = context.canonicalize().unwrap();
         let binding = EncounterAgencyBinding {
             revision: rev("rev/1"),
             active: true,

@@ -87,7 +87,7 @@ fn client_home(seam_path: &str, tree: &Path) -> Result<PathBuf> {
 
 /// Expand one seam path: `~/` against the given home, absolute as-is,
 /// relative against the working tree.
-fn expand_seam(seam_path: &str, home: &Path, tree: &Path) -> PathBuf {
+pub(crate) fn expand_seam(seam_path: &str, home: &Path, tree: &Path) -> PathBuf {
     expand_seam_with(seam_path, home, tree, |name| std::env::var_os(name))
 }
 

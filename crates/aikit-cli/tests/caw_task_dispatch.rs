@@ -50,14 +50,21 @@ impl World {
             socket,
             child: None,
         };
-        for p in ["Control/user", "Control/relations", "Work/demo/src"] {
+        for p in [
+            "Control/user",
+            "Control/relations",
+            "Work/demo/src",
+            "Work/demo/ProjectCentral",
+            "Work/sibling",
+        ] {
             fs::create_dir_all(world.root.join(p)).unwrap();
         }
         fs::write(world.root.join("Control/user/human.md"), "HUMAN_UNCHANGED").unwrap();
         let policy_path = "Control/user/placement.json";
         let policy_ref = format!("central:source:control:root:{policy_path}");
         fs::write(world.root.join(policy_path), json!({"schema":"central.work-placement-policy/v1",
-            "scope_ref":"control:root", "writable":[{"path":"Work/demo","class":"repository"}], "protected":[],
+            "scope_ref":"control:root", "writable":[{"path":"Work/demo","class":"repository"}],
+            "protected":["Work/demo/ProjectCentral"],
             "enforcement":"material-filesystem", "required_coverage":["file-content","file-creation","file-removal","rename-link","truncate","descendant-processes"], "lease_seconds":300}).to_string()).unwrap();
         fs::write(world.root.join("Control/relations/source-relations.json"), json!({"schema":"central.control.ground-relations/v1",
             "project_id":"control:root", "relations":[{"ref":policy_ref,"path":policy_path,"roles":["work-placement-policy"],
@@ -183,7 +190,7 @@ impl World {
         json!({"central":{"ctrl_bin":std::env::var("AIKIT_CAW_CTRL_BIN").expect("native Central required"),"central_root":self.root,
             "project":null,"task_ref":"task:native-joined","purpose":"Native protected task","participant_refs":["agent:existing-1"],"source_refs":["source/agency"]},
             "provider":{"id":"controlled-task","label":"Controlled native, not model","protocol":"acp","argv":["python3","-u",Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/caw_task_provider.py"), self.root.join("Work/demo/src/protocol.log"),self.root.join("Control/user/human.md"), self.root.join("Work/loose.txt")]},
-            "cwd":self.root.join("Work/demo/src"),"selected_directories":[self.root.join("Work/demo/src")],
+            "cwd":self.root.join("Work/demo"),"selected_directories":[self.root.join("Work/demo/src")],
             "workcell_boundary_bin":std::env::var("AIKIT_CAW_WORKCELL_BOUNDARY_BIN").expect("native Workcell required"),"authority_ref":"authority:project:delegation"})
     }
     fn prepare(&self) -> Value {
@@ -470,7 +477,7 @@ fn real_task_dispatch_confines_protocol_and_rechecks_source_without_duplicate_wo
     );
     assert_eq!(alternate["ok"], false);
     assert!(!w.root.join("Work/demo/src/protocol.log").exists());
-    assert_eq!(w.open(&prepared, &w.root.join("Work/demo/src"))["ok"], true);
+    assert_eq!(w.open(&prepared, &w.root.join("Work/demo"))["ok"], true);
     let before = fs::read(w.root.join("Work/demo/src/protocol.log")).unwrap();
     for field in [
         "revision",
@@ -506,7 +513,7 @@ fn real_task_dispatch_confines_protocol_and_rechecks_source_without_duplicate_wo
     assert_eq!(evidence["denied"], json!([true, true]));
     assert_eq!(evidence["selected_context"], true);
     assert_eq!(evidence["central_token_present"], false);
-    assert_eq!(evidence["cwd"], json!(w.root.join("Work/demo/src")));
+    assert_eq!(evidence["cwd"], json!(w.root.join("Work/demo")));
     assert_eq!(
         fs::read_to_string(w.root.join("Control/user/human.md")).unwrap(),
         "HUMAN_UNCHANGED"
@@ -551,12 +558,50 @@ fn wrong_actual_cwd_and_removed_now_cannot_launch_a_provider() {
         }
         w.start();
         let cwd = if remove {
-            w.root.join("Work/demo/src")
+            w.root.join("Work/demo")
         } else {
             w.root.clone()
         };
         assert_eq!(w.open(&prepared, &cwd)["ok"], false);
         assert!(!w.root.join("Work/demo/src/protocol.log").exists());
+    }
+}
+
+#[test]
+#[ignore = "requires exact native owners; mandatory CAW lane"]
+fn protected_or_sibling_working_directory_refuses_before_provider_start() {
+    for relative in ["Work/demo/ProjectCentral", "Work/sibling"] {
+        let w = World::new(true);
+        let mut input = w.prepare_input();
+        input["cwd"] = json!(w.root.join(relative));
+        let result = w.command(&[
+            "encounter-task-configure".into(),
+            "--agent-session".into(),
+            "agent-session/task".into(),
+            "--request-json".into(),
+            input.to_string(),
+        ]);
+        assert!(!result.status.success(), "{relative}");
+        assert!(!w.root.join("Work/demo/src/protocol.log").exists());
+    }
+}
+
+#[test]
+#[ignore = "requires exact native owners; mandatory CAW lane"]
+fn removed_or_replaced_working_directory_refuses_at_task_continuation() {
+    for replace in [false, true] {
+        let mut w = World::new(true);
+        let prepared = w.prepare();
+        let working_directory = w.root.join("Work/demo");
+        let moved = w.root.join("Work/demo-before");
+        fs::rename(&working_directory, &moved).unwrap();
+        if replace {
+            fs::create_dir_all(working_directory.join("src")).unwrap();
+            fs::create_dir_all(working_directory.join("ProjectCentral")).unwrap();
+        }
+        w.start();
+        assert_eq!(w.open(&prepared, &working_directory)["ok"], false);
+        assert!(!working_directory.join("src/protocol.log").exists());
     }
 }
 #[test]
@@ -1073,3 +1118,323 @@ fn first_pending_preparation_remains_bound_to_same_native_request() {
 
 #[path = "support/caw_task_material.rs"]
 mod material;
+
+#[test]
+#[ignore = "requires exact native Central, Actuation and Workcell executables; mandatory prepared-run lane"]
+fn native_prepared_run_preserves_authority_and_existing_worktree() {
+    use sha2::{Digest, Sha256};
+    let w = World::new(true);
+    let recognise_cleanup_authority = |world: &World| {
+        let path = world.root.join("Control/relations/source-relations.json");
+        let mut source: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        source["relations"].as_array_mut().unwrap().push(json!({
+            "ref":"central:source:control:root:Control/user/native-action-authority.json",
+            "path":"Control/user/native-action-authority.json", "roles":["native-action-authority"],
+            "provenance":"human-adopted", "standing":"architecture-contract", "treatment":"projectcentral-user",
+            "recognition":"controlled-test-only", "recorded_at_unix_seconds":1
+        }));
+        fs::write(path, source.to_string()).unwrap();
+    };
+    recognise_cleanup_authority(&w);
+    let binary = PathBuf::from(
+        std::env::var_os("AIKIT_CAW_WORKCELL_BIN").expect("native Workcell required"),
+    );
+    let state = w.root.join("Work/demo/material");
+    let repository = w.root.join("Work/demo/src");
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "--template="]);
+    git(&["config", "user.name", "Native task test"]);
+    git(&["config", "user.email", "native@example.invalid"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    fs::write(repository.join("readme"), "native material\n").unwrap();
+    git(&["add", "readme"]);
+    git(&["commit", "-m", "native material"]);
+    let workcell = |args: &[String]| {
+        let out = Command::new(&binary)
+            .arg("--state-root")
+            .arg(&state)
+            .arg("--json")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    let started = workcell(&[
+        "--workspace-source".into(),
+        repository.display().to_string(),
+        "run".into(),
+        "start".into(),
+        "--run".into(),
+        "native-task".into(),
+        "--extension".into(),
+        "branch_law=aikit".into(),
+        "--workspace".into(),
+        "writable".into(),
+    ]);
+    struct Release {
+        binary: PathBuf,
+        state: PathBuf,
+    }
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = Command::new(&self.binary)
+                .arg("--state-root")
+                .arg(&self.state)
+                .args(["--json", "run", "release", "--run", "native-task"])
+                .output();
+        }
+    }
+    let _release = Release {
+        binary: binary.clone(),
+        state: state.clone(),
+    };
+    let worktree = started["run"]["material_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|r| r.as_str()?.strip_prefix("workspace:git-worktree:"))
+        .map(|key| state.join("workspaces").join(key))
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    fs::write(w.root.join("Control/user/native-action-authority.json"),json!({"schema":"central.native-action-authority/v1","scope_ref":"control:root","grants":[{"principal_ref":"agent:existing-1","actor_kind":"agent","token_sha256":format!("{:x}",Sha256::digest(b"native-run-cleanup-authority-proof-20260924")),"scope_refs":["control:root"],"actions":["central.now.lifecycle"],"expires_at_unix_seconds":u64::MAX}]}).to_string()).unwrap();
+    let mut request = w.prepare_input();
+    request["cwd"] = json!(worktree);
+    request["selected_directories"] = json!([worktree]);
+    request["prepared_run_scope"] =
+        json!({"run_slug":"native-task","expected_demand_digest":started["run"]["demand_digest"]});
+    request
+        .as_object_mut()
+        .unwrap()
+        .remove("workcell_boundary_bin");
+    let mut paths = vec![binary.parent().unwrap().to_path_buf()];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+    let configure = |world: &World, request: &Value| {
+        Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
+            .env("AIKIT_HOME", world.home.root())
+            .env("WORKCELL_HOME", &state)
+            .env("PATH", std::env::join_paths(&paths).unwrap())
+            .env(
+                "OI_ACTUATION_BIN",
+                std::env::var_os("AIKIT_CAW_ACTUATION_BIN").unwrap(),
+            )
+            .env(
+                "CENTRAL_NATIVE_TOKEN",
+                "native-run-cleanup-authority-proof-20260924",
+            )
+            .arg("-C")
+            .arg(&world.root)
+            .args([
+                "encounter-task-configure",
+                "--agent-session",
+                "agent-session/task",
+                "--request-json",
+            ])
+            .arg(request.to_string())
+            .output()
+            .unwrap()
+    };
+    let mut stale = request.clone();
+    stale["prepared_run_scope"]["expected_demand_digest"] = json!("sha256:stale");
+    assert!(
+        !configure(&w, &stale).status.success(),
+        "stale demand must refuse before allocation"
+    );
+    // A real boundary refusal after allocation closes only that new NOW.
+    let other = World::new(true);
+    recognise_cleanup_authority(&other);
+    fs::copy(
+        w.root.join("Control/user/native-action-authority.json"),
+        other.root.join("Control/user/native-action-authority.json"),
+    )
+    .unwrap();
+    let mut wrong = other.prepare_input();
+    wrong["prepared_run_scope"] = request["prepared_run_scope"].clone();
+    wrong
+        .as_object_mut()
+        .unwrap()
+        .remove("workcell_boundary_bin");
+    let refusal = configure(&other, &wrong);
+    assert!(!refusal.status.success());
+    let retained = other.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(retained["ready"], false);
+    assert_eq!(retained["cleanup"]["state"], "confirmed", "{retained}");
+    assert_eq!(
+        retained["cleanup"]["receipt"]["record"]["lifecycle"],
+        "closed"
+    );
+    assert!(
+        worktree.is_dir(),
+        "failure cleanup must not delete a pre-existing run worktree"
+    );
+    let out = configure(&w, &request);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let record: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(record["ready"], true);
+    assert_eq!(record["request"]["cwd"], json!(worktree));
+    assert_eq!(
+        record["prepared_run"]["scope"]["prepared_write_boundary"],
+        record["inspection"]
+    );
+    assert_eq!(
+        record["prepared_run"]["scope"]["agency"]["admission"]["status"],
+        "actualised"
+    );
+    assert_eq!(
+        record["prepared_run"]["scope"]["agency"]["admission"]["differentiated_binding"]
+            ["agency_ref"],
+        "agency:project:delegation"
+    );
+    assert_eq!(
+        record["requirements"]["authority_ref"],
+        "authority:project:delegation"
+    );
+    assert_eq!(
+        record["requirements"]["writable_paths"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "only native NOW and selected existing worktree"
+    );
+    assert_eq!(
+        workcell(&["run".into(), "list".into(), "--full".into()])["runs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    // Revoke the exact source after preparation: even an unchanged run name
+    // cannot authorize another provider launch.
+    let agency_before_revocation = fs::read(w.root.join("agency.json")).unwrap();
+    fs::write(w.root.join("agency.json"), "{}").unwrap();
+    let refused = Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
+        .env("AIKIT_HOME", w.home.root())
+        .current_dir(&worktree)
+        .args([
+            "encounter-task-exec",
+            "--agent-session",
+            "agent-session/task",
+            "--expected-revision",
+            record["revision"].as_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        !refused.status.success(),
+        "changed Agency must refuse before provider execution"
+    );
+    assert!(!w.root.join("Work/demo/src/protocol.log").exists());
+
+    // Restore the exact admitted test source, then make a real failed
+    // amendment to this ready prepared-run task. The generic unhosted abort
+    // must not restore around Workcell's retained run authority, even though
+    // the requested ready revision exists in this same native task history.
+    fs::write(w.root.join("agency.json"), agency_before_revocation).unwrap();
+    let run_before = workcell(&[
+        "run".into(),
+        "show".into(),
+        "--run".into(),
+        "native-task".into(),
+    ]);
+    let mut missing = request.clone();
+    missing["selected_directories"] = json!([worktree.join("missing-native-directory")]);
+    let amendment = Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
+        .env("AIKIT_HOME", w.home.root())
+        .env("WORKCELL_HOME", &state)
+        .env("PATH", std::env::join_paths(&paths).unwrap())
+        .env(
+            "OI_ACTUATION_BIN",
+            std::env::var_os("AIKIT_CAW_ACTUATION_BIN").unwrap(),
+        )
+        .env(
+            "CENTRAL_NATIVE_TOKEN",
+            "native-run-cleanup-authority-proof-20260924",
+        )
+        .arg("-C")
+        .arg(&w.root)
+        .args([
+            "encounter-task-configure",
+            "--agent-session",
+            "agent-session/task",
+            "--request-json",
+        ])
+        .arg(missing.to_string())
+        .args(["--expected-revision", record["revision"].as_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        !amendment.status.success(),
+        "the actual missing directory must refuse after journalling pending"
+    );
+    let pending = w.cli(&[
+        "encounter-task-read".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+    ]);
+    assert_eq!(pending["ready"], false);
+    assert!(pending["prepared_run"].is_object());
+    assert_eq!(
+        pending["request"]["prepared_run_scope"],
+        request["prepared_run_scope"]
+    );
+    let aborted = w.command(&[
+        "encounter-task-abort".into(),
+        "--agent-session".into(),
+        "agent-session/task".into(),
+        "--expected-revision".into(),
+        pending["revision"].as_str().unwrap().into(),
+        "--restore-revision".into(),
+        record["revision"].as_str().unwrap().into(),
+    ]);
+    assert!(!aborted.status.success());
+    assert!(String::from_utf8_lossy(&aborted.stderr)
+        .contains("Prepared-run preparation may have uncertain effects"));
+    assert_eq!(
+        w.cli(&[
+            "encounter-task-read".into(),
+            "--agent-session".into(),
+            "agent-session/task".into()
+        ]),
+        pending,
+        "abort must retain the exact pending task for native Workcell recovery"
+    );
+    let run_after = workcell(&[
+        "run".into(),
+        "show".into(),
+        "--run".into(),
+        "native-task".into(),
+    ]);
+    assert_eq!(run_after["run"], run_before["run"]);
+    assert_eq!(run_after["run_revision"], run_before["run_revision"]);
+    assert!(worktree.is_dir());
+    assert!(!w.root.join("Work/demo/src/protocol.log").exists());
+}

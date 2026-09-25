@@ -82,6 +82,19 @@ pub struct AdmittedAgency {
     pub receipt: Value,
 }
 impl AdmittedAgency {
+    /// Whether the native owner admitted this Agency at the root of its World.
+    ///
+    /// `scope:root` is the original Actuation spelling retained by existing
+    /// receipts. Current Central root admissions name the root World itself in
+    /// both fields. That current spelling is root only when both identities are
+    /// exactly `control:root`; a foreign World cannot become root merely by
+    /// borrowing Central's scope ref.
+    pub fn is_root_context(&self) -> bool {
+        self.scope_ref.as_str() == "scope:root"
+            || (self.world_ref.as_str() == crate::central_world_sources::ROOT_WORLD_REF
+                && self.scope_ref.as_str() == crate::central_world_sources::ROOT_WORLD_REF)
+    }
+
     /// Preserve an explicitly admitted World's identity as the operative ground
     /// when there is no narrower local Project. In particular, Central root
     /// agency is not a binding-free or synthetic child-Project context.
@@ -116,7 +129,7 @@ impl AdmittedAgency {
                 )));
             }
         }
-        if self.scope_ref.as_str() != "scope:root" {
+        if !self.is_root_context() {
             return Err(AikitError::new(
                 "agency_admission.project_binding_required",
                 "Only declared root scope is a meta-project; a child World requires its native Project binding",

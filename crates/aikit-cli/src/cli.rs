@@ -814,7 +814,12 @@ pub enum RoutineSub {
         invocation_ref: String,
     },
     /// List all admitted invocation envelopes in stable identity order.
-    Invocations,
+    Invocations {
+        /// Include actual retained execution returns. Admission without one
+        /// is explicitly unknown; it is never reported as completion.
+        #[arg(long)]
+        with_outcomes: bool,
+    },
     /// List stored Routines (and, read-only, the foreign harness timers that
     /// no Routine claims).
     List {
@@ -1138,6 +1143,9 @@ pub struct ComposeArgs {
 
 #[derive(Debug, Args)]
 pub struct ModelResolveArgs {
+    /// Read the complete ranked roster, including failed gates, without choosing a winner.
+    #[arg(long)]
+    pub roster_only: bool,
     /// The kind of work this child/model is for.
     #[arg(long, default_value = "agent-child")]
     pub use_type: String,
@@ -3376,6 +3384,11 @@ pub struct HarnessCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum HarnessSub {
+    /// Read declared layers, composed tools and redacted native observations. Never launch or apply.
+    Disclose {
+        /// Optional admitted profile slug or registered harness name; omit for every profile.
+        harness: Option<String>,
+    },
     /// Run a harness in the foreground against a declared model route.
     Run(HarnessRunArgs),
     /// Show a harness's declared auth options (`--json`), or run its declared

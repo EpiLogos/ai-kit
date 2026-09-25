@@ -54,6 +54,9 @@ for line in sys.stdin:
                         "sessionCapabilities": {"resume": True}}})
     elif method in ("session/new", "session/load", "session/resume"):
         native = message.get("params", {}).get("sessionId", native)
+        if mode == "retained-model" and method != "session/new":
+            with open(sys.argv[2]) as saved:
+                model = json.load(saved)["model"]
         result(ident, {"sessionId": native, "configOptions": config(), "modes": modes()})
     elif method == "session/set_mode":
         requested = message["params"]["modeId"]
@@ -70,6 +73,9 @@ for line in sys.stdin:
         params = message["params"]
         if params["configId"] == "model":
             model = params["value"]
+            if mode == "retained-model":
+                with open(sys.argv[2], "w") as saved:
+                    json.dump({"model": model}, saved)
         elif params["configId"] == "reasoning_effort":
             effort = params["value"]
         if mode == "lost-model-ack":
