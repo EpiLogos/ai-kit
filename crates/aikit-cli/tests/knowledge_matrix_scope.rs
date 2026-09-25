@@ -272,5 +272,29 @@ fn projectworld_matrix_isolation_over_real_scopes() {
         "root scope lost a Project's matrix: {world_view:#?}"
     );
 
+    // The graph obeys the same scope: an empty-query graph at cedar's scope
+    // keeps the sibling's compiled matrix objects and wiki space out of its
+    // reply. Regression for the landing replay of the ProjectWorld isolation
+    // packet (2026-09-25): the graph's source-citation nodes served
+    // clearing files — including sibling-Project copies — and a sibling
+    // wiki-space node at Project scope, a channel the search repair's law
+    // had not reached.
+    let graph = cedar
+        .knowledge_graph("", 2_000, 4_000)
+        .expect("cedar graph reply");
+    let text = graph.to_string();
+    for marker in ["larch", "Larch", "central:wiki:project:larch"] {
+        assert!(
+            !text.contains(marker),
+            "cedar graph reply names sibling material ({marker})"
+        );
+    }
+    // The root composition still shows in the graph: scope narrows siblings,
+    // it does not blind the Project to root-lineage material.
+    assert!(
+        text.contains("cap.rootworld.unique"),
+        "cedar graph lost the root composition matrix"
+    );
+
     std::env::remove_var("CENTRAL_CTRL_BIN");
 }

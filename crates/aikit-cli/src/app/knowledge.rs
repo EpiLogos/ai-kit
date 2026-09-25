@@ -19,7 +19,9 @@ use aikit_core::knowledge_navigation::ProjectAuthoredPending;
 use aikit_core::knowledge_source_pool::{
     material_for_actor, NativeSourcePoolProvider, SourceMaterial, SourcePool, SourcePoolProvider,
 };
-use aikit_core::knowledge_wiki::{parse_wiki_objects, OkfWikiBundle, WikiObject};
+use aikit_core::knowledge_wiki::{
+    parse_wiki_objects, OkfWikiBundle, WikiObject, PROJECT_WIKI_SPACE_REF_PREFIX,
+};
 use aikit_core::knowledge_wiki_index::SemanticWikiIndex;
 use aikit_core::project_map::{ProjectLens, ProjectMap, ProjectMapBinding, ProjectMapEndpoint};
 use aikit_core::repair_absence_lines;
@@ -110,6 +112,69 @@ mod gitnexus_budget_tests {
     }
 }
 
+#[cfg(test)]
+mod project_scope_tests {
+    use super::ref_belongs_to_project_scope;
+    use std::collections::BTreeMap;
+
+    fn belongs(resource: &str, display: &str) -> bool {
+        let work = BTreeMap::new();
+        let central = BTreeMap::new();
+        ref_belongs_to_project_scope(resource, display, &work, &central)
+    }
+
+    #[test]
+    fn a_clearing_drops_whole_from_a_project_scope() {
+        // The packet A incident shape: a clearing's evidence tree holding a
+        // sibling-Project state copy must not re-enter through the graph.
+        assert!(!belongs(
+            "central:source:control:root:Control/agents/now/clearings/a5cbbe83/T/evidence/disposable-held-decision/Central/Work/Factory/.factory/development-state.json",
+            "Work/O-I",
+        ));
+        assert!(!belongs(
+            "central:source:control:root:Control/agents/now/clearings/a5cbbe83/T/acceptance.json",
+            "Work/O-I",
+        ));
+    }
+
+    #[test]
+    fn a_sibling_wiki_space_names_the_sibling_and_the_root_space_passes() {
+        assert!(!belongs("central:wiki:project:Factory", "Work/O-I"));
+        assert!(belongs("central:wiki:project:O-I", "Work/O-I"));
+        // The root composition space is not a Project space: it passes.
+        assert!(belongs("central:wiki:root", "Work/O-I"));
+    }
+
+    #[test]
+    fn a_raw_path_under_another_work_tree_names_the_sibling_by_layout() {
+        assert!(!belongs(
+            "/Users/admin/Central/Work/Factory/ProjectCentral/user/capability-matrix.csv",
+            "Work/O-I",
+        ));
+        // Own-tree raw paths stay inside their Project's scope.
+        assert!(belongs(
+            "/Users/admin/Central/Work/O-I/docs/overview.md",
+            "Work/O-I",
+        ));
+        // Paths outside any Work tree pass: the root lineage is broader.
+        assert!(belongs("/Users/admin/notes/overview.md", "Work/O-I"));
+        // A segment named `Workfile` is not a Work segment.
+        assert!(belongs("/Users/admin/Workfile/x.md", "Work/O-I"));
+    }
+
+    #[test]
+    fn canonical_work_refs_keep_their_owner_rule() {
+        assert!(belongs(
+            "central:source:control:root:Work/O-I/docs/overview.md",
+            "Work/O-I",
+        ));
+        assert!(!belongs(
+            "central:source:control:root:Work/Factory/ProjectCentral/user/capability-matrix.csv",
+            "Work/O-I",
+        ));
+    }
+}
+
 /// True when an attribution map names `resource` as owned by a Project
 /// other than `display` — the check that keeps another Project's compiled
 /// objects (authored edges, folder basis, capability matrices) out of a
@@ -123,6 +188,71 @@ fn attributed_to_other_project(
     attribution
         .get(resource)
         .is_some_and(|project| project != display)
+}
+
+/// Whether `resource` may enter a reply scoped to `display` (`Work/<name>`).
+/// Canonical Source refs retain Project ownership regardless of whether the
+/// caller reaches them through SourcePool or ProjectMap; clearings drop
+/// whole; sibling wiki spaces and sibling raw work-tree paths name the
+/// sibling by layout. The root lineage keeps every shape: this predicate is
+/// consulted only when a reply HAS a Project scope.
+fn ref_belongs_to_project_scope(
+    resource: &str,
+    display: &str,
+    work_repo_scopes: &BTreeMap<String, String>,
+    central_project_source_scopes: &BTreeMap<String, String>,
+) -> bool {
+    if resource.starts_with("source:project:") {
+        return work_repo_scopes
+            .iter()
+            .any(|(prefix, project)| resource.starts_with(prefix.as_str()) && project == display);
+    }
+    if resource.starts_with("central:source:project:") {
+        return central_project_source_scopes
+            .iter()
+            .any(|(prefix, project)| resource.starts_with(prefix.as_str()) && project == display);
+    }
+    if let Some(rest) = resource.strip_prefix("central:source:control:root:Work/") {
+        return rest
+            .split_once('/')
+            .is_some_and(|(project, _)| format!("Work/{project}") == display);
+    }
+    // Project NOW-field law (packet A): a clearing drops whole from a
+    // Project-scoped reply — it is a working horizon, never a common record.
+    // The graph and every other consumer of this predicate obey the scope
+    // the search repair established, so a clearing's evidence tree —
+    // including sibling-Project copies it holds — cannot re-enter a
+    // ProjectWorld through the graph door.
+    if resource.starts_with("central:source:control:root:Control/agents/now/clearings/") {
+        return false;
+    }
+    // Another Project's wiki space names the sibling outright; the root
+    // composition space (`central:wiki:root`) passes.
+    if let Some(project_id) = resource
+        .strip_prefix(PROJECT_WIKI_SPACE_REF_PREFIX)
+        .filter(|id| !id.is_empty() && !id.contains('/'))
+    {
+        return display
+            .strip_prefix("Work/")
+            .is_some_and(|own| project_id.eq_ignore_ascii_case(own));
+    }
+    // An unattributed raw filesystem path under another Project's work tree
+    // names the sibling by machine layout; a ProjectWorld reply discloses
+    // owned refs. Paths outside any `Work/<Project>/` segment pass.
+    if resource.starts_with('/') {
+        let own = display.strip_prefix("Work/");
+        let mut segments = resource.split('/');
+        while let Some(segment) = segments.next() {
+            if segment == "Work" {
+                if let Some(project) = segments.next() {
+                    if own.is_none_or(|name| !project.eq_ignore_ascii_case(name)) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 
 /// One project's GitNexus code-index degradation: the binary was present and
@@ -216,25 +346,12 @@ impl KnowledgeRuntime {
     /// Canonical Source refs retain Project ownership regardless of whether
     /// the caller reaches them through SourcePool or ProjectMap.
     fn source_belongs_to_scope(&self, resource: &str, display: &str) -> bool {
-        if resource.starts_with("source:project:") {
-            return self.work_repo_scopes.iter().any(|(prefix, project)| {
-                resource.starts_with(prefix.as_str()) && project == display
-            });
-        }
-        if resource.starts_with("central:source:project:") {
-            return self
-                .central_project_source_scopes
-                .iter()
-                .any(|(prefix, project)| {
-                    resource.starts_with(prefix.as_str()) && project == display
-                });
-        }
-        if let Some(rest) = resource.strip_prefix("central:source:control:root:Work/") {
-            return rest
-                .split_once('/')
-                .is_some_and(|(project, _)| format!("Work/{project}") == display);
-        }
-        true
+        ref_belongs_to_project_scope(
+            resource,
+            display,
+            &self.work_repo_scopes,
+            &self.central_project_source_scopes,
+        )
     }
 
     /// Flow cognition (W1.4/W1.5) reads identity and material through these
@@ -942,19 +1059,25 @@ impl Service {
                 // pass.
                 objects.retain(|object| {
                     let reference = object.ref_id().as_str();
-                    !attributed_to_other_project(
-                        &runtime.authored_edge_projects,
-                        reference,
-                        &display,
-                    ) && !attributed_to_other_project(
-                        &runtime.folder_subject_projects,
-                        reference,
-                        &display,
-                    ) && !attributed_to_other_project(
-                        &runtime.matrix_object_projects,
-                        reference,
-                        &display,
-                    )
+                    // The same scope predicate the material obeys: another
+                    // Project's wiki space (or any ref naming a sibling)
+                    // stays out of a ProjectWorld's graph reply.
+                    runtime.source_belongs_to_scope(reference, &display)
+                        && !attributed_to_other_project(
+                            &runtime.authored_edge_projects,
+                            reference,
+                            &display,
+                        )
+                        && !attributed_to_other_project(
+                            &runtime.folder_subject_projects,
+                            reference,
+                            &display,
+                        )
+                        && !attributed_to_other_project(
+                            &runtime.matrix_object_projects,
+                            reference,
+                            &display,
+                        )
                 });
             }
             let mut hits = found.hits.clone();
