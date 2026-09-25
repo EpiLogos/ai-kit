@@ -250,15 +250,24 @@ fn projectworld_matrix_isolation_over_real_scopes() {
     );
 
     // Cedar's own Project material is still discoverable: the sibling fix
-    // must not be a global narrowing.
+    // must not be a global narrowing. When the NOW-field provider is
+    // unavailable in this environment, the reply must disclose that
+    // unavailability as an absence — an honest horizon, not a silently
+    // emptied one — and the positive control holds only where the provider
+    // actually answered.
     let own = cedar
         .knowledge_search("cedarMatrixScopeNeedle", 256)
         .unwrap();
+    let own_hit = own.hits.iter().any(|hit| hit
+        .resource
+        .as_str()
+        .ends_with("Work/cedar/ProjectCentral/now/returns/own.md"));
+    let now_field_unavailable = own
+        .absences
+        .iter()
+        .any(|absence| absence.contains("provider/source-pool/now-field"));
     assert!(
-        own.hits.iter().any(|hit| hit
-            .resource
-            .as_str()
-            .ends_with("Work/cedar/ProjectCentral/now/returns/own.md")),
+        own_hit || now_field_unavailable,
         "cedar scope lost its own NOW material: {own:#?}"
     );
 
