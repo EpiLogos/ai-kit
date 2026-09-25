@@ -43,6 +43,11 @@ pub struct SpecimenOptions {
     /// Inbound texts to emit; the same text twice is the same native event,
     /// which is exactly what the duplicate-suppression proof needs.
     pub emit_inbound: Vec<String>,
+    /// Delay before the FIRST emission. A harness binds the connector's
+    /// conversations after the service registers it; an inbound that arrives
+    /// before its binding exists is refused by the kernel, so conformance
+    /// harnesses delay the first emission past that moment.
+    pub emit_inbound_delay_ms: u64,
     /// Delay between consecutive inbound emissions, after the first.
     pub emit_inbound_interval_ms: u64,
     pub health_detail: Option<String>,
@@ -55,6 +60,7 @@ impl Default for SpecimenOptions {
             platform: "specimen".into(),
             conversation_id: "main".into(),
             emit_inbound: Vec::new(),
+            emit_inbound_delay_ms: 0,
             emit_inbound_interval_ms: 0,
             health_detail: None,
         }
@@ -147,8 +153,16 @@ pub fn run_specimen_connector<R: BufRead, W: Write + Send + 'static>(
         let platform = options.platform.clone();
         let conversation_id = options.conversation_id.clone();
         let texts = options.emit_inbound.clone();
+        let initial_delay = options.emit_inbound_delay_ms;
         let interval = options.emit_inbound_interval_ms;
         Some(thread::spawn(move || {
+            // The first emission waits out the harness's bind window too.
+            for _ in 0..(initial_delay / 25) {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
             for (index, text) in texts.iter().enumerate() {
                 if index > 0 && interval > 0 {
                     // Wake often so a shutdown is never a schedule

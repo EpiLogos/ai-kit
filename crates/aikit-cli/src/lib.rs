@@ -37,6 +37,7 @@ pub mod file_context;
 pub mod foreign;
 pub mod foreign_cron;
 pub mod gateway_contact;
+pub mod gateway_connectors;
 pub mod gateway_install;
 pub mod gateway_ops;
 pub mod gateway_owners;

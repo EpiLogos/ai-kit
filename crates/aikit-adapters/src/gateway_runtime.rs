@@ -111,6 +111,10 @@ fn default_context_revision() -> u64 {
     1
 }
 
+fn default_subscribe_limit() -> usize {
+    usize::MAX
+}
+
 /// Stable semantic route between one provider-native conversation and one
 /// situated AgentSession/ActuationStream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1189,6 +1193,19 @@ pub enum GatewayCommand {
         after_sequence: u64,
         limit: usize,
     },
+    /// Live subscription: answered immediately with the replay payload (the
+    /// same response a Replay gets); a running service then pushes each
+    /// subsequently appended event of that stream as its own `stream-event`
+    /// response frame on the same connection until disconnect. A client that
+    /// returns re-subscribes from its last seen sequence: the replay covers
+    /// the gap, so no appended event is missed and none is repeated.
+    Subscribe {
+        stream_ref: ResourceRef,
+        #[serde(default)]
+        after_sequence: u64,
+        #[serde(default = "default_subscribe_limit")]
+        limit: usize,
+    },
     PrepareOperation {
         binding_ref: ResourceRef,
         operation: OutboundOperationKind,
@@ -1279,6 +1296,7 @@ impl GatewayCommand {
                 | Self::Status
                 | Self::Ecology
                 | Self::Replay { .. }
+                | Self::Subscribe { .. }
                 | Self::Control { .. }
                 | Self::Snapshot
                 | Self::CommuniqueInbox { .. }
@@ -1334,6 +1352,12 @@ pub enum GatewayResponse {
     },
     Replay {
         replay: GatewayReplay,
+    },
+    /// A live push: one event appended to a subscribed Stream. The service
+    /// emits this response without a request; clients never send it.
+    StreamEvent {
+        stream_ref: ResourceRef,
+        event: GatewayStreamEvent,
     },
     OperationPrepared {
         operation: OutboundOperation,
@@ -1412,6 +1436,16 @@ pub fn execute_gateway_command(
             result: gateway.ingest(event)?,
         }),
         GatewayCommand::Replay {
+            stream_ref,
+            after_sequence,
+            limit,
+        } => Ok(GatewayResponse::Replay {
+            replay: gateway.replay(&stream_ref, after_sequence, limit)?,
+        }),
+        // A subscribe's kernel answer is the replay payload; the running
+        // service attaches the live push while answering (see
+        // gateway_service), so the replay and the registration are atomic.
+        GatewayCommand::Subscribe {
             stream_ref,
             after_sequence,
             limit,
