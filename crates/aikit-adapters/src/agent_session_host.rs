@@ -985,7 +985,7 @@ impl SessionLane {
             SessionControlKind::Mode,
         )?;
         self.shared.dispatch(&command)?;
-        match self.shared.await_control(receiver)? {
+        match self.shared.await_control(receiver, None)? {
             ControlDelivery::Signals(signals) => {
                 if let Some(reason) = signals.iter().find_map(|signal| match &signal.kind {
                     ConnectionSignalKind::Degraded { degradation } => {
