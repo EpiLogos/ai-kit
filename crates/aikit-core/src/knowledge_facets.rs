@@ -220,6 +220,9 @@ pub struct PlaceFacet {
     pub valid_to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observer_frame: Option<String>,
+    /// Owner-declared spatial qualification from ql.techne/v1; never inferred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncertainty: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<String>,
 }
@@ -235,6 +238,7 @@ impl PlaceFacet {
             valid_from: None,
             valid_to: None,
             observer_frame: None,
+            uncertainty: None,
             source_ref: None,
         }
     }

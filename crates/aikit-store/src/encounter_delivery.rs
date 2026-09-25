@@ -282,6 +282,86 @@ impl EncounterStore {
         body.map(|b| serde_json::from_str(&b).map_err(failure))
             .transpose()
     }
+    /// Reduce only the latest native-open generation to an unresolved recovery
+    /// state. Current-process ownership is never reconstructed from the journal:
+    /// an unmatched reservation requires native evidence, while a refusal whose
+    /// cleanup was not confirmed remains uncertain across owner restarts.
+    pub fn native_open_recovery(&self, session: &ResourceRef) -> Result<Option<Value>> {
+        validate(session)?;
+        let connection = self.connection.lock().map_err(failure)?;
+        let reserved: Option<(u64, String)> = connection
+            .query_row(
+                "SELECT cursor,event FROM encounter_events WHERE session=?1 AND json_extract(event,'$.kind')='native-open-reserved' ORDER BY cursor DESC LIMIT 1",
+                [session.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(failure)?;
+        let Some((reserved_cursor, reserved_body)) = reserved else {
+            return Ok(None);
+        };
+        let reserved: Value = serde_json::from_str(&reserved_body).map_err(failure)?;
+        let Some(generation) = reserved["connection_generation"].as_str() else {
+            return Ok(Some(serde_json::json!({
+                "state":"RecoveryRequired",
+                "error":"Latest native startup reservation has no generation identity; explicit native reconciliation is required",
+                "opening":reserved,
+                "terminal":null
+            })));
+        };
+        let terminal_body: Option<String> = connection
+            .query_row(
+                "SELECT event FROM encounter_events WHERE session=?1 AND cursor>?2 AND json_extract(event,'$.connection_generation')=?3 AND json_extract(event,'$.kind') IN ('binding','native-open-reconciled','native-open-refused') ORDER BY cursor DESC LIMIT 1",
+                params![session.as_str(), reserved_cursor, generation],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(failure)?;
+        let Some(terminal_body) = terminal_body else {
+            return Ok(Some(serde_json::json!({
+                "state":"RecoveryRequired",
+                "error":"A prior native startup has no generation-bound terminal evidence; explicit native reconciliation is required",
+                "opening":reserved,
+                "terminal":null
+            })));
+        };
+        let terminal: Value = serde_json::from_str(&terminal_body).map_err(failure)?;
+        if terminal["kind"] == "native-open-refused"
+            && terminal["cleanup_confirmed"].as_bool() != Some(true)
+        {
+            return Ok(Some(serde_json::json!({
+                "state":"CleanupUncertain",
+                "error":terminal["reason"].as_str().unwrap_or("Native startup cleanup was not confirmed"),
+                "opening":reserved,
+                "terminal":terminal
+            })));
+        }
+        Ok(None)
+    }
+    /// Unresolved startup truth across every canonical session retained in the
+    /// owner journal, including sessions no longer attached to a SessionSpace.
+    pub fn native_open_recoveries(&self) -> Result<Vec<(ResourceRef, Value)>> {
+        let sessions = {
+            let connection = self.connection.lock().map_err(failure)?;
+            let mut query = connection
+                .prepare("SELECT DISTINCT session FROM encounter_events WHERE json_extract(event,'$.kind')='native-open-reserved' ORDER BY session")
+                .map_err(failure)?;
+            let rows = query
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(failure)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(failure)?;
+            rows
+        };
+        let mut unresolved = Vec::new();
+        for session in sessions {
+            let session = ResourceRef::parse(session)?;
+            if let Some(recovery) = self.native_open_recovery(&session)? {
+                unresolved.push((session, recovery));
+            }
+        }
+        Ok(unresolved)
+    }
     /// Explicit recovery for an uncertain request requires operator-supplied
     /// native evidence and cannot manufacture a successful response or retry it.
     pub fn reconcile_delivery(

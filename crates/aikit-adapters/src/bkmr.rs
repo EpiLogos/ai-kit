@@ -21,6 +21,9 @@ use crate::runner::CommandRunner;
 
 const REF_PREFIX: &str = "aikit-source-ref:";
 
+#[path = "bkmr_snapshot.rs"]
+mod snapshot;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BkmrCliSurface {
     available: bool,
@@ -845,11 +848,18 @@ impl<R: CommandRunner> BkmrStoreSearchProvider<R> {
         None
     }
 
-    fn run(&self, args: &[String], code: &'static str) -> Result<String> {
-        let mut argv = vec![self.binary.clone()];
+    fn run_in_store(&self, store: &BkmrStore, args: &[String], code: &'static str) -> Result<String> {
+        let snapshot = snapshot::Snapshot::read_only(&store.path)?;
+        let mut argv = vec![
+            self.binary.clone(),
+            "--config".into(),
+            snapshot.config.display().to_string(),
+            "--db".into(),
+            snapshot.database.display().to_string(),
+        ];
         argv.extend(args.iter().cloned());
         self.runner
-            .run(&argv)?
+            .run_with_timeout(&argv, std::time::Duration::from_secs(30))?
             .require(&argv, code)
             .map(|output| output.stdout)
     }
@@ -976,10 +986,9 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrStoreSearchProvider<R> {
                 format!("{raw} does not name a bookmark id"),
             ));
         }
-        let stdout = self.run(
+        let stdout = self.run_in_store(
+            store,
             &[
-                "--db".into(),
-                store.path.display().to_string(),
                 "show".into(),
                 id.to_string(),
                 "--json".into(),
@@ -1068,10 +1077,9 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrStoreSearchProvider<R> {
         let required: BTreeSet<&str> = tags.iter().map(String::as_str).collect();
         let mut merged: Vec<SourceHit> = Vec::new();
         for store in &self.stores {
-            let stdout = match self.run(
+            let stdout = match self.run_in_store(
+                store,
                 &[
-                    "--db".into(),
-                    store.path.display().to_string(),
                     "search".into(),
                     fts_query.clone(),
                     "--json".into(),
@@ -1315,6 +1323,13 @@ mod tests {
             .on("bkmr hsearch --help", "options: --json --tags --limit --np\n")
     }
 
+    fn sqlite_store(directory: &Path, name: &str) -> BkmrStore {
+        let path = directory.join(format!("{name}.db"));
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE bookmarks (id INTEGER PRIMARY KEY);").unwrap();
+        store(name, &path)
+    }
+
     fn store(name: &str, path: &Path) -> BkmrStore {
         BkmrStore {
             name: name.to_owned(),
@@ -1410,18 +1425,19 @@ mod tests {
 
     #[test]
     fn a_broken_store_is_skipped_and_named_while_the_others_answer() {
+        let directory = tempfile::tempdir().unwrap();
+        let healthy = sqlite_store(directory.path(), "kept");
         let runner = store_cli_scripted()
-            .failing("/stores/broken.db", 64, "disk I/O error\nr2d2: line2\n")
             .on(
-                "/stores/kept.db",
+                "--db",
                 store_record_json(7, "Kept", "reachable content").as_str(),
             );
         let provider = BkmrStoreSearchProvider::connect(
             runner,
             "bkmr",
             vec![
-                store("broken", Path::new("/stores/broken.db")),
-                store("kept", Path::new("/stores/kept.db")),
+                store("broken", &directory.path().join("missing.db")),
+                healthy,
             ],
         );
         let hits = provider
@@ -1440,13 +1456,14 @@ mod tests {
 
     #[test]
     fn personal_bookmarks_are_searched_read_only_with_minted_refs() {
+        let directory = tempfile::tempdir().unwrap();
         let response = store_record_json(41, "A title", "civil time close discipline");
         let recorder =
             crate::runner::RecordingRunner::new(store_cli_scripted().on("--db", &response));
         let provider = BkmrStoreSearchProvider::connect(
             recorder,
             "bkmr",
-            vec![store("books", Path::new("/stores/books.db"))],
+            vec![sqlite_store(directory.path(), "books")],
         );
         let hits = provider
             .search("civil time", SourceSearchMode::Fulltext, &[], 10)
@@ -1461,12 +1478,13 @@ mod tests {
 
     #[test]
     fn hyphenated_terms_reach_bkmr_as_quoted_fts5_literals() {
+        let directory = tempfile::tempdir().unwrap();
         let runner = store_cli_scripted().on("--db", "[]");
         let recorder = crate::runner::RecordingRunner::new(runner);
         let provider = BkmrStoreSearchProvider::connect(
             &recorder,
             "bkmr",
-            vec![store("books", Path::new("/stores/books.db"))],
+            vec![sqlite_store(directory.path(), "books")],
         );
         let hits = provider
             .search(
@@ -1497,12 +1515,13 @@ mod tests {
 
     #[test]
     fn a_canonical_source_ref_in_a_description_is_kept() {
+        let directory = tempfile::tempdir().unwrap();
         let response = r#"[{"bookmark":{"id":7,"title":"S","description":"aikit-source-ref:source:astronomy","tags":[],"content":"quasars"},"score":0.8}]"#;
         let runner = store_cli_scripted().on("--db", response);
         let provider = BkmrStoreSearchProvider::connect(
             runner,
             "bkmr",
-            vec![store("books", Path::new("/stores/books.db"))],
+            vec![sqlite_store(directory.path(), "books")],
         );
         let hits = provider
             .search("quasars", SourceSearchMode::Fulltext, &[], 10)
@@ -1513,6 +1532,7 @@ mod tests {
 
     #[test]
     fn store_reads_and_writes_stay_on_their_sides_of_the_fence() {
+        let directory = tempfile::tempdir().unwrap();
         let runner = store_cli_scripted().on(
             "--db",
             r#"[{"bookmark":{"id":41,"title":"A","description":"human bookmark","tags":[],"content":"the body"}}]"#,
@@ -1520,7 +1540,7 @@ mod tests {
         let mut provider = BkmrStoreSearchProvider::connect(
             runner,
             "bkmr",
-            vec![store("books", Path::new("/stores/books.db"))],
+            vec![sqlite_store(directory.path(), "books")],
         );
         let reading = provider
             .read(&SourceRef::parse("source:bkmr:books:41").unwrap())

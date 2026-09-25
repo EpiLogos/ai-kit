@@ -60,6 +60,7 @@ dependencies = [
  "jiff",
  "keyring",
  "pulldown-cmark",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",

@@ -246,6 +246,10 @@ pub(crate) struct MatrixEvidence {
     /// needs, not just the ones touching the selection.
     #[serde(default)]
     pub(crate) grid_relations: Vec<Value>,
+    /// Every relation record across all views (the prepared-context path
+    /// stays view-bound through `grid_relations`; contemplation reads the
+    /// whole matrix).
+    pub(crate) all_view_relations: Vec<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -759,6 +763,22 @@ pub(crate) fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>
         });
     }
 
+    let all_view_relations = rows
+        .iter()
+        .skip(1)
+        .filter(|row| csv_field(row, type_i) != "capability")
+        .map(|relation| {
+            json!({
+                "view_id": csv_field(relation, view_i),
+                "row_id": csv_field(relation, row_i),
+                "column_id": csv_field(relation, col_i),
+                "relation": csv_field(relation, relation_i),
+                "coverage": csv_field(relation, coverage_i),
+                "question": csv_field(relation, question_i),
+                "capability_refs": matrix_ref_list(csv_field(relation, refs_i)),
+            })
+        })
+        .collect::<Vec<_>>();
     let grid_relations = relation_rows
         .iter()
         .map(|relation| {
@@ -789,6 +809,7 @@ pub(crate) fn read_matrix(config: &MatrixPrepare) -> Result<(Vec<NowContextItem>
             manifest_digest,
             capability_rows,
             grid_relations,
+            all_view_relations,
             csv_digest,
         },
     ))

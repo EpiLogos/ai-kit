@@ -47,6 +47,53 @@ pub enum WorkingEnvironmentTerminalAttachment {
     },
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum WorkingEnvironmentCapture {
+    Captured { native_id: String, format: String, text: String, truncated: bool },
+    Unavailable { reason: String },
+}
+
+/// Bounded native read of one exact persisted Surface. Unsupported providers
+/// remain explicit; observing never materialises a substitute terminal.
+pub fn capture(plan: &SessionPlan, provider: &ResourceRef, subject: &ResourceRef, lines: u16) -> Result<WorkingEnvironmentCapture> {
+    use aikit_adapters::{herdr::HerdrWorkingEnvironment, runner::SystemRunner};
+    use aikit_core::AikitError;
+    if !(1..=2000).contains(&lines) {
+        return Err(AikitError::new("session_space.capture_limit", "Capture lines must be between 1 and 2000"));
+    }
+    let surfaces = plan_surfaces(plan);
+    let Some((_, logical)) = surfaces.iter().find(|(surface, _)| surface == subject) else {
+        return Ok(WorkingEnvironmentCapture::Unavailable {reason:"The persisted plan has no binding for this Surface".into()});
+    };
+    let technology = technology_from_provider(provider);
+    let result = if technology == Some(PlaceTechnology::tmux()) {
+        Tmux::bounded_system(std::time::Duration::from_secs(2)).capture_surface(plan, logical, lines)
+    } else if technology == Some(PlaceTechnology::herdr()) {
+        HerdrWorkingEnvironment::for_plan(SystemRunner::new().with_timeout(std::time::Duration::from_secs(2)), plan, provider.clone(), &surfaces, None)
+            .capture_surface(subject, lines)
+    } else {
+        return Ok(WorkingEnvironmentCapture::Unavailable {reason:format!("{provider} does not publish a terminal capture operation")});
+    };
+    let (native_id, mut text) = result?;
+    let mut truncated = false;
+    // ANSI is content, never HTML. Bound the complete native snapshot before
+    // it crosses the owner seam, with truncation disclosed to the viewer.
+    let count = text.lines().count();
+    if count > usize::from(lines) {
+        let from: usize = text.split_inclusive('\n').take(count - usize::from(lines)).map(str::len).sum();
+        text = text[from..].to_owned();
+        truncated = true;
+    }
+    if text.len() > 256 * 1024 {
+        let mut from = text.len() - 256 * 1024;
+        while !text.is_char_boundary(from) { from += 1; }
+        text = text[from..].to_owned();
+        truncated = true;
+    }
+    Ok(WorkingEnvironmentCapture::Captured {native_id,format:"ansi".into(),text,truncated})
+}
+
 /// The canonical Surface Ref for one logical pane of a plan.
 ///
 /// Deliberately derived from the plan's own view/pane ids and nothing else: the

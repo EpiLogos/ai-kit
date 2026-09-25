@@ -151,19 +151,34 @@ impl PiRpcConnectionAdapter {
                     "Pi native state does not confirm the selected provider/model; no default or fallback is admitted",
                 ));
             }
-            self.model_observation = Some(NativeModelObservation {
-                current_model_id: model.clone(),
+        }
+        // Model observation belongs to the native session even when no durable
+        // AIKit policy selected it. Keep Pi's human name; a missing name is an
+        // explicit absence, never a provider transport id posing as a title.
+        self.model_observation = data["model"]["id"]
+            .as_str()
+            .filter(|model| !model.trim().is_empty())
+            .map(|model| NativeModelObservation {
+                native_provider: data["model"]["provider"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(str::to_owned),
+                current_model_id: model.into(),
                 available_models: vec![NativeAdvertisedModel {
-                    model_id: model.clone(),
-                    name: data["model"]["name"].as_str().unwrap_or(model).into(),
+                    roster_identity: data["model"]["provider"].as_str().filter(|provider| !provider.trim().is_empty()).map(|provider| crate::agent_connection::NativeModelRosterIdentity {
+                        provider_ref: format!("provider:{provider}"), provider_native_id: model.to_owned(), harness_slug: Some("pi".into()),
+                    }),
+                    model_id: model.into(),
+                    name: data["model"]["name"]
+                        .as_str()
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or("Unnamed model")
+                        .into(),
                     description: None,
                 }],
                 reasoning_effort: None,
-                standing: format!(
-                    "Pi native get_state; provider={provider}; configuration, not an inference receipt"
-                ),
+                standing: "Pi native get_state; configuration, not an inference receipt".into(),
             });
-        }
         self.observed_session = Some(id.into());
         Ok(id.into())
     }

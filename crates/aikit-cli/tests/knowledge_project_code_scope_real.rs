@@ -91,10 +91,10 @@ fn has_now_source(result: &aikit_core::KnowledgeSearchResult, relative: &str) ->
         .any(|hit| hit.resource.as_str() == expected)
 }
 
-fn code_query_failed_for(result: &aikit_core::KnowledgeSearchResult, project: &str) -> bool {
+fn code_query_failed_for(result: &aikit_core::KnowledgeSearchResult, project: &Path) -> bool {
     result.absences.iter().any(|absence| {
         absence.starts_with("ProjectMap code search degraded:")
-            && absence.contains(&format!("--repo {project}"))
+            && absence.contains(&format!("--repo {}", project.display()))
     })
 }
 
@@ -123,6 +123,34 @@ impl Drop for RestorePermissions {
     }
 }
 
+/// Snapshot only the real owner indexes built above. Reads run against private
+/// query copies, so even metadata rewrites on the originals are a regression.
+type OwnerIndexSnapshot = std::collections::BTreeMap<
+    std::path::PathBuf,
+    (u64, std::time::SystemTime, blake3::Hash),
+>;
+fn owner_indexes(world: &Path) -> OwnerIndexSnapshot {
+    fn visit(path: &Path, rows: &mut OwnerIndexSnapshot) {
+        for entry in fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                visit(&path, rows);
+            } else {
+                let metadata = fs::metadata(&path).unwrap();
+                rows.insert(
+                    path.clone(),
+                    (metadata.len(), metadata.modified().unwrap(), blake3::hash(&fs::read(path).unwrap())),
+                );
+            }
+        }
+    }
+    let mut rows = OwnerIndexSnapshot::new();
+    for name in ["cedar", "larch"] {
+        visit(&world.join("Work").join(name).join(".gitnexus"), &mut rows);
+    }
+    rows
+}
+
 #[test]
 fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     let binary = std::env::var("AIKIT_GITNEXUS_BIN").unwrap_or_else(|_| "gitnexus".into());
@@ -141,6 +169,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     let temp = TempDir::new().unwrap();
     let world = temp.path().join("Central");
     fs::create_dir_all(world.join("Control")).unwrap();
+    let world = world.canonicalize().unwrap();
     // The real Central root also carries an AIKit marker. Its topmost profile
     // must not make a nested Git worktree outside Work/ a root-wide query.
     fs::create_dir_all(world.join(".aikit")).unwrap();
@@ -156,8 +185,8 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         "export function larchUniqueLocator(): string {\n  return 'larch';\n}\n",
         true,
     );
-    // A declared Project without a Git repository makes the real GitNexus
-    // indexing command fail; its degradation must remain in that Project.
+    // A declared Project without an owner index must disclose its actual
+    // admission failure only in that Project; reads must not create one.
     project(&world, "broken", "export const broken = true;\n", false);
     // The real authored-wiki compiler rejects this bounded source while
     // retaining the rest of the World. Its diagnostic belongs to larch.
@@ -211,6 +240,30 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     std::env::set_var("AIKIT_BKMR_CONFIG_DIR", temp.path().join("bkmr-config"));
     std::env::set_var("GITNEXUS_WORKER_POOL_SIZE", "1");
 
+    let gitnexus_home = isolated_home.join(".gitnexus");
+    std::env::set_var("GITNEXUS_HOME", &gitnexus_home);
+    // Explicit test setup indexes real repositories with the actual owner CLI.
+    // Service reads below may admit/query these indexes, never build them.
+    for name in ["cedar", "larch"] {
+        let repo = world.join("Work").join(name);
+        let output = Command::new(&binary)
+            .arg("analyze")
+            .arg(&repo)
+            .args(["--index-only", "--name", name])
+            .current_dir(&repo)
+            .output()
+            .expect("actual GitNexus index command starts");
+        assert!(
+            output.status.success(),
+            "real index setup for {name} failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(repo.join(".gitnexus/lbug").is_file(), "native index missing for {name}");
+    }
+    let indexed_before = owner_indexes(&world);
+    let registry_before = fs::read(gitnexus_home.join("registry.json")).unwrap();
+
     let cedar = world.join("Work/cedar");
     let root_text = world.display().to_string();
     let selected_binary = binary.clone();
@@ -226,7 +279,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     .unwrap();
 
     // An explicit cross-Project query is allowed and must prove that the
-    // provider actually indexed larch. Merely getting an empty result from a
+    // provider actually reads larch's real index. An empty result from a
     // broken provider is not a scoping proof.
     let cross = service
         .knowledge_search(&format!(": larch {NEEDLE}"), 256)
@@ -356,22 +409,22 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     // stay scoped: silently dropping cedar's own error would be false health.
     let own_failure = service.knowledge_search("", 256).unwrap();
     assert!(
-        code_query_failed_for(&own_failure, "cedar"),
+        code_query_failed_for(&own_failure, &world.join("Work/cedar")),
         "cedar's real GitNexus query failure was lost: {:?}",
         own_failure.absences
     );
     assert!(
-        !code_query_failed_for(&own_failure, "larch"),
+        !code_query_failed_for(&own_failure, &world.join("Work/larch")),
         "cedar search disclosed larch's real GitNexus query failure"
     );
     let direct_failure = service
         .knowledge_resolve(&parse_or_search_expression("").unwrap(), 256)
         .unwrap();
-    assert!(code_query_failed_for(&direct_failure, "cedar"));
-    assert!(!code_query_failed_for(&direct_failure, "larch"));
+    assert!(code_query_failed_for(&direct_failure, &world.join("Work/cedar")));
+    assert!(!code_query_failed_for(&direct_failure, &world.join("Work/larch")));
     let cross_failure = service.knowledge_search(": larch", 256).unwrap();
-    assert!(code_query_failed_for(&cross_failure, "larch"));
-    assert!(!code_query_failed_for(&cross_failure, "cedar"));
+    assert!(code_query_failed_for(&cross_failure, &world.join("Work/larch")));
+    assert!(!code_query_failed_for(&cross_failure, &world.join("Work/cedar")));
 
     // An unknown but syntactically valid Project names an empty Project
     // view. It cannot become a broad all-Projects query.
@@ -450,8 +503,8 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         "Work/larch/ProjectCentral/now/returns/sibling.md"
     ));
     let root_failure = root_service.knowledge_search("", 256).unwrap();
-    assert!(code_query_failed_for(&root_failure, "cedar"));
-    assert!(code_query_failed_for(&root_failure, "larch"));
+    assert!(code_query_failed_for(&root_failure, &world.join("Work/cedar")));
+    assert!(code_query_failed_for(&root_failure, &world.join("Work/larch")));
 
     let worktree_world = world.display().to_string();
     let worktree_binary = binary.clone();
@@ -629,4 +682,17 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         "knowledge.project_scope_unresolved",
         "ambiguous native Project identity must refuse a root-wide search"
     );
+    assert_eq!(
+        owner_indexes(&world), indexed_before,
+        "Knowledge reads changed a native owner index"
+    );
+    assert_eq!(
+        fs::read(gitnexus_home.join("registry.json")).unwrap(), registry_before,
+        "Knowledge reads rewrote the native owner registry"
+    );
+    assert!(
+        !world.join("Work/broken/.gitnexus").exists(),
+        "read rebuilt the unavailable Project index"
+    );
+
 }

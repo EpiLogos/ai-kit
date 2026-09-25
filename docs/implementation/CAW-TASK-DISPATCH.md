@@ -20,6 +20,18 @@ AIKit neither guesses a task directory nor filters inconvenient protected paths.
 A protected descendant beneath a requested writable ancestor is an unsupported
 material request, not permission to discard that protection.
 
+The invocation `cwd` is an identity-anchored read/material location inside one
+of Central's native repository, worktree or NOW grants. It is not itself a
+write grant: a registered checkout root remains a valid `cwd` when Central
+correctly refuses ambiguous write/remove approval for that root because
+`.git`, `.central` or `ProjectCentral` is protected below it. Only the explicit
+selected directories and allocated NOW contents enter the Workcell writable
+boundary. AIKit retains the `cwd` device/inode/path identity and rechecks it at
+configuration, continuation and launch; removal, replacement, a protected or
+sibling directory, or changed Central basis refuses before provider start.
+Bindings prepared with the former write-destination anchor format require an
+explicit reprepare of the same task request rather than silent conversion.
+
 The native write boundary is supported unprivileged Linux Landlock. It protects
 the documented regular-file write/create/remove/rename-link/truncate operations
 and descendants, not reads, network/delegated services, metadata, privileged
@@ -222,3 +234,50 @@ production joins. The full programme retains P01–P28, exact Candidate/worktree
 source/test/diff/NOW basis, environment continuity, assisted commissioning,
 Candidate comparison, documents, recurrence, installed/material acceptance and
 fresh independent full-feature verification.
+
+## Reusing an existing Workcell run
+
+`encounter-task-configure` accepts an optional `prepared_run_scope` object:
+
+```json
+{"prepared_run_scope":{"run_slug":"selected-run","expected_demand_digest":"sha256:<native run digest>"}}
+```
+
+The caller still supplies the existing Central task, selected native Agency
+and authority, provider, canonical `cwd`, and selected directories. The cwd
+must be the run's already allocated worktree. Configuration does not create a
+new worktree and cannot combine this input with `material_host` allocation.
+For this path, `workcell_boundary_bin` may be omitted: AIKit resolves `workcell`
+and `workcell-write-boundary` from its native process environment, requires the
+same installation directory, and retains both canonical executable paths and
+the canonical Workcell state root. A renderer cannot select an executable.
+
+AIKit first checks native Agency/task authority and the selected run/demand. It
+then allocates or resumes the exact Central NOW, obtains Central's real write
+requirements, and asks Workcell to prepare that exact boundary. Workcell
+actualises the existing Agency source through Actuation, checks its task Action
+and authority, and refuses a changed run or a boundary missing the selected
+worktree. The scope retains the run revision, demand digest, admitted Agency
+source/digest, native inspection, and selected material identity. AIKit compares
+the complete inspection with the actual execution boundary and rechecks it
+before provider launch. Changed source, run revision, material path identity,
+policy or NOW refuses execution; there is no weaker fallback.
+
+A preparation refusal closes only a NOW newly created by this operation,
+through Central's authenticated revision-checked lifecycle action. The failed
+task keeps the allocation and cleanup receipt (or the precise unconfirmed
+cleanup reason). Existing NOWs, run worktrees and material are preserved. A
+closed clearing requires explicit native re-entry before retry; configuration
+does not silently reopen it.
+
+`encounter-agency-mint --for-task` requests the task Action in addition to the
+ordinary chat Actions. Actuation still judges the request against the unchanged
+standing grant and bounds. Omitting the flag retains ordinary chat minting.
+
+The native regression
+`native_prepared_run_preserves_authority_and_existing_worktree` in
+`crates/aikit-cli/tests/caw_task_dispatch.rs` uses actual Central, Actuation and
+Workcell processes and a disposable native material run. It is deliberately
+ignored by the generic suite and must be run with the source-built owner paths
+in the maintained CAW environment; a generic green suite is not proof of this
+joined path.

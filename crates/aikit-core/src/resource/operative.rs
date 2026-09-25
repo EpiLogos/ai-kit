@@ -1068,6 +1068,7 @@ pub fn horizons_for_kind(kind: ResourceKind) -> BTreeSet<AddressHorizon> {
         | ResourceKind::Procedure
         | ResourceKind::Routine
         | ResourceKind::Harness
+        | ResourceKind::Connection
         | ResourceKind::ExecutionOffer => BTreeSet::from([AddressHorizon::H5]),
         ResourceKind::Model | ResourceKind::Host => {
             BTreeSet::from([AddressHorizon::H1, AddressHorizon::H4])

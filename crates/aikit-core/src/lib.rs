@@ -60,6 +60,7 @@ pub mod jev;
 pub mod knowledge;
 pub mod knowledge_code;
 pub mod knowledge_construction;
+pub mod knowledge_wiki_facts;
 pub mod knowledge_entity_address;
 pub mod knowledge_facets;
 pub mod knowledge_ingest;

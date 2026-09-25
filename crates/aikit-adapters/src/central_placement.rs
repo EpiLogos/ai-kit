@@ -131,6 +131,20 @@ impl<R: CommandRunner> NativeCentralPlacement<R> {
         Ok(task)
     }
 
+    /// Close only a clearing this failed preparation actually created. The
+    /// native owner retains its history/artifacts and checks exact revisions.
+    pub fn close_new_allocation(&self, task: &AllocatedCentralTask) -> Result<Option<Value>> {
+        if task.allocation["created"] != true { return Ok(None); }
+        let receipt = self.call(&task.request, "central.now.lifecycle", json!({
+            "now_ref":task.allocation["now_ref"], "expected_revision":task.allocation["revision"]["revision"],
+            "expected_policy_revision":task.allocation["policy"]["revision"], "lifecycle":"closed",
+        }))?;
+        if receipt["schema"]!="central.now-lifecycle/v1" || receipt["record"]["now_ref"]!=task.allocation["now_ref"] || receipt["record"]["lifecycle"]!="closed" {
+            return Err(failure("cleanup_mismatch","Central did not confirm the newly allocated clearing closed"));
+        }
+        Ok(Some(receipt))
+    }
+
     /// A continuation reads the allocated source; it cannot mint a replacement
     /// NOW, reactivate an archived task, refresh a stale policy or renew a lease.
     pub fn revalidate(&self, task: &AllocatedCentralTask) -> Result<Value> {
@@ -187,6 +201,79 @@ impl<R: CommandRunner> NativeCentralPlacement<R> {
             ));
         }
         Ok(result)
+    }
+
+    /// Anchor the directory from which the task body runs without presenting
+    /// that directory itself as a write. A registered repository/worktree root
+    /// can be a valid invocation location while Central correctly refuses an
+    /// ambiguous write/remove approval for it because protected descendants
+    /// (`.git`, `.central`, `ProjectCentral`) live below it.
+    pub fn working_directory_anchor(
+        &self,
+        task: &AllocatedCentralTask,
+        directory: &Path,
+    ) -> Result<Value> {
+        self.revalidate(task)?;
+        if !directory.is_absolute()
+            || !directory.is_dir()
+            || directory.canonicalize().map_err(io_error)? != directory
+        {
+            return Err(failure(
+                "material_bounds",
+                "Task working directory must exist with its exact canonical identity",
+            ));
+        }
+        let policy = &task.allocation["policy"];
+        let grants = policy["writable_destinations"].as_array().ok_or_else(|| {
+            failure(
+                "owner_response",
+                "Effective policy has no native writable destination list",
+            )
+        })?;
+        let mut within_grant = false;
+        for grant in grants {
+            let path = Path::new(text(grant, "/path")?);
+            if !path.is_absolute() {
+                return Err(failure(
+                    "owner_response",
+                    "Native writable destination is not absolute",
+                ));
+            }
+            within_grant |= directory.starts_with(path);
+        }
+        let protected_paths = policy["protected_paths"].as_array().ok_or_else(|| {
+            failure(
+                "owner_response",
+                "Effective policy has no native protected path list",
+            )
+        })?;
+        let mut inside_protected = false;
+        for protected in protected_paths {
+            let raw = protected
+                .as_str()
+                .filter(|path| !path.trim().is_empty())
+                .ok_or_else(|| {
+                    failure(
+                        "owner_response",
+                        "Native protected path must be non-empty text",
+                    )
+                })?;
+            let path = Path::new(raw);
+            if !path.is_absolute() {
+                return Err(failure(
+                    "owner_response",
+                    "Native protected path is not absolute",
+                ));
+            }
+            inside_protected |= directory.starts_with(path);
+        }
+        if !within_grant || inside_protected {
+            return Err(failure(
+                "material_bounds",
+                "Task working directory must be inside a native writable destination and outside protected source/metadata ground",
+            ));
+        }
+        directory_anchor(directory)
     }
 
     /// Narrow explicitly selected directory grants, not every directory in a
@@ -301,6 +388,30 @@ fn check_policy(policy: &Value) -> Result<()> {
     }
     text(policy, "/revision")?;
     Ok(())
+}
+#[cfg(unix)]
+fn directory_anchor(path: &Path) -> Result<Value> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path).map_err(io_error)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(failure(
+            "material_bounds",
+            "Task working directory must remain a real directory",
+        ));
+    }
+    Ok(json!({
+        "schema":"aikit.task-working-directory-anchor/v1",
+        "path":path,
+        "device":metadata.dev(),
+        "inode":metadata.ino(),
+    }))
+}
+#[cfg(not(unix))]
+fn directory_anchor(_path: &Path) -> Result<Value> {
+    Err(failure(
+        "material_bounds",
+        "Native task working-directory identity is unsupported on this platform",
+    ))
 }
 fn text<'a>(value: &'a Value, pointer: &str) -> Result<&'a str> {
     value
