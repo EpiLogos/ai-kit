@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -60,6 +60,11 @@ pub struct KnowledgeSearchHit {
     pub authority: SourceAuthority,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ranking: Option<KnowledgeRankingEvidence>,
+    /// Other faculties that found the same file: a code-index hit over a
+    /// source the pool also holds folds into that source instead of
+    /// duplicating the row, and names itself here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corroborated_by: Vec<ProviderRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -240,6 +245,53 @@ pub struct KnowledgeApplication<'a> {
     /// own references, so search and relations fan out across all of them.
     code: Vec<&'a dyn CodeIndexProvider>,
     project_map: Option<&'a ProjectMap>,
+    /// Scoped-reply attribution: the reply's own Project display plus the
+    /// ref → owning-Project maps for compiled authored edges, folder
+    /// subjects and capability-matrix objects (and their cited carrier
+    /// paths). When present, an authored Wiki citation attributed to
+    /// another Project surfaces neither as a hit nor as an unreadable
+    /// absence — sibling carrier paths must not re-enter a scoped reply
+    /// through the diagnostic door after the hits are filtered.
+    project_attribution: Option<ScopedAttribution<'a>>,
+}
+
+/// The attribution maps a scoped application consults, borrowed from the
+/// runtime that assembled it.
+#[derive(Clone, Copy)]
+struct ScopedAttribution<'a> {
+    scoped_project: &'a str,
+    authored_edge_projects: &'a BTreeMap<String, String>,
+    folder_subject_projects: &'a BTreeMap<String, String>,
+    matrix_object_projects: &'a BTreeMap<String, String>,
+}
+
+impl<'a> ScopedAttribution<'a> {
+    /// True when `resource` is attributed to a Project other than the
+    /// reply's own scope.
+    fn owned_by_other_project(&self, resource: &str) -> bool {
+        [
+            self.authored_edge_projects,
+            self.folder_subject_projects,
+            self.matrix_object_projects,
+        ]
+        .iter()
+        .any(|attribution| {
+            attribution
+                .get(resource)
+                .is_some_and(|project| project != self.scoped_project)
+        })
+    }
+
+    /// Whether an authored Wiki citation stays out of this scoped reply.
+    /// Two doors are closed: a citation attributed to another Project, and
+    /// a citation that is a plain filesystem path — compiled carriers carry
+    /// no Project ownership in their text, so an unattributed path can only
+    /// be root-composition material, and a Project reply discloses owned
+    /// refs, not the machine's layout. The root scope (no attribution
+    /// wired) keeps every shape.
+    fn suppresses(&self, source: &str) -> bool {
+        self.owned_by_other_project(source) || source.starts_with('/')
+    }
 }
 
 impl<'a> KnowledgeApplication<'a> {
@@ -250,6 +302,7 @@ impl<'a> KnowledgeApplication<'a> {
             sources: Vec::new(),
             code: Vec::new(),
             project_map: None,
+            project_attribution: None,
         }
     }
 
@@ -279,6 +332,31 @@ impl<'a> KnowledgeApplication<'a> {
     pub fn with_project_map(mut self, project_map: &'a ProjectMap) -> Self {
         self.project_map = Some(project_map);
         self
+    }
+
+    #[must_use]
+    pub fn with_project_attribution(
+        mut self,
+        scoped_project: &'a str,
+        authored_edge_projects: &'a BTreeMap<String, String>,
+        folder_subject_projects: &'a BTreeMap<String, String>,
+        matrix_object_projects: &'a BTreeMap<String, String>,
+    ) -> Self {
+        self.project_attribution = Some(ScopedAttribution {
+            scoped_project,
+            authored_edge_projects,
+            folder_subject_projects,
+            matrix_object_projects,
+        });
+        self
+    }
+
+    /// True when the application carries scoped attribution and the source
+    /// must stay out of the reply entirely (see `ScopedAttribution::suppresses`).
+    fn source_suppressed_in_scope(&self, source: &str) -> bool {
+        self.project_attribution
+            .as_ref()
+            .is_some_and(|attribution| attribution.suppresses(source))
     }
 
     pub fn status(&self) -> KnowledgeProviderStatus {
@@ -388,6 +466,33 @@ impl<'a> KnowledgeApplication<'a> {
         // observed hit ahead of every derived one; score only breaks ties
         // inside a tier, so a code-specific query still ranks its own best
         // symbols against each other exactly as before.
+        // One row per file across faculties: a code-reference hit whose
+        // basename matches an observed source hit corroborates it rather
+        // than duplicating it. The source hit keeps its score; the folding
+        // is disclosed on the hit itself.
+        let mut folded: Vec<KnowledgeSearchHit> = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let mut merged = false;
+            if hit.kind == ResourceKind::CodeReference {
+                if let Some(filename) = hit.label.rsplit('/').next() {
+                    for existing in folded.iter_mut() {
+                        let tail = existing.label.rsplit('/').next().unwrap_or_default();
+                        if existing.kind == ResourceKind::KnowledgeSource
+                            && !filename.is_empty()
+                            && tail == filename
+                        {
+                            existing.corroborated_by.push(hit.provider.clone());
+                            merged = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !merged {
+                folded.push(hit);
+            }
+        }
+        hits = folded;
         hits.sort_by(|left, right| {
             authority_rank(left.authority)
                 .cmp(&authority_rank(right.authority))
@@ -475,7 +580,7 @@ impl<'a> KnowledgeApplication<'a> {
 
         let mut unreadable: Vec<SourceRef> = Vec::new();
         if let Some(wiki) = &self.wiki {
-            hits.extend(wiki.search(query, limit).into_iter().map(|hit| {
+            hits.extend(wiki.search(query, limit).into_iter().filter_map(|hit| {
                 match &hit.address {
                     // A curated Wiki object keeps the Wiki address and the
                     // KnowledgeNode/Space/Frame kind it always had.
@@ -485,7 +590,7 @@ impl<'a> KnowledgeApplication<'a> {
                             "frame" => ResourceKind::KnowledgeFrame,
                             _ => ResourceKind::KnowledgeNode,
                         };
-                        KnowledgeSearchHit {
+                        Some(KnowledgeSearchHit {
                             address: KnowledgeAddress::Wiki(resource.clone()),
                             resource: resource.clone(),
                             kind,
@@ -495,7 +600,8 @@ impl<'a> KnowledgeApplication<'a> {
                             provider: wiki.status().provider,
                             authority: SourceAuthority::Authored,
                             ranking: None,
-                        }
+                            corroborated_by: Vec::new(),
+                        })
                     }
                     // A source cited by a curated node is findable, but it is
                     // not itself curated Wiki identity: it reaches the
@@ -506,6 +612,15 @@ impl<'a> KnowledgeApplication<'a> {
                     // `Authored` authority; only its provenance house
                     // differs from a curated Wiki object.
                     WikiSearchAddress::AuthoredSource { source } => {
+                        // Scoped attribution precedes findability: a source
+                        // attributed to another Project — or an unattributed
+                        // raw filesystem path — produces neither a hit nor
+                        // the unreadable-source absence below, so sibling
+                        // carriers cannot re-enter a scoped reply through
+                        // the diagnostic door.
+                        if self.source_suppressed_in_scope(source.as_str()) {
+                            return None;
+                        }
                         // Findability must not outrun openability in silence.
                         // If this horizon cannot materialise the source, the
                         // result says so here — at the point the address is
@@ -517,7 +632,7 @@ impl<'a> KnowledgeApplication<'a> {
                         let resource = ResourceRef::parse(source.as_str()).expect(
                             "SourceRef validation is compatible with ResourceRef validation",
                         );
-                        KnowledgeSearchHit {
+                        Some(KnowledgeSearchHit {
                             address: KnowledgeAddress::Source(source.clone()),
                             resource,
                             kind: ResourceKind::KnowledgeSource,
@@ -527,7 +642,8 @@ impl<'a> KnowledgeApplication<'a> {
                             provider: wiki.status().provider,
                             authority: SourceAuthority::Authored,
                             ranking: None,
-                        }
+                            corroborated_by: Vec::new(),
+                        })
                     }
                 }
             }));
@@ -590,6 +706,7 @@ impl<'a> KnowledgeApplication<'a> {
                         snippet: hit.snippet,
                         provider: hit.provider,
                         authority: SourceAuthority::Observed,
+                        corroborated_by: Vec::new(),
                         ranking: None,
                     }
                 })),
@@ -615,6 +732,7 @@ impl<'a> KnowledgeApplication<'a> {
                             snippet: hit.snippet,
                             provider: hit.provider,
                             authority: SourceAuthority::Derived,
+                            corroborated_by: Vec::new(),
                             ranking: None,
                         }))
                     }
@@ -648,6 +766,7 @@ impl<'a> KnowledgeApplication<'a> {
                     address: KnowledgeAddress::ProjectMap(endpoint.resource.clone()),
                     resource: endpoint.resource.clone(),
                     kind: endpoint.kind,
+                    corroborated_by: Vec::new(),
                     label,
                     score: if endpoint.resource.as_str() == query {
                         1.25

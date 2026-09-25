@@ -122,20 +122,64 @@ impl NowFieldScope {
     /// Retain common Control records and only one discovered Work project's
     /// NOW files. `None` keeps Control alone, so an unknown Project cannot
     /// turn a wildcard scope into a search of every sibling register.
+    ///
+    /// "Common" is narrower than the whole root register. A root clearing is
+    /// one commission's working field, not a common record: its scratch and
+    /// evidence trees accumulate verbatim copies of any Project's material,
+    /// and a day-rollover rehearsal verifiably carried Work/Factory's
+    /// `.factory/development-state.json` into an O-I-scoped reply. Raw
+    /// harness session captures parked under a flow directory are records of
+    /// nobody — the flow record itself is the Markdown document beside them.
+    /// Project scope therefore searches the root register's record surfaces
+    /// only — dated day readings, the flow records at the flows root, the
+    /// human day file — plus the project's own NOW register. Nested flow
+    /// event directories and day `.sources` snapshot subtrees are working
+    /// material the same narrowing excludes (a nested event document on the
+    /// live ground carried verifier-only canaries and sibling repository
+    /// names; snapshot subtrees verifiably carry sibling NOW records). The
+    /// root scope keeps the broad aperture; root-scope and explicit
+    /// cross-Project reads are unaffected.
     pub fn for_project(&self, project_name: Option<&str>) -> Self {
         let mut scoped = self.clone();
-        scoped.includes.retain_mut(|include| {
+        let mut narrowed = Vec::new();
+        for mut include in scoped.includes.drain(..) {
             if let Some(rest) = include.glob.strip_prefix("Work/*/").map(str::to_owned) {
                 if let Some(name) = project_name {
                     include.glob = format!("Work/{}/{rest}", escape_glob_literal(name));
-                    true
-                } else {
-                    false
+                    narrowed.push(include);
                 }
-            } else {
-                !include.glob.starts_with("Work/")
+            } else if include.glob.starts_with("Control/agents/now/clearings/") {
+                // A clearing is one commission's bounded working field.
+                // Nothing under it is a common record; drop the family whole
+                // rather than judging its contents file by file.
+            } else if include.glob.starts_with("Control/agents/now/flows/") {
+                // Flow records are Markdown by naming law and live at the
+                // flows root (`<slug>-<date>.md`). An event directory under
+                // flows/ is a commission's working container, not a record
+                // surface: a nested document there carries whatever the
+                // commission parked beside its machinery, so only the
+                // root's own records answer a Project scope. Top-level only
+                // also keeps the glob shape unambiguous for the read
+                // authorisation, which shares these globs with search.
+                narrowed.push(ScopeInclude {
+                    glob: "Control/agents/now/flows/*.md".into(),
+                    family: include.family,
+                });
+            } else if include.glob.starts_with("Control/agents/now/day/") {
+                // A day reading is the dated record. Its `.sources`
+                // snapshot subtrees keep byte-exact copies of whatever a
+                // day closed over — sibling-project material included,
+                // verified on the live ground — so a Project scope reads
+                // the readings only.
+                narrowed.push(ScopeInclude {
+                    glob: "Control/agents/now/day/*.md".into(),
+                    family: include.family,
+                });
+            } else if !include.glob.starts_with("Work/") {
+                narrowed.push(include);
             }
-        });
+        }
+        scoped.includes = narrowed;
         let own_root = project_name.map(|name| format!("Work/{name}"));
         scoped.pruned.retain(|path| {
             !path.starts_with("Work/")
@@ -238,7 +282,12 @@ fn match_parts(pattern: &[Vec<GlobPart>], path: &str) -> bool {
         return match_segment(&pattern[0], path) && pattern.len() == 1;
     };
     if pattern.len() == 1 {
-        return false;
+        // A trailing `**` consumes every remaining segment: `a/**` must
+        // authorise the directory's descendants, not only the directory
+        // itself. Ripgrep's globs — which the search pass runs under —
+        // already match these files; without this branch the authorisation
+        // pass silently dropped every nested day snapshot and flow file.
+        return pattern[0].len() == 1 && pattern[0][0] == GlobPart::AnyDepth;
     }
     if match_segment(&pattern[0], segment) && match_parts(&pattern[1..], rest) {
         return true;
@@ -876,6 +925,56 @@ mod tests {
     }
 
     #[test]
+    fn project_scope_treats_clearings_and_raw_flow_captures_as_out_of_scope() {
+        let mut scope = scope();
+        scope.includes.push(ScopeInclude {
+            glob: "Control/agents/now/flows/**".into(),
+            family: "flow",
+        });
+        scope.includes.push(ScopeInclude {
+            glob: "Control/agents/now/day/**".into(),
+            family: "day",
+        });
+        let scoped = scope.for_project(Some("O-I"));
+        // The clearing family is dropped whole: a commission's scratch and
+        // evidence trees are nobody's common record.
+        assert!(!scoped
+            .includes
+            .iter()
+            .any(|include| include.glob.starts_with("Control/agents/now/clearings/")));
+        // Flow records stay searchable at the flows root; anything parked
+        // inside an event directory — a Markdown note included — does not,
+        // because event directories are commissions' working containers.
+        assert!(scoped.is_authorised(Path::new(
+            "Control/agents/now/flows/incident-2026-09-25-1210.md"
+        )));
+        assert!(!scoped.is_authorised(Path::new(
+            "Control/agents/now/flows/event-dir/record-2026-09-25-1215.md"
+        )));
+        assert!(!scoped.is_authorised(Path::new(
+            "Control/agents/now/flows/event-dir/sessions/stream.jsonl"
+        )));
+        // Day readings answer; their `.sources` snapshot subtrees do not.
+        assert!(scoped.is_authorised(Path::new("Control/agents/now/day/2026-09-25.md")));
+        assert!(!scoped.is_authorised(Path::new(
+            "Control/agents/now/day/2026-09-24.sources/agents/handoff.json"
+        )));
+        // The root scope keeps the broad aperture.
+        assert!(scope.is_authorised(Path::new(
+            "Control/agents/now/flows/event-dir/sessions/stream.jsonl"
+        )));
+        assert!(scope.is_authorised(Path::new(
+            "Control/agents/now/clearings/abc/T/evidence/state.json"
+        )));
+        // An unknown project keeps the same common-record discipline.
+        let unknown = scope.for_project(None);
+        assert!(unknown.is_authorised(Path::new(
+            "Control/agents/now/flows/incident-2026-09-25-1210.md"
+        )));
+        assert!(!unknown.is_authorised(Path::new("Control/agents/now/clearings/abc/now.json")));
+    }
+
+    #[test]
     fn glob_matching_survives_multi_byte_path_components() {
         assert!(glob_match(
             "Work/*/ProjectCentral/now/**/*.json",
@@ -904,6 +1003,25 @@ mod tests {
         assert!(glob_match(
             "Control/agents/now/day/**",
             "Control/agents/now/day"
+        ));
+        // A trailing `**` authorises the directory's descendants — rg's
+        // search semantics and this authorisation pass must agree, or the
+        // search finds files the read path refuses.
+        assert!(glob_match(
+            "Control/agents/now/day/**",
+            "Control/agents/now/day/2026-09-24.md"
+        ));
+        assert!(glob_match(
+            "Control/agents/now/day/**",
+            "Control/agents/now/day/2026-09-24.sources/handoff.json"
+        ));
+        assert!(glob_match(
+            "Control/agents/now/flows/**",
+            "Control/agents/now/flows/event/sessions/stream.jsonl"
+        ));
+        assert!(!glob_match(
+            "Control/user/day/*/day.md",
+            "Control/user/day/2026-09-17/extra/notes/day.md"
         ));
     }
 

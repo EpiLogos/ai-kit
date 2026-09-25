@@ -36,10 +36,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.2
       - name: Install tmux
         run: brew install tmux
+      - name: Ensure real ripgrep for Project-scope acceptance
+        run: |
+          if ! command -v rg >/dev/null 2>&1; then
+            brew install ripgrep
+          fi
+          rg --version
       - name: Validate installed Prime-QL acceptance runner
         run: python3 -m py_compile scripts/verify-epi-prime-ql.py
       - name: Verify repository
         shell: bash
+        env:
+          AIKIT_REQUIRE_RIPGREP_REAL: "1"
         run: |
           set +e
           bash scripts/verify 2>&1 | tee /tmp/aikit.log
@@ -71,11 +79,18 @@ jobs:
         uses: taiki-e/install-action@v2.87.8
         with:
           tool: cargo-nextest
+      - name: Ensure real ripgrep for Project-scope acceptance
+        run: |
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y ripgrep
+          fi
+          rg --version
       - name: Test ${{ matrix.package }}
         shell: bash
         run: |
           set +e
-          cargo nextest run --locked -p '${{ matrix.package }}' --all-targets 2>&1 | tee /tmp/aikit.log
+          AIKIT_REQUIRE_RIPGREP_REAL=1 cargo nextest run --locked -p '${{ matrix.package }}' --all-targets 2>&1 | tee /tmp/aikit.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             grep -E '(^error(\[|:)|^warning:|^failures:|^test result:|^thread .*panicked|^  left:|^ right:|^note:|^help:|^  -->|^   -->)' /tmp/aikit.log | tail -n 100 > /tmp/aikit-focus.log || true

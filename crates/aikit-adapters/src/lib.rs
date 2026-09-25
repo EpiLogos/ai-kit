@@ -33,6 +33,10 @@ pub mod flow_authored_wiki;
 pub mod gateway_client;
 pub mod gateway_communique;
 pub mod gateway_connector;
+pub mod gateway_connector_config;
+pub mod gateway_connector_pump;
+pub mod gateway_connector_specimen;
+pub mod gateway_connector_wire;
 #[allow(unused_imports)]
 pub mod gateway_runtime;
 pub mod gateway_service;
@@ -69,6 +73,7 @@ pub mod session_space_reconstruction;
 pub mod shells;
 mod telegram_bot_api;
 pub mod telegram_gateway;
+pub mod telegram_gateway_curl;
 pub mod tool_sources;
 pub mod wiki_document;
 pub mod wiki_graph;
@@ -155,6 +160,18 @@ pub use gateway_connector::{
     OutboundOperation, OutboundOperationKind, SenderIdentity, SenderKind,
     GATEWAY_CONNECTOR_SCHEMA_PATH, GATEWAY_CONNECTOR_SDK_VERSION, GATEWAY_CONNECTOR_WIRE_VERSION,
 };
+pub use gateway_connector_config::{
+    build_connector_factory, load_gateway_connectors, store_gateway_connectors,
+    ConnectorTokenLocation, GatewayConnectorEntry, GatewayConnectorFactory,
+    GatewayConnectorsFile, GATEWAY_CONNECTORS_FILE_NAME, GATEWAY_CONNECTORS_SCHEMA,
+};
+pub use gateway_connector_pump::{
+    spawn_connector_workers, ConnectorOutbound, ConnectorQueues, CONNECTOR_QUIET_POLL_CODE,
+};
+pub use gateway_connector_specimen::{
+    run_specimen_connector, SpecimenOptions, SPECIMEN_CONNECTOR_VERSION,
+};
+pub use gateway_connector_wire::StdioWireConnector;
 pub use gateway_runtime::{
     connector_descriptor, execute_gateway_command, text_send, AgencyGateway,
     GatewayActuationControlIntent, GatewayActuationControlOperation, GatewayBinding,
@@ -171,8 +188,9 @@ pub use gateway_service::{
     acquire_gateway_state_lock, execute_against_state_file, persist_gateway_state,
     restore_gateway_state, run_gateway_service, run_gateway_service_with_hooks,
     run_gateway_service_with_ticks, GatewayOccupancyReader, GatewayServiceConfig,
-    GatewayServiceHooks, GatewayStateLock, GatewayTick, GatewayTickLoop,
-    DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION,
+    GatewayServiceHooks, GatewayServiceRuntime, GatewayStateLock, GatewayTick, GatewayTickLoop,
+    SubscriptionHub, SubscriptionSink, DEFAULT_GATEWAY_MAX_FRAME_BYTES,
+    GATEWAY_SERVICE_CARRIER_VERSION,
 };
 pub use harness_disclosure::{
     disclose, ComposedEntry, DriftEntry, DriftKind, HarnessDisclosure, NativeEntry,

@@ -123,7 +123,10 @@ impl<R: CommandRunner> CentralFileMapProvider<R> {
     ) -> Result<Self> {
         let executable = executable.into();
         let root = root.into();
-        let input = json!({"project":project,"federated":project.is_none()});
+        // Capabilities only: the owner keeps the roster, and `read()`
+        // resolves sources live. Materialising every pooled source here made
+        // attachment cost scale with the whole world.
+        let input = json!({"project":project,"federated":project.is_none(),"resources":false});
         let reading = call(&runner, &executable, &root, "inspect", &input)?;
         let native = &reading["provider"];
         let available = native["available"] == true;
@@ -152,12 +155,7 @@ impl<R: CommandRunner> CentralFileMapProvider<R> {
                 ),
             ]),
         };
-        let material = reading["resources"]
-            .as_array()
-            .ok_or_else(|| invalid("Missing source roster"))?
-            .iter()
-            .map(|v| material(v, String::new()))
-            .collect::<Result<Vec<_>>>()?;
+        let material = Vec::new();
         Ok(Self {
             runner,
             executable,

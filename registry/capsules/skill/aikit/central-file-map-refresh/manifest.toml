@@ -1,0 +1,24 @@
+schema = 1
+id = "skill/aikit/central-file-map-refresh"
+kind = "skill"
+name = "Central environmental file-map refresh"
+description = "METHOD: Probe every participating Central scope for uninitialized or stale persistent file maps and refresh exactly those scopes — `central.file-map.search` federated, `central.world` for Project-name spelling, then `central.file-map.refresh` per affected scope — run by a Routine's native runner with no model, no source registration and no knowledge compilation."
+maturity = "draft"
+tags = ["aikit", "routine", "method", "file-map", "source-pool", "native-method"]
+
+[skill]
+root = "payload"
+
+# The body is native: a Routine dispatches it through AIKit's native runner,
+# which calls exactly these Central Actions through `ctrl` and never opens a
+# model encounter. See crates/aikit-cli/src/routine_native.rs.
+[metadata.native-method]
+schema = "aikit.native-method/v1"
+body = "central-file-map-refresh"
+actions = [
+  "central:action/central.file-map.search",
+  "central:action/central.world",
+  "central:action/central.file-map.refresh",
+]
+
+# None of these Actions is token-gated, so the Method declares no credential.

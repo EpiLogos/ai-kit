@@ -232,51 +232,86 @@ pub fn claim(
     let (position_ref, record) = resolve_position(owners, &request.position, project.as_deref())?;
     let base = format!("aikit inhabit --position {position_ref} --reason <why>");
 
+    let eligible: Vec<String> = record
+        .get("eligible_agent_refs")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
     let agent = match &request.agent {
-        Some(agent) => agent.clone(),
-        None => {
-            let eligible: Vec<String> = record
-                .get("eligible_agent_refs")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default();
-            match eligible.as_slice() {
-                [one] => one.clone(),
-                [] => {
-                    return Err(refusal(
-                        "inhabit.agent_required",
-                        format!("{position_ref} names no eligible Agent."),
-                        "Nothing was claimed.",
-                        format!("{base} --agent <agent ref> -- <harness argv>"),
-                    ))
-                }
-                many => {
-                    return Err(refusal(
-                        "inhabit.agent_ambiguous",
-                        format!(
-                            "{position_ref} names {} eligible Agents: {}.",
-                            many.len(),
-                            many.join(", ")
-                        ),
-                        "Nothing was claimed.",
-                        format!("{base} --agent <one of them> -- <harness argv>"),
-                    ))
-                }
+        Some(agent) => {
+            if !eligible.iter().any(|candidate| candidate == agent) {
+                return Err(refusal(
+                    "inhabit.agent_ineligible",
+                    format!(
+                        "{position_ref} does not name {agent} as an eligible Agent (eligible: {}).",
+                        if eligible.is_empty() {
+                            "none".into()
+                        } else {
+                            eligible.join(", ")
+                        }
+                    ),
+                    "Nothing was claimed. Passing --agent does not bypass the Position's eligible-Agent list.",
+                    format!("{base} --agent <one eligible Agent> -- <harness argv>"),
+                ));
             }
+            agent.clone()
         }
+        None => match eligible.as_slice() {
+            [one] => one.clone(),
+            [] => {
+                return Err(refusal(
+                    "inhabit.agent_required",
+                    format!("{position_ref} names no eligible Agent."),
+                    "Nothing was claimed.",
+                    format!("{base} --agent <agent ref> -- <harness argv>"),
+                ))
+            }
+            many => {
+                return Err(refusal(
+                    "inhabit.agent_ambiguous",
+                    format!(
+                        "{position_ref} names {} eligible Agents: {}.",
+                        many.len(),
+                        many.join(", ")
+                    ),
+                    "Nothing was claimed.",
+                    format!("{base} --agent <one of them> -- <harness argv>"),
+                ))
+            }
+        },
     };
+    let admitted = home
+        .map(|home| existing_agency(home, &agent, project.as_deref()))
+        .unwrap_or_default();
     let agency = match &request.agency {
-        Some(agency) => agency.clone(),
+        Some(agency) => {
+            if !admitted.iter().any(|candidate| candidate == agency) {
+                return Err(refusal(
+                    "inhabit.agency_not_admitted",
+                    format!(
+                        "{agency} is not an admitted Agency for {agent} (admitted: {}).",
+                        if admitted.is_empty() {
+                            "none".into()
+                        } else {
+                            admitted.join(", ")
+                        }
+                    ),
+                    "Nothing was claimed. Passing --agency does not bypass admission.",
+                    format!(
+                        "{base} --agent {agent} --agency <one admitted Agency> -- <harness argv>"
+                    ),
+                ));
+            }
+            agency.clone()
+        }
         None => {
-            let found = home
-                .map(|home| existing_agency(home, &agent, project.as_deref()))
-                .unwrap_or_default();
+            let found = admitted;
             match found.as_slice() {
                 [one] => one.clone(),
                 [] => {
@@ -285,7 +320,7 @@ pub fn claim(
                         format!("AIKit holds no admitted Agency for {agent}."),
                         "Nothing was claimed.",
                         format!(
-                            "{base} --agent {agent} --agency <agency ref> -- <harness argv>   (or mint one: aikit session-space encounter-agency-mint --agent-session <agent-session/…> --project-cwd {} --agent-ref {agent})",
+                            "mint one, then inhabit: aikit session-space encounter-agency-mint --agent-session <agent-session/…> --project-cwd {} --agent-ref {agent}",
                             request.cwd.display()
                         ),
                     ))
