@@ -348,8 +348,14 @@ fn native_pi_advertises_one_current_model_with_its_real_name() {
     assert_eq!(observation.available_models.len(), 1);
     let model = &observation.available_models[0];
     assert_eq!(model.model_id, observation.current_model_id);
-    let identity = model.roster_identity.as_ref().expect("Pi supplies exact native roster coordinates");
-    assert_eq!(identity.provider_ref, format!("provider:{}", observation.native_provider.as_ref().unwrap()));
+    let identity = model
+        .roster_identity
+        .as_ref()
+        .expect("Pi supplies exact native roster coordinates");
+    assert_eq!(
+        identity.provider_ref,
+        format!("provider:{}", observation.native_provider.as_ref().unwrap())
+    );
     assert_eq!(identity.provider_native_id, model.model_id);
     assert_eq!(identity.harness_slug.as_deref(), Some("pi"));
     assert!(!model.name.trim().is_empty());

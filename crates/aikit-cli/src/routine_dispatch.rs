@@ -389,10 +389,18 @@ pub struct ResidentEncounterRunner {
     pub home: aikit_store::AikitHome,
 }
 
-fn resident_request(socket: &Path, request: &crate::encounter_service::EncounterRequest) -> Result<Value> {
+fn resident_request(
+    socket: &Path,
+    request: &crate::encounter_service::EncounterRequest,
+) -> Result<Value> {
     let response = crate::encounter_service::request(socket, request)?;
     if response["ok"] != true {
-        return Err(AikitError::new("routine.encounter_refused", response["error"]["message"].as_str().unwrap_or("Resident encounter owner refused the Routine request")));
+        return Err(AikitError::new(
+            "routine.encounter_refused",
+            response["error"]["message"]
+                .as_str()
+                .unwrap_or("Resident encounter owner refused the Routine request"),
+        ));
     }
     Ok(response["data"].clone())
 }
@@ -878,14 +886,17 @@ impl<O: OccurrenceSource, M: MethodResolver, R: RoutineRunner> RoutineDispatcher
         use aikit_store::routine_invocation::{RoutineExecutionOutcome, RoutineExecutionStatus};
         // Preserve the actual return before adding delivery provenance. The
         // provider delivery hash alone cannot disclose success or failure.
-        self.ledger.record_outcome(&evidence.invocation_ref, RoutineExecutionOutcome {
-            status: match outcome.status {
-                RunStatus::Completed => RoutineExecutionStatus::Completed,
-                RunStatus::Failed => RoutineExecutionStatus::Failed,
-                RunStatus::Unreturned => RoutineExecutionStatus::Unreturned,
+        self.ledger.record_outcome(
+            &evidence.invocation_ref,
+            RoutineExecutionOutcome {
+                status: match outcome.status {
+                    RunStatus::Completed => RoutineExecutionStatus::Completed,
+                    RunStatus::Failed => RoutineExecutionStatus::Failed,
+                    RunStatus::Unreturned => RoutineExecutionStatus::Unreturned,
+                },
+                detail: outcome.detail.clone(),
             },
-            detail: outcome.detail.clone(),
-        })?;
+        )?;
         let status_text = match outcome.status {
             RunStatus::Completed => "completed",
             RunStatus::Failed => "failed",

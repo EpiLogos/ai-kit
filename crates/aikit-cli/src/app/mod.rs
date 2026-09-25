@@ -319,15 +319,20 @@ pub struct Service {
 
 impl Service {
     fn workcell_run_resources(&self) -> Vec<aikit_core::resource::ResourceRecord> {
-        if let Some(reading) = self.workcell_run_reading.borrow().as_ref() { return reading.clone(); }
+        if let Some(reading) = self.workcell_run_reading.borrow().as_ref() {
+            return reading.clone();
+        }
         let executable = std::env::var("AIKIT_WORKCELL_BIN").unwrap_or_else(|_| "workcell".into());
-        let records = match aikit_adapters::workcell_run_intake::read(&SystemRunner::probe(), &executable) {
-            Ok(observed) => observed,
-            Err(error) => {
-                self.context_composition_notes.borrow_mut().push(format!("Workcell run resources unavailable: {error}"));
-                Vec::new()
-            }
-        };
+        let records =
+            match aikit_adapters::workcell_run_intake::read(&SystemRunner::probe(), &executable) {
+                Ok(observed) => observed,
+                Err(error) => {
+                    self.context_composition_notes
+                        .borrow_mut()
+                        .push(format!("Workcell run resources unavailable: {error}"));
+                    Vec::new()
+                }
+            };
         *self.workcell_run_reading.borrow_mut() = Some(records.clone());
         records
     }
@@ -1105,13 +1110,22 @@ impl Service {
     /// listing command — this, `model-catalogue show` and the TUI overlay are
     /// the resolution surfaces.
     pub fn read_model_roster(
-        &self, composed: &serde_json::Value, use_type: &str,
+        &self,
+        composed: &serde_json::Value,
+        use_type: &str,
         policy: aikit_core::resource::ModelRankingPolicy,
     ) -> Result<serde_json::Value> {
         use aikit_core::resource::{rank_model_roster, ModelRouteSet};
-        let routes: Vec<ModelRouteSet> = serde_json::from_value(composed.get("model_routes").cloned().unwrap_or_default())
-            .map_err(|error| AikitError::new("model_roster.route_sets_unreadable", error.to_string()))?;
-        let roster = rank_model_roster(self.model_roster_demand(use_type)?, policy, self.roster_candidates(&routes)?);
+        let routes: Vec<ModelRouteSet> =
+            serde_json::from_value(composed.get("model_routes").cloned().unwrap_or_default())
+                .map_err(|error| {
+                    AikitError::new("model_roster.route_sets_unreadable", error.to_string())
+                })?;
+        let roster = rank_model_roster(
+            self.model_roster_demand(use_type)?,
+            policy,
+            self.roster_candidates(&routes)?,
+        );
         let (catalogue, _) = aikit_store::model_catalogue::resolved_catalogue(&self.home);
         let route_facts: Vec<_> = routes.iter().flat_map(|set| set.routes.iter()).map(|route| {
             let harness = if route.kind == aikit_core::resource::ModelRouteKind::HarnessNative {
@@ -1121,8 +1135,10 @@ impl Service {
                 "name":catalogue.get(&route.model).map(|entry|entry.name.as_str()),"harness":harness,
                 "availability":route.availability})
         }).collect();
-        Ok(serde_json::json!({"schema":"aikit.model-roster-reading/v1","roster":roster,"route_facts":route_facts,
-            "standing":"Read-only ranked native route evidence; no selection, session launch or inference"}))
+        Ok(
+            serde_json::json!({"schema":"aikit.model-roster-reading/v1","roster":roster,"route_facts":route_facts,
+            "standing":"Read-only ranked native route evidence; no selection, session launch or inference"}),
+        )
     }
 
     pub fn resolve_model(
@@ -1139,8 +1155,10 @@ impl Service {
                     AikitError::new("model_roster.route_sets_unreadable", error.to_string())
                 })?;
         let reading = self.read_model_roster(composed, use_type, policy)?;
-        let roster: aikit_core::resource::ModelRoster = serde_json::from_value(reading["roster"].clone())
-            .map_err(|error| AikitError::new("model_roster.reading_unreadable", error.to_string()))?;
+        let roster: aikit_core::resource::ModelRoster =
+            serde_json::from_value(reading["roster"].clone()).map_err(|error| {
+                AikitError::new("model_roster.reading_unreadable", error.to_string())
+            })?;
 
         let winning_model = roster
             .entries

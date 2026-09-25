@@ -57,6 +57,7 @@ fn a_real_owner_refusal_never_becomes_a_prepared_draft_or_completed_run() {
         method_revision: SourceRevision::parse("revision/native-refusal").unwrap(),
         prompt: "No inference may occur in this refusal test".into(),
         observation_payload: None,
+        time_schedule: None,
         native: None,
         authorised_actions: Vec::new(),
     });

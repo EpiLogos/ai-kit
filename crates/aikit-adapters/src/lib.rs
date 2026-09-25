@@ -16,7 +16,6 @@ pub mod authored_wiki_living;
 pub mod authored_wiki_read;
 pub mod authored_wiki_source;
 pub mod bkmr;
-pub mod workcell_run_intake;
 pub mod central_agent_profile;
 pub mod central_development_field;
 pub mod central_temporal;
@@ -75,6 +74,7 @@ pub mod wiki_document;
 pub mod wiki_graph;
 pub mod work_repos;
 pub mod workcell_instance_intake;
+pub mod workcell_run_intake;
 pub mod working_environment;
 pub mod working_environment_control;
 

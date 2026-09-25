@@ -134,13 +134,21 @@ impl<R: CommandRunner> NativeCentralPlacement<R> {
     /// Close only a clearing this failed preparation actually created. The
     /// native owner retains its history/artifacts and checks exact revisions.
     pub fn close_new_allocation(&self, task: &AllocatedCentralTask) -> Result<Option<Value>> {
-        if task.allocation["created"] != true { return Ok(None); }
+        if task.allocation["created"] != true {
+            return Ok(None);
+        }
         let receipt = self.call(&task.request, "central.now.lifecycle", json!({
             "now_ref":task.allocation["now_ref"], "expected_revision":task.allocation["revision"]["revision"],
             "expected_policy_revision":task.allocation["policy"]["revision"], "lifecycle":"closed",
         }))?;
-        if receipt["schema"]!="central.now-lifecycle/v1" || receipt["record"]["now_ref"]!=task.allocation["now_ref"] || receipt["record"]["lifecycle"]!="closed" {
-            return Err(failure("cleanup_mismatch","Central did not confirm the newly allocated clearing closed"));
+        if receipt["schema"] != "central.now-lifecycle/v1"
+            || receipt["record"]["now_ref"] != task.allocation["now_ref"]
+            || receipt["record"]["lifecycle"] != "closed"
+        {
+            return Err(failure(
+                "cleanup_mismatch",
+                "Central did not confirm the newly allocated clearing closed",
+            ));
         }
         Ok(Some(receipt))
     }

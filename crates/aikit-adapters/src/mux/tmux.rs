@@ -211,19 +211,36 @@ impl<R: CommandRunner> Tmux<R> {
 
     /// Capture only a currently AIKit-tagged logical pane. This never opens,
     /// focuses or recreates a provider session. Native ids stay provenance.
-    pub fn capture_surface(&self, plan: &SessionPlan, logical_key: &str, lines: u16) -> Result<(String, String)> {
+    pub fn capture_surface(
+        &self,
+        plan: &SessionPlan,
+        logical_key: &str,
+        lines: u16,
+    ) -> Result<(String, String)> {
         if !(1..=2000).contains(&lines) {
-            return Err(AikitError::new("mux.capture_limit", "Capture lines must be between 1 and 2000"));
+            return Err(AikitError::new(
+                "mux.capture_limit",
+                "Capture lines must be between 1 and 2000",
+            ));
         }
         let (native, _) = self.attach_surface_command(plan, logical_key)?;
         let start = format!("-{}", lines.saturating_sub(1));
-        let output = self.runner.run_with_timeout(
-            &self.argv(&["capture-pane", "-p", "-e", "-t", &native, "-S", &start]),
-            std::time::Duration::from_secs(2),
-        )?.require(&self.argv(&["capture-pane", "-t", &native]), "mux.tmux_capture_failed")?;
+        let output = self
+            .runner
+            .run_with_timeout(
+                &self.argv(&["capture-pane", "-p", "-e", "-t", &native, "-S", &start]),
+                std::time::Duration::from_secs(2),
+            )?
+            .require(
+                &self.argv(&["capture-pane", "-t", &native]),
+                "mux.tmux_capture_failed",
+            )?;
         let (after, _) = self.attach_surface_command(plan, logical_key)?;
         if after != native {
-            return Err(AikitError::new("mux.tmux_surface_changed", "The working pane changed during capture; retry its current binding"));
+            return Err(AikitError::new(
+                "mux.tmux_surface_changed",
+                "The working pane changed during capture; retry its current binding",
+            ));
         }
         Ok((native, output.stdout))
     }

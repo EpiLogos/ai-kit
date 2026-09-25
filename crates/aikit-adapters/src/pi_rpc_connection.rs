@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use crate::agent_connection::*;
 use crate::interactive_connection::{
-    InteractiveAgentConnectionAdapter, NativeModeControls, PermissionDecision,
+    InteractiveAgentConnectionAdapter, NativeModeControls, NativeModelControls, PermissionDecision,
 };
 
 const PI_NO_PERMISSION_MODES: &str =
@@ -20,6 +20,19 @@ enum Pending {
     Attach(ResourceRef),
     Prompt,
     Control,
+    SetModel {
+        native_session_id: String,
+        selection_id: String,
+        provider: String,
+        model_id: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct PiNativeModel {
+    provider: String,
+    model_id: String,
+    advertised: NativeAdvertisedModel,
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +47,8 @@ pub struct PiRpcConnectionAdapter {
     binding: Option<NativeSessionBinding>,
     stop: Option<(String, Option<String>)>,
     expected_model: Option<(String, String)>,
+    models_discovered: bool,
+    native_models: BTreeMap<String, PiNativeModel>,
     model_observation: Option<crate::agent_connection::NativeModelObservation>,
     abort_acknowledged: bool,
     /// The person asked for this turn to stop (an `abort` was sent). Pi may
@@ -54,6 +69,8 @@ impl PiRpcConnectionAdapter {
             binding: None,
             stop: None,
             expected_model: None,
+            models_discovered: false,
+            native_models: BTreeMap::new(),
             model_observation: None,
             abort_acknowledged: false,
             abort_requested: false,
@@ -113,6 +130,67 @@ impl PiRpcConnectionAdapter {
         }
     }
 
+    fn selection_id(provider: &str, model_id: &str) -> String {
+        format!("{provider}/{model_id}")
+    }
+
+    fn discover_models(&mut self, data: &Value) -> Result<()> {
+        let models = data["models"].as_array().ok_or_else(|| {
+            error(
+                "connection.pi_rpc.invalid_model_catalogue",
+                "Pi get_available_models returned no model list",
+            )
+        })?;
+        let mut discovered = BTreeMap::new();
+        for model in models {
+            let provider = model["provider"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    error(
+                        "connection.pi_rpc.invalid_model_catalogue",
+                        "Pi advertised a model without a provider",
+                    )
+                })?;
+            let model_id = model["id"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    error(
+                        "connection.pi_rpc.invalid_model_catalogue",
+                        "Pi advertised a model without an id",
+                    )
+                })?;
+            let selection_id = Self::selection_id(provider, model_id);
+            if discovered.contains_key(&selection_id) {
+                return Err(error(
+                    "connection.pi_rpc.duplicate_model",
+                    "Pi advertised a duplicate provider/model identity",
+                ));
+            }
+            let native_name = model["name"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(model_id);
+            discovered.insert(
+                selection_id.clone(),
+                PiNativeModel {
+                    provider: provider.to_owned(),
+                    model_id: model_id.to_owned(),
+                    advertised: NativeAdvertisedModel {
+                        roster_identity: None,
+                        model_id: selection_id,
+                        name: format!("{native_name} · {provider}"),
+                        description: model["description"].as_str().map(ToOwned::to_owned),
+                    },
+                },
+            );
+        }
+        self.native_models = discovered;
+        self.models_discovered = true;
+        Ok(())
+    }
+
     fn observe_state(&mut self, data: &Value) -> Result<String> {
         let id = data["sessionId"]
             .as_str()
@@ -155,18 +233,33 @@ impl PiRpcConnectionAdapter {
         // Model observation belongs to the native session even when no durable
         // AIKit policy selected it. Keep Pi's human name; a missing name is an
         // explicit absence, never a provider transport id posing as a title.
-        self.model_observation = data["model"]["id"]
+        let provider = data["model"]["provider"]
             .as_str()
-            .filter(|model| !model.trim().is_empty())
-            .map(|model| NativeModelObservation {
-                native_provider: data["model"]["provider"]
-                    .as_str()
-                    .filter(|s| !s.trim().is_empty())
-                    .map(str::to_owned),
+            .filter(|value| !value.trim().is_empty());
+        let model = data["model"]["id"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty());
+        self.model_observation = match (provider, model, self.native_models.is_empty()) {
+            (Some(provider), Some(model), false) => {
+                let selection_id = Self::selection_id(provider, model);
+                Some(NativeModelObservation {
+                    native_provider: Some(provider.to_owned()),
+                    current_model_id: selection_id,
+                    available_models: self.native_models.values().map(|model| model.advertised.clone()).collect(),
+                    reasoning_effort: None,
+                    standing: "Pi native get_available_models + get_state; configuration, not an inference receipt".into(),
+                })
+            }
+            (_, Some(model), _) => Some(NativeModelObservation {
+                native_provider: provider.map(str::to_owned),
                 current_model_id: model.into(),
                 available_models: vec![NativeAdvertisedModel {
-                    roster_identity: data["model"]["provider"].as_str().filter(|provider| !provider.trim().is_empty()).map(|provider| crate::agent_connection::NativeModelRosterIdentity {
-                        provider_ref: format!("provider:{provider}"), provider_native_id: model.to_owned(), harness_slug: Some("pi".into()),
+                    roster_identity: provider.map(|provider| {
+                        crate::agent_connection::NativeModelRosterIdentity {
+                            provider_ref: format!("provider:{provider}"),
+                            provider_native_id: model.to_owned(),
+                            harness_slug: Some("pi".into()),
+                        }
                     }),
                     model_id: model.into(),
                     name: data["model"]["name"]
@@ -178,7 +271,9 @@ impl PiRpcConnectionAdapter {
                 }],
                 reasoning_effort: None,
                 standing: "Pi native get_state; configuration, not an inference receipt".into(),
-            });
+            }),
+            _ => None,
+        };
         self.observed_session = Some(id.into());
         Ok(id.into())
     }
@@ -204,7 +299,12 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
     }
 
     fn initialize(&mut self) -> Result<ConnectionCommand> {
-        Ok(self.request("get_state", json!({}), Pending::Initialize))
+        let operation = if self.expected_model.is_some() {
+            "get_state"
+        } else {
+            "get_available_models"
+        };
+        Ok(self.request(operation, json!({}), Pending::Initialize))
     }
 
     fn open_session(&mut self, request: SessionOpenRequest) -> Result<ConnectionCommand> {
@@ -234,21 +334,22 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
                 "Pi context belongs to its native process launch; this adapter cannot change directories or MCP configuration",
             ));
         }
-        if self.observed_session.is_none() {
+        if !self.models_discovered && self.observed_session.is_none() {
             return Err(error(
                 "connection.pi_rpc.not_initialized",
                 "Read Pi native state before attachment",
             ));
         }
-        if request
-            .native_session_id
-            .as_ref()
-            .is_some_and(|id| Some(id) != self.observed_session.as_ref())
-        {
-            return Err(error(
-                "connection.pi_rpc.session_mismatch",
-                "Requested native Pi session does not match the observed process",
-            ));
+        if let (Some(requested), Some(observed)) = (
+            request.native_session_id.as_ref(),
+            self.observed_session.as_ref(),
+        ) {
+            if requested != observed {
+                return Err(error(
+                    "connection.pi_rpc.session_mismatch",
+                    "Requested native Pi session does not match the observed process",
+                ));
+            }
         }
         let canonical = request.agent_session.ok_or_else(|| {
             error(
@@ -301,8 +402,16 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
             }
             return match pending {
                 Pending::Initialize => {
-                    self.observe_state(&message["data"])?;
-                    Ok(vec![self.signal(ConnectionSignalKind::Status { message: "Pi native session observed; permission and resume faculties are not claimed".into() })])
+                    let status = if message["data"].get("models").is_some() {
+                        self.discover_models(&message["data"])?;
+                        "Pi native model catalogue observed; model configuration is not an inference receipt"
+                    } else {
+                        self.observe_state(&message["data"])?;
+                        "Pi native session observed; permission and resume faculties are not claimed"
+                    };
+                    Ok(vec![self.signal(ConnectionSignalKind::Status {
+                        message: status.into(),
+                    })])
                 }
                 Pending::Attach(canonical) => {
                     let id = self.observe_state(&message["data"])?;
@@ -316,6 +425,37 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
                     ])
                 }
                 Pending::Prompt => Ok(Vec::new()), // Acceptance is not completion.
+                Pending::SetModel {
+                    native_session_id,
+                    selection_id,
+                    provider,
+                    model_id,
+                } => {
+                    if message["command"].as_str() != Some("set_model")
+                        || message["data"]["provider"].as_str() != Some(provider.as_str())
+                        || message["data"]["id"].as_str() != Some(model_id.as_str())
+                    {
+                        return Err(error(
+                            "connection.pi_rpc.model_configuration_unconfirmed",
+                            "Pi set_model response did not confirm the exact requested provider/model",
+                        ));
+                    }
+                    self.require_session(&native_session_id)?;
+                    let mut observation = self.model_observation.clone().ok_or_else(|| {
+                        error(
+                            "connection.pi_rpc.model_selection_unsupported",
+                            "Pi resident session has no native model observation",
+                        )
+                    })?;
+                    observation.current_model_id = selection_id;
+                    self.model_observation = Some(observation.clone());
+                    if let Some(binding) = &mut self.binding {
+                        binding.model_observation = Some(observation.clone());
+                    }
+                    Ok(vec![self.signal(ConnectionSignalKind::ModelConfigured {
+                        model_observation: observation,
+                    })])
+                }
                 Pending::Control => {
                     if message["command"] == "abort" {
                         self.abort_acknowledged = true;
@@ -437,14 +577,62 @@ impl InteractiveAgentConnectionAdapter for PiRpcConnectionAdapter {
         ))
     }
 
+    fn session_model_controls(&self, native_session_id: &str) -> NativeModelControls {
+        if self.expected_model.is_some() {
+            return NativeModelControls::unavailable(
+                "Pi model is fixed by the admitted launch-time owner configuration",
+            );
+        }
+        if self
+            .binding
+            .as_ref()
+            .is_none_or(|binding| binding.native_session_id != native_session_id)
+        {
+            return NativeModelControls::unavailable(
+                "Pi model configuration requires the observed, bound native session",
+            );
+        }
+        match &self.model_observation {
+            Some(observation) if !observation.available_models.is_empty() => NativeModelControls {
+                model_selection: true,
+                reasoning_effort_selection: false,
+                reason: None,
+            },
+            _ => NativeModelControls::unavailable(
+                "Pi did not advertise any configured native models",
+            ),
+        }
+    }
+
     fn set_session_model(
         &mut self,
-        _native_session_id: &str,
-        _provider_model_id: &str,
+        native_session_id: &str,
+        provider_model_id: &str,
     ) -> Result<ConnectionCommand> {
-        Err(error(
-            "connection.pi_rpc.model_selection_unsupported",
-            "Pi model selection is a launch-time owner configuration; this resident protocol exposes no confirmed in-session selector",
+        self.require_session(native_session_id)?;
+        if self.expected_model.is_some() {
+            return Err(error(
+                "connection.pi_rpc.model_selection_unsupported",
+                "Pi model is fixed by the admitted launch-time owner configuration",
+            ));
+        }
+        let model = self.native_models.get(provider_model_id).ok_or_else(|| {
+            error(
+                "connection.pi_rpc.model_not_advertised",
+                "Requested model was not advertised by Pi get_available_models",
+            )
+        })?;
+        let provider = model.provider.clone();
+        let model_id = model.model_id.clone();
+        Ok(self.request(
+            "set_model",
+            json!({"provider": provider, "modelId": model_id}),
+            Pending::SetModel {
+                native_session_id: native_session_id.to_owned(),
+                selection_id: provider_model_id.to_owned(),
+                provider,
+                model_id,
+            },
         ))
     }
 

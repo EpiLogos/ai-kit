@@ -125,10 +125,8 @@ impl Drop for RestorePermissions {
 
 /// Snapshot only the real owner indexes built above. Reads run against private
 /// query copies, so even metadata rewrites on the originals are a regression.
-type OwnerIndexSnapshot = std::collections::BTreeMap<
-    std::path::PathBuf,
-    (u64, std::time::SystemTime, blake3::Hash),
->;
+type OwnerIndexSnapshot =
+    std::collections::BTreeMap<std::path::PathBuf, (u64, std::time::SystemTime, blake3::Hash)>;
 fn owner_indexes(world: &Path) -> OwnerIndexSnapshot {
     fn visit(path: &Path, rows: &mut OwnerIndexSnapshot) {
         for entry in fs::read_dir(path).unwrap() {
@@ -139,7 +137,11 @@ fn owner_indexes(world: &Path) -> OwnerIndexSnapshot {
                 let metadata = fs::metadata(&path).unwrap();
                 rows.insert(
                     path.clone(),
-                    (metadata.len(), metadata.modified().unwrap(), blake3::hash(&fs::read(path).unwrap())),
+                    (
+                        metadata.len(),
+                        metadata.modified().unwrap(),
+                        blake3::hash(&fs::read(path).unwrap()),
+                    ),
                 );
             }
         }
@@ -259,7 +261,10 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(repo.join(".gitnexus/lbug").is_file(), "native index missing for {name}");
+        assert!(
+            repo.join(".gitnexus/lbug").is_file(),
+            "native index missing for {name}"
+        );
     }
     let indexed_before = owner_indexes(&world);
     let registry_before = fs::read(gitnexus_home.join("registry.json")).unwrap();
@@ -420,11 +425,23 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     let direct_failure = service
         .knowledge_resolve(&parse_or_search_expression("").unwrap(), 256)
         .unwrap();
-    assert!(code_query_failed_for(&direct_failure, &world.join("Work/cedar")));
-    assert!(!code_query_failed_for(&direct_failure, &world.join("Work/larch")));
+    assert!(code_query_failed_for(
+        &direct_failure,
+        &world.join("Work/cedar")
+    ));
+    assert!(!code_query_failed_for(
+        &direct_failure,
+        &world.join("Work/larch")
+    ));
     let cross_failure = service.knowledge_search(": larch", 256).unwrap();
-    assert!(code_query_failed_for(&cross_failure, &world.join("Work/larch")));
-    assert!(!code_query_failed_for(&cross_failure, &world.join("Work/cedar")));
+    assert!(code_query_failed_for(
+        &cross_failure,
+        &world.join("Work/larch")
+    ));
+    assert!(!code_query_failed_for(
+        &cross_failure,
+        &world.join("Work/cedar")
+    ));
 
     // An unknown but syntactically valid Project names an empty Project
     // view. It cannot become a broad all-Projects query.
@@ -503,8 +520,14 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         "Work/larch/ProjectCentral/now/returns/sibling.md"
     ));
     let root_failure = root_service.knowledge_search("", 256).unwrap();
-    assert!(code_query_failed_for(&root_failure, &world.join("Work/cedar")));
-    assert!(code_query_failed_for(&root_failure, &world.join("Work/larch")));
+    assert!(code_query_failed_for(
+        &root_failure,
+        &world.join("Work/cedar")
+    ));
+    assert!(code_query_failed_for(
+        &root_failure,
+        &world.join("Work/larch")
+    ));
 
     let worktree_world = world.display().to_string();
     let worktree_binary = binary.clone();
@@ -683,16 +706,17 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         "ambiguous native Project identity must refuse a root-wide search"
     );
     assert_eq!(
-        owner_indexes(&world), indexed_before,
+        owner_indexes(&world),
+        indexed_before,
         "Knowledge reads changed a native owner index"
     );
     assert_eq!(
-        fs::read(gitnexus_home.join("registry.json")).unwrap(), registry_before,
+        fs::read(gitnexus_home.join("registry.json")).unwrap(),
+        registry_before,
         "Knowledge reads rewrote the native owner registry"
     );
     assert!(
         !world.join("Work/broken/.gitnexus").exists(),
         "read rebuilt the unavailable Project index"
     );
-
 }

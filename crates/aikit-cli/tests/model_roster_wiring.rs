@@ -98,11 +98,15 @@ fn read_only_resolution_discloses_empty_roster_without_demanding_a_winner() {
     // inspection operation must disclose it; selection must still refuse.
     let routes = serde_json::json!({"model_routes":[]});
     let policy = aikit_core::resource::ModelRankingPolicy::CheapestEligible;
-    let reading = service.read_model_roster(&routes, "desktop-chat", policy).unwrap();
+    let reading = service
+        .read_model_roster(&routes, "desktop-chat", policy)
+        .unwrap();
     assert_eq!(reading["schema"], "aikit.model-roster-reading/v1");
     assert_eq!(reading["roster"]["entries"], serde_json::json!([]));
     assert_eq!(reading["route_facts"], serde_json::json!([]));
-    assert!(service.resolve_model(&routes, "desktop-chat", policy).is_err());
+    assert!(service
+        .resolve_model(&routes, "desktop-chat", policy)
+        .is_err());
 }
 
 #[test]
@@ -114,8 +118,17 @@ fn read_only_resolution_uses_real_composition_without_opening_an_encounter() {
     let home = tmp.path().join("home");
     let service = service(&home, &root);
     let composed = service.compose_selected_plan(None).unwrap();
-    let reading = service.read_model_roster(&composed, "desktop-chat", aikit_core::resource::ModelRankingPolicy::CheapestEligible).unwrap();
+    let reading = service
+        .read_model_roster(
+            &composed,
+            "desktop-chat",
+            aikit_core::resource::ModelRankingPolicy::CheapestEligible,
+        )
+        .unwrap();
     assert_eq!(reading["schema"], "aikit.model-roster-reading/v1");
     assert!(reading["roster"]["entries"].is_array());
-    assert!(!home.join("state/encounters").exists(), "read-only ranking must not start or journal a session");
+    assert!(
+        !home.join("state/encounters").exists(),
+        "read-only ranking must not start or journal a session"
+    );
 }

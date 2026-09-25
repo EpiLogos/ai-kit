@@ -848,7 +848,12 @@ impl<R: CommandRunner> BkmrStoreSearchProvider<R> {
         None
     }
 
-    fn run_in_store(&self, store: &BkmrStore, args: &[String], code: &'static str) -> Result<String> {
+    fn run_in_store(
+        &self,
+        store: &BkmrStore,
+        args: &[String],
+        code: &'static str,
+    ) -> Result<String> {
         let snapshot = snapshot::Snapshot::read_only(&store.path)?;
         let mut argv = vec![
             self.binary.clone(),
@@ -988,11 +993,7 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrStoreSearchProvider<R> {
         }
         let stdout = self.run_in_store(
             store,
-            &[
-                "show".into(),
-                id.to_string(),
-                "--json".into(),
-            ],
+            &["show".into(), id.to_string(), "--json".into()],
             "knowledge.bkmr_stores_read_failed",
         )?;
         let records = json_records(&stdout)?;
@@ -1326,7 +1327,8 @@ mod tests {
     fn sqlite_store(directory: &Path, name: &str) -> BkmrStore {
         let path = directory.join(format!("{name}.db"));
         let db = rusqlite::Connection::open(&path).unwrap();
-        db.execute_batch("CREATE TABLE bookmarks (id INTEGER PRIMARY KEY);").unwrap();
+        db.execute_batch("CREATE TABLE bookmarks (id INTEGER PRIMARY KEY);")
+            .unwrap();
         store(name, &path)
     }
 
@@ -1427,11 +1429,10 @@ mod tests {
     fn a_broken_store_is_skipped_and_named_while_the_others_answer() {
         let directory = tempfile::tempdir().unwrap();
         let healthy = sqlite_store(directory.path(), "kept");
-        let runner = store_cli_scripted()
-            .on(
-                "--db",
-                store_record_json(7, "Kept", "reachable content").as_str(),
-            );
+        let runner = store_cli_scripted().on(
+            "--db",
+            store_record_json(7, "Kept", "reachable content").as_str(),
+        );
         let provider = BkmrStoreSearchProvider::connect(
             runner,
             "bkmr",
