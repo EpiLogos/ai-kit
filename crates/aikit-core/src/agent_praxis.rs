@@ -854,7 +854,14 @@ enum SurfaceReading {
 }
 
 const SCOPE_AWAY_MARKERS: [&str; 8] = [
-    "no", "not", "without", "never", "except", "excluding", "avoid", "skip",
+    "no",
+    "not",
+    "without",
+    "never",
+    "except",
+    "excluding",
+    "avoid",
+    "skip",
 ];
 
 /// True when the term at `index` is named only to be scoped away. A marker
@@ -902,7 +909,9 @@ fn read_surface(terms: &BTreeSet<String>, tokens: &[String]) -> SurfaceReading {
 /// first (the act's stated intent), then the invoked Skill's description. A
 /// methodology triggers only positively; a field named only to be scoped away
 /// keeps the methodology carried, visibly.
-pub fn decide_methodology_instantiation(facts: &SkillInvocationFacts) -> MethodologyInstantiationDecision {
+pub fn decide_methodology_instantiation(
+    facts: &SkillInvocationFacts,
+) -> MethodologyInstantiationDecision {
     let skill_form = praxis_form(&facts.skill_description);
     let description_tokens = tokenize(praxis_payload(&facts.skill_description));
     let mut undertaking_tokens = Vec::new();
@@ -1141,17 +1150,29 @@ mod tests {
         });
         let disclosure = disclose_agent_praxis(&input);
         let answer = &disclosure.answers.where_am_i;
-        assert!(answer.contains("NOW location worktrees/env-2/o-i"), "{answer}");
+        assert!(
+            answer.contains("NOW location worktrees/env-2/o-i"),
+            "{answer}"
+        );
         assert!(answer.contains("machine"), "{answer}");
         assert!(answer.contains("project:O-I"), "{answer}");
         assert!(answer.contains("development seat"), "{answer}");
-        assert!(answer.contains("a landed lane releases its seat"), "{answer}");
+        assert!(
+            answer.contains("a landed lane releases its seat"),
+            "{answer}"
+        );
 
         input.now_location.as_mut().unwrap().primary_on_main = Some(true);
         input.now_location.as_mut().unwrap().branch = Some("main".into());
         let disclosure = disclose_agent_praxis(&input);
-        assert!(disclosure.answers.where_am_i.contains("the project's primary checkout"),
-            "{}", disclosure.answers.where_am_i);
+        assert!(
+            disclosure
+                .answers
+                .where_am_i
+                .contains("the project's primary checkout"),
+            "{}",
+            disclosure.answers.where_am_i
+        );
 
         // Without a NOW location the answer stays the world-only reading.
         input.now_location = None;
@@ -1483,7 +1504,10 @@ mod tests {
         let decision = decide(&facts);
         // The unclassifiable entry is named with its reason.
         assert_eq!(decision.unclassified.len(), 1);
-        assert_eq!(decision.unclassified[0].id, "skill/central/vision-authoring");
+        assert_eq!(
+            decision.unclassified[0].id,
+            "skill/central/vision-authoring"
+        );
         assert!(decision.unclassified[0].reason.contains("METHODOLOGY"));
         // A bare prefix still classifies as Methodology; it declares no field,
         // so it stays carried for no field overlap — never fabricated intent.
