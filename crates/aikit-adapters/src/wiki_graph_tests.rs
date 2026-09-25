@@ -11,6 +11,7 @@ fn hit(reference: &str) -> KnowledgeSearchHit {
         score: 1.0,
         snippet: String::new(),
         provider: ProviderRef::parse("provider/semantic-wiki").unwrap(),
+        corroborated_by: Vec::new(),
         authority: SourceAuthority::Authored,
         ranking: None,
     }
