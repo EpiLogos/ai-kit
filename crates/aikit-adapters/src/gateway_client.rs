@@ -16,10 +16,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use aikit_core::resource::ResourceRef;
 use aikit_core::{AikitError, Result};
 
 use crate::gateway_runtime::GatewayResponseEnvelope;
-use crate::gateway_runtime::{GatewayCommand, GatewayRequestEnvelope, GatewayResponse};
+use crate::gateway_runtime::{
+    GatewayCommand, GatewayReplay, GatewayRequestEnvelope, GatewayResponse, GatewayStreamEvent,
+};
 use crate::gateway_service::{base64_encode, sha1, WEBSOCKET_GUID};
 
 pub const GATEWAY_CLIENT_VERSION: &str = "aikit.gateway-client/v1";
@@ -459,6 +462,241 @@ fn frame_io_error(context: &'static str) -> impl FnOnce(io::Error) -> AikitError
     }
 }
 
+// ---------------------------------------------------------------------------
+// Live subscription
+// ---------------------------------------------------------------------------
+
+/// One live subscription: a persistent carrier connection that answered a
+/// [`GatewayCommand::Subscribe`] with its replay payload and now receives one
+/// pushed frame per subsequently appended stream event until the carrier
+/// closes. The gateway keeps no client affinity, so a consumer that returns
+/// re-subscribes from its last seen sequence — the replay then covers exactly
+/// the gap, so no appended event is missed and none is repeated.
+pub struct GatewaySubscription {
+    replay: GatewayReplay,
+    #[cfg(unix)]
+    reader: BufReader<std::os::unix::net::UnixStream>,
+    /// Bytes of a push line read before its newline arrived, so a read split
+    /// across two waits can never be decoded as two frames. A complete line is
+    /// never carried here.
+    carry: Option<String>,
+}
+
+impl std::fmt::Debug for GatewaySubscription {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GatewaySubscription")
+            .field("replay", &self.replay)
+            .field("pending_line_fragment", &self.carry.as_ref().map(|carry| carry.len()))
+            .finish_non_exhaustive()
+    }
+}
+
+/// One bounded wait on a live subscription.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GatewaySubscriptionRead {
+    /// A stream event appended after the subscribe's replay answer.
+    Event(GatewayStreamEvent),
+    /// Nothing arrived within the wait budget; the carrier is still up as far
+    /// as this read can tell.
+    Idle,
+    /// The carrier closed. The consumer must re-subscribe from its last seen
+    /// sequence; nothing it sent is ever re-sent by this client.
+    Closed,
+}
+
+/// Subscribe to one stream's journal over the given carrier: the first
+/// response is the same replay payload a [`GatewayCommand::Replay`] gets
+/// (bounded by `after_sequence` and `limit`), and the returned subscription
+/// then yields every subsequently appended event. The persistent carrier is
+/// the owner-only Unix socket — the well-known same-host endpoint the
+/// terminal surface addresses; network carriers remain one-shot queries.
+#[cfg(unix)]
+pub fn gateway_subscribe(
+    socket_path: &std::path::Path,
+    stream_ref: ResourceRef,
+    after_sequence: u64,
+    limit: usize,
+) -> Result<GatewaySubscription> {
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket_path).map_err(|error| {
+        AikitError::new(
+            "agency_gateway_client.unix_connect",
+            format!(
+                "connect gateway socket {}: {error}",
+                socket_path.display()
+            ),
+        )
+    })?;
+    stream
+        .set_read_timeout(Some(CARRIER_TIMEOUT))
+        .map_err(|error| {
+            AikitError::new(
+                "agency_gateway_client.unix_timeout",
+                format!("set gateway socket read timeout: {error}"),
+            )
+        })?;
+    let request = GatewayRequestEnvelope {
+        request_id: Some(format!("subscribe-{stream_ref}")),
+        command: GatewayCommand::Subscribe {
+            stream_ref: stream_ref.clone(),
+            after_sequence,
+            limit,
+        },
+    };
+    let encoded = serde_json::to_string(&request).map_err(|error| {
+        AikitError::new(
+            "agency_gateway_client.request_encode",
+            format!("encode gateway subscribe: {error}"),
+        )
+    })?;
+    write_request_line(&mut stream, &encoded)?;
+    let mut reader = BufReader::new(stream);
+    let envelope = read_response_line(&mut reader)?;
+    if !envelope.ok {
+        return Err(envelope
+            .error
+            .map(|error| {
+                AikitError::new(
+                    "agency_gateway_client.gateway_refused",
+                    format!("gateway refused the subscribe: {}", error.message),
+                )
+                .with("gateway_error_code", error.code)
+            })
+            .unwrap_or_else(|| {
+                AikitError::new(
+                    "agency_gateway_client.envelope_refused",
+                    "gateway returned a failure envelope without an error block",
+                )
+            }));
+    }
+    let replay = match envelope.response {
+        Some(GatewayResponse::Replay { replay }) => replay,
+        _ => {
+            return Err(AikitError::new(
+                "agency_gateway_client.unexpected_response",
+                "gateway answered the subscribe with something other than its replay payload",
+            ))
+        }
+    };
+    Ok(GatewaySubscription {
+        replay,
+        reader,
+        carry: None,
+    })
+}
+
+impl GatewaySubscription {
+    /// The replay payload the subscribe was answered with: every event after
+    /// the requested cursor, up to the limit, plus the stream's last sequence.
+    pub fn replay(&self) -> &GatewayReplay {
+        &self.replay
+    }
+
+    /// Take the replay payload, consuming the subscription's answer.
+    pub fn into_replay(self) -> GatewayReplay {
+        self.replay
+    }
+
+    /// Wait up to `wait` for the next pushed event. `GatewaySubscriptionRead::Idle`
+    /// means the wait expired with nothing to deliver; `Closed` means the
+    /// carrier ended and the consumer must re-subscribe from the last sequence
+    /// it saw. A failure envelope or an undecodable frame is an error, not an
+    /// event — the connection is no longer speaking the protocol.
+    #[cfg(unix)]
+    pub fn next_event(&mut self, wait: Duration) -> Result<GatewaySubscriptionRead> {
+        self.reader
+            .get_ref()
+            .set_read_timeout(Some(wait))
+            .map_err(|error| {
+            AikitError::new(
+                "agency_gateway_client.unix_timeout",
+                format!("set gateway socket read timeout: {error}"),
+            )
+        })?;
+        let mut line = self.carry.take().unwrap_or_default();
+        let before = line.len();
+        let read = match self.reader.read_line(&mut line) {
+            Ok(count) => count,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+                ) =>
+            {
+                // Whatever arrived before the wait expired was a partial
+                // line; keep it so the next wait completes the frame.
+                if line.len() > before {
+                    self.carry = Some(line);
+                }
+                return Ok(GatewaySubscriptionRead::Idle);
+            }
+            Err(error) => {
+                return Err(AikitError::new(
+                    "agency_gateway_client.read",
+                    format!("read gateway push: {error}"),
+                ))
+            }
+        };
+        if read == 0 {
+            if !line.is_empty() {
+                // A trailing fragment without a newline dies with the
+                // carrier: an unterminated frame was never a whole response.
+                return Ok(GatewaySubscriptionRead::Closed);
+            }
+            return Ok(GatewaySubscriptionRead::Closed);
+        }
+        match line.find('\n') {
+            Some(position) => {
+                let rest = line[position + 1..].to_string();
+                self.carry = if rest.is_empty() { None } else { Some(rest) };
+                self.decode_push(&line[..position])
+            }
+            None => {
+                self.carry = Some(line);
+                Ok(GatewaySubscriptionRead::Idle)
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn decode_push(&self, line: &str) -> Result<GatewaySubscriptionRead> {
+        let envelope: GatewayResponseEnvelope = serde_json::from_str(line).map_err(|error| {
+            AikitError::new(
+                "agency_gateway_client.response_decode",
+                format!("decode gateway push: {error}"),
+            )
+        })?;
+        if !envelope.ok {
+            return Err(envelope
+                .error
+                .map(|error| {
+                    AikitError::new(
+                        "agency_gateway_client.gateway_refused",
+                        format!("gateway pushed a failure envelope: {}", error.message),
+                    )
+                    .with("gateway_error_code", error.code)
+                })
+                .unwrap_or_else(|| {
+                    AikitError::new(
+                        "agency_gateway_client.envelope_refused",
+                        "gateway pushed a failure envelope without an error block",
+                    )
+                }));
+        }
+        match envelope.response {
+            Some(GatewayResponse::StreamEvent { event, .. }) => {
+                Ok(GatewaySubscriptionRead::Event(event))
+            }
+            _ => Err(AikitError::new(
+                "agency_gateway_client.unexpected_response",
+                "gateway pushed something other than a stream event on the subscription",
+            )),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,5 +837,121 @@ mod tests {
 
         gateway_request(&target, GatewayCommand::Shutdown, None).unwrap();
         service.join().unwrap().unwrap();
+    }
+
+    /// The subscription client against the real service: the subscribe is
+    /// answered with the replay payload, pushed events arrive on the same
+    /// connection, a quiet wait is `Idle`, the carrier closing is `Closed`,
+    /// and a re-subscribe from the last seen sequence covers the gap with no
+    /// duplicates.
+    #[cfg(unix)]
+    #[test]
+    fn subscription_client_replays_pushes_and_reports_idle_and_closed() {
+        use crate::gateway_connector_pump::tests::{fixture_entry, FixtureFactory, FixtureInner};
+        use crate::gateway_runtime::GatewayStreamEvent;
+        use crate::gateway_service::{
+            run_gateway_service_with_hooks, GatewayServiceConfig, GatewayServiceHooks,
+        };
+        use std::sync::mpsc;
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("gateway.sock");
+        let state = root.path().join("gateway.json");
+        {
+            let mut gateway = AgencyGateway::new(r("agency-gateway/test"));
+            crate::gateway_connector_pump::tests::seed_binding(&mut gateway);
+            crate::gateway_service::persist_gateway_state(&gateway, Some(&state)).unwrap();
+        }
+        let inner = FixtureInner::new();
+        let config = GatewayServiceConfig {
+            websocket_bind: None,
+            websocket_bearer_token: None,
+            unix_socket: Some(socket.clone()),
+            state_file: Some(state.clone()),
+            max_frame_bytes: crate::gateway_service::DEFAULT_GATEWAY_MAX_FRAME_BYTES,
+        };
+        let hooks = GatewayServiceHooks {
+            ticks: None,
+            occupancy: None,
+            connectors: vec![Box::new(FixtureFactory {
+                entry: fixture_entry(),
+                inner: Arc::clone(&inner),
+            })],
+        };
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            done_tx
+                .send(run_gateway_service_with_hooks(
+                    AgencyGateway::new(r("agency-gateway/test")),
+                    config,
+                    hooks,
+                ))
+                .unwrap()
+        });
+        wait_until(5, || socket.exists());
+
+        // One event appends before anyone subscribes.
+        inner.push_text("one");
+        wait_until(10, || {
+            crate::gateway_service::restore_gateway_state(
+                AgencyGateway::new(r("agency-gateway/test")),
+                Some(&state),
+            )
+            .unwrap()
+            .snapshot()
+            .streams
+            .iter()
+            .any(|stream| stream.next_sequence > 1)
+        });
+
+        let stream_ref = r("actuation-stream/fixture");
+        let mut subscription = gateway_subscribe(&socket, stream_ref.clone(), 0, 100).unwrap();
+        let replay = subscription.replay();
+        assert_eq!(replay.events.len(), 1, "the replay covers the journal");
+        assert_eq!(replay.events[0].sequence, 1);
+        assert_eq!(replay.stream_last_sequence, 1);
+
+        // A quiet wait answers Idle, never an invented event.
+        assert_eq!(
+            subscription.next_event(Duration::from_millis(50)).unwrap(),
+            GatewaySubscriptionRead::Idle
+        );
+
+        // A live append is pushed as its own frame.
+        inner.push_text("two");
+        let pushed = loop {
+            match subscription.next_event(Duration::from_secs(1)).unwrap() {
+                GatewaySubscriptionRead::Event(event) => break event,
+                GatewaySubscriptionRead::Idle => continue,
+                GatewaySubscriptionRead::Closed => panic!("the carrier closed before the push"),
+            }
+        };
+        let GatewayStreamEvent { sequence, event } = pushed;
+        assert_eq!(sequence, 2);
+        assert_eq!(event["content"], "two");
+
+        // The carrier closing is reported as Closed: a consumer re-subscribes
+        // from its last seen sequence and the replay covers the gap.
+        let mut stop = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        use std::io::Write as _;
+        writeln!(
+            stop,
+            "{}",
+            serde_json::json!({"command": {"type": "shutdown"}})
+        )
+        .unwrap();
+        drop(stop);
+        let closed = loop {
+            match subscription.next_event(Duration::from_secs(1)).unwrap() {
+                GatewaySubscriptionRead::Closed => break true,
+                GatewaySubscriptionRead::Idle => continue,
+                GatewaySubscriptionRead::Event(_) => break false,
+            }
+        };
+        assert!(closed, "a shutdown carrier must report Closed, not events");
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
     }
 }

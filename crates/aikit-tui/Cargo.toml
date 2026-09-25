@@ -16,6 +16,7 @@ needless_borrows_for_generic_args = "allow"
 [dependencies]
 aikit-core = { workspace = true }
 aikit-store = { workspace = true }
+aikit-adapters = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
