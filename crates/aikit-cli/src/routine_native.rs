@@ -50,6 +50,8 @@ const WORLD: &str = "central.world";
 const NOW_ROLLOVER: &str = "projectcentral.now.rollover";
 const FACTORY_COLLECT: &str = "factory:action/telemetry.collect";
 const FACTORY_FIELD: &str = "factory:action/telemetry.field";
+const FILE_MAP_SEARCH: &str = "central.file-map.search";
+const FILE_MAP_REFRESH: &str = "central.file-map.refresh";
 
 /// A native body AIKit knows how to execute. Adding one is a code change and
 /// a review, never a capsule's self-declaration.
@@ -57,6 +59,7 @@ const FACTORY_FIELD: &str = "factory:action/telemetry.field";
 #[serde(rename_all = "kebab-case")]
 pub enum NativeBody {
     CentralDayRollover,
+    CentralFileMapRefresh,
     FactoryCollect,
     FactoryFieldRefresh,
 }
@@ -65,6 +68,7 @@ impl NativeBody {
     fn parse(raw: &str) -> Option<Self> {
         match raw {
             "central-day-rollover" => Some(Self::CentralDayRollover),
+            "central-file-map-refresh" => Some(Self::CentralFileMapRefresh),
             "factory-collect" => Some(Self::FactoryCollect),
             "factory-field-refresh" => Some(Self::FactoryFieldRefresh),
             _ => None,
@@ -74,6 +78,7 @@ impl NativeBody {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::CentralDayRollover => "central-day-rollover",
+            Self::CentralFileMapRefresh => "central-file-map-refresh",
             Self::FactoryCollect => "factory-collect",
             Self::FactoryFieldRefresh => "factory-field-refresh",
         }
@@ -83,12 +88,13 @@ impl NativeBody {
     fn required_actions(self) -> &'static [&'static str] {
         match self {
             Self::CentralDayRollover => &[TIME_POLICY, DAY_ENSURE, WORLD, NOW_ROLLOVER],
+            Self::CentralFileMapRefresh => &[FILE_MAP_SEARCH, FILE_MAP_REFRESH, WORLD],
             Self::FactoryCollect | Self::FactoryFieldRefresh => &[],
         }
     }
     fn required_factory_actions(self) -> &'static [&'static str] {
         match self {
-            Self::CentralDayRollover => &[],
+            Self::CentralDayRollover | Self::CentralFileMapRefresh => &[],
             Self::FactoryCollect => &[FACTORY_COLLECT, FACTORY_FIELD],
             Self::FactoryFieldRefresh => &[FACTORY_FIELD],
         }
@@ -152,7 +158,7 @@ impl NativeMethod {
             .and_then(NativeBody::parse)
             .ok_or_else(|| {
                 metadata_error(format!(
-                    "{}: native body is missing or not one AIKit executes (central-day-rollover, factory-collect, factory-field-refresh)",
+                    "{}: native body is missing or not one AIKit executes (central-day-rollover, central-file-map-refresh, factory-collect, factory-field-refresh)",
                     capsule.id
                 ))
             })?;
@@ -1002,6 +1008,148 @@ impl NativeActionRunner {
     }
 }
 
+/// The scope world a file-map absence names. Search reports either
+/// `"<world>: map not initialized"` or a stale source ref of the form
+/// `central:source:<world>:<path>: stale index; refresh required`.
+fn absence_world(absence: &str) -> Option<String> {
+    if let Some(world) = absence.strip_suffix(": map not initialized") {
+        return Some(world.to_owned());
+    }
+    let rest = absence.strip_prefix("central:source:")?;
+    if rest.starts_with("control:root:") {
+        return Some("control:root".to_owned());
+    }
+    let name = rest.strip_prefix("project:")?;
+    let end = name.find(':')?;
+    Some(format!("project:{}", &name[..end]))
+}
+
+impl NativeActionRunner {
+    /// Environmental file-map hygiene: probe every participating scope for
+    /// uninitialized or stale persistent maps, then refresh exactly those
+    /// scopes. Derived-state maintenance only — no source is registered or
+    /// withdrawn, no knowledge is compiled, no model runs.
+    fn file_map_refresh(&self, run: &mut Run<'_>) -> (RunStatus, Value) {
+        // `limit: 0` short-circuits Central's search before it inspects any
+        // scope, so the probe asks for one hit and reads only the absences.
+        let probe = match run.call(
+            FILE_MAP_SEARCH,
+            json!({ "federated": true, "limit": 1 }),
+        ) {
+            Ok(probe) => probe,
+            Err(error) => {
+                return (
+                    RunStatus::Failed,
+                    json!({ "stage": "probe", "error": error.to_string() }),
+                )
+            }
+        };
+        // `run.call` hands back the Action envelope's data; a file-map result
+        // lives one level down, under `result`.
+        let mut worlds: Vec<String> = probe
+            .get("result")
+            .and_then(|result| result.get("absences"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|absence| absence.as_str().and_then(absence_world))
+            .collect();
+        worlds.sort();
+        worlds.dedup();
+        let names: Vec<String> = match run.call(WORLD, json!({})) {
+            Ok(world) => world
+                .pointer("/work/projects")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|project| {
+                    project
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect(),
+            // World spelling stays recoverable: fall back to the raw world
+            // name and let the per-scope refresh record what happened.
+            Err(_) => Vec::new(),
+        };
+        let mut scopes = Vec::new();
+        let mut failed = false;
+        if worlds.iter().any(|world| world == "control:root") {
+            let (outcome, ok) = refresh_scope(run, None);
+            failed |= !ok;
+            scopes.push(outcome);
+        }
+        for world in worlds.iter().filter(|world| world.starts_with("project:")) {
+            let world_name = world.trim_start_matches("project:");
+            // World refs fold case; `central.world` is the authority for the
+            // spelling a refresh accepts (Work/Quaternal-Logic, not
+            // `project:quaternal-logic`).
+            let name = names
+                .iter()
+                .find(|name| name.to_lowercase() == world_name)
+                .cloned()
+                .unwrap_or_else(|| world_name.to_owned());
+            let (outcome, ok) = refresh_scope(run, Some(&name));
+            failed |= !ok;
+            scopes.push(outcome);
+        }
+        (
+            if failed {
+                RunStatus::Failed
+            } else {
+                RunStatus::Completed
+            },
+            json!({
+                "stage": "complete",
+                "absences": probe.get("result").and_then(|result| result.get("absences")),
+                "scopes": scopes,
+                "not_done": [
+                    "no source registered or withdrawn",
+                    "no knowledge compiled",
+                    "no Return recognised",
+                    "no model or encounter spawned",
+                ],
+            }),
+        )
+    }
+}
+
+fn refresh_scope(run: &mut Run<'_>, project: Option<&str>) -> (Value, bool) {
+    let world = project
+        .map(|project| format!("project:{project}"))
+        .unwrap_or_else(|| "control:root".to_owned());
+    let input = match project {
+        Some(project) => json!({ "project": project, "embeddings": true }),
+        None => json!({ "embeddings": true }),
+    };
+    match run.call(FILE_MAP_REFRESH, input) {
+        Ok(report) => {
+            let result = report.get("result").unwrap_or(&report);
+            (
+                json!({
+                    "world": world,
+                    "project": project,
+                    "outcome": "refreshed",
+                    "entries": result.get("entries"),
+                    "changes": result.get("changes").and_then(Value::as_array).map(Vec::len),
+                    "diagnostics": result.get("diagnostics"),
+                }),
+                true,
+            )
+        }
+        Err(error) => (
+            json!({
+                "world": world,
+                "project": project,
+                "outcome": "failed",
+                "error": error.to_string(),
+            }),
+            false,
+        ),
+    }
+}
+
 impl RoutineRunner for NativeActionRunner {
     fn run(&self, request: RoutineRunRequest) -> RoutineRunOutcome {
         let Some(method) = request.native.clone() else {
@@ -1019,6 +1167,7 @@ impl RoutineRunner for NativeActionRunner {
         };
         let (status, result) = match method.body {
             NativeBody::CentralDayRollover => self.day_rollover(&mut run),
+            NativeBody::CentralFileMapRefresh => self.file_map_refresh(&mut run),
             NativeBody::FactoryCollect => self.factory_sensing(&mut run, true),
             NativeBody::FactoryFieldRefresh => self.factory_sensing(&mut run, false),
         };
