@@ -1857,6 +1857,7 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                     "git_commit": snapshot.git_commit,
                     "owner_revision": snapshot.owner_revision,
                     "skills": snapshot.skills.len(),
+                    "rejected": snapshot.rejected,
                 }),
                 vec![],
             ))
@@ -1889,6 +1890,8 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                     "active_skills": status.active.as_ref().map(|record| record.skills.len()),
                     "candidate_retired_skills": retired(&status.candidate),
                     "active_retired_skills": retired(&status.active),
+                    "candidate_rejected": status.candidate.as_ref().map(|record| record.rejected.clone()),
+                    "active_rejected": status.active.as_ref().map(|record| record.rejected.clone()),
                     "rollback_points": status.state.history,
                 }),
                 vec![],

@@ -104,6 +104,19 @@ pub struct SnapshotSkill {
     pub retirement_reason: Option<String>,
 }
 
+/// A candidate skill the snapshot refused, with the machine code and message of
+/// the refusal. Only Git and plain Directory sources tolerate rejections — one
+/// broken tree must not take every unrelated skill down with it. Control-ground
+/// and Central sources refuse the whole sync instead and never write a snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RejectedSkill {
+    /// The refused skill's directory, relative to the scan root (`.` for the
+    /// scan root itself).
+    pub path: String,
+    pub code: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotRecord {
     pub schema: u32,
@@ -114,6 +127,11 @@ pub struct SnapshotRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_revision: Option<String>,
     pub skills: Vec<SnapshotSkill>,
+    /// Candidate skills refused by validation. Absent from the record — on
+    /// disk and in the digest — when empty, so snapshots without rejections
+    /// keep the identity they have always had.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected: Vec<RejectedSkill>,
 }
 
 #[derive(Debug, Clone)]
@@ -376,12 +394,6 @@ fn build_snapshot(
     staging: &Path,
 ) -> Result<SnapshotRecord> {
     let roots = discover_skills(scan_root)?;
-    if roots.is_empty() && !spec.kind.control_ground() {
-        return Err(AikitError::new(
-            "source.no_skills",
-            format!("skill source `{}` contains no valid Agent Skills", spec.id),
-        ));
-    }
     let mut hasher = blake3::Hasher::new();
     let owner_revision = if matches!(&spec.kind, SourceKind::Central { .. }) {
         let receipt: serde_json::Value = serde_json::from_slice(
@@ -404,14 +416,34 @@ fn build_snapshot(
         hash_field(&mut hasher, commit);
     }
     let mut skills = Vec::new();
+    let mut rejected = Vec::new();
     let mut ids = BTreeSet::new();
 
     for root in roots {
         reject_symlinks(&root)?;
-        let skill = agent_skills::validate(&root)?;
+        let relative = root.strip_prefix(scan_root).unwrap_or(Path::new(""));
+        let relative_text = path_text(relative);
+        let relative_text = if relative_text.is_empty() {
+            ".".to_string()
+        } else {
+            relative_text
+        };
+        // Control-ground and Central sources refuse the whole sync at the
+        // first invalid skill — their standing is authored, not discovered.
+        // Git and plain Directory sources record the refusal and keep the
+        // valid remainder: a repository can carry an unrelated broken tree
+        // beside the skills that are wanted.
+        let strict = spec.kind.control_ground();
+        let skill = match agent_skills::validate(&root) {
+            Ok(skill) => skill,
+            Err(error) => {
+                record_rejection(strict, &relative_text, &mut rejected, &mut hasher, error)?;
+                continue;
+            }
+        };
         // A Control-ground source reads the sibling contract beside each skill;
         // every other source never opens skill.json at all.
-        let control = if spec.kind.control_ground() {
+        let control = if strict {
             let directory_name = root
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -423,14 +455,16 @@ fn build_snapshot(
         } else {
             None
         };
-        let relative = root.strip_prefix(scan_root).unwrap_or(Path::new(""));
         let capsule_tail = if relative.as_os_str().is_empty() {
             skill.name.clone()
         } else {
             path_text(relative)
         };
         let id = format!("skill/{}/{capsule_tail}", spec.id);
-        aikit_core::CapsuleId::parse(&id)?;
+        if let Err(error) = aikit_core::CapsuleId::parse(&id) {
+            record_rejection(strict, &relative_text, &mut rejected, &mut hasher, error)?;
+            continue;
+        }
         if !ids.insert(id.clone()) {
             return Err(AikitError::new(
                 "source.skill_collision",
@@ -505,6 +539,9 @@ fn build_snapshot(
         });
     }
     skills.sort_by(|left, right| left.id.cmp(&right.id));
+    if skills.is_empty() && !spec.kind.control_ground() {
+        return Err(no_valid_skills(spec, &rejected));
+    }
     let digest = hasher.finalize().to_hex().to_string();
     let record = SnapshotRecord {
         schema: 1,
@@ -513,9 +550,69 @@ fn build_snapshot(
         git_commit,
         owner_revision,
         skills,
+        rejected,
     };
     write_toml_atomic(&staging.join(SNAPSHOT_FILE), &record)?;
     Ok(record)
+}
+
+/// The refusal for a tolerated source whose candidates all failed: every
+/// rejection is named, and the way out is scoping the source to the tree that
+/// actually holds the skills.
+fn no_valid_skills(spec: &SourceSpec, rejected: &[RejectedSkill]) -> AikitError {
+    let message = if rejected.is_empty() {
+        format!(
+            "skill source `{}` contains no Agent Skills; a snapshot needs directories holding \
+             a {} — point the source at the tree that contains them \
+             (`--root <dir>` for a Git source)",
+            spec.id,
+            agent_skills::SKILL_FILE,
+        )
+    } else {
+        let mut rendered = format!(
+            "skill source `{}` contains no valid Agent Skills; all {} candidates were rejected:",
+            spec.id,
+            rejected.len(),
+        );
+        for rejection in rejected {
+            rendered.push_str(&format!(
+                "\n  - {}: [{}] {}",
+                rejection.path, rejection.code, rejection.message
+            ));
+        }
+        rendered.push_str(
+            "\nFix the named skills, or scope the source to the valid tree \
+             (`--root <dir>` for a Git source).",
+        );
+        rendered
+    };
+    AikitError::new("source.no_skills", message)
+}
+
+/// Either refuse the whole sync (Control-ground and Central sources) or record
+/// the refusal as part of the snapshot — the rejected path, code and message
+/// participate in the digest so a rejection that appears or disappears is a new
+/// candidate, never a stale record under an old name.
+fn record_rejection(
+    strict: bool,
+    path: &str,
+    rejected: &mut Vec<RejectedSkill>,
+    hasher: &mut blake3::Hasher,
+    error: AikitError,
+) -> Result<()> {
+    if strict {
+        return Err(error);
+    }
+    hash_field(hasher, "rejected");
+    hash_field(hasher, path);
+    hash_field(hasher, error.code());
+    hash_field(hasher, error.message());
+    rejected.push(RejectedSkill {
+        path: path.to_string(),
+        code: error.code().to_string(),
+        message: error.message().to_string(),
+    });
+    Ok(())
 }
 
 pub fn promote(
