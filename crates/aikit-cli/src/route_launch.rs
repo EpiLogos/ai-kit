@@ -92,6 +92,19 @@ pub(crate) enum RouteSelection<'a> {
     NoneViable(Vec<String>),
 }
 
+/// The token a harness's own CLI accepts. Catalogue identity stays
+/// `provider:z-ai`; Pi's model list and `--provider` flag say `zai`.
+fn harness_argv_provider(harness: &str, provider: &ProviderRef) -> String {
+    let stripped = provider
+        .as_str()
+        .strip_prefix("provider:")
+        .unwrap_or(provider.as_str());
+    if harness == "pi" && stripped == "z-ai" {
+        return "zai".to_string();
+    }
+    stripped.to_string()
+}
+
 fn same_offer_prefers_harness<'a>(usable: Vec<&'a ModelRoute>) -> Vec<&'a ModelRoute> {
     let mut grouped: Vec<((String, String), Vec<&'a ModelRoute>)> = Vec::new();
     for route in usable {
@@ -552,12 +565,7 @@ pub(crate) fn plan_route_launch_with_runner(
         }
     }
 
-    let native_provider = route
-        .provider
-        .as_str()
-        .strip_prefix("provider:")
-        .unwrap_or(route.provider.as_str())
-        .to_string();
+    let native_provider = harness_argv_provider(slug, &route.provider);
     let mut model_args = dispatch.model_args(slug, &native_provider, &route.provider_native_id)?;
 
     let using_codex_login = codex_login
@@ -1199,6 +1207,18 @@ mod tests {
     }
 
     #[test]
+    fn pi_receives_the_zai_flag_for_the_catalogue_provider() {
+        assert_eq!(
+            harness_argv_provider("pi", &ProviderRef::parse("provider:z-ai").unwrap()),
+            "zai"
+        );
+        assert_eq!(
+            harness_argv_provider("pi", &ProviderRef::parse("provider:deepseek").unwrap()),
+            "deepseek"
+        );
+    }
+
+    #[test]
     fn the_same_provider_offer_observed_twice_selects_the_harness_route() {
         let model = canonical_model_ref("model:glm-5.3-flash").unwrap();
         let provider = ProviderRef::parse("provider:z-ai").unwrap();
@@ -1225,6 +1245,7 @@ mod tests {
         assert_eq!(route.provider_native_id, "glm-5.3-flash");
     }
 
+    #[test]
     fn several_usable_routes_refuse_asking_for_an_explicit_pin() {
         let (_dir, home) = home();
         // Two providers can both serve the owner-catalogued model, and both
