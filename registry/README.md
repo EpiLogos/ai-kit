@@ -52,3 +52,14 @@ account reading != canonical source
 HTML rendering != canonical source
 Projection refinement != silent source mutation
 ```
+
+## The shape of the development world
+
+`guidance/aikit/development-world` carries the standing orientation the owner
+commissioned on 2026-09-25: the ground's shape (Control and its machines, the
+Workcell, projects and their registers, rendered harness floors) and what a
+development seat is — one coherent feature line per programme, the project's
+primary checkout standing on `main`, and a landed lane releasing its seat. It
+is the guidance-form twin of Central's authored statement
+`Control/agents/governance/world/shape-of-the-world.md`, which renders into
+every harness floor (AGENTS.md / CLAUDE.md).
