@@ -160,6 +160,20 @@ fn project_scope_uses_literal_work_name_and_keeps_common_control_with_real_ripgr
         &root.join("Control/agents/now/clearings/common/note.json"),
         "literalGlobNeedle\n",
     );
+    // A flow record is a common Control record surface; a raw harness
+    // capture parked beside it is not.
+    write(
+        &root.join("Control/agents/now/flows/common-record-2026-09-25-1210.md"),
+        "literalGlobNeedle\n",
+    );
+    write(
+        &root.join("Control/agents/now/flows/common-event/sessions/stream.jsonl"),
+        "{\"line\":\"literalGlobNeedle raw capture\"}\n",
+    );
+    let record = aikit_core::SourceRef::parse(
+        "central:source:control:root:Control/agents/now/flows/common-record-2026-09-25-1210.md",
+    )
+    .unwrap();
     let broad = NowFieldScope::standard(&root);
     let provider = NowFieldSourcePoolProvider::connect(
         aikit_adapters::now_field::default_runner(&root),
@@ -173,9 +187,12 @@ fn project_scope_uses_literal_work_name_and_keeps_common_control_with_real_ripgr
     let refs: Vec<&str> = hits.iter().map(|hit| hit.source.as_str()).collect();
     assert!(refs
         .contains(&"central:source:control:root:Work/fee*box/ProjectCentral/now/agents/own.json"));
-    assert!(
-        refs.contains(&"central:source:control:root:Control/agents/now/clearings/common/note.json")
-    );
+    // A clearing is one commission's working field, not a common record: its
+    // note stays out of a Project-scoped reply.
+    assert!(!refs.iter().any(|source| source.contains("clearings/")));
+    // The flow record is searchable; the raw capture parked beside it is not.
+    assert!(refs.contains(&record.as_str()));
+    assert!(!refs.iter().any(|source| source.ends_with(".jsonl")));
     assert!(!refs
         .iter()
         .any(|source| source.contains("Work/feeeeeebox/")));
@@ -186,6 +203,15 @@ fn project_scope_uses_literal_work_name_and_keeps_common_control_with_real_ripgr
     assert_eq!(
         provider.read(&sibling).unwrap_err().code(),
         "now_field.source_unauthorised"
+    );
+    let clearing_note = aikit_core::SourceRef::parse(
+        "central:source:control:root:Control/agents/now/clearings/common/note.json",
+    )
+    .unwrap();
+    assert_eq!(
+        provider.read(&clearing_note).unwrap_err().code(),
+        "now_field.source_unauthorised",
+        "a clearing record is out of Project scope even when named directly"
     );
 
     let unknown = NowFieldSourcePoolProvider::connect(
@@ -202,15 +228,12 @@ fn project_scope_uses_literal_work_name_and_keeps_common_control_with_real_ripgr
         .collect();
     assert_eq!(
         unknown_refs,
-        vec!["central:source:control:root:Control/agents/now/clearings/common/note.json"]
+        vec![record.as_str().to_owned()],
+        "an unknown Project reaches common record surfaces only"
     );
 
     let own = aikit_core::SourceRef::parse(
         "central:source:control:root:Work/fee*box/ProjectCentral/now/agents/own.json",
-    )
-    .unwrap();
-    let common = aikit_core::SourceRef::parse(
-        "central:source:control:root:Control/agents/now/clearings/common/note.json",
     )
     .unwrap();
     let traversal = aikit_core::SourceRef::parse(
@@ -303,7 +326,7 @@ fn project_scope_uses_literal_work_name_and_keeps_common_control_with_real_ripgr
                 .into_iter()
                 .map(|hit| hit.source.as_str().to_owned())
                 .collect();
-            assert_eq!(live_refs, vec![common.as_str().to_owned()]);
+            assert_eq!(live_refs, vec![record.as_str().to_owned()]);
             assert_eq!(
                 provider.read(&own).unwrap_err().code(),
                 "now_field.source_unauthorised"
@@ -323,7 +346,7 @@ fn project_scope_uses_literal_work_name_and_keeps_common_control_with_real_ripgr
         let expected = if own_visible {
             own.as_str()
         } else {
-            common.as_str()
+            record.as_str()
         };
         let refs: Vec<String> = marked_provider
             .search("literalGlobNeedle", SourceSearchMode::Fulltext, &[], 20)
@@ -343,7 +366,7 @@ fn project_scope_uses_literal_work_name_and_keeps_common_control_with_real_ripgr
             .map(|hit| hit.source.as_str().to_owned())
             .collect();
         assert_eq!(regex_refs, vec![expected.to_owned()]);
-        let withheld = if own_visible { &common } else { &own };
+        let withheld = if own_visible { &record } else { &own };
         assert_eq!(
             marked_provider.read(withheld).unwrap_err().code(),
             "now_field.source_unauthorised",
@@ -355,5 +378,166 @@ fn project_scope_uses_literal_work_name_and_keeps_common_control_with_real_ripgr
             .as_str()
             != withheld.as_str()));
         fs::remove_file(marker).unwrap();
+    }
+}
+
+/// The observed incident this scope repair closes: a rehearsal clearing's
+/// evidence tree carried a verbatim copy of a sibling Project's state file
+/// (Work/Factory/.factory/development-state.json) into an O-I-scoped
+/// Knowledge reply through the NOW-field provider. The root scope keeps the
+/// broad aperture; the project scope must never reach the clearing, no
+/// matter what a commission parks inside its own working field.
+#[test]
+fn project_scope_never_searches_clearing_scratch_or_raw_flow_captures() {
+    if !ripgrep::available() {
+        assert!(
+            std::env::var_os("AIKIT_REQUIRE_RIPGREP_REAL").is_none(),
+            "real NOW-field conformance requires ripgrep"
+        );
+        return;
+    }
+    let ground = tempfile::TempDir::new().expect("temp ground");
+    let root = ground.path().to_path_buf();
+    write(
+        &root.join(
+            "Control/agents/now/clearings/rehearsal/T/evidence/day-rollover/Central/Work/Factory/.factory/development-state.json",
+        ),
+        r#"{"schema":"factory.work-custody/v1","reason":"siblingIncidentNeedle"}"#,
+    );
+    write(
+        &root.join("Control/agents/now/flows/incident-record-2026-09-25-1210.md"),
+        "siblingIncidentNeedle flow record\n",
+    );
+    write(
+        &root.join("Control/agents/now/flows/incident-event/sessions/2026-09-25.stream.jsonl"),
+        "{\"text\":\"siblingIncidentNeedle raw capture\"}\n",
+    );
+    // A Markdown note inside an event directory is still the commission's
+    // working material: on the live ground such a document carried
+    // verifier-only canaries and sibling repository names.
+    write(
+        &root.join("Control/agents/now/flows/incident-event/working-note.md"),
+        "siblingIncidentNeedle event working note\n",
+    );
+    write(
+        &root.join("Control/agents/now/day/2026-09-25.md"),
+        "siblingIncidentNeedle day reading\n",
+    );
+    // A day `.sources` snapshot keeps byte-exact copies of whatever the day
+    // closed over; on the live ground those copies name sibling Projects.
+    write(
+        &root.join("Control/agents/now/day/2026-09-24.sources/agents/handoff.json"),
+        "{\"text\":\"siblingIncidentNeedle snapshot naming Work/Factory\"}\n",
+    );
+    write(
+        &root.join("Work/O-I/ProjectCentral/now/agents/own.json"),
+        "siblingIncidentNeedle own register\n",
+    );
+
+    let sibling_copy = aikit_core::SourceRef::parse(
+        "central:source:control:root:Control/agents/now/clearings/rehearsal/T/evidence/day-rollover/Central/Work/Factory/.factory/development-state.json",
+    )
+    .unwrap();
+    let raw_capture = aikit_core::SourceRef::parse(
+        "central:source:control:root:Control/agents/now/flows/incident-event/sessions/2026-09-25.stream.jsonl",
+    )
+    .unwrap();
+
+    // Root scope: the broad aperture is unchanged, so this test proves the
+    // narrowing below did the work rather than the fixture being inert.
+    let broad = NowFieldSourcePoolProvider::connect(
+        aikit_adapters::now_field::default_runner(&root),
+        ripgrep::executable(),
+        NowFieldScope::standard(&root),
+    )
+    .expect("root provider connects");
+    let root_refs: Vec<String> = broad
+        .search("siblingIncidentNeedle", SourceSearchMode::Fulltext, &[], 20)
+        .expect("root search runs")
+        .into_iter()
+        .map(|hit| hit.source.as_str().to_owned())
+        .collect();
+    assert!(
+        root_refs.contains(&sibling_copy.as_str().to_owned()),
+        "root scope keeps the broad aperture: {root_refs:?}"
+    );
+    assert!(root_refs
+        .iter()
+        .any(|source| source.ends_with("incident-event/working-note.md")),
+        "root scope keeps event-directory material too: {root_refs:?}");
+    assert!(root_refs
+        .iter()
+        .any(|source| source.contains("day/2026-09-24.sources/")),
+        "root scope keeps day snapshot material too: {root_refs:?}");
+
+    // Project scope: only the own register and the flow record answer.
+    let scoped = NowFieldSourcePoolProvider::connect(
+        aikit_adapters::now_field::default_runner(&root),
+        ripgrep::executable(),
+        NowFieldScope::standard(&root).for_project(Some("O-I")),
+    )
+    .expect("scoped provider connects");
+    let refs: Vec<String> = scoped
+        .search("siblingIncidentNeedle", SourceSearchMode::Fulltext, &[], 20)
+        .expect("scoped search runs")
+        .into_iter()
+        .map(|hit| hit.source.as_str().to_owned())
+        .collect();
+    assert!(
+        refs.contains(
+            &"central:source:control:root:Work/O-I/ProjectCentral/now/agents/own.json".to_owned()
+        ),
+        "own register must stay searchable: {refs:?}"
+    );
+    assert!(
+        refs.contains(
+            &"central:source:control:root:Control/agents/now/flows/incident-record-2026-09-25-1210.md"
+                .to_owned()
+        ),
+        "flow records stay searchable: {refs:?}"
+    );
+    assert!(
+        refs.contains(
+            &"central:source:control:root:Control/agents/now/day/2026-09-25.md".to_owned()
+        ),
+        "day readings stay searchable: {refs:?}"
+    );
+    assert!(
+        !refs.iter().any(|source| source.contains("clearings/")),
+        "clearing scratch must not enter a project-scoped reply: {refs:?}"
+    );
+    assert!(
+        !refs.iter().any(|source| source.contains("flows/incident-event/")),
+        "event-directory material must not enter a project-scoped reply: {refs:?}"
+    );
+    assert!(
+        !refs.iter().any(|source| source.contains("day/2026-09-24.sources/")),
+        "day snapshot material must not enter a project-scoped reply: {refs:?}"
+    );
+    assert!(
+        !refs.iter().any(|source| source.ends_with(".jsonl")),
+        "raw harness captures must not enter a project-scoped reply: {refs:?}"
+    );
+    for withheld in [&sibling_copy, &raw_capture] {
+        assert_eq!(
+            scoped.read(withheld).unwrap_err().code(),
+            "now_field.source_unauthorised",
+            "{withheld} must be unreadable at project scope even when named directly"
+        );
+    }
+    let event_note = aikit_core::SourceRef::parse(
+        "central:source:control:root:Control/agents/now/flows/incident-event/working-note.md",
+    )
+    .unwrap();
+    let day_snapshot = aikit_core::SourceRef::parse(
+        "central:source:control:root:Control/agents/now/day/2026-09-24.sources/agents/handoff.json",
+    )
+    .unwrap();
+    for withheld in [&event_note, &day_snapshot] {
+        assert_eq!(
+            scoped.read(withheld).unwrap_err().code(),
+            "now_field.source_unauthorised",
+            "{withheld} must be unreadable at project scope even when named directly"
+        );
     }
 }
