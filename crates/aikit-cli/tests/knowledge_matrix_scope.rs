@@ -258,10 +258,11 @@ fn projectworld_matrix_isolation_over_real_scopes() {
     let own = cedar
         .knowledge_search("cedarMatrixScopeNeedle", 256)
         .unwrap();
-    let own_hit = own.hits.iter().any(|hit| hit
-        .resource
-        .as_str()
-        .ends_with("Work/cedar/ProjectCentral/now/returns/own.md"));
+    let own_hit = own.hits.iter().any(|hit| {
+        hit.resource
+            .as_str()
+            .ends_with("Work/cedar/ProjectCentral/now/returns/own.md")
+    });
     let now_field_unavailable = own
         .absences
         .iter()
