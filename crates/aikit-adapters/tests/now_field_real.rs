@@ -461,14 +461,18 @@ fn project_scope_never_searches_clearing_scratch_or_raw_flow_captures() {
         root_refs.contains(&sibling_copy.as_str().to_owned()),
         "root scope keeps the broad aperture: {root_refs:?}"
     );
-    assert!(root_refs
-        .iter()
-        .any(|source| source.ends_with("incident-event/working-note.md")),
-        "root scope keeps event-directory material too: {root_refs:?}");
-    assert!(root_refs
-        .iter()
-        .any(|source| source.contains("day/2026-09-24.sources/")),
-        "root scope keeps day snapshot material too: {root_refs:?}");
+    assert!(
+        root_refs
+            .iter()
+            .any(|source| source.ends_with("incident-event/working-note.md")),
+        "root scope keeps event-directory material too: {root_refs:?}"
+    );
+    assert!(
+        root_refs
+            .iter()
+            .any(|source| source.contains("day/2026-09-24.sources/")),
+        "root scope keeps day snapshot material too: {root_refs:?}"
+    );
 
     // Project scope: only the own register and the flow record answer.
     let scoped = NowFieldSourcePoolProvider::connect(
@@ -507,11 +511,15 @@ fn project_scope_never_searches_clearing_scratch_or_raw_flow_captures() {
         "clearing scratch must not enter a project-scoped reply: {refs:?}"
     );
     assert!(
-        !refs.iter().any(|source| source.contains("flows/incident-event/")),
+        !refs
+            .iter()
+            .any(|source| source.contains("flows/incident-event/")),
         "event-directory material must not enter a project-scoped reply: {refs:?}"
     );
     assert!(
-        !refs.iter().any(|source| source.contains("day/2026-09-24.sources/")),
+        !refs
+            .iter()
+            .any(|source| source.contains("day/2026-09-24.sources/")),
         "day snapshot material must not enter a project-scoped reply: {refs:?}"
     );
     assert!(

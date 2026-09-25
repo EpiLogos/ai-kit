@@ -110,6 +110,21 @@ mod gitnexus_budget_tests {
     }
 }
 
+/// True when an attribution map names `resource` as owned by a Project
+/// other than `display` — the check that keeps another Project's compiled
+/// objects (authored edges, folder basis, capability matrices) out of a
+/// scoped reply or graph. Unattributed refs pass: the root lineage is a
+/// distinct, legitimately broader aperture.
+fn attributed_to_other_project(
+    attribution: &BTreeMap<String, String>,
+    resource: &str,
+    display: &str,
+) -> bool {
+    attribution
+        .get(resource)
+        .is_some_and(|project| project != display)
+}
+
 /// One project's GitNexus code-index degradation: the binary was present and
 /// index-capable, but building that project's index failed. Held per project
 /// so a scoped reply carries only its own scope's line and `knowledge status`
@@ -186,6 +201,12 @@ pub(super) struct KnowledgeRuntime {
     /// → Work-relative project display, for scoped queries to keep another
     /// project's folder basis out of their results.
     folder_subject_projects: BTreeMap<String, String>,
+    /// Compiled capability-matrix object ref — or its cited carrier path —
+    /// → Work-relative project display, for scoped queries and graphs to
+    /// keep another project's matrix material out of their results. The
+    /// root composition stays unattributed: the root lineage is a distinct,
+    /// legitimately broader aperture.
+    matrix_object_projects: BTreeMap<String, String>,
     /// This invocation's own project in Work-relative display (`Work/demo`),
     /// when the invocation root sits in a Central Work project.
     current_project: Option<String>,
@@ -280,12 +301,23 @@ impl KnowledgeRuntime {
     fn application_with_project_scope<'a>(
         &'a self,
         context: FamiliarityContext,
-        scoped_project: Option<&str>,
+        scoped_project: Option<&'a str>,
         now_field: Option<&'a NowFieldSourcePoolProvider<SystemRunner>>,
         work_repos: Option<&'a WorkReposSourcePoolProvider<SystemRunner>>,
     ) -> KnowledgeApplication<'a> {
         let mut application =
             KnowledgeApplication::new(context).with_project_map(&self.project_map);
+        if let Some(scope) = scoped_project {
+            // Scoped replies consult the runtime's attribution at the
+            // source: sibling-owned authored citations produce neither hits
+            // nor unreadable-source absences (knowledge_navigation).
+            application = application.with_project_attribution(
+                scope,
+                &self.authored_edge_projects,
+                &self.folder_subject_projects,
+                &self.matrix_object_projects,
+            );
+        }
         if let Some(provider) = &self.wiki {
             application = application.with_wiki(provider);
         }
@@ -497,12 +529,6 @@ impl Service {
             // their project in the ref itself (`source:project:<id>:…`), so
             // the same discipline applies to them.
             if let Some(display) = &scoped_display {
-                let attributed_to_other_project =
-                    |attribution: &BTreeMap<String, String>, resource: &str| {
-                        attribution
-                            .get(resource)
-                            .is_some_and(|project| project != display)
-                    };
                 result.hits.retain(|hit| {
                     let resource = hit.resource.as_str();
                     // A Source ref may surface through SourcePool or a
@@ -511,9 +537,19 @@ impl Service {
                     if !runtime.source_belongs_to_scope(resource, display) {
                         return false;
                     }
-                    if attributed_to_other_project(&runtime.authored_edge_projects, resource)
-                        || attributed_to_other_project(&runtime.folder_subject_projects, resource)
-                    {
+                    if attributed_to_other_project(
+                        &runtime.authored_edge_projects,
+                        resource,
+                        display,
+                    ) || attributed_to_other_project(
+                        &runtime.folder_subject_projects,
+                        resource,
+                        display,
+                    ) || attributed_to_other_project(
+                        &runtime.matrix_object_projects,
+                        resource,
+                        display,
+                    ) {
                         return false;
                     }
                     match &hit.address {
@@ -882,7 +918,7 @@ impl Service {
         let expression =
             parse_or_search_expression_in_scope(query, self.knowledge_scope_project().as_deref())?;
         self.with_knowledge(|runtime, _| {
-            let objects: Vec<_> = runtime
+            let mut objects: Vec<_> = runtime
                 .wiki_index()
                 .map(|index| {
                     index
@@ -898,6 +934,27 @@ impl Service {
             {
                 material.retain(|item| {
                     runtime.source_belongs_to_scope(item.binding.source.as_str(), &display)
+                });
+                // The graph obeys the same attribution the scoped search
+                // does: a Project's graph keeps another Project's compiled
+                // authored edges, folder basis and capability-matrix
+                // material out, while unattributed (root-lineage) objects
+                // pass.
+                objects.retain(|object| {
+                    let reference = object.ref_id().as_str();
+                    !attributed_to_other_project(
+                        &runtime.authored_edge_projects,
+                        reference,
+                        &display,
+                    ) && !attributed_to_other_project(
+                        &runtime.folder_subject_projects,
+                        reference,
+                        &display,
+                    ) && !attributed_to_other_project(
+                        &runtime.matrix_object_projects,
+                        reference,
+                        &display,
+                    )
                 });
             }
             let mut hits = found.hits.clone();
@@ -1123,6 +1180,7 @@ impl Service {
         let mut project_absences = Vec::new();
         let mut authored_edge_projects = BTreeMap::new();
         let mut folder_subject_projects = BTreeMap::new();
+        let mut matrix_object_projects = BTreeMap::new();
         let central_root = self.knowledge_central_root(root);
         let mut discovered = discover_material(
             root,
@@ -1158,6 +1216,7 @@ impl Service {
             // (project spaces + the Central root composition), origin Compiled.
             let matrices = aikit_adapters::capability_matrix::compile_world_matrices(central_root);
             absences.extend(matrices.absences);
+            matrix_object_projects = matrices.object_projects;
             project_absences.extend(matrices.project_absences.into_iter().map(|absence| {
                 ProjectOwnedAbsence {
                     project: absence.project,
@@ -1821,6 +1880,7 @@ impl Service {
             project_absences,
             authored_edge_projects,
             folder_subject_projects,
+            matrix_object_projects,
             current_project,
         })
     }

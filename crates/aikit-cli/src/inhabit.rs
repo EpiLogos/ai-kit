@@ -303,7 +303,9 @@ pub fn claim(
                         }
                     ),
                     "Nothing was claimed. Passing --agency does not bypass admission.",
-                    format!("{base} --agent {agent} --agency <one admitted Agency> -- <harness argv>"),
+                    format!(
+                        "{base} --agent {agent} --agency <one admitted Agency> -- <harness argv>"
+                    ),
                 ));
             }
             agency.clone()

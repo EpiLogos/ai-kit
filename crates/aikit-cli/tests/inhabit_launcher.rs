@@ -224,9 +224,15 @@ fn supplied_agent_or_agency_cannot_bypass_eligibility_or_admission() {
     );
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("does not name agent/someone-else as an eligible Agent"), "{stderr}");
+    assert!(
+        stderr.contains("does not name agent/someone-else as an eligible Agent"),
+        "{stderr}"
+    );
     assert!(stderr.contains("Nothing was claimed."), "{stderr}");
-    assert!(world.actuation_calls().is_empty(), "ineligible agent claimed nothing");
+    assert!(
+        world.actuation_calls().is_empty(),
+        "ineligible agent claimed nothing"
+    );
 
     let output = world.run(
         &args(&[
@@ -245,7 +251,10 @@ fn supplied_agent_or_agency_cannot_bypass_eligibility_or_admission() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("is not an admitted Agency"), "{stderr}");
-    assert!(world.actuation_calls().is_empty(), "unadmitted agency claimed nothing");
+    assert!(
+        world.actuation_calls().is_empty(),
+        "unadmitted agency claimed nothing"
+    );
 }
 
 #[test]
