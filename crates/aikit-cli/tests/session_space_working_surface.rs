@@ -272,8 +272,15 @@ fn persisted_working_surface_opens_and_focuses_real_tmux_after_store_restart() {
     let before = observe(&store.load(&space).unwrap(), &binding).unwrap();
     assert!(before.reading.live_native_id.is_none());
     assert!(before.outcome.is_none());
-    assert!(capture(&store.load(&space).unwrap(), &binding, 500).is_err(), "reading an absent pane must refuse without creating it");
-    assert!(observe(&store.load(&space).unwrap(), &binding).unwrap().reading.live_native_id.is_none());
+    assert!(
+        capture(&store.load(&space).unwrap(), &binding, 500).is_err(),
+        "reading an absent pane must refuse without creating it"
+    );
+    assert!(observe(&store.load(&space).unwrap(), &binding)
+        .unwrap()
+        .reading
+        .live_native_id
+        .is_none());
 
     let opened = open(&store.load(&space).unwrap(), &binding).unwrap();
     let native = match opened.outcome.unwrap() {
@@ -326,30 +333,80 @@ fn persisted_working_surface_opens_and_focuses_real_tmux_after_store_restart() {
 
     let marker_one = "PERSISTED_WORKING_SURFACE_ONE";
     let read_marker = "READ_ONLY_CAPTURE_MARKER";
-    let sent = Command::new("tmux").args(["-L", &socket, "send-keys", "-t", &native,
-        &format!("printf '{read_marker}\\n'"), "Enter"]).output().unwrap();
+    let sent = Command::new("tmux")
+        .args([
+            "-L",
+            &socket,
+            "send-keys",
+            "-t",
+            &native,
+            &format!("printf '{read_marker}\\n'"),
+            "Enter",
+        ])
+        .output()
+        .unwrap();
     assert!(sent.status.success());
     let capture_started = Instant::now();
     loop {
         let frame = capture(&store.load(&space).unwrap(), &binding, 500).unwrap();
-        assert_eq!(frame.schema, "aikit.session-space-working-surface-capture/v1");
+        assert_eq!(
+            frame.schema,
+            "aikit.session-space-working-surface-capture/v1"
+        );
         assert_eq!(frame.agent_session, agent);
         assert_eq!(frame.binding, binding);
-        if let aikit_cli::working_environment_field::WorkingEnvironmentCapture::Captured {native_id,text,format,..} = frame.capture {
-            assert_eq!(native_id,native);
-            assert_eq!(format,"ansi");
-            if text.contains(read_marker) {break;}
-        } else {panic!("opened tmux pane must expose a capture");}
-        assert!(capture_started.elapsed() < Duration::from_secs(1), "marker did not appear within one second");
+        if let aikit_cli::working_environment_field::WorkingEnvironmentCapture::Captured {
+            native_id,
+            text,
+            format,
+            ..
+        } = frame.capture
+        {
+            assert_eq!(native_id, native);
+            assert_eq!(format, "ansi");
+            if text.contains(read_marker) {
+                break;
+            }
+        } else {
+            panic!("opened tmux pane must expose a capture");
+        }
+        assert!(
+            capture_started.elapsed() < Duration::from_secs(1),
+            "marker did not appear within one second"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(capture_started.elapsed() < Duration::from_secs(1), "native capture exceeded the one-second view acceptance");
-    let cli_capture = Command::new(cargo_bin("aikit")).args(["-C",home.root().to_str().unwrap(),"session-space","working-surface","capture",&space.to_string(),binding.as_str(),"--lines","500"])
-        .env("AIKIT_HOME",home.root()).env("AIKIT_TMUX_SOCKET",&socket).output().unwrap();
-    assert!(cli_capture.status.success(),"{}",String::from_utf8_lossy(&cli_capture.stderr));
-    let cli_frame:serde_json::Value=serde_json::from_slice(&cli_capture.stdout).unwrap();
-    assert_eq!(cli_frame["binding"],binding.as_str());
-    assert!(cli_frame["capture"]["text"].as_str().unwrap().contains(read_marker));
+    assert!(
+        capture_started.elapsed() < Duration::from_secs(1),
+        "native capture exceeded the one-second view acceptance"
+    );
+    let cli_capture = Command::new(cargo_bin("aikit"))
+        .args([
+            "-C",
+            home.root().to_str().unwrap(),
+            "session-space",
+            "working-surface",
+            "capture",
+            &space.to_string(),
+            binding.as_str(),
+            "--lines",
+            "500",
+        ])
+        .env("AIKIT_HOME", home.root())
+        .env("AIKIT_TMUX_SOCKET", &socket)
+        .output()
+        .unwrap();
+    assert!(
+        cli_capture.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli_capture.stderr)
+    );
+    let cli_frame: serde_json::Value = serde_json::from_slice(&cli_capture.stdout).unwrap();
+    assert_eq!(cli_frame["binding"], binding.as_str());
+    assert!(cli_frame["capture"]["text"]
+        .as_str()
+        .unwrap()
+        .contains(read_marker));
     assert!(capture(&store.load(&space).unwrap(), &binding, 0).is_err());
     let output_one = attach_through_public_cli(
         home.root(),
@@ -421,7 +478,10 @@ fn persisted_working_surface_opens_and_focuses_real_tmux_after_store_restart() {
         .args(["-L", socket.as_str(), "kill-server"])
         .output()
         .unwrap();
-    assert!(capture(&restarted.load(&space).unwrap(), &binding, 500).is_err(), "capture must not silently recreate a destroyed working surface");
+    assert!(
+        capture(&restarted.load(&space).unwrap(), &binding, 500).is_err(),
+        "capture must not silently recreate a destroyed working surface"
+    );
     let rebound = open(&restarted.load(&space).unwrap(), &binding).unwrap();
     assert!(matches!(
         rebound.reading.native_standing,

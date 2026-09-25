@@ -417,10 +417,25 @@ fn a_due_day_occurrence_opens_the_day_and_rolls_now_fields_with_native_actions_o
     assert_eq!(record["method_body"], "native:central-day-rollover");
     assert_eq!(record["outcome"]["status"], "completed", "{record}");
     let history = aikit.run(&["routine", "invocations", "--with-outcomes"]);
-    let retained = history.as_array().unwrap().iter().find(|entry| entry["invocation_ref"] == record["invocation_ref"]).expect("native invocation is retained");
-    assert_eq!(retained["outcome"], record["outcome"], "a fresh CLI read retains the exact actual native return");
+    let retained = history
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["invocation_ref"] == record["invocation_ref"])
+        .expect("native invocation is retained");
+    assert_eq!(
+        retained["outcome"], record["outcome"],
+        "a fresh CLI read retains the exact actual native return"
+    );
     let legacy = aikit.run(&["routine", "invocations"]);
-    assert!(legacy.as_array().unwrap().iter().all(|entry| entry.get("outcome").is_none()), "default native evidence output remains compatible");
+    assert!(
+        legacy
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry.get("outcome").is_none()),
+        "default native evidence output remains compatible"
+    );
     let detail: Value =
         serde_json::from_str(record["outcome"]["detail"].as_str().unwrap()).unwrap();
     assert_eq!(detail["runner"], "native");
@@ -635,7 +650,10 @@ fn a_native_run_without_a_bound_credential_refuses_before_calling_the_gated_acti
     let record = &tick["dispatched"][0];
     assert_eq!(record["outcome"]["status"], "failed", "{tick}");
     let history = aikit.run(&["routine", "invocations", "--with-outcomes"]);
-    assert_eq!(history[0]["outcome"], record["outcome"], "the native refused action remains failed after restart/readback");
+    assert_eq!(
+        history[0]["outcome"], record["outcome"],
+        "the native refused action remains failed after restart/readback"
+    );
     let detail: Value =
         serde_json::from_str(record["outcome"]["detail"].as_str().unwrap()).unwrap();
     assert_eq!(detail["result"]["stage"], "day-ensure");

@@ -942,7 +942,8 @@ fn cmd_routine(command: RoutineCmd) -> Result<Reply> {
             serde_json::to_value(store.history()?)
         } else {
             serde_json::to_value(store.list()?)
-        }).map_err(|error| {
+        })
+        .map_err(|error| {
             AikitError::new(
                 "cli.routine_json_failed",
                 format!("could not encode Routine invocation evidence: {error}"),
@@ -1650,7 +1651,11 @@ fn cmd_model_resolve(cwd: &std::path::Path, args: ModelResolveArgs) -> Result<Re
     let service = Service::discover(cwd)?;
     let composed = service.compose_selected_plan(None)?;
     let policy = aikit_core::resource::ModelRankingPolicy::parse_name(&args.ranking_policy)?;
-    let data = if args.roster_only { service.read_model_roster(&composed, &args.use_type, policy)? } else { service.resolve_model(&composed, &args.use_type, policy)? };
+    let data = if args.roster_only {
+        service.read_model_roster(&composed, &args.use_type, policy)?
+    } else {
+        service.resolve_model(&composed, &args.use_type, policy)?
+    };
     Ok(reply(&service, data, diagnostic_warnings(&service)))
 }
 

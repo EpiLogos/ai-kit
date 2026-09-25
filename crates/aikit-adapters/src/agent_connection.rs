@@ -146,7 +146,10 @@ fn unique_advertised_models(models: Vec<NativeAdvertisedModel>) -> Vec<NativeAdv
         .into_iter()
         // ACP model options carry opaque IDs, not an admitted native
         // provider/profile join. Ignore extensions claiming that authority.
-        .map(|mut model| { model.roster_identity = None; model })
+        .map(|mut model| {
+            model.roster_identity = None;
+            model
+        })
         .filter(|model| seen.insert(model.model_id.clone()))
         .collect()
 }
