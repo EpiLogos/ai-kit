@@ -935,6 +935,7 @@ impl Service {
                         provider,
                         authority: SourceAuthority::Observed,
                         ranking: None,
+                        corroborated_by: Vec::new(),
                     });
                 }
             }
