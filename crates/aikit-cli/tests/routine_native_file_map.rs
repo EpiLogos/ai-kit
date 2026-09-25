@@ -284,7 +284,9 @@ fn a_due_file_map_occurrence_probes_every_scope_and_refreshes_the_uninitialized(
         .map(|absence| absence.as_str().unwrap().to_owned())
         .collect();
     assert!(
-        worlds.iter().any(|world| world == "control:root: map not initialized"),
+        worlds
+            .iter()
+            .any(|world| world == "control:root: map not initialized"),
         "{worlds:?}"
     );
     assert!(!root.join(".central/bkmr/index.db").exists());
@@ -325,7 +327,7 @@ fn a_due_file_map_occurrence_probes_every_scope_and_refreshes_the_uninitialized(
     let trigger =
         json!({"schema":"aikit.time-schedule/v1","schedule_ref":"schedule/disposable-file-map",
                          "schedule":{"kind":"once","due_unix_ms": now_ms - 2_000}})
-            .to_string();
+        .to_string();
     aikit.run(&[
         "routine",
         "create",
@@ -371,7 +373,10 @@ fn a_due_file_map_occurrence_probes_every_scope_and_refreshes_the_uninitialized(
         .iter()
         .filter_map(|scope| scope["project"].as_str())
         .collect();
-    assert!(names.contains(&"Alpha") && names.contains(&"Beta"), "{scopes:?}");
+    assert!(
+        names.contains(&"Alpha") && names.contains(&"Beta"),
+        "{scopes:?}"
+    );
     let calls = receipt["calls"].as_array().unwrap();
     let called: Vec<&str> = calls
         .iter()
@@ -381,9 +386,7 @@ fn a_due_file_map_occurrence_probes_every_scope_and_refreshes_the_uninitialized(
     assert!(called.contains(&"central.file-map.refresh"), "{called:?}");
     assert!(called.contains(&"central.world"), "{called:?}");
     assert!(
-        calls
-            .iter()
-            .all(|call| call["credential_env"].is_null()),
+        calls.iter().all(|call| call["credential_env"].is_null()),
         "no Action is token-gated: {calls:?}"
     );
 
