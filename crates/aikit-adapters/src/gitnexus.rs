@@ -399,6 +399,11 @@ impl<R: CommandRunner> CodeIndexProvider for GitNexusCodeIndexProvider<R> {
             "--name".into(),
             self.repo_name.clone(),
         ];
+        // A ground without git — personal collections, dated work — is still
+        // indexable; git is not the ticket into the code index.
+        if !root.join(".git").exists() {
+            args.push("--skip-git".into());
+        }
         if force {
             args.push("--force".into());
         }
