@@ -376,10 +376,22 @@ impl<'a> KnowledgeApplication<'a> {
             !matches!(hit.address, KnowledgeAddress::ProjectMap(_))
                 || !native_resources.contains(&hit.resource.to_string())
         });
+        // Authority tier before score (addendum A-6): a code-index hit is
+        // GitNexus's own *derived* reading of the repository, never the
+        // authored or observed ground a documentation query is actually
+        // asking about. GitNexus's own score defaults to 0.5 whenever its
+        // JSON carries no `score`/`relevance`/`similarity` field (see
+        // `GitNexusCodeIndexProvider::search_hits`), which used to let a flat
+        // wall of default-scored code symbols interleave with — and bury —
+        // an authored Wiki node or an observed SourcePool document scored
+        // below that default. Grouping by tier first keeps every authored or
+        // observed hit ahead of every derived one; score only breaks ties
+        // inside a tier, so a code-specific query still ranks its own best
+        // symbols against each other exactly as before.
         hits.sort_by(|left, right| {
-            right
-                .score
-                .total_cmp(&left.score)
+            authority_rank(left.authority)
+                .cmp(&authority_rank(right.authority))
+                .then_with(|| right.score.total_cmp(&left.score))
                 .then_with(|| left.resource.cmp(&right.resource))
         });
         let mut seen = HashSet::new();
@@ -1581,6 +1593,20 @@ impl<'a> KnowledgeApplication<'a> {
     }
 }
 
+/// Ranking tier for [`resolve`]'s global sort: lower sorts first. Authored
+/// ground and observed artefacts share the top tier — a query does not
+/// prefer a curated Wiki node over the source it cites, only over derived
+/// intelligence about either. `Learned`/`Generated` sit behind `Derived`:
+/// both name material with even less claim to being the thing a query asked
+/// about than a structural code reading.
+fn authority_rank(authority: SourceAuthority) -> u8 {
+    match authority {
+        SourceAuthority::Authored | SourceAuthority::Observed => 0,
+        SourceAuthority::Derived => 1,
+        SourceAuthority::Learned | SourceAuthority::Generated => 2,
+    }
+}
+
 fn provider_absent(name: &str) -> AikitError {
     AikitError::new(
         "knowledge.provider_absent",
@@ -1849,6 +1875,197 @@ mod tests {
                 .iter()
                 .map(|hit| (hit.resource.as_str(), hit.provider.as_str()))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// A fake code lens that answers every search with high-scored symbol
+    /// hits, tagged `Derived` exactly as `GitNexusCodeIndexProvider` tags its
+    /// own hits — the shape a real GitNexus index takes for a query that
+    /// also happens to match code symbol/file names.
+    struct FakeCodeIndex {
+        count: usize,
+        score: f64,
+    }
+
+    impl CodeIndexProvider for FakeCodeIndex {
+        fn capabilities(&self) -> crate::knowledge_code::CodeIndexCapabilities {
+            crate::knowledge_code::CodeIndexCapabilities {
+                provider: self.provider(),
+                version: Some("9.9.9".into()),
+                index: true,
+                search: true,
+                context: false,
+                impact: false,
+                trace: false,
+                detect_changes: false,
+                structural_check: false,
+                cypher: false,
+                pdg_impact: false,
+                structured_output: true,
+            }
+        }
+
+        fn status(&self) -> crate::knowledge_code::CodeIndexStatus {
+            crate::knowledge_code::CodeIndexStatus {
+                provider: self.provider(),
+                available: true,
+                version: Some("9.9.9".into()),
+                tested_version: Some("9.9.9".into()),
+                version_drift: false,
+                indexed: true,
+                capabilities: self.capabilities(),
+                detail: "fake".into(),
+            }
+        }
+
+        fn index(
+            &mut self,
+            _root: &std::path::Path,
+            _force: bool,
+        ) -> Result<crate::knowledge_code::CodeIndexStatus> {
+            Ok(self.status())
+        }
+
+        fn search(
+            &self,
+            _query: &str,
+            limit: usize,
+        ) -> Result<Vec<crate::knowledge_code::CodeSearchHit>> {
+            Ok((0..self.count.min(limit))
+                .map(|index| {
+                    let reference = CodeReference {
+                        source: SourceRef::parse("source:git/demo").unwrap(),
+                        revision: None,
+                        path: format!("src/auth_{index}.rs"),
+                        symbol: Some(format!("authenticate_{index}")),
+                        kind: Some("Function".into()),
+                        line: None,
+                    };
+                    crate::knowledge_code::CodeSearchHit {
+                        resource: reference.resource_ref(),
+                        reference,
+                        title: format!("authenticate_{index}"),
+                        score: Some(self.score),
+                        snippet: String::new(),
+                        provider: self.provider(),
+                        provider_binding: None,
+                    }
+                })
+                .collect())
+        }
+
+        fn context(&self, reference: &CodeReference) -> Result<crate::knowledge_code::CodeContext> {
+            Ok(crate::knowledge_code::CodeContext {
+                reference: reference.clone(),
+                provider: self.provider(),
+                detail: Value::Null,
+            })
+        }
+
+        fn impact(
+            &self,
+            reference: &CodeReference,
+            _direction: &str,
+        ) -> Result<crate::knowledge_code::CodeImpact> {
+            Ok(crate::knowledge_code::CodeImpact {
+                reference: reference.clone(),
+                provider: self.provider(),
+                detail: Value::Null,
+            })
+        }
+
+        fn trace(
+            &self,
+            from: &CodeReference,
+            to: &CodeReference,
+        ) -> Result<crate::knowledge_code::CodeTrace> {
+            Ok(crate::knowledge_code::CodeTrace {
+                from: from.clone(),
+                to: to.clone(),
+                provider: self.provider(),
+                detail: Value::Null,
+            })
+        }
+
+        fn detect_changes(
+            &self,
+            scope: &str,
+            base_ref: Option<&str>,
+        ) -> Result<crate::knowledge_code::CodeChanges> {
+            Ok(crate::knowledge_code::CodeChanges {
+                provider: self.provider(),
+                scope: scope.into(),
+                base_ref: base_ref.map(str::to_string),
+                detail: Value::Null,
+            })
+        }
+
+        fn structural_check(&self) -> Result<crate::knowledge_code::CodeStructuralCheck> {
+            Ok(crate::knowledge_code::CodeStructuralCheck {
+                provider: self.provider(),
+                detail: Value::Null,
+            })
+        }
+    }
+
+    impl FakeCodeIndex {
+        fn provider(&self) -> ProviderRef {
+            ProviderRef::parse("provider/code-index/fake").unwrap()
+        }
+    }
+
+    /// A documentation query must not be answered only by derived code
+    /// symbols that happen to share its words. Before this case, `resolve`
+    /// sorted purely by score, and GitNexus's own default score (0.5 when its
+    /// JSON carries no `score`/`relevance`/`similarity`) sat above a curated
+    /// Wiki hit's real but modest match score — so a wall of default-scored
+    /// code hits could bury the one authored answer the query wanted. This
+    /// reproduces that shape with a fake code lens scored well above the
+    /// Wiki hit and asserts the authored hit still leads.
+    #[test]
+    fn a_documentation_hit_is_not_displaced_by_higher_scored_derived_code_hits() {
+        let index = wiki();
+        let wiki_provider = SemanticWikiProvider::new(&index);
+        let code = FakeCodeIndex {
+            count: 8,
+            score: 0.97,
+        };
+        let app = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_wiki(wiki_provider)
+            .with_code(&code);
+
+        let result = app.search("Authentication", 10);
+        let wiki_position = result
+            .hits
+            .iter()
+            .position(|hit| hit.resource.as_str() == "wiki:node:auth")
+            .expect("the authored Wiki node is still found");
+        let code_positions: Vec<usize> = result
+            .hits
+            .iter()
+            .enumerate()
+            .filter(|(_, hit)| hit.authority == SourceAuthority::Derived)
+            .map(|(index, _)| index)
+            .collect();
+        assert!(
+            !code_positions.is_empty(),
+            "the fake code lens contributed derived hits: {:#?}",
+            result.hits
+        );
+        assert!(
+            code_positions
+                .iter()
+                .all(|&position| wiki_position < position),
+            "the authored hit at {wiki_position} must rank ahead of every derived hit \
+             at {code_positions:?}: {:#?}",
+            result.hits
+        );
+        assert_eq!(
+            result.hits[0].authority,
+            SourceAuthority::Authored,
+            "the top hit for a documentation query is authored ground, not a \
+             higher-scored derived code symbol: {:#?}",
+            result.hits
         );
     }
 

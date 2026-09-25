@@ -43,6 +43,73 @@ use super::Service;
 const MAX_DISCOVERY_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_DISCOVERY_FILES: usize = 4096;
 
+/// Default wall-clock budget for one GitNexus subprocess call (capability
+/// probe, index, or search) issued by a project's code-lens provider.
+/// Indexing a real repository is legitimate work, not a health probe, so
+/// this sits well above `aikit_core::probe::probe_budget()` (10s, meant for
+/// `--version`/`--help`-shaped checks) — but it is still a hard ceiling: a
+/// live gate against the real Central ground found `gitnexus analyze
+/// --index-only` on one large Work repo running past five minutes
+/// unbounded, which is exactly the class of stall a query must never carry
+/// silently.
+const DEFAULT_GITNEXUS_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Environment override for [`DEFAULT_GITNEXUS_BUDGET`], in whole seconds.
+const GITNEXUS_BUDGET_VAR: &str = "AIKIT_GITNEXUS_BUDGET_SECS";
+
+/// At most this many discovered Work projects index in parallel. GitNexus's
+/// own process is heavy (observed over 1 GB resident indexing one large
+/// repo), so parallelism is bounded rather than one thread per project.
+const MAX_GITNEXUS_PARALLELISM: usize = 4;
+
+/// The effective GitNexus subprocess budget: `AIKIT_GITNEXUS_BUDGET_SECS`
+/// when it parses to at least one second, otherwise
+/// [`DEFAULT_GITNEXUS_BUDGET`]. An unparseable or zero override falls back
+/// to the default rather than disabling the bound — the bound has no off
+/// switch, matching the probe-budget discipline it sits beside.
+fn gitnexus_budget() -> std::time::Duration {
+    parse_gitnexus_budget(std::env::var(GITNEXUS_BUDGET_VAR).ok().as_deref())
+}
+
+/// Pure parse behind [`gitnexus_budget`], split out so the fallback rules are
+/// testable without mutating process-wide environment state.
+fn parse_gitnexus_budget(raw: Option<&str>) -> std::time::Duration {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs >= 1)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(DEFAULT_GITNEXUS_BUDGET)
+}
+
+#[cfg(test)]
+mod gitnexus_budget_tests {
+    use super::{parse_gitnexus_budget, DEFAULT_GITNEXUS_BUDGET};
+
+    #[test]
+    fn absent_or_junk_or_zero_falls_back_to_the_default_rather_than_disabling_the_bound() {
+        assert_eq!(parse_gitnexus_budget(None), DEFAULT_GITNEXUS_BUDGET);
+        assert_eq!(parse_gitnexus_budget(Some("")), DEFAULT_GITNEXUS_BUDGET);
+        assert_eq!(
+            parse_gitnexus_budget(Some("not-a-number")),
+            DEFAULT_GITNEXUS_BUDGET
+        );
+        assert_eq!(parse_gitnexus_budget(Some("0")), DEFAULT_GITNEXUS_BUDGET);
+        assert_eq!(parse_gitnexus_budget(Some("-5")), DEFAULT_GITNEXUS_BUDGET);
+    }
+
+    #[test]
+    fn a_valid_override_wins() {
+        assert_eq!(
+            parse_gitnexus_budget(Some("90")),
+            std::time::Duration::from_secs(90)
+        );
+        // Surrounding whitespace (a shell export quirk) does not defeat it.
+        assert_eq!(
+            parse_gitnexus_budget(Some(" 12 ")),
+            std::time::Duration::from_secs(12)
+        );
+    }
+}
+
 /// One project's GitNexus code-index degradation: the binary was present and
 /// index-capable, but building that project's index failed. Held per project
 /// so a scoped reply carries only its own scope's line and `knowledge status`
@@ -1565,32 +1632,112 @@ impl Service {
         // when it cannot index, so the absence is per project — never a
         // global "provider absent"; unavailable projects share one grouped
         // line per distinct reason.
-        let mut code = Vec::new();
-        let mut code_project_scopes = Vec::new();
+        //
+        // Bounded and parallel (owner repair, W-knowledge-search-2026-09-24):
+        // a live gate against the real Central ground found `knowledge
+        // search`/`knowledge status` taking minutes — one large Work repo's
+        // `gitnexus analyze --index-only` alone ran past five minutes
+        // unbounded, and this loop ran one such call per discovered project,
+        // strictly sequentially, on every single invocation (no index state
+        // survives between CLI processes). Every GitNexus subprocess this
+        // provider spawns — capability probe, index, search — now runs under
+        // `gitnexus_budget()`, so one huge or hung repository is killed and
+        // disclosed rather than stalling the query; indexing itself runs in
+        // bounded parallel across projects so N repos cost roughly one
+        // budget's wall time, not N of them summed.
+        let code_budget = gitnexus_budget();
+        let parallelism = std::thread::available_parallelism()
+            .map(|n| n.get().clamp(1, MAX_GITNEXUS_PARALLELISM))
+            .unwrap_or(2);
+        let mut code = Vec::with_capacity(work_projects.len());
+        let mut code_project_scopes = Vec::with_capacity(work_projects.len());
         let mut code_degradations: Vec<ProjectCodeDegradation> = Vec::new();
+        // The binary is a seam: `AIKIT_GITNEXUS_BIN` (resolved through the
+        // process environment at `Service::open`) overrides the PATH lookup,
+        // so a test — and an operator — pins code intelligence to a known
+        // binary instead of depending on whatever the host happens to have.
+        let gitnexus_binary = self.gitnexus_binary.clone();
+        // `gitnexus analyze` records each indexed repo in one global
+        // `registry.json` by an unlocked read-modify-write, and `query --repo`
+        // resolves the repo name through that registry. Two concurrent
+        // analyses can each write back their own copy, silently dropping the
+        // other repo's entry so its code never surfaces. Probes and adoption
+        // stay parallel; the registry-writing index step runs one at a time.
+        let index_lock = std::sync::Mutex::new(());
         let mut gitnexus_unavailable: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut project_sources = Vec::with_capacity(work_projects.len());
         for project in &work_projects {
             let source = SourceRef::parse(format!("source:project-code:{}", project.project_id))?;
-            // The binary is a seam: `AIKIT_GITNEXUS_BIN` (resolved through the
-            // process environment at `Service::open`) overrides the PATH lookup,
-            // so a test — and an operator — pins code intelligence to a known
-            // binary instead of depending on whatever the host happens to have.
-            let runner = SystemRunner::new().with_cwd(&project.root);
-            let mut provider = match self.gitnexus_binary.as_deref() {
-                Some(binary) => GitNexusCodeIndexProvider::with_binary(
-                    runner,
-                    binary,
-                    project.project_id.clone(),
-                    source,
-                    None,
-                ),
-                None => {
-                    GitNexusCodeIndexProvider::new(runner, project.project_id.clone(), source, None)
-                }
-            };
-            let status = provider.status();
-            if status.available && status.capabilities.index {
-                if let Err(error) = provider.index(&project.root, false) {
+            project_sources.push((project.clone(), source));
+        }
+        for batch in project_sources.chunks(parallelism) {
+            let outcomes: Vec<(
+                WorkRepoProject,
+                GitNexusCodeIndexProvider<SystemRunner>,
+                Option<aikit_core::AikitError>,
+            )> = std::thread::scope(|scope| {
+                let handles: Vec<_> = batch
+                    .iter()
+                    .map(|(project, source)| {
+                        let project = project.clone();
+                        let source = source.clone();
+                        let binary = gitnexus_binary.clone();
+                        let index_lock = &index_lock;
+                        scope.spawn(move || {
+                            let runner = SystemRunner::new()
+                                .with_cwd(&project.root)
+                                .with_timeout(code_budget);
+                            let mut provider = match binary.as_deref() {
+                                Some(binary) => GitNexusCodeIndexProvider::with_binary(
+                                    runner,
+                                    binary,
+                                    project.project_id.clone(),
+                                    source,
+                                    None,
+                                ),
+                                None => GitNexusCodeIndexProvider::new(
+                                    runner,
+                                    project.project_id.clone(),
+                                    source,
+                                    None,
+                                ),
+                            };
+                            let status = provider.status();
+                            // A query reads the existing derived index; it
+                            // never re-indexes one that exists (that made
+                            // every `knowledge` call cost minutes). Only an
+                            // unindexed project is indexed here; freshness
+                            // of an existing index is disclosed, not
+                            // re-checked (`aikit knowledge code index`).
+                            let adopted = provider.adopt_existing_index(&project.root);
+                            let index_error =
+                                if status.available && status.capabilities.index && !adopted {
+                                    let _registry = index_lock
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    provider.index(&project.root, false).err()
+                                } else {
+                                    None
+                                };
+                            (project, provider, index_error)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle
+                            .join()
+                            .expect("GitNexus index worker thread did not panic")
+                    })
+                    .collect()
+            });
+            for (project, provider, index_error) in outcomes {
+                if let Some(error) = index_error {
+                    // A timed-out call surfaces here exactly like any other
+                    // index failure: `error` already names the budget it
+                    // violated (`mux.command_timeout`), so the project is
+                    // disclosed as degraded, never silently dropped.
                     // Per-project code state, scoped like `authored_pending`:
                     // never the global per-query absence that leaked another
                     // project's code degradation into a scoped reply.
@@ -1602,26 +1749,28 @@ impl Service {
                         ),
                     });
                 }
-            } else if !status.available {
-                let reason = provider
-                    .unavailable_reason()
-                    .unwrap_or_else(|| "GitNexus executable is unavailable".into());
-                gitnexus_unavailable
-                    .entry(reason)
-                    .or_default()
-                    .push(format!("Work/{}", project.name));
-            } else {
-                gitnexus_unavailable
-                    .entry(format!(
-                        "installed version {} does not expose the `analyze --index-only` surface this integration uses (tested {})",
-                        status.version.as_deref().unwrap_or("unknown"),
-                        aikit_core::knowledge_code::GITNEXUS_TESTED_VERSION
-                    ))
-                    .or_default()
-                    .push(format!("Work/{}", project.name));
+                let status = provider.status();
+                if !status.available {
+                    let reason = provider
+                        .unavailable_reason()
+                        .unwrap_or_else(|| "GitNexus executable is unavailable".into());
+                    gitnexus_unavailable
+                        .entry(reason)
+                        .or_default()
+                        .push(format!("Work/{}", project.name));
+                } else if !status.capabilities.index {
+                    gitnexus_unavailable
+                        .entry(format!(
+                            "installed version {} does not expose the `analyze --index-only` surface this integration uses (tested {})",
+                            status.version.as_deref().unwrap_or("unknown"),
+                            aikit_core::knowledge_code::GITNEXUS_TESTED_VERSION
+                        ))
+                        .or_default()
+                        .push(format!("Work/{}", project.name));
+                }
+                code.push(provider);
+                code_project_scopes.push(format!("Work/{}", project.name));
             }
-            code.push(provider);
-            code_project_scopes.push(format!("Work/{}", project.name));
         }
         for (reason, projects) in gitnexus_unavailable {
             // A status note, not a per-query absence: capability state is the
