@@ -22,13 +22,21 @@
 //! `None` (not observed), and a rung is only `true` with the evidence that
 //! establishes it. Carrying a Skill does not mean it was loaded; loading does
 //! not mean it was invoked; success does not mean it is generally fit.
+//!
+//! Beside the disclosure, this module carries Jev's standing invocation-time
+//! decision: for each carried Methodology, does this act need it instantiated
+//! (loaded), or does the invoked Skill carry enough context? Same law as the
+//! disclosure: a pure read over the facts the caller supplies — the invoked
+//! Skill's ordinary description, the carried Methodologies' declared fields,
+//! and the undertaking the act names — never a store, never an authority
+//! grant, nothing fabricated when nothing is carried.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::id::CapsuleId;
-use crate::method::{praxis_form, praxis_payload, PraxisForm};
+use crate::method::{methodology_payload, praxis_form, praxis_payload, PraxisForm};
 use crate::skillset::SkillSet;
 
 pub const AGENT_PRAXIS_DISCLOSURE_SCHEMA: &str = "aikit.agent-praxis-disclosure/v1";
@@ -698,6 +706,287 @@ fn answer(
     }
 }
 
+/// Jev's invocation-time question, answered as a typed read over the facts
+/// the caller supplies: does a Methodology need to be instantiated (loaded)
+/// here, or does the Skill carry enough context?
+pub const METHODOLOGY_INSTANTIATION_SCHEMA: &str = "aikit.methodology-instantiation/v1";
+
+/// The skill-invocation context the decision reads. Every field is a fact the
+/// caller already holds; the Skill's form is read from its description, never
+/// asserted separately.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillInvocationFacts {
+    /// The invoked Skill's id, as the catalogue names it.
+    pub skill_id: String,
+    pub skill_description: String,
+    /// The Methodologies carried into this act (id + description), as the
+    /// Agent's repertoire discloses them.
+    #[serde(default)]
+    pub carried_methodologies: Vec<CarriedMethodology>,
+    /// What the current act is about, in the act's own words: the stated
+    /// undertaking, the session's declared intent, selected refs. Optional —
+    /// a decision may rest on the invoked Skill's description alone.
+    #[serde(default)]
+    pub undertaking_hints: Vec<String>,
+}
+
+/// One carried Methodology, by its ordinary Skill identity.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CarriedMethodology {
+    pub id: String,
+    pub description: String,
+}
+
+/// The verdict for one carried Methodology, with the field terms that
+/// decided it — the reason stays checkable against the act's own words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MethodologyInstantiation {
+    pub id: String,
+    #[serde(flatten)]
+    pub decision: MethodologyDecision,
+    /// The methodology's declared field terms found in the act's words
+    /// (for `description-scoped-away`, the terms that were scoped away).
+    pub matching_terms: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "kebab-case")]
+pub enum MethodologyDecision {
+    Instantiate { reason: InstantiateReason },
+    Carry { reason: CarryReason },
+}
+
+/// Why a Methodology should be instantiated for this act.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InstantiateReason {
+    /// The undertaking this act declares names the methodology's field.
+    FieldMatchesUndertaking,
+    /// The invoked Skill's own description names the methodology's field.
+    DescriptionTriggers,
+}
+
+/// Why a Methodology stays carried without being instantiated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CarryReason {
+    /// Nothing in the act's words names the methodology's field.
+    NoFieldOverlap,
+    /// The act's words name the field only to scope it away (a `no`, `not`,
+    /// `without`, `never`, `except`, `excluding`, `avoid` or `skip` marker
+    /// directly before the term), so nothing triggers positively.
+    DescriptionScopedAway,
+}
+
+impl InstantiateReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FieldMatchesUndertaking => "field matches the undertaking",
+            Self::DescriptionTriggers => "description triggers",
+        }
+    }
+}
+
+impl CarryReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoFieldOverlap => "no field overlap",
+            Self::DescriptionScopedAway => "description scoped away",
+        }
+    }
+}
+
+/// A carried entry whose description does not classify as METHODOLOGY: named,
+/// never silently dropped (the disclosure's own practice for unresolved refs).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnclassifiedMethodology {
+    pub id: String,
+    pub reason: String,
+}
+
+/// The typed decision for one skill invocation: one verdict per carried
+/// Methodology, the unclassified entries named, and the plain-language answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MethodologyInstantiationDecision {
+    pub schema: String,
+    /// The invoked Skill this decision answers for.
+    pub skill_id: String,
+    /// The invoked Skill's classification, read from its description.
+    pub skill_form: PraxisForm,
+    pub decisions: Vec<MethodologyInstantiation>,
+    pub unclassified: Vec<UnclassifiedMethodology>,
+    /// The short human reading of the decisions above.
+    pub answer: String,
+}
+
+/// The field vocabulary a Methodology declares: the payload after its
+/// `METHODOLOGY:` prefix, as lowercase words minus small function words.
+/// Exact token match, no stemming — the decision stays a lexical read of the
+/// declared field, explainable in both directions.
+fn field_terms(description: &str) -> BTreeSet<String> {
+    const STOPWORDS: [&str; 22] = [
+        "the", "a", "an", "of", "for", "and", "or", "to", "in", "on", "with", "when", "how",
+        "what", "is", "are", "be", "this", "that", "it", "its", "am",
+    ];
+    let payload = methodology_payload(description).unwrap_or_else(|| description.trim());
+    tokenize(payload)
+        .into_iter()
+        .filter(|token| token.len() >= 2 && !STOPWORDS.contains(&token.as_str()))
+        .collect()
+}
+
+fn tokenize(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
+}
+
+/// How one surface of the act's words reads against a methodology's field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SurfaceReading {
+    /// At least one field term appears unscoped.
+    Positive(Vec<String>),
+    /// Field terms appear, but only under a scope-away marker.
+    ScopedAway(Vec<String>),
+    /// No field term appears at all.
+    Silent,
+}
+
+const SCOPE_AWAY_MARKERS: [&str; 8] = [
+    "no", "not", "without", "never", "except", "excluding", "avoid", "skip",
+];
+
+/// True when the term at `index` is named only to be scoped away. A marker
+/// may sit directly before the term or across one determiner ("without the
+/// documentation"); a bare determiner scopes nothing.
+fn is_scoped_at(tokens: &[String], index: usize) -> bool {
+    const DETERMINERS: [&str; 6] = ["the", "a", "an", "this", "that", "any"];
+    let mut cursor = index;
+    if cursor > 0 && DETERMINERS.contains(&tokens[cursor - 1].as_str()) {
+        cursor -= 1;
+    }
+    cursor > 0 && SCOPE_AWAY_MARKERS.contains(&tokens[cursor - 1].as_str())
+}
+
+fn read_surface(terms: &BTreeSet<String>, tokens: &[String]) -> SurfaceReading {
+    let mut positive = Vec::new();
+    let mut scoped = Vec::new();
+    for term in terms {
+        let hits: Vec<usize> = tokens
+            .iter()
+            .enumerate()
+            .filter(|(_, token)| *token == term)
+            .map(|(index, _)| index)
+            .collect();
+        if hits.is_empty() {
+            continue;
+        }
+        if hits.iter().any(|&index| !is_scoped_at(tokens, index)) {
+            positive.push(term.clone());
+        } else {
+            scoped.push(term.clone());
+        }
+    }
+    if !positive.is_empty() {
+        SurfaceReading::Positive(positive)
+    } else if !scoped.is_empty() {
+        SurfaceReading::ScopedAway(scoped)
+    } else {
+        SurfaceReading::Silent
+    }
+}
+
+/// Decide the standing invocation-time question. Pure: every fact comes from
+/// `facts`; nothing is enabled, loaded or rewritten. The undertaking is read
+/// first (the act's stated intent), then the invoked Skill's description. A
+/// methodology triggers only positively; a field named only to be scoped away
+/// keeps the methodology carried, visibly.
+pub fn decide_methodology_instantiation(facts: &SkillInvocationFacts) -> MethodologyInstantiationDecision {
+    let skill_form = praxis_form(&facts.skill_description);
+    let description_tokens = tokenize(praxis_payload(&facts.skill_description));
+    let mut undertaking_tokens = Vec::new();
+    for hint in &facts.undertaking_hints {
+        undertaking_tokens.extend(tokenize(hint));
+    }
+
+    let mut decisions = Vec::new();
+    let mut unclassified = Vec::new();
+    for carried in &facts.carried_methodologies {
+        if praxis_form(&carried.description) != PraxisForm::Methodology {
+            unclassified.push(UnclassifiedMethodology {
+                id: carried.id.clone(),
+                reason: "the description lacks the METHODOLOGY: prefix, so no field is declared"
+                    .into(),
+            });
+            continue;
+        }
+        let terms = field_terms(&carried.description);
+        let undertaking = read_surface(&terms, &undertaking_tokens);
+        let description = read_surface(&terms, &description_tokens);
+        let (decision, matching_terms) = match (&undertaking, &description) {
+            (SurfaceReading::Positive(terms), _) => (
+                MethodologyDecision::Instantiate {
+                    reason: InstantiateReason::FieldMatchesUndertaking,
+                },
+                terms.clone(),
+            ),
+            (_, SurfaceReading::Positive(terms)) => (
+                MethodologyDecision::Instantiate {
+                    reason: InstantiateReason::DescriptionTriggers,
+                },
+                terms.clone(),
+            ),
+            (SurfaceReading::ScopedAway(terms), _) | (_, SurfaceReading::ScopedAway(terms)) => (
+                MethodologyDecision::Carry {
+                    reason: CarryReason::DescriptionScopedAway,
+                },
+                terms.clone(),
+            ),
+            (SurfaceReading::Silent, SurfaceReading::Silent) => (
+                MethodologyDecision::Carry {
+                    reason: CarryReason::NoFieldOverlap,
+                },
+                Vec::new(),
+            ),
+        };
+        decisions.push(MethodologyInstantiation {
+            id: carried.id.clone(),
+            decision,
+            matching_terms,
+        });
+    }
+
+    let answer = if decisions.is_empty() && unclassified.is_empty() {
+        "no Methodology is carried; nothing to instantiate or keep".to_string()
+    } else {
+        let mut parts = Vec::new();
+        for entry in &decisions {
+            parts.push(match &entry.decision {
+                MethodologyDecision::Instantiate { reason } => {
+                    format!("instantiate {} ({})", entry.id, reason.as_str())
+                }
+                MethodologyDecision::Carry { reason } => {
+                    format!("carry {} ({})", entry.id, reason.as_str())
+                }
+            });
+        }
+        for entry in &unclassified {
+            parts.push(format!("{} is not Methodology-classified", entry.id));
+        }
+        parts.join("; ")
+    };
+
+    MethodologyInstantiationDecision {
+        schema: METHODOLOGY_INSTANTIATION_SCHEMA.into(),
+        skill_id: facts.skill_id.clone(),
+        skill_form,
+        decisions,
+        unclassified,
+        answer,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1036,6 +1325,176 @@ mod tests {
         assert_eq!(
             disclosure.expression.authorship.as_deref(),
             Some("generated-proposal")
+        );
+    }
+
+    // --- The methodology instantiation decision ---
+
+    fn invocation() -> SkillInvocationFacts {
+        SkillInvocationFacts {
+            skill_id: "skill/aikit/html-account".into(),
+            skill_description: "Author a self-contained HTML account.".into(),
+            carried_methodologies: vec![CarriedMethodology {
+                id: "skill/central/docs-methodology".into(),
+                description: "METHODOLOGY: orient the documentation field".into(),
+            }],
+            undertaking_hints: vec![],
+        }
+    }
+
+    fn decide(facts: &SkillInvocationFacts) -> MethodologyInstantiationDecision {
+        let decision = decide_methodology_instantiation(facts);
+        assert_eq!(decision.schema, METHODOLOGY_INSTANTIATION_SCHEMA);
+        assert_eq!(decision.skill_id, facts.skill_id);
+        decision
+    }
+
+    #[test]
+    fn matching_methodology_instantiates_on_the_undertaking() {
+        let mut facts = invocation();
+        facts.undertaking_hints = vec!["write the documentation walk for the gateway".into()];
+        let decision = decide(&facts);
+        assert_eq!(decision.decisions.len(), 1);
+        let entry = &decision.decisions[0];
+        assert_eq!(entry.id, "skill/central/docs-methodology");
+        assert_eq!(
+            entry.decision,
+            MethodologyDecision::Instantiate {
+                reason: InstantiateReason::FieldMatchesUndertaking
+            }
+        );
+        assert_eq!(entry.matching_terms, vec!["documentation".to_string()]);
+        assert!(decision.answer.contains("instantiate"));
+        assert!(decision.answer.contains("field matches the undertaking"));
+        // The wire shape keeps the typed verdict legible.
+        let json = serde_json::to_value(&decision).unwrap();
+        assert_eq!(json["decisions"][0]["decision"], "instantiate");
+        assert_eq!(json["decisions"][0]["reason"], "field-matches-undertaking");
+        assert_eq!(json["skill_form"], "skill");
+    }
+
+    #[test]
+    fn triggering_description_instantiates_without_hints() {
+        let mut facts = invocation();
+        facts.skill_description = "METHOD: documentation account walk".into();
+        let decision = decide(&facts);
+        assert_eq!(decision.skill_form, PraxisForm::Method);
+        assert_eq!(
+            decision.decisions[0].decision,
+            MethodologyDecision::Instantiate {
+                reason: InstantiateReason::DescriptionTriggers
+            }
+        );
+        assert_eq!(
+            decision.decisions[0].matching_terms,
+            vec!["documentation".to_string()]
+        );
+        // The undertaking outranks the description when both trigger.
+        facts.undertaking_hints = vec!["the documentation field needs orienting".into()];
+        let decision = decide(&facts);
+        assert_eq!(
+            decision.decisions[0].decision,
+            MethodologyDecision::Instantiate {
+                reason: InstantiateReason::FieldMatchesUndertaking
+            }
+        );
+    }
+
+    #[test]
+    fn scoped_away_methodology_stays_carried() {
+        let mut facts = invocation();
+        facts.skill_description = "Author an account without the documentation walk.".into();
+        let decision = decide(&facts);
+        assert_eq!(
+            decision.decisions[0].decision,
+            MethodologyDecision::Carry {
+                reason: CarryReason::DescriptionScopedAway
+            }
+        );
+        // The scoped term stays named: the reason is checkable, not bare.
+        assert_eq!(
+            decision.decisions[0].matching_terms,
+            vec!["documentation".to_string()]
+        );
+
+        // The same scoping in the undertaking keeps it carried too.
+        let mut facts = invocation();
+        facts.undertaking_hints = vec!["skip documentation for this act".into()];
+        let decision = decide(&facts);
+        assert_eq!(
+            decision.decisions[0].decision,
+            MethodologyDecision::Carry {
+                reason: CarryReason::DescriptionScopedAway
+            }
+        );
+        assert!(decision.answer.contains("description scoped away"));
+    }
+
+    #[test]
+    fn unrelated_methodology_stays_carried_for_no_field_overlap() {
+        let mut facts = invocation();
+        facts.skill_description = "Grill a plan one question at a time.".into();
+        facts.carried_methodologies.push(CarriedMethodology {
+            id: "skill/personal/wayfinder".into(),
+            description: "METHODOLOGY: chart the developmental field".into(),
+        });
+        let decision = decide(&facts);
+        assert_eq!(decision.decisions.len(), 2);
+        for entry in &decision.decisions {
+            assert_eq!(
+                entry.decision,
+                MethodologyDecision::Carry {
+                    reason: CarryReason::NoFieldOverlap
+                },
+                "{}",
+                entry.id
+            );
+            assert!(entry.matching_terms.is_empty());
+        }
+        assert!(decision.answer.contains("carry"));
+    }
+
+    #[test]
+    fn no_carried_methodologies_is_an_honest_empty_decision() {
+        let mut facts = invocation();
+        facts.carried_methodologies = vec![];
+        let decision = decide(&facts);
+        assert!(decision.decisions.is_empty());
+        assert!(decision.unclassified.is_empty());
+        assert_eq!(
+            decision.answer,
+            "no Methodology is carried; nothing to instantiate or keep"
+        );
+    }
+
+    #[test]
+    fn non_methodology_entries_are_named_not_dropped() {
+        let mut facts = invocation();
+        facts.carried_methodologies = vec![
+            CarriedMethodology {
+                id: "skill/central/vision-authoring".into(),
+                description: "Author a Vision account.".into(),
+            },
+            CarriedMethodology {
+                id: "skill/central/bare".into(),
+                description: "METHODOLOGY:".into(),
+            },
+        ];
+        let decision = decide(&facts);
+        // The unclassifiable entry is named with its reason.
+        assert_eq!(decision.unclassified.len(), 1);
+        assert_eq!(decision.unclassified[0].id, "skill/central/vision-authoring");
+        assert!(decision.unclassified[0].reason.contains("METHODOLOGY"));
+        // A bare prefix still classifies as Methodology; it declares no field,
+        // so it stays carried for no field overlap — never fabricated intent.
+        assert!(decision.unclassified[0].id != "skill/central/bare");
+        assert_eq!(decision.decisions.len(), 1);
+        assert_eq!(decision.decisions[0].id, "skill/central/bare");
+        assert_eq!(
+            decision.decisions[0].decision,
+            MethodologyDecision::Carry {
+                reason: CarryReason::NoFieldOverlap
+            }
         );
     }
 }

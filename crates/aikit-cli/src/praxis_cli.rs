@@ -11,9 +11,8 @@ use serde_json::{json, Value};
 
 use aikit_core::a2a_card::{project_a2a_agent_card, projection_input_from_participation};
 use aikit_core::agent_praxis::{
-    disclose_agent_praxis, AgentProfileFacts, DisclosureInput, NowLocationFacts, PraxisActivity,
-    SetReading,
-    SkillFacts,
+    decide_methodology_instantiation, disclose_agent_praxis, AgentProfileFacts, DisclosureInput,
+    NowLocationFacts, PraxisActivity, SetReading, SkillFacts, SkillInvocationFacts,
 };
 use aikit_core::id::CapsuleId;
 use aikit_core::method::{praxis_form, praxis_payload, PraxisForm};
@@ -220,6 +219,27 @@ pub fn disclose(
     })
 }
 
+/// `aikit praxis instantiate-check` — Jev's standing invocation-time
+/// question, answered from the invocation facts the caller hands over: does a
+/// carried Methodology need to be instantiated here, or does the Skill carry
+/// enough context? Reads nothing else and loads nothing.
+pub fn instantiate_check(invocation_json: &str) -> Result<Value> {
+    let facts: SkillInvocationFacts =
+        serde_json::from_value(read_json(invocation_json, "skill invocation")?).map_err(|error| {
+            AikitError::new(
+                "praxis.invocation_invalid",
+                format!("the invocation facts do not satisfy aikit.methodology-instantiation/v1 input: {error}"),
+            )
+        })?;
+    let decision = decide_methodology_instantiation(&facts);
+    serde_json::to_value(decision).map_err(|error| {
+        AikitError::new(
+            "praxis.encode_failed",
+            format!("could not encode the instantiation decision: {error}"),
+        )
+    })
+}
+
 /// `aikit a2a card`.
 pub fn a2a_card(
     participation_json: &str,
@@ -253,4 +273,33 @@ pub fn a2a_card(
         "public_skill_count": card["skills"].as_array().map_or(0, Vec::len),
         "card": card,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instantiate_check_returns_the_typed_decision() {
+        let raw = serde_json::json!({
+            "skill_id": "skill/demo/html-account",
+            "skill_description": "Author a self-contained HTML account.",
+            "carried_methodologies": [
+                {"id": "skill/demo/docs-methodology",
+                 "description": "METHODOLOGY: orient the documentation field"}
+            ],
+            "undertaking_hints": ["write the documentation walk"]
+        })
+        .to_string();
+        let value = instantiate_check(&raw).unwrap();
+        assert_eq!(value["schema"], "aikit.methodology-instantiation/v1");
+        assert_eq!(value["decisions"][0]["decision"], "instantiate");
+        assert_eq!(value["decisions"][0]["reason"], "field-matches-undertaking");
+    }
+
+    #[test]
+    fn instantiate_check_refuses_unreadable_invocation_facts() {
+        let error = instantiate_check("{\"skill_id\":\"x\"}").unwrap_err();
+        assert_eq!(error.code(), "praxis.invocation_invalid");
+    }
 }

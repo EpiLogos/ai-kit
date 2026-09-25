@@ -2871,6 +2871,18 @@ pub enum PraxisSub {
         #[arg(long = "now-primary")]
         now_primary: bool,
     },
+    /// Decide, per carried Methodology, whether this skill invocation should
+    /// instantiate (load) it or keep it carried: Jev's standing question of
+    /// whether the Methodology orients this act or the Skill carries enough
+    /// context. Pure: answered from the invocation facts supplied.
+    InstantiateCheck {
+        /// Skill-invocation facts (`aikit.methodology-instantiation/v1`
+        /// input: the invoked Skill's id/description, the carried
+        /// Methodologies, optional undertaking hints). Prefix a path with @
+        /// to read a file.
+        #[arg(long = "invocation-json", value_name = "JSON|@FILE")]
+        invocation_json: String,
+    },
 }
 
 #[derive(Debug, Args)]

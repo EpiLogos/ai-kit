@@ -3514,9 +3514,12 @@ fn cmd_praxis(cwd: &std::path::Path, a: PraxisCmd) -> Result<Reply> {
                     register: now_register.clone(),
                     checkout_root: now_root.clone(),
                     branch: now_branch.clone(),
-                    primary_on_main: if now_primary { Some(true) } else { None },
+                    primary_on_main: if *now_primary { Some(true) } else { None },
                 }),
         )?,
+        PraxisSub::InstantiateCheck { invocation_json } => {
+            aikit_cli::praxis_cli::instantiate_check(invocation_json)?
+        }
     };
     Ok(reply(&service, data, diagnostic_warnings(&service)))
 }
