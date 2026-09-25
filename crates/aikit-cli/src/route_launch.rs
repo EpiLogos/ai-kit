@@ -30,8 +30,8 @@ use aikit_adapters::runner::CommandRunner;
 use aikit_core::harness_profile::{ModelDispatchPosture, ModelsLayer};
 use aikit_core::model_harness_binding::HarnessProviderGate;
 use aikit_core::resource::{
-    canonical_model_ref, CredentialCondition, ModelRoute, ModelRouteSet, ProviderRef, ResourceRef,
-    RouteAvailability, RouteUsability,
+    canonical_model_ref, CredentialCondition, ModelRoute, ModelRouteKind, ModelRouteSet,
+    ProviderRef, ResourceRef, RouteAvailability, RouteUsability,
 };
 use aikit_core::{AikitError, Result};
 use aikit_store::model_catalogue::{load_provider_catalogs, resolved_catalogue};
@@ -92,6 +92,31 @@ pub(crate) enum RouteSelection<'a> {
     NoneViable(Vec<String>),
 }
 
+fn same_offer_prefers_harness<'a>(usable: Vec<&'a ModelRoute>) -> Vec<&'a ModelRoute> {
+    let mut grouped: Vec<((String, String), Vec<&'a ModelRoute>)> = Vec::new();
+    for route in usable {
+        let key = (
+            route.provider.to_string(),
+            route.provider_native_id.clone(),
+        );
+        if let Some((_, group)) = grouped.iter_mut().find(|(existing, _)| *existing == key) {
+            group.push(route);
+        } else {
+            grouped.push((key, vec![route]));
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(_, group)| {
+            group
+                .iter()
+                .copied()
+                .find(|route| route.kind == ModelRouteKind::HarnessNative)
+                .unwrap_or(group[0])
+        })
+        .collect()
+}
+
 pub(crate) fn select_route<'a>(
     set: &'a ModelRouteSet,
     pin: Option<&ProviderRef>,
@@ -133,6 +158,11 @@ fn select_route_with_login<'a>(
                     && matches!(&route.credential, CredentialCondition::Required { .. }))
         })
         .collect();
+    // One provider offering one native id is one route, however many times
+    // the catalogue and the harness both observed it. A harness launch takes
+    // the harness-native observation of that offer. Distinct native ids, or
+    // distinct providers, stay ambiguous and still require an explicit pin.
+    let usable = same_offer_prefers_harness(usable);
     match usable.len() {
         0 => RouteSelection::NoneUsable(
             set.routes
@@ -1169,6 +1199,32 @@ mod tests {
     }
 
     #[test]
+    fn the_same_provider_offer_observed_twice_selects_the_harness_route() {
+        let model = canonical_model_ref("model:glm-5.3-flash").unwrap();
+        let provider = ProviderRef::parse("provider:z-ai").unwrap();
+        let mut set = ModelRouteSet::new(model.clone());
+        for kind in [ModelRouteKind::ProviderNative, ModelRouteKind::HarnessNative] {
+            set.routes.push(ModelRoute {
+                model: model.clone(),
+                provider: provider.clone(),
+                kind,
+                provider_native_id: "glm-5.3-flash".into(),
+                endpoint: None,
+                availability: RouteAvailability::Observed {
+                    detection_ref: kind.as_str().into(),
+                },
+                credential: CredentialCondition::NotRequired,
+                provenance: vec![],
+            });
+        }
+        let selected = select_route(&set, Some(&provider));
+        let RouteSelection::Selected(route) = selected else {
+            panic!("one native id must not stay ambiguous");
+        };
+        assert_eq!(route.kind, ModelRouteKind::HarnessNative);
+        assert_eq!(route.provider_native_id, "glm-5.3-flash");
+    }
+
     fn several_usable_routes_refuse_asking_for_an_explicit_pin() {
         let (_dir, home) = home();
         // Two providers can both serve the owner-catalogued model, and both
