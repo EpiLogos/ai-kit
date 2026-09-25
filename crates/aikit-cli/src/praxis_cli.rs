@@ -11,7 +11,8 @@ use serde_json::{json, Value};
 
 use aikit_core::a2a_card::{project_a2a_agent_card, projection_input_from_participation};
 use aikit_core::agent_praxis::{
-    disclose_agent_praxis, AgentProfileFacts, DisclosureInput, PraxisActivity, SetReading,
+    disclose_agent_praxis, AgentProfileFacts, DisclosureInput, NowLocationFacts, PraxisActivity,
+    SetReading,
     SkillFacts,
 };
 use aikit_core::id::CapsuleId;
@@ -127,6 +128,7 @@ pub fn disclose(
     profile_json: &str,
     activity_json: Option<&str>,
     select: &[String],
+    now: Option<NowLocationFacts>,
 ) -> Result<Value> {
     let profile_value = unwrap_profile(read_json(profile_json, "AgentProfile")?);
     let profile: AgentProfileFacts = serde_json::from_value(profile_value).map_err(|error| {
@@ -208,6 +210,7 @@ pub fn disclose(
         activity,
         selected: select.to_vec(),
         context_id: Some(view.context.context_id.to_string()),
+        now_location: now,
     });
     serde_json::to_value(disclosure).map_err(|error| {
         AikitError::new(

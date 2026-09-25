@@ -143,6 +143,8 @@ pub struct DisclosureInput {
     /// Skills explicitly selected for the current act (a Method, a Focus binding).
     pub selected: Vec<String>,
     pub context_id: Option<String>,
+    /// The NOW location the acting session stands in, when disclosed.
+    pub now_location: Option<NowLocationFacts>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,6 +249,31 @@ pub struct WorldRefs {
     pub ratified_world_refs: Vec<String>,
     pub scope: Option<String>,
     pub knowledge_source_refs: Vec<String>,
+}
+
+/// The NOW location of the acting session — the owner's "where": a Workcell
+/// seat on a machine, in a register. The Workcell IS the NOW location; the
+/// bounded worktrees of a project are workcells on its machine. The caller
+/// supplies these from native records (the machine's Workcell binding in
+/// `Control/machines/current.json`, the seat's own checkout state); the
+/// disclosure composes them into the where-am-I answer verbatim and
+/// invents nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NowLocationFacts {
+    /// The Workcell the session stands in (e.g. `workcell:mac`, or a bounded
+    /// seat worktree on it, named as the owner names it).
+    pub workcell_ref: String,
+    /// The machine the Workcell runs on, when disclosed.
+    pub machine_ref: Option<String>,
+    /// Which register this session's work lands in (`project:<name>` or the
+    /// root register), when disclosed.
+    pub register: Option<String>,
+    /// The checkout root the seat occupies.
+    pub checkout_root: Option<String>,
+    /// The branch the seat stands on.
+    pub branch: Option<String>,
+    /// True when this seat is the project's primary checkout standing on main.
+    pub primary_on_main: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -495,6 +522,7 @@ pub fn disclose_agent_praxis(input: &DisclosureInput) -> AgentPraxisDisclosure {
         &world,
         &operative,
         &return_relation,
+        input.now_location.as_ref(),
     );
 
     AgentPraxisDisclosure {
@@ -531,6 +559,7 @@ fn list(items: &[&str], empty: &str) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn answer(
     profile: &AgentProfileFacts,
     expression: &Expression,
@@ -539,6 +568,7 @@ fn answer(
     world: &WorldRefs,
     operative: &Operative,
     returned: &ReturnRelation,
+    now_location: Option<&NowLocationFacts>,
 ) -> Answers {
     let why = match (&expression.purpose, &expression.recognition) {
         (Some(purpose), Some(recognition)) if recognition != "recognised" => {
@@ -573,7 +603,7 @@ fn answer(
         }
         parts.join("; ")
     };
-    let where_am_i = match &world.world_ref {
+    let world_part = match &world.world_ref {
         Some(world_ref) => {
             let others: Vec<&str> = world
                 .ratified_world_refs
@@ -595,6 +625,35 @@ fn answer(
             }
         }
         None => "no World is named on the profile".into(),
+    };
+    let where_am_i = match now_location {
+        Some(now) => {
+            let mut parts = vec![world_part];
+            let mut location = format!("NOW location {}", now.workcell_ref);
+            if let Some(machine) = &now.machine_ref {
+                location.push_str(&format!(" on machine {machine}"));
+            }
+            parts.push(location);
+            if let Some(register) = &now.register {
+                parts.push(format!("work lands in the {register} register"));
+            }
+            match (&now.checkout_root, &now.branch, now.primary_on_main) {
+                (Some(root), Some(branch), Some(true)) => {
+                    parts.push(format!("seated at {root} on {branch} (the project's primary checkout)"))
+                }
+                (Some(root), Some(branch), _) => parts.push(format!(
+                    "seated at {root} on {branch} (a development seat; a landed lane releases its seat)"
+                )),
+                (None, Some(branch), _) => parts.push(format!("standing on branch {branch}")),
+                (Some(root), None, _) => parts.push(format!("seated at {root}")),
+                (None, None, None) => {}
+                (None, None, Some(primary)) => parts.push(format!(
+                    "primary checkout on main: {primary}"
+                )),
+            }
+            parts.join("; ")
+        }
+        None => world_part,
     };
     let operative_now = if operative.selected.is_empty()
         && operative.loaded.is_empty()
@@ -759,6 +818,7 @@ mod tests {
 
     fn input() -> DisclosureInput {
         DisclosureInput {
+            now_location: None,
             profile: profile(),
             sets: vec![
                 SetReading {
@@ -777,6 +837,37 @@ mod tests {
             selected: vec![],
             context_id: Some("ctx_test".into()),
         }
+    }
+
+    #[test]
+    fn now_location_answers_where_am_i_in_the_owner_s_terms() {
+        let mut input = input();
+        input.now_location = Some(NowLocationFacts {
+            workcell_ref: "worktrees/env-2/o-i".into(),
+            machine_ref: Some("workcell:mac machine Admins-MacBook-Pro-3".into()),
+            register: Some("project:O-I".into()),
+            checkout_root: Some("/Users/admin/Central/worktrees/env-2/o-i".into()),
+            branch: Some("feat/document-surface-20260925".into()),
+            primary_on_main: None,
+        });
+        let disclosure = disclose_agent_praxis(&input);
+        let answer = &disclosure.answers.where_am_i;
+        assert!(answer.contains("NOW location worktrees/env-2/o-i"), "{answer}");
+        assert!(answer.contains("machine"), "{answer}");
+        assert!(answer.contains("project:O-I"), "{answer}");
+        assert!(answer.contains("development seat"), "{answer}");
+        assert!(answer.contains("a landed lane releases its seat"), "{answer}");
+
+        input.now_location.as_mut().unwrap().primary_on_main = Some(true);
+        input.now_location.as_mut().unwrap().branch = Some("main".into());
+        let disclosure = disclose_agent_praxis(&input);
+        assert!(disclosure.answers.where_am_i.contains("the project's primary checkout"),
+            "{}", disclosure.answers.where_am_i);
+
+        // Without a NOW location the answer stays the world-only reading.
+        input.now_location = None;
+        let disclosure = disclose_agent_praxis(&input);
+        assert!(!disclosure.answers.where_am_i.contains("NOW location"));
     }
 
     fn entry<'a>(disclosure: &'a AgentPraxisDisclosure, id: &str) -> &'a PraxisEntry {

@@ -976,6 +976,8 @@ pub enum GatewaySub {
     Forward(GatewayQueryArgs),
     /// Declare, list or remove the gateway endpoints of other Workcells.
     Remote(GatewayRemoteCmd),
+    /// Declare, list or remove the connectors this gateway service runs.
+    Connector(GatewayConnectorCmd),
 }
 
 /// `aikit gateway who`.
@@ -1096,6 +1098,58 @@ pub enum GatewayRemoteSub {
     Remove {
         #[arg(long, value_name = "WORKCELL_REF")]
         workcell: String,
+    },
+}
+
+/// `aikit gateway connector` — the connectors a gateway service runs.
+#[derive(Debug, Args)]
+pub struct GatewayConnectorCmd {
+    #[command(subcommand)]
+    pub command: GatewayConnectorSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GatewayConnectorSub {
+    /// Declare (or replace) a connector the gateway service runs.
+    Add {
+        /// The connector platform, e.g. `telegram`.
+        #[arg(long, value_name = "PLATFORM")]
+        platform: String,
+        /// The connector ref, e.g. `gateway-connector/telegram/main`.
+        #[arg(long = "ref", value_name = "REF")]
+        connector_ref: String,
+        /// Where the connector's token lives: `file:/abs/path` (owner-only,
+        /// chmod 600) or a keychain:// / pass:// / op:// / varlock:// ref.
+        /// Never the token itself.
+        #[arg(long = "token-location", value_name = "LOCATION")]
+        token_location: Option<String>,
+        /// Implementation the service builds (default: the platform name).
+        #[arg(long, value_name = "NAME")]
+        implementation: Option<String>,
+        /// External connector command for the `stdio` implementation
+        /// (shell-quoted argv, spawned with JSON wire frames on stdio).
+        #[arg(long, value_name = "COMMAND")]
+        program: Option<String>,
+        /// Non-secret configuration ref recorded for provenance.
+        #[arg(long = "configuration-ref", value_name = "REF")]
+        configuration_ref: Option<String>,
+        /// Declare the connector but do not run it.
+        #[arg(long)]
+        disable: bool,
+        /// Refused: a token value never travels on the command line.
+        #[arg(long, value_name = "TOKEN", hide = true)]
+        token: Option<String>,
+    },
+    /// List the declared connectors (token locations, never secrets).
+    List {
+        /// Emit the connectors document as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a declared connector.
+    Remove {
+        #[arg(long = "ref", value_name = "REF")]
+        connector_ref: String,
     },
 }
 
@@ -2796,6 +2850,26 @@ pub enum PraxisSub {
         /// Skills selected for the current act. Repeatable.
         #[arg(long = "select", value_name = "SKILL")]
         select: Vec<String>,
+        /// The Workcell the session stands in — the NOW location (the
+        /// owner's "where": Workcells are where sessions are; a project's
+        /// bounded worktrees are Workcells on its machine).
+        #[arg(long = "now-workcell", value_name = "WORKCELL_REF")]
+        now_workcell: Option<String>,
+        /// The machine that Workcell runs on.
+        #[arg(long = "now-machine", value_name = "MACHINE_REF")]
+        now_machine: Option<String>,
+        /// Which register this session's work lands in (project:<name> or root).
+        #[arg(long = "now-register", value_name = "REGISTER")]
+        now_register: Option<String>,
+        /// The checkout root the seat occupies.
+        #[arg(long = "now-root", value_name = "PATH")]
+        now_root: Option<String>,
+        /// The branch the seat stands on.
+        #[arg(long = "now-branch", value_name = "BRANCH")]
+        now_branch: Option<String>,
+        /// This seat is the project's primary checkout standing on main.
+        #[arg(long = "now-primary")]
+        now_primary: bool,
     },
 }
 

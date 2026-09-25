@@ -1242,10 +1242,19 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
                     },
                 ));
+            // The connectors file names what this service runs. Building the
+            // factories here is the startup gate: an unknown implementation or
+            // an unusable token location stops the service before any carrier
+            // binds, naming the connector.
+            let connectors = aikit_cli::gateway_connectors::connector_factories(&home)?;
             aikit_adapters::run_gateway_service_with_hooks(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
-                aikit_adapters::GatewayServiceHooks { ticks, occupancy },
+                aikit_adapters::GatewayServiceHooks {
+                    ticks,
+                    occupancy,
+                    connectors,
+                },
             )?;
             Ok(Reply::Text("gateway service stopped cleanly".into()))
         }
@@ -1385,6 +1394,12 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 aikit_cli::gateway_contact::remote_remove(&home, &workcell)?
             }
         }),
+        GatewaySub::Connector(c) => {
+            match aikit_cli::gateway_connectors::connector_command(&home, c)? {
+                aikit_cli::gateway_connectors::ConnectorOutput::Text(text) => Ok(Reply::Text(text)),
+                aikit_cli::gateway_connectors::ConnectorOutput::Data(data) => gateway_data(data),
+            }
+        }
         query => {
             let command = match query {
                 GatewaySub::Protocol(_) => aikit_adapters::GatewayCommand::Protocol,
@@ -1402,7 +1417,8 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Conversation(_)
                 | GatewaySub::Delegate(_)
                 | GatewaySub::Forward(_)
-                | GatewaySub::Remote(_) => unreachable!("handled above"),
+                | GatewaySub::Remote(_)
+                | GatewaySub::Connector(_) => unreachable!("handled above"),
             };
             let args = match query {
                 GatewaySub::Protocol(a)
@@ -1420,7 +1436,8 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Conversation(_)
                 | GatewaySub::Delegate(_)
                 | GatewaySub::Forward(_)
-                | GatewaySub::Remote(_) => unreachable!("handled above"),
+                | GatewaySub::Remote(_)
+                | GatewaySub::Connector(_) => unreachable!("handled above"),
             };
             let target = aikit_cli::gateway_ops::carrier_target(&home, &args)?;
             let response =
@@ -3477,12 +3494,28 @@ fn cmd_praxis(cwd: &std::path::Path, a: PraxisCmd) -> Result<Reply> {
             profile_json,
             activity_json,
             select,
+            now_workcell,
+            now_machine,
+            now_register,
+            now_root,
+            now_branch,
+            now_primary,
         } => aikit_cli::praxis_cli::disclose(
             service.home(),
             service.resolved(),
             profile_json,
             activity_json.as_deref(),
             select,
+            now_workcell
+                .clone()
+                .map(|workcell_ref| aikit_core::agent_praxis::NowLocationFacts {
+                    workcell_ref,
+                    machine_ref: now_machine.clone(),
+                    register: now_register.clone(),
+                    checkout_root: now_root.clone(),
+                    branch: now_branch.clone(),
+                    primary_on_main: if now_primary { Some(true) } else { None },
+                }),
         )?,
     };
     Ok(reply(&service, data, diagnostic_warnings(&service)))
