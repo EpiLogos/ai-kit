@@ -14,6 +14,7 @@ use aikit_adapters::work_repos::{
     discover_work_projects, WorkRepoProject, WorkReposSourcePoolProvider,
 };
 use aikit_core::knowledge::{KnowledgeContextPack, KnowledgeRelationView, KnowledgeRoute};
+use aikit_core::knowledge_code::CodeIndexProvider;
 use aikit_core::knowledge_navigation::ProjectAuthoredPending;
 use aikit_core::knowledge_source_pool::{
     material_for_actor, NativeSourcePoolProvider, SourceMaterial, SourcePool, SourcePoolProvider,
@@ -42,8 +43,75 @@ use super::Service;
 const MAX_DISCOVERY_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_DISCOVERY_FILES: usize = 4096;
 
-/// One project's GitNexus code-index admission degradation. A Knowledge read
-/// observes an existing index and never builds or repairs it. Held per project
+/// Default wall-clock budget for one GitNexus subprocess call (capability
+/// probe, index, or search) issued by a project's code-lens provider.
+/// Indexing a real repository is legitimate work, not a health probe, so
+/// this sits well above `aikit_core::probe::probe_budget()` (10s, meant for
+/// `--version`/`--help`-shaped checks) — but it is still a hard ceiling: a
+/// live gate against the real Central ground found `gitnexus analyze
+/// --index-only` on one large Work repo running past five minutes
+/// unbounded, which is exactly the class of stall a query must never carry
+/// silently.
+const DEFAULT_GITNEXUS_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Environment override for [`DEFAULT_GITNEXUS_BUDGET`], in whole seconds.
+const GITNEXUS_BUDGET_VAR: &str = "AIKIT_GITNEXUS_BUDGET_SECS";
+
+/// At most this many discovered Work projects index in parallel. GitNexus's
+/// own process is heavy (observed over 1 GB resident indexing one large
+/// repo), so parallelism is bounded rather than one thread per project.
+const MAX_GITNEXUS_PARALLELISM: usize = 4;
+
+/// The effective GitNexus subprocess budget: `AIKIT_GITNEXUS_BUDGET_SECS`
+/// when it parses to at least one second, otherwise
+/// [`DEFAULT_GITNEXUS_BUDGET`]. An unparseable or zero override falls back
+/// to the default rather than disabling the bound — the bound has no off
+/// switch, matching the probe-budget discipline it sits beside.
+fn gitnexus_budget() -> std::time::Duration {
+    parse_gitnexus_budget(std::env::var(GITNEXUS_BUDGET_VAR).ok().as_deref())
+}
+
+/// Pure parse behind [`gitnexus_budget`], split out so the fallback rules are
+/// testable without mutating process-wide environment state.
+fn parse_gitnexus_budget(raw: Option<&str>) -> std::time::Duration {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs >= 1)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(DEFAULT_GITNEXUS_BUDGET)
+}
+
+#[cfg(test)]
+mod gitnexus_budget_tests {
+    use super::{parse_gitnexus_budget, DEFAULT_GITNEXUS_BUDGET};
+
+    #[test]
+    fn absent_or_junk_or_zero_falls_back_to_the_default_rather_than_disabling_the_bound() {
+        assert_eq!(parse_gitnexus_budget(None), DEFAULT_GITNEXUS_BUDGET);
+        assert_eq!(parse_gitnexus_budget(Some("")), DEFAULT_GITNEXUS_BUDGET);
+        assert_eq!(
+            parse_gitnexus_budget(Some("not-a-number")),
+            DEFAULT_GITNEXUS_BUDGET
+        );
+        assert_eq!(parse_gitnexus_budget(Some("0")), DEFAULT_GITNEXUS_BUDGET);
+        assert_eq!(parse_gitnexus_budget(Some("-5")), DEFAULT_GITNEXUS_BUDGET);
+    }
+
+    #[test]
+    fn a_valid_override_wins() {
+        assert_eq!(
+            parse_gitnexus_budget(Some("90")),
+            std::time::Duration::from_secs(90)
+        );
+        // Surrounding whitespace (a shell export quirk) does not defeat it.
+        assert_eq!(
+            parse_gitnexus_budget(Some(" 12 ")),
+            std::time::Duration::from_secs(12)
+        );
+    }
+}
+
+/// One project's GitNexus code-index degradation: the binary was present and
+/// index-capable, but building that project's index failed. Held per project
 /// so a scoped reply carries only its own scope's line and `knowledge status`
 /// names every project — the same discipline `authored_pending` and the
 /// per-project anchor lines already follow.
@@ -1559,72 +1627,164 @@ impl Service {
         if let Some(provider) = &central {
             material.extend(provider.descriptors().iter().cloned());
         }
-        // Knowledge reads observe existing derived indexes. Rebuilding all Work
-        // repos here made even a wiki relation read mutate source repositories
-        // and wait indefinitely for an unrelated code analysis.
-        let mut code = Vec::new();
-        let mut code_project_scopes = Vec::new();
+        // GitNexus per discovered project (Design C): the structural layer is
+        // capability-gated per project. Each provider joins the runtime even
+        // when it cannot index, so the absence is per project — never a
+        // global "provider absent"; unavailable projects share one grouped
+        // line per distinct reason.
+        //
+        // Bounded and parallel (owner repair, W-knowledge-search-2026-09-24):
+        // a live gate against the real Central ground found `knowledge
+        // search`/`knowledge status` taking minutes — one large Work repo's
+        // `gitnexus analyze --index-only` alone ran past five minutes
+        // unbounded, and this loop ran one such call per discovered project,
+        // strictly sequentially, on every single invocation (no index state
+        // survives between CLI processes). Every GitNexus subprocess this
+        // provider spawns — capability probe, index, search — now runs under
+        // `gitnexus_budget()`, so one huge or hung repository is killed and
+        // disclosed rather than stalling the query; indexing itself runs in
+        // bounded parallel across projects so N repos cost roughly one
+        // budget's wall time, not N of them summed.
+        let code_budget = gitnexus_budget();
+        let parallelism = std::thread::available_parallelism()
+            .map(|n| n.get().clamp(1, MAX_GITNEXUS_PARALLELISM))
+            .unwrap_or(2);
+        let mut code = Vec::with_capacity(work_projects.len());
+        let mut code_project_scopes = Vec::with_capacity(work_projects.len());
         let mut code_degradations: Vec<ProjectCodeDegradation> = Vec::new();
-        let mut prototype: Option<GitNexusCodeIndexProvider<SystemRunner>> = None;
+        // The binary is a seam: `AIKIT_GITNEXUS_BIN` (resolved through the
+        // process environment at `Service::open`) overrides the PATH lookup,
+        // so a test — and an operator — pins code intelligence to a known
+        // binary instead of depending on whatever the host happens to have.
+        let gitnexus_binary = self.gitnexus_binary.clone();
+        // `gitnexus analyze` records each indexed repo in one global
+        // `registry.json` by an unlocked read-modify-write, and `query --repo`
+        // resolves the repo name through that registry. Two concurrent
+        // analyses can each write back their own copy, silently dropping the
+        // other repo's entry so its code never surfaces. Probes and adoption
+        // stay parallel; the registry-writing index step runs one at a time.
+        let index_lock = std::sync::Mutex::new(());
+        let mut gitnexus_unavailable: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut project_sources = Vec::with_capacity(work_projects.len());
         for project in &work_projects {
             let source = SourceRef::parse(format!("source:project-code:{}", project.project_id))?;
-            let runner = SystemRunner::probe().with_cwd(&project.root);
-            let mut provider = match prototype.as_ref() {
-                Some(value) => value.for_project(runner, project.project_id.clone(), source),
-                None => match self.gitnexus_binary.as_deref() {
-                    Some(binary) => GitNexusCodeIndexProvider::with_binary(
-                        runner,
-                        binary,
-                        project.project_id.clone(),
-                        source,
-                        None,
-                    ),
-                    None => GitNexusCodeIndexProvider::new(
-                        runner,
-                        project.project_id.clone(),
-                        source,
-                        None,
-                    ),
-                },
-            };
-            if prototype.is_none() {
-                prototype = Some(provider.for_project(
-                    SystemRunner::probe(),
-                    project.project_id.clone(),
-                    SourceRef::parse(format!("source:project-code:{}", project.project_id))?,
-                ));
-            }
-            match provider.open_existing(&project.root) {
-                Ok(status) => {
-                    status_notes.push(format!("GitNexus Work/{}: {}", project.name, status.detail))
-                }
-                Err(error) => {
-                    // Admission failure belongs to this Project's queries;
-                    // a read never repairs or rebuilds the owner's index.
-                    let message = format!(
-                        "GitNexus CodeIndex degraded for Work/{}: existing index unavailable: {error}; no rebuild performed",
-                        project.name
-                    );
-                    status_notes.push(message.clone());
+            project_sources.push((project.clone(), source));
+        }
+        for batch in project_sources.chunks(parallelism) {
+            let outcomes: Vec<(
+                WorkRepoProject,
+                GitNexusCodeIndexProvider<SystemRunner>,
+                Option<aikit_core::AikitError>,
+            )> = std::thread::scope(|scope| {
+                let handles: Vec<_> = batch
+                    .iter()
+                    .map(|(project, source)| {
+                        let project = project.clone();
+                        let source = source.clone();
+                        let binary = gitnexus_binary.clone();
+                        let index_lock = &index_lock;
+                        scope.spawn(move || {
+                            let runner = SystemRunner::new()
+                                .with_cwd(&project.root)
+                                .with_timeout(code_budget);
+                            let mut provider = match binary.as_deref() {
+                                Some(binary) => GitNexusCodeIndexProvider::with_binary(
+                                    runner,
+                                    binary,
+                                    project.project_id.clone(),
+                                    source,
+                                    None,
+                                ),
+                                None => GitNexusCodeIndexProvider::new(
+                                    runner,
+                                    project.project_id.clone(),
+                                    source,
+                                    None,
+                                ),
+                            };
+                            let status = provider.status();
+                            // A query reads the existing derived index; it
+                            // never re-indexes one that exists (that made
+                            // every `knowledge` call cost minutes). Only an
+                            // unindexed project is indexed here; freshness
+                            // of an existing index is disclosed, not
+                            // re-checked (`aikit knowledge code index`).
+                            let adopted = provider.adopt_existing_index(&project.root);
+                            let index_error =
+                                if status.available && status.capabilities.index && !adopted {
+                                    let _registry = index_lock
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    provider.index(&project.root, false).err()
+                                } else {
+                                    None
+                                };
+                            (project, provider, index_error)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle
+                            .join()
+                            .expect("GitNexus index worker thread did not panic")
+                    })
+                    .collect()
+            });
+            for (project, provider, index_error) in outcomes {
+                if let Some(error) = index_error {
+                    // A timed-out call surfaces here exactly like any other
+                    // index failure: `error` already names the budget it
+                    // violated (`mux.command_timeout`), so the project is
+                    // disclosed as degraded, never silently dropped.
+                    // Per-project code state, scoped like `authored_pending`:
+                    // never the global per-query absence that leaked another
+                    // project's code degradation into a scoped reply.
                     code_degradations.push(ProjectCodeDegradation {
                         project: format!("Work/{}", project.name),
-                        message,
+                        message: format!(
+                            "GitNexus CodeIndex degraded for Work/{}: {error}",
+                            project.name
+                        ),
                     });
                 }
+                let status = provider.status();
+                if !status.available {
+                    let reason = provider
+                        .unavailable_reason()
+                        .unwrap_or_else(|| "GitNexus executable is unavailable".into());
+                    gitnexus_unavailable
+                        .entry(reason)
+                        .or_default()
+                        .push(format!("Work/{}", project.name));
+                } else if !status.capabilities.index {
+                    gitnexus_unavailable
+                        .entry(format!(
+                            "installed version {} does not expose the `analyze --index-only` surface this integration uses (tested {})",
+                            status.version.as_deref().unwrap_or("unknown"),
+                            aikit_core::knowledge_code::GITNEXUS_TESTED_VERSION
+                        ))
+                        .or_default()
+                        .push(format!("Work/{}", project.name));
+                }
+                code.push(provider);
+                code_project_scopes.push(format!("Work/{}", project.name));
             }
-            if let Some(reason) = provider.unavailable_reason() {
-                status_notes.push(format!(
-                    "GitNexus Work/{} executable unavailable: {reason}",
-                    project.name
-                ));
-            }
-            code.push(provider);
-            code_project_scopes.push(format!("Work/{}", project.name));
+        }
+        for (reason, projects) in gitnexus_unavailable {
+            // A status note, not a per-query absence: capability state is the
+            // same for every query, and a scoped reply must keep another
+            // project's disclosures out (the discipline authored_pending and
+            // the anchor lines already follow). Status names every project.
+            status_notes.push(format!(
+                "GitNexus unavailable for {}: {reason}",
+                projects.join(", ")
+            ));
         }
 
         let project_map =
             self.build_project_map(wiki.as_ref().map(SqliteWikiProvider::index), &material)?;
-        absences.extend(self.context_composition_notes());
 
         let now_field_roster = now_field
             .as_ref()
@@ -1677,13 +1837,7 @@ impl Service {
         material: &[SourceMaterial],
     ) -> Result<ProjectMap> {
         let mut map = ProjectMap::new();
-        let observed = self.workcell_run_resources();
-        let material_run_refs = observed
-            .iter()
-            .map(|record| record.descriptor.id.clone())
-            .collect::<BTreeSet<_>>();
-        let shallow =
-            aikit_tui::project_world_service::resource_index_with_records(self, observed)?;
+        let shallow = PaletteBackend::navigation_index(self);
         let mut project_resource = None;
 
         for record in ResourceIndex::resources(&shallow) {
@@ -1756,11 +1910,6 @@ impl Service {
                 .filter(|resource| resource != project)
                 .collect::<Vec<_>>();
             for resource in endpoints {
-                // A global Workcell ledger reading does not establish that a
-                // run or its binding belongs to the current Project.
-                if material_run_refs.contains(&resource) {
-                    continue;
-                }
                 map.bind(ProjectMapBinding {
                     from: project.clone(),
                     to: resource,
@@ -1929,9 +2078,11 @@ fn discover_material(
             // that body — which used to make the sniff claim the shard as
             // malformed Wiki material and warn on every search. What parses
             // as SourceMaterial is SourceMaterial.
-            let source_items = parse_source_material(&text);
+            let source_items = serde_json::from_str::<SourceMaterial>(&text)
+                .map(|item| vec![item])
+                .or_else(|_| serde_json::from_str::<Vec<SourceMaterial>>(&text));
 
-            if source_items.is_none() && discover_wiki && text.contains("okf-wiki/v1") {
+            if source_items.is_err() && discover_wiki && text.contains("okf-wiki/v1") {
                 match parse_wiki_objects(&text) {
                     Ok(objects) => {
                         for object in objects {
@@ -1954,7 +2105,7 @@ fn discover_material(
                 }
             }
 
-            if let Some(items) = source_items {
+            if let Ok(items) = source_items {
                 for item in items {
                     let source = item.binding.source.clone();
                     if conflicted_sources.contains(&source) {
@@ -1976,25 +2127,6 @@ fn discover_material(
         }
     }
     Ok(discovered)
-}
-
-fn parse_source_material(text: &str) -> Option<Vec<SourceMaterial>> {
-    // Both fields are required by SourceMaterial. Reject impossible objects
-    // before serde walks unrelated, potentially megabyte-sized nested values.
-    // This is only a necessary condition: a mention inside a body may pass it.
-    // Escaped keys and arrays (including serde's struct sequence form) retain
-    // the exact parser. No accepted source representation or discovery path is
-    // excluded, and malformed Wiki candidates still reach the Wiki reader.
-    if text.trim_start().starts_with('{')
-        && (!text.contains("\"binding\"") || !text.contains("\"body\""))
-        && !text.contains("\\u")
-    {
-        return None;
-    }
-    serde_json::from_str::<SourceMaterial>(text)
-        .map(|item| vec![item])
-        .or_else(|_| serde_json::from_str::<Vec<SourceMaterial>>(text))
-        .ok()
 }
 
 /// The compiler's own anchor-gap disclosure, partitioned into status notes by
@@ -2088,151 +2220,4 @@ fn work_member(central_root: &Path, path: &Path) -> Option<String> {
         return None;
     }
     parts.next()?.as_os_str().to_str().map(str::to_owned)
-}
-
-#[cfg(test)]
-mod discovery_tests {
-    use super::*;
-    use aikit_core::knowledge_source_pool::{SourceBinding, SourceVisibility};
-    use aikit_core::resource::SourceRevision;
-    use serde_json::json;
-
-    fn source(name: &str) -> SourceMaterial {
-        SourceMaterial {
-            binding: SourceBinding {
-                source: SourceRef::parse(format!("source:{name}")).unwrap(),
-                revision: SourceRevision::parse("sha256:discovery-test").unwrap(),
-                title: name.into(),
-                tags: Vec::new(),
-                visibility: SourceVisibility::Public,
-                owners: Vec::new(),
-                media_type: "text/markdown".into(),
-                locator: None,
-                metadata: BTreeMap::new(),
-            },
-            body: "An authored source discussing okf-wiki/v1, not a Wiki bundle.".into(),
-        }
-    }
-
-    #[test]
-    fn source_discovery_preserves_all_supported_material_representations() {
-        let material = source("representations");
-        let object = serde_json::to_string(&material).unwrap();
-        let binding = serde_json::to_string(&material.binding).unwrap();
-        let body = serde_json::to_string(&material.body).unwrap();
-        let sequence = format!("[{binding},{body}]");
-        let representations = [
-            object.clone(),
-            format!(" \n\t{object}\r"),
-            object.replace("\"binding\"", "\"\\u0062inding\""),
-            object.replace("\"body\"", "\"b\\u006fdy\""),
-            format!("{{\"unknown\":[{{\"nested\":true}}],\"body\":{body},\"binding\":{binding}}}"),
-            format!("[{object}]"),
-            sequence.clone(),
-            format!("[{sequence}]"),
-        ];
-        for text in representations {
-            // The production typed parser is the contract, including its
-            // accepted sequence and escaped-key representations.
-            let expected = serde_json::from_str::<SourceMaterial>(&text)
-                .map(|item| vec![item])
-                .or_else(|_| serde_json::from_str::<Vec<SourceMaterial>>(&text))
-                .unwrap();
-            assert_eq!(expected, vec![material.clone()]);
-            assert_eq!(parse_source_material(&text), Some(expected));
-        }
-        assert_eq!(parse_source_material("[]"), Some(Vec::new()));
-        for text in [
-            "{",
-            "{\"body\":\"text\"}",
-            "{\"binding\":{}}",
-            "{\"binding\":null,\"body\":\"text\"}",
-            "{\"\\u0062inding\":null,\"body\":\"text\"}",
-            "{\"body\":\"binding\",\"other\":\"body\"}",
-            "null",
-        ] {
-            assert!(serde_json::from_str::<SourceMaterial>(text).is_err());
-            assert!(serde_json::from_str::<Vec<SourceMaterial>>(text).is_err());
-            assert_eq!(parse_source_material(text), None);
-        }
-    }
-
-    #[test]
-    fn source_discovery_reads_real_files_without_reclassifying_authored_bodies() {
-        let root = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
-        let sources = [source("object"), source("escaped"), source("sequence")];
-        fs::write(
-            root.path().join("object.json"),
-            serde_json::to_vec(&sources[0]).unwrap(),
-        )
-        .unwrap();
-        fs::write(
-            root.path().join("escaped.json"),
-            serde_json::to_string(&sources[1])
-                .unwrap()
-                .replace("\"binding\"", "\"\\u0062inding\""),
-        )
-        .unwrap();
-        fs::write(
-            root.path().join("sequence.json"),
-            serde_json::to_vec(&json!([sources[2].binding, sources[2].body])).unwrap(),
-        )
-        .unwrap();
-        // Valid large unrelated JSON from a real file exercises the early
-        // rejection; it must neither become a source nor a Wiki warning.
-        fs::write(
-            root.path().join("unrelated.json"),
-            serde_json::to_vec(&json!({"payload": "x".repeat(3 * 1024 * 1024)})).unwrap(),
-        )
-        .unwrap();
-        let mut absences = Vec::new();
-        let discovered = discover_material(root.path(), home.path(), &mut absences, true).unwrap();
-        assert!(absences.is_empty(), "{absences:?}");
-        assert!(discovered.wiki.is_empty());
-        assert_eq!(discovered.sources.len(), sources.len());
-        for material in sources {
-            assert_eq!(
-                discovered.sources.get(&material.binding.source),
-                Some(&material)
-            );
-        }
-    }
-
-    #[test]
-    fn source_discovery_keeps_conflicts_withheld_and_malformed_wiki_disclosed() {
-        let root = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
-        let original = source("conflict");
-        let mut changed = original.clone();
-        changed.body = "Conflicting content at the same native source reference.".into();
-        for (name, material) in [("a", &original), ("b", &changed), ("c", &original)] {
-            fs::write(
-                root.path().join(format!("{name}.json")),
-                serde_json::to_vec(material).unwrap(),
-            )
-            .unwrap();
-        }
-        fs::write(
-            root.path().join("wiki.json"),
-            r#"{"profile":"okf-wiki/v1","objects":"invalid"}"#,
-        )
-        .unwrap();
-        let mut absences = Vec::new();
-        let discovered = discover_material(root.path(), home.path(), &mut absences, true).unwrap();
-        assert!(discovered.sources.is_empty());
-        assert!(discovered.wiki.is_empty());
-        assert_eq!(absences.len(), 2, "{absences:?}");
-        assert!(absences
-            .iter()
-            .any(|line| line.contains("SourcePool material conflict")));
-        assert!(absences
-            .iter()
-            .any(|line| line.contains("self-identified SemanticWiki material")));
-        // Native Central discovery still leaves Wiki interpretation to its owner.
-        let mut native_absences = Vec::new();
-        discover_material(root.path(), home.path(), &mut native_absences, false).unwrap();
-        assert_eq!(native_absences.len(), 1);
-        assert!(native_absences[0].contains("SourcePool material conflict"));
-    }
 }
