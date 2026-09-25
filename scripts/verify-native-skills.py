@@ -27,6 +27,7 @@ EXPECTED_SKILLS = {
     "skill/aikit/wiki-inhabitation",
     "skill/aikit/experience-campaign",
     "skill/aikit/central-day-rollover",
+    "skill/aikit/central-file-map-refresh",
     "skill/aikit/factory-telemetry-collect",
     "skill/aikit/factory-telemetry-field-refresh",
     "skill/aikit/skillset-package-authoring",

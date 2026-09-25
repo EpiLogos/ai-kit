@@ -191,6 +191,20 @@ fn leak_scan(hits: &[KnowledgeSearchHit], scope: &str) -> Vec<String> {
 /// process-environment state that must not race between tests.
 #[test]
 fn projectworld_matrix_isolation_over_real_scopes() {
+    // The cedar-scope positive control answers through the real NOW-field
+    // provider, which searches with real ripgrep. Like `now_field_real`, the
+    // test skips honestly when ripgrep is absent and hardens when the
+    // environment declares real-ripgrep acceptance (`AIKIT_REQUIRE_RIPGREP_REAL`).
+    if !aikit_adapters::ripgrep::available() {
+        assert!(
+            std::env::var_os("AIKIT_REQUIRE_RIPGREP_REAL").is_none(),
+            "real ProjectWorld matrix-isolation conformance requires ripgrep"
+        );
+        eprintln!(
+            "ripgrep is not installed; the ProjectWorld matrix isolation acceptance test skipped"
+        );
+        return;
+    }
     let temp = matrix_world();
     let world = temp.path().join("world");
     let stub = stub_ctrl(&world);
