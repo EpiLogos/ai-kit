@@ -324,10 +324,26 @@ fn doctor_warns_that_scheduled_automations_will_not_fire_without_a_gateway() {
 }
 
 fn free_bind() -> String {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    format!("127.0.0.1:{port}")
+    use std::sync::atomic::{AtomicU32, Ordering};
+    // An ephemeral port freed here can be claimed by a concurrently starting
+    // test's own server before this test's serve binds it, so hand each caller
+    // a distinct reservation instead of a port that is only momentarily free.
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let base = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port() as u32;
+    for attempt in 0..64u32 {
+        let spread = NEXT.fetch_add(7, Ordering::SeqCst) % 4096 + attempt;
+        let candidate = 1024 + (base.wrapping_add(spread * 97) % (65535 - 1024));
+        if let Ok(listener) = std::net::TcpListener::bind(format!("127.0.0.1:{candidate}")) {
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            return format!("127.0.0.1:{port}");
+        }
+    }
+    panic!("no reservable loopback port for the gateway test");
 }
 
 fn token_file(dir: &std::path::Path, mode: u32) -> std::path::PathBuf {
