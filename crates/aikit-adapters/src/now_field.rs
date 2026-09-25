@@ -687,6 +687,10 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
         };
         let outcome = self.searcher.search(&request)?;
         let required: BTreeSet<&str> = tags.iter().map(String::as_str).collect();
+        // One row per document: a clearing that mentions the query on five
+        // lines is one answer, not five. The first match's line binding is
+        // kept on the folded hit.
+        let mut seen_documents = BTreeSet::new();
         Ok(outcome
             .matches
             .iter()
@@ -695,6 +699,7 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
                 required.is_empty()
                     || required.is_subset(&hit.tags.iter().map(String::as_str).collect())
             })
+            .filter(|hit| seen_documents.insert(hit.source.to_string()))
             .take(limit)
             .collect())
     }
