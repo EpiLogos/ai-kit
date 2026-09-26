@@ -100,6 +100,12 @@ pub struct CentralAgentProfileProjection {
     /// cannot recover a field lost here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent_provenance: Option<CentralAgentProfileIntentProvenance>,
+    /// Central file ref to the reusable expressive character (an
+    /// `oi.expression/v1` material document of reuse kind `character`) the
+    /// Agent appears through. Carried as a ref for downstream disclosure; AIKit
+    /// neither dereferences nor interprets the material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expressive_character_ref: Option<ResourceRef>,
 }
 
 impl CentralAgentProfileProjection {
@@ -148,6 +154,14 @@ impl CentralAgentProfileProjection {
                 "central_agent_profile.identity_collapse",
                 "agent_ref and profile ref must remain distinct",
             ));
+        }
+        if let Some(character) = &self.expressive_character_ref {
+            if ResourceRef::parse(character.as_str()).is_err() {
+                return Err(AikitError::new(
+                    "central_agent_profile.invalid_ref",
+                    "expressive_character_ref must be a non-empty, trimmed ref",
+                ));
+            }
         }
         if let Some(provenance) = &self.intent_provenance {
             if provenance.schema != CENTRAL_AGENT_PROFILE_PROVENANCE_SCHEMA {
@@ -273,6 +287,51 @@ mod tests {
                 .unwrap_err()
                 .code(),
             "central_agent_profile.identity_collapse"
+        );
+    }
+
+    #[test]
+    fn carries_expressive_character_ref_and_omits_it_when_absent() {
+        let plain = CentralAgentProfileProjection::parse(&profile_value()).unwrap();
+        assert!(plain.expressive_character_ref.is_none());
+        assert!(serde_json::to_value(&plain)
+            .unwrap()
+            .get("expressive_character_ref")
+            .is_none());
+
+        let character = "central:Control/agents/expressive-material/character/nous.expression.json";
+        let mut value = profile_value();
+        value["expressive_character_ref"] = serde_json::json!(character);
+        let projection = CentralAgentProfileProjection::parse(&value).unwrap();
+        assert_eq!(
+            projection
+                .expressive_character_ref
+                .as_ref()
+                .map(ResourceRef::as_str),
+            Some(character)
+        );
+        // The authored slice keeps the full source, so disclosure reaches it.
+        let authored = projection.authored_projection();
+        assert_eq!(
+            authored
+                .profile_source
+                .as_ref()
+                .and_then(|source| source.expressive_character_ref.as_ref())
+                .map(ResourceRef::as_str),
+            Some(character)
+        );
+        assert_eq!(
+            serde_json::to_value(&projection).unwrap()["expressive_character_ref"],
+            character
+        );
+
+        let mut untrimmed = profile_value();
+        untrimmed["expressive_character_ref"] = serde_json::json!(" central:x");
+        assert_eq!(
+            CentralAgentProfileProjection::parse(&untrimmed)
+                .unwrap_err()
+                .code(),
+            "central_agent_profile.invalid_ref"
         );
     }
 
