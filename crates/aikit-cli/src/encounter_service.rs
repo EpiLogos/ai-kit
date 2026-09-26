@@ -632,6 +632,34 @@ impl EncounterService {
         }
         result.map_err(error)
     }
+    /// Withdraw one configured encounter provider by id: the exact inverse of
+    /// [`EncounterService::configure`]. Like configure, this is an explicit
+    /// native operation, never an IPC request. A resident owner that already
+    /// opened the provider keeps its existing session until restart; new opens
+    /// refuse because the registration is gone. Configured editions a person
+    /// still wants are not touched — withdrawal names exactly one id.
+    pub fn deconfigure(home: &AikitHome, provider_id: &str) -> Result<()> {
+        if provider_id.is_empty()
+            || provider_id.len() > 128
+            || !provider_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(error(
+                "Provider withdrawal requires the exact safe id given at configuration",
+            ));
+        }
+        let path = home
+            .state()
+            .join("encounter-providers")
+            .join(format!("{}.json", provider_id));
+        std::fs::remove_file(&path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => {
+                error(format!("No configured encounter provider named {provider_id}"))
+            }
+            _ => error(format!("withdraw {}: {e}", path.display())),
+        })
+    }
     fn providers(&self) -> Result<Vec<EncounterProvider>> {
         let root = self.home.state().join("encounter-providers");
         if !root.exists() {
@@ -2600,6 +2628,35 @@ mod tests {
             "the derived fallback variants ride the resolved provider into every open"
         );
         assert_eq!(provider.from_profile.as_deref(), Some("gemini"));
+    }
+
+    #[test]
+    fn deconfigure_withdraws_exactly_one_provider_and_refuses_unknown_ids() {
+        let home = test_home();
+        EncounterService::configure(&home, profile_provider("gemini-acp", "gemini")).unwrap();
+        EncounterService::configure(&home, profile_provider("kimi-acp", "kimi")).unwrap();
+
+        EncounterService::deconfigure(&home, "gemini-acp").unwrap();
+
+        let remaining: Vec<String> = EncounterService::new(home.clone())
+            .unwrap()
+            .providers()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(remaining, ["kimi-acp"], "only the named id is withdrawn");
+
+        let refused = EncounterService::deconfigure(&home, "gemini-acp").unwrap_err();
+        assert!(
+            refused.to_string().contains("gemini-acp"),
+            "an unknown id is refused by name, not silently accepted: {refused}"
+        );
+        let refused_unsafe = EncounterService::deconfigure(&home, "../escape").unwrap_err();
+        assert!(
+            refused_unsafe.to_string().contains("safe id"),
+            "an unsafe id never reaches the filesystem: {refused_unsafe}"
+        );
     }
 
     #[test]

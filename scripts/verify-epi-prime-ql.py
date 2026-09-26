@@ -691,3 +691,17 @@ finally:
     shutdown = stop_owner(server)
     (out_dir / "owner-shutdown.json").write_text(json.dumps(shutdown, indent=2) + "\n")
     server_log.close()
+    # The acceptance provider is scaffolding for this run, not a configured
+    # edition a person keeps: withdraw it even when the acceptance body failed,
+    # so repeated runs do not accumulate rows in the ordinary provider list.
+    try:
+        withdrawal = cli(
+            "session-space", "encounter-deconfigure", "--provider-id", provider_id
+        )
+        (out_dir / "provider-withdrawal.json").write_text(
+            json.dumps(withdrawal, indent=2) + "\n"
+        )
+    except Exception as error:  # noqa: BLE001 - recorded, never masks the result
+        (out_dir / "provider-withdrawal.json").write_text(
+            json.dumps({"withdrawn": False, "error": str(error)}, indent=2) + "\n"
+        )
