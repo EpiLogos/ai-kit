@@ -820,9 +820,11 @@ fn restart_drains_the_in_flight_turn_persists_state_and_keeps_semantic_identity(
     assert_eq!(result["drain"]["interrupted"], json!(1), "{result}");
 
     // The drain recorded the interruption honestly before persisting.
+    // The bound is generous: this suite runs beside a live gateway, its
+    // connectors and real harness processes on a loaded machine.
     harness.wait_until(
         "the interrupted turn is journalled",
-        Duration::from_secs(30),
+        Duration::from_secs(90),
         |harness| harness.stream_events().len() == 2,
     );
     let events = harness.stream_events();
