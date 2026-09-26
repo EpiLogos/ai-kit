@@ -1032,10 +1032,7 @@ impl NativeActionRunner {
     fn file_map_refresh(&self, run: &mut Run<'_>) -> (RunStatus, Value) {
         // `limit: 0` short-circuits Central's search before it inspects any
         // scope, so the probe asks for one hit and reads only the absences.
-        let probe = match run.call(
-            FILE_MAP_SEARCH,
-            json!({ "federated": true, "limit": 1 }),
-        ) {
+        let probe = match run.call(FILE_MAP_SEARCH, json!({ "federated": true, "limit": 1 })) {
             Ok(probe) => probe,
             Err(error) => {
                 return (

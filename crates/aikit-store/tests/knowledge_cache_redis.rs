@@ -2,7 +2,7 @@
 //! overwrite, namespace isolation, and status. Gated on
 //! `AIKIT_TEST_REDIS_ADDR` exactly like the NOW-context Redis proofs.
 
-use aikit_store::knowledge_cache::{KnowledgeCacheStore, KnowledgeCacheStatus};
+use aikit_store::knowledge_cache::{KnowledgeCacheStatus, KnowledgeCacheStore};
 use aikit_store::now_context::{RedisNowConfig, NOW_REDIS_CONFIG_SCHEMA};
 
 fn config(address: String, prefix: String) -> RedisNowConfig {
@@ -30,7 +30,8 @@ fn knowledge_cache_round_trips_overwrites_and_isolates_namespaces() {
     let run = ulid::Ulid::generate().to_string();
     let first = KnowledgeCacheStore::new(config(address.clone(), format!("aikit-kc-test-{run}-a")))
         .unwrap();
-    let second = KnowledgeCacheStore::new(config(address, format!("aikit-kc-test-{run}-b"))).unwrap();
+    let second =
+        KnowledgeCacheStore::new(config(address, format!("aikit-kc-test-{run}-b"))).unwrap();
 
     let status = first.status(None).unwrap();
     assert_eq!(
@@ -68,5 +69,13 @@ fn knowledge_cache_round_trips_overwrites_and_isolates_namespaces() {
     assert_eq!(second.get(None, operation).unwrap(), None);
 
     // A different basis is a different key: the old entry is not served.
-    assert_eq!(first.get(None, "relations\x1fbasis-2\x1fsource:git/demo\x1f2\x1f64\x1f256").unwrap(), None);
+    assert_eq!(
+        first
+            .get(
+                None,
+                "relations\x1fbasis-2\x1fsource:git/demo\x1f2\x1f64\x1f256"
+            )
+            .unwrap(),
+        None
+    );
 }

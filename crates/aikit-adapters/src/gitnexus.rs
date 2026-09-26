@@ -664,7 +664,12 @@ fn binary_identity(binary: &str) -> Option<String> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_nanos();
-    Some(format!("{}|{}|{}", canonical.display(), meta.len(), modified))
+    Some(format!(
+        "{}|{}|{}",
+        canonical.display(),
+        meta.len(),
+        modified
+    ))
 }
 
 fn surface_cache_path() -> Option<PathBuf> {
@@ -698,7 +703,8 @@ fn discover_cli_memoised<R: CommandRunner>(runner: &R, binary: &str) -> GitNexus
             // Only a successful observation is remembered: an unavailable
             // surface (a transient spawn failure) is re-probed next time.
             if surface.available {
-                persisted.retain(|key, _| !key.starts_with(identity.split('|').next().unwrap_or("")));
+                persisted
+                    .retain(|key, _| !key.starts_with(identity.split('|').next().unwrap_or("")));
                 persisted.insert(identity.clone(), surface.clone());
                 if let Some(path) = &cache_path {
                     if let Some(parent) = path.parent() {

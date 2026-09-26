@@ -927,8 +927,6 @@ impl Service {
                         runtime.source_belongs_to_scope(item.binding.source.as_str(), &display)
                     });
                 }
-                    });
-                }
                 let mut hits = found.hits.clone();
                 if query.trim().is_empty() {
                     for item in &material {

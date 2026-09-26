@@ -108,10 +108,7 @@ fn harness_argv_provider(harness: &str, provider: &ProviderRef) -> String {
 fn same_offer_prefers_harness<'a>(usable: Vec<&'a ModelRoute>) -> Vec<&'a ModelRoute> {
     let mut grouped: Vec<((String, String), Vec<&'a ModelRoute>)> = Vec::new();
     for route in usable {
-        let key = (
-            route.provider.to_string(),
-            route.provider_native_id.clone(),
-        );
+        let key = (route.provider.to_string(), route.provider_native_id.clone());
         if let Some((_, group)) = grouped.iter_mut().find(|(existing, _)| *existing == key) {
             group.push(route);
         } else {
@@ -1223,7 +1220,10 @@ mod tests {
         let model = canonical_model_ref("model:glm-5.3-flash").unwrap();
         let provider = ProviderRef::parse("provider:z-ai").unwrap();
         let mut set = ModelRouteSet::new(model.clone());
-        for kind in [ModelRouteKind::ProviderNative, ModelRouteKind::HarnessNative] {
+        for kind in [
+            ModelRouteKind::ProviderNative,
+            ModelRouteKind::HarnessNative,
+        ] {
             set.routes.push(ModelRoute {
                 model: model.clone(),
                 provider: provider.clone(),
