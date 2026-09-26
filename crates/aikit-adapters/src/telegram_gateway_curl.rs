@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use aikit_core::{AikitError, Result};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::telegram_bot_api::{TelegramBotApiTransport, TELEGRAM_BOT_API_BASE};
 
@@ -205,6 +205,7 @@ impl TelegramBotApiTransport for TelegramCurlTransport {
 #[cfg(test)]
 mod telegram_gateway_curl_tests {
     use super::*;
+    use serde_json::json;
     use crate::telegram_bot_api::TELEGRAM_BOT_API_BASE;
 
     fn r(value: &str) -> aikit_core::resource::ResourceRef {

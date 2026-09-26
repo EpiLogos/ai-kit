@@ -22,9 +22,8 @@ use crate::gateway_connector::{
     ConnectorDescriptor, GatewayConnector, GATEWAY_CONNECTOR_SDK_VERSION,
 };
 use crate::gateway_connector_wire::StdioWireConnector;
-use crate::telegram_gateway::{
-    TelegramBotApiTransport, TelegramConnector, TelegramConnectorConfig,
-};
+use crate::telegram_gateway::{TelegramConnector, TelegramConnectorConfig};
+use crate::telegram_gateway_curl::TelegramCurlTransport;
 
 pub const GATEWAY_CONNECTORS_SCHEMA: &str = "aikit.gateway-connectors/v1";
 
@@ -310,29 +309,9 @@ pub fn build_connector_factory(
 }
 
 /// The Telegram implementation constructs its connector with the token resolved
-/// from the declared location. This build carries no Telegram HTTP transport,
-/// so a constructed connector reports each provider call as refused rather
-/// than pretending to poll — the pump surfaces that as Unavailable health.
-struct UnconfiguredTelegramTransport {
-    _token: SecretValue,
-}
-
-impl TelegramBotApiTransport for UnconfiguredTelegramTransport {
-    fn call(
-        &mut self,
-        method: &str,
-        _params: serde_json::Value,
-    ) -> aikit_core::Result<serde_json::Value> {
-        Err(AikitError::new(
-            "telegram_gateway.transport_unconfigured",
-            format!(
-                "this AIKit build carries no Telegram HTTP transport; Bot API method {method} \
-                 was not sent"
-            ),
-        ))
-    }
-}
-
+/// from the declared location and the live Bot API carrier: the system curl
+/// (see [`crate::telegram_gateway_curl`]). Long polling, delivery and edits
+/// ride the same transport the live proof exercises.
 struct TelegramConnectorFactory {
     entry: GatewayConnectorEntry,
 }
@@ -368,8 +347,9 @@ impl GatewayConnectorFactory for TelegramConnectorFactory {
             )
         })?;
         let token = ConnectorTokenLocation::parse(raw_location)?.resolve()?;
+        let transport = TelegramCurlTransport::from_token(token.expose())?;
         let connector = TelegramConnector::new(
-            UnconfiguredTelegramTransport { _token: token },
+            transport,
             TelegramConnectorConfig {
                 connector_ref,
                 configuration_ref,
@@ -552,12 +532,11 @@ mod tests {
         telegram_entry.token_location = Some(format!("file:{}", token.display()));
         let telegram = build_connector_factory(telegram_entry).unwrap();
         assert_eq!(telegram.entry().implementation, "telegram");
-        let mut connector = telegram.build().unwrap();
+        let connector = telegram.build().unwrap();
         assert_eq!(connector.descriptor().platform, "telegram");
-        // No HTTP transport in this build: the constructed connector reports
-        // the refusal instead of pretending to reach the Bot API.
-        let refused = crate::gateway_connector_pump::block_on(connector.connect()).unwrap_err();
-        assert_eq!(refused.code(), "telegram_gateway.transport_unconfigured");
+        // The factory wires the live curl transport; whether the real Bot API
+        // answers is physical evidence (telegram_gateway_live.rs), never a
+        // deterministic suite call.
 
         let mut specimen = entry("stdio");
         specimen.connector_ref = "gateway-connector/specimen/main".into();
