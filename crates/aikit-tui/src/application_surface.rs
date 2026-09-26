@@ -7,6 +7,9 @@
 
 use std::collections::BTreeMap;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use aikit_core::resource::ActionStageability;
 use aikit_core::{AikitError, KnowledgeRelationView, ProjectWorldReadModel, ResourceRef, Result};
@@ -1423,6 +1426,7 @@ pub fn event_loop<B, T, E>(
     events: &mut E,
     backend: &mut B,
     request: ApplicationSurfaceRequest,
+    orphaned: Arc<AtomicBool>,
 ) -> Result<PaletteOutcome>
 where
     B: PaletteBackend,
@@ -1435,8 +1439,15 @@ where
         .size()
         .map_err(|error| AikitError::new("tui.terminal_size_failed", format!("{error}")))?;
     controller.dispatch(backend, UiAction::Resize(size.width, size.height))?;
+    let mut dirty = true;
     loop {
-        controller.draw_terminal(terminal)?;
+        if orphaned.load(Ordering::Acquire) {
+            return Ok(PaletteOutcome::Closed);
+        }
+        if dirty {
+            controller.draw_terminal(terminal)?;
+            dirty = false;
+        }
         // Drain every event the terminal has already handed the process
         // before drawing again. Fast typing, a held key's autorepeat, or a
         // paste can queue several events ahead of this loop reading them;
@@ -1450,6 +1461,7 @@ where
             let Some(event) = events.next()? else {
                 return Ok(PaletteOutcome::Closed);
             };
+            dirty |= controller.event_dirties_frame(&event);
             match controller.handle(backend, event)? {
                 ApplicationSurfaceStep::Continue => {}
                 ApplicationSurfaceStep::Outcome(outcome) => return Ok(outcome),
@@ -1459,6 +1471,81 @@ where
             }
         }
     }
+}
+
+/// Does this event require the next frame to be redrawn? The controller's
+/// answer extends [`surface_event_dirties`] by one case: while the
+/// Conversation aperture is open, an idle tick may carry pushed stream
+/// events or a reconnect step, so idle is potentially frame-changing. A
+/// closed aperture makes idle a no-op again, exactly as before.
+impl ApplicationSurfaceController {
+    fn event_dirties_frame(&self, event: &PaletteEvent) -> bool {
+        match event {
+            PaletteEvent::Idle => self.conversation.is_open(),
+            other => surface_event_dirties(other),
+        }
+    }
+}
+
+/// Does handling this event require the next frame to be redrawn?
+///
+/// The controller treats idle ticks and mouse motion as no-ops, so redrawing
+/// on them produces an identical frame at full render cost, over and over —
+/// the cost that kept an orphaned surface spinning at high CPU for days with
+/// nobody watching. Only events whose handling can change the frame (keys,
+/// resizes, mouse presses) mark it dirty; the classification must over-draw
+/// rather than under-draw, so a no-op key release still counts.
+fn surface_event_dirties(event: &PaletteEvent) -> bool {
+    match event {
+        PaletteEvent::Key(_) | PaletteEvent::Resize(..) => true,
+        PaletteEvent::Mouse(mouse) => {
+            matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        }
+        PaletteEvent::Idle => false,
+    }
+}
+
+/// Close the surface when this process is orphaned.
+///
+/// A surface whose session is gone — its shell or terminal emulator died —
+/// never receives another key, yet the loop would keep waiting and redrawing
+/// forever. The watchdog remembers the pid that started this process; once
+/// the operating system reparents the process, the flag rises and the loop
+/// closes through the ordinary exit path, so the terminal is restored by the
+/// same drop that handles a normal quit.
+/// The pid of this process's parent, per platform: the watchdog compares it
+/// against the value recorded at startup, and a change means the original
+/// parent died and the operating system reparented the surface.
+#[cfg(unix)]
+fn current_parent_id() -> u32 {
+    std::os::unix::process::parent_id()
+}
+
+#[cfg(windows)]
+fn current_parent_id() -> u32 {
+    std::os::windows::process::parent_id()
+}
+
+fn arm_orphan_watchdog() -> Result<Arc<AtomicBool>> {
+    let orphaned = Arc::new(AtomicBool::new(false));
+    let original_parent = current_parent_id();
+    let flag = Arc::clone(&orphaned);
+    std::thread::Builder::new()
+        .name("orphan-watchdog".into())
+        .spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(2));
+            if current_parent_id() != original_parent {
+                flag.store(true, Ordering::Release);
+                return;
+            }
+        })
+        .map_err(|error| {
+            AikitError::new(
+                "tui.watchdog_spawn_failed",
+                format!("could not start the orphan watchdog thread: {error}"),
+            )
+        })?;
+    Ok(orphaned)
 }
 
 pub fn run_on_terminal<B: PaletteBackend>(
@@ -1478,7 +1565,8 @@ pub fn run_on_terminal<B: PaletteBackend>(
     let mut terminal = Terminal::with_options(terminal_backend, options)
         .map_err(|error| AikitError::new("tui.terminal_setup_failed", format!("{error}")))?;
     let mut events = CrosstermEvents::default();
-    let outcome = event_loop(&mut terminal, &mut events, backend, request);
+    let orphaned = arm_orphan_watchdog()?;
+    let outcome = event_loop(&mut terminal, &mut events, backend, request, orphaned);
     let _ = terminal.clear();
     let _ = terminal.show_cursor();
     outcome
