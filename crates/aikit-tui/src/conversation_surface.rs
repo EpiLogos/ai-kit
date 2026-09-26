@@ -13,19 +13,21 @@
 use std::time::{Duration, Instant};
 
 use ratatui::text::{Line, Span};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use aikit_adapters::gateway_client::{
     gateway_command_within, gateway_subscribe, GatewayCarrierTarget, GatewaySubscription,
     GatewaySubscriptionRead,
 };
 use aikit_adapters::gateway_connector::{
-    ConnectorConnectionState, ConnectorHealth, ConversationAddress, InboundEvent,
-    InboundEventKind, SenderIdentity, SenderKind,
+    ConnectorConnectionState, ConnectorHealth, ConversationAddress, InboundEvent, InboundEventKind,
+    SenderIdentity, SenderKind,
 };
+use aikit_adapters::gateway_conversation_engine::{parse_slash, SlashParse};
 use aikit_adapters::gateway_runtime::{
-    GatewayBinding, GatewayCommand, GatewayDiscovery, GatewayEcology, GatewayEcologySurface,
-    GatewayIngressDecision, GatewayIngressResult, GatewayResponse, GatewayStreamEvent,
+    GatewayBinding, GatewayCommand, GatewayConversationOperation, GatewayDiscovery, GatewayEcology,
+    GatewayEcologySurface, GatewayIngressDecision, GatewayIngressResult, GatewayResponse,
+    GatewayStreamEvent,
 };
 use aikit_core::resource::ResourceRef;
 use aikit_store::home::AikitHome;
@@ -114,6 +116,9 @@ pub enum LineRole {
     User,
     /// An assistant/reply line.
     Agent,
+    /// An honest turn-failure record: the turn failed or was interrupted, and
+    /// the journal says so instead of carrying a fabricated answer.
+    Failure,
     /// A control event (tool call, permission, membership, harness noise).
     Control,
     /// A kind this surface does not render, disclosed rather than hidden.
@@ -123,10 +128,7 @@ pub enum LineRole {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LinkState {
     Live,
-    Degraded {
-        attempts: u32,
-        next_retry: Instant,
-    },
+    Degraded { attempts: u32, next_retry: Instant },
 }
 
 /// An open conversation: one subscription, its bounded history window, and
@@ -159,6 +161,9 @@ pub enum CompositionOutcome {
     /// The gateway could not be asked. The composed text is kept; nothing is
     /// sent again without the operator pressing Enter.
     Unreachable { reason: String },
+    /// A canonical conversation-control operation was answered by the engine
+    /// as a conversation response; the answer is rendered in the conversation.
+    Answered { operation: String },
 }
 
 /// The whole aperture state: roster, health, the open conversation and the
@@ -342,17 +347,17 @@ impl ConversationSurface {
         let Some(entry) = self.entries.get(self.selected).cloned() else {
             return;
         };
-        let binding = match gateway_command_within(&target, GatewayCommand::Discover, None, READ_TIMEOUT)
-        {
-            Ok(GatewayResponse::Discovery { discovery }) => {
-                find_binding(&discovery, &entry.binding_ref)
-            }
-            Ok(_) => None,
-            Err(error) => {
-                self.note = Some(format!("could not read the gateway's bindings: {error}"));
-                None
-            }
-        };
+        let binding =
+            match gateway_command_within(&target, GatewayCommand::Discover, None, READ_TIMEOUT) {
+                Ok(GatewayResponse::Discovery { discovery }) => {
+                    find_binding(&discovery, &entry.binding_ref)
+                }
+                Ok(_) => None,
+                Err(error) => {
+                    self.note = Some(format!("could not read the gateway's bindings: {error}"));
+                    None
+                }
+            };
         let Some(binding) = binding else {
             self.note = Some(format!(
                 "binding {} is no longer on the gateway; reopening the roster",
@@ -455,6 +460,17 @@ impl ConversationSurface {
                 reason: "no Unix socket carrier on this platform".into(),
             });
         };
+        // A slash-composed text that parses to a canonical operation travels
+        // as the landed Conversation command, so the engine's answer comes
+        // back as a conversation response and renders in the pane. Anything
+        // else rides the gateway's own ingest path exactly as before.
+        if let SlashParse::Operation(operation) = parse_slash(&text) {
+            let Some(open) = self.open_conversation.as_ref() else {
+                return None;
+            };
+            let binding_ref = open.entry.binding_ref.clone();
+            return self.submit_operation(&target, binding_ref, operation);
+        }
         self.compose_counter += 1;
         let event_ref = ResourceRef::parse(format!(
             "aikit-tui/{stream_ref}/compose-{}",
@@ -516,6 +532,10 @@ impl ConversationSurface {
                 self.compose.clear();
                 self.note = None;
             }
+            CompositionOutcome::Answered { .. } => {
+                // The engine's answer is already rendered in the conversation;
+                // there is no note to carry.
+            }
             CompositionOutcome::PairingRequired { sender } => {
                 self.note = Some(format!(
                     "the gateway requires pairing for sender {sender}; nothing was appended"
@@ -531,6 +551,67 @@ impl ConversationSurface {
                     "the message was not sent ({reason}); your text is kept - press Enter to try again"
                 ));
             }
+        }
+        Some(outcome)
+    }
+
+    /// Send one canonical conversation-control operation and render the
+    /// engine's answer into the open conversation. The answer is the engine's
+    /// own result document, received as a conversation response; it is
+    /// rendered, never stored as journal history — on reopen the pane rebuilds
+    /// from the journal, which holds what the stream actually carried. An
+    /// operation the gateway could not answer keeps the composed text and says
+    /// so, exactly as a refused message does.
+    fn submit_operation(
+        &mut self,
+        target: &GatewayCarrierTarget,
+        binding_ref: ResourceRef,
+        operation: GatewayConversationOperation,
+    ) -> Option<CompositionOutcome> {
+        let answer = gateway_command_within(
+            target,
+            GatewayCommand::Conversation {
+                binding_ref,
+                operation,
+            },
+            None,
+            SEND_TIMEOUT,
+        );
+        let outcome = match answer {
+            Ok(GatewayResponse::Conversation {
+                operation, result, ..
+            }) => {
+                if let Some(open) = &mut self.open_conversation {
+                    for text in control_answer_lines(&operation, &result) {
+                        open.history.push(ConversationLine {
+                            role: LineRole::Control,
+                            // Not a journal event: the answer carries no
+                            // sequence and must never move the reconnect
+                            // cursor.
+                            sequence: 0,
+                            text,
+                        });
+                    }
+                    while open.history.len() > HISTORY_WINDOW {
+                        open.history.remove(0);
+                        open.older_history_exists = true;
+                    }
+                }
+                self.compose.clear();
+                self.note = None;
+                CompositionOutcome::Answered {
+                    operation: operation_name(&operation).to_string(),
+                }
+            }
+            Ok(_) => CompositionOutcome::Unreachable {
+                reason: "the gateway answered the operation with something unexpected".into(),
+            },
+            Err(error) => CompositionOutcome::Unreachable {
+                reason: error.to_string(),
+            },
+        };
+        if let CompositionOutcome::Unreachable { reason } = &outcome {
+            self.note = Some(format!("the operation was not answered ({reason}); your text is kept - press Enter to try again"));
         }
         Some(outcome)
     }
@@ -551,7 +632,10 @@ impl ConversationSurface {
         // borrow.
         let retry = match open.link {
             LinkState::Live => None,
-            LinkState::Degraded { attempts, next_retry } => Some((attempts, next_retry)),
+            LinkState::Degraded {
+                attempts,
+                next_retry,
+            } => Some((attempts, next_retry)),
         };
         let mut recovered = false;
         match retry {
@@ -633,10 +717,7 @@ impl ConversationSurface {
                     theme.heading(),
                 )));
                 if let Some(authority) = &self.authority {
-                    lines.push(Line::from(Span::styled(
-                        authority.clone(),
-                        theme.dim(),
-                    )));
+                    lines.push(Line::from(Span::styled(authority.clone(), theme.dim())));
                 }
                 lines.push(Line::from(Span::styled(
                     if self.reachable {
@@ -678,7 +759,9 @@ impl ConversationSurface {
                     lines.push(Line::from(Span::styled(
                         format!(
                             "{cursor} {}/{}  connector {}  seq {}",
-                            entry.platform, entry.conversation_id, entry.connector_ref,
+                            entry.platform,
+                            entry.conversation_id,
+                            entry.connector_ref,
                             entry.last_sequence
                         ),
                         style,
@@ -713,6 +796,7 @@ impl ConversationSurface {
                     let style = match line.role {
                         LineRole::User => theme.accent(),
                         LineRole::Agent => theme.base(),
+                        LineRole::Failure => theme.error(),
                         LineRole::Control => theme.dim(),
                         LineRole::Unknown => theme.unavailable(),
                     };
@@ -728,9 +812,7 @@ impl ConversationSurface {
                     theme.base(),
                 )));
                 lines.push(Line::from(Span::styled(
-                    format!(
-                        "Enter send {sep} Up/Down history {sep} Esc back to conversations"
-                    ),
+                    format!("Enter send {sep} Up/Down history {sep} Esc back to conversations"),
                     theme.dim(),
                 )));
                 let end = lines.len().saturating_sub(open.scroll_back);
@@ -848,6 +930,17 @@ fn conversation_line(event: &GatewayStreamEvent) -> ConversationLine {
             };
             line(LineRole::Agent, text)
         }
+        "agent-message" => {
+            // The engine's journaled agent turn: an honest reply attributed to
+            // the binding's agent session, rendered as a first-class agent
+            // line — distinct from a human line, never disclosure filler.
+            let text = if content.is_empty() {
+                "agent sent an empty reply".to_string()
+            } else {
+                format!("agent: {content}")
+            };
+            line(LineRole::Agent, text)
+        }
         "harness-event" | "tool-request" | "tool-result" | "permission" | "cancellation" => {
             let detail = event
                 .event
@@ -862,12 +955,247 @@ fn conversation_line(event: &GatewayStreamEvent) -> ConversationLine {
                 .get("custom_kind")
                 .and_then(Value::as_str)
                 .unwrap_or("unlabelled");
-            line(LineRole::Control, format!("- {custom}"))
+            if custom == "gateway-agent/turn-failure" {
+                // A failed or interrupted turn is journaled honestly; the
+                // line says so in the failure voice, never as agent chatter.
+                line(
+                    LineRole::Failure,
+                    format!("! {}", turn_failure_text(content, &event.event)),
+                )
+            } else {
+                line(LineRole::Control, format!("- {custom}"))
+            }
         }
         other => line(
             LineRole::Unknown,
             format!("? unhandled event kind \"{other}\" - shown as the journal stores it"),
         ),
+    }
+}
+
+/// The honest failure sentence a turn-failure record carries. The engine
+/// journals the sentence in `content`; the structured `metadata.failure` is
+/// the fallback when the content is empty.
+fn turn_failure_text(content: &str, event: &Value) -> String {
+    if !content.is_empty() {
+        return content.to_string();
+    }
+    let failure = event.pointer("/metadata/failure");
+    match failure
+        .and_then(|failure| failure.get("kind"))
+        .and_then(Value::as_str)
+    {
+        Some("failed") => format!(
+            "the turn failed: {}",
+            failure
+                .and_then(|failure| failure.get("reason"))
+                .and_then(Value::as_str)
+                .unwrap_or("no reason recorded"),
+        ),
+        Some("interrupted") => {
+            let detail = failure
+                .and_then(|failure| failure.get("detail"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if detail.is_empty() {
+                "the turn was interrupted before it answered".to_string()
+            } else {
+                format!("the turn was interrupted before it answered ({detail})")
+            }
+        }
+        _ => "the turn produced no answer".to_string(),
+    }
+}
+
+fn operation_name(operation: &GatewayConversationOperation) -> &'static str {
+    match operation {
+        GatewayConversationOperation::Status => "status",
+        GatewayConversationOperation::Stop => "stop",
+        GatewayConversationOperation::New => "new",
+        GatewayConversationOperation::Sessions => "sessions",
+        GatewayConversationOperation::Restart => "restart",
+        GatewayConversationOperation::PauseConnector { .. } => "pause",
+        GatewayConversationOperation::ResumeConnector { .. } => "resume",
+        GatewayConversationOperation::Model { .. } => "model",
+        GatewayConversationOperation::Harness => "harness",
+        GatewayConversationOperation::Skills => "skills",
+    }
+}
+
+/// Render one engine answer — the `GatewayResponse::Conversation` result
+/// document — as readable control lines, from the shapes the engine answers
+/// with today. The model selector, the harness disclosure, the skill surface
+/// and the conversation status are shaped; any other result renders field by
+/// field, never hidden.
+fn control_answer_lines(operation: &GatewayConversationOperation, result: &Value) -> Vec<String> {
+    let head = |text: String| format!("- {text}");
+    let named = |field: &str| {
+        result
+            .get(field)
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string()
+    };
+    match operation {
+        GatewayConversationOperation::Status => {
+            let stream_at = match (
+                result.get("stream_last_sequence").and_then(Value::as_u64),
+                result.get("stream_event_count").and_then(Value::as_u64),
+            ) {
+                (Some(last), Some(count)) => format!("stream at {last} ({count} events)"),
+                _ => "stream unread".to_string(),
+            };
+            let turn = match result.get("turn_in_flight").and_then(Value::as_bool) {
+                Some(true) => "turn in flight: yes",
+                Some(false) => "turn in flight: no",
+                None => "turn in flight: unknown",
+            };
+            let backing = result
+                .get("agent_backing")
+                .and_then(Value::as_str)
+                .unwrap_or("none");
+            let connector = result
+                .pointer("/connector_health/state")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            vec![
+                head(format!(
+                    "status: binding {}; {stream_at}; {turn}",
+                    named("binding_ref"),
+                )),
+                head(format!("status: backing {backing}; connector {connector}")),
+            ]
+        }
+        GatewayConversationOperation::Model { model } => {
+            let harness = named("harness");
+            match model {
+                Some(id) => {
+                    let previous = result
+                        .pointer("/receipt/previous")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unrecorded");
+                    vec![head(format!(
+                        "model: {id} selected on harness {harness} (previous: {previous})"
+                    ))]
+                }
+                None => {
+                    let controls = result.get("controls").unwrap_or(&Value::Null);
+                    let available: Vec<&str> = controls
+                        .get("available")
+                        .and_then(Value::as_array)
+                        .map(|models| models.iter().filter_map(Value::as_str).collect())
+                        .unwrap_or_default();
+                    if !available.is_empty() {
+                        let mut lines = vec![head(format!(
+                            "model: harness {harness} offers {}",
+                            available.join(", "),
+                        ))];
+                        if let Some(current) = controls.get("current").and_then(Value::as_str) {
+                            lines.push(head(format!("model: current selection {current}")));
+                        }
+                        lines
+                    } else if controls.get("model_selection") == Some(&json!(true)) {
+                        vec![head(format!(
+                            "model: harness {harness} exposes a native model selector; name the \
+                             provider model with /model <name>"
+                        ))]
+                    } else {
+                        let reason = controls
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .filter(|reason| !reason.is_empty())
+                            .unwrap_or("the harness discloses no selector");
+                        vec![head(format!(
+                            "model: harness {harness} exposes no model selector ({reason})"
+                        ))]
+                    }
+                }
+            }
+        }
+        GatewayConversationOperation::Harness => {
+            let backing = result
+                .get("current")
+                .and_then(Value::as_str)
+                .unwrap_or("none");
+            let available: Vec<&str> = result
+                .get("available")
+                .and_then(Value::as_array)
+                .map(|backings| {
+                    backings
+                        .iter()
+                        .filter_map(|backing| backing.get("id").and_then(Value::as_str))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut lines = vec![head(format!(
+                "harness: backing {backing}; available backings: {}",
+                if available.is_empty() {
+                    "none".to_string()
+                } else {
+                    available.join(", ")
+                },
+            ))];
+            if let Some(command) = result.get("switch_command").and_then(Value::as_str) {
+                lines.push(head(format!(
+                    "harness switch (disclosed, not performed): {command}"
+                )));
+            }
+            lines
+        }
+        GatewayConversationOperation::Skills => {
+            let harness = named("harness");
+            let skills = result.get("skills").and_then(Value::as_array);
+            let count = skills.map(Vec::len).unwrap_or(0);
+            let mut lines = vec![head(format!(
+                "skills: {count} available on harness {harness}",
+            ))];
+            if let Some(skills) = skills {
+                for skill in skills {
+                    let name = skill
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unnamed");
+                    let summary = skill
+                        .get("summary")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    lines.push(head(if summary.is_empty() {
+                        format!("skill {name}")
+                    } else {
+                        format!("skill {name}: {summary}")
+                    }));
+                }
+            }
+            lines.push(head(
+                "skills: name the skill in your message - the gateway does not execute skills"
+                    .to_string(),
+            ));
+            lines
+        }
+        other => {
+            let name = operation_name(other);
+            match result.as_object() {
+                Some(fields) if !fields.is_empty() => fields
+                    .iter()
+                    .map(|(field, value)| {
+                        head(format!("{name}/{}: {}", field, render_value(value)))
+                    })
+                    .collect(),
+                _ => vec![head(format!("{name}: {result}"))],
+            }
+        }
+    }
+}
+
+/// One field value in a fallback answer line: scalars read plainly, anything
+/// structured renders as the compact JSON the engine actually answered.
+fn render_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Bool(flag) => flag.to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::Null => "none".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -923,10 +1251,7 @@ fn status_strip<'a>(
                 detail
             )
         }
-        None => format!(
-            "connector {} no health reading",
-            open.entry.connector_ref
-        ),
+        None => format!("connector {} no health reading", open.entry.connector_ref),
     };
     Line::from(Span::styled(
         format!("{link} {sep} {connector} {sep} seq {}", open.last_seen),

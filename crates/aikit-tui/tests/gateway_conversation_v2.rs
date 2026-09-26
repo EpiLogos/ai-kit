@@ -27,11 +27,11 @@ use aikit_adapters::gateway_connector::{
     ConnectorConnectionState, ConnectorHealth, ConversationAddress, SenderIdentity, SenderKind,
 };
 use aikit_adapters::gateway_runtime::{
-    GatewayBinding, GatewayCommand, GatewayDiscovery, GatewayEcology, GatewayEcologyAgency,
-    GatewayEcologySession, GatewayEcologyStream, GatewayEcologySurface, GatewayIngressDecision,
-    GatewayIngressPolicy, GatewayIngressResult, GatewayReplay, GatewayRequestEnvelope,
-    GatewayResponse, GatewayResponseEnvelope, GatewayStatus, GatewayStreamEvent,
-    AGENCY_GATEWAY_VERSION,
+    GatewayBinding, GatewayCommand, GatewayConversationOperation, GatewayDiscovery, GatewayEcology,
+    GatewayEcologyAgency, GatewayEcologySession, GatewayEcologyStream, GatewayEcologySurface,
+    GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult, GatewayReplay,
+    GatewayRequestEnvelope, GatewayResponse, GatewayResponseEnvelope, GatewayStatus,
+    GatewayStreamEvent, AGENCY_GATEWAY_VERSION,
 };
 use aikit_core::resource::ResourceRef;
 use aikit_tui::application_surface::{
@@ -210,7 +210,9 @@ impl FakeGateway {
         let sequence = {
             let mut state = self.state.lock().unwrap();
             let sequence = state.journal.len() as u64 + 1;
-            state.journal.push(journal_event_from(sequence, text, sender));
+            state
+                .journal
+                .push(journal_event_from(sequence, text, sender));
             sequence
         };
         self.publish(sequence, text, sender);
@@ -266,7 +268,10 @@ impl FakeGateway {
                 None
             };
             if let Some(subscriber) = &subscriber {
-                self.subscribers.lock().unwrap().push(Arc::clone(subscriber));
+                self.subscribers
+                    .lock()
+                    .unwrap()
+                    .push(Arc::clone(subscriber));
             }
             let response = self.answer(&request.command);
             let encoded = serde_json::to_string(&GatewayResponseEnvelope::from_result(
@@ -312,8 +317,7 @@ impl FakeGateway {
                     agencies: vec![GatewayEcologyAgency {
                         agency_ref: ResourceRef::parse("agency/fixture").unwrap(),
                         sessions: vec![GatewayEcologySession {
-                            agent_session_ref: ResourceRef::parse("agent-session/fixture")
-                                .unwrap(),
+                            agent_session_ref: ResourceRef::parse("agent-session/fixture").unwrap(),
                             agency_ref: ResourceRef::parse("agency/fixture").unwrap(),
                             actuation_refs: vec![ResourceRef::parse("actuation/fixture").unwrap()],
                             agent_ref: None,
@@ -354,7 +358,9 @@ impl FakeGateway {
                 },
             },
             GatewayCommand::Subscribe {
-                after_sequence, limit, ..
+                after_sequence,
+                limit,
+                ..
             } => {
                 let journal = self.journal();
                 // Sequence is index+1: a replay returns events whose
@@ -426,8 +432,91 @@ impl FakeGateway {
                     },
                 }
             }
+            GatewayCommand::Conversation {
+                binding_ref,
+                operation,
+            } => {
+                assert_eq!(
+                    binding_ref.as_str(),
+                    BINDING_REF,
+                    "the aperture addresses the open conversation's binding"
+                );
+                let result = fixture_operation_answer(operation);
+                GatewayResponse::Conversation {
+                    binding_ref: binding_ref.clone(),
+                    operation: operation.clone(),
+                    result,
+                }
+            }
             other => panic!("the fake gateway was not prepared for {other:?}"),
         }
+    }
+}
+
+/// The deterministic answers the real conversation engine gives these
+/// operations, in the exact shapes its `FixtureTurnSource` discloses (see the
+/// gateway conversation engine's deterministic suite): the fixture harness is
+/// `fixture-harness`, its model roster and skills are the engine's own.
+fn fixture_operation_answer(operation: &GatewayConversationOperation) -> Value {
+    match operation {
+        GatewayConversationOperation::Status => json!({
+            "binding_ref": BINDING_REF,
+            "connector_ref": CONNECTOR_REF,
+            "address": {
+                "platform": "fixture",
+                "scope_id": null,
+                "conversation_id": "conv-1",
+                "thread_id": null
+            },
+            "agent_session_ref": "agent-session/fixture",
+            "stream_ref": STREAM_REF,
+            "stream_last_sequence": 1,
+            "stream_event_count": 1,
+            "context_revision": 1,
+            "forked_from": null,
+            "turn_in_flight": false,
+            "agent_backing": "fixture-harness",
+            "connector_health": {"state": "connected", "detail": "fixture link"}
+        }),
+        GatewayConversationOperation::Model { model: None } => json!({
+            "harness": "fixture-harness",
+            "agent_session_ref": "agent-session/fixture",
+            "controls": {
+                "model_selection": true,
+                "reasoning_effort_selection": false,
+                "reason": null,
+                "available": ["fixture/opus", "fixture/sonnet", "fixture/haiku"],
+                "current": "fixture/sonnet"
+            }
+        }),
+        GatewayConversationOperation::Model { model: Some(id) } => json!({
+            "harness": "fixture-harness",
+            "agent_session_ref": "agent-session/fixture",
+            "model": id,
+            "receipt": {"previous": "fixture/sonnet", "current": id}
+        }),
+        GatewayConversationOperation::Harness => json!({
+            "current": "fixture-harness",
+            "available": [],
+            "switch_command": "aikit gateway connector add --platform fixture \
+                --ref gateway-connector/fixture/main --agent-backing <id> …",
+            "law": "a backing switch is a session-replacement event; the gateway discloses \
+                    the command and never performs it"
+        }),
+        GatewayConversationOperation::Skills => json!({
+            "harness": "fixture-harness",
+            "agent_session_ref": "agent-session/fixture",
+            "skills": [
+                {"name": "fixture-greeting", "summary": "Greet the conversation warmly."},
+                {"name": "fixture-arithmetic", "summary": "Add two small numbers deterministically."}
+            ],
+            "invocation": "the harness carries skills in-turn; name the skill in conversation \
+                           — the gateway does not execute skills"
+        }),
+        other => json!({
+            "stopped": false,
+            "detail": format!("the fixture's honest receipt for {other:?}")
+        }),
     }
 }
 
@@ -486,6 +575,53 @@ fn journal_event_from(sequence: u64, text: &str, sender: &str) -> Value {
             "conversation_id": "conv-1",
             "native_sender_id": sender,
             "sender_kind": "human"
+        },
+        "content": text
+    })
+}
+
+/// The event shape the kernel's `record_agent_reply` journals for a successful
+/// agent turn: kind `agent-message`, attributed to the binding's agent
+/// session, answering the inbound sequence.
+fn agent_message_event(sequence: u64, in_reply_to_sequence: u64, text: &str) -> Value {
+    json!({
+        "event_ref": format!("{STREAM_REF}/gateway-event/{sequence}"),
+        "sequence": sequence,
+        "kind": "agent-message",
+        "native_trace_ref": format!("gateway-agent-reply/{in_reply_to_sequence}"),
+        "disclosure": "portable",
+        "metadata": {
+            "agent_session_ref": "agent-session/fixture",
+            "agency_ref": "agency/fixture",
+            "actuation_ref": "actuation/fixture",
+            "in_reply_to_sequence": in_reply_to_sequence
+        },
+        "content": text
+    })
+}
+
+/// The event shape `record_agent_reply` journals for a failed or interrupted
+/// turn: kind `custom`, custom_kind `gateway-agent/turn-failure`, with the
+/// structured failure in the metadata and the honest sentence as the content.
+fn turn_failure_event(
+    sequence: u64,
+    in_reply_to_sequence: u64,
+    failure: Value,
+    text: &str,
+) -> Value {
+    json!({
+        "event_ref": format!("{STREAM_REF}/gateway-event/{sequence}"),
+        "sequence": sequence,
+        "kind": "custom",
+        "custom_kind": "gateway-agent/turn-failure",
+        "native_trace_ref": format!("gateway-agent-reply/{in_reply_to_sequence}"),
+        "disclosure": "portable",
+        "metadata": {
+            "agent_session_ref": "agent-session/fixture",
+            "agency_ref": "agency/fixture",
+            "actuation_ref": "actuation/fixture",
+            "in_reply_to_sequence": in_reply_to_sequence,
+            "failure": failure
         },
         "content": text
     })
@@ -845,6 +981,171 @@ fn an_unknown_event_kind_is_disclosed_not_hidden() {
     assert!(
         rendered.contains("teleportation"),
         "the unknown kind's name must be shown: {rendered}"
+    );
+}
+
+#[test]
+fn an_agent_reply_journals_as_a_first_class_agent_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let gateway = FakeGateway::start(dir.path());
+    {
+        let mut state = gateway.state.lock().unwrap();
+        state
+            .journal
+            .push(agent_message_event(2, 1, "echo: hello there"));
+    }
+    let (_fixture_dir, mut backend) = fixture();
+    let mut surface = surface_with(&mut backend, &gateway.socket_path);
+    open_conversation(&mut surface, &mut backend);
+
+    let rendered = render(&surface);
+    assert!(
+        rendered.contains("agent: echo: hello there"),
+        "a journaled agent reply must render as an agent line: {rendered}"
+    );
+    assert!(
+        rendered.contains("fixture-user: hello there"),
+        "the human line keeps its own form beside the agent line: {rendered}"
+    );
+    assert!(
+        !rendered.contains("unhandled"),
+        "an agent-message is a known kind, never disclosure filler: {rendered}"
+    );
+}
+
+#[test]
+fn a_turn_failure_record_renders_honestly() {
+    let dir = tempfile::tempdir().unwrap();
+    let gateway = FakeGateway::start(dir.path());
+    {
+        let mut state = gateway.state.lock().unwrap();
+        state.journal.push(turn_failure_event(
+            2,
+            1,
+            json!({"kind": "failed", "reason": "the harness crashed"}),
+            "the turn failed: the harness crashed",
+        ));
+        state.journal.push(turn_failure_event(
+            3,
+            1,
+            json!({"kind": "interrupted", "detail": "stop requested from the conversation"}),
+            "the turn was interrupted before it answered (stop requested from the conversation)",
+        ));
+    }
+    let (_fixture_dir, mut backend) = fixture();
+    let mut surface = surface_with(&mut backend, &gateway.socket_path);
+    open_conversation(&mut surface, &mut backend);
+
+    let rendered = render(&surface);
+    assert!(
+        rendered.contains("! the turn failed: the harness crashed"),
+        "a failed turn must render as the failure it is: {rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "! the turn was interrupted before it answered (stop requested from the conversation)"
+        ),
+        "an interrupted turn must render as the interruption it is: {rendered}"
+    );
+    assert!(
+        !rendered.contains("unhandled"),
+        "a turn-failure record is a known kind, never disclosure filler: {rendered}"
+    );
+    assert!(
+        !rendered.contains("gateway-agent/turn-failure"),
+        "the failure renders as its sentence, not its label: {rendered}"
+    );
+}
+
+#[test]
+fn a_composed_control_operation_answers_as_a_conversation_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let gateway = FakeGateway::start(dir.path());
+    let (_fixture_dir, mut backend) = fixture();
+    let mut surface = surface_with(&mut backend, &gateway.socket_path);
+    open_conversation(&mut surface, &mut backend);
+
+    for event in typed("/skills") {
+        surface.handle(&mut backend, event).unwrap();
+    }
+    let rendered = render(&surface);
+    assert!(
+        rendered.contains("- skills: 2 available on harness fixture-harness"),
+        "the engine's skill answer must render readably: {rendered}"
+    );
+    assert!(
+        rendered.contains("skill fixture-greeting: Greet the conversation warmly."),
+        "each disclosed skill renders on its own line: {rendered}"
+    );
+    assert!(
+        rendered.contains("skill fixture-arithmetic: Add two small numbers deterministically."),
+        "every disclosed skill is named: {rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "- skills: name the skill in your message - the gateway does not execute skills"
+        ),
+        "the skill answer carries the invocation law: {rendered}"
+    );
+    assert!(
+        !rendered.contains("compose> /skills"),
+        "the answered operation leaves the compose lane: {rendered}"
+    );
+    assert!(
+        gateway.ingest_texts().is_empty(),
+        "a control operation travels as a conversation command, never as ingress"
+    );
+}
+
+#[test]
+fn model_and_status_answers_render_readably() {
+    let dir = tempfile::tempdir().unwrap();
+    let gateway = FakeGateway::start(dir.path());
+    let (_fixture_dir, mut backend) = fixture();
+    let mut surface = surface_with(&mut backend, &gateway.socket_path);
+    open_conversation(&mut surface, &mut backend);
+
+    for event in typed("/model") {
+        surface.handle(&mut backend, event).unwrap();
+    }
+    let rendered = render(&surface);
+    assert!(
+        rendered.contains(
+            "- model: harness fixture-harness offers fixture/opus, fixture/sonnet, fixture/haiku"
+        ),
+        "the harness's own model roster must render readably: {rendered}"
+    );
+    assert!(
+        rendered.contains("- model: current selection fixture/sonnet"),
+        "the harness's current selection must render: {rendered}"
+    );
+
+    for event in typed("/model fixture/haiku") {
+        surface.handle(&mut backend, event).unwrap();
+    }
+    let rendered = render(&surface);
+    assert!(
+        rendered.contains(
+            "- model: fixture/haiku selected on harness fixture-harness \
+             (previous: fixture/sonnet)"
+        ),
+        "a model selection renders with the harness's own receipt: {rendered}"
+    );
+
+    for event in typed("/status") {
+        surface.handle(&mut backend, event).unwrap();
+    }
+    let rendered = render(&surface);
+    assert!(
+        rendered.contains(
+            "- status: binding gateway-binding/fixture; stream at 1 (1 events); \
+             turn in flight: no"
+        ),
+        "the conversation's status answer must render readably: {rendered}"
+    );
+    assert!(
+        rendered.contains("- status: backing fixture-harness; connector connected"),
+        "the status answer must carry the backing and connector readings: {rendered}"
     );
 }
 
