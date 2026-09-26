@@ -72,6 +72,9 @@ pub mod session_space_connection;
 pub mod session_space_observation;
 pub mod session_space_reconstruction;
 pub mod shells;
+mod slack_bot_api;
+pub mod slack_gateway;
+pub mod slack_gateway_curl;
 mod telegram_bot_api;
 pub mod telegram_gateway;
 pub mod telegram_gateway_curl;
@@ -244,6 +247,10 @@ pub use session_space_observation::{
     SESSION_SPACE_OBSERVATION_FILE_VERSION,
 };
 pub use session_space_reconstruction::session_space_native_observations;
+pub use slack_gateway::{
+    SlackBotApiTransport, SlackBotIdentity, SlackConnector, SlackConnectorConfig,
+    SLACK_GATEWAY_CONNECTOR_VERSION, SLACK_WEB_API_BASE,
+};
 pub use telegram_gateway::{
     TelegramBotApiTransport, TelegramBotIdentity, TelegramConnector, TelegramConnectorConfig,
     TELEGRAM_BOT_API_BASE, TELEGRAM_GATEWAY_CONNECTOR_VERSION,

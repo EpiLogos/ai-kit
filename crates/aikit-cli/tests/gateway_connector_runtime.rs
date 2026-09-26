@@ -653,6 +653,108 @@ fn the_connectors_file_refuses_token_values_and_unusable_token_locations() {
 }
 
 #[test]
+fn slack_connector_declaration_flows_through_the_service_config_plane() {
+    let home = TempDir::new().unwrap();
+    let loose = token_file(home.path(), "slack-loose.token", 0o644);
+
+    // The telegram discipline covers slack: a world-readable token file is
+    // refused at declaration time.
+    let (ok, envelope, _) = run(
+        home.path(),
+        &[
+            "gateway",
+            "connector",
+            "add",
+            "--platform",
+            "slack",
+            "--ref",
+            "gateway-connector/slack/main",
+            "--token-location",
+            &format!("file:{}", loose.display()),
+        ],
+    );
+    assert!(!ok, "a loose slack token file must be refused: {envelope}");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("owner"),
+        "{envelope}"
+    );
+
+    // No token location: the slack validation names the requirement.
+    let (ok, envelope, _) = run(
+        home.path(),
+        &[
+            "gateway",
+            "connector",
+            "add",
+            "--platform",
+            "slack",
+            "--ref",
+            "gateway-connector/slack/main",
+        ],
+    );
+    assert!(!ok, "a slack declaration without a token location must be refused: {envelope}");
+    let message = envelope["error"]["message"].as_str().unwrap();
+    assert!(message.contains("--token-location"), "{message}");
+
+    // The usable declaration lands; the implementation defaults to the
+    // platform name and list discloses the location, never the material.
+    let usable = token_file(home.path(), "slack.token", 0o600);
+    let (ok, envelope, _) = run(
+        home.path(),
+        &[
+            "gateway",
+            "connector",
+            "add",
+            "--platform",
+            "slack",
+            "--ref",
+            "gateway-connector/slack/main",
+            "--token-location",
+            &format!("file:{}", usable.display()),
+            "--configuration-ref",
+            "gateway-config/slack/main",
+        ],
+    );
+    assert!(ok, "the usable slack declaration must land: {envelope}");
+    let (ok, envelope, stdout) = run(home.path(), &["gateway", "connector", "list"]);
+    assert!(ok, "{envelope}");
+    let connectors = envelope["data"]["connectors"].as_array().unwrap();
+    assert_eq!(connectors.len(), 1);
+    assert_eq!(connectors[0]["connector_ref"], "gateway-connector/slack/main");
+    assert_eq!(connectors[0]["platform"], "slack");
+    assert_eq!(connectors[0]["implementation"], "slack");
+    assert_eq!(
+        connectors[0]["token_location"],
+        format!("file:{}", usable.display())
+    );
+    assert!(
+        !stdout.contains("connector-bot-token-value"),
+        "the token material must never be listed: {stdout}"
+    );
+    let stored =
+        std::fs::read_to_string(home.path().join("state/gateway-connectors.json")).unwrap();
+    assert!(!stored.contains("connector-bot-token-value"), "{stored}");
+
+    // Remove leaves the plane clean.
+    let (ok, envelope, _) = run(
+        home.path(),
+        &[
+            "gateway",
+            "connector",
+            "remove",
+            "--ref",
+            "gateway-connector/slack/main",
+        ],
+    );
+    assert!(ok, "{envelope}");
+    let (_, envelope, _) = run(home.path(), &["gateway", "connector", "list"]);
+    assert_eq!(envelope["data"]["connectors"].as_array().unwrap().len(), 0);
+}
+
+#[test]
 fn an_unknown_implementation_stops_the_service_at_startup_naming_it() {
     let home = TempDir::new().unwrap();
     write_connectors_file(

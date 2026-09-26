@@ -22,6 +22,8 @@ use crate::gateway_connector::{
     ConnectorDescriptor, GatewayConnector, GATEWAY_CONNECTOR_SDK_VERSION,
 };
 use crate::gateway_connector_wire::StdioWireConnector;
+use crate::slack_bot_api::{SlackConnector, SlackConnectorConfig};
+use crate::slack_gateway_curl::SlackCurlTransport;
 use crate::telegram_gateway::{TelegramConnector, TelegramConnectorConfig};
 use crate::telegram_gateway_curl::TelegramCurlTransport;
 
@@ -91,6 +93,18 @@ impl GatewayConnectorEntry {
                         "gateway_connector_config.token_location_required",
                         format!(
                             "connector {} is a telegram connector; declare --token-location \
+                             (an owner-only file: path or a keychain/pass/op/varlock ref)",
+                            self.connector_ref
+                        ),
+                    ));
+                }
+            }
+            "slack" => {
+                if self.token_location.is_none() {
+                    return Err(AikitError::new(
+                        "gateway_connector_config.token_location_required",
+                        format!(
+                            "connector {} is a slack connector; declare --token-location \
                              (an owner-only file: path or a keychain/pass/op/varlock ref)",
                             self.connector_ref
                         ),
@@ -296,12 +310,13 @@ pub fn build_connector_factory(
     entry.validate()?;
     match entry.implementation.as_str() {
         "telegram" => Ok(Box::new(TelegramConnectorFactory { entry })),
+        "slack" => Ok(Box::new(SlackConnectorFactory { entry })),
         "stdio" => Ok(Box::new(StdioConnectorFactory { entry })),
         other => Err(AikitError::new(
             "gateway_connector_config.unknown_implementation",
             format!(
-                "connector {} names implementation {other:?}; this build knows `telegram` \
-                 and `stdio`",
+                "connector {} names implementation {other:?}; this build knows `telegram`, \
+                 `slack` and `stdio`",
                 entry.connector_ref
             ),
         )),
@@ -355,6 +370,64 @@ impl GatewayConnectorFactory for TelegramConnectorFactory {
                 configuration_ref,
                 poll_timeout_seconds: 30,
                 allowed_updates: Vec::new(),
+                provenance: vec!["gateway connectors file".into()],
+            },
+        )?;
+        Ok(Box::new(connector))
+    }
+}
+
+/// The Slack implementation constructs its connector with the token resolved
+/// from the declared location (the same [`ConnectorTokenLocation`] resolver
+/// Telegram uses) and the live Web API carrier: the system curl (see
+/// [`crate::slack_gateway_curl`]). Ingress polls `conversations.history` for
+/// the channels declared in the connector's configuration ref material — the
+/// factory starts delivery-only (no ingress channels), matching the
+/// egress-first posture; polling channels are a configuration concern.
+struct SlackConnectorFactory {
+    entry: GatewayConnectorEntry,
+}
+
+impl GatewayConnectorFactory for SlackConnectorFactory {
+    fn entry(&self) -> &GatewayConnectorEntry {
+        &self.entry
+    }
+
+    fn build(&self) -> Result<Box<dyn GatewayConnector>> {
+        let connector_ref = ResourceRef::parse(&self.entry.connector_ref).map_err(|error| {
+            AikitError::new(
+                "gateway_connector_config.connector_ref",
+                format!("connector ref {}: {error}", self.entry.connector_ref),
+            )
+        })?;
+        let configuration_ref = match &self.entry.configuration_ref {
+            Some(raw) => Some(ResourceRef::parse(raw).map_err(|error| {
+                AikitError::new(
+                    "gateway_connector_config.configuration_ref",
+                    format!("configuration ref {raw}: {error}"),
+                )
+            })?),
+            None => None,
+        };
+        let raw_location = self.entry.token_location.as_deref().ok_or_else(|| {
+            AikitError::new(
+                "gateway_connector_config.token_location_required",
+                format!(
+                    "connector {} has no token location",
+                    self.entry.connector_ref
+                ),
+            )
+        })?;
+        let token = ConnectorTokenLocation::parse(raw_location)?.resolve()?;
+        let transport = SlackCurlTransport::from_token(token.expose())?;
+        let connector = SlackConnector::new(
+            transport,
+            SlackConnectorConfig {
+                connector_ref,
+                configuration_ref,
+                ingress_channels: Vec::new(),
+                ingest_backlog: false,
+                history_poll_limit: 100,
                 provenance: vec!["gateway connectors file".into()],
             },
         )?;
@@ -537,6 +610,32 @@ mod tests {
         // The factory wires the live curl transport; whether the real Bot API
         // answers is physical evidence (telegram_gateway_live.rs), never a
         // deterministic suite call.
+
+        // Slack mirrors telegram: the same token-location resolver, the live
+        // Web API curl transport, egress-first capabilities.
+        let mut slack_entry = entry("slack");
+        slack_entry.connector_ref = "gateway-connector/slack/main".into();
+        slack_entry.platform = "slack".into();
+        slack_entry.token_location = Some(format!("file:{}", token.display()));
+        let slack = build_connector_factory(slack_entry).unwrap();
+        assert_eq!(slack.entry().implementation, "slack");
+        let connector = slack.build().unwrap();
+        assert_eq!(connector.descriptor().platform, "slack");
+        use crate::gateway_connector::ConnectorOperation;
+        let operations = &connector.descriptor().capabilities.operations;
+        assert!(operations.contains(&ConnectorOperation::Send));
+        assert!(!operations.contains(&ConnectorOperation::Typing),
+            "Slack has no typing API; the capability is never advertised");
+        assert!(!operations.contains(&ConnectorOperation::Media),
+            "files.upload v2 is outside this cut; the capability is never advertised");
+
+        let mut no_token = entry("slack");
+        no_token.connector_ref = "gateway-connector/slack/main".into();
+        no_token.token_location = None;
+        assert_eq!(
+            no_token.validate().unwrap_err().code(),
+            "gateway_connector_config.token_location_required"
+        );
 
         let mut specimen = entry("stdio");
         specimen.connector_ref = "gateway-connector/specimen/main".into();
