@@ -52,7 +52,9 @@ fn source_read_returns_to_owner_and_does_not_rebuild() {
     ]);
     let mut provider =
         CentralFileMapProvider::connect(&owner, "ctrl", "/world", Some("alpha")).unwrap();
-    assert!(provider.descriptors()[0].body.is_empty());
+    // Attach carries capabilities only: the roster stays with the owner, so
+    // no descriptor is materialised here and nothing is rebuilt.
+    assert!(provider.descriptors().is_empty());
     assert!(provider.rebuild(&[]).is_err());
     let material = provider
         .read(&SourceRef::parse("central:source:test").unwrap())
