@@ -34,7 +34,10 @@ use crate::application::{
     HistoryEntry, RelationReadModel, ResolvedActionReadModel, ResolvedSearchReadModel,
     ResourceListItem, ResourceListReadModel, StagedChanges, TuiApplicationService,
 };
-use crate::backend::{FactoryWorkEntry, PaletteBackend, Toggle};
+use crate::backend::{
+    AgentProfileAcceptReceipt, AgentProfileSaveReceipt, AgentSessionPreparation, EncounterLaunch,
+    FactoryWorkEntry, FactoryWorkStartReceipt, PaletteBackend, Toggle, WorldReadiness,
+};
 use crate::live_field::{
     live_working_field, parse_action_ref, reach_for, working_environment_actions, LiveWorkingField,
     WorkingEnvironmentOperation, WorkingEnvironmentOutcome,
@@ -558,6 +561,39 @@ impl TuiApplicationService for ApplicationService<'_> {
             .backend
             .working_environments()?
             .map(|observations| live_working_field(&observations, &projectable)))
+    }
+
+    fn start_factory_work(&mut self) -> Result<FactoryWorkStartReceipt> {
+        self.backend.start_factory_work()
+    }
+
+    fn save_agent_profile(
+        &mut self,
+        purpose: &str,
+        name: Option<&str>,
+    ) -> Result<AgentProfileSaveReceipt> {
+        self.backend.save_agent_profile(purpose, name)
+    }
+
+    fn accept_agent_profile(
+        &mut self,
+        expected_revision: &str,
+        expected_content_digest: Option<&str>,
+    ) -> Result<AgentProfileAcceptReceipt> {
+        self.backend
+            .accept_agent_profile(expected_revision, expected_content_digest)
+    }
+
+    fn world_readiness(&self) -> Result<WorldReadiness> {
+        self.backend.world_readiness()
+    }
+
+    fn prepare_agent_session(&mut self, profile_ref: &str) -> Result<AgentSessionPreparation> {
+        self.backend.prepare_agent_session(profile_ref)
+    }
+
+    fn start_encounter(&mut self, agent_session: &str) -> Result<EncounterLaunch> {
+        self.backend.start_encounter(agent_session)
     }
 
     fn model_roster(&mut self) -> Result<Option<aikit_core::resource::ModelRoster>> {

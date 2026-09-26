@@ -23,6 +23,7 @@ use crate::project_workspace_render::{
     explain_lines, project_world_lines, workspace_section_label, WorkspaceReading,
 };
 use crate::theme::Theme;
+use crate::world_entry;
 
 /// Render the resting shell with an already-resolved host glyph capability.
 ///
@@ -107,13 +108,29 @@ fn draw_shell(
     // Rect a moment ago — or what an earlier frame left there, since
     // `Terminal::draw`'s contract only promises a diff against the
     // previous frame, not a blanked buffer — stays behind as far as the
-    // panel's own content is shorter than the row it sits over. Rather
-    // than let the list content it will never let the viewer see reach the
-    // buffer at all, this leaves `panes.list` genuinely blank for the
-    // Relations panel to draw onto, the same way a popup clears before it
-    // draws (`Clear`'s own example).
+    // list content it will never let the viewer see reach the buffer at
+    // all. Rather than let the list content it will never let the viewer
+    // see reach the buffer at all, this leaves `panes.list` genuinely blank
+    // for the Relations panel to draw onto, the same way a popup clears
+    // before it draws (`Clear`'s own example).
     let relations_panel_covers_list = state.presentation == PresentationMode::Workspace
         && state.workspace_section == WorkspaceSection::Knowledge;
+
+    // The next-steps block (spec §1.5/§4.2) is drawn exactly where its keys
+    // are live: `steps_active_here` is the one gate for both rendering and
+    // input, so a block that is visible is always live and a live block is
+    // always visible. The block pins to the bottom of the world pane — the
+    // preview pane when one exists, else the list pane carrying the compact
+    // reading — through `world_entry::bottom_block`, the same function the
+    // mouse hit-test uses.
+    let next_steps = reading
+        .filter(|_| world_entry::steps_active_here(state))
+        .map(|reading| world_entry::steps_for_view(state, &reading));
+    let steps_height = next_steps
+        .as_ref()
+        .map(|steps| steps.len())
+        .unwrap_or(0)
+        .min(usize::from(inner.height));
 
     let compact_world_lines = if !relations_panel_covers_list
         && panes.preview.is_none()
@@ -127,16 +144,94 @@ fn draw_shell(
     };
     if relations_panel_covers_list {
         frame.render_widget(Clear, panes.list);
+    } else if state.overlay == Some(Overlay::Help) {
+        // Below wide there is no preview pane for `preview_pane` to show the
+        // help in, so the help takes the world pane's own rect here — the
+        // help is where the world was, and Esc gives it straight back.
+        frame.render_widget(
+            Paragraph::new(
+                world_entry::help_lines(state, reading.as_ref(), glyphs)
+                    .into_iter()
+                    .map(Line::raw)
+                    .collect::<Vec<_>>(),
+            )
+            .wrap(Wrap { trim: false }),
+            panes.list,
+        );
     } else if let Some(lines) = compact_world_lines {
-        frame.render_widget(project_world_pane(lines, &theme), panes.list);
+        render_with_steps(
+            frame,
+            panes.list,
+            steps_height,
+            || project_world_pane(lines, &theme),
+            next_steps.as_deref(),
+            glyphs,
+        );
     } else {
         draw_resources(frame, state, &theme, panes.list, glyphs);
     }
 
     if let Some(preview) = panes.preview {
-        frame.render_widget(preview_pane(state, &theme, reading, glyphs), preview);
+        if let (Some(reading), true) = (reading, steps_height > 0) {
+            // The steps block only coexists with the world pane's own
+            // content, which is what preview_pane would show here anyway
+            // (its overlay/selection branches are unreachable while
+            // `steps_active_here` holds). Split the pane: world reading
+            // above, steps pinned below.
+            let block = crate::world_entry::bottom_block(preview, steps_height);
+            let content = ratatui::layout::Rect {
+                height: preview.height.saturating_sub(block.height),
+                ..preview
+            };
+            let lines = project_world_lines(state, reading, glyphs);
+            frame.render_widget(project_world_pane(lines, &theme), content);
+            frame.render_widget(
+                ratatui::widgets::Paragraph::new(world_entry::next_step_lines(
+                    next_steps.as_deref().unwrap_or(&[]),
+                    usize::from(block.width),
+                    glyphs,
+                )),
+                block,
+            );
+        } else {
+            frame.render_widget(preview_pane(state, &theme, reading, glyphs), preview);
+        }
     }
     frame.render_widget(footer(state, &theme, glyphs), panes.footer);
+}
+
+/// Render `content` into the top of `pane` and the next-steps rows into the
+/// bottom-pinned block, used where the world pane carries the compact
+/// reading (no preview pane). `content` is a closure so the already-built
+/// paragraph is moved only when actually rendered.
+fn render_with_steps(
+    frame: &mut Frame,
+    pane: ratatui::layout::Rect,
+    steps_height: usize,
+    content: impl FnOnce() -> Paragraph<'static>,
+    steps: Option<&[crate::world_entry::NextStep]>,
+    glyphs: Glyphs,
+) {
+    if steps_height == 0 {
+        frame.render_widget(content(), pane);
+        return;
+    }
+    let block = crate::world_entry::bottom_block(pane, steps_height);
+    let content_rect = ratatui::layout::Rect {
+        height: pane.height.saturating_sub(block.height),
+        ..pane
+    };
+    frame.render_widget(content(), content_rect);
+    if let Some(steps) = steps {
+        frame.render_widget(
+            Paragraph::new(world_entry::next_step_lines(
+                steps,
+                usize::from(block.width),
+                glyphs,
+            )),
+            block,
+        );
+    }
 }
 
 fn query_line<'a>(state: &'a TuiState, theme: &Theme, glyphs: Glyphs) -> Paragraph<'a> {
@@ -317,6 +412,18 @@ fn preview_pane<'a>(
 ) -> Paragraph<'a> {
     let world = reading.map(|reading| reading.world);
     let sep = glyphs.separator();
+    if state.overlay == Some(Overlay::Help) {
+        // Context-aware help: the content is derived from where the
+        // operator actually stands, including the next steps' outcomes when
+        // the block is drawn here.
+        return Paragraph::new(
+            crate::world_entry::help_lines(state, reading.as_ref(), glyphs)
+                .into_iter()
+                .map(Line::raw)
+                .collect::<Vec<_>>(),
+        )
+        .wrap(Wrap { trim: false });
+    }
     if state.overlay == Some(Overlay::ModelRoster) {
         let mut lines: Vec<Line> = vec![
             Line::from(Span::styled("Model roster", theme.heading())),
@@ -527,6 +634,19 @@ fn footer<'a>(state: &'a TuiState, theme: &Theme, glyphs: Glyphs) -> Paragraph<'
         .unwrap_or("unresolved");
     let sep = glyphs.separator();
     let updown = glyphs.vertical_keys();
+    // Hints for the always-available help key and, where the next-steps
+    // block is drawn, its digit keys. Both only when the query is empty —
+    // the same condition under which the keys mean those things.
+    let help_hint = if state.query.is_empty() && state.action_query.is_none() {
+        format!(" {sep} ? help")
+    } else {
+        String::new()
+    };
+    let steps_hint = if crate::world_entry::steps_active_here(state) {
+        format!(" {sep} 1-9 next steps")
+    } else {
+        String::new()
+    };
     let text = if state.action_query.is_some() {
         format!(
             "Action mode {sep} type to filter {sep} {updown} choose {sep} Enter invoke {sep} Space invoke if stageable {sep} Esc return"
@@ -540,7 +660,7 @@ fn footer<'a>(state: &'a TuiState, theme: &Theme, glyphs: Glyphs) -> Paragraph<'
             String::new()
         };
         format!(
-            "{} {sep} {} result{} {sep} {} staged {sep} scope {} {sep} Alt+{} fields {sep} : actions {sep} Ctrl+W Quick{system_hints}",
+            "{} {sep} {} result{} {sep} {} staged {sep} scope {} {sep} Alt+{} fields {sep} : actions {sep} Ctrl+W Quick{system_hints}{steps_hint}{help_hint}",
             workspace_section_label(state.workspace_section),
             state.read_model.resources.len(),
             if state.read_model.resources.len() == 1 { "" } else { "s" },
@@ -550,7 +670,7 @@ fn footer<'a>(state: &'a TuiState, theme: &Theme, glyphs: Glyphs) -> Paragraph<'
         )
     } else {
         format!(
-            "{} result{} {sep} {} staged {sep} scope {} {sep} {updown} navigate {sep} : actions {sep} Space stage {sep} Ctrl+S preview/apply {sep} Ctrl+W Workspace",
+            "{} result{} {sep} {} staged {sep} scope {} {sep} {updown} navigate {sep} : actions {sep} Space stage {sep} Ctrl+S preview/apply {sep} Ctrl+W Workspace{help_hint}",
             state.read_model.resources.len(),
             if state.read_model.resources.len() == 1 { "" } else { "s" },
             state.staged.len(),
@@ -578,6 +698,13 @@ fn pad(text: &str, width: usize, glyphs: Glyphs) -> String {
         out.push(' ');
     }
     out
+}
+
+/// Clip `text` to `width` cells, marking that something was dropped. The
+/// public entry the next-steps block and the help overlay share with the
+/// resource rows, so every pane degrades the same way at narrow width.
+pub fn clip(text: &str, width: usize, glyphs: Glyphs) -> String {
+    truncate(text, width, glyphs)
 }
 
 /// Clip `text` to `width` cells, marking that something was dropped.

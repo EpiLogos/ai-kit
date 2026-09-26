@@ -37,6 +37,7 @@ pub mod theme;
 pub mod tree;
 pub mod v2_render;
 pub mod working_field;
+pub mod world_entry;
 pub mod workspace_navigation;
 
 use aikit_core::id::{CapsuleId, GenerationId};
