@@ -80,7 +80,10 @@ impl ConnectorOutbound {
     }
 
     fn try_pop(&self) -> Option<OutboundOperation> {
-        self.queue.lock().ok().and_then(|mut queue| queue.pop_front())
+        self.queue
+            .lock()
+            .ok()
+            .and_then(|mut queue| queue.pop_front())
     }
 }
 
@@ -93,10 +96,31 @@ pub struct ConnectorQueues {
 impl ConnectorQueues {
     pub fn queue_for(&self, connector_ref: &ResourceRef) -> Arc<ConnectorOutbound> {
         let mut queues = self.queues.lock().expect("connector queue registry");
-        queues
-            .entry(connector_ref.clone())
-            .or_default()
-            .clone()
+        queues.entry(connector_ref.clone()).or_default().clone()
+    }
+}
+
+/// Pump-level admission control. A paused pump stops polling its connector
+/// for inbound events, keeps serving the outbound queue (so control answers
+/// still reach their conversations), and says so in its health detail. The
+/// conversation engine's canonical pause/resume sets this.
+#[derive(Default)]
+pub struct ConnectorPumpControls {
+    paused: Mutex<BTreeMap<ResourceRef, Arc<AtomicBool>>>,
+}
+
+impl ConnectorPumpControls {
+    pub fn flag_for(&self, connector_ref: &ResourceRef) -> Arc<AtomicBool> {
+        let mut paused = self.paused.lock().expect("connector pause registry");
+        paused.entry(connector_ref.clone()).or_default().clone()
+    }
+
+    pub fn is_paused(&self, connector_ref: &ResourceRef) -> bool {
+        self.flag_for(connector_ref).load(Ordering::SeqCst)
+    }
+
+    pub fn set_paused(&self, connector_ref: &ResourceRef, paused: bool) {
+        self.flag_for(connector_ref).store(paused, Ordering::SeqCst);
     }
 }
 
@@ -106,6 +130,8 @@ struct WorkerContext {
     state_file: Option<PathBuf>,
     hub: Arc<SubscriptionHub>,
     queue: Arc<ConnectorOutbound>,
+    controls: Arc<ConnectorPumpControls>,
+    engine: Option<Arc<crate::gateway_conversation_engine::GatewayConversationEngine>>,
 }
 
 /// Spawn one pump per enabled factory. Disabled entries are named on stderr
@@ -117,6 +143,8 @@ pub fn spawn_connector_workers(
     state_file: Option<PathBuf>,
     hub: Arc<SubscriptionHub>,
     queues: Arc<ConnectorQueues>,
+    controls: Arc<ConnectorPumpControls>,
+    engine: Option<Arc<crate::gateway_conversation_engine::GatewayConversationEngine>>,
     factories: Vec<Box<dyn GatewayConnectorFactory>>,
 ) -> Vec<JoinHandle<()>> {
     let mut workers = Vec::new();
@@ -145,6 +173,8 @@ pub fn spawn_connector_workers(
             state_file: state_file.clone(),
             hub: Arc::clone(&hub),
             queue: queues.queue_for(&connector_ref),
+            controls: Arc::clone(&controls),
+            engine: engine.clone(),
         };
         workers.push(thread::spawn(move || {
             run_connector_worker(context, factory, connector_ref);
@@ -173,10 +203,7 @@ fn run_connector_worker(
     // Register the connector's own descriptor first: every kernel observation
     // (health, ingest, delivery) is refused for an unregistered connector.
     let descriptor = connector.descriptor();
-    if let Err(error) = locked_command(
-        &context,
-        GatewayCommand::RegisterConnector { descriptor },
-    ) {
+    if let Err(error) = locked_command(&context, GatewayCommand::RegisterConnector { descriptor }) {
         park_unavailable(
             &context,
             &connector_ref,
@@ -341,9 +368,23 @@ fn serve_event_loop(
         } else {
             health
         };
+        let health = if context.controls.is_paused(&generation.connector_ref) {
+            let mut health = health;
+            let base = health.detail.unwrap_or_else(|| "connected".into());
+            health.detail = Some(format!("paused by gateway command; {base}"));
+            health
+        } else {
+            health
+        };
         if last_health.as_ref() != Some(&health) {
             record_health(context, health.clone());
             last_health = Some(health);
+        }
+        // A paused connector admits no new ingress; the loop keeps servicing
+        // the outbound queue and health above.
+        if context.controls.is_paused(&generation.connector_ref) {
+            sleep_with_shutdown(context, Duration::from_millis(100));
+            continue;
         }
         // Ingress: one event per iteration.
         match block_on(connector.next_event()) {
@@ -408,7 +449,9 @@ fn execute_and_record(
             connector_ref: generation.connector_ref.clone(),
             state: DeliveryState::Failed,
             native_message_id: None,
-            detail: Some(format!("connector could not execute the operation: {error}")),
+            detail: Some(format!(
+                "connector could not execute the operation: {error}"
+            )),
             native: Default::default(),
             provenance: vec!["gateway connector pump".into()],
         },
@@ -430,7 +473,8 @@ fn duplicate_key(event: &InboundEvent) -> Option<String> {
 
 /// One kernel command under the state lock, persisted like a carrier command.
 /// An appended ingress is published to the live subscription registry while
-/// the lock is still held so subscribers see every append, in order.
+/// the lock is still held so subscribers see every append, in order — and the
+/// conversation engine sees the same event the same way.
 fn locked_command(context: &WorkerContext, command: GatewayCommand) -> Result<GatewayResponse> {
     let mut gateway = context.gateway.lock().map_err(|_| {
         AikitError::new(
@@ -440,10 +484,15 @@ fn locked_command(context: &WorkerContext, command: GatewayCommand) -> Result<Ga
     })?;
     let response = execute_gateway_command(&mut gateway, command)?;
     if let GatewayResponse::Ingress {
-        result: GatewayIngressResult::Appended { stream_ref, event, .. },
+        result: GatewayIngressResult::Appended {
+            stream_ref, event, ..
+        },
     } = &response
     {
         context.hub.publish(stream_ref, event);
+        if let Some(engine) = &context.engine {
+            engine.appended(&gateway, event);
+        }
     }
     persist_gateway_state(&gateway, context.state_file.as_deref())?;
     Ok(response)
@@ -546,8 +595,7 @@ pub mod tests {
     };
     use crate::gateway_connector_config::GatewayConnectorEntry;
     use crate::gateway_runtime::{
-        AgencyGateway, GatewayBinding, GatewayCommand, GatewayIngressDecision,
-        GatewayIngressPolicy,
+        AgencyGateway, GatewayBinding, GatewayCommand, GatewayIngressDecision, GatewayIngressPolicy,
     };
     use crate::telegram_bot_api::TelegramConnectorConfig;
     use crate::telegram_gateway::TelegramConnector;
@@ -618,12 +666,17 @@ pub mod tests {
         fn connect(&mut self) -> ConnectorFuture<'_, ConnectorHello> {
             let result = (|| -> Result<ConnectorHello> {
                 self.inner.connects.fetch_add(1, Ordering::SeqCst);
-                let remaining = self
-                    .inner
-                    .connect_failures_remaining
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                        if n == 0 { None } else { Some(n - 1) }
-                    });
+                let remaining = self.inner.connect_failures_remaining.fetch_update(
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                    |n| {
+                        if n == 0 {
+                            None
+                        } else {
+                            Some(n - 1)
+                        }
+                    },
+                );
                 if remaining.is_ok() {
                     return Err(AikitError::new(
                         "gateway_connector_fixture.connect_refused",
@@ -728,6 +781,7 @@ pub mod tests {
             token_location: None,
             configuration_ref: None,
             program: Vec::new(),
+            agent_backing: None,
             provenance: Vec::new(),
         }
     }
@@ -841,6 +895,8 @@ pub mod tests {
                 Some(self.state_file.clone()),
                 Arc::clone(&self.hub),
                 Arc::clone(&self.queues),
+                Arc::new(ConnectorPumpControls::default()),
+                None,
                 vec![Box::new(FixtureFactory {
                     entry: fixture_entry(),
                     inner,
@@ -909,8 +965,7 @@ pub mod tests {
 
         let worker = harness.spawn_worker(Arc::clone(&inner));
         harness.wait_until("both events ingested and the receipt recorded", |harness| {
-            harness.status().delivery_receipt_count == 1
-                && harness.stream_events().len() == 2
+            harness.status().delivery_receipt_count == 1 && harness.stream_events().len() == 2
         });
         harness.shutdown.store(true, Ordering::SeqCst);
         worker.join().unwrap();
@@ -941,11 +996,13 @@ pub mod tests {
         inner.push_text("fresh");
 
         let worker = harness.spawn_worker(Arc::clone(&inner));
-        harness.wait_until("the fresh event lands after the duplicate is skipped", |harness| {
-            let events = harness.stream_events();
-            events.len() == 2
-                && events.iter().any(|event| event.event["content"] == "fresh")
-        });
+        harness.wait_until(
+            "the fresh event lands after the duplicate is skipped",
+            |harness| {
+                let events = harness.stream_events();
+                events.len() == 2 && events.iter().any(|event| event.event["content"] == "fresh")
+            },
+        );
         harness.wait_until("the skip is visible in connector health", |harness| {
             harness
                 .health()
@@ -1106,6 +1163,8 @@ pub mod tests {
             queue: harness
                 .queues
                 .queue_for(&ResourceRef::parse("gateway-connector/telegram/main").unwrap()),
+            controls: Arc::new(ConnectorPumpControls::default()),
+            engine: None,
         };
         // Ingest through the exact command path a pump iteration uses.
         locked_command(&context, GatewayCommand::Ingest { event }).unwrap();

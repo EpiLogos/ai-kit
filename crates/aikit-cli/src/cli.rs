@@ -978,6 +978,29 @@ pub enum GatewaySub {
     Remote(GatewayRemoteCmd),
     /// Declare, list or remove the connectors this gateway service runs.
     Connector(GatewayConnectorCmd),
+    /// Canonical conversation control against a running gateway:
+    /// `aikit gateway agent status|stop|new|sessions|restart|pause|resume`.
+    Agent(GatewayAgentArgs),
+}
+
+/// `aikit gateway agent` — the canonical conversation-control operations,
+/// executable from any surface that can carry a gateway command.
+#[derive(Debug, Args)]
+pub struct GatewayAgentArgs {
+    /// The operation: `status`, `stop`, `new`, `sessions`, `restart`,
+    /// `pause` or `resume`.
+    #[arg(value_name = "OP")]
+    pub operation: String,
+    /// The gateway binding whose conversation is controlled, e.g.
+    /// `gateway-binding/telegram`.
+    #[arg(long = "binding", value_name = "REF")]
+    pub binding_ref: String,
+    /// Connector ref for `pause`/`resume` (default: the binding's own
+    /// connector).
+    #[arg(long = "connector", value_name = "REF")]
+    pub connector_ref: Option<String>,
+    #[command(flatten)]
+    pub carrier: GatewayQueryArgs,
 }
 
 /// `aikit gateway who`.
@@ -1133,6 +1156,12 @@ pub enum GatewayConnectorSub {
         /// Non-secret configuration ref recorded for provenance.
         #[arg(long = "configuration-ref", value_name = "REF")]
         configuration_ref: Option<String>,
+        /// The harness backing this connector's conversations, named as the
+        /// encounter plane names its providers (e.g. `pi`). The gateway
+        /// conversation engine resolves the name at serve time and runs real
+        /// agent turns; without it, connector conversations stay journal-only.
+        #[arg(long = "agent-backing", value_name = "HARNESS")]
+        agent_backing: Option<String>,
         /// Declare the connector but do not run it.
         #[arg(long)]
         disable: bool,

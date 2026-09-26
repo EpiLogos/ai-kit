@@ -8,11 +8,15 @@
 //! agree on where the gateway lives without a flag. Explicit carriers still
 //! win over every default.
 
-use aikit_adapters::{GatewayCarrierTarget, GatewayServiceConfig, DEFAULT_GATEWAY_MAX_FRAME_BYTES};
+use aikit_adapters::{
+    GatewayCarrierTarget, GatewayConversationOperation, GatewayServiceConfig,
+    DEFAULT_GATEWAY_MAX_FRAME_BYTES,
+};
+use aikit_core::resource::ResourceRef;
 use aikit_core::{AikitError, Result};
 use aikit_store::home::AikitHome;
 
-use crate::cli::{GatewayQueryArgs, GatewayServeArgs};
+use crate::cli::{GatewayAgentArgs, GatewayQueryArgs, GatewayServeArgs};
 
 /// Resolve the serve carriers. The state file always defaults to the home
 /// file; the Unix carrier defaults to the home socket when no carrier is
@@ -137,4 +141,35 @@ fn gateway_token_from_env() -> Option<String> {
     std::env::var("AIKIT_GATEWAY_TOKEN")
         .ok()
         .filter(|token| !token.trim().is_empty())
+}
+
+/// Resolve `aikit gateway agent <op>` into the canonical operation the
+/// protocol carries. The names here mirror the connector-edge slash commands;
+/// both spellings resolve to one `GatewayConversationOperation`.
+pub fn conversation_operation(args: &GatewayAgentArgs) -> Result<GatewayConversationOperation> {
+    let connector_ref = match &args.connector_ref {
+        Some(raw) => Some(ResourceRef::parse(raw).map_err(|error| {
+            AikitError::new(
+                "cli.gateway_connector_ref_invalid",
+                format!("parse connector ref {raw}: {error}"),
+            )
+        })?),
+        None => None,
+    };
+    match args.operation.as_str() {
+        "status" => Ok(GatewayConversationOperation::Status),
+        "stop" => Ok(GatewayConversationOperation::Stop),
+        "new" => Ok(GatewayConversationOperation::New),
+        "sessions" => Ok(GatewayConversationOperation::Sessions),
+        "restart" => Ok(GatewayConversationOperation::Restart),
+        "pause" => Ok(GatewayConversationOperation::PauseConnector { connector_ref }),
+        "resume" => Ok(GatewayConversationOperation::ResumeConnector { connector_ref }),
+        other => Err(AikitError::new(
+            "cli.gateway_agent_operation_unknown",
+            format!(
+                "unknown conversation operation {other:?}; use status, stop, new, sessions, \
+                 restart, pause or resume"
+            ),
+        )),
+    }
 }

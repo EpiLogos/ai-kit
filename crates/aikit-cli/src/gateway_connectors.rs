@@ -10,15 +10,22 @@
 
 use aikit_adapters::{
     build_connector_factory, load_gateway_connectors, store_gateway_connectors,
-    ConnectorTokenLocation, GatewayConnectorEntry, GatewayConnectorFactory,
-    GatewayConnectorsFile, GATEWAY_CONNECTORS_FILE_NAME,
+    AgentHostTurnSource, ConnectorTokenLocation, ConversationHarnessProtocol,
+    GatewayConnectorEntry, GatewayConnectorFactory, GatewayConnectorsFile,
+    GatewayTurnSourceResolver, GATEWAY_CONNECTORS_FILE_NAME,
 };
 use aikit_core::resource::ResourceRef;
 use aikit_core::{AikitError, Result};
 use aikit_store::AikitHome;
 use serde_json::{json, Value};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use crate::cli::{GatewayConnectorCmd, GatewayConnectorSub};
+use crate::encounter_profile_provider::resolve_provider;
+use crate::encounter_service::EncounterProtocol;
 use crate::gateway_contact::three_part;
 
 /// The connectors document of this AIKit home.
@@ -41,7 +48,10 @@ pub enum ConnectorOutput {
     Data(Value),
 }
 
-pub fn connector_command(home: &AikitHome, command: GatewayConnectorCmd) -> Result<ConnectorOutput> {
+pub fn connector_command(
+    home: &AikitHome,
+    command: GatewayConnectorCmd,
+) -> Result<ConnectorOutput> {
     match command.command {
         GatewayConnectorSub::Add {
             platform,
@@ -50,6 +60,7 @@ pub fn connector_command(home: &AikitHome, command: GatewayConnectorCmd) -> Resu
             implementation,
             program,
             configuration_ref,
+            agent_backing,
             disable,
             token,
         } => add(
@@ -60,6 +71,7 @@ pub fn connector_command(home: &AikitHome, command: GatewayConnectorCmd) -> Resu
             implementation,
             program,
             configuration_ref,
+            agent_backing,
             disable,
             token,
         ),
@@ -77,6 +89,7 @@ fn add(
     implementation: Option<String>,
     program: Option<String>,
     configuration_ref: Option<String>,
+    agent_backing: Option<String>,
     disable: bool,
     token: Option<String>,
 ) -> Result<ConnectorOutput> {
@@ -129,6 +142,7 @@ fn add(
         }),
         configuration_ref,
         program,
+        agent_backing,
         provenance: vec!["aikit gateway connector add".into()],
     };
     entry.validate()?;
@@ -165,15 +179,12 @@ fn list(home: &AikitHome, json: bool) -> Result<ConnectorOutput> {
     let mut lines = Vec::new();
     for entry in &file.connectors {
         lines.push(format!(
-            "{}\n    platform {} · implementation {} · {} · token {}{}{}",
+            "{}\n    platform {} · implementation {} · {} · token {}{}{}{}",
             entry.connector_ref,
             entry.platform,
             entry.implementation,
             if entry.enabled { "enabled" } else { "disabled" },
-            entry
-                .token_location
-                .as_deref()
-                .unwrap_or("none"),
+            entry.token_location.as_deref().unwrap_or("none"),
             if entry.program.is_empty() {
                 String::new()
             } else {
@@ -181,6 +192,10 @@ fn list(home: &AikitHome, json: bool) -> Result<ConnectorOutput> {
             },
             match &entry.configuration_ref {
                 Some(reference) => format!("\n    configuration: {reference}"),
+                None => String::new(),
+            },
+            match &entry.agent_backing {
+                Some(harness) => format!("\n    agent backing: {harness}"),
                 None => String::new(),
             },
         ));
@@ -212,12 +227,203 @@ fn remove(home: &AikitHome, connector_ref: String) -> Result<ConnectorOutput> {
 
 /// Build the factories `serve` will run. An unknown implementation is a
 /// startup error naming it, before any carrier binds.
-pub fn connector_factories(
-    home: &AikitHome,
-) -> Result<Vec<Box<dyn GatewayConnectorFactory>>> {
+pub fn connector_factories(home: &AikitHome) -> Result<Vec<Box<dyn GatewayConnectorFactory>>> {
     let file = load(home)?;
     file.connectors
         .into_iter()
         .map(build_connector_factory)
         .collect()
+}
+
+/// The conversation engine's turn sources: the encounter plane's own provider
+/// registry (`state/encounter-providers/*.json`, profile-derived entries
+/// resolved at load) read through the connector entries' `agent_backing`
+/// names. No second harness registry is invented here: a connector backs its
+/// conversations with a provider the encounter plane already declares.
+///
+/// A declared backing that no provider answers, or whose connection facts are
+/// unreachable, is a serve-time startup error naming it — the gateway must
+/// not silently run a connector with conversations that can never be answered.
+pub fn conversation_turn_resolver(home: &AikitHome) -> Result<Arc<dyn GatewayTurnSourceResolver>> {
+    let file = load(home)?;
+    let mut backings: BTreeMap<String, String> = BTreeMap::new();
+    for entry in &file.connectors {
+        if let Some(harness) = &entry.agent_backing {
+            backings.insert(entry.connector_ref.clone(), harness.clone());
+        }
+    }
+    if backings.is_empty() {
+        return Ok(Arc::new(NoAgentBacking));
+    }
+    let providers = load_encounter_providers(home)?;
+    let mut resolved: BTreeMap<String, ResolvedProvider> = BTreeMap::new();
+    for (connector_ref, harness) in &backings {
+        let provider = providers
+            .iter()
+            .find(|provider| &provider.id == harness)
+            .ok_or_else(|| {
+                three_part(
+                    "gateway.agent_backing_unknown",
+                    format!(
+                        "Connector {connector_ref} declares agent backing {harness:?}, but no \
+                         encounter provider of that name is declared in {}.",
+                        home.state().join("encounter-providers").display()
+                    ),
+                    "The gateway service was not started.",
+                    format!(
+                        "Declare the provider with `aikit encounter providers add` (or remove \
+                         --agent-backing from connector {connector_ref})."
+                    ),
+                )
+            })?;
+        if provider.argv.is_empty() {
+            return Err(three_part(
+                "gateway.agent_backing_unresolved",
+                format!(
+                    "Connector {connector_ref} declares agent backing {harness:?}, but that \
+                     provider's connection facts carry no launch command."
+                ),
+                "The gateway service was not started.",
+                "Declare the provider with an explicit argv or a resolvable profile.",
+            ));
+        }
+        crate::encounter_profile_provider::ensure_connection_facts_reachable(provider).map_err(
+            |error| {
+                three_part(
+                    "gateway.agent_backing_unreachable",
+                    format!(
+                        "Connector {connector_ref} declares agent backing {harness:?}, but its \
+                         launch command is unusable: {error}"
+                    ),
+                    "The gateway service was not started.",
+                    "Fix the provider's connection facts, or remove --agent-backing.",
+                )
+            },
+        )?;
+        resolved.insert(
+            harness.clone(),
+            ResolvedProvider {
+                protocol: harness_protocol(provider.protocol),
+                argv: provider.argv.clone(),
+                cwd: provider
+                    .cwd
+                    .as_ref()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| {
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    }),
+            },
+        );
+    }
+    Ok(Arc::new(ProviderTurnResolver {
+        backings,
+        resolved,
+        sources: Mutex::new(BTreeMap::new()),
+    }))
+}
+
+struct ResolvedProvider {
+    protocol: ConversationHarnessProtocol,
+    argv: Vec<String>,
+    cwd: std::path::PathBuf,
+}
+
+struct NoAgentBacking;
+
+impl GatewayTurnSourceResolver for NoAgentBacking {
+    fn turn_source_for(
+        &self,
+        _connector_ref: &ResourceRef,
+        _platform: &str,
+    ) -> Option<Arc<dyn aikit_adapters::ConversationTurnSource>> {
+        None
+    }
+}
+
+struct ProviderTurnResolver {
+    backings: BTreeMap<String, String>,
+    resolved: BTreeMap<String, ResolvedProvider>,
+    /// One lazily launched harness per backing name: the same process carries
+    /// every conversation that names it.
+    sources: Mutex<BTreeMap<String, Arc<dyn aikit_adapters::ConversationTurnSource>>>,
+}
+
+impl GatewayTurnSourceResolver for ProviderTurnResolver {
+    fn turn_source_for(
+        &self,
+        connector_ref: &ResourceRef,
+        _platform: &str,
+    ) -> Option<Arc<dyn aikit_adapters::ConversationTurnSource>> {
+        let harness = self.backings.get(connector_ref.as_str())?;
+        let mut sources = self.sources.lock().ok()?;
+        if let Some(source) = sources.get(harness) {
+            return Some(Arc::clone(source));
+        }
+        let resolved = self.resolved.get(harness)?;
+        let source: Arc<dyn aikit_adapters::ConversationTurnSource> =
+            Arc::new(AgentHostTurnSource::new(
+                harness.clone(),
+                resolved.protocol,
+                resolved.argv.clone(),
+                resolved.cwd.clone(),
+            ));
+        sources.insert(harness.clone(), Arc::clone(&source));
+        Some(source)
+    }
+}
+
+fn harness_protocol(protocol: EncounterProtocol) -> ConversationHarnessProtocol {
+    match protocol {
+        EncounterProtocol::Acp => ConversationHarnessProtocol::Acp,
+        EncounterProtocol::PiRpc => ConversationHarnessProtocol::PiRpc,
+        EncounterProtocol::PrimeRpc => ConversationHarnessProtocol::PrimeRpc,
+    }
+}
+
+/// The encounter plane's own provider load: every `encounter-providers/*.json`
+/// of this home, with profile-derived entries resolved from their embedded
+/// profiles at load time. One registry, read the same way.
+fn load_encounter_providers(
+    home: &AikitHome,
+) -> Result<Vec<crate::encounter_service::EncounterProvider>> {
+    let root = home.state().join("encounter-providers");
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut rows = Vec::new();
+    for entry in std::fs::read_dir(&root).map_err(|error| {
+        AikitError::new(
+            "gateway.agent_backing_providers",
+            format!("read {}: {error}", root.display()),
+        )
+    })? {
+        let path = entry
+            .map_err(|error| {
+                AikitError::new(
+                    "gateway.agent_backing_providers",
+                    format!("read {}: {error}", root.display()),
+                )
+            })?
+            .path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let bytes = std::fs::read(&path).map_err(|error| {
+            AikitError::new(
+                "gateway.agent_backing_providers",
+                format!("read {}: {error}", path.display()),
+            )
+        })?;
+        let provider: crate::encounter_service::EncounterProvider = serde_json::from_slice(&bytes)
+            .map_err(|error| {
+                AikitError::new(
+                    "gateway.agent_backing_providers",
+                    format!("decode {}: {error}", path.display()),
+                )
+            })?;
+        rows.push(resolve_provider(provider).map_err(|failure| {
+            AikitError::new(failure.code(), format!("{}: {failure}", path.display()))
+        })?);
+    }
+    Ok(rows)
 }

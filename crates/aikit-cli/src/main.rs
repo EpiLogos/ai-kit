@@ -1245,8 +1245,12 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
             // The connectors file names what this service runs. Building the
             // factories here is the startup gate: an unknown implementation or
             // an unusable token location stops the service before any carrier
-            // binds, naming the connector.
+            // binds, naming the connector. The same file names agent-backed
+            // conversations: the turn sources resolve here too, so a declared
+            // harness that no encounter provider answers stops the service
+            // before it can accept conversations it could never respond to.
             let connectors = aikit_cli::gateway_connectors::connector_factories(&home)?;
+            let conversation = aikit_cli::gateway_connectors::conversation_turn_resolver(&home)?;
             aikit_adapters::run_gateway_service_with_hooks(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
@@ -1254,6 +1258,10 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                     ticks,
                     occupancy,
                     connectors,
+                    conversation: Some(aikit_adapters::GatewayConversationHooks {
+                        turn_sources: Some(conversation),
+                        policy: None,
+                    }),
                 },
             )?;
             Ok(Reply::Text("gateway service stopped cleanly".into()))
@@ -1400,6 +1408,41 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 aikit_cli::gateway_connectors::ConnectorOutput::Data(data) => gateway_data(data),
             }
         }
+        GatewaySub::Agent(a) => {
+            let operation = aikit_cli::gateway_ops::conversation_operation(&a)?;
+            let target = aikit_cli::gateway_ops::carrier_target(&home, &a.carrier)?;
+            let command = aikit_adapters::GatewayCommand::Conversation {
+                binding_ref: aikit_core::resource::ResourceRef::parse(&a.binding_ref).map_err(
+                    |error| {
+                        AikitError::new(
+                            "cli.gateway_binding_ref_invalid",
+                            format!("parse binding ref {}: {error}", a.binding_ref),
+                        )
+                    },
+                )?,
+                operation,
+            };
+            let response =
+                aikit_adapters::gateway_command(&target, command, None).map_err(|error| {
+                    aikit_cli::gateway_ops::unreachable_hint(&error).unwrap_or(error)
+                })?;
+            let data = serde_json::to_value(&response).map_err(|error| {
+                AikitError::new(
+                    "cli.gateway_response_encode",
+                    format!("encode gateway response: {error}"),
+                )
+            })?;
+            Ok(Reply::Data {
+                context: EnvelopeContext {
+                    context_id: None,
+                    session_id: None,
+                    project_root: None,
+                },
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
         query => {
             let command = match query {
                 GatewaySub::Protocol(_) => aikit_adapters::GatewayCommand::Protocol,
@@ -1418,7 +1461,8 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Delegate(_)
                 | GatewaySub::Forward(_)
                 | GatewaySub::Remote(_)
-                | GatewaySub::Connector(_) => unreachable!("handled above"),
+                | GatewaySub::Connector(_)
+                | GatewaySub::Agent(_) => unreachable!("handled above"),
             };
             let args = match query {
                 GatewaySub::Protocol(a)
@@ -1437,7 +1481,8 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Delegate(_)
                 | GatewaySub::Forward(_)
                 | GatewaySub::Remote(_)
-                | GatewaySub::Connector(_) => unreachable!("handled above"),
+                | GatewaySub::Connector(_)
+                | GatewaySub::Agent(_) => unreachable!("handled above"),
             };
             let target = aikit_cli::gateway_ops::carrier_target(&home, &args)?;
             let response =

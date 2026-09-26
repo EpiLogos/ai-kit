@@ -37,6 +37,7 @@ pub mod gateway_connector_config;
 pub mod gateway_connector_pump;
 pub mod gateway_connector_specimen;
 pub mod gateway_connector_wire;
+pub mod gateway_conversation_engine;
 #[allow(unused_imports)]
 pub mod gateway_runtime;
 pub mod gateway_service;
@@ -162,20 +163,28 @@ pub use gateway_connector::{
 };
 pub use gateway_connector_config::{
     build_connector_factory, load_gateway_connectors, store_gateway_connectors,
-    ConnectorTokenLocation, GatewayConnectorEntry, GatewayConnectorFactory,
-    GatewayConnectorsFile, GATEWAY_CONNECTORS_FILE_NAME, GATEWAY_CONNECTORS_SCHEMA,
+    ConnectorTokenLocation, GatewayConnectorEntry, GatewayConnectorFactory, GatewayConnectorsFile,
+    GATEWAY_CONNECTORS_FILE_NAME, GATEWAY_CONNECTORS_SCHEMA,
 };
 pub use gateway_connector_pump::{
-    spawn_connector_workers, ConnectorOutbound, ConnectorQueues, CONNECTOR_QUIET_POLL_CODE,
+    spawn_connector_workers, ConnectorOutbound, ConnectorPumpControls, ConnectorQueues,
+    CONNECTOR_QUIET_POLL_CODE,
 };
 pub use gateway_connector_specimen::{
     run_specimen_connector, SpecimenOptions, SPECIMEN_CONNECTOR_VERSION,
 };
 pub use gateway_connector_wire::StdioWireConnector;
+pub use gateway_conversation_engine::{
+    parse_slash, AgentHostTurnSource, ConversationHarnessProtocol, ConversationTurn,
+    ConversationTurnOutcome, ConversationTurnRequest, ConversationTurnSource, EnginePolicy,
+    FixtureScript, FixtureTurnSource, GatewayConversationEngine, GatewayTurnSourceResolver,
+    SlashParse,
+};
 pub use gateway_runtime::{
     connector_descriptor, execute_gateway_command, text_send, AgencyGateway,
-    GatewayActuationControlIntent, GatewayActuationControlOperation, GatewayBinding,
-    GatewayCommand, GatewayDiscovery, GatewayEcology, GatewayEcologyAgency, GatewayEcologySession,
+    GatewayActuationControlIntent, GatewayActuationControlOperation, GatewayAgentReply,
+    GatewayAgentReplyFailure, GatewayBinding, GatewayCommand, GatewayConversationOperation,
+    GatewayDiscovery, GatewayEcology, GatewayEcologyAgency, GatewayEcologySession,
     GatewayEcologyStream, GatewayEcologySurface, GatewayErrorEnvelope, GatewayForkOrigin,
     GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult, GatewayInvocationMode,
     GatewayOccupancyReading, GatewayOwnerUnavailable, GatewayReplay, GatewayRequestEnvelope,
@@ -187,10 +196,10 @@ pub use gateway_runtime::{
 pub use gateway_service::{
     acquire_gateway_state_lock, execute_against_state_file, persist_gateway_state,
     restore_gateway_state, run_gateway_service, run_gateway_service_with_hooks,
-    run_gateway_service_with_ticks, GatewayOccupancyReader, GatewayServiceConfig,
-    GatewayServiceHooks, GatewayServiceRuntime, GatewayStateLock, GatewayTick, GatewayTickLoop,
-    SubscriptionHub, SubscriptionSink, DEFAULT_GATEWAY_MAX_FRAME_BYTES,
-    GATEWAY_SERVICE_CARRIER_VERSION,
+    run_gateway_service_with_ticks, GatewayConversationHooks, GatewayOccupancyReader,
+    GatewayServiceConfig, GatewayServiceHooks, GatewayServiceRuntime, GatewayStateLock,
+    GatewayTick, GatewayTickLoop, SubscriptionHub, SubscriptionSink,
+    DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION,
 };
 pub use harness_disclosure::{
     disclose, ComposedEntry, DriftEntry, DriftKind, HarnessDisclosure, NativeEntry,

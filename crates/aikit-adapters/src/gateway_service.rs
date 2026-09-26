@@ -349,6 +349,20 @@ pub struct GatewayServiceHooks {
     pub ticks: Option<GatewayTickLoop>,
     pub occupancy: Option<Arc<dyn GatewayOccupancyReader>>,
     pub connectors: Vec<Box<dyn GatewayConnectorFactory>>,
+    /// The conversation engine's turn-source resolver and policy. `None`
+    /// still builds an engine: canonical conversation control works, and a
+    /// connector that names no agent backing simply gets no turns.
+    pub conversation: Option<GatewayConversationHooks>,
+}
+
+/// How the service builds its conversation engine.
+#[derive(Default)]
+pub struct GatewayConversationHooks {
+    /// Resolves a connector's agent-backed turn source from its configuration.
+    pub turn_sources:
+        Option<Arc<dyn crate::gateway_conversation_engine::GatewayTurnSourceResolver>>,
+    /// Bounded restart-drain and interruption policy. Defaults when absent.
+    pub policy: Option<crate::gateway_conversation_engine::EnginePolicy>,
 }
 
 // ---------------------------------------------------------------------------
@@ -517,10 +531,7 @@ struct ConnectionSubscriptions {
 
 impl ConnectionSubscriptions {
     fn new(hub: Arc<SubscriptionHub>) -> Self {
-        Self {
-            hub,
-            active: None,
-        }
+        Self { hub, active: None }
     }
 
     /// Subscribe this connection to `stream_ref`. One live subscription per
@@ -531,7 +542,11 @@ impl ConnectionSubscriptions {
         self.active = None;
         let sink = SubscriptionSink::new();
         let id = self.hub.register(stream_ref, Arc::clone(&sink));
-        self.active = Some(ConnectionSubscription { hub: Arc::clone(&self.hub), id, sink: Arc::clone(&sink) });
+        self.active = Some(ConnectionSubscription {
+            hub: Arc::clone(&self.hub),
+            id,
+            sink: Arc::clone(&sink),
+        });
         sink
     }
 }
@@ -572,6 +587,7 @@ pub fn run_gateway_service_with_ticks(
             ticks,
             occupancy: None,
             connectors: Vec::new(),
+            conversation: None,
         },
     )
 }
@@ -580,6 +596,9 @@ pub fn run_gateway_service_with_ticks(
 pub struct GatewayServiceRuntime {
     pub hub: Arc<SubscriptionHub>,
     pub queues: Arc<ConnectorQueues>,
+    pub controls: Arc<crate::gateway_connector_pump::ConnectorPumpControls>,
+    /// The conversation engine, present on every running service.
+    pub engine: Option<Arc<crate::gateway_conversation_engine::GatewayConversationEngine>>,
     pub connections: ConnectionRegistry,
 }
 
@@ -618,9 +637,7 @@ pub struct ConnectionRegistry {
 
 impl ConnectionRegistry {
     fn register(&self, closer: Arc<dyn ConnectionCloser>) -> ConnectionGuard<'_> {
-        let id = self
-            .next_id
-            .fetch_add(1, Ordering::SeqCst);
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut inner) = self.inner.lock() {
             inner.insert(id, closer);
         }
@@ -670,6 +687,7 @@ pub fn run_gateway_service_with_hooks(
         ticks,
         occupancy,
         connectors,
+        conversation,
     } = hooks;
     config.validate()?;
     // Held until this function returns: the service is the only writer of its
@@ -685,9 +703,27 @@ pub fn run_gateway_service_with_hooks(
     let gateway = restore_gateway_state(gateway, config.state_file.as_deref())?;
     let gateway = Arc::new(Mutex::new(gateway));
     let shutdown = Arc::new(AtomicBool::new(false));
+    let hub = Arc::new(SubscriptionHub::default());
+    let queues = Arc::new(ConnectorQueues::default());
+    let controls = Arc::new(crate::gateway_connector_pump::ConnectorPumpControls::default());
+    let GatewayConversationHooks {
+        turn_sources,
+        policy,
+    } = conversation.unwrap_or_default();
+    let engine = crate::gateway_conversation_engine::GatewayConversationEngine::new(
+        Arc::clone(&gateway),
+        Arc::clone(&hub),
+        Arc::clone(&queues),
+        Arc::clone(&controls),
+        config.state_file.clone(),
+        turn_sources,
+        policy.unwrap_or_default(),
+    );
     let runtime = Arc::new(GatewayServiceRuntime {
-        hub: Arc::new(SubscriptionHub::default()),
-        queues: Arc::new(ConnectorQueues::default()),
+        hub,
+        queues,
+        controls: Arc::clone(&controls),
+        engine: Some(engine),
         connections: ConnectionRegistry::default(),
     });
 
@@ -700,6 +736,8 @@ pub fn run_gateway_service_with_hooks(
         config.state_file.clone(),
         Arc::clone(&runtime.hub),
         Arc::clone(&runtime.queues),
+        Arc::clone(&runtime.controls),
+        runtime.engine.clone(),
         connectors,
     );
 
@@ -949,9 +987,7 @@ fn handle_websocket_connection(
     loop {
         let frame = match read_websocket_frame(&mut reader, max_frame_bytes) {
             Ok(frame) => frame,
-            Err(error)
-                if is_idle_timeout(&error) && subscriptions.active.is_some() =>
-            {
+            Err(error) if is_idle_timeout(&error) && subscriptions.active.is_some() => {
                 // A subscribed client may sit silent waiting for events;
                 // keep the connection alive with a protocol ping.
                 let mut writer = writer.lock().expect("writer");
@@ -1037,9 +1073,7 @@ fn handle_websocket_connection(
 
 fn is_idle_timeout(error: &AikitError) -> bool {
     error.code() == "agency_gateway_service.io"
-        && error
-            .to_string()
-            .contains("read WebSocket frame header")
+        && error.to_string().contains("read WebSocket frame header")
 }
 
 #[cfg(unix)]
@@ -1198,7 +1232,11 @@ where
 {
     // Responses and subscription pushes come from two threads; every write
     // goes through this one lock so lines never interleave mid-write.
-    let writer = Arc::new(Mutex::new(stream.duplicate().map_err(io_error("duplicate gateway line stream"))?));
+    let writer = Arc::new(Mutex::new(
+        stream
+            .duplicate()
+            .map_err(io_error("duplicate gateway line stream"))?,
+    ));
     // Registered so the service's exit closes this connection: a subscriber's
     // next read ends instead of outliving the service.
     let _connection = runtime.connections.register(stream.closer());
@@ -1256,9 +1294,7 @@ where
                     writer
                         .write_all(b"\n")
                         .map_err(io_error("write gateway push terminator"))?;
-                    writer
-                        .flush()
-                        .map_err(io_error("flush gateway push"))?;
+                    writer.flush().map_err(io_error("flush gateway push"))?;
                     Ok(())
                 }));
             }
@@ -1330,6 +1366,48 @@ fn execute_serialized_request(
         })?;
         return Ok((encoded, false, None));
     }
+    // A canonical conversation-control command is the running engine's to
+    // execute: the kernel holds no turn sources. The engine locks the state
+    // itself, answers the requesting carrier, surfaces its line to the
+    // requesting conversation, and persists — and a restart drains, answers,
+    // and then stops the service so the service manager rematerialises it.
+    if let Some(engine) = &runtime.engine {
+        if let GatewayCommand::Conversation {
+            binding_ref,
+            operation,
+        } = request.command.clone()
+        {
+            // An operation the engine refuses (an unknown binding, say) is
+            // the same honest error envelope any other command gets — never a
+            // closed carrier.
+            let execution = match engine.execute(binding_ref, operation) {
+                Ok(execution) => execution,
+                Err(error) => {
+                    let encoded = serde_json::to_string(
+                        &GatewayResponseEnvelope::from_result(request.request_id, Err(error)),
+                    )
+                    .map_err(|error| {
+                        AikitError::new(
+                            "agency_gateway_service.response_encode",
+                            format!("encode gateway response: {error}"),
+                        )
+                    })?;
+                    return Ok((encoded, false, None));
+                }
+            };
+            let encoded = serde_json::to_string(&GatewayResponseEnvelope::from_result(
+                request.request_id,
+                Ok(execution.response),
+            ))
+            .map_err(|error| {
+                AikitError::new(
+                    "agency_gateway_service.response_encode",
+                    format!("encode gateway response: {error}"),
+                )
+            })?;
+            return Ok((encoded, execution.restart_requested, None));
+        }
+    }
     let should_shutdown = request.command.is_shutdown();
     let mut gateway = gateway.lock().map_err(|_| {
         AikitError::new(
@@ -1361,11 +1439,18 @@ fn execute_serialized_request(
                 .push(operation.clone());
         }
         Ok(GatewayResponse::Ingress {
-            result: GatewayIngressResult::Appended { stream_ref, event, .. },
+            result:
+                GatewayIngressResult::Appended {
+                    stream_ref, event, ..
+                },
         }) => {
             // Carrier-appended events reach live subscribers exactly like
-            // pump-appended ones, under the same lock.
+            // pump-appended ones, under the same lock — and the conversation
+            // engine sees the same append.
             runtime.hub.publish(stream_ref, event);
+            if let Some(engine) = &runtime.engine {
+                engine.appended(&gateway, event);
+            }
         }
         _ => {}
     }
@@ -1755,6 +1840,8 @@ mod tests {
         Arc::new(GatewayServiceRuntime {
             hub: Arc::new(SubscriptionHub::default()),
             queues: Arc::new(crate::gateway_connector_pump::ConnectorQueues::default()),
+            controls: Arc::new(crate::gateway_connector_pump::ConnectorPumpControls::default()),
+            engine: None,
             connections: ConnectionRegistry::default(),
         })
     }
@@ -2211,6 +2298,7 @@ mod tests {
                 entry: fixture_entry(),
                 inner: Arc::clone(&inner),
             })],
+            conversation: None,
         };
         let (done_tx, done_rx) = mpsc::channel();
         thread::spawn(move || {
@@ -2262,7 +2350,10 @@ mod tests {
         let replay = read_gateway_line(&client, far_deadline);
         assert_eq!(replay["response"]["type"], "replay", "{replay}");
         assert_eq!(
-            replay["response"]["replay"]["events"].as_array().unwrap().len(),
+            replay["response"]["replay"]["events"]
+                .as_array()
+                .unwrap()
+                .len(),
             1
         );
         inner.push_text("two");
@@ -2337,7 +2428,10 @@ mod tests {
         )
         .unwrap();
         drop(client);
-        done_rx.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
     }
 
     #[test]
@@ -2373,6 +2467,7 @@ mod tests {
                 asked: Arc::clone(&asked),
             })),
             connectors: Vec::new(),
+            conversation: None,
         };
         let (done_tx, done_rx) = mpsc::channel();
         thread::spawn(move || {

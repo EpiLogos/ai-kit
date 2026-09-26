@@ -24,9 +24,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use aikit_adapters::{
-    ConnectorDescriptor, ConnectorHealth, ConversationAddress, DeliveryReceipt, GatewayConnector,
-    InboundEvent, InboundEventKind, MediaReference, OutboundOperation, OutboundOperationKind,
-    SenderIdentity, GATEWAY_CONNECTOR_SDK_VERSION, GATEWAY_CONNECTOR_WIRE_VERSION,
+    ConnectorDescriptor, ConnectorHealth, ConnectorOperation, ConversationAddress, DeliveryReceipt,
+    GatewayConnector, InboundEvent, InboundEventKind, MediaReference, OutboundOperation,
+    OutboundOperationKind, SenderIdentity, GATEWAY_CONNECTOR_SDK_VERSION,
+    GATEWAY_CONNECTOR_WIRE_VERSION,
 };
 use aikit_core::resource::ResourceRef;
 use aikit_core::{AikitError, Result};
@@ -338,6 +339,66 @@ pub enum GatewayIngressResult {
 pub enum GatewayActuationControlOperation {
     Interrupt,
     Cancel,
+}
+
+/// Canonical conversation-control operations. These are gateway-native: a
+/// connector surface may spell them with slash strings at its own edge, a
+/// carrier client may send them directly, but the operation itself is this
+/// enum — never a parsed string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "kebab-case")]
+pub enum GatewayConversationOperation {
+    /// Conversation-scoped detail: binding, stream position, in-flight turn,
+    /// agent backing and connector health.
+    Status,
+    /// Interrupt the in-flight turn of the binding's agent session.
+    Stop,
+    /// Fresh turn context for the binding: a forked Stream and a new
+    /// AgentSession generation under the same connector conversation. The old
+    /// Stream is retained in the journal and named in the result.
+    New,
+    /// List the agent sessions behind this gateway's bindings.
+    Sessions,
+    /// A drained, state-preserving rematerialisation: stop admitting new
+    /// turn work, resolve the in-flight turn under the bounded policy, persist
+    /// the snapshot, answer, and exit so the service manager restarts it.
+    Restart,
+    /// Stop admitting new connector ingress for one connector; the pump keeps
+    /// serving outbound work and reports the pause in its health. `None`
+    /// targets the requesting conversation's own connector.
+    PauseConnector {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connector_ref: Option<ResourceRef>,
+    },
+    /// Resume connector ingress after a pause.
+    ResumeConnector {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connector_ref: Option<ResourceRef>,
+    },
+}
+
+/// One agent reply (or honest turn failure) to be journaled on the same
+/// Stream the inbound message appended to, attributed to the binding's agent
+/// session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayAgentReply {
+    pub binding_ref: ResourceRef,
+    /// The journal sequence of the inbound event this answers.
+    pub in_reply_to_sequence: u64,
+    pub text: String,
+    /// Set when the turn failed or was interrupted: the text carried to the
+    /// surface says so, and the journaled event is a turn-failure record,
+    /// never a fabricated successful reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<GatewayAgentReplyFailure>,
+}
+
+/// Why a turn produced no real answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GatewayAgentReplyFailure {
+    Failed { reason: String },
+    Interrupted { detail: Option<String> },
 }
 
 /// Portable control intent. A harness/Actuation control adapter performs the
@@ -850,6 +911,126 @@ impl AgencyGateway {
         })
     }
 
+    /// The binding bound to one connector conversation, if any.
+    pub fn binding_by_route(
+        &self,
+        connector_ref: &ResourceRef,
+        address: &ConversationAddress,
+    ) -> Option<&GatewayBinding> {
+        let binding_ref = self.routes.get(&GatewayRouteKey::new(
+            connector_ref.clone(),
+            address.clone(),
+        ))?;
+        self.bindings.get(binding_ref)
+    }
+
+    /// One binding by ref.
+    pub fn binding(&self, binding_ref: &ResourceRef) -> Option<&GatewayBinding> {
+        self.bindings.get(binding_ref)
+    }
+
+    /// Whether the connector advertises an operation (e.g. Typing for a
+    /// best-effort indicator before a turn).
+    pub fn connector_supports(
+        &self,
+        connector_ref: &ResourceRef,
+        operation: ConnectorOperation,
+    ) -> bool {
+        self.connectors
+            .get(connector_ref)
+            .is_some_and(|descriptor| descriptor.capabilities.operations.contains(&operation))
+    }
+
+    /// One stream journal read view: last sequence and event count.
+    pub fn stream_position(&self, stream_ref: &ResourceRef) -> Option<(u64, usize)> {
+        self.streams
+            .get(stream_ref)
+            .map(|stream| (stream.next_sequence.saturating_sub(1), stream.events.len()))
+    }
+
+    /// Append an agent turn's reply (or its honest failure record) to the same
+    /// Stream journal the inbound human event appended to, attributed to the
+    /// binding's agent session. This is the kernel's only door for an agent
+    /// reply: an inbound human event is never fabricated to carry one.
+    pub fn record_agent_reply(&mut self, reply: GatewayAgentReply) -> Result<GatewayStreamEvent> {
+        let binding = self.bindings.get(&reply.binding_ref).ok_or_else(|| {
+            AikitError::new(
+                "agency_gateway.unknown_binding",
+                format!(
+                    "agent reply cites binding {} which does not exist",
+                    reply.binding_ref
+                ),
+            )
+        })?;
+        let binding = binding.clone();
+        let stream = self
+            .streams
+            .entry(binding.actuation_stream_ref.clone())
+            .or_insert_with(|| GatewayStreamJournal::for_binding(&binding));
+        stream.ensure_binding(&binding)?;
+        let sequence = stream.next_sequence;
+        let mut metadata = Map::new();
+        metadata.insert(
+            "agent_session_ref".into(),
+            json!(binding.agent_session_ref.to_string()),
+        );
+        metadata.insert("agency_ref".into(), json!(binding.agency_ref.to_string()));
+        metadata.insert(
+            "actuation_ref".into(),
+            json!(binding.actuation_ref.to_string()),
+        );
+        metadata.insert(
+            "in_reply_to_sequence".into(),
+            json!(reply.in_reply_to_sequence),
+        );
+        let (kind, custom_kind) = match &reply.failure {
+            None => ("agent-message", None),
+            Some(failure) => {
+                metadata.insert(
+                    "failure".into(),
+                    json!(match failure {
+                        GatewayAgentReplyFailure::Failed { reason } => json!({
+                            "kind": "failed",
+                            "reason": reason,
+                        }),
+                        GatewayAgentReplyFailure::Interrupted { detail } => json!({
+                            "kind": "interrupted",
+                            "detail": detail,
+                        }),
+                    }),
+                );
+                ("custom", Some("gateway-agent/turn-failure"))
+            }
+        };
+        let mut event = Map::new();
+        event.insert(
+            "event_ref".into(),
+            json!(format!(
+                "{}/gateway-event/{sequence}",
+                binding.actuation_stream_ref
+            )),
+        );
+        event.insert("sequence".into(), json!(sequence));
+        event.insert("kind".into(), json!(kind));
+        if let Some(custom_kind) = custom_kind {
+            event.insert("custom_kind".into(), json!(custom_kind));
+        }
+        event.insert(
+            "native_trace_ref".into(),
+            json!(format!(
+                "gateway-agent-reply/{}",
+                reply.in_reply_to_sequence
+            )),
+        );
+        event.insert("disclosure".into(), json!("portable"));
+        event.insert("metadata".into(), Value::Object(metadata));
+        if let Some(surface_ref) = &binding.surface_ref {
+            event.insert("surface_ref".into(), json!(surface_ref.to_string()));
+        }
+        event.insert("content".into(), json!(reply.text));
+        stream.append(Value::Object(event))
+    }
+
     pub fn discovery(&self) -> GatewayDiscovery {
         GatewayDiscovery {
             version: AGENCY_GATEWAY_VERSION.into(),
@@ -1220,6 +1401,14 @@ pub enum GatewayCommand {
         binding_ref: ResourceRef,
         operation: GatewayActuationControlOperation,
     },
+    /// A canonical conversation-control operation (status, stop, new, sessions,
+    /// restart, connector pause/resume). The kernel holds no turn sources: a
+    /// running gateway service routes this to its conversation engine; offline
+    /// execution is refused honestly.
+    Conversation {
+        binding_ref: ResourceRef,
+        operation: GatewayConversationOperation,
+    },
     Snapshot,
     Restore {
         snapshot: GatewaySnapshot,
@@ -1318,6 +1507,17 @@ impl GatewayCommand {
             _ => None,
         }
     }
+
+    /// The conversation-control request this command carries, if any.
+    pub fn conversation_request(&self) -> Option<(&ResourceRef, &GatewayConversationOperation)> {
+        match self {
+            Self::Conversation {
+                binding_ref,
+                operation,
+            } => Some((binding_ref, operation)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1370,6 +1570,14 @@ pub enum GatewayResponse {
     },
     ControlIntent {
         intent: GatewayActuationControlIntent,
+    },
+    /// A conversation-control operation's answer. The result document is the
+    /// engine's own reading (status detail, session list, receipts); the
+    /// heterogeneous shapes share one response kind.
+    Conversation {
+        binding_ref: ResourceRef,
+        operation: GatewayConversationOperation,
+        result: Value,
     },
     Snapshot {
         snapshot: GatewaySnapshot,
@@ -1474,6 +1682,16 @@ pub fn execute_gateway_command(
         } => Ok(GatewayResponse::ControlIntent {
             intent: gateway.control_intent(&binding_ref, operation)?,
         }),
+        GatewayCommand::Conversation {
+            binding_ref,
+            operation,
+        } => Err(AikitError::new(
+            "agency_gateway.engine_absent",
+            format!(
+                "conversation operation {operation:?} for binding {binding_ref} is executed by a \
+                 running gateway service's conversation engine; this kernel holds no turn sources"
+            ),
+        )),
         GatewayCommand::Snapshot => Ok(GatewayResponse::Snapshot {
             snapshot: gateway.snapshot(),
         }),

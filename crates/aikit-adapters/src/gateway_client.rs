@@ -877,6 +877,7 @@ mod tests {
                 entry: fixture_entry(),
                 inner: Arc::clone(&inner),
             })],
+            conversation: None,
         };
         let (done_tx, done_rx) = mpsc::channel();
         thread::spawn(move || {

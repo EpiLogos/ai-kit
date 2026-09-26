@@ -18,7 +18,9 @@ use aikit_core::secret_ref::{SecretRef, SecretResolver as _};
 use aikit_core::{AikitError, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::gateway_connector::{ConnectorDescriptor, GatewayConnector, GATEWAY_CONNECTOR_SDK_VERSION};
+use crate::gateway_connector::{
+    ConnectorDescriptor, GatewayConnector, GATEWAY_CONNECTOR_SDK_VERSION,
+};
 use crate::gateway_connector_wire::StdioWireConnector;
 use crate::telegram_gateway::{
     TelegramBotApiTransport, TelegramConnector, TelegramConnectorConfig,
@@ -45,6 +47,13 @@ pub struct GatewayConnectorEntry {
     /// External connector command (argv) for the `stdio` implementation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub program: Vec<String>,
+    /// The harness backing this connector's conversations, named as the
+    /// encounter plane names its providers. The gateway conversation engine
+    /// resolves the name at serve time and drives real agent turns for the
+    /// connector's bindings. A name here is a route to configuration the
+    /// owner already declared — never credentials, never a model key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_backing: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provenance: Vec<String>,
 }
@@ -70,7 +79,10 @@ impl GatewayConnectorEntry {
         if self.implementation.trim().is_empty() {
             return Err(AikitError::new(
                 "gateway_connector_config.empty_implementation",
-                format!("connector {} must name its implementation", self.connector_ref),
+                format!(
+                    "connector {} must name its implementation",
+                    self.connector_ref
+                ),
             ));
         }
         match self.implementation.as_str() {
@@ -165,9 +177,8 @@ pub fn store_gateway_connectors(path: &Path, file: &GatewayConnectorsFile) -> Re
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(write)?;
     }
-    let bytes = serde_json::to_vec_pretty(file).map_err(|error| {
-        AikitError::new("gateway_connector_config.write", error.to_string())
-    })?;
+    let bytes = serde_json::to_vec_pretty(file)
+        .map_err(|error| AikitError::new("gateway_connector_config.write", error.to_string()))?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, bytes).map_err(write)?;
     std::fs::rename(&tmp, path).map_err(write)
@@ -280,7 +291,9 @@ pub trait GatewayConnectorFactory: Send + Sync {
 
 /// Map an entry to its implementation's factory. An unknown implementation is
 /// a named startup error, never a silent skip.
-pub fn build_connector_factory(entry: GatewayConnectorEntry) -> Result<Box<dyn GatewayConnectorFactory>> {
+pub fn build_connector_factory(
+    entry: GatewayConnectorEntry,
+) -> Result<Box<dyn GatewayConnectorFactory>> {
     entry.validate()?;
     match entry.implementation.as_str() {
         "telegram" => Ok(Box::new(TelegramConnectorFactory { entry })),
@@ -345,16 +358,15 @@ impl GatewayConnectorFactory for TelegramConnectorFactory {
             })?),
             None => None,
         };
-        let raw_location = self
-            .entry
-            .token_location
-            .as_deref()
-            .ok_or_else(|| {
-                AikitError::new(
-                    "gateway_connector_config.token_location_required",
-                    format!("connector {} has no token location", self.entry.connector_ref),
-                )
-            })?;
+        let raw_location = self.entry.token_location.as_deref().ok_or_else(|| {
+            AikitError::new(
+                "gateway_connector_config.token_location_required",
+                format!(
+                    "connector {} has no token location",
+                    self.entry.connector_ref
+                ),
+            )
+        })?;
         let token = ConnectorTokenLocation::parse(raw_location)?.resolve()?;
         let connector = TelegramConnector::new(
             UnconfiguredTelegramTransport { _token: token },
@@ -436,6 +448,7 @@ mod tests {
             token_location: Some("file:/run/token".into()),
             configuration_ref: None,
             program: Vec::new(),
+            agent_backing: None,
             provenance: Vec::new(),
         }
     }
@@ -465,7 +478,8 @@ mod tests {
         let error = match build_connector_factory(entry("carrier-pigeon")) {
             Err(error) => error,
             Ok(_) => panic!("an unknown implementation must be refused"),
-        };        assert_eq!(
+        };
+        assert_eq!(
             error.code(),
             "gateway_connector_config.unknown_implementation"
         );
@@ -542,8 +556,7 @@ mod tests {
         assert_eq!(connector.descriptor().platform, "telegram");
         // No HTTP transport in this build: the constructed connector reports
         // the refusal instead of pretending to reach the Bot API.
-        let refused =
-            crate::gateway_connector_pump::block_on(connector.connect()).unwrap_err();
+        let refused = crate::gateway_connector_pump::block_on(connector.connect()).unwrap_err();
         assert_eq!(refused.code(), "telegram_gateway.transport_unconfigured");
 
         let mut specimen = entry("stdio");
@@ -553,7 +566,10 @@ mod tests {
         specimen.program = vec!["/bin/cat".into()];
         let stdio = build_connector_factory(specimen).unwrap();
         let connector = stdio.build().unwrap();
-        assert_eq!(connector.descriptor().connector_ref.to_string(), "gateway-connector/specimen/main");
+        assert_eq!(
+            connector.descriptor().connector_ref.to_string(),
+            "gateway-connector/specimen/main"
+        );
         assert!(
             connector.descriptor().capabilities.operations.is_empty(),
             "the pre-Hello shell advertises nothing"
