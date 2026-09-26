@@ -60,6 +60,11 @@ pub struct KnowledgeSearchHit {
     pub authority: SourceAuthority,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ranking: Option<KnowledgeRankingEvidence>,
+    /// Other faculties that found the same file: a code-index hit over a
+    /// source the pool also holds folds into that source instead of
+    /// duplicating the row, and names itself here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corroborated_by: Vec<ProviderRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -388,6 +393,33 @@ impl<'a> KnowledgeApplication<'a> {
         // observed hit ahead of every derived one; score only breaks ties
         // inside a tier, so a code-specific query still ranks its own best
         // symbols against each other exactly as before.
+        // One row per file across faculties: a code-reference hit whose
+        // basename matches an observed source hit corroborates it rather
+        // than duplicating it. The source hit keeps its score; the folding
+        // is disclosed on the hit itself.
+        let mut folded: Vec<KnowledgeSearchHit> = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let mut merged = false;
+            if hit.kind == ResourceKind::CodeReference {
+                if let Some(filename) = hit.label.rsplit('/').next() {
+                    for existing in folded.iter_mut() {
+                        let tail = existing.label.rsplit('/').next().unwrap_or_default();
+                        if existing.kind == ResourceKind::KnowledgeSource
+                            && !filename.is_empty()
+                            && tail == filename
+                        {
+                            existing.corroborated_by.push(hit.provider.clone());
+                            merged = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !merged {
+                folded.push(hit);
+            }
+        }
+        hits = folded;
         hits.sort_by(|left, right| {
             authority_rank(left.authority)
                 .cmp(&authority_rank(right.authority))
@@ -495,6 +527,7 @@ impl<'a> KnowledgeApplication<'a> {
                             provider: wiki.status().provider,
                             authority: SourceAuthority::Authored,
                             ranking: None,
+                            corroborated_by: Vec::new(),
                         }
                     }
                     // A source cited by a curated node is findable, but it is
@@ -527,6 +560,7 @@ impl<'a> KnowledgeApplication<'a> {
                             provider: wiki.status().provider,
                             authority: SourceAuthority::Authored,
                             ranking: None,
+                            corroborated_by: Vec::new(),
                         }
                     }
                 }
@@ -590,6 +624,7 @@ impl<'a> KnowledgeApplication<'a> {
                         snippet: hit.snippet,
                         provider: hit.provider,
                         authority: SourceAuthority::Observed,
+                        corroborated_by: Vec::new(),
                         ranking: None,
                     }
                 })),
@@ -615,6 +650,7 @@ impl<'a> KnowledgeApplication<'a> {
                             snippet: hit.snippet,
                             provider: hit.provider,
                             authority: SourceAuthority::Derived,
+                            corroborated_by: Vec::new(),
                             ranking: None,
                         }))
                     }
@@ -648,6 +684,7 @@ impl<'a> KnowledgeApplication<'a> {
                     address: KnowledgeAddress::ProjectMap(endpoint.resource.clone()),
                     resource: endpoint.resource.clone(),
                     kind: endpoint.kind,
+                    corroborated_by: Vec::new(),
                     label,
                     score: if endpoint.resource.as_str() == query {
                         1.25

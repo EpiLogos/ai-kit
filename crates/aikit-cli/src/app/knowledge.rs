@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::knowledge_cache::{address_cache_key, BasisScope};
 use aikit_adapters::bkmr::{
     bkmr_config_dir, discover_bkmr_stores, BkmrSourcePoolProvider, BkmrStoreSearchProvider,
 };
@@ -386,147 +387,165 @@ impl Service {
         // The scope that governs this reply's disclosure: an explicit `:`
         // scope in the expression, else the invocation's own project.
         let explicit_scope = expression_scope_project(expression).map(str::to_owned);
-        let mut result = self.with_knowledge(|runtime, _application| {
-            let scoped_display = runtime.scoped_project_display(explicit_scope.as_deref());
-            if explicit_scope.is_some() && scoped_display.is_none() {
-                return Err(aikit_core::AikitError::new(
-                    "knowledge.scope_invalid",
-                    "Explicit Project scope is invalid or cannot be resolved",
-                ));
-            }
-            let discovered_project = scoped_display.as_deref().and_then(|display| {
-                runtime
-                    .work_repos
-                    .as_ref()?
-                    .projects()
-                    .iter()
-                    .find(|project| format!("Work/{}", project.name) == display)
-            });
-            // The root NOW provider includes every Work project, but a
-            // Project-scoped reply may only query its own NOW files plus
-            // common Control records. Selecting globs before ripgrep also
-            // prevents sibling read failures from surfacing as absences.
-            let mut scoped_provider_absences = Vec::new();
-            let scoped_now_field = match (scoped_display.as_deref(), runtime.now_field.as_ref()) {
-                (Some(_), Some(provider)) => {
-                    let scope = provider
-                        .scope()
-                        .for_project(discovered_project.map(|p| p.name.as_str()));
-                    match NowFieldSourcePoolProvider::connect(
-                        aikit_adapters::now_field::default_runner(&scope.central_root),
-                        aikit_adapters::ripgrep::executable(),
-                        scope,
-                    ) {
-                        Ok(provider) => Some(provider),
-                        Err(error) => {
-                            scoped_provider_absences
-                                .push(format!("NOW-field scoped search unavailable: {error}"));
-                            None
+        // The retrieval itself is pure compute over the ground: answered from
+        // the result cache when the basis has not moved. Learned
+        // accessibility and search-hit memory below stay live on every call.
+        let expression_key = serde_json::to_string(expression).map_err(|error| {
+            aikit_core::AikitError::new("knowledge.cache_key", error.to_string())
+        })?;
+        let mut result = self.with_knowledge_cached(
+            BasisScope::Full,
+            &format!("resolve\x1f{candidate_limit}\x1f{expression_key}"),
+            || {
+                self.with_knowledge(|runtime, _application| {
+                    let scoped_display = runtime.scoped_project_display(explicit_scope.as_deref());
+                    if explicit_scope.is_some() && scoped_display.is_none() {
+                        return Err(aikit_core::AikitError::new(
+                            "knowledge.scope_invalid",
+                            "Explicit Project scope is invalid or cannot be resolved",
+                        ));
+                    }
+                    let discovered_project = scoped_display.as_deref().and_then(|display| {
+                        runtime
+                            .work_repos
+                            .as_ref()?
+                            .projects()
+                            .iter()
+                            .find(|project| format!("Work/{}", project.name) == display)
+                    });
+                    // The root NOW provider includes every Work project, but a
+                    // Project-scoped reply may only query its own NOW files plus
+                    // common Control records. Selecting globs before ripgrep also
+                    // prevents sibling read failures from surfacing as absences.
+                    let mut scoped_provider_absences = Vec::new();
+                    let scoped_now_field =
+                        match (scoped_display.as_deref(), runtime.now_field.as_ref()) {
+                            (Some(_), Some(provider)) => {
+                                let scope = provider
+                                    .scope()
+                                    .for_project(discovered_project.map(|p| p.name.as_str()));
+                                match NowFieldSourcePoolProvider::connect(
+                                    aikit_adapters::now_field::default_runner(&scope.central_root),
+                                    aikit_adapters::ripgrep::executable(),
+                                    scope,
+                                ) {
+                                    Ok(provider) => Some(provider),
+                                    Err(error) => {
+                                        scoped_provider_absences.push(format!(
+                                            "NOW-field scoped search unavailable: {error}"
+                                        ));
+                                        None
+                                    }
+                                }
+                            }
+                            _ => None,
+                        };
+                    let now_field = if scoped_display.is_some() {
+                        scoped_now_field.as_ref()
+                    } else {
+                        runtime.now_field.as_ref()
+                    };
+                    // A Work-repos search can fail before producing any hits. Search
+                    // only the resolved Project at the provider boundary so another
+                    // repo's ripgrep failure cannot appear in this reply's absences.
+                    // The root World deliberately retains the broad native provider.
+                    let scoped_work_repos = discovered_project.map(|project| {
+                        WorkReposSourcePoolProvider::connect(
+                            SystemRunner::new().with_env_removed("RIPGREP_CONFIG_PATH"),
+                            aikit_adapters::ripgrep::executable(),
+                            vec![project.clone()],
+                        )
+                    });
+                    let work_repos = if scoped_display.is_some() {
+                        scoped_work_repos.as_ref()
+                    } else {
+                        runtime.work_repos.as_ref()
+                    };
+                    let mut result = runtime
+                        .application_with_project_scope(
+                            self.knowledge_context(),
+                            scoped_display.as_deref(),
+                            now_field,
+                            work_repos,
+                        )
+                        .resolve(expression, candidate_limit);
+                    result.absences.extend(scoped_provider_absences);
+                    result.absences.extend(runtime.absences.clone());
+                    result.absences.extend(
+                        runtime
+                            .project_absences
+                            .iter()
+                            .filter(|absence| {
+                                scoped_display
+                                    .as_deref()
+                                    .is_none_or(|project| project == absence.project)
+                            })
+                            .map(|absence| absence.message.clone()),
+                    );
+                    // Pending authored relations are scoped: a query sees its own
+                    // scope's rollup; other projects' pendings stay with
+                    // `knowledge status`.
+                    if let Some(pending) = scoped_display.as_deref().and_then(|display| {
+                        runtime
+                            .authored_pending
+                            .iter()
+                            .find(|pending| pending.project == display)
+                    }) {
+                        result.absences.push(pending.rollup_line());
+                    }
+                    // Code-index degradations are scoped the same way: a reply carries
+                    // only its own scope's line, never another project's — the leak
+                    // this fix closes. Every project's degradation stays in
+                    // `knowledge status`.
+                    if let Some(display) = scoped_display.as_deref() {
+                        for degradation in &runtime.code_degradations {
+                            if degradation.project == display {
+                                result.absences.push(degradation.message.clone());
+                            }
                         }
                     }
-                }
-                _ => None,
-            };
-            let now_field = if scoped_display.is_some() {
-                scoped_now_field.as_ref()
-            } else {
-                runtime.now_field.as_ref()
-            };
-            // A Work-repos search can fail before producing any hits. Search
-            // only the resolved Project at the provider boundary so another
-            // repo's ripgrep failure cannot appear in this reply's absences.
-            // The root World deliberately retains the broad native provider.
-            let scoped_work_repos = discovered_project.map(|project| {
-                WorkReposSourcePoolProvider::connect(
-                    SystemRunner::new().with_env_removed("RIPGREP_CONFIG_PATH"),
-                    aikit_adapters::ripgrep::executable(),
-                    vec![project.clone()],
-                )
-            });
-            let work_repos = if scoped_display.is_some() {
-                scoped_work_repos.as_ref()
-            } else {
-                runtime.work_repos.as_ref()
-            };
-            let mut result = runtime
-                .application_with_project_scope(
-                    self.knowledge_context(),
-                    scoped_display.as_deref(),
-                    now_field,
-                    work_repos,
-                )
-                .resolve(expression, candidate_limit);
-            result.absences.extend(scoped_provider_absences);
-            result.absences.extend(runtime.absences.clone());
-            result.absences.extend(
-                runtime
-                    .project_absences
-                    .iter()
-                    .filter(|absence| {
-                        scoped_display
-                            .as_deref()
-                            .is_none_or(|project| project == absence.project)
-                    })
-                    .map(|absence| absence.message.clone()),
-            );
-            // Pending authored relations are scoped: a query sees its own
-            // scope's rollup; other projects' pendings stay with
-            // `knowledge status`.
-            if let Some(pending) = scoped_display.as_deref().and_then(|display| {
-                runtime
-                    .authored_pending
-                    .iter()
-                    .find(|pending| pending.project == display)
-            }) {
-                result.absences.push(pending.rollup_line());
-            }
-            // Code-index degradations are scoped the same way: a reply carries
-            // only its own scope's line, never another project's — the leak
-            // this fix closes. Every project's degradation stays in
-            // `knowledge status`.
-            if let Some(display) = scoped_display.as_deref() {
-                for degradation in &runtime.code_degradations {
-                    if degradation.project == display {
-                        result.absences.push(degradation.message.clone());
+                    // A scoped query keeps another project's compiled authored edges
+                    // — and its compiled folder subjects — out of its results;
+                    // unattributable material passes through. Work-repo hits carry
+                    // their project in the ref itself (`source:project:<id>:…`), so
+                    // the same discipline applies to them.
+                    if let Some(display) = &scoped_display {
+                        let attributed_to_other_project =
+                            |attribution: &BTreeMap<String, String>, resource: &str| {
+                                attribution
+                                    .get(resource)
+                                    .is_some_and(|project| project != display)
+                            };
+                        result.hits.retain(|hit| {
+                            let resource = hit.resource.as_str();
+                            // A Source ref may surface through SourcePool or a
+                            // ProjectMap endpoint. The address wrapper does not
+                            // change which Project owns it.
+                            if !runtime.source_belongs_to_scope(resource, display) {
+                                return false;
+                            }
+                            if attributed_to_other_project(
+                                &runtime.authored_edge_projects,
+                                resource,
+                            ) || attributed_to_other_project(
+                                &runtime.folder_subject_projects,
+                                resource,
+                            ) {
+                                return false;
+                            }
+                            match &hit.address {
+                                aikit_core::KnowledgeAddress::Code(reference) => runtime
+                                    .code_source_scopes
+                                    .get(reference.source.as_str())
+                                    .is_some_and(|project| project == display),
+                                _ => true,
+                            }
+                        });
                     }
-                }
-            }
-            // A scoped query keeps another project's compiled authored edges
-            // — and its compiled folder subjects — out of its results;
-            // unattributable material passes through. Work-repo hits carry
-            // their project in the ref itself (`source:project:<id>:…`), so
-            // the same discipline applies to them.
-            if let Some(display) = &scoped_display {
-                let attributed_to_other_project =
-                    |attribution: &BTreeMap<String, String>, resource: &str| {
-                        attribution
-                            .get(resource)
-                            .is_some_and(|project| project != display)
-                    };
-                result.hits.retain(|hit| {
-                    let resource = hit.resource.as_str();
-                    // A Source ref may surface through SourcePool or a
-                    // ProjectMap endpoint. The address wrapper does not
-                    // change which Project owns it.
-                    if !runtime.source_belongs_to_scope(resource, display) {
-                        return false;
-                    }
-                    if attributed_to_other_project(&runtime.authored_edge_projects, resource)
-                        || attributed_to_other_project(&runtime.folder_subject_projects, resource)
-                    {
-                        return false;
-                    }
-                    match &hit.address {
-                        aikit_core::KnowledgeAddress::Code(reference) => runtime
-                            .code_source_scopes
-                            .get(reference.source.as_str())
-                            .is_some_and(|project| project == display),
-                        _ => true,
-                    }
-                });
-            }
-            Ok(result)
-        })?;
+                    Ok(result)
+                })
+            },
+        )?;
         self.apply_learned_accessibility(&resolve_subjects(expression), &mut result)?;
         result.hits.truncate(limit);
         if let Err(error) = self.knowledge_store().remember_search_hits(&result.hits) {
@@ -666,7 +685,7 @@ impl Service {
         ))
     }
 
-    fn knowledge_central_root<'a>(&'a self, root: &'a Path) -> Option<&'a Path> {
+    pub(super) fn knowledge_central_root<'a>(&'a self, root: &'a Path) -> Option<&'a Path> {
         self.knowledge_central_root.as_deref().or_else(|| {
             root.ancestors().find(|candidate| {
                 candidate.join("Control").is_dir() && candidate.join("Work").is_dir()
@@ -781,7 +800,7 @@ impl Service {
 
     /// The bare Work name used as the lowered scope key (`demo` for
     /// `Work/demo`) — the readable spelling of the project world.
-    fn knowledge_scope_project(&self) -> Option<String> {
+    pub(super) fn knowledge_scope_project(&self) -> Option<String> {
         self.current_project_display().and_then(|display| {
             display
                 .rsplit('/')
@@ -829,37 +848,43 @@ impl Service {
         &self,
         address: &KnowledgeAddress,
     ) -> Result<aikit_core::KnowledgeReading> {
-        self.with_knowledge(|_, application| application.read(address))
+        let key = address_cache_key("read", address, "");
+        self.with_knowledge_cached(BasisScope::Ground, &key, || {
+            self.with_knowledge(|_, application| application.read(address))
+        })
     }
 
     /// Additive native document facet; plain KnowledgeReading users keep their API.
     pub fn knowledge_read_document(&self, address: &KnowledgeAddress) -> Result<serde_json::Value> {
-        self.with_knowledge(|runtime, application| {
-            let reading = application.read(address)?;
-            let material = runtime.document_material();
-            let objects: Vec<_> = runtime
-                .wiki_index()
-                .map(|index| {
-                    index
-                        .discover()
-                        .into_iter()
-                        .filter_map(|reference| index.resolve(&reference))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let relations = application
-                .relations(address, 1, 256, 512)
-                .and_then(|view| {
-                    aikit_adapters::wiki_document::complete_source_relations(
-                        &reading, view, &material, &objects,
-                    )
-                })
-                .ok();
-            aikit_adapters::wiki_document::reading_document(
-                &reading,
-                relations.as_ref(),
-                &runtime.document_material(),
-            )
+        let key = address_cache_key("read-document", address, "");
+        self.with_knowledge_cached(BasisScope::Ground, &key, || {
+            self.with_knowledge(|runtime, application| {
+                let reading = application.read(address)?;
+                let material = runtime.document_material();
+                let objects: Vec<_> = runtime
+                    .wiki_index()
+                    .map(|index| {
+                        index
+                            .discover()
+                            .into_iter()
+                            .filter_map(|reference| index.resolve(&reference))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let relations = application
+                    .relations(address, 1, 256, 512)
+                    .and_then(|view| {
+                        aikit_adapters::wiki_document::complete_source_relations(
+                            &reading, view, &material, &objects,
+                        )
+                    })
+                    .ok();
+                aikit_adapters::wiki_document::reading_document(
+                    &reading,
+                    relations.as_ref(),
+                    &runtime.document_material(),
+                )
+            })
         })
     }
 
@@ -881,71 +906,75 @@ impl Service {
             self.knowledge_search(query, max_nodes.saturating_add(max_edges).saturating_add(1))?;
         let expression =
             parse_or_search_expression_in_scope(query, self.knowledge_scope_project().as_deref())?;
-        self.with_knowledge(|runtime, _| {
-            let objects: Vec<_> = runtime
-                .wiki_index()
-                .map(|index| {
-                    index
-                        .discover()
-                        .into_iter()
-                        .filter_map(|reference| index.resolve(&reference))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let mut material = runtime.document_material();
-            if let Some(display) =
-                runtime.scoped_project_display(expression_scope_project(&expression))
-            {
-                material.retain(|item| {
-                    runtime.source_belongs_to_scope(item.binding.source.as_str(), &display)
-                });
-            }
-            let mut hits = found.hits.clone();
-            if query.trim().is_empty() {
-                for item in &material {
-                    let provider = runtime
-                        .central
-                        .as_ref()
-                        .filter(|p| {
-                            p.descriptors()
-                                .iter()
-                                .any(|m| m.binding.source == item.binding.source)
-                        })
-                        .map(|p| p.status().provider)
-                        .or_else(|| {
-                            runtime
-                                .now_field
-                                .as_ref()
-                                .filter(|_| {
-                                    runtime
-                                        .now_field_roster
-                                        .iter()
-                                        .any(|m| m.binding.source == item.binding.source)
-                                })
-                                .map(|p| p.status().provider)
-                        })
-                        .unwrap_or_else(|| runtime.native_source.status().provider);
-                    hits.push(aikit_core::knowledge_navigation::KnowledgeSearchHit {
-                        address: KnowledgeAddress::Source(item.binding.source.clone()),
-                        resource: ResourceRef::parse(item.binding.source.as_str())?,
-                        kind: ResourceKind::KnowledgeSource,
-                        label: item.binding.title.clone(),
-                        score: 0.0,
-                        snippet: String::new(),
-                        provider,
-                        authority: SourceAuthority::Observed,
-                        ranking: None,
+        let graph_key = format!("graph\x1f{max_nodes}\x1f{max_edges}\x1f{query}");
+        self.with_knowledge_cached(BasisScope::Full, &graph_key, || {
+            self.with_knowledge(|runtime, _| {
+                let objects: Vec<_> = runtime
+                    .wiki_index()
+                    .map(|index| {
+                        index
+                            .discover()
+                            .into_iter()
+                            .filter_map(|reference| index.resolve(&reference))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut material = runtime.document_material();
+                if let Some(display) =
+                    runtime.scoped_project_display(expression_scope_project(&expression))
+                {
+                    material.retain(|item| {
+                        runtime.source_belongs_to_scope(item.binding.source.as_str(), &display)
                     });
                 }
-            }
-            Ok(aikit_adapters::wiki_graph::project_graph(
-                &hits,
-                &objects,
-                &material,
-                max_nodes,
-                max_edges,
-                &found.absences,
-            ))
+                let mut hits = found.hits.clone();
+                if query.trim().is_empty() {
+                    for item in &material {
+                        let provider = runtime
+                            .central
+                            .as_ref()
+                            .filter(|p| {
+                                p.descriptors()
+                                    .iter()
+                                    .any(|m| m.binding.source == item.binding.source)
+                            })
+                            .map(|p| p.status().provider)
+                            .or_else(|| {
+                                runtime
+                                    .now_field
+                                    .as_ref()
+                                    .filter(|_| {
+                                        runtime
+                                            .now_field_roster
+                                            .iter()
+                                            .any(|m| m.binding.source == item.binding.source)
+                                    })
+                                    .map(|p| p.status().provider)
+                            })
+                            .unwrap_or_else(|| runtime.native_source.status().provider);
+                        hits.push(aikit_core::knowledge_navigation::KnowledgeSearchHit {
+                            address: KnowledgeAddress::Source(item.binding.source.clone()),
+                            resource: ResourceRef::parse(item.binding.source.as_str())?,
+                            kind: ResourceKind::KnowledgeSource,
+                            label: item.binding.title.clone(),
+                            score: 0.0,
+                            snippet: String::new(),
+                            provider,
+                            authority: SourceAuthority::Observed,
+                            ranking: None,
+                            corroborated_by: Vec::new(),
+                        });
+                    }
+                }
+                Ok(aikit_adapters::wiki_graph::project_graph(
+                    &hits,
+                    &objects,
+                    &material,
+                    max_nodes,
+                    max_edges,
+                    &found.absences,
+                ))
+            })
         })
     }
 
@@ -956,28 +985,35 @@ impl Service {
         max_nodes: usize,
         max_edges: usize,
     ) -> Result<KnowledgeRelationView> {
-        self.with_knowledge(|runtime, application| {
-            let view = application.relations(address, depth, max_nodes, max_edges)?;
-            if !matches!(address, KnowledgeAddress::Source(_)) || depth == 0 {
-                return Ok(view);
-            }
-            let reading = application.read(address)?;
-            let objects: Vec<_> = runtime
-                .wiki_index()
-                .map(|index| {
-                    index
-                        .discover()
-                        .into_iter()
-                        .filter_map(|reference| index.resolve(&reference))
-                        .collect()
-                })
-                .unwrap_or_default();
-            aikit_adapters::wiki_document::complete_source_relations(
-                &reading,
-                view,
-                &runtime.document_material(),
-                &objects,
-            )
+        let key = address_cache_key(
+            "relations",
+            address,
+            &format!("\x1f{depth}\x1f{max_nodes}\x1f{max_edges}"),
+        );
+        self.with_knowledge_cached(BasisScope::Ground, &key, || {
+            self.with_knowledge(|runtime, application| {
+                let view = application.relations(address, depth, max_nodes, max_edges)?;
+                if !matches!(address, KnowledgeAddress::Source(_)) || depth == 0 {
+                    return Ok(view);
+                }
+                let reading = application.read(address)?;
+                let objects: Vec<_> = runtime
+                    .wiki_index()
+                    .map(|index| {
+                        index
+                            .discover()
+                            .into_iter()
+                            .filter_map(|reference| index.resolve(&reference))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                aikit_adapters::wiki_document::complete_source_relations(
+                    &reading,
+                    view,
+                    &runtime.document_material(),
+                    &objects,
+                )
+            })
         })
     }
 
@@ -1077,7 +1113,7 @@ impl Service {
     }
 
     pub fn knowledge_status(&self) -> Result<KnowledgeProviderStatus> {
-        self.with_knowledge(|runtime, application| {
+        let mut status = self.with_knowledge(|runtime, application| {
             let mut status = application.status();
             status.absences.extend(runtime.absences.clone());
             status.absences.extend(
@@ -1101,7 +1137,11 @@ impl Service {
             }
             status.authored_pending = runtime.authored_pending.clone();
             Ok(status)
-        })
+        })?;
+        // The result cache's own disclosure: what it is, what this invocation
+        // did with it, or why it stood down.
+        status.notes.push(self.knowledge_result_cache_note());
+        Ok(status)
     }
 
     pub fn knowledge_forget(&mut self, scope: ForgetScope) -> Result<()> {
@@ -1688,15 +1728,16 @@ impl Service {
                                 .with_cwd(&project.root)
                                 .with_timeout(code_budget);
                             let mut provider = match binary.as_deref() {
-                                Some(binary) => GitNexusCodeIndexProvider::with_binary(
+                                Some(binary) => GitNexusCodeIndexProvider::with_binary_memoised(
                                     runner,
                                     binary,
                                     project.project_id.clone(),
                                     source,
                                     None,
                                 ),
-                                None => GitNexusCodeIndexProvider::new(
+                                None => GitNexusCodeIndexProvider::with_binary_memoised(
                                     runner,
+                                    "gitnexus",
                                     project.project_id.clone(),
                                     source,
                                     None,

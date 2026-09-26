@@ -89,6 +89,7 @@ use crate::temporal::process_central_root;
 mod development_field;
 mod flow_cognition;
 mod knowledge;
+mod knowledge_cache;
 mod model_resident;
 mod root_context;
 

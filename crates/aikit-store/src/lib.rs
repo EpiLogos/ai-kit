@@ -63,6 +63,7 @@ pub mod home;
 pub mod inbox;
 pub mod index;
 pub mod knowledge_application;
+pub mod knowledge_cache;
 pub mod knowledge_wiki;
 pub mod locks;
 pub mod model_catalogue;
