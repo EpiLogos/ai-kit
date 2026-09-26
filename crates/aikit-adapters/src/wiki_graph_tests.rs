@@ -13,6 +13,7 @@ fn hit(reference: &str) -> KnowledgeSearchHit {
         provider: ProviderRef::parse("provider/semantic-wiki").unwrap(),
         authority: SourceAuthority::Authored,
         ranking: None,
+        corroborated_by: Vec::new(),
     }
 }
 fn objects() -> Vec<WikiObject> {
