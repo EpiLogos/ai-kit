@@ -279,6 +279,57 @@ pub struct FactoryWorkStartReceipt {
     pub receipt: String,
 }
 
+/// Passthrough mirror of the owner-native agent-profile save result
+/// (Central `central.agent-profile/v1` fields, carried verbatim). `revision`
+/// is the exact source revision the save landed; `content_digest` is the
+/// digest a later accept must match (CAS). No field here is derived by the
+/// UI: an absent field stays absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentProfileSaveReceipt {
+    pub profile_ref: String,
+    pub agent_ref: String,
+    pub revision: String,
+    pub content_digest: Option<String>,
+}
+
+/// Passthrough mirror of the owner-native accept result: the exact reviewed
+/// source the human accepted, identified by revision and content digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentProfileAcceptReceipt {
+    pub profile_ref: String,
+    pub revision: String,
+    pub content_digest: String,
+}
+
+/// The world-readiness reading (E0 matrix #6): ready/reason/action. Not
+/// ready is a semantic answer naming its reason and the useful next action,
+/// never a transport error and never a silent pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldReadiness {
+    pub ready: bool,
+    pub reason: Option<String>,
+    pub suggested_action: Option<String>,
+}
+
+/// Passthrough mirror of the folded `session-space agent-session-prepare`
+/// result. The contract says `provider_started: false` at this stage; the
+/// owner's own value is carried exactly, and a `true` is recorded by the
+/// application as the prepare stage failing the contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSessionPreparation {
+    pub agent_session: String,
+    pub space: Option<String>,
+    pub provider_started: bool,
+}
+
+/// Passthrough mirror of the encounter-launch result: the live session and,
+/// where the owner discloses it, the carrier the body runs on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncounterLaunch {
+    pub agent_session: String,
+    pub carrier: Option<String>,
+}
+
 /// Low-level resolved/package/runtime backend beneath `ApplicationService`.
 ///
 /// Despite the retained compatibility name, this trait owns no application state,
@@ -478,6 +529,77 @@ pub trait PaletteBackend {
         Err(aikit_core::AikitError::new(
             "factory.start_work_unavailable",
             "this application backend has no native Factory Commission binding",
+        ))
+    }
+
+    /// Whether this backend binds each native Agent-work lifecycle operation
+    /// (Central agent-profile save/accept, O-I world readiness, AIKit folded
+    /// `agent-session-prepare`, encounter launch). Read once at surface
+    /// construction — never probed per render — and the sole source of the
+    /// next-step rows' honest "unavailable" reasons. Every default is
+    /// `false`: an operation is bound only when a backend says so.
+    fn agent_work_bindings(&self) -> crate::world_entry::AgentWorkBindings {
+        crate::world_entry::AgentWorkBindings::none()
+    }
+
+    /// Save the composed Agent source through the owner's Central
+    /// agent-profile save/express operation (exact revision + content
+    /// digest). The default refuses: no owner operation is bound, and no
+    /// receipt may be manufactured.
+    fn save_agent_profile(
+        &mut self,
+        _purpose: &str,
+        _name: Option<&str>,
+    ) -> Result<AgentProfileSaveReceipt> {
+        Err(aikit_core::AikitError::new(
+            "agent_profile.save_not_exposed",
+            "this application boundary does not bind the Central agent-profile save operation",
+        ))
+    }
+
+    /// Accept exactly the reviewed source: expected revision and content
+    /// digest must match what was reviewed (CAS) or the owner refuses. The
+    /// default refuses for the same reason as
+    /// [`PaletteBackend::save_agent_profile`].
+    fn accept_agent_profile(
+        &mut self,
+        _expected_revision: &str,
+        _expected_content_digest: Option<&str>,
+    ) -> Result<AgentProfileAcceptReceipt> {
+        Err(aikit_core::AikitError::new(
+            "agent_profile.accept_not_exposed",
+            "this application boundary does not bind the Central agent-profile accept operation",
+        ))
+    }
+
+    /// The O-I world-readiness reading required before preparation. The
+    /// default reports itself as unbound: readiness unknown is not readiness
+    /// confirmed.
+    fn world_readiness(&self) -> Result<WorldReadiness> {
+        Err(aikit_core::AikitError::new(
+            "world.readiness_not_exposed",
+            "this application boundary does not bind the O-I world readiness operation",
+        ))
+    }
+
+    /// Folded `session-space agent-session-prepare` over an accepted
+    /// profile: mints the AgentSession and its space with the provider not
+    /// started. The default refuses.
+    fn prepare_agent_session(&mut self, _profile_ref: &str) -> Result<AgentSessionPreparation> {
+        Err(aikit_core::AikitError::new(
+            "session_space.prepare_not_exposed",
+            "this application boundary does not bind the folded agent-session-prepare operation",
+        ))
+    }
+
+    /// Launch the encounter for a prepared session: the live body. Client
+    /// exit never stops providers; a lost launch outcome is reconciled
+    /// through the owner's session-find before any retry. The default
+    /// refuses.
+    fn start_encounter(&mut self, _agent_session: &str) -> Result<EncounterLaunch> {
+        Err(aikit_core::AikitError::new(
+            "encounter.start_not_exposed",
+            "this application boundary does not bind the encounter launch operation",
         ))
     }
 

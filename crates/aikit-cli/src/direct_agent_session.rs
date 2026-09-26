@@ -17,7 +17,7 @@ use aikit_core::session_space_application::{
     SessionSpaceProjectContextBinding,
 };
 use aikit_core::{AikitError, CapsuleId, ResourceRef, Result};
-use aikit_store::{AikitHome, ContextLock, LockOptions, SessionSpaceApplicationStore};
+use aikit_store::{skillsets, AikitHome, ContextLock, LockOptions, SessionSpaceApplicationStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -58,12 +58,26 @@ pub struct DirectAgentBinding {
     pub project: Option<String>,
     pub project_context: SessionSpaceProjectContextBinding,
     pub skill_digests: Vec<SkillDigest>,
+    /// Members the profile's SkillSets asked for that did not project in this
+    /// context, each with the resolver's own reason. A set is a request and
+    /// this is the reply: omitted nowhere, failed nowhere without a name.
+    /// Absent (default empty) in bindings prepared before SkillSets resolved.
+    #[serde(default)]
+    pub withheld_members: Vec<WithheldMember>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkillDigest {
     pub reference: String,
     pub content_digest: String,
+}
+/// One SkillSet member that did not project into the effective repertoire,
+/// with the view's own reason — the same words `aikit set show` uses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WithheldMember {
+    pub reference: String,
+    pub reason: String,
 }
 
 fn key(request: &PrepareRequest) -> Result<String> {
@@ -300,14 +314,19 @@ pub fn validate_review(
     Ok(())
 }
 
-fn material(
+/// Resolve the profile's effective Skill repertoire: every individually named
+/// Skill (a requirement — delivery failure refuses) plus every SkillSet member
+/// (a request — a member that does not project here is named as withheld with
+/// the resolver's own reason). Deterministic, so prepare and prompt resolve
+/// identical bytes; the round-trip test holds them to it.
+pub fn material(
     service: &Service,
     profile: &CentralAgentProfileProjection,
-) -> Result<(Vec<SkillDigest>, String)> {
-    // Complex references require existing native Agency composition. Do not
-    // silently drop them and claim that the selected Agent is active.
-    if !profile.skill_set_refs.is_empty()
-        || !profile.method_refs.is_empty()
+) -> Result<(Vec<SkillDigest>, Vec<WithheldMember>, String)> {
+    // Complex references beyond a Skill repertoire still require existing
+    // native Agency composition. Do not silently drop them and claim that the
+    // selected Agent is active.
+    if !profile.method_refs.is_empty()
         || !profile.routine_refs.is_empty()
         || !profile.governance_refs.is_empty()
         || !profile.knowledge_source_refs.is_empty()
@@ -316,38 +335,85 @@ fn material(
     {
         return Err(failure(
             "direct_agent.context_requires_agency",
-            "This definition requires composed governance, Knowledge, SkillSet, Method, Routine, computer or placement context. Use its native Agency admission route; Direct text/Skill delivery cannot silently omit those requirements",
+            "This definition requires composed governance, Knowledge, Method, Routine, computer or placement context. Use its native Agency admission route; Direct text/Skill delivery cannot silently omit those requirements",
         ));
     }
-    let mut seen = std::collections::BTreeSet::new();
-    let mut digests = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut digests: Vec<SkillDigest> = Vec::new();
+    let mut withheld: Vec<WithheldMember> = Vec::new();
     let mut text = String::new();
+
+    // Individual Skill refs first, in authored order, exactly as before: a
+    // repeated reference is a refusal, and a Skill that cannot be delivered
+    // fails the preparation — an individually named Skill is a requirement.
     for reference in &profile.skill_refs {
-        if !seen.insert(reference.clone()) {
+        let id = CapsuleId::parse(reference.as_str())?;
+        if !seen.insert(id.to_string()) {
             return Err(failure(
                 "direct_agent.skill_duplicate",
                 "The Agent definition repeats a Skill reference",
             ));
         }
-        let markdown = service.effective_skill_markdown(&CapsuleId::parse(reference.as_str())?)?;
-        digests.push(SkillDigest {
-            reference: reference.to_string(),
-            content_digest: format!("blake3:{}", blake3::hash(markdown.as_bytes()).to_hex()),
-        });
-        // Quote document delimiters as content. Sources remain untrusted content,
-        // not authority to override the human, tool permission or native policy.
-        text.push_str(&format!(
-            "\n{}\n",
-            json!({"kind":"effective-skill-source", "ref":reference, "text":markdown})
-        ));
-        if text.len() > MAX_BYTES / 2 {
-            return Err(failure(
-                "direct_agent.context_oversized",
-                "Effective Skill delivery exceeds the bounded turn size",
-            ));
+        deliver_skill(service, &id, &mut digests, &mut text)?;
+    }
+
+    // SkillSet refs resolve through the native set store (home sets and
+    // registry semantic refs alike), with nested membership attached, into the
+    // same effective repertoire. A set confers nothing: each member is checked
+    // against its own gates exactly as it would be alone, and a member that
+    // does not project in this context is reported with the view's own reason
+    // instead of failing the whole preparation or disappearing silently.
+    for set_reference in &profile.skill_set_refs {
+        let set = skillsets::load(service.home(), set_reference.as_str())?;
+        for member in set.all_members() {
+            if !seen.insert(member.to_string()) {
+                continue; // union: naming a member twice is idempotent
+            }
+            if deliver_skill(service, &member, &mut digests, &mut text).is_err() {
+                let view = service.resolved();
+                let reason = view
+                    .unavailable_reason(&member)
+                    .map(|reason| reason.describe())
+                    .unwrap_or_else(|| {
+                        "not effective in this context".to_string()
+                    });
+                withheld.push(WithheldMember {
+                    reference: member.to_string(),
+                    reason,
+                });
+            }
         }
     }
-    Ok((digests, text))
+    Ok((digests, withheld, text))
+}
+
+/// Deliver one Skill into the direct-session payload: its effective markdown,
+/// digested and quoted as untrusted source material. Deterministic, so a
+/// re-prepare and a parent-prompt rebuild reach identical bytes.
+fn deliver_skill(
+    service: &Service,
+    id: &CapsuleId,
+    digests: &mut Vec<SkillDigest>,
+    text: &mut String,
+) -> Result<()> {
+    let markdown = service.effective_skill_markdown(id)?;
+    digests.push(SkillDigest {
+        reference: id.to_string(),
+        content_digest: format!("blake3:{}", blake3::hash(markdown.as_bytes()).to_hex()),
+    });
+    // Quote document delimiters as content. Sources remain untrusted content,
+    // not authority to override the human, tool permission or native policy.
+    text.push_str(&format!(
+        "\n{}\n",
+        json!({"kind":"effective-skill-source", "ref":id.to_string(), "text":markdown})
+    ));
+    if text.len() > MAX_BYTES / 2 {
+        return Err(failure(
+            "direct_agent.context_oversized",
+            "Effective Skill delivery exceeds the bounded turn size",
+        ));
+    }
+    Ok(())
 }
 
 /// Read the actual native ProjectBinding, without preparation or authority.
@@ -543,7 +609,7 @@ pub fn prepare_with<R: CommandRunner>(
     let evidence = ContextResolutionEvidence::from_resolution(&resolution)?;
     let project_context =
         SessionSpaceProjectContextBinding::new(evidence.project().clone(), evidence)?;
-    let (skill_digests, _) = material(service, &profile)?;
+    let (skill_digests, withheld_members, _) = material(service, &profile)?;
     let binding = DirectAgentBinding {
         schema: SCHEMA.into(),
         request,
@@ -556,6 +622,7 @@ pub fn prepare_with<R: CommandRunner>(
         project,
         project_context,
         skill_digests,
+        withheld_members,
     };
     owner_review(runner, &binding)?;
     if let Some(existing) = existing {
@@ -641,7 +708,7 @@ pub fn reading(home: &AikitHome, session: &ResourceRef) -> Result<Value> {
                 == Some(&binding.project_context.context)
     });
     Ok(
-        json!({"schema":SCHEMA,"agent_ref":binding.agent_ref,"agent_session":session,"space":binding.space,"request_id":binding.request.request_id,"acceptance_ref":binding.request.expected_acceptance_ref,"profile_ref":binding.request.profile_ref,"profile_revision":binding.request.expected_revision,"project_ref":binding.project_context.project,"prepared":ready,"resume_preparation_allowed":!ready,"provider_started":false,"execution_authority_granted":false,"brokered_child_context":"not-established; child launch requires its own context/admission","skill_sources":binding.skill_digests}),
+        json!({"schema":SCHEMA,"agent_ref":binding.agent_ref,"agent_session":session,"space":binding.space,"request_id":binding.request.request_id,"acceptance_ref":binding.request.expected_acceptance_ref,"profile_ref":binding.request.profile_ref,"profile_revision":binding.request.expected_revision,"project_ref":binding.project_context.project,"prepared":ready,"resume_preparation_allowed":!ready,"provider_started":false,"execution_authority_granted":false,"brokered_child_context":"not-established; child launch requires its own context/admission","skill_sources":binding.skill_digests,"withheld_members":binding.withheld_members}),
     )
 }
 
@@ -672,11 +739,11 @@ pub fn prompt(
     let review = owner_review(&SystemRunner::new(), &binding)?;
     let profile = CentralAgentProfileProjection::parse(&review["profile"])?;
     let service = Service::open(home.clone(), &binding.cwd, |key| std::env::var(key).ok())?;
-    let (digests, skill_text) = material(&service, &profile)?;
-    if binding.skill_digests != digests {
+    let (digests, withheld, skill_text) = material(&service, &profile)?;
+    if binding.skill_digests != digests || binding.withheld_members != withheld {
         return Err(failure(
             "direct_agent.skill_context_stale",
-            "Effective Skill bytes changed since session preparation; review/reprepare, never silently replace context",
+            "Effective Skill repertoire changed since session preparation; review/reprepare, never silently replace context",
         ));
     }
     let payload = format!(
