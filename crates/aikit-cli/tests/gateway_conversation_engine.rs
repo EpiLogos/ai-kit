@@ -225,10 +225,22 @@ impl GatewayConnectorFactory for RecordingFactory {
     }
 }
 
-/// Resolves the one fixture connector ref to the scripted turn source.
+/// Resolves the one fixture connector ref to the scripted turn source. The
+/// `backings` roster is what the canonical Harness listing discloses.
 struct FixtureResolver {
     connector_ref: ResourceRef,
     source: Arc<FixtureTurnSource>,
+    backings: Vec<Value>,
+}
+
+impl FixtureResolver {
+    fn new(connector_ref: ResourceRef, source: Arc<FixtureTurnSource>) -> Self {
+        Self {
+            connector_ref,
+            source,
+            backings: Vec::new(),
+        }
+    }
 }
 
 impl GatewayTurnSourceResolver for FixtureResolver {
@@ -242,6 +254,10 @@ impl GatewayTurnSourceResolver for FixtureResolver {
         } else {
             None
         }
+    }
+
+    fn available_backings(&self) -> Vec<Value> {
+        self.backings.clone()
     }
 }
 
@@ -301,9 +317,15 @@ impl Harness {
             Arc::clone(&queues),
             Arc::clone(&controls),
             Some(state_file.clone()),
-            Some(Arc::new(FixtureResolver {
-                connector_ref: r(CONNECTOR_REF),
-                source: Arc::clone(&source),
+            Some(Arc::new({
+                let resolver = FixtureResolver::new(r(CONNECTOR_REF), Arc::clone(&source));
+                FixtureResolver {
+                    backings: vec![
+                        json!({"id": "provider-alpha", "label": "Provider Alpha", "protocol": "acp"}),
+                        json!({"id": "provider-beta", "label": "Provider Beta", "protocol": "pi-rpc"}),
+                    ],
+                    ..resolver
+                }
             })),
             policy,
         );
@@ -513,10 +535,10 @@ fn a_denied_or_pairing_sender_never_starts_a_turn() {
         Arc::new(ConnectorQueues::default()),
         Arc::new(ConnectorPumpControls::default()),
         Some(dir.path().join("gateway.json")),
-        Some(Arc::new(FixtureResolver {
-            connector_ref: r(CONNECTOR_REF),
-            source: Arc::clone(&source),
-        })),
+        Some(Arc::new(FixtureResolver::new(
+            r(CONNECTOR_REF),
+            Arc::clone(&source),
+        ))),
         aikit_adapters::EnginePolicy::default(),
     );
     gateway.lock().unwrap().bind(binding).unwrap();
@@ -1034,6 +1056,28 @@ fn conversation_operations_round_trip_as_portable_json() {
         CONNECTOR_REF
     );
 
+    // The new selector operations are portable too, and list/set spellings
+    // are one operation with an optional argument.
+    let model = serde_json::to_value(aikit_adapters::GatewayConversationOperation::Model {
+        model: Some("fixture/haiku".into()),
+    })
+    .unwrap();
+    assert_eq!(model["op"], "model");
+    assert_eq!(model["model"], "fixture/haiku");
+    let list = serde_json::to_value(aikit_adapters::GatewayConversationOperation::Model {
+        model: None,
+    })
+    .unwrap();
+    assert_eq!(list["op"], "model");
+    assert!(list.get("model").is_none(), "{list}");
+    for (operation, op) in [
+        (aikit_adapters::GatewayConversationOperation::Harness, "harness"),
+        (aikit_adapters::GatewayConversationOperation::Skills, "skills"),
+    ] {
+        let encoded = serde_json::to_value(operation).unwrap();
+        assert_eq!(encoded["op"], op, "{encoded}");
+    }
+
     // The kernel itself refuses the operation honestly: only a running
     // service's engine executes it.
     let mut kernel = AgencyGateway::new(r("agency-gateway/test"));
@@ -1046,6 +1090,247 @@ fn conversation_operations_round_trip_as_portable_json() {
     )
     .unwrap_err();
     assert_eq!(error.code(), "agency_gateway.engine_absent", "{error}");
+}
+
+#[test]
+fn model_listing_and_selection_ride_the_harness_native_seam() {
+    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
+    let model = |name: Option<&str>| {
+        harness
+            .engine
+            .execute(
+                harness.binding_ref.clone(),
+                aikit_adapters::GatewayConversationOperation::Model {
+                    model: name.map(str::to_owned),
+                },
+            )
+            .unwrap()
+    };
+
+    // The list answers with the harness's own selector disclosure: roster and
+    // current selection, deterministically.
+    let execution = model(None);
+    let GatewayResponse::Conversation { result, .. } = execution.response else {
+        panic!("model answers with a conversation response");
+    };
+    assert_eq!(result["controls"]["model_selection"], json!(true), "{result}");
+    assert_eq!(
+        result["controls"]["available"],
+        json!(["fixture/opus", "fixture/sonnet", "fixture/haiku"]),
+        "{result}"
+    );
+    assert_eq!(result["controls"]["current"], json!("fixture/sonnet"));
+
+    // Selection applies through the same native seam and answers with the
+    // harness's own confirmation.
+    let execution = model(Some("fixture/haiku"));
+    let GatewayResponse::Conversation { result, .. } = execution.response else {
+        panic!("model set answers with a conversation response");
+    };
+    assert_eq!(result["model"], json!("fixture/haiku"), "{result}");
+    assert_eq!(result["receipt"]["previous"], json!("fixture/sonnet"));
+    assert_eq!(result["receipt"]["current"], json!("fixture/haiku"));
+
+    // A model the harness does not advertise is refused, naming its roster.
+    let error = harness
+        .engine
+        .execute(
+            harness.binding_ref.clone(),
+            aikit_adapters::GatewayConversationOperation::Model {
+                model: Some("fixture/gpt-5".into()),
+            },
+        )
+        .err()
+        .expect("an unadvertised model is refused");
+    assert!(
+        error.to_string().contains("fixture/opus"),
+        "the refusal names the harness's models: {error}"
+    );
+
+    // And the next list reads the new state of the native selector.
+    let GatewayResponse::Conversation { result, .. } = model(None).response else {
+        panic!("model answers with a conversation response");
+    };
+    assert_eq!(result["controls"]["current"], json!("fixture/haiku"));
+
+    // The surface alias answers through the connector too.
+    harness.admit(fixture_inbound("/model", "mo1"));
+    harness.wait_until(
+        "the /model alias surfaces the roster",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| text.contains("model: harness fixture-harness offers"))
+        },
+    );
+    harness.admit(fixture_inbound("/model fixture/opus", "mo2"));
+    harness.wait_until(
+        "the /model alias selects through the seam",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| text.contains("fixture/opus selected"))
+        },
+    );
+}
+
+#[test]
+fn harness_listing_discloses_the_backing_the_providers_and_the_switch_law() {
+    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
+    let execution = harness
+        .engine
+        .execute(
+            harness.binding_ref.clone(),
+            aikit_adapters::GatewayConversationOperation::Harness,
+        )
+        .unwrap();
+    let GatewayResponse::Conversation { result, .. } = execution.response else {
+        panic!("harness answers with a conversation response");
+    };
+    assert_eq!(result["current"], json!("fixture-harness"), "{result}");
+    let available = result["available"].as_array().unwrap();
+    assert_eq!(available.len(), 2, "{result}");
+    assert_eq!(available[0]["id"], json!("provider-alpha"));
+    assert_eq!(available[0]["label"], json!("Provider Alpha"));
+    assert_eq!(available[0]["protocol"], json!("acp"));
+    assert!(
+        result["switch_command"]
+            .as_str()
+            .unwrap()
+            .contains("--agent-backing <id>"),
+        "{result}"
+    );
+    assert!(
+        result["law"]
+            .as_str()
+            .unwrap()
+            .contains("session-replacement"),
+        "{result}"
+    );
+
+    // The surface alias is the same disclosure, in one line.
+    harness.admit(fixture_inbound("/harness", "ha1"));
+    harness.wait_until(
+        "the /harness alias surfaces backing and providers",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| {
+                    text.contains("harness: backing fixture-harness")
+                        && text.contains("provider-alpha")
+                        && text.contains("session-replacement")
+                })
+        },
+    );
+}
+
+#[test]
+fn skills_listing_discloses_the_surface_and_names_the_invocation_law() {
+    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
+    let execution = harness
+        .engine
+        .execute(
+            harness.binding_ref.clone(),
+            aikit_adapters::GatewayConversationOperation::Skills,
+        )
+        .unwrap();
+    let GatewayResponse::Conversation { result, .. } = execution.response else {
+        panic!("skills answers with a conversation response");
+    };
+    let skills = result["skills"].as_array().unwrap();
+    assert_eq!(skills.len(), 2, "{result}");
+    let names: Vec<&str> = skills
+        .iter()
+        .filter_map(|skill| skill["name"].as_str())
+        .collect();
+    assert!(names.contains(&"fixture-arithmetic"), "{result}");
+    assert!(names.contains(&"fixture-greeting"), "{result}");
+    assert!(
+        result["invocation"]
+            .as_str()
+            .unwrap()
+            .contains("does not execute"),
+        "{result}"
+    );
+
+    // The surface alias discloses the same surface with the invocation law.
+    harness.admit(fixture_inbound("/skills", "sk1"));
+    harness.wait_until(
+        "the /skills alias surfaces the skill surface",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| {
+                    text.contains("skills: 2 available on harness fixture-harness")
+                        && text.contains("does not execute")
+                })
+        },
+    );
+
+    // A conversation with no agent backing is answered honestly: there is no
+    // skill surface to disclose.
+    let dir = TempDir::new().unwrap();
+    let mut kernel = AgencyGateway::new(r("agency-gateway/test"));
+    kernel.register_connector(fixture_descriptor()).unwrap();
+    kernel
+        .bind(GatewayBinding {
+            binding_ref: r(BINDING_REF),
+            connector_ref: r(CONNECTOR_REF),
+            address: fixture_address(),
+            agent_session_ref: r("agent-session/fixture"),
+            agency_ref: r("agency/fixture"),
+            actuation_ref: r("actuation/fixture"),
+            actuation_stream_ref: r(STREAM_REF),
+            agent_ref: None,
+            harness_ref: None,
+            surface_ref: None,
+            forked_from: None,
+            context_revision: 1,
+            ingress: GatewayIngressPolicy {
+                default: GatewayIngressDecision::Allow,
+                sender_overrides: Default::default(),
+            },
+            provenance: Vec::new(),
+        })
+        .unwrap();
+    let engine = aikit_adapters::GatewayConversationEngine::new(
+        Arc::new(Mutex::new(kernel)),
+        Arc::new(aikit_adapters::SubscriptionHub::default()),
+        Arc::new(ConnectorQueues::default()),
+        Arc::new(ConnectorPumpControls::default()),
+        Some(dir.path().join("gateway.json")),
+        None,
+        aikit_adapters::EnginePolicy::default(),
+    );
+    let execution = engine
+        .execute(
+            r(BINDING_REF),
+            aikit_adapters::GatewayConversationOperation::Skills,
+        )
+        .unwrap();
+    let GatewayResponse::Conversation { result, .. } = execution.response else {
+        panic!("skills answers with a conversation response");
+    };
+    assert_eq!(result["available"], json!(false), "{result}");
+    let GatewayResponse::Conversation { result, .. } = engine
+        .execute(
+            r(BINDING_REF),
+            aikit_adapters::GatewayConversationOperation::Model { model: None },
+        )
+        .unwrap()
+        .response
+    else {
+        panic!("model answers with a conversation response");
+    };
+    assert_eq!(result["available"], json!(false), "{result}");
 }
 
 // ---------------------------------------------------------------------------

@@ -981,6 +981,10 @@ pub enum GatewaySub {
     /// Canonical conversation control against a running gateway:
     /// `aikit gateway agent status|stop|new|sessions|restart|pause|resume`.
     Agent(GatewayAgentArgs),
+    /// Inspect the coexistence of harness gateways on this machine: detect
+    /// foreign harness gateways (Hermes, OpenClaw), show the policy, and —
+    /// with `--policy` — set it. Detection is inspect-only.
+    Coexistence(GatewayCoexistenceArgs),
 }
 
 /// `aikit gateway agent` — the canonical conversation-control operations,
@@ -988,7 +992,7 @@ pub enum GatewaySub {
 #[derive(Debug, Args)]
 pub struct GatewayAgentArgs {
     /// The operation: `status`, `stop`, `new`, `sessions`, `restart`,
-    /// `pause` or `resume`.
+    /// `pause`, `resume`, `model`, `harness` or `skills`.
     #[arg(value_name = "OP")]
     pub operation: String,
     /// The gateway binding whose conversation is controlled, e.g.
@@ -999,8 +1003,26 @@ pub struct GatewayAgentArgs {
     /// connector).
     #[arg(long = "connector", value_name = "REF")]
     pub connector_ref: Option<String>,
+    /// Provider model id for `model` (omit it to list the harness's own
+    /// model selector).
+    #[arg(long, value_name = "MODEL")]
+    pub model: Option<String>,
     #[command(flatten)]
     pub carrier: GatewayQueryArgs,
+}
+
+/// `aikit gateway coexistence` — what harness gateways share this machine,
+/// and the policy between them.
+#[derive(Debug, Args)]
+pub struct GatewayCoexistenceArgs {
+    /// Print the coexistence reading as JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Set the coexistence policy: `exclusive` (the default) refuses to start
+    /// connectors a detected foreign gateway is recorded to own;
+    /// `coexist` starts alongside detected foreign gateways.
+    #[arg(long, value_name = "POLICY")]
+    pub policy: Option<String>,
 }
 
 /// `aikit gateway who`.

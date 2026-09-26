@@ -9,14 +9,19 @@
 //! win over every default.
 
 use aikit_adapters::{
-    GatewayCarrierTarget, GatewayConversationOperation, GatewayServiceConfig,
-    DEFAULT_GATEWAY_MAX_FRAME_BYTES,
+    coexistence_report, decide, detect, exclusive_gate, load_coexistence, probe_live,
+    store_coexistence, CoexistenceDecision, CoexistencePolicy, GatewayCarrierTarget,
+    GatewayCoexistenceGate, GatewayConversationOperation, GatewayServiceConfig,
+    DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_COEXISTENCE_FILE_NAME,
 };
 use aikit_core::resource::ResourceRef;
 use aikit_core::{AikitError, Result};
 use aikit_store::home::AikitHome;
+use serde_json::Value;
 
-use crate::cli::{GatewayAgentArgs, GatewayQueryArgs, GatewayServeArgs};
+use crate::cli::{
+    GatewayAgentArgs, GatewayCoexistenceArgs, GatewayQueryArgs, GatewayServeArgs,
+};
 
 /// Resolve the serve carriers. The state file always defaults to the home
 /// file; the Unix carrier defaults to the home socket when no carrier is
@@ -143,6 +148,168 @@ fn gateway_token_from_env() -> Option<String> {
         .filter(|token| !token.trim().is_empty())
 }
 
+// ---------------------------------------------------------------------------
+// Coexistence
+// ---------------------------------------------------------------------------
+
+/// The coexistence document of this AIKit home.
+pub fn coexistence_path(home: &AikitHome) -> std::path::PathBuf {
+    home.state().join(GATEWAY_COEXISTENCE_FILE_NAME)
+}
+
+/// What `aikit gateway coexistence` answers with. Human output is plain
+/// lines; `--json` keeps the reading for the envelope.
+pub enum CoexistenceOutput {
+    Text(String),
+    Data(Value),
+}
+
+/// `aikit gateway coexistence`: report the policy, what foreign harness
+/// gateways were observed on this machine, and the decision that follows —
+/// and, with `--policy`, set the policy. Detection is inspect-only; the
+/// command never touches a foreign service.
+pub fn coexistence_command(
+    home: &AikitHome,
+    args: &GatewayCoexistenceArgs,
+) -> Result<CoexistenceOutput> {
+    let path = coexistence_path(home);
+    let mut document = load_coexistence(&path)?;
+    let mut policy_line = format!(
+        "coexistence policy: {} ({})",
+        document.policy.as_str(),
+        path.display()
+    );
+    if let Some(raw) = &args.policy {
+        let policy = CoexistencePolicy::parse(raw)?;
+        let previous = document.policy;
+        if policy != previous {
+            document.policy = policy;
+            store_coexistence(&path, &document)?;
+        }
+        policy_line = format!(
+            "coexistence policy: {} ({}) — {}",
+            document.policy.as_str(),
+            path.display(),
+            if policy != previous {
+                format!("changed from {}", previous.as_str())
+            } else {
+                "unchanged".into()
+            }
+        );
+    }
+
+    let probe = probe_live();
+    let foreign = detect(&probe);
+    let decision = decide(document.policy, &foreign);
+
+    let mut lines = vec![
+        policy_line,
+        format!("decision: {}", decision.summary()),
+        format!(
+            "recorded foreign bot identities: {}",
+            if document.foreign_bot_identities.is_empty() {
+                "none".into()
+            } else {
+                document
+                    .foreign_bot_identities
+                    .iter()
+                    .map(|identity| format!(
+                        "{} on {} (bot {})",
+                        identity.harness, identity.platform, identity.bot_id
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            }
+        ),
+    ];
+    if foreign.is_empty() {
+        lines.push(
+            "foreign harness gateways: none observed (launchd/systemd labels, well-known \
+             binaries on PATH, and state directories)"
+                .into(),
+        );
+    } else {
+        for gateway in &foreign {
+            lines.push(format!(
+                "foreign harness gateway {}: {}",
+                gateway.harness,
+                gateway.evidence.join("; ")
+            ));
+        }
+    }
+    lines.push(
+        "detection is inspect-only: aikit never starts, stops or reconfigures a foreign \
+         harness gateway"
+            .into(),
+    );
+
+    let report = coexistence_report(&document, &path, &foreign, &decision);
+    if args.json {
+        Ok(CoexistenceOutput::Data(report))
+    } else {
+        Ok(CoexistenceOutput::Text(lines.join("\n")))
+    }
+}
+
+/// What `serve` discloses about coexistence before any carrier binds, and the
+/// gate (when the exclusive policy holds against a detected foreign gateway)
+/// that refuses a connector whose recorded platform + bot identity the
+/// foreign gateway owns.
+pub struct ServeCoexistence {
+    pub gate: Option<std::sync::Arc<dyn GatewayCoexistenceGate>>,
+    /// Plain-words disclosure lines, printed on serve startup.
+    pub lines: Vec<String>,
+}
+
+/// Read the coexistence posture for a serving gateway: policy from this
+/// home's document, sightings from a live probe, decision from both.
+pub fn serve_coexistence(home: &AikitHome) -> Result<ServeCoexistence> {
+    let path = coexistence_path(home);
+    let document = load_coexistence(&path)?;
+    let foreign = detect(&probe_live());
+    let decision = decide(document.policy, &foreign);
+    let mut lines = vec![format!(
+        "policy {} ({}): {}",
+        document.policy.as_str(),
+        path.display(),
+        decision.summary()
+    )];
+    for gateway in &foreign {
+        lines.push(format!(
+            "foreign gateway {}: {}",
+            gateway.harness,
+            gateway.evidence.join("; ")
+        ));
+    }
+    let gate = match &decision {
+        CoexistenceDecision::ExclusiveHold { foreign } => {
+            lines.push(
+                "connector start is gated: a connector whose platform + bot identity a \
+                 detected foreign gateway owns is refused"
+                    .into(),
+            );
+            if document.foreign_bot_identities.is_empty() {
+                lines.push(
+                    "no foreign bot identity is recorded, so no connector is refused today; \
+                     record one in the coexistence document when a foreign gateway is \
+                     observed to own a bot identity"
+                        .into(),
+                );
+            }
+            Some(std::sync::Arc::new(exclusive_gate(
+                foreign.clone(),
+                document.foreign_bot_identities.clone(),
+            )) as std::sync::Arc<dyn GatewayCoexistenceGate>)
+        }
+        CoexistenceDecision::Coexisting { .. } => {
+            lines.push("connectors start alongside the detected foreign gateways".into());
+            None
+        }
+        CoexistenceDecision::ExclusivelyOurs => None,
+    };
+    Ok(ServeCoexistence { gate, lines })
+}
+
 /// Resolve `aikit gateway agent <op>` into the canonical operation the
 /// protocol carries. The names here mirror the connector-edge slash commands;
 /// both spellings resolve to one `GatewayConversationOperation`.
@@ -164,11 +331,16 @@ pub fn conversation_operation(args: &GatewayAgentArgs) -> Result<GatewayConversa
         "restart" => Ok(GatewayConversationOperation::Restart),
         "pause" => Ok(GatewayConversationOperation::PauseConnector { connector_ref }),
         "resume" => Ok(GatewayConversationOperation::ResumeConnector { connector_ref }),
+        "model" => Ok(GatewayConversationOperation::Model {
+            model: args.model.clone(),
+        }),
+        "harness" => Ok(GatewayConversationOperation::Harness),
+        "skills" => Ok(GatewayConversationOperation::Skills),
         other => Err(AikitError::new(
             "cli.gateway_agent_operation_unknown",
             format!(
                 "unknown conversation operation {other:?}; use status, stop, new, sessions, \
-                 restart, pause or resume"
+                 restart, pause, resume, model, harness or skills"
             ),
         )),
     }

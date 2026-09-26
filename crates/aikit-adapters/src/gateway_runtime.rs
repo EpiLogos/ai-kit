@@ -375,6 +375,23 @@ pub enum GatewayConversationOperation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         connector_ref: Option<ResourceRef>,
     },
+    /// The binding's harness native model selector. `None` lists what the
+    /// harness itself discloses (its controls, and a roster when it offers
+    /// one); `Some(id)` selects a provider-advertised model through the same
+    /// native seam. The gateway never invents a parallel notion of models.
+    Model {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
+    /// The binding's agent backing and the available provider ids (name +
+    /// label + protocol only). Read-only: switching a backing mid-session is a
+    /// session-replacement event this kernel does not own, so the answer
+    /// discloses the exact command instead of performing it.
+    Harness,
+    /// The aikit skill surface available to the backed harness, with the
+    /// invocation law disclosed: the harness carries skills in-turn; the
+    /// gateway does not execute skills.
+    Skills,
 }
 
 /// One agent reply (or honest turn failure) to be journaled on the same

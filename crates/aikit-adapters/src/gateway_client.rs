@@ -878,6 +878,7 @@ mod tests {
                 inner: Arc::clone(&inner),
             })],
             conversation: None,
+            coexistence: None,
         };
         let (done_tx, done_rx) = mpsc::channel();
         thread::spawn(move || {

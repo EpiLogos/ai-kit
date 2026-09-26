@@ -123,6 +123,30 @@ pub trait ConversationTurnSource: Send + Sync {
     fn reset(&self, agent_session: &ResourceRef) -> Result<()>;
     /// The sessions this source currently holds.
     fn sessions(&self) -> Result<Vec<Value>>;
+    /// The harness's own native model selector, read for this binding's agent
+    /// session. The harness's controls are the substance of a model selector;
+    /// the gateway exposes them and invents no parallel notion. The default is
+    /// the honest refusal of a source with no such seam.
+    fn model_controls(&self, _agent_session: &ResourceRef) -> Result<Value> {
+        Err(AikitError::new(
+            "gateway_conversation.model_controls_unsupported",
+            "this turn source does not expose the harness's model selector",
+        ))
+    }
+    /// Select a provider-advertised model through the harness's own native
+    /// seam, and answer with the receipt the harness confirmed.
+    fn set_model(&self, _agent_session: &ResourceRef, _model: &str) -> Result<Value> {
+        Err(AikitError::new(
+            "gateway_conversation.model_selection_unsupported",
+            "this turn source cannot select a model",
+        ))
+    }
+    /// The aikit skill surface available to the backed harness. The harness
+    /// carries skills in-turn; a listing here is a disclosure of that surface,
+    /// never an executor. The default is an honest empty disclosure.
+    fn skills(&self) -> Result<Vec<Value>> {
+        Ok(Vec::new())
+    }
 }
 
 /// Resolves the turn source for a binding's connector, from the connector
@@ -134,6 +158,12 @@ pub trait GatewayTurnSourceResolver: Send + Sync {
         connector_ref: &ResourceRef,
         platform: &str,
     ) -> Option<Arc<dyn ConversationTurnSource>>;
+    /// The backings this resolver could name for a connector, as the provider
+    /// registry names them (id, label, protocol — no credentials, no argv).
+    /// Read-only disclosure for the canonical Harness listing.
+    fn available_backings(&self) -> Vec<Value> {
+        Vec::new()
+    }
 }
 
 /// A completion slot shared between a turn's worker thread and its waiters.
@@ -224,7 +254,14 @@ pub struct FixtureTurnSource {
     turns: Mutex<Vec<Arc<TurnSlot>>>,
     contexts: Mutex<Vec<String>>,
     resets: AtomicUsize,
+    current_model: Mutex<String>,
 }
+
+/// The fixture's deterministic model roster, in disclosure order.
+pub const FIXTURE_MODELS: [&str; 3] = ["fixture/opus", "fixture/sonnet", "fixture/haiku"];
+
+/// The fixture's default selection from that roster.
+pub const FIXTURE_DEFAULT_MODEL: &str = "fixture/sonnet";
 
 impl FixtureTurnSource {
     pub fn named(name: impl Into<String>) -> Self {
@@ -234,6 +271,7 @@ impl FixtureTurnSource {
             turns: Mutex::new(Vec::new()),
             contexts: Mutex::new(Vec::new()),
             resets: AtomicUsize::new(0),
+            current_model: Mutex::new(FIXTURE_DEFAULT_MODEL.into()),
         }
     }
 
@@ -350,6 +388,48 @@ impl ConversationTurnSource for FixtureTurnSource {
             .map(|context| json!({"agent_session_ref": context, "state": "resident"}))
             .collect())
     }
+
+    fn model_controls(&self, _agent_session: &ResourceRef) -> Result<Value> {
+        Ok(json!({
+            "model_selection": true,
+            "reasoning_effort_selection": false,
+            "reason": Value::Null,
+            "available": FIXTURE_MODELS,
+            "current": self.current_model.lock().expect("fixture model").clone(),
+        }))
+    }
+
+    fn set_model(&self, _agent_session: &ResourceRef, model: &str) -> Result<Value> {
+        if !FIXTURE_MODELS.contains(&model) {
+            return Err(AikitError::new(
+                "gateway_conversation.model_unknown",
+                format!(
+                    "the harness does not advertise {model:?}; its models are {}",
+                    FIXTURE_MODELS.join(", ")
+                ),
+            ));
+        }
+        let mut current = self.current_model.lock().expect("fixture model");
+        let previous = current.clone();
+        *current = model.to_owned();
+        Ok(json!({
+            "previous": previous,
+            "current": model,
+        }))
+    }
+
+    fn skills(&self) -> Result<Vec<Value>> {
+        Ok(vec![
+            json!({
+                "name": "fixture-greeting",
+                "summary": "Greet the conversation warmly.",
+            }),
+            json!({
+                "name": "fixture-arithmetic",
+                "summary": "Add two small numbers deterministically.",
+            }),
+        ])
+    }
 }
 
 /// Which wire protocol a real harness speaks. The adapter is constructed from
@@ -374,6 +454,10 @@ pub struct AgentHostTurnSource {
     argv: Vec<String>,
     cwd: PathBuf,
     host: Arc<OnceLock<Mutex<AgentSessionHost>>>,
+    /// The Agent Skills roots the backed harness carries its skills from.
+    /// `None` means the standard roots: the home `~/.agents/skills` and the
+    /// working directory's `.agents/skills`.
+    skill_roots: Option<Vec<PathBuf>>,
 }
 
 impl AgentHostTurnSource {
@@ -389,7 +473,27 @@ impl AgentHostTurnSource {
             argv,
             cwd,
             host: Arc::new(OnceLock::new()),
+            skill_roots: None,
         }
+    }
+
+    /// Name the Agent Skills roots explicitly (deterministic proof); the
+    /// default keeps the standard roots.
+    pub fn with_skill_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.skill_roots = Some(roots);
+        self
+    }
+
+    fn resolved_skill_roots(&self) -> Vec<PathBuf> {
+        if let Some(roots) = &self.skill_roots {
+            return roots.clone();
+        }
+        let mut roots = Vec::new();
+        if let Some(home) = std::env::var_os("HOME") {
+            roots.push(PathBuf::from(home).join(".agents").join("skills"));
+        }
+        roots.push(self.cwd.join(".agents").join("skills"));
+        roots
     }
 
     fn host(&self) -> Result<&Mutex<AgentSessionHost>> {
@@ -439,8 +543,19 @@ impl AgentHostTurnSource {
         if locked.lane(agent_session).is_ok() {
             return Ok(());
         }
+        // The pi/prime RPC adapters attach to the session their own spawned
+        // process observes — they claim no create/load/resume. The turn
+        // source keeps one resident host per binding, so that observed
+        // process IS the conversation; continuity across process loss is
+        // pi's own session store, not a gateway claim.
+        let mode = match self.protocol {
+            ConversationHarnessProtocol::Acp => SessionOpenMode::Create,
+            ConversationHarnessProtocol::PiRpc | ConversationHarnessProtocol::PrimeRpc => {
+                SessionOpenMode::Attach
+            }
+        };
         locked.open_session(SessionOpenRequest {
-            mode: SessionOpenMode::Create,
+            mode,
             native_session_id: None,
             cwd: self.cwd.display().to_string(),
             additional_directories: Vec::new(),
@@ -528,6 +643,72 @@ impl ConversationTurnSource for AgentHostTurnSource {
             })
             .collect())
     }
+
+    fn model_controls(&self, agent_session: &ResourceRef) -> Result<Value> {
+        let host = self.host()?;
+        let locked = host.lock().map_err(|_| poisoned())?;
+        let lane = locked.lane(agent_session)?;
+        let controls = lane.model_controls()?;
+        serde_json::to_value(&controls).map_err(|error| {
+            AikitError::new(
+                "gateway_conversation.model_controls_encode",
+                format!("encode the harness's model controls: {error}"),
+            )
+        })
+    }
+
+    fn set_model(&self, agent_session: &ResourceRef, model: &str) -> Result<Value> {
+        let host = self.host()?;
+        let locked = host.lock().map_err(|_| poisoned())?;
+        let lane = locked.lane(agent_session)?;
+        let receipt = lane.set_model(model)?;
+        serde_json::to_value(&receipt).map_err(|error| {
+            AikitError::new(
+                "gateway_conversation.model_receipt_encode",
+                format!("encode the model configuration receipt: {error}"),
+            )
+        })
+    }
+
+    fn skills(&self) -> Result<Vec<Value>> {
+        let mut disclosed = Vec::new();
+        for root in self.resolved_skill_roots() {
+            let entries = match std::fs::read_dir(&root) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(AikitError::new(
+                        "gateway_conversation.skills_root_unreadable",
+                        format!("read {}: {error}", root.display()),
+                    ));
+                }
+            };
+            let mut dirs: Vec<PathBuf> = entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir())
+                .collect();
+            dirs.sort();
+            for dir in dirs {
+                if !dir.join(crate::clients::agent_skills::SKILL_FILE).is_file() {
+                    continue;
+                }
+                match crate::clients::agent_skills::validate(&dir) {
+                    Ok(skill) => disclosed.push(json!({
+                        "name": skill.name,
+                        "summary": crate::clients::agent_skills::first_sentence(&skill.description),
+                        "root": dir.display().to_string(),
+                    })),
+                    // One broken skill never takes the disclosure down; it is
+                    // named on stderr instead of silently skipped.
+                    Err(error) => {
+                        eprintln!("gateway conversation engine: skill {}: {error}", dir.display());
+                    }
+                }
+            }
+        }
+        Ok(disclosed)
+    }
 }
 
 /// A plain name for a lane state, for status disclosure.
@@ -601,6 +782,11 @@ pub fn parse_slash(text: &str) -> SlashParse {
             }
             Err(error) => SlashParse::Unknown(format!("/resume ({error})")),
         },
+        "model" => SlashParse::Operation(GatewayConversationOperation::Model {
+            model: argument.map(str::to_owned),
+        }),
+        "harness" => SlashParse::Operation(GatewayConversationOperation::Harness),
+        "skills" => SlashParse::Operation(GatewayConversationOperation::Skills),
         other => SlashParse::Unknown(format!("/{other}")),
     }
 }
@@ -727,7 +913,7 @@ impl GatewayConversationEngine {
                         &binding_ref,
                         format!(
                             "unknown command {name}; the conversation commands are: /status /stop \
-                             /new /sessions /restart /pause /resume"
+                             /new /sessions /restart /pause /resume /model /harness /skills"
                         ),
                     );
                 });
@@ -1020,6 +1206,11 @@ impl GatewayConversationEngine {
             GatewayConversationOperation::ResumeConnector { connector_ref } => {
                 self.set_paused(binding_ref, connector_ref.clone(), false)
             }
+            GatewayConversationOperation::Model { model } => {
+                self.model(binding_ref, model.as_deref())
+            }
+            GatewayConversationOperation::Harness => self.harness(binding_ref),
+            GatewayConversationOperation::Skills => self.skills(binding_ref),
         }
     }
 
@@ -1254,6 +1445,207 @@ impl GatewayConversationEngine {
                 "sessions": native,
             }),
             line,
+        ))
+    }
+
+    /// The binding behind a surface request and its turn source, so the
+    /// selector operations share one lookup.
+    fn binding_and_source(
+        &self,
+        binding_ref: &ResourceRef,
+    ) -> Result<(
+        GatewayBinding,
+        Option<Arc<dyn ConversationTurnSource>>,
+    )> {
+        let binding = {
+            let kernel = self.gateway.lock().map_err(|_| poisoned())?;
+            kernel
+                .binding(binding_ref)
+                .cloned()
+                .ok_or_else(|| unknown_binding(binding_ref))?
+        };
+        let source = self.source_for(&binding);
+        Ok((binding, source))
+    }
+
+    /// Canonical Model: list what the harness's own native selector discloses,
+    /// or select one provider-advertised model through the same seam. No
+    /// backing, or a harness with no selector, is answered honestly.
+    fn model(
+        self: &Arc<Self>,
+        binding_ref: &ResourceRef,
+        model: Option<&str>,
+    ) -> Result<(Value, Option<String>, Option<ResourceRef>, bool)> {
+        let (binding, source) = self.binding_and_source(binding_ref)?;
+        let Some(source) = source else {
+            return Ok((
+                json!({
+                    "available": false,
+                    "reason": "this conversation has no agent backing",
+                }),
+                Some(
+                    "model: this conversation has no agent backing, so there is no model \
+                     selector"
+                        .into(),
+                ),
+                None,
+                false,
+            ));
+        };
+        let harness = source.harness().unwrap_or_else(|| "unnamed".into());
+        match model {
+            None => {
+                let controls = source.model_controls(&binding.agent_session_ref)?;
+                let line = if controls
+                    .get("available")
+                    .is_some_and(Value::is_array)
+                {
+                    let roster = controls["available"]
+                        .as_array()
+                        .expect("checked array")
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("model: harness {harness} offers {roster}; select one with /model <name>")
+                } else if controls.get("model_selection").is_some_and(Value::is_boolean) {
+                    if controls["model_selection"] == json!(true) {
+                        format!(
+                            "model: harness {harness} exposes a native model selector; name the \
+                             provider model with /model <name>"
+                        )
+                    } else {
+                        let reason = controls
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .filter(|reason| !reason.is_empty())
+                            .unwrap_or("the harness discloses no selector");
+                        format!("model: harness {harness} exposes no model selector ({reason})")
+                    }
+                } else {
+                    format!("model: harness {harness} disclosed its selector: {controls}")
+                };
+                Ok((
+                    json!({
+                        "harness": harness,
+                        "agent_session_ref": binding.agent_session_ref.to_string(),
+                        "controls": controls,
+                    }),
+                    Some(line),
+                    None,
+                    false,
+                ))
+            }
+            Some(id) => {
+                let receipt = source.set_model(&binding.agent_session_ref, id)?;
+                let previous = receipt
+                    .get("previous")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unrecorded");
+                Ok((
+                    json!({
+                        "harness": harness,
+                        "agent_session_ref": binding.agent_session_ref.to_string(),
+                        "model": id,
+                        "receipt": receipt,
+                    }),
+                    Some(format!(
+                        "model: {id} selected on harness {harness} (previous: {previous}); the \
+                         receipt is the harness's own confirmation"
+                    )),
+                    None,
+                    false,
+                ))
+            }
+        }
+    }
+
+    /// Canonical Harness: the binding's current backing and the available
+    /// provider ids. Switching is disclosed as the exact command, never
+    /// performed: a live harness swap is a session-replacement event this
+    /// kernel does not own.
+    fn harness(
+        self: &Arc<Self>,
+        binding_ref: &ResourceRef,
+    ) -> Result<(Value, Option<String>, Option<ResourceRef>, bool)> {
+        let (binding, source) = self.binding_and_source(binding_ref)?;
+        let current = source.as_ref().and_then(|source| source.harness());
+        let available = self
+            .resolver
+            .as_ref()
+            .map(|resolver| resolver.available_backings())
+            .unwrap_or_default();
+        let names = available
+            .iter()
+            .filter_map(|backing| backing.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let switch_command = format!(
+            "aikit gateway connector add --platform {} --ref {} --agent-backing <id> …",
+            binding.address.platform, binding.connector_ref
+        );
+        let line = format!(
+            "harness: backing {}; available backings: {}; switching re-declares the connector \
+             and restarts the service — a live swap is a session-replacement event the gateway \
+             does not perform",
+            current.as_deref().unwrap_or("none"),
+            if names.is_empty() { "none" } else { &names },
+        );
+        Ok((
+            json!({
+                "current": current,
+                "available": available,
+                "switch_command": switch_command,
+                "law": "a backing switch is a session-replacement event; the gateway discloses \
+                        the command and never performs it",
+            }),
+            Some(line),
+            None,
+            false,
+        ))
+    }
+
+    /// Canonical Skills: the aikit skill surface the backed harness carries,
+    /// with the invocation law disclosed — the harness carries skills in-turn;
+    /// the gateway does not execute skills.
+    fn skills(
+        self: &Arc<Self>,
+        binding_ref: &ResourceRef,
+    ) -> Result<(Value, Option<String>, Option<ResourceRef>, bool)> {
+        let (binding, source) = self.binding_and_source(binding_ref)?;
+        let Some(source) = source else {
+            return Ok((
+                json!({
+                    "available": false,
+                    "reason": "this conversation has no agent backing",
+                }),
+                Some(
+                    "skills: this conversation has no agent backing, so there is no skill \
+                     surface to disclose"
+                        .into(),
+                ),
+                None,
+                false,
+            ));
+        };
+        let harness = source.harness().unwrap_or_else(|| "unnamed".into());
+        let skills = source.skills()?;
+        let line = format!(
+            "skills: {} available on harness {harness}; the harness carries skills in-turn — \
+             name the skill in your message (the gateway does not execute skills)",
+            skills.len(),
+        );
+        Ok((
+            json!({
+                "harness": harness,
+                "agent_session_ref": binding.agent_session_ref.to_string(),
+                "skills": skills,
+                "invocation": "the harness carries skills in-turn; name the skill in \
+                               conversation — the gateway does not execute skills",
+            }),
+            Some(line),
+            None,
+            false,
         ))
     }
 

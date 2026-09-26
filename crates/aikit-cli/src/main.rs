@@ -1251,6 +1251,15 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
             // before it can accept conversations it could never respond to.
             let connectors = aikit_cli::gateway_connectors::connector_factories(&home)?;
             let conversation = aikit_cli::gateway_connectors::conversation_turn_resolver(&home)?;
+            // Coexistence: read the policy, observe the machine, disclose the
+            // decision before any carrier binds, and gate connector starts
+            // when the exclusive policy holds against a detected foreign
+            // harness gateway. Inspection only — no foreign service is
+            // touched.
+            let coexistence = aikit_cli::gateway_ops::serve_coexistence(&home)?;
+            for line in &coexistence.lines {
+                eprintln!("gateway coexistence: {line}");
+            }
             aikit_adapters::run_gateway_service_with_hooks(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
@@ -1262,6 +1271,7 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                         turn_sources: Some(conversation),
                         policy: None,
                     }),
+                    coexistence: coexistence.gate,
                 },
             )?;
             Ok(Reply::Text("gateway service stopped cleanly".into()))
@@ -1443,6 +1453,12 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 exit_code: json::EXIT_OK,
             })
         }
+        GatewaySub::Coexistence(a) => {
+            match aikit_cli::gateway_ops::coexistence_command(&home, &a)? {
+                aikit_cli::gateway_ops::CoexistenceOutput::Text(text) => Ok(Reply::Text(text)),
+                aikit_cli::gateway_ops::CoexistenceOutput::Data(data) => gateway_data(data),
+            }
+        }
         query => {
             let command = match query {
                 GatewaySub::Protocol(_) => aikit_adapters::GatewayCommand::Protocol,
@@ -1462,7 +1478,8 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Forward(_)
                 | GatewaySub::Remote(_)
                 | GatewaySub::Connector(_)
-                | GatewaySub::Agent(_) => unreachable!("handled above"),
+                | GatewaySub::Agent(_)
+                | GatewaySub::Coexistence(_) => unreachable!("handled above"),
             };
             let args = match query {
                 GatewaySub::Protocol(a)
@@ -1482,7 +1499,8 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Forward(_)
                 | GatewaySub::Remote(_)
                 | GatewaySub::Connector(_)
-                | GatewaySub::Agent(_) => unreachable!("handled above"),
+                | GatewaySub::Agent(_)
+                | GatewaySub::Coexistence(_) => unreachable!("handled above"),
             };
             let target = aikit_cli::gateway_ops::carrier_target(&home, &args)?;
             let response =

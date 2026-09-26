@@ -353,6 +353,11 @@ pub struct GatewayServiceHooks {
     /// still builds an engine: canonical conversation control works, and a
     /// connector that names no agent backing simply gets no turns.
     pub conversation: Option<GatewayConversationHooks>,
+    /// The coexistence gate at serve startup: with the `exclusive` policy and
+    /// a foreign harness gateway detected, a connector whose platform + bot
+    /// identity the foreign gateway is recorded to own is refused with a
+    /// named error. `None` gates nothing.
+    pub coexistence: Option<Arc<dyn crate::gateway_coexistence::GatewayCoexistenceGate>>,
 }
 
 /// How the service builds its conversation engine.
@@ -588,6 +593,7 @@ pub fn run_gateway_service_with_ticks(
             occupancy: None,
             connectors: Vec::new(),
             conversation: None,
+            coexistence: None,
         },
     )
 }
@@ -688,6 +694,7 @@ pub fn run_gateway_service_with_hooks(
         occupancy,
         connectors,
         conversation,
+        coexistence,
     } = hooks;
     config.validate()?;
     // Held until this function returns: the service is the only writer of its
@@ -726,6 +733,41 @@ pub fn run_gateway_service_with_hooks(
         engine: Some(engine),
         connections: ConnectionRegistry::default(),
     });
+
+    // Coexistence gate at serve startup: with the exclusive policy and a
+    // foreign harness gateway detected, a connector whose platform + bot
+    // identity the foreign gateway is recorded to own is refused with a named
+    // error, printed here. Every other connector passes; nothing is silent.
+    let connectors = match coexistence {
+        Some(gate) => {
+            let mut admitted = Vec::new();
+            for factory in connectors {
+                let (connector_ref, platform, enabled) = {
+                    let entry = factory.entry();
+                    (
+                        entry.connector_ref.clone(),
+                        entry.platform.clone(),
+                        entry.enabled,
+                    )
+                };
+                if !enabled {
+                    admitted.push(factory);
+                    continue;
+                }
+                match gate.admit_connector(&connector_ref, &platform) {
+                    Ok(()) => admitted.push(factory),
+                    Err(error) => {
+                        eprintln!(
+                            "connector {connector_ref} was not started by the coexistence \
+                             policy: {error}"
+                        );
+                    }
+                }
+            }
+            admitted
+        }
+        None => connectors,
+    };
 
     // Connector pumps run beside the carriers. A pump failure never takes a
     // carrier down; workers stop when the shutdown flag is set, which every
@@ -1825,6 +1867,7 @@ mod tests {
     use super::*;
     use std::{
         net::SocketAddr,
+        os::unix::net::UnixStream,
         sync::mpsc,
         time::{Duration, Instant},
     };
@@ -2168,11 +2211,7 @@ mod tests {
                 .unwrap()
         });
 
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !socket.exists() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(socket.exists());
+        wait_connectable(&socket);
         assert_eq!(
             fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
             0o600
@@ -2203,6 +2242,24 @@ mod tests {
             .unwrap();
         assert!(state.exists());
         assert!(!socket.exists());
+    }
+
+
+    /// Wait until the socket accepts a connection. The socket file appears at
+    /// bind(), but connect is refused until listen() — waiting for the file
+    /// alone races the listener.
+    fn wait_connectable(socket: &std::path::Path) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if UnixStream::connect(socket).is_ok() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the socket never accepted a connection"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// A fixture Workcell owner: answers from a map, counts how often it was
@@ -2299,6 +2356,7 @@ mod tests {
                 inner: Arc::clone(&inner),
             })],
             conversation: None,
+            coexistence: None,
         };
         let (done_tx, done_rx) = mpsc::channel();
         thread::spawn(move || {
@@ -2310,10 +2368,7 @@ mod tests {
                 ))
                 .unwrap()
         });
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !socket.exists() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-        }
+        wait_connectable(&socket);
 
         let subscribe = |after_sequence: u64| -> std::os::unix::net::UnixStream {
             let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
@@ -2468,6 +2523,7 @@ mod tests {
             })),
             connectors: Vec::new(),
             conversation: None,
+            coexistence: None,
         };
         let (done_tx, done_rx) = mpsc::channel();
         thread::spawn(move || {
@@ -2475,10 +2531,7 @@ mod tests {
                 .send(run_gateway_service_with_hooks(gateway(), config, hooks))
                 .unwrap()
         });
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !socket.exists() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-        }
+        wait_connectable(&socket);
         let mut stream = UnixStream::connect(&socket).unwrap();
         let first = line_exchange(
             &mut stream,
