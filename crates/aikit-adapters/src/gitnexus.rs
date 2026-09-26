@@ -21,7 +21,7 @@ use crate::runner::CommandRunner;
 #[path = "gitnexus_snapshot.rs"]
 mod snapshot;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct GitNexusCliSurface {
     available: bool,
     version: Option<String>,
@@ -70,6 +70,39 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
     ) -> Self {
         let binary = binary.into();
         let cli = discover_cli(&runner, &binary);
+        Self {
+            runner,
+            binary,
+            repo_name: repo_name.into(),
+            source,
+            revision,
+            provider: ProviderRef::parse("provider/code-index/gitnexus")
+                .expect("static GitNexus provider ref must be valid"),
+            root: None,
+            indexed: false,
+            index_observation: None,
+            isolate_reads: false,
+            cli,
+        }
+    }
+
+    /// As [`Self::with_binary`], but the executable's CLI surface is observed
+    /// once per installed binary rather than once per construction: a
+    /// knowledge call builds one provider per Work project, and re-probing
+    /// (`--version`, `--help`, `impact --help`, `analyze --help` — four Node
+    /// cold starts each) cost ~10 s on every call. The observation is keyed by
+    /// the resolved executable's path, size and modification time, held for
+    /// the process and persisted under `$AIKIT_HOME/cache` so separate
+    /// invocations reuse it; a reinstalled or upgraded binary is re-probed.
+    pub fn with_binary_memoised(
+        runner: R,
+        binary: impl Into<String>,
+        repo_name: impl Into<String>,
+        source: SourceRef,
+        revision: Option<SourceRevision>,
+    ) -> Self {
+        let binary = binary.into();
+        let cli = discover_cli_memoised(&runner, &binary);
         Self {
             runner,
             binary,
@@ -607,6 +640,85 @@ fn unavailable_surface(reason: String) -> GitNexusCliSurface {
         pdg_impact: false,
         reason: Some(reason),
     }
+}
+
+/// The identity an observed CLI surface is valid for: the resolved
+/// executable plus its size and modification time. `None` when the binary
+/// cannot be resolved to a file (then nothing is memoised).
+fn binary_identity(binary: &str) -> Option<String> {
+    let path = Path::new(binary);
+    let resolved = if path.components().count() > 1 {
+        Some(path.to_path_buf())
+    } else {
+        std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join(binary))
+                .find(|candidate| candidate.is_file())
+        })
+    }?;
+    let canonical = std::fs::canonicalize(&resolved).ok()?;
+    let meta = std::fs::metadata(&canonical).ok()?;
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(format!("{}|{}|{}", canonical.display(), meta.len(), modified))
+}
+
+fn surface_cache_path() -> Option<PathBuf> {
+    let home = std::env::var_os("AIKIT_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".aikit")))?;
+    Some(home.join("cache").join("gitnexus-cli-surface.json"))
+}
+
+fn discover_cli_memoised<R: CommandRunner>(runner: &R, binary: &str) -> GitNexusCliSurface {
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, OnceLock};
+    static SURFACES: OnceLock<Mutex<BTreeMap<String, GitNexusCliSurface>>> = OnceLock::new();
+    let Some(identity) = binary_identity(binary) else {
+        return discover_cli(runner, binary);
+    };
+    let memo = SURFACES.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Some(surface) = memo.lock().ok().and_then(|m| m.get(&identity).cloned()) {
+        return surface;
+    }
+    let cache_path = surface_cache_path();
+    let mut persisted: BTreeMap<String, GitNexusCliSurface> = cache_path
+        .as_ref()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let surface = match persisted.get(&identity) {
+        Some(surface) => surface.clone(),
+        None => {
+            let surface = discover_cli(runner, binary);
+            // Only a successful observation is remembered: an unavailable
+            // surface (a transient spawn failure) is re-probed next time.
+            if surface.available {
+                persisted.retain(|key, _| !key.starts_with(identity.split('|').next().unwrap_or("")));
+                persisted.insert(identity.clone(), surface.clone());
+                if let Some(path) = &cache_path {
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    if let Ok(bytes) = serde_json::to_vec_pretty(&persisted) {
+                        let temp = path.with_extension(format!("json.{}", std::process::id()));
+                        if std::fs::write(&temp, bytes).is_ok() {
+                            let _ = std::fs::rename(&temp, path);
+                        }
+                    }
+                }
+            }
+            surface
+        }
+    };
+    if let Ok(mut m) = memo.lock() {
+        m.insert(identity, surface.clone());
+    }
+    surface
 }
 
 fn probe_help<R: CommandRunner>(runner: &R, binary: &str, args: &[&str]) -> String {

@@ -786,7 +786,7 @@ fn code_lens_readings(
     } = revisions;
     let revision = SourceRevision::parse(format!("git:{head_sha}")).ok();
     let mut provider = match gitnexus_binary {
-        Some(bin) => GitNexusCodeIndexProvider::with_binary(
+        Some(bin) => GitNexusCodeIndexProvider::with_binary_memoised(
             SystemRunner::new(),
             bin.to_string(),
             repo_name.to_string(),
@@ -1175,7 +1175,7 @@ fn code_provider(repo: &KnowledgeCodeRepoArgs) -> Result<CodeProvider> {
     };
     let source = SourceRef::parse(format!("source:git/{repo_name}"))?;
     let provider = match &repo.gitnexus_binary {
-        Some(bin) => GitNexusCodeIndexProvider::with_binary(
+        Some(bin) => GitNexusCodeIndexProvider::with_binary_memoised(
             SystemRunner::new(),
             bin.clone(),
             repo_name,
