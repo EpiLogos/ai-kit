@@ -18,9 +18,17 @@ use clap::{Args, Parser, Subcommand};
 /// Re-exported from core so the CLI and the resolver name the same thing.
 pub use aikit_core::context::Isolation;
 
-/// `aikit` — a context-scoped capability router for agentic terminal work.
+/// `aikit` — orient in your World, find what applies, and act on it.
+///
+/// AIKit composes scoped Agent capability: it binds Skill sources, projects
+/// what a scope can actually run, and gives work an encounter surface. The
+/// everyday heads below are the ordinary entry (`world`, `search`, `act`,
+/// `compose`, `work`, `knowledge`, `praxis`, `history`, `system`, `explain`,
+/// `ui`); every pre-grouping root spelling still parses to its original
+/// handler as a compatibility alias, and `aikit system commands --json`
+/// emits the complete generated command reference.
 #[derive(Debug, Parser)]
-#[command(name = "aikit", version = version_line(), about, disable_help_subcommand = true)]
+#[command(name = "aikit", version = version_line(), about, long_about, after_help = ROOT_AFTER_HELP, disable_help_subcommand = true)]
 pub struct Cli {
     /// Emit machine-readable JSON on stdout.
     #[arg(long, global = true)]
@@ -34,14 +42,77 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
+/// The bounded everyday help: what this tool is for, a few task-shaped
+/// examples, and the route to the complete reference. Deliberately short —
+/// the complete, generated surface lives one command away.
+pub const ROOT_AFTER_HELP: &str = "\
+Task examples:
+  aikit world status                 where am I: the effective context reading
+  aikit search greet                 find a capability, Skill or resource by name
+  aikit act                          what can be done to the current subject
+  aikit act describe <ref>           the exact input/output/effect contract
+  aikit act invoke <ref> --input @task.json
+                                     perform one explicit action
+  aikit praxis list                  the Skills/Methods/Methodologies this scope carries
+  aikit set show <set>               what a SkillSet repertoire projects here
+  aikit whoami                       the joined World inhabitation reading
+  aikit explain <ref>                why a capability has its current effective evidence
+
+The complete command reference — every group, verb and flag — is generated
+from the parser itself:
+  aikit system commands --json       full structured command tree
+  aikit help <command>               help for any one command
+
+Every command accepts --json for a stable machine envelope and -C <dir> to
+resolve as if in another directory. Old root spellings (e.g. `aikit status`,
+`aikit whoami`) remain exact aliases of their group paths.";
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Manage pinned Git and machine-local Agent Skill sources.
-    Source(SourceCmd),
-    /// Author scoped, additive guidance for Agent Skills.
-    Skill(SkillCmd),
-    /// Bind directories and repositories to reusable project skill sets.
-    Project(ProjectCmd),
+    // -- Everyday heads (the default encounter) -----------------------------
+    /// Orient in the World: status, context, Project binding and inhabitation.
+    World(WorldGroup),
+    /// Resolve typed resources and operative expressions through the shared search field.
+    #[command(visible_alias = "resolve")]
+    Search(SearchArgs),
+    /// Find, describe and invoke what can actually be done here.
+    Act(ActGroup),
+    /// Compose a scope: profiles, declarations, generations and launch plans.
+    Compose(ComposeArgs),
+    /// Enter real work: sessions, tasks, harnesses and developmental commissions.
+    Work(WorkGroup),
+    /// Navigate provider-neutral project knowledge through the shared application faculty.
+    Knowledge(KnowledgeCmd),
+    /// Read praxis: Skills by form, Method discovery, and the operative disclosure.
+    Praxis(PraxisCmd),
+    /// Read cross-domain evidence-bearing History, optionally scoped to one Resource.
+    History(HistoryArgs),
+    /// System lifecycle: sources, configuration, credentials, repair and the
+    /// complete generated command reference.
+    System(SystemArgs),
+    /// Explain why a capability or V2 Resource has its current effective evidence.
+    Explain(ExplainArgs),
+    /// Open the terminal application (the default when no subcommand is given).
+    Ui(UiArgs),
+
+    // -- Compatibility spellings and the remaining roots --------------------
+    // Every root below keeps its original handler; where a group path also
+    // exists (e.g. `world status`), both spellings are the same command.
+    /// Jump to what you meant: act if unambiguous, else offer the candidates.
+    Z(ZArgs),
+    /// The tree: organise sets, see the resolved hook chain, inspect registries.
+    Tree(TreeArgs),
+    /// Show the effective view for the current context. (`world status` is the
+    /// same command.)
+    Status(StatusArgs),
+    /// Show what applying the current declarations would change.
+    Diff(DiffArgs),
+    /// Run the health checks.
+    Doctor(DoctorArgs),
+    /// Resolve one Model through the current roster without actualising it.
+    ModelResolve(ModelResolveArgs),
+    /// Read a Provider Source into the canonical Model catalogue, and read the catalogue back.
+    ModelCatalogue(ModelCatalogueCmd),
     /// Discover the foreign skill roots already on this machine and show them.
     Init(InitArgs),
     /// Survey the skill trees on this machine: which version is running, where.
@@ -57,57 +128,34 @@ pub enum Command {
     /// author's intake check. Validation only; nothing is registered, applied
     /// or projected.
     HarnessProfile(HarnessProfileCmd),
-    /// Jump to what you meant: act if unambiguous, else offer the candidates.
-    Z(ZArgs),
     /// Create, inspect and point harnesses at skill-sets.
     Set(SetCmd),
-    /// The tree: organise sets, see the resolved hook chain, inspect registries.
-    Tree(TreeArgs),
-    /// Open the palette (the default when no subcommand is given).
-    Ui(UiArgs),
-    /// Resolve typed resources and operative expressions through the shared search field.
-    #[command(visible_alias = "resolve")]
-    Search(SearchArgs),
-    /// Read the bounded Development Field carrier/provenance/Git substrate.
-    DevelopmentField(DevelopmentFieldArgs),
-    /// Project repository checkouts onto their canonical target (origin/main):
-    /// report drift, and with --apply fast-forward only the clean, behind ones.
-    Worktree(WorktreeCmd),
-    /// Navigate provider-neutral project knowledge through the shared application faculty.
-    Knowledge(KnowledgeCmd),
+    /// Author and inspect Skills and additive overlays.
+    /// (`praxis skill` is the same command.)
+    Skill(SkillCmd),
     /// Owner-side Flow cognition: explicit Contemplate(FlowRef) with
     /// preflight and Explain disclosure, and the changed-since-thought read.
     Flow(FlowCmd),
     /// Validate, write and repair `okf-wiki/v1` Agent Wiki files.
     Wiki(WikiCmd),
     /// Declare, validate and compress QL-shaped `WikiConstellation`s against
-    /// the pinned QL shape contract (CASE 18: the shape system's own product
-    /// surface, separate from `wiki` so this case never has to touch that
-    /// command's dispatch).
+    /// the pinned QL shape contract.
+    ///
+    /// The shape system's own product surface, separate from `wiki` so this
+    /// command never has to touch that command's dispatch.
     WikiShape(WikiShapeCmd),
     /// Construct revisioned native Wiki wholes and contextual participations.
     WikiConstruct(crate::wiki_construct::ConstructArgs),
-    /// Show the effective view for the current context.
-    Status(StatusArgs),
-    /// Emit the owner settings-disclosure descriptor for the O:I System surface.
-    System(SystemArgs),
     /// Resolve the shipped six-product Guardian family against this machine's registered sources.
     Family(FamilyArgs),
     /// Emit the owner configuration contribution for the O:I configuration plane.
     ConfigContribution(ConfigContributionArgs),
     /// Owner-native configuration verbs for the O:I configuration plane.
     Config(ConfigCmd),
-    /// Explain why a capability or V2 Resource has its current effective evidence.
-    Explain(ExplainArgs),
-    /// Read cross-domain evidence-bearing History, optionally scoped to one Resource.
-    History(HistoryArgs),
-    /// Show what applying the current declarations would change.
-    Diff(DiffArgs),
-    /// Run the health checks.
-    Doctor(DoctorArgs),
     /// Inspect, bind and explicitly import credentials.
     Credential(CredentialCmd),
-    /// Run an exported capability once.
+    /// Run an exported capability once. (`praxis run` is the same command for
+    /// exported capabilities.)
     Run(RunArgs),
     /// Enable a capability in a scope.
     Enable(ToggleArgs),
@@ -125,24 +173,19 @@ pub enum Command {
     Continuity(ContinuityCmd),
     /// Bring up, attach to and reconcile session topologies.
     Session(SessionCmd),
-    /// Operate durable SessionSpace semantics (folded companion surface; O-I #376).
+    /// Operate durable SessionSpace semantics (folded companion surface).
     ///
     /// A pure pass-through: everything after `session-space` (verbs, flags,
     /// `--help`) is forwarded verbatim to the one folded companion surface. The
     /// help flag is disabled here so `--help`/`-h` reach that surface instead of
     /// this wrapper; run `aikit session-space --help` for the verb list.
+    /// (`aikit work space` forwards to the same surface.)
     #[command(name = "session-space", disable_help_flag = true)]
     SessionSpace {
         /// Everything after `session-space`, forwarded verbatim.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<std::ffi::OsString>,
     },
-    /// Compose the launch plan: Central profile + Actuation instantiation receipt → actor bootstrap.
-    Compose(ComposeArgs),
-    /// Resolve one Model through the current roster without actualising it.
-    ModelResolve(ModelResolveArgs),
-    /// Read a Provider Source into the canonical Model catalogue, and read the catalogue back.
-    ModelCatalogue(ModelCatalogueCmd),
     /// Spawn, list and close agent tasks.
     Task(TaskCmd),
     /// Show the capture inbox.
@@ -157,9 +200,9 @@ pub enum Command {
     Bypass(BypassCmd),
     /// Install, launch and inspect agent clients.
     Client(ClientCmd),
-    /// Run a harness against a declared model route (ADR 0005 Stage 2).
+    /// Run a harness against a declared model route.
     Harness(HarnessCmd),
-    /// List, check and install user-owned alias families (ADR 0005 Stage 1).
+    /// List, check and install user-owned alias families.
     Alias(AliasCmd),
     /// Install multiplexer integration and detect the current stack.
     Mux(MuxCmd),
@@ -171,9 +214,6 @@ pub enum Command {
     Jobs(JobsArgs),
     /// Discover Methods: skills whose description carries the METHOD: prefix.
     Method(MethodArgs),
-    /// Read praxis: list Skills by form (Skill / Method / Methodology) and
-    /// disclose an Agent's carried, selected and operative praxis.
-    Praxis(PraxisCmd),
     /// A2A interoperability projections (the published Agent Card).
     A2a(A2aCmd),
     /// Authorise and read versioned Routine invocation evidence.
@@ -205,16 +245,920 @@ pub enum Command {
     Gateway(GatewayCmd),
     /// Who and where am I: the joined World inhabitation reading
     /// (`aikit.inhabitation-reading/v1`) over Central, Actuation, Factory and
-    /// AIKit's own SessionSpace/Redis projections.
+    /// AIKit's own SessionSpace/Redis projections. (`world whoami` is the same
+    /// command.)
     Whoami(WhoamiArgs),
     /// Trace the current operation back to ProjectCentral ground
     /// (`aikit.refocus-reading/v1`): work, Position, NOW, body, nearby work,
-    /// changed sources and the Return target.
+    /// changed sources and the Return target. (`world refocus` is the same
+    /// command.)
     Refocus(RefocusArgs),
     /// Occupy a World Position and launch a body into it: claim the tenure
     /// through Actuation, then exec the harness with `OI_POSITION_REF` and
     /// `OI_OCCUPANT_GENERATION` stamped. Leaving is explicit (`--release`).
     Inhabit(InhabitArgs),
+    /// Manage pinned Git and machine-local Agent Skill sources.
+    Source(SourceCmd),
+    /// Bind directories and repositories to reusable project skill sets.
+    Project(ProjectCmd),
+    /// Read the bounded Development Field carrier/provenance/Git substrate.
+    DevelopmentField(DevelopmentFieldArgs),
+    /// Project repository checkouts onto their canonical target (origin/main):
+    /// report drift, and with --apply fast-forward only the clean, behind ones.
+    Worktree(WorktreeCmd),
+}
+
+// ---------------------------------------------------------------------------
+// Canonical encounter groups (classification §1).
+//
+// Each group member re-uses the exact `Args`/`Cmd` type its old root spelling
+// parses into, and dispatch hands it to the same handler function. A group
+// path is therefore a compatibility alias of its old root by construction —
+// one implementation per semantic operation, no argument-envelope or JSON
+// schema drift, no entity renames. The parse-parity test
+// (`tests/cli_route_parity.rs`) pins this table against the parser.
+// ---------------------------------------------------------------------------
+
+/// `aikit world` — orient: where am I, what binds here, who inhabits it.
+#[derive(Debug, Args)]
+pub struct WorldGroup {
+    #[command(subcommand)]
+    pub command: WorldGroupCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorldGroupCommand {
+    /// Bind directories and repositories to reusable project skill sets.
+    Project(ProjectCmd),
+    /// Show the effective view for the current context.
+    Status(StatusArgs),
+    /// Inspect and change context bindings.
+    Context(ContextCmd),
+    /// Read the bounded Development Field carrier/provenance/Git substrate.
+    #[command(name = "development-field")]
+    DevelopmentField(DevelopmentFieldArgs),
+    /// A2A interoperability projections (the published Agent Card).
+    A2a(A2aCmd),
+    /// Prepare, inspect and mutate Redis-backed participant NOW context.
+    #[command(name = "now-context")]
+    NowContext(NowContextCmd),
+    /// Who and where am I: the joined World inhabitation reading.
+    Whoami(WhoamiArgs),
+    /// Trace the current operation back to ProjectCentral ground.
+    Refocus(RefocusArgs),
+    /// Occupy a World Position and launch a body into it.
+    Inhabit(InhabitArgs),
+}
+
+impl WorldGroupCommand {
+    pub fn route(&self) -> &'static str {
+        match self {
+            Self::Project(c) => project_route(c),
+            Self::Status(_) => "cmd_status",
+            Self::Context(c) => context_route(c),
+            Self::DevelopmentField(_) => "cmd_development_field",
+            Self::A2a(c) => a2a_route(c),
+            Self::NowContext(c) => now_context_route(c),
+            Self::Whoami(_) => "cmd_whoami",
+            Self::Refocus(_) => "cmd_refocus",
+            Self::Inhabit(_) => "cmd_inhabit",
+        }
+    }
+}
+
+/// `aikit work` — enter real work: sessions, tasks, harnesses and commissions.
+#[derive(Debug, Args)]
+pub struct WorkGroup {
+    #[command(subcommand)]
+    pub command: WorkGroupCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkGroupCommand {
+    /// Inspect the continuity engine's star commands and verify a close-out.
+    Continuity(ContinuityCmd),
+    /// Bring up, attach to and reconcile session topologies.
+    Session(SessionCmd),
+    /// Operate the folded SessionSpace owner surface; arguments are forwarded
+    /// verbatim (the `session-space` root spelling reaches the same surface).
+    #[command(name = "space", disable_help_flag = true)]
+    Space {
+        /// Everything after `work space`, forwarded verbatim.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
+    },
+    /// Launch a native client with the current context's projection. Install
+    /// and status stay under System.
+    #[command(name = "client")]
+    Client(ClientWorkCmd),
+    /// Spawn, list and close agent tasks.
+    Task(TaskCmd),
+    /// List tracked background jobs.
+    Jobs(JobsArgs),
+    /// Run a harness against a declared model route.
+    Harness(HarnessCmd),
+    /// Start developmental work through Factory's native Commission boundary.
+    Factory(FactoryCmd),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ClientWorkCommand {
+    /// Launch a client with the current context's projection.
+    Launch(ClientLaunchArgs),
+}
+
+/// `aikit work client` — the launch side of the native client surface.
+#[derive(Debug, Args)]
+pub struct ClientWorkCmd {
+    #[command(subcommand)]
+    pub command: ClientWorkCommand,
+}
+
+impl WorkGroupCommand {
+    pub fn route(&self) -> &'static str {
+        match self {
+            Self::Continuity(c) => continuity_route(c),
+            Self::Session(c) => session_route(c),
+            Self::Space { .. } => "session-space-forward",
+            Self::Client(c) => match c.command {
+                ClientWorkCommand::Launch(_) => "cmd_client_launch",
+            },
+            Self::Task(c) => task_route(c),
+            Self::Jobs(_) => "cmd_jobs",
+            Self::Harness(c) => harness_route(c),
+            Self::Factory(c) => factory_route(c),
+        }
+    }
+}
+
+/// `aikit act` — contextual discovery, exact contracts, explicit invocation.
+///
+/// One transport over the existing native invocation seam (the application
+/// runner and the resource index); no second registry. Search may find an
+/// Action; `act describe` returns its exact contract; `act invoke` performs
+/// it once, resolving the ref before any effect.
+#[derive(Debug, Args)]
+pub struct ActGroup {
+    #[command(subcommand)]
+    pub command: Option<ActGroupCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ActGroupCommand {
+    /// Discover Actions applicable to a subject (default: the current scope).
+    Discover(ActDiscoverArgs),
+    /// Describe the exact input/output/effect contract of one ref.
+    Describe(ActDescribeArgs),
+    /// Invoke one ref through the existing native runner, once.
+    Invoke(ActInvokeArgs),
+}
+
+/// `aikit act` / `aikit act discover`.
+#[derive(Debug, Args)]
+pub struct ActDiscoverArgs {
+    /// Discover Actions for this subject ref instead of the current scope.
+    #[arg(long, value_name = "REF")]
+    pub subject: Option<String>,
+    /// Rank Actions against this text (uses the shared fuzzy scorer).
+    #[arg(long, value_name = "TEXT")]
+    pub query: Option<String>,
+    /// Cap the number of rows returned (default 24).
+    #[arg(long, default_value_t = 24)]
+    pub limit: usize,
+}
+
+/// `aikit act describe <ref>`.
+#[derive(Debug, Args)]
+pub struct ActDescribeArgs {
+    /// The Action or capability ref to describe, as search or discovery
+    /// returned it.
+    #[arg(value_name = "REF")]
+    pub reference: String,
+}
+
+/// `aikit act invoke <ref>`.
+#[derive(Debug, Args)]
+pub struct ActInvokeArgs {
+    /// The ref to invoke, exactly as describe/search returned it.
+    #[arg(value_name = "REF")]
+    pub reference: String,
+    /// The action input as inline JSON, or `@FILE` to read it. Contributed to
+    /// the invoked operation as one argument, verbatim — the existing native
+    /// seam speaks argv, and this doorway adds no second input grammar.
+    #[arg(long, value_name = "JSON|@FILE")]
+    pub input: Option<String>,
+    /// Confirm running an executable whose revision has not been reviewed
+    /// (the same trust gate `aikit run` applies).
+    #[arg(long)]
+    pub confirm: bool,
+    /// Remaining arguments, passed through to the invoked operation after `--`.
+    #[arg(last = true, value_name = "ARGS")]
+    pub args: Vec<String>,
+}
+
+// `aikit system` members. The root `system` keeps its bare owner disclosure
+// (`system --json`); these are grouped operator surfaces over the same
+// handlers.
+#[derive(Debug, Subcommand)]
+pub enum SystemGroupCommand {
+    /// Manage pinned Git and machine-local Agent Skill sources.
+    Source(SourceCmd),
+    /// Discover the foreign skill roots already on this machine and show them.
+    Init(InitArgs),
+    /// Survey the skill trees on this machine: which version is running, where.
+    Collate(CollateArgs),
+    /// Move a foreign skill root into AIKit ownership through a reversible Procedure.
+    Adopt(AdoptArgs),
+    /// Inspect and undo recorded Procedures.
+    Procedure(ProcedureCmd),
+    /// Validate an externally authored harness-profile document. Validation
+    /// only; nothing is registered, applied or projected.
+    #[command(name = "harness-profile")]
+    HarnessProfile(HarnessProfileCmd),
+    /// Project repository checkouts onto their canonical target.
+    Worktree(WorktreeCmd),
+    /// Emit the owner configuration contribution for the O:I configuration plane.
+    #[command(name = "config-contribution")]
+    ConfigContribution(ConfigContributionArgs),
+    /// Owner-native configuration verbs for the O:I configuration plane.
+    Config(ConfigCmd),
+    /// Run the health checks; repair is explicit.
+    Doctor(DoctorArgs),
+    /// Inspect, bind and explicitly import credentials.
+    Credential(CredentialCmd),
+    /// Issue, list and revoke hook bypass tokens.
+    Bypass(BypassCmd),
+    /// Install, launch and inspect agent clients.
+    Client(ClientCmd),
+    /// Install multiplexer integration and detect the current stack.
+    Mux(MuxCmd),
+    /// The hook dispatcher entry point (invoked by clients, not usually by hand).
+    Hook(HookCmd),
+    /// Read a Provider Source into the canonical Model catalogue, and read the
+    /// catalogue back. Refresh is provider maintenance.
+    #[command(name = "model-catalogue")]
+    ModelCatalogue(ModelCatalogueCmd),
+    /// Record review decisions for catalogued capsule revisions.
+    Trust(TrustCmd),
+    /// Run, inspect and query the Agency Gateway service.
+    Gateway(GatewayCmd),
+    /// Print shell integration to be sourced from an rc file. Never evaluated
+    /// automatically.
+    Shell(ShellCmd),
+    /// Managed generation lifecycle (cleanup).
+    Generations(SystemGenerationsCmd),
+    /// Emit the complete generated command reference for this binary.
+    Commands(SystemCommandsArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SystemGenerationsCommand {
+    /// Garbage-collect old generations (managed cleanup only).
+    Prune(PruneArgs),
+}
+
+/// `aikit system generations` — the managed generation lifecycle group.
+#[derive(Debug, Args)]
+pub struct SystemGenerationsCmd {
+    #[command(subcommand)]
+    pub command: SystemGenerationsCommand,
+}
+
+/// `aikit system commands`.
+#[derive(Debug, Args)]
+pub struct SystemCommandsArgs {}
+
+// `aikit compose` members: composition is scope declaration and
+// materialisation. The root `compose` keeps its launch-plan flags.
+#[derive(Debug, Subcommand)]
+pub enum ComposeGroupCommand {
+    /// Compute the launch plan for the current composition (no realisation).
+    Plan(ComposePlanArgs),
+    /// Create and inspect project-specific profile lenses.
+    Profile(ProfileCmd),
+    /// Show what applying the current declarations would change. No mutation.
+    Diff(DiffArgs),
+    /// Enable a capability in a scope.
+    Enable(ToggleArgs),
+    /// Disable a capability in a scope.
+    Disable(ToggleArgs),
+    /// Apply a profile to a scope.
+    Use(UseArgs),
+    /// Materialise the current declarations into a new generation.
+    Apply(ApplyArgs),
+    /// Return the previous generation (generation recovery, never human source).
+    Rollback(RollbackArgs),
+    /// List, check and install user-owned alias families.
+    Alias(AliasCmd),
+    /// Model selection without actualising it.
+    #[command(name = "model")]
+    Model(ComposeModelCmd),
+}
+
+/// `aikit compose plan`.
+#[derive(Debug, Args)]
+pub struct ComposePlanArgs {}
+
+/// `aikit compose model` — model selection without actualising it.
+#[derive(Debug, Args)]
+pub struct ComposeModelCmd {
+    #[command(subcommand)]
+    pub command: ComposeModelCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ComposeModelCommand {
+    /// Resolve one Model through the current roster without actualising it.
+    Resolve(ModelResolveArgs),
+    /// Read the resolved Model catalogue (the composed read side).
+    Catalogue(ComposeModelCatalogueCmd),
+}
+
+/// `aikit compose model catalogue` — the composed read side of the catalogue.
+#[derive(Debug, Args)]
+pub struct ComposeModelCatalogueCmd {
+    #[command(subcommand)]
+    pub command: ComposeModelCatalogueCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ComposeModelCatalogueCommand {
+    /// Show the resolved catalogue: first-party seed, Provider Sources, owner entries.
+    Show(ModelCatalogueShowArgs),
+}
+
+/// `aikit history` members beyond the common timeline.
+#[derive(Debug, Subcommand)]
+pub enum HistoryGroupCommand {
+    /// List recently run invocations (actual completed runs).
+    Recent(RecentArgs),
+    /// Show usage statistics.
+    Stats(StatsArgs),
+    /// Export the event log (operator depth).
+    Log(LogCmd),
+    /// List recent hook and run failures, with original errors.
+    Failures(FailuresArgs),
+    /// List bypasses issued and spent (audit, not authority).
+    Bypasses(BypassesArgs),
+}
+
+/// One semantic handler, named for the parse-parity test and the generated
+/// command reference. A canonical group path and its old root spelling must
+/// produce the same route — that is what "same-handler alias" means, and the
+/// parity test holds both spellings to it.
+impl Command {
+    pub fn route(&self) -> &'static str {
+        match self {
+            Self::World(group) => group.command.route(),
+            Self::Search(_) => "cmd_search",
+            Self::Act(group) => match &group.command {
+                None => "cmd_act_discover",
+                Some(ActGroupCommand::Discover(_)) => "cmd_act_discover",
+                Some(ActGroupCommand::Describe(_)) => "cmd_act_describe",
+                Some(ActGroupCommand::Invoke(_)) => "cmd_act_invoke",
+            },
+            Self::Compose(a) => compose_route(a),
+            Self::Work(group) => group.command.route(),
+            Self::Knowledge(c) => knowledge_route(&c.command),
+            Self::Praxis(c) => praxis_route(&c.command),
+            Self::History(a) => history_route(a),
+            Self::System(a) => system_route(a),
+            Self::Explain(_) => "cmd_explain",
+            Self::Ui(_) => "open_surface",
+            Self::Z(_) => "cmd_z",
+            Self::Tree(_) => "cmd_tree",
+            Self::Status(_) => "cmd_status",
+            Self::Skill(c) => skill_route(&c.command),
+            Self::Diff(_) => "cmd_diff",
+            Self::Doctor(_) => "cmd_doctor",
+            Self::ModelResolve(_) => "cmd_model_resolve",
+            Self::ModelCatalogue(c) => model_catalogue_route(&c.command),
+            Self::Init(_) => "cmd_init",
+            Self::Collate(_) => "cmd_collate",
+            Self::Adopt(_) => "cmd_adopt",
+            Self::Procedure(c) => procedure_route(&c.command),
+            Self::Profile(c) => profile_route(&c.command),
+            Self::HarnessProfile(c) => harness_profile_route(&c.command),
+            Self::Set(c) => set_route(&c.command),
+            Self::Flow(c) => flow_route(&c.command),
+            Self::Wiki(c) => wiki_route(&c.command),
+            Self::WikiShape(c) => wiki_shape_route(&c.command),
+            Self::WikiConstruct(_) => "wiki_construct::run",
+            Self::Family(_) => "cmd_family",
+            Self::ConfigContribution(_) => "config_plane::contribution_document",
+            Self::Config(_) => "config_plane::dispatch",
+            Self::Credential(c) => credential_route(&c.command),
+            Self::Run(_) => "cmd_run",
+            Self::Enable(_) => "cmd_toggle_enable",
+            Self::Disable(_) => "cmd_toggle_disable",
+            Self::Use(_) => "cmd_use",
+            Self::Apply(_) => "cmd_apply",
+            Self::Rollback(_) => "cmd_rollback",
+            Self::Context(c) => context_route(c),
+            Self::Continuity(c) => continuity_route(c),
+            Self::Session(c) => session_route(c),
+            Self::SessionSpace { .. } => "session-space-forward",
+            Self::Task(c) => task_route(c),
+            Self::Inbox(_) => "cmd_inbox",
+            Self::Capture(_) => "cmd_capture",
+            Self::Promote(_) => "cmd_promote",
+            Self::Prune(_) => "cmd_prune",
+            Self::Bypass(c) => bypass_route(&c.command),
+            Self::Client(c) => client_route(&c.command),
+            Self::Harness(c) => harness_route(c),
+            Self::Alias(c) => alias_route(&c.command),
+            Self::Mux(c) => mux_route(&c.command),
+            Self::Hook(c) => hook_route(&c.command),
+            Self::Capabilities(c) => capabilities_route(&c.command),
+            Self::Jobs(_) => "cmd_jobs",
+            Self::Method(c) => method_route(&c.command),
+            Self::A2a(c) => a2a_route(c),
+            Self::Routine(c) => routine_route(&c.command),
+            Self::Jev(c) => jev_route(&c.command),
+            Self::NowContext(c) => now_context_route(c),
+            Self::Factory(c) => factory_route(c),
+            Self::Trust(c) => trust_route(&c.command),
+            Self::Recent(_) => "cmd_recent",
+            Self::Stats(_) => "cmd_stats",
+            Self::Log(c) => log_route(&c.command),
+            Self::Shell(c) => shell_route(&c.command),
+            Self::Unused(_) => "cmd_unused",
+            Self::Failures(_) => "cmd_failures",
+            Self::Bypasses(_) => "cmd_bypasses",
+            Self::Gateway(c) => gateway_route(&c.command),
+            Self::Whoami(_) => "cmd_whoami",
+            Self::Refocus(_) => "cmd_refocus",
+            Self::Inhabit(_) => "cmd_inhabit",
+            Self::Source(c) => source_route(&c.command),
+            Self::Project(c) => project_route(c),
+            Self::DevelopmentField(_) => "cmd_development_field",
+            Self::Worktree(c) => worktree_route(&c.command),
+        }
+    }
+}
+
+/// Route a parsed `system` invocation: bare stays the owner disclosure.
+pub fn system_route(args: &SystemArgs) -> &'static str {
+    match &args.command {
+        None => "cmd_system",
+        Some(SystemGroupCommand::Source(c)) => source_route(&c.command),
+        Some(SystemGroupCommand::Init(_)) => "cmd_init",
+        Some(SystemGroupCommand::Collate(_)) => "cmd_collate",
+        Some(SystemGroupCommand::Adopt(_)) => "cmd_adopt",
+        Some(SystemGroupCommand::Procedure(c)) => procedure_route(&c.command),
+        Some(SystemGroupCommand::HarnessProfile(c)) => harness_profile_route(&c.command),
+        Some(SystemGroupCommand::Worktree(c)) => worktree_route(&c.command),
+        Some(SystemGroupCommand::ConfigContribution(_)) => "config_plane::contribution_document",
+        Some(SystemGroupCommand::Config(_)) => "config_plane::dispatch",
+        Some(SystemGroupCommand::Doctor(_)) => "cmd_doctor",
+        Some(SystemGroupCommand::Credential(c)) => credential_route(&c.command),
+        Some(SystemGroupCommand::Bypass(c)) => bypass_route(&c.command),
+        Some(SystemGroupCommand::Client(c)) => client_route(&c.command),
+        Some(SystemGroupCommand::Mux(c)) => mux_route(&c.command),
+        Some(SystemGroupCommand::Hook(c)) => hook_route(&c.command),
+        Some(SystemGroupCommand::ModelCatalogue(c)) => model_catalogue_route(&c.command),
+        Some(SystemGroupCommand::Trust(c)) => trust_route(&c.command),
+        Some(SystemGroupCommand::Gateway(c)) => gateway_route(&c.command),
+        Some(SystemGroupCommand::Shell(c)) => shell_route(&c.command),
+        Some(SystemGroupCommand::Generations(c)) => match c.command {
+            SystemGenerationsCommand::Prune(_) => "cmd_prune",
+        },
+        Some(SystemGroupCommand::Commands(_)) => "cmd_system_commands",
+    }
+}
+
+fn compose_route(args: &ComposeArgs) -> &'static str {
+    match &args.command {
+        None => "cmd_compose",
+        Some(ComposeGroupCommand::Plan(_)) => "cmd_compose",
+        Some(ComposeGroupCommand::Profile(c)) => profile_route(&c.command),
+        Some(ComposeGroupCommand::Diff(_)) => "cmd_diff",
+        Some(ComposeGroupCommand::Enable(_)) => "cmd_toggle_enable",
+        Some(ComposeGroupCommand::Disable(_)) => "cmd_toggle_disable",
+        Some(ComposeGroupCommand::Use(_)) => "cmd_use",
+        Some(ComposeGroupCommand::Apply(_)) => "cmd_apply",
+        Some(ComposeGroupCommand::Rollback(_)) => "cmd_rollback",
+        Some(ComposeGroupCommand::Alias(c)) => alias_route(&c.command),
+        Some(ComposeGroupCommand::Model(m)) => match &m.command {
+            ComposeModelCommand::Resolve(_) => "cmd_model_resolve",
+            ComposeModelCommand::Catalogue(c) => match &c.command {
+                ComposeModelCatalogueCommand::Show(_) => "cmd_model_catalogue",
+            },
+        },
+    }
+}
+
+fn knowledge_route(command: &KnowledgeSub) -> &'static str {
+    match command {
+        KnowledgeSub::Search(_) => "cmd_knowledge_search",
+        KnowledgeSub::Resolve(_) => "cmd_knowledge_resolve",
+        KnowledgeSub::Open(_) => "cmd_knowledge_open",
+        KnowledgeSub::Read(_) => "cmd_knowledge_read",
+        KnowledgeSub::Relations(_) => "cmd_knowledge_relations",
+        KnowledgeSub::Graph(_) => "cmd_knowledge_graph",
+        KnowledgeSub::Route(_) => "cmd_knowledge_route",
+        KnowledgeSub::Frame(_) => "cmd_knowledge_frame",
+        KnowledgeSub::Sources(_) => "cmd_knowledge_sources",
+        KnowledgeSub::Explain(_) => "cmd_knowledge_explain",
+        KnowledgeSub::History(_) => "cmd_knowledge_history",
+        KnowledgeSub::Status(_) => "cmd_knowledge_status",
+        KnowledgeSub::Forget(c) => match &c.command {
+            KnowledgeForgetSub::Destination(_) => "cmd_knowledge_forget_destination",
+            KnowledgeForgetSub::Route(_) => "cmd_knowledge_forget_route",
+            KnowledgeForgetSub::Project(_) => "cmd_knowledge_forget_project",
+            KnowledgeForgetSub::All(_) => "cmd_knowledge_forget_all",
+        },
+        KnowledgeSub::Code(c) => knowledge_code_route(&c.command),
+        KnowledgeSub::Flow(c) => flow_route(&c.command),
+        KnowledgeSub::Wiki(c) => wiki_route(&c.command),
+        KnowledgeSub::WikiShape(c) => wiki_shape_route(&c.command),
+        KnowledgeSub::WikiConstruct(_) => "wiki_construct::run",
+        KnowledgeSub::Jev(c) => jev_route(&c.command),
+    }
+}
+
+fn knowledge_code_route(command: &KnowledgeCodeSub) -> &'static str {
+    match command {
+        KnowledgeCodeSub::Status(_) => "cmd_knowledge_code_status",
+        KnowledgeCodeSub::Index(_) => "cmd_knowledge_code_index",
+        KnowledgeCodeSub::Search(_) => "cmd_knowledge_code_search",
+        KnowledgeCodeSub::Context(_) => "cmd_knowledge_code_context",
+        KnowledgeCodeSub::Impact(_) => "cmd_knowledge_code_impact",
+        KnowledgeCodeSub::Trace(_) => "cmd_knowledge_code_trace",
+        KnowledgeCodeSub::Changes(_) => "cmd_knowledge_code_changes",
+        KnowledgeCodeSub::Check(_) => "cmd_knowledge_code_check",
+    }
+}
+
+fn praxis_route(command: &PraxisSub) -> &'static str {
+    match command {
+        PraxisSub::List { .. } => "cmd_praxis_list",
+        PraxisSub::Disclose { .. } => "cmd_praxis_disclose",
+        PraxisSub::Skill(c) => skill_route(&c.command),
+        PraxisSub::Set(c) => set_route(&c.command),
+        PraxisSub::Family(_) => "cmd_family",
+        PraxisSub::Run(_) => "cmd_run",
+        PraxisSub::Inbox(_) => "cmd_inbox",
+        PraxisSub::Capture(_) => "cmd_capture",
+        PraxisSub::Promote(_) => "cmd_promote",
+        PraxisSub::Capabilities(c) => capabilities_route(&c.command),
+        PraxisSub::Method(c) => method_route(&c.command),
+        PraxisSub::Routine(c) => routine_route(&c.command),
+        PraxisSub::Unused(_) => "cmd_unused",
+    }
+}
+
+fn history_route(args: &HistoryArgs) -> &'static str {
+    match &args.command {
+        None => "cmd_history",
+        Some(HistoryGroupCommand::Recent(_)) => "cmd_recent",
+        Some(HistoryGroupCommand::Stats(_)) => "cmd_stats",
+        Some(HistoryGroupCommand::Log(c)) => log_route(&c.command),
+        Some(HistoryGroupCommand::Failures(_)) => "cmd_failures",
+        Some(HistoryGroupCommand::Bypasses(_)) => "cmd_bypasses",
+    }
+}
+
+fn a2a_route(command: &A2aCmd) -> &'static str {
+    match &command.command {
+        A2aSub::Card { .. } => "cmd_a2a_card",
+    }
+}
+
+fn source_route(command: &SourceSub) -> &'static str {
+    match command {
+        SourceSub::BindCentral(_) => "cmd_source_bind_central",
+        SourceSub::AddDirectory(_) => "cmd_source_add_directory",
+        SourceSub::AddGit(_) => "cmd_source_add_git",
+        SourceSub::SetRevision(_) => "cmd_source_set_revision",
+        SourceSub::Sync(_) => "cmd_source_sync",
+        SourceSub::Show(_) => "cmd_source_show",
+        SourceSub::Promote(_) => "cmd_source_promote",
+        SourceSub::Rollback(_) => "cmd_source_rollback",
+        SourceSub::Remove(_) => "cmd_source_remove",
+    }
+}
+
+fn project_route(command: &ProjectCmd) -> &'static str {
+    match &command.command {
+        ProjectSub::Bind(_) => "cmd_project_bind",
+        ProjectSub::Show(_) => "cmd_project_show",
+        ProjectSub::List(_) => "cmd_project_list",
+        ProjectSub::Defaults(_) => "cmd_project_defaults",
+        ProjectSub::Unbind(_) => "cmd_project_unbind",
+    }
+}
+
+fn context_route(command: &ContextCmd) -> &'static str {
+    match &command.command {
+        ContextSub::Current(_) => "cmd_context_current",
+        ContextSub::List(_) => "cmd_context_list",
+        ContextSub::Bind(_) => "cmd_context_bind",
+        ContextSub::Reset(_) => "cmd_context_reset",
+        ContextSub::Env(_) => "cmd_context_env",
+    }
+}
+
+fn procedure_route(command: &ProcedureSub) -> &'static str {
+    match command {
+        ProcedureSub::List(_) => "cmd_procedure_list",
+        ProcedureSub::Plan(c) => match &c.command {
+            ProcedurePlanSub::Adopt(_) => "cmd_procedure_plan_adopt",
+            ProcedurePlanSub::ProfileFork(_) => "cmd_procedure_plan_profile_fork",
+        },
+        ProcedureSub::Diff(_) => "cmd_procedure_diff",
+        ProcedureSub::Run(_) => "cmd_procedure_run",
+        ProcedureSub::Undo(_) => "cmd_procedure_undo",
+    }
+}
+
+fn profile_route(command: &ProfileSub) -> &'static str {
+    match command {
+        ProfileSub::Fork(_) => "cmd_profile_fork",
+        ProfileSub::Diff(_) => "cmd_profile_diff",
+    }
+}
+
+fn harness_profile_route(command: &HarnessProfileSub) -> &'static str {
+    match command {
+        HarnessProfileSub::Validate(_) => "cmd_harness_profile_validate",
+    }
+}
+
+fn set_route(command: &SetSub) -> &'static str {
+    match command {
+        SetSub::List(_) => "cmd_set_list",
+        SetSub::Show(_) => "cmd_set_show",
+        SetSub::Create(_) => "cmd_set_create",
+        SetSub::Add(_) => "cmd_set_add",
+        SetSub::Remove(_) => "cmd_set_remove",
+        SetSub::Rename(_) => "cmd_set_rename",
+        SetSub::Delete(_) => "cmd_set_delete",
+        SetSub::Package(_) => "cmd_set_package",
+    }
+}
+
+fn flow_route(command: &FlowSub) -> &'static str {
+    match command {
+        FlowSub::Preflight(_) => "cmd_flow_preflight",
+        FlowSub::Contemplate(_) => "cmd_flow_contemplate",
+        FlowSub::ChangedSince(_) => "cmd_flow_changed_since",
+    }
+}
+
+fn wiki_route(command: &WikiSub) -> &'static str {
+    match command {
+        WikiSub::Projection(_) => "cmd_wiki_projection",
+        WikiSub::Validate(_) => "cmd_wiki_validate",
+        WikiSub::Node(_) => "cmd_wiki_node",
+        WikiSub::Edge(_) => "cmd_wiki_edge",
+        WikiSub::Space(_) => "cmd_wiki_space",
+        WikiSub::Root(_) => "cmd_wiki_root",
+        WikiSub::Stage(_) => "cmd_wiki_stage",
+        WikiSub::Ingest(_) => "cmd_wiki_ingest",
+        WikiSub::Query(_) => "cmd_wiki_query",
+        WikiSub::Maintenance(_) => "cmd_wiki_maintenance",
+    }
+}
+
+fn wiki_shape_route(command: &WikiShapeSub) -> &'static str {
+    match command {
+        WikiShapeSub::Declare(_) => "cmd_wiki_shape_declare",
+        WikiShapeSub::Validate(_) => "cmd_wiki_shape_validate",
+        WikiShapeSub::Compress(_) => "cmd_wiki_shape_compress",
+    }
+}
+
+fn skill_route(command: &SkillSub) -> &'static str {
+    match command {
+        SkillSub::Overlay(c) => match &c.command {
+            SkillOverlaySub::Set(_) => "cmd_skill_overlay_set",
+            SkillOverlaySub::Show(_) => "cmd_skill_overlay_show",
+            SkillOverlaySub::Clear(_) => "cmd_skill_overlay_clear",
+        },
+    }
+}
+
+fn credential_route(command: &CredentialSub) -> &'static str {
+    match command {
+        CredentialSub::Setup(_) => "cmd_credential_setup",
+        CredentialSub::Explain(_) => "cmd_credential_explain",
+        CredentialSub::List(_) => "cmd_credential_list",
+        CredentialSub::Rotate(_) => "cmd_credential_rotate",
+        CredentialSub::Revoke(_) => "cmd_credential_revoke",
+        CredentialSub::Discover(_) => "cmd_credential_discover",
+        CredentialSub::Verify(_) => "cmd_credential_verify",
+    }
+}
+
+fn bypass_route(command: &BypassSub) -> &'static str {
+    match command {
+        BypassSub::Issue(_) => "cmd_bypass_issue",
+        BypassSub::List(_) => "cmd_bypass_list",
+        BypassSub::Revoke(_) => "cmd_bypass_revoke",
+    }
+}
+
+fn client_route(command: &ClientSub) -> &'static str {
+    match command {
+        ClientSub::Install(_) => "cmd_client_install",
+        ClientSub::Launch(_) => "cmd_client_launch",
+        ClientSub::Status(_) => "cmd_client_status",
+    }
+}
+
+fn harness_route(command: &HarnessCmd) -> &'static str {
+    match &command.command {
+        HarnessSub::Disclose { .. } => "cmd_harness_disclose",
+        HarnessSub::Run(_) => "cmd_harness_run",
+        HarnessSub::Auth(_) => "cmd_harness_auth",
+    }
+}
+
+fn alias_route(command: &AliasSub) -> &'static str {
+    match command {
+        AliasSub::List => "cmd_alias_list",
+        AliasSub::Check => "cmd_alias_check",
+        AliasSub::Install(_) => "cmd_alias_install",
+    }
+}
+
+fn mux_route(command: &MuxSub) -> &'static str {
+    match command {
+        MuxSub::Install(_) => "cmd_mux_install",
+        MuxSub::Detect(_) => "cmd_mux_detect",
+    }
+}
+
+fn hook_route(command: &HookSub) -> &'static str {
+    match command {
+        HookSub::Dispatch(_) => "cmd_hook_dispatch",
+    }
+}
+
+fn capabilities_route(command: &CapabilitiesSub) -> &'static str {
+    match command {
+        CapabilitiesSub::List(_) => "cmd_capabilities_list",
+        CapabilitiesSub::Read(_) => "cmd_capabilities_read",
+    }
+}
+
+fn method_route(command: &MethodCommand) -> &'static str {
+    match command {
+        MethodCommand::List { .. } => "cmd_method_list",
+        MethodCommand::Prove { .. } => "cmd_method_prove",
+    }
+}
+
+fn routine_route(command: &RoutineSub) -> &'static str {
+    match command {
+        RoutineSub::AuthoriseInvocation { .. } => "cmd_routine_authorise_invocation",
+        RoutineSub::Invocation { .. } => "cmd_routine_invocation",
+        RoutineSub::Invocations { .. } => "cmd_routine_invocations",
+        RoutineSub::List { .. } => "cmd_routine_list",
+        RoutineSub::Show { .. } => "cmd_routine_show",
+        RoutineSub::Create { .. } => "cmd_routine_create",
+        RoutineSub::Enable { .. } => "cmd_routine_enable",
+        RoutineSub::Disable { .. } => "cmd_routine_disable",
+        RoutineSub::RunNow { .. } => "cmd_routine_run_now",
+        RoutineSub::Reprove { .. } => "cmd_routine_reprove",
+        RoutineSub::Delete { .. } => "cmd_routine_delete",
+        RoutineSub::Credential { .. } => "cmd_routine_credential",
+        RoutineSub::ImportForeign { .. } => "cmd_routine_import_foreign",
+    }
+}
+
+fn jev_route(command: &JevSub) -> &'static str {
+    match command {
+        JevSub::Validate(_) => "cmd_jev_validate",
+        JevSub::Invoke(_) => "cmd_jev_invoke",
+    }
+}
+
+fn now_context_route(command: &NowContextCmd) -> &'static str {
+    match &command.command {
+        NowContextSub::Status(_) => "cmd_now_status",
+        NowContextSub::FactorySensing(_) => "cmd_now_factory_sensing",
+        NowContextSub::Prepare(_) => "cmd_now_prepare",
+        NowContextSub::Inspect(_) => "cmd_now_inspect",
+        NowContextSub::Publish(_) => "cmd_now_publish",
+        NowContextSub::AppendChange(_) => "cmd_now_append_change",
+        NowContextSub::Revoke(_) => "cmd_now_revoke",
+        NowContextSub::Field(_) => "cmd_now_field",
+        NowContextSub::Contemplate(_) => "cmd_now_contemplate",
+        NowContextSub::TestSelection(_) => "cmd_now_test_selection",
+        NowContextSub::PublishIntelligence(_) => "cmd_now_publish_intelligence",
+    }
+}
+
+fn factory_route(command: &FactoryCmd) -> &'static str {
+    match &command.command {
+        FactorySub::StartWork { .. } => "cmd_factory_start_work",
+    }
+}
+
+fn trust_route(command: &TrustSub) -> &'static str {
+    match command {
+        TrustSub::Record(_) => "cmd_trust_record",
+        TrustSub::Show(_) => "cmd_trust_show",
+    }
+}
+
+fn log_route(command: &LogSub) -> &'static str {
+    match command {
+        LogSub::Export(_) => "cmd_log_export",
+    }
+}
+
+fn shell_route(command: &ShellSub) -> &'static str {
+    match command {
+        ShellSub::Init(_) => "cmd_shell_init",
+    }
+}
+
+fn session_route(command: &SessionCmd) -> &'static str {
+    match &command.command {
+        SessionSub::Up(_) => "cmd_session_up",
+        SessionSub::Attach(_) => "cmd_session_attach",
+        SessionSub::List(_) => "cmd_session_list",
+        SessionSub::Diff(_) => "cmd_session_diff",
+        SessionSub::Reconcile(_) => "cmd_session_reconcile",
+        SessionSub::Down(_) => "cmd_session_down",
+        SessionSub::Lifecycle(c) => match &c.command {
+            SessionLifecycleSub::List(_) => "cmd_session_lifecycle_list",
+            SessionLifecycleSub::History(_) => "cmd_session_lifecycle_history",
+            SessionLifecycleSub::Show(_) => "cmd_session_lifecycle_show",
+            SessionLifecycleSub::Start(_) => "cmd_session_lifecycle_start",
+            SessionLifecycleSub::End(_) => "cmd_session_lifecycle_end",
+            SessionLifecycleSub::Thinking(_) => "cmd_session_lifecycle_thinking",
+            SessionLifecycleSub::Cancel(_) => "cmd_session_lifecycle_cancel",
+            SessionLifecycleSub::Permission(c) => match &c.command {
+                SessionLifecyclePermissionSub::Request(_) => {
+                    "cmd_session_lifecycle_permission_request"
+                }
+                SessionLifecyclePermissionSub::Grant(_) => "cmd_session_lifecycle_permission_grant",
+                SessionLifecyclePermissionSub::Refuse(_) => {
+                    "cmd_session_lifecycle_permission_refuse"
+                }
+            },
+        },
+    }
+}
+
+fn task_route(command: &TaskCmd) -> &'static str {
+    match &command.command {
+        TaskSub::Spawn(_) => "cmd_task_spawn",
+        TaskSub::List(_) => "cmd_task_list",
+        TaskSub::Close(_) => "cmd_task_close",
+    }
+}
+
+fn continuity_route(command: &ContinuityCmd) -> &'static str {
+    match &command.command {
+        ContinuitySub::Commands(_) => "cmd_continuity_commands",
+        ContinuitySub::Pressure(_) => "cmd_continuity_pressure",
+        ContinuitySub::Closeout(c) => match &c.command {
+            ContinuityCloseoutSub::Verify(_) => "cmd_continuity_closeout_verify",
+        },
+    }
+}
+
+fn gateway_route(command: &GatewaySub) -> &'static str {
+    match command {
+        GatewaySub::Serve(_) => "cmd_gateway_serve",
+        GatewaySub::Tick => "cmd_gateway_tick",
+        GatewaySub::InstallService(_) => "cmd_gateway_install_service",
+        GatewaySub::UninstallService => "cmd_gateway_uninstall_service",
+        GatewaySub::Who(_) => "cmd_gateway_who",
+        GatewaySub::Send(_) => "cmd_gateway_send",
+        GatewaySub::Inbox(_) => "cmd_gateway_inbox",
+        GatewaySub::Conversation(_) => "cmd_gateway_conversation",
+        GatewaySub::Delegate(_) => "cmd_gateway_delegate",
+        GatewaySub::Forward(_) => "cmd_gateway_forward",
+        GatewaySub::Remote(c) => match &c.command {
+            GatewayRemoteSub::Add { .. } => "cmd_gateway_remote_add",
+            GatewayRemoteSub::List => "cmd_gateway_remote_list",
+            GatewayRemoteSub::Remove { .. } => "cmd_gateway_remote_remove",
+        },
+        GatewaySub::Protocol(_) => "cmd_gateway_protocol",
+        GatewaySub::Discover(_) => "cmd_gateway_discover",
+        GatewaySub::Status(_) => "cmd_gateway_status",
+        GatewaySub::Ecology(_) => "cmd_gateway_ecology",
+        GatewaySub::Snapshot(_) => "cmd_gateway_snapshot",
+    }
+}
+
+fn worktree_route(command: &WorktreeSub) -> &'static str {
+    match command {
+        WorktreeSub::Project(_) => "cmd_worktree_project",
+    }
+}
+
+fn model_catalogue_route(command: &ModelCatalogueSub) -> &'static str {
+    match command {
+        ModelCatalogueSub::Refresh(_) => "cmd_model_catalogue_refresh",
+        ModelCatalogueSub::Show(_) => "cmd_model_catalogue_show",
+    }
 }
 
 /// `aikit inhabit`.
@@ -1139,6 +2083,12 @@ pub struct ComposeArgs {
     /// LOCAL_INSPECTABILITY.
     #[arg(long)]
     pub ranking_policy: Option<String>,
+    /// The grouped composition surfaces (`compose plan`, `compose apply`,
+    /// `compose use`, …). Bare `compose <flags>` stays the launch-plan
+    /// computation; `compose plan` is that same computation without
+    /// realisation.
+    #[command(subcommand)]
+    pub command: Option<ComposeGroupCommand>,
 }
 
 #[derive(Debug, Args)]
@@ -1807,6 +2757,25 @@ pub enum KnowledgeSub {
     /// envelope (provider, version, tested version, drift, SourceRef, source
     /// revision, CodeReference, operation, basis) the contemplation field uses.
     Code(KnowledgeCodeCmd),
+    /// Owner-side Flow cognition: explicit Contemplate(FlowRef) with
+    /// preflight and Explain disclosure, and the changed-since-thought read.
+    /// (The `flow` root spelling is the same command.)
+    Flow(FlowCmd),
+    /// Validate, write and repair `okf-wiki/v1` Agent Wiki files.
+    /// (The `wiki` root spelling is the same command.)
+    Wiki(WikiCmd),
+    /// Declare, validate and compress QL-shaped `WikiConstellation`s against
+    /// the pinned QL shape contract. (The `wiki-shape` root spelling is the
+    /// same command.)
+    #[command(name = "wiki-shape")]
+    WikiShape(WikiShapeCmd),
+    /// Construct revisioned native Wiki wholes and contextual participations.
+    /// (The `wiki-construct` root spelling is the same command.)
+    #[command(name = "wiki-construct")]
+    WikiConstruct(crate::wiki_construct::ConstructArgs),
+    /// Invoke or validate the general typed Jev decision capability.
+    /// (The `jev` root spelling is the same command.)
+    Jev(JevCmd),
 }
 
 #[derive(Debug, Args)]
@@ -2421,8 +3390,15 @@ pub struct StatusArgs {
     pub all: bool,
 }
 
+/// `aikit system` — bare, the owner settings-disclosure descriptor for the
+/// O:I System surface. The grouped operator surfaces (`system source`,
+/// `system config`, `system doctor`, `system commands`, …) hang off the same
+/// root and never change what bare `system` answers.
 #[derive(Debug, Args)]
-pub struct SystemArgs {}
+pub struct SystemArgs {
+    #[command(subcommand)]
+    pub command: Option<SystemGroupCommand>,
+}
 
 /// The Guardian family reading takes no arguments: it discloses the whole
 /// shipped family against every registered source.
@@ -2532,8 +3508,13 @@ pub struct ExplainArgs {
 #[derive(Debug, Args)]
 pub struct HistoryArgs {
     /// Optional canonical ResourceRef to filter the common timeline.
+    /// (`history recent`, `history stats`, … are the grouped views over the
+    /// same evidence; a ResourceRef that collides with a view name should be
+    /// read through the group spelling instead.)
     #[arg(value_name = "RESOURCE")]
     pub resource: Option<String>,
+    #[command(subcommand)]
+    pub command: Option<HistoryGroupCommand>,
 }
 
 #[derive(Debug, Args)]
@@ -2797,6 +3778,38 @@ pub enum PraxisSub {
         #[arg(long = "select", value_name = "SKILL")]
         select: Vec<String>,
     },
+    /// Author scoped, additive guidance for Agent Skills. (The `skill` root
+    /// spelling is the same command.)
+    Skill(SkillCmd),
+    /// Create, inspect and point harnesses at skill-sets. (The `set` root
+    /// spelling is the same command.)
+    Set(SetCmd),
+    /// Resolve the shipped six-product Guardian family against this machine's
+    /// registered sources. (The `family` root spelling is the same command.)
+    Family(FamilyArgs),
+    /// Run an exported capability once. (The `run` root spelling is the same
+    /// command.)
+    Run(RunArgs),
+    /// Show the capture inbox. (The `inbox` root spelling is the same command.)
+    Inbox(InboxArgs),
+    /// Capture text or a command into the inbox. (The `capture` root spelling
+    /// is the same command.)
+    Capture(CaptureArgs),
+    /// Promote a captured candidate into a capsule. (The `promote` root
+    /// spelling is the same command.)
+    Promote(PromoteArgs),
+    /// List and read the capabilities exposed to a brokered client.
+    /// (The `capabilities` root spelling is the same command.)
+    Capabilities(CapabilitiesCmd),
+    /// Discover Methods: skills whose description carries the METHOD: prefix.
+    /// (The `method` root spelling is the same command.)
+    Method(MethodArgs),
+    /// Authorise and read versioned Routine invocation evidence.
+    /// (The `routine` root spelling is the same command.)
+    Routine(RoutineCmd),
+    /// List catalogued-but-never-used capabilities. (The `unused` root
+    /// spelling is the same command.)
+    Unused(UnusedArgs),
 }
 
 #[derive(Debug, Args)]

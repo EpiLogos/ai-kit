@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod activity_evidence;
+pub mod act;
 pub mod adopt;
 pub mod alias_family;
 pub mod app;
@@ -20,6 +21,7 @@ pub mod client;
 pub mod closeout;
 mod cmux_config;
 pub mod collate;
+pub mod command_metadata;
 pub mod communique_turn;
 pub mod config_plane;
 pub mod contemplation_field;
