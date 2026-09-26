@@ -125,6 +125,25 @@ function cwdOf(ctx: { cwd?: string }): string {
 }
 
 /**
+ * The resident session's id: pi exposes it through ctx.sessionManager.
+ * The dispatcher binds SessionStart inhabitation (World/Position/current-work
+ * lean entry) to the payload's session id; without it the occupant receives
+ * only the historical temporal floor. Absent or throwing reads degrade to
+ * undefined — the dispatcher then answers with the unbound floor, never a
+ * fabricated identity.
+ */
+function sessionIdOf(ctx: {
+  sessionManager?: { getSessionId?: () => string | null | undefined };
+}): string | undefined {
+  try {
+    const id = ctx.sessionManager?.getSessionId?.();
+    return typeof id === "string" && id.trim() ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Show a notice where pi has a UI. Fire-and-forget; never awaited, never
  * allowed to throw into the handler.
  */
@@ -160,7 +179,7 @@ export default function (pi: {
   // --- session lifecycle -------------------------------------------------
 
   pi.on("session_start", async (eventObject: any, ctx: any) => {
-    const decision = dispatchAikit("SessionStart", jsonSafe({ ...eventObject, cwd: cwdOf(ctx) }));
+    const decision = dispatchAikit("SessionStart", jsonSafe({ ...eventObject, cwd: cwdOf(ctx), session_id: sessionIdOf(ctx) }));
     if (decision) {
       queueInjection(decision.injected);
     }
@@ -169,7 +188,7 @@ export default function (pi: {
   });
 
   pi.on("session_shutdown", async (eventObject: any, ctx: any) => {
-    dispatchAikit("SessionEnd", jsonSafe({ ...eventObject, cwd: cwdOf(ctx) }));
+    dispatchAikit("SessionEnd", jsonSafe({ ...eventObject, cwd: cwdOf(ctx), session_id: sessionIdOf(ctx) }));
   });
 
   // --- context injection seam ---------------------------------------------
@@ -194,7 +213,7 @@ export default function (pi: {
   pi.on("input", async (eventObject: any, ctx: any) => {
     const decision = dispatchAikit(
       "UserPromptSubmit",
-      jsonSafe({ text: eventObject.text, source: eventObject.source, cwd: cwdOf(ctx) }),
+      jsonSafe({ text: eventObject.text, source: eventObject.source, cwd: cwdOf(ctx), session_id: sessionIdOf(ctx) }),
     );
     if (!decision) {
       return undefined; // system failure: fail open, the prompt proceeds
