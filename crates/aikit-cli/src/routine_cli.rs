@@ -1022,41 +1022,6 @@ pub fn observe_factory_change(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn trigger_parsing_accepts_schedule_records_and_plain_kinds() {
-        let schedule = parse_trigger(json!({
-            "schema": TIME_SCHEDULE_VERSION,
-            "schedule_ref": "schedule/daily-0600",
-            "schedule": { "kind": "daily", "time": "06:00" }
-        }))
-        .unwrap();
-        assert!(matches!(schedule, TriggerSpec::Schedule(_)));
-        assert!(matches!(
-            parse_trigger(json!({ "kind": "manual" })).unwrap(),
-            TriggerSpec::Manual
-        ));
-        let event = parse_trigger(json!({
-            "kind": "event",
-            "event_ref": "aikit.routine-event/v1:claude:Stop"
-        }))
-        .unwrap();
-        assert!(matches!(event, TriggerSpec::Event { .. }));
-        assert!(parse_trigger(json!({ "kind": "hourly" })).is_err());
-        assert!(parse_trigger(json!({ "schema": "aikit.time-schedule/v1", "schedule_ref": "s", "schedule": { "kind": "daily", "time": "25:00" } })).is_err());
-    }
-
-    #[test]
-    fn slugs_are_stable_and_bounded() {
-        assert_eq!(slug("Daily Nara Flow"), "daily-nara-flow");
-        assert_eq!(slug("!!!"), "routine");
-    }
-}
-
-
 /// `aikit method run <ref> [--input <json>|@file] [--confirm]` — the
 /// deterministic invocation route of one Method (§2.2). Preflight refuses
 /// before any effect: an unknown ref, a Skill that is not a Method, an
@@ -1139,4 +1104,38 @@ pub fn method_run(
         "result_digest": crate::scoped_invocation::run_result_digest(&run).to_string(),
         "postconditions": "not claimed by this route; `aikit method prove` promotes this receipt into a proven basis only when explicit verification passes",
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trigger_parsing_accepts_schedule_records_and_plain_kinds() {
+        let schedule = parse_trigger(json!({
+            "schema": TIME_SCHEDULE_VERSION,
+            "schedule_ref": "schedule/daily-0600",
+            "schedule": { "kind": "daily", "time": "06:00" }
+        }))
+        .unwrap();
+        assert!(matches!(schedule, TriggerSpec::Schedule(_)));
+        assert!(matches!(
+            parse_trigger(json!({ "kind": "manual" })).unwrap(),
+            TriggerSpec::Manual
+        ));
+        let event = parse_trigger(json!({
+            "kind": "event",
+            "event_ref": "aikit.routine-event/v1:claude:Stop"
+        }))
+        .unwrap();
+        assert!(matches!(event, TriggerSpec::Event { .. }));
+        assert!(parse_trigger(json!({ "kind": "hourly" })).is_err());
+        assert!(parse_trigger(json!({ "schema": "aikit.time-schedule/v1", "schedule_ref": "s", "schedule": { "kind": "daily", "time": "25:00" } })).is_err());
+    }
+
+    #[test]
+    fn slugs_are_stable_and_bounded() {
+        assert_eq!(slug("Daily Nara Flow"), "daily-nara-flow");
+        assert_eq!(slug("!!!"), "routine");
+    }
 }
