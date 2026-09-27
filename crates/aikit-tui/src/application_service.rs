@@ -32,9 +32,11 @@ use serde_json::{json, to_string_pretty, to_value, Value};
 use crate::application::{
     ActionInvocationReceipt, ActionOutcome, ActivationIntent, ApplyReceipt, CompositionPreview,
     HistoryEntry, RelationReadModel, ResolvedActionReadModel, ResolvedSearchReadModel,
-    ResourceListItem, ResourceListReadModel, StagedChanges, TuiApplicationService,
+    ResourceListItem, ResourceListReadModel, StagedChanges, TuiApplicationService, SkillSetFieldRow};
+use crate::backend::{
+    AgentProfileAcceptReceipt, AgentProfileSaveReceipt, AgentSessionPreparation, EncounterLaunch,
+    FactoryWorkEntry, FactoryWorkStartReceipt, PaletteBackend, Toggle, WorldReadiness,
 };
-use crate::backend::{FactoryWorkEntry, PaletteBackend, Toggle};
 use crate::live_field::{
     live_working_field, parse_action_ref, reach_for, working_environment_actions, LiveWorkingField,
     WorkingEnvironmentOperation, WorkingEnvironmentOutcome,
@@ -76,7 +78,7 @@ impl<'a> ApplicationService<'a> {
         Self::navigation_index_from(self.backend)
     }
 
-    fn navigation_index_from(backend: &dyn PaletteBackend) -> Result<ResourceSearchIndex> {
+    pub fn navigation_index_from(backend: &dyn PaletteBackend) -> Result<ResourceSearchIndex> {
         let mut index = crate::project_world_service::resource_index_with_records(
             backend,
             backend.context_resource_records()?,
@@ -558,6 +560,65 @@ impl TuiApplicationService for ApplicationService<'_> {
             .backend
             .working_environments()?
             .map(|observations| live_working_field(&observations, &projectable)))
+    }
+
+    fn start_factory_work(&mut self) -> Result<FactoryWorkStartReceipt> {
+        self.backend.start_factory_work()
+    }
+
+    fn skill_set_field(&self) -> Result<Vec<SkillSetFieldRow>> {
+        // The read sits below the CLI/TUI split: the same store the CLI's
+        // `aikit set list` reads, projected by the same resolved view. No
+        // home — no disclosed field; the Praxis step names the absence.
+        let Some(home) = self.backend.application_home() else {
+            return Ok(Vec::new());
+        };
+        let view = self.backend.view();
+        let sets = aikit_store::skillsets::load_all(home)?;
+        Ok(sets
+            .iter()
+            .map(|set| {
+                let projection = aikit_core::skillset::project(set, view);
+                SkillSetFieldRow {
+                    name: set.label(),
+                    provenance: set.provenance.as_str().to_owned(),
+                    summary: projection.summarize(&format!("sets/{}", set.name)),
+                    members: set.len(),
+                    projected: projection.projected.len(),
+                    withheld: projection.withheld.len(),
+                }
+            })
+            .collect())
+    }
+
+    fn save_agent_profile(
+        &mut self,
+        purpose: &str,
+        name: Option<&str>,
+        skill_sets: &[String],
+    ) -> Result<AgentProfileSaveReceipt> {
+        self.backend.save_agent_profile(purpose, name, skill_sets)
+    }
+
+    fn accept_agent_profile(
+        &mut self,
+        expected_revision: &str,
+        expected_content_digest: Option<&str>,
+    ) -> Result<AgentProfileAcceptReceipt> {
+        self.backend
+            .accept_agent_profile(expected_revision, expected_content_digest)
+    }
+
+    fn world_readiness(&self) -> Result<WorldReadiness> {
+        self.backend.world_readiness()
+    }
+
+    fn prepare_agent_session(&mut self, profile_ref: &str) -> Result<AgentSessionPreparation> {
+        self.backend.prepare_agent_session(profile_ref)
+    }
+
+    fn start_encounter(&mut self, agent_session: &str) -> Result<EncounterLaunch> {
+        self.backend.start_encounter(agent_session)
     }
 
     fn model_roster(&mut self) -> Result<Option<aikit_core::resource::ModelRoster>> {

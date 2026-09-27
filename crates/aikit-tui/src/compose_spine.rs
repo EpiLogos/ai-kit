@@ -213,13 +213,31 @@ fn standing_for(
         // resolve, so the row says what it has rather than reading as a total
         // blank on a step that is partly answerable.
         ComposeStep::Praxis => {
-            StepStanding::NotExposed(format!(
-            "no Profile/SkillSet/Skill/Method contract here; {} capabilit{}, {} action{} resolve",
-            world.capability_horizon.capabilities.len(),
-            if world.capability_horizon.capabilities.len() == 1 { "y" } else { "ies" },
-            world.capability_horizon.actions.len(),
-            s(world.capability_horizon.actions.len()),
-        ))
+            // SkillSet-first: the field is the repertoire a person selects
+            // from. A boundary disclosing no sets keeps the named absence —
+            // it never renders fake rows.
+            if state.compose_skill_set_field.is_empty() {
+                StepStanding::NotExposed(format!(
+                    "no SkillSet field disclosed here; {} capabilit{}, {} action{} resolve",
+                    world.capability_horizon.capabilities.len(),
+                    if world.capability_horizon.capabilities.len() == 1 { "y" } else { "ies" },
+                    world.capability_horizon.actions.len(),
+                    s(world.capability_horizon.actions.len()),
+                ))
+            } else if state.compose_skill_sets.is_empty() {
+                StepStanding::Open(format!(
+                    "choose a SkillSet first; {} set{} disclosed",
+                    state.compose_skill_set_field.len(),
+                    if state.compose_skill_set_field.len() == 1 { "" } else { "s" },
+                ))
+            } else {
+                StepStanding::Determined(format!(
+                    "{} set{} selected ({}) - a request the owner resolves at preparation",
+                    state.compose_skill_sets.len(),
+                    if state.compose_skill_sets.len() == 1 { "" } else { "s" },
+                    state.compose_skill_sets.join(", "),
+                ))
+            }
         }
 
         ComposeStep::Information => {
@@ -367,12 +385,21 @@ fn standing_for(
             s(state.staged.len())
         )),
 
-        // §6.2's Factory route needs the Run/Journey status contract #227
-        // records as absent; the direct route needs a session-start contract
-        // this boundary does not publish either.
-        ComposeStep::EnterWork => StepStanding::NotExposed(
-            "no session-start or Factory Run contract at this application boundary".into(),
-        ),
+        // The Enter-work step is exposed through the §1.3 primary actions
+        // (`world_entry::enter_work_steps`): Save Agent, Save and start
+        // Direct work, Start Factory work, and Start/Continue for an
+        // accepted Agent — each carrying its exact standing. An unbound
+        // owner operation keeps its row and names itself; it is not a
+        // missing contract any more, it is a named pending binding.
+        ComposeStep::EnterWork => StepStanding::Open(format!(
+            "purpose {}, {}",
+            if state.compose_purpose.trim().is_empty() {
+                "not authored"
+            } else {
+                "authored"
+            },
+            state.agent_work.describe(),
+        )),
     }
 }
 
@@ -497,11 +524,33 @@ fn step_detail(
             lines
         }
 
-        ComposeStep::Praxis => vec![
-            "  aikit-core publishes praxis - resolve_praxis, PraxisResolution,".into(),
-            "  SelectedMethod - but no praxis contract crosses this application".into(),
-            "  boundary, so no Profile/SkillSet/Skill/Method can be chosen here.".into(),
-            format!(
+        ComposeStep::Praxis => {
+            let mut lines = Vec::new();
+            if state.compose_skill_set_field.is_empty() {
+                lines.push(
+                    "  no SkillSet field is disclosed at this boundary, so no".into(),
+                );
+                lines.push("  repertoire can be chosen here.".into());
+            } else {
+                lines.push("  Choose a SkillSet first; individual exceptions ride beside".into());
+                lines.push("  them later. A set is a request: the owner's own resolution at".into());
+                lines.push("  preparation decides what projects and what is withheld.".into());
+                lines.push(String::new());
+                for (index, row) in state.compose_skill_set_field.iter().enumerate() {
+                    let selected = state.compose_skill_sets.contains(&row.name);
+                    lines.push(format!(
+                        "  {} {} {:<24} {}",
+                        index + 1,
+                        if selected { "[x]" } else { "[ ]" },
+                        row.name,
+                        row.summary,
+                    ));
+                }
+                lines.push(String::new());
+                lines.push("  Digits toggle the numbered sets; the selection rides the".into());
+                lines.push("  save exactly as shown here.".into());
+            }
+            lines.push(format!(
                 "  What does resolve: {} capabilit{}, {} action{}.",
                 world.capability_horizon.capabilities.len(),
                 if world.capability_horizon.capabilities.len() == 1 {
@@ -511,8 +560,9 @@ fn step_detail(
                 },
                 world.capability_horizon.actions.len(),
                 s(world.capability_horizon.actions.len()),
-            ),
-        ],
+            ));
+            lines
+        }
 
         ComposeStep::Information => {
             let mut lines = Vec::new();
@@ -626,11 +676,60 @@ fn step_detail(
             }
         }
 
-        ComposeStep::EnterWork => vec![
-            "  There are two ways in: a direct session and Factory work. Neither".into(),
-            "  has a contract at this application boundary - no session-start,".into(),
-            "  and Factory publishes no Run/Journey status (ai-kit#227).".into(),
-        ],
+        ComposeStep::EnterWork => {
+            let mut lines = vec![
+                "  Authored here (exact human source, carried verbatim):".into(),
+                format!(
+                    "    purpose {}",
+                    if state.compose_purpose.trim().is_empty() {
+                        "- not authored yet (Enter authors it)".to_string()
+                    } else {
+                        format!("\"{}\"", state.compose_purpose.trim())
+                    }
+                ),
+                format!(
+                    "    name    {}",
+                    if state.compose_agent_name.trim().is_empty() {
+                        "- none (the owner derives identity; absence is normal)".to_string()
+                    } else {
+                        state.compose_agent_name.trim().to_string()
+                    }
+                ),
+                String::new(),
+                format!("  Lifecycle: {}", state.agent_work.describe()),
+                "  saved is not accepted; accepted is not prepared; prepared is not running"
+                    .into(),
+                String::new(),
+                "  Primary actions (digits dispatch where drawn):".into(),
+            ];
+            for step in crate::world_entry::enter_work_steps(
+                state,
+                reading.factory_work_entry,
+                reading.agent_work_bindings,
+            ) {
+                let reason = match &step.availability {
+                    crate::world_entry::StepAvailability::Ready => String::new(),
+                    crate::world_entry::StepAvailability::Disabled { reason } => {
+                        format!("  - unavailable: {reason}")
+                    }
+                };
+                lines.push(format!("    {}) {}{reason}", step.key, step.label));
+            }
+            lines.push(String::new());
+            lines.push(
+                "  Save and start Direct work names each component effect before it runs:".into(),
+            );
+            lines.push(
+                "    save (Central) -> accept (human token) -> readiness -> prepare".into(),
+            );
+            lines.push(
+                "    (provider not started) -> launch. A failed stage preserves every".into(),
+            );
+            lines.push(
+                "    earlier one and a retry resumes that stage only.".into(),
+            );
+            lines
+        }
     }
 }
 
@@ -942,6 +1041,9 @@ mod tests {
     /// A step with no boundary contract still discloses something: which
     /// contract is missing. An empty detail pane would read as "nothing to
     /// see", which is the misreading the standings exist to prevent.
+    /// Enter-work, by contrast, is no longer unexposed at all: it carries
+    /// the §1.3 primary actions, so it must never read as a missing
+    /// contract again.
     #[test]
     fn an_unexposed_step_in_hand_discloses_the_contract_that_is_missing() {
         let world = world();
@@ -955,7 +1057,6 @@ mod tests {
                 ComposeStep::Intention,
                 "no contract at this application boundary",
             ),
-            (ComposeStep::EnterWork, "no session-start"),
         ] {
             let state = TuiState {
                 compose_step: step,
@@ -968,6 +1069,20 @@ mod tests {
                 "{step:?} must name the missing contract; got:\n{rendered}"
             );
         }
+        let enter_work = TuiState {
+            compose_step: ComposeStep::EnterWork,
+            ..Default::default()
+        };
+        let lines = compose_spine_lines(&enter_work, reading(&world, &roster), Glyphs::unicode());
+        let rendered = lines.join("\n");
+        assert!(
+            !rendered.contains("no session-start"),
+            "Enter-work carries the primary actions now; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Save Agent") && rendered.contains("Start Factory work"),
+            "the primary actions must be listed; got:\n{rendered}"
+        );
     }
 
     /// Every step in hand renders detail, and every one of them stays ASCII
