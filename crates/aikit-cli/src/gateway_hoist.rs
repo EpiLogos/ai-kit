@@ -711,7 +711,9 @@ pub fn apply_over_channel(
         let token_argv = vec![
             "sh".to_owned(),
             "-c".to_owned(),
-            format!("umask 077; mkdir -p '{target_dir}' && cat > '{target_path}'"),
+            format!(
+                "umask 077; mkdir -p '{target_dir}' && cat > '{target_path}' && chmod 600 '{target_path}'"
+            ),
         ];
         channel.run("stage-token", &token_argv, Some(bytes))?;
         record(
