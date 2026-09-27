@@ -216,6 +216,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::A2a(a)) => cmd_a2a(cwd, a),
         Some(Command::Routine(c)) => cmd_routine(c),
         Some(Command::Jev(c)) => cmd_jev(c),
+        Some(Command::Decide(c)) => cmd_decide(c),
         Some(Command::NowContext(c)) => cmd_now_context(cwd, c),
         Some(Command::Factory(c)) => cmd_factory(c),
         Some(Command::Trust(a)) => cmd_trust(cwd, a),
@@ -1031,6 +1032,14 @@ fn cmd_jev(command: JevCmd) -> Result<Reply> {
     let data = match command.command {
         JevSub::Validate(args) => aikit_cli::jev_now::jev_validate(args)?,
         JevSub::Invoke(args) => aikit_cli::jev_now::jev_invoke(args)?,
+    };
+    data_reply(data)
+}
+
+fn cmd_decide(command: DecideCmd) -> Result<Reply> {
+    let data = match command.command {
+        DecideSub::Status(args) => aikit_cli::decide::decide_status(args)?,
+        DecideSub::Invoke(args) => aikit_cli::decide::decide_invoke(args)?,
     };
     data_reply(data)
 }

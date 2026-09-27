@@ -1,6 +1,10 @@
-//! The provider's general state + typed-question protocol. This is an I/O-free
-//! contract, not a document-only mode, a chat model, or another Agent registry.
-//! Question IDs are attribution; the provider does not use them for inference.
+//! The general state + typed-question decision protocol (`action/model/decide`).
+//! This is an I/O-free contract, not a document-only mode, a chat model, or
+//! another Agent registry. Question IDs are attribution; the provider does not
+//! use them for inference. The typed questions and strict answer validation are
+//! provider-neutral; each transport adapter adds its own provider identity law
+//! (the TypeSafe/Jev adapter requires concrete `jev-` versions, a local
+//! SystemOne-compatible server admits its own model identities).
 //! https://docs.typesafe.ai/api (checked 2026-09-22).
 use crate::{AikitError, Result};
 use serde::{de, Deserialize, Deserializer, Serialize};
@@ -9,10 +13,21 @@ use std::{collections::BTreeMap, fmt};
 
 pub const JEV_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 pub const JEV_PROTOCOL: &str = "typesafe.systemone/v1";
+/// The hosted TypeSafe/Jev decision provider's protocol marker, kept distinct
+/// from the protocol shape itself so a local or self-hosted endpoint can speak
+/// the same shape under a different standing.
+pub const JEV_PROVIDER: &str = "typesafe-jev";
 pub const JEV_ACTION_REF: &str = "action/model/decide";
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const TOLERANCE: f64 = 0.00001;
+/// Serving-precision bound for local/self-hosted endpoints whose checkpoints
+/// run in bf16: a bf16 softmax cannot represent 1e-5 distribution precision
+/// (observed sums drift ~1e-4). Coverage of the exact options, the [0,1]
+/// range, the declared winner and the score expected-value laws are unchanged;
+/// only the sum/expected-value numeric bound widens, at the endpoint standing,
+/// never for the hosted provider.
+pub const ENDPOINT_TOLERANCE: f64 = 0.001;
 
 fn invalid(message: &str) -> AikitError {
     AikitError::new("jev.invalid_request", message)
@@ -120,8 +135,14 @@ impl JevRequest {
         Ok(request)
     }
     pub fn validate(&self) -> Result<()> {
-        if !identifier(&self.model) || !self.model.starts_with("jev-") {
-            return Err(invalid("An explicit Jev model selector is required"));
+        // Provider-neutral: any explicit, bounded model identifier is a valid
+        // request subject. Provider identity law (TypeSafe requires a concrete
+        // `jev-…` selector) is enforced by the transport adapter that speaks
+        // for that provider, so a local server does not need a Jev-shaped name.
+        if !identifier(&self.model) {
+            return Err(invalid(
+                "An explicit, bounded model selector is required",
+            ));
         }
         if !matches!(
             self.state,
@@ -192,6 +213,12 @@ pub struct JevResponse {
     pub answers: BTreeMap<String, Answer>,
     /// Required on success. Absence is not zero usage.
     pub usage: TokenUsage,
+    /// Optional serving metadata some SystemOne-compatible servers report
+    /// (local inference latency). It is disclosure, never a probability, a
+    /// cost, or an answer; every other unknown field is still refused so
+    /// protocol drift cannot masquerade as an answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<f64>,
 }
 fn probability(value: f64) -> bool {
     value.is_finite() && (0.0..=1.0).contains(&value)
@@ -199,10 +226,11 @@ fn probability(value: f64) -> bool {
 fn distribution<'a>(
     values: &BTreeMap<String, f64>,
     keys: impl Iterator<Item = &'a String>,
+    sum_tolerance: f64,
 ) -> Result<()> {
     if !values.keys().eq(keys)
         || !values.values().all(|value| probability(*value))
-        || (values.values().sum::<f64>() - 1.0).abs() > TOLERANCE
+        || (values.values().sum::<f64>() - 1.0).abs() > sum_tolerance
     {
         return Err(malformed(
             "Probability distribution must cover the exact options and sum to one",
@@ -211,27 +239,35 @@ fn distribution<'a>(
     Ok(())
 }
 impl JevResponse {
-    pub fn parse_for(bytes: &[u8], request: &JevRequest) -> Result<Self> {
+    /// Structural parse only: bounded unique JSON that satisfies the response
+    /// shape. The standing's law is applied separately — the hosted transport
+    /// validates through `validate_typesafe_for` (exacting numeric bounds), a
+    /// local/self-hosted endpoint through `validate_for_with_tolerance` with
+    /// the endpoint standing's serving-precision bound.
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
         let value = unique_json(bytes, MAX_RESPONSE_BYTES).map_err(|_| {
             malformed("Response must be bounded JSON with no duplicate object keys")
         })?;
-        let response: Self = serde_json::from_value(value)
-            .map_err(|_| malformed("Response is missing a required answer, version, usage field, or has the wrong type"))?;
-        response.validate_for(request)?;
-        Ok(response)
+        serde_json::from_value(value)
+            .map_err(|_| malformed("Response is missing a required answer, version, usage field, or has the wrong type"))
     }
     pub fn validate_for(&self, request: &JevRequest) -> Result<()> {
+        self.validate_for_with_tolerance(request, TOLERANCE)
+    }
+    /// The same strict typed validation with an explicit numeric bound for the
+    /// distribution sum and the score expected value. The endpoint standing
+    /// admits `ENDPOINT_TOLERANCE` (bf16 serving precision); the hosted
+    /// standing keeps the exacting default.
+    pub fn validate_for_with_tolerance(
+        &self,
+        request: &JevRequest,
+        sum_tolerance: f64,
+    ) -> Result<()> {
         request.validate()?;
-        let Some(version) = self.model.strip_prefix("jev-") else {
-            return Err(malformed("Provider did not return a concrete Jev version"));
-        };
-        let parts: Vec<_> = version.split('.').collect();
-        if parts.len() != 3
-            || !parts
-                .iter()
-                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
-        {
-            return Err(malformed("Provider returned a model alias or malformed version instead of the evaluated version"));
+        if !identifier(&self.model) {
+            return Err(malformed(
+                "Provider did not return a usable model identity",
+            ));
         }
         if !self.answers.keys().eq(request.questions.keys()) {
             return Err(malformed("Every requested question needs exactly one answer; missing or surplus answers refuse the determination"));
@@ -247,7 +283,7 @@ impl JevResponse {
                         confidence,
                     },
                 ) => {
-                    distribution(probabilities, criteria.keys())?;
+                    distribution(probabilities, criteria.keys(), sum_tolerance)?;
                     let chosen = probabilities
                         .get(choice)
                         .ok_or_else(|| malformed("Chosen option was not in the question"))?;
@@ -275,7 +311,7 @@ impl JevResponse {
                         .enumerate()
                         .map(|(i, entry)| (i.to_string(), entry.clone()))
                         .collect();
-                    distribution(probabilities, expected.keys())?;
+                    distribution(probabilities, expected.keys(), sum_tolerance)?;
                     if legend != &expected
                         || !probability(*confidence)
                         || !score.is_finite()
@@ -288,7 +324,7 @@ impl JevResponse {
                         .enumerate()
                         .map(|(i, _)| i as f64 * probabilities[&i.to_string()])
                         .sum::<f64>();
-                    if (score - weighted).abs() > TOLERANCE * criteria.len() as f64 {
+                    if (score - weighted).abs() > sum_tolerance * criteria.len() as f64 {
                         return Err(malformed(
                             "Score is not the expected value of its distribution",
                         ));
@@ -301,6 +337,36 @@ impl JevResponse {
         }
         Ok(())
     }
+    /// The hosted TypeSafe/Jev provider's identity law, enforced by the
+    /// transport that speaks for that provider: the request must select a
+    /// `jev-…` model (the resolvable aliases `jev-latest`/`jev-preview` are
+    /// admitted requests) and the answer must report the concrete evaluated
+    /// version. A local SystemOne-compatible server is not subject to this; it
+    /// validates through `validate_for` alone.
+    pub fn validate_typesafe_for(&self, request: &JevRequest) -> Result<()> {
+        self.validate_for(request)?;
+        if !identifier(&request.model) || !request.model.starts_with("jev-") {
+            return Err(invalid(
+                "The TypeSafe provider requires a jev- model selector",
+            ));
+        }
+        let Some(version) = self.model.strip_prefix("jev-") else {
+            return Err(malformed("Provider did not return a concrete Jev version"));
+        };
+        if !concrete_version(version) {
+            return Err(malformed(
+                "Provider returned a model alias or malformed version instead of the evaluated version",
+            ));
+        }
+        Ok(())
+    }
+}
+fn concrete_version(version: &str) -> bool {
+    let parts: Vec<_> = version.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// A per-invocation bound is explicit, finite and reserved before each attempt.
@@ -353,6 +419,45 @@ pub fn estimated_input_tokens_range(request: &JevRequest) -> (u64, u64) {
         .map(|b| b.len())
         .unwrap_or(usize::MAX) as u64;
     (bytes.saturating_mul(10) / 45, bytes.saturating_mul(10) / 25)
+}
+
+/// Bounded invocation limits for a local or self-hosted SystemOne-compatible
+/// decision endpoint. There is no tariff here by law: an operator-hosted
+/// endpoint has no per-token price source, and inventing a rate would fabricate
+/// cost evidence. Usage is still required on every successful answer; the
+/// token ceilings are admission bounds, not a price basis.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionLimits {
+    pub timeout_ms: u64,
+    pub max_attempts: u32,
+    pub max_input_tokens_per_attempt: u64,
+    pub max_output_tokens_per_attempt: u64,
+    /// The explicitly selected model identity. The endpoint answer must echo
+    /// it; a mismatch means the served artifact changed and the answer is
+    /// refused rather than misattributed.
+    pub model: String,
+}
+impl DecisionLimits {
+    pub fn validate(&self, request: &JevRequest) -> Result<()> {
+        request.validate()?;
+        if !(1..=180_000).contains(&self.timeout_ms)
+            || !(1..=8).contains(&self.max_attempts)
+            || self.max_input_tokens_per_attempt == 0
+            || self.max_output_tokens_per_attempt == 0
+            || !identifier(&self.model)
+        {
+            return Err(invalid(
+                "Time, attempts, token ceilings and an explicit selected model are required for a decision endpoint",
+            ));
+        }
+        if self.model != request.model {
+            return Err(invalid(
+                "The configured decision model must match the request's explicit model selector",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl JevLimits {

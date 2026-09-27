@@ -21,7 +21,12 @@ fn response() -> Value {
     },"usage":{"input_tokens":700,"output_tokens":80}})
 }
 fn parse(value: &Value) -> aikit_core::Result<JevResponse> {
-    JevResponse::parse_for(&serde_json::to_vec(value).unwrap(), &request())
+    let response = JevResponse::parse(&serde_json::to_vec(value).unwrap())?;
+    response.validate_for(&request())?;
+    Ok(response)
+}
+fn parse_only(value: &Value) -> aikit_core::Result<JevResponse> {
+    JevResponse::parse(&serde_json::to_vec(value).unwrap())
 }
 #[test]
 fn general_questions_outside_document_practice_are_first_class() {
@@ -92,9 +97,24 @@ fn score_uses_the_actual_ordered_rubric_and_expected_value() {
     assert!(parse(&value).is_err());
 }
 #[test]
-fn actual_version_is_required_instead_of_echoed_alias() {
+fn provider_identity_law_lives_at_the_typesafe_boundary_not_the_protocol() {
+    // The provider-neutral protocol requires a usable model identity but does
+    // not dictate its shape: a local SystemOne-compatible server admits its
+    // own model names.
+    for (model, neutral_ok) in [
+        ("kev-latest", true),
+        ("jaredpalmer/kev-0.8b@r10", true),
+        ("jev-1.13.0", true),
+        ("", false),
+    ] {
+        let mut value = response();
+        value["model"] = json!(model);
+        assert_eq!(parse(&value).is_ok(), neutral_ok, "neutral parse of {model}");
+    }
+    // The TypeSafe boundary keeps its own law: concrete evaluated `jev-x.y.z`
+    // versions only, never an echoed alias or a foreign identity.
     for model in [
-        "",
+        "kev-latest",
         "jev-latest",
         "jev-preview",
         "another-model",
@@ -103,8 +123,48 @@ fn actual_version_is_required_instead_of_echoed_alias() {
     ] {
         let mut value = response();
         value["model"] = json!(model);
-        assert!(parse(&value).is_err());
+        let parsed = parse(&value).expect("parseable response");
+        assert!(
+            parsed.validate_typesafe_for(&request()).is_err(),
+            "TypeSafe law must refuse {model}"
+        );
     }
+    let foreign_request_value = json!({
+        "model": "kev-latest", "state": {},
+        "questions": {"q": {"type": "noul", "instructions": "Question"}}
+    });
+    let foreign_request = JevRequest::parse(&serde_json::to_vec(&foreign_request_value).unwrap())
+        .expect("a local model selector is a valid protocol request");
+    let parsed = parse(&response()).unwrap();
+    assert!(parsed.validate_for(&foreign_request).is_err());
+}
+
+#[test]
+fn bf16_serving_precision_is_admitted_at_the_endpoint_standing_never_at_the_hosted_one() {
+    // A bf16 endpoint's softmax sums to ~1.0001: unrepresentable at the hosted
+    // 1e-5 bound, honest at the documented endpoint bound.
+    let mut value = response();
+    value["answers"]["action"]["probabilities"] = json!({"wait": 0.9001, "stop": 0.1});
+    let parsed = parse_only(&value).expect("structurally parseable response");
+    assert!(parsed.validate_for(&request()).is_err(), "hosted-exact law refuses the drift");
+    assert!(parsed
+        .validate_for_with_tolerance(&request(), aikit_core::jev::ENDPOINT_TOLERANCE)
+        .is_ok(), "endpoint standing admits bf16 serving precision");
+    // Coverage and range laws do not widen with the bound.
+    let mut uncovered = response();
+    uncovered["answers"]["action"]["probabilities"] = json!({"wait": 0.9001});
+    let parsed = parse(&uncovered).unwrap_err();
+    assert_eq!(parsed.code(), "jev.invalid_answer");
+}
+
+#[test]
+fn a_local_model_selector_is_a_valid_request_but_not_a_typesafe_one() {
+    let local = json!({
+        "model": "kev-latest", "state": {"ticket": "double charge"},
+        "questions": {"billing": {"type": "noul", "instructions": "Is this billing?"}}
+    });
+    let request = JevRequest::parse(&serde_json::to_vec(&local).unwrap()).unwrap();
+    request.validate().unwrap();
 }
 #[test]
 fn duplicate_json_members_are_rejected_at_every_level() {
@@ -113,7 +173,7 @@ fn duplicate_json_members_are_rejected_at_every_level() {
     let raw = br#"{"model":"jev-1.13.0","state":{},"questions":{"q":{"type":"noul","instructions":"Question"},"q":{"type":"noul","instructions":"Another"}}}"#;
     assert!(JevRequest::parse(raw).is_err());
     let raw = br#"{"model":"jev-1.13.0","model":"jev-1.13.0","answers":{},"usage":{"input_tokens":1,"output_tokens":1}}"#;
-    assert!(JevResponse::parse_for(raw, &request()).is_err());
+    assert!(JevResponse::parse(raw).is_err());
 }
 #[test]
 fn validation_is_not_only_a_parser_guard() {

@@ -180,6 +180,11 @@ pub enum Command {
     Routine(RoutineCmd),
     /// Invoke or validate the general typed Jev decision capability.
     Jev(JevCmd),
+    /// Select, inspect and invoke the optional decision provider
+    /// (`action/model/decide`): None, a managed local model (recommended),
+    /// an existing self-hosted endpoint, or the hosted TypeSafe/Jev API.
+    #[command(name = "decide")]
+    Decide(DecideCmd),
     /// Prepare, inspect and mutate Redis-backed participant NOW context.
     #[command(name = "now-context")]
     NowContext(NowContextCmd),
@@ -484,6 +489,54 @@ pub struct JevInvokeArgs {
     #[arg(long = "controlled-endpoint", value_name = "HOST:PORT")]
     pub controlled_endpoint: Option<std::net::SocketAddr>,
     /// Permit a deliberately supplied env:// secret reference for this invocation only.
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DecideCmd {
+    #[command(subcommand)]
+    pub command: DecideSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DecideSub {
+    /// Report the selected decision provider's actual placement, selected
+    /// model, install/load state, license and download/resource facts; with
+    /// `--probe`, one real bounded typed diagnostic.
+    Status(DecideStatusArgs),
+    /// Invoke the selected decision provider with typed questions and return
+    /// its bounded invocation receipt.
+    Invoke(DecideInvokeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DecideStatusArgs {
+    /// Decision-provider configuration (`aikit.decision-provider/v1`).
+    #[arg(long = "provider-file", value_name = "PATH")]
+    pub provider_file: std::path::PathBuf,
+    /// Run one real bounded Noul diagnostic against the selected provider.
+    #[arg(long = "probe")]
+    pub probe: bool,
+    #[arg(long = "curl", value_name = "PATH")]
+    pub curl: Option<std::path::PathBuf>,
+    /// Permit a deliberately supplied env:// secret reference.
+    #[arg(long = "allow-env-import")]
+    pub allow_env_import: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DecideInvokeArgs {
+    /// Decision-provider configuration (`aikit.decision-provider/v1`).
+    #[arg(long = "provider-file", value_name = "PATH")]
+    pub provider_file: std::path::PathBuf,
+    #[arg(long = "request-file", value_name = "PATH")]
+    pub request_file: std::path::PathBuf,
+    #[arg(long = "invocation-ref", value_name = "RESOURCE_REF")]
+    pub invocation_ref: Option<String>,
+    #[arg(long = "curl", value_name = "PATH")]
+    pub curl: Option<std::path::PathBuf>,
+    /// Permit a deliberately supplied env:// secret reference.
     #[arg(long = "allow-env-import")]
     pub allow_env_import: bool,
 }

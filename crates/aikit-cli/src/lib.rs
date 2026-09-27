@@ -27,6 +27,7 @@ pub mod contemplation_intel;
 pub mod continuity_disclosure;
 pub mod control_ground;
 pub mod credential;
+pub mod decide;
 pub(crate) mod credential_delivery;
 pub mod direct_agent_session;
 pub mod discover;

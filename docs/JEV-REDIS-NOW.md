@@ -161,6 +161,101 @@ Return changes append to independent participant cursors; one participant
 cannot consume another participant's only notification. Heartbeats and warm
 cache reads do not require Jev inference.
 
+## Local decision models (optional, local-first)
+
+`action/model/decide` is provider-neutral: the typed Noul/Choice/Score
+questions and the strict answer validation do not belong to one vendor. The
+hosted TypeSafe/Jev provider keeps its own law at its transport (concrete
+`jev-…` versions, native credentials, finite tariff reservation). Local and
+self-hosted endpoints speak the same shape under a different standing, with
+the laws an operator-owned endpoint actually has: an explicitly
+unauthenticated local server needs no invented API key, no fabricated tariff
+exists because there is no price source, and usage is still required on every
+answer.
+
+### The election
+
+Exactly one placement is elected through an `aikit.decision-provider/v1`
+configuration:
+
+| mode | placement | notes |
+|---|---|---|
+| `none` | no decision service | the ordinary path; unrelated work never requires one and never falls back to hosted inference on its own |
+| `managed-local` | Workcell-owned local model service on loopback | recommended where installed; the serving process, material, health, restart and cleanup belong to Workcell's declared services |
+| `endpoint` | an existing self-hosted SystemOne-compatible endpoint | beyond loopback this requires an explicit `allow_remote` election and HTTPS |
+| `hosted` | the TypeSafe/Jev API | unchanged law: native credential, `JevLimits`, concrete returned version |
+
+The decision provider is independent of the acting (coding/writing) models:
+it is never resolved from the model roster, and acting-provider disclosure
+does not cover it. Electing local serving of private text is not an election
+to send that text to a cloud worker; an Omarchy tunnel keeps its remote
+placement identity.
+
+### Commands
+
+```sh
+aikit --json decide status \
+  --provider-file decision-provider.json          # actual placement, selected model,
+                                                   # install/load state, license, card
+aikit --json decide status \
+  --provider-file decision-provider.json --probe  # + one real bounded Noul diagnostic
+aikit --json decide invoke \
+  --provider-file decision-provider.json \
+  --request-file jev-request.json
+```
+
+`aikit jev invoke` and `aikit jev validate` are unchanged. In a NOW
+preparation request, `selection` may use `mode: "provider"` with an explicit
+`provider_file`, caller-supplied `state` and an **explicit**
+`relevance_threshold` — thresholds are never silently copied from one
+provider's calibration to another's. The elected provider's identity digest
+(mode, standing, model, artifact identity) joins the prepared basis, so a
+provider, runtime or calibration change moves the basis digest and cannot
+present cached decisions as the same basis; canonical source revisions and
+NOW state are unaffected.
+
+### First local recipe: Kev-0.8B via the existing `/v1/systemone` shape
+
+[jaredpalmer/kev](https://github.com/jaredpalmer/kev) (Apache-2.0) is a family
+of Jev-like decision models serving the same typed protocol on loopback. The
+evaluated candidates on this ground's Apple M4 (16 GB): **Kev-4B** (balanced;
+~8 GB resident weights in bf16, model card targets 32 GB Macs) and
+**Kev-0.8B** (low-resource; ~1.7 GB resident). **Kev-0.8B is what fits this
+machine's honest headroom, so it is the only model the recipe installs**; the
+transport is model-agnostic, so a larger self-hosted model is admitted later
+by re-electing it, not by silently downloading weights.
+
+Pins for the installed cut: upstream `5920c5fe4ca8e0970ed4209ac2c9b8e18bea5109`,
+adapter `jaredpalmer/kev-0.8b`, base `Qwen/Qwen3.5-0.8B-Base @ dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68`,
+mlx-lm `>=0.31.3,<0.32` on Metal, backbone as stored (bf16), fp32 pointer
+head, checkpoint-fitted temperature. `scripts/decision-local/install-kev.sh`
+installs and records SHA-256s in a material manifest;
+`scripts/decision-local/kev-decision-service.example.json` declares the
+serving process through Workcell's existing declared-services path (loopback
+bind, readiness probe, idempotent start, owned stop); starting runs with
+`HF_HUB_OFFLINE=1`, proving cached weights can start and answer without
+outbound network.
+
+### Meaning, disclosure and evaluation
+
+- Probabilities come from the endpoint's own calibration; none are invented
+  from label-only answers, and a local model result grants no authority and
+  supplies no human Recognition.
+- Mandatory sources are never placed under optional semantic pruning: a
+  provider selection only ranks egress-approved candidates, exactly as the
+  Jev selection always has, and a full-scope assessment is never silently
+  truncated.
+- No mandatory LLM approval call is added after permitted judgments; the
+  ordinary path (selection `all`) remains the default and needs no decision
+  service at all.
+- Decision-provider disclosure is evaluated separately from acting-provider
+  disclosure: a selection receipt records the elected decision identity, not
+  an acting model's.
+- A fresh installation without weights stays fully usable: mode `none` (or an
+  elected-but-unavailable local service, which is a visible failure) never
+  becomes a silent cloud fallback, and disabling the service is separate from
+  deleting its weights.
+
 ## Cloud acceptance
 
 `.github/workflows/jev-redis-now.yml` exercises:
