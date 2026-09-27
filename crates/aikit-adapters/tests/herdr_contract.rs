@@ -1589,6 +1589,141 @@ fn the_reconcile_never_transposes_a_direction_herdr_lacks() {
 }
 
 #[test]
+fn a_materialised_pane_gets_its_declared_command_through_pane_run() {
+    // herdr has no command slot at create or split time; the plan's command
+    // travels through `herdr pane run` after the pane exists, and its pane
+    // id is the freshly split one — never a guessed name.
+    let mut plan = two_pane_plan(Direction::Right, Some(("w7", "w7:p1")));
+    plan.views[0].steps[1].command = vec!["tail".into(), "-f".into(), "build.log".into()];
+    let surfaces = plan_surfaces(&plan);
+    let runner = Arc::new(
+        ScriptedRunner::new()
+            .sequence(
+                "api snapshot",
+                &[
+                    fixture("session-snapshot-reconcile-before.json").as_str(),
+                    fixture("session-snapshot-reconcile-before.json").as_str(),
+                    fixture("session-snapshot-reconcile-after.json").as_str(),
+                ],
+            )
+            .on("pane split", &fixture("pane-split-w7.json"))
+            .on("pane run", ""),
+    );
+    let mut provider = HerdrWorkingEnvironment::for_plan(
+        runner.clone(),
+        &plan,
+        r2(herdr_provider_ref_uri()),
+        &surfaces,
+        Some(&surfaces[1].0),
+    );
+
+    let observation = provider.open().unwrap();
+    assert_eq!(
+        observation.canonical_native_id(&surfaces[1].0),
+        Some("w7:p2")
+    );
+    assert!(
+        runner
+            .call_lines()
+            .iter()
+            .any(|call| call == "herdr pane run w7:p2 tail -f build.log"),
+        "the declared command runs in the freshly split pane: {:?}",
+        runner.call_lines()
+    );
+    assert!(
+        !observation
+            .provenance
+            .iter()
+            .any(|line| line.starts_with("reconcile: ")),
+        "no warnings on the happy path: {:?}",
+        observation.provenance
+    );
+}
+
+#[test]
+fn a_failing_pane_command_is_a_named_warning_not_a_failed_open() {
+    let mut plan = two_pane_plan(Direction::Right, Some(("w7", "w7:p1")));
+    plan.views[0].steps[1].command = vec!["make".into(), "dev".into()];
+    let surfaces = plan_surfaces(&plan);
+    let runner = Arc::new(
+        ScriptedRunner::new()
+            .sequence(
+                "api snapshot",
+                &[
+                    fixture("session-snapshot-reconcile-before.json").as_str(),
+                    fixture("session-snapshot-reconcile-before.json").as_str(),
+                    fixture("session-snapshot-reconcile-after.json").as_str(),
+                ],
+            )
+            .on("pane split", &fixture("pane-split-w7.json"))
+            .failing("pane run", 1, "herdr: pane is gone"),
+    );
+    let mut provider = HerdrWorkingEnvironment::for_plan(
+        runner,
+        &plan,
+        r2(herdr_provider_ref_uri()),
+        &surfaces,
+        Some(&surfaces[1].0),
+    );
+
+    let observation = provider.open().unwrap();
+    assert_eq!(
+        observation.canonical_native_id(&surfaces[1].0),
+        Some("w7:p2"),
+        "the pane exists and is bound regardless of its command"
+    );
+    assert_eq!(observation.health, WorkingEnvironmentHealth::Healthy);
+    assert!(
+        observation
+            .provenance
+            .iter()
+            .any(|line| line.contains("herdr-entry/second")
+                && line.contains("did not start in w7:p2")),
+        "{:?}",
+        observation.provenance
+    );
+}
+
+#[test]
+fn the_reconcile_accepts_the_logical_key_as_the_split_source_too() {
+    // A plan may also name the source by its logical key; both shapes
+    // resolve, and the pane materialises either way.
+    let mut plan = two_pane_plan(Direction::Right, Some(("w7", "w7:p1")));
+    for view in &mut plan.views {
+        for step in &mut view.steps {
+            if let Some(split) = &mut step.split {
+                split.from = "herdr-entry/root".into();
+            }
+        }
+    }
+    let surfaces = plan_surfaces(&plan);
+    let runner = Arc::new(
+        ScriptedRunner::new()
+            .sequence(
+                "api snapshot",
+                &[
+                    fixture("session-snapshot-reconcile-before.json").as_str(),
+                    fixture("session-snapshot-reconcile-before.json").as_str(),
+                    fixture("session-snapshot-reconcile-after.json").as_str(),
+                ],
+            )
+            .on("pane split", &fixture("pane-split-w7.json")),
+    );
+    let mut provider = HerdrWorkingEnvironment::for_plan(
+        runner,
+        &plan,
+        r2(herdr_provider_ref_uri()),
+        &surfaces,
+        Some(&surfaces[1].0),
+    );
+    let observation = provider.open().unwrap();
+    assert_eq!(
+        observation.canonical_native_id(&surfaces[1].0),
+        Some("w7:p2")
+    );
+}
+
+#[test]
 fn a_fully_recorded_place_still_reissues_no_evidence() {
     // The all-recorded attach: every surface the plan declares is recorded
     // and live, so created evidence stays None — a repeated open stages no
