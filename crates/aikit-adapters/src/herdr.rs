@@ -424,6 +424,10 @@ pub struct HerdrWorkingEnvironment<R> {
     plan_surfaces: Vec<(ResourceRef, String)>,
     /// Logical pane key → the plan's declared split (source + direction).
     plan_splits: BTreeMap<String, Split>,
+    /// Logical pane key → the plan's declared command, honoured after the
+    /// pane materialises: herdr has no command slot at create or split time,
+    /// so `herdr pane run` is the post-hoc route.
+    plan_commands: BTreeMap<String, Vec<String>>,
     /// Why a declared pane was not materialised by the last open: recorded
     /// into the observation's provenance, never silently dropped.
     reconcile_warnings: Vec<String>,
@@ -443,6 +447,7 @@ impl<R> HerdrWorkingEnvironment<R> {
             agent_session_bindings: BTreeMap::new(),
             plan_surfaces: Vec::new(),
             plan_splits: BTreeMap::new(),
+            plan_commands: BTreeMap::new(),
             reconcile_warnings: Vec::new(),
         }
     }
@@ -489,10 +494,16 @@ impl<R> HerdrWorkingEnvironment<R> {
         environment.plan_surfaces = surfaces.to_vec();
         for view in &plan.views {
             for step in &view.steps {
+                let logical = format!("{}/{}", view.id, step.pane);
                 if let Some(split) = &step.split {
                     environment
                         .plan_splits
-                        .insert(format!("{}/{}", view.id, step.pane), split.clone());
+                        .insert(logical.clone(), split.clone());
+                }
+                if !step.command.is_empty() {
+                    environment
+                        .plan_commands
+                        .insert(logical, step.command.clone());
                 }
             }
         }
@@ -829,8 +840,36 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
     /// honoured honestly — an unhonourable direction, an unbound source, a
     /// split that would mint an invisibly small pane — is skipped with a
     /// provenance line naming it, never silently.
+    /// Run one materialised pane's declared command in it. `herdr pane run`
+    /// is the only route — workspace create and pane split take no command —
+    /// and it is best-effort by contract: a command that does not start is a
+    /// named provenance line, never a failed open.
+    fn run_declared_command(&mut self, logical: &str, pane_id: &str) {
+        let Some(command) = self.plan_commands.get(logical).cloned() else {
+            return;
+        };
+        let mut argv = vec![
+            "herdr".to_string(),
+            "pane".to_string(),
+            "run".to_string(),
+            pane_id.to_string(),
+        ];
+        argv.extend(command);
+        match self.runner.run(&argv) {
+            Ok(output) if output.status == 0 => {}
+            Ok(output) => self.reconcile_warnings.push(format!(
+                "plan pane {logical}: its command did not start in {pane_id} (exit {}): {}",
+                output.status,
+                output.stderr.trim()
+            )),
+            Err(error) => self.reconcile_warnings.push(format!(
+                "plan pane {logical}: its command did not start in {pane_id}: {}",
+                error.message()
+            )),
+        }
+    }
+
     fn reconcile_plan_surfaces(&mut self) -> Result<()> {
-        self.reconcile_warnings.clear();
         let snapshot = self.snapshot()?;
         for (surface, logical) in self.plan_surfaces.clone() {
             if self.surface_bindings.contains_key(&surface) {
@@ -888,7 +927,8 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
                 ));
                 continue;
             }
-            self.split_surface(&source_surface, surface, direction)?;
+            let pane_id = self.split_surface(&source_surface, surface, direction)?;
+            self.run_declared_command(&logical, &pane_id);
         }
         Ok(())
     }
@@ -1013,6 +1053,7 @@ impl<R: CommandRunner> WorkingEnvironmentProvider for HerdrWorkingEnvironment<R>
     }
 
     fn open(&mut self) -> Result<WorkingEnvironmentObservation> {
+        self.reconcile_warnings.clear();
         let snapshot = self.snapshot()?;
         let recorded_live = self
             .workspace_id
@@ -1028,8 +1069,16 @@ impl<R: CommandRunner> WorkingEnvironmentProvider for HerdrWorkingEnvironment<R>
             self.surface_bindings.clear();
             let created = self.create_workspace()?;
             if let Some(subject) = self.open_subject.clone() {
+                let subject_logical = self
+                    .plan_surfaces
+                    .iter()
+                    .find(|(surface, _)| *surface == subject)
+                    .map(|(_, key)| key.clone());
                 self.surface_bindings
-                    .insert(subject, created.root_pane_id.clone());
+                    .insert(subject.clone(), created.root_pane_id.clone());
+                if let Some(logical) = subject_logical {
+                    self.run_declared_command(&logical, &created.root_pane_id);
+                }
             }
         }
         // Both halves of create-or-attach reconcile: a plan that declares
