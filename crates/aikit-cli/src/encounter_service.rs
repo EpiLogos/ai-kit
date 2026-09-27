@@ -632,7 +632,7 @@ impl EncounterService {
         }
         result.map_err(error)
     }
-    fn providers(&self) -> Result<Vec<EncounterProvider>> {
+    pub(crate) fn providers(&self) -> Result<Vec<EncounterProvider>> {
         let root = self.home.state().join("encounter-providers");
         if !root.exists() {
             return Ok(Vec::new());

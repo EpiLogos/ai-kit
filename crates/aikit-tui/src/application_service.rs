@@ -79,7 +79,7 @@ impl<'a> ApplicationService<'a> {
         Self::navigation_index_from(self.backend)
     }
 
-    fn navigation_index_from(backend: &dyn PaletteBackend) -> Result<ResourceSearchIndex> {
+    pub fn navigation_index_from(backend: &dyn PaletteBackend) -> Result<ResourceSearchIndex> {
         let mut index = crate::project_world_service::resource_index_with_records(
             backend,
             backend.context_resource_records()?,

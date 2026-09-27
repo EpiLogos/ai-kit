@@ -40,11 +40,19 @@ use crate::app::Service;
 /// this is not a second application service or semantic store.
 struct V2SurfaceService<'a> {
     service: &'a mut Service,
+    /// Correlation retained from this backend's own save stage: the accept CAS
+    /// names the exact profile the save landed. The surface stage machine
+    /// always saves before accepting, so this is the reviewed source — never a
+    /// renderer-selected or roster-guessed identity.
+    saved_profile_ref: Option<String>,
 }
 
 impl<'a> V2SurfaceService<'a> {
     fn new(service: &'a mut Service) -> Self {
-        Self { service }
+        Self {
+            service,
+            saved_profile_ref: None,
+        }
     }
 
     fn composition_navigation_index(&self) -> ResourceSearchIndex {
@@ -252,6 +260,442 @@ impl PaletteBackend for V2SurfaceService<'_> {
             operation,
         )
     }
+
+    fn factory_work_entry(&self) -> aikit_tui::backend::FactoryWorkEntry {
+        <Service as PaletteBackend>::factory_work_entry(self.service)
+    }
+
+    fn start_factory_work(&mut self) -> Result<aikit_tui::backend::FactoryWorkStartReceipt> {
+        <Service as PaletteBackend>::start_factory_work(self.service)
+    }
+
+    fn agent_work_bindings(&self) -> aikit_tui::world_entry::AgentWorkBindings {
+        // Read once at surface construction (the trait's contract): the
+        // operations are bound exactly when the invocation stands in a native
+        // Central root or Work Project. Launch routes through the encounter
+        // owner, which is always constructible for this backend.
+        let bound = agent_work::central_scope(self.service).is_ok();
+        aikit_tui::world_entry::AgentWorkBindings {
+            save: bound,
+            accept: bound,
+            readiness: bound,
+            prepare: bound,
+            launch: bound,
+        }
+    }
+
+    fn save_agent_profile(
+        &mut self,
+        purpose: &str,
+        name: Option<&str>,
+    ) -> Result<aikit_tui::backend::AgentProfileSaveReceipt> {
+        let scope = agent_work::central_scope(self.service)?;
+        let world_ref = agent_work::expected_world_ref(&scope)?;
+        let mut input = serde_json::json!({
+            "scope": scope.scope,
+            "intent_expression": purpose,
+            "purpose": purpose,
+            "world_ref": world_ref,
+            "ratified_world_refs": [world_ref],
+            "skill_refs": [],
+            "skill_set_refs": [],
+        });
+        if let Some(project) = &scope.project {
+            input["project"] = serde_json::json!(project);
+        }
+        if let Some(name) = name {
+            input["name"] = serde_json::json!(name);
+        }
+        let runner = aikit_adapters::runner::SystemRunner::new();
+        let expressed = agent_work::run_central_action(
+            &runner,
+            &scope,
+            "agent-profile.express",
+            input,
+        )?;
+        let profile_ref = expressed["allocation"]["profile_ref"]
+            .as_str()
+            .or_else(|| expressed["profile"]["ref"].as_str())
+            .ok_or_else(|| {
+                aikit_core::AikitError::new(
+                    "agent_profile.save_invalid",
+                    "Central's express answer names no profile reference",
+                )
+            })?
+            .to_owned();
+        // Revision and content digest come from the owner's own review
+        // reading, never derived here: these are the exact CAS values a later
+        // accept must name.
+        let review = agent_work::run_central_action(
+            &runner,
+            &scope,
+            "agent-profile.review",
+            agent_work::review_input(&scope, &profile_ref),
+        )?;
+        let receipt = agent_work::save_receipt(&review)?;
+        self.saved_profile_ref = Some(receipt.profile_ref.clone());
+        Ok(receipt)
+    }
+
+    fn accept_agent_profile(
+        &mut self,
+        expected_revision: &str,
+        expected_content_digest: Option<&str>,
+    ) -> Result<aikit_tui::backend::AgentProfileAcceptReceipt> {
+        let profile_ref = self.saved_profile_ref.clone().ok_or_else(|| {
+            aikit_core::AikitError::new(
+                "agent_profile.accept_without_save",
+                "accept names the profile this surface saved; no save is held here",
+            )
+        })?;
+        let expected_content_digest = expected_content_digest.ok_or_else(|| {
+            aikit_core::AikitError::new(
+                "agent_profile.accept_without_digest",
+                "accept is a CAS on the exact reviewed source; its content digest is required",
+            )
+        })?;
+        let scope = agent_work::central_scope(self.service)?;
+        let runner = aikit_adapters::runner::SystemRunner::new();
+        agent_work::run_central_action(
+            &runner,
+            &scope,
+            "agent-profile.accept",
+            serde_json::json!({
+                "scope": scope.scope,
+                "profile_ref": profile_ref,
+                "expected_revision": expected_revision,
+                "expected_content_digest": expected_content_digest,
+            }),
+        )?;
+        // A write acknowledgement is not acceptance evidence: reread the
+        // review and confirm the exact source before the stage advances.
+        let review = agent_work::run_central_action(
+            &runner,
+            &scope,
+            "agent-profile.review",
+            agent_work::review_input(&scope, &profile_ref),
+        )?;
+        if review["accepted"] != serde_json::json!(true)
+            || review["profile"]["revision"] != serde_json::json!(expected_revision)
+            || review["content_digest"] != serde_json::json!(expected_content_digest)
+        {
+            return Err(aikit_core::AikitError::new(
+                "agent_profile.accept_stale",
+                "Central does not show the exact source as accepted; reread the roster before retrying",
+            ));
+        }
+        Ok(aikit_tui::backend::AgentProfileAcceptReceipt {
+            profile_ref,
+            revision: expected_revision.to_owned(),
+            content_digest: expected_content_digest.to_owned(),
+        })
+    }
+
+    fn world_readiness(&self) -> Result<aikit_tui::backend::WorldReadiness> {
+        let reading = crate::direct_agent_session::scope(self.service)?;
+        let readiness = &reading["world_readiness"];
+        Ok(aikit_tui::backend::WorldReadiness {
+            ready: readiness["ready"] == serde_json::json!(true),
+            reason: readiness["reason"].as_str().map(str::to_owned),
+            suggested_action: readiness["action"].as_str().map(str::to_owned),
+        })
+    }
+
+    fn prepare_agent_session(
+        &mut self,
+        profile_ref: &str,
+    ) -> Result<aikit_tui::backend::AgentSessionPreparation> {
+        let scope = agent_work::central_scope(self.service)?;
+        let runner = aikit_adapters::runner::SystemRunner::new();
+        // Acceptance evidence comes from the owner's review reading — never
+        // from renderer state — and `prepare` revalidates it natively.
+        let review = agent_work::run_central_action(
+            &runner,
+            &scope,
+            "agent-profile.review",
+            agent_work::review_input(&scope, profile_ref),
+        )?;
+        if review["accepted"] != serde_json::json!(true) {
+            return Err(aikit_core::AikitError::new(
+                "agent_profile.not_accepted",
+                "preparation needs the exact accepted source; accept the definition in Central first",
+            ));
+        }
+        let request = crate::direct_agent_session::PrepareRequest {
+            request_id: format!("tui-prepare-{}", ulid::Ulid::generate()),
+            profile_ref: profile_ref.to_owned(),
+            expected_revision: agent_work::text_field(&review["profile"]["revision"], "revision")?,
+            expected_content_digest: agent_work::text_field(
+                &review["content_digest"],
+                "content digest",
+            )?,
+            expected_acceptance_ref: agent_work::text_field(
+                &review["acceptance"]["acceptance_ref"],
+                "acceptance ref",
+            )?,
+        };
+        let reading = crate::direct_agent_session::prepare(self.service, request)?;
+        if reading["prepared"] != serde_json::json!(true) {
+            let session = reading["agent_session"].as_str().unwrap_or(profile_ref);
+            return Err(aikit_core::AikitError::new(
+                "session_space.preparation_incomplete",
+                format!(
+                    "preparation is incomplete; session {session} stays resumable through the same retained request"
+                ),
+            ));
+        }
+        Ok(aikit_tui::backend::AgentSessionPreparation {
+            agent_session: agent_work::text_field(&reading["agent_session"], "agent session")?,
+            space: reading["space"].as_str().map(str::to_owned),
+            provider_started: reading["provider_started"].as_bool().unwrap_or(false),
+        })
+    }
+
+    fn start_encounter(
+        &mut self,
+        agent_session: &str,
+    ) -> Result<aikit_tui::backend::EncounterLaunch> {
+        agent_work::start_encounter(self.service, agent_session)
+    }
+}
+
+/// Production backing for the V2 surface's native Agent-work lifecycle: each
+/// stage routes to the existing owner operation (Central agent-profile
+/// express/review/accept, the folded direct-agent-session preparation, and the
+/// encounter owner daemon). Nothing here manufactures a receipt; a stage's
+/// outcome is the owner's own answer.
+mod agent_work {
+    use super::Service;
+    use aikit_adapters::runner::CommandRunner;
+    use aikit_core::{AikitError, ResourceRef, Result};
+    use serde_json::{json, Value};
+    use std::path::PathBuf;
+
+    pub(crate) struct CentralScope {
+        pub cwd: PathBuf,
+        pub central: PathBuf,
+        pub scope: &'static str,
+        pub project: Option<String>,
+    }
+
+    fn refusal(code: &'static str, message: impl Into<String>) -> AikitError {
+        AikitError::new(code, message)
+    }
+
+    /// The native Central encounter scope of this invocation: the canonical
+    /// Central root, whether the invocation stands at the root or in exactly
+    /// one Work Project. The same derivation the folded preparation applies.
+    pub(crate) fn central_scope(service: &Service) -> Result<CentralScope> {
+        let cwd = std::fs::canonicalize(service.invocation_cwd())
+            .map_err(|error| refusal("direct_agent.source_io", error.to_string()))?;
+        let central = crate::temporal::central_root_enclosing(Some(&cwd)).ok_or_else(|| {
+            refusal(
+                "direct_agent.central_unbound",
+                "The disclosed location is not in Central; select the Central root or a native Work Project",
+            )
+        })?;
+        let central = std::fs::canonicalize(central)
+            .map_err(|error| refusal("direct_agent.source_io", error.to_string()))?;
+        let (scope, project) = if cwd == central {
+            ("root", None)
+        } else {
+            let relative = cwd.strip_prefix(central.join("Work")).map_err(|_| {
+                refusal(
+                    "direct_agent.scope_invalid",
+                    "Direct Agent scope must be the Central root or an exact Work member",
+                )
+            })?;
+            if relative.components().count() != 1
+                || !cwd.join("ProjectCentral/project.json").is_file()
+            {
+                return Err(refusal(
+                    "direct_agent.scope_invalid",
+                    "Select the exact native Project root",
+                ));
+            }
+            (
+                "project",
+                Some(
+                    relative
+                        .to_str()
+                        .ok_or_else(|| refusal("direct_agent.source_io", "Project name is not UTF-8"))?
+                        .to_owned(),
+                ),
+            )
+        };
+        Ok(CentralScope {
+            cwd,
+            central,
+            scope,
+            project,
+        })
+    }
+
+    /// The canonical World ref of the scope: `control:root`, or the Project's
+    /// own native identity read from its authored manifest — the same
+    /// expected-scope derivation the native review check applies.
+    pub(crate) fn expected_world_ref(scope: &CentralScope) -> Result<String> {
+        if scope.scope == "root" {
+            return Ok("control:root".to_owned());
+        }
+        scope.project.as_deref().ok_or_else(|| {
+            refusal("direct_agent.scope_invalid", "project scope names no Project")
+        })?;
+        let manifest: Value = serde_json::from_slice(
+            &std::fs::read(scope.cwd.join("ProjectCentral/project.json")).map_err(|error| {
+                refusal("direct_agent.source_io", error.to_string())
+            })?,
+        )
+        .map_err(|error| refusal("direct_agent.source_io", error.to_string()))?;
+        let id = manifest["project_id"].as_str().ok_or_else(|| {
+            refusal(
+                "direct_agent.project_invalid",
+                "Native Project source identity is missing",
+            )
+        })?;
+        Ok(format!("project:{id}"))
+    }
+
+    pub(crate) fn review_input(scope: &CentralScope, profile_ref: &str) -> Value {
+        let mut input = json!({"scope": scope.scope, "profile_ref": profile_ref});
+        if let Some(project) = &scope.project {
+            input["project"] = json!(project);
+        }
+        input
+    }
+
+    /// One bounded native Central Action invocation through the owner's own
+    /// CLI: resolved executable, explicit argv vector, JSON envelope checked.
+    pub(crate) fn run_central_action<R: CommandRunner>(
+        runner: &R,
+        scope: &CentralScope,
+        action: &str,
+        input: Value,
+    ) -> Result<Value> {
+        let executable = std::env::var("CENTRAL_CTRL_BIN").unwrap_or_else(|_| "ctrl".into());
+        let argv = vec![
+            executable,
+            "--json".into(),
+            "--root".into(),
+            scope.central.display().to_string(),
+            "action".into(),
+            "run".into(),
+            action.into(),
+            input.to_string(),
+        ];
+        let output = runner.run(&argv)?;
+        if output.status != 0 {
+            return Err(refusal(
+                "central.action_unavailable",
+                format!("Central could not answer `{action}`; repair System → Central and reread"),
+            ));
+        }
+        if output.stdout.len() > 1024 * 1024 {
+            return Err(refusal(
+                "central.action_oversized",
+                format!("Central's `{action}` answer is oversized"),
+            ));
+        }
+        let envelope: Value = serde_json::from_str(&output.stdout)
+            .map_err(|error| refusal("central.action_invalid", error.to_string()))?;
+        if envelope["ok"] != json!(true) {
+            return Err(refusal(
+                "central.action_refused",
+                format!("Central refused `{action}`: {}", envelope["error"]["message"].as_str().unwrap_or("no reason given")),
+            ));
+        }
+        Ok(envelope["data"].clone())
+    }
+
+    pub(crate) fn text_field(value: &Value, name: &str) -> Result<String> {
+        value
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                refusal(
+                    "central.action_invalid",
+                    format!("Central's answer carries no {name}"),
+                )
+            })
+    }
+
+    pub(crate) fn save_receipt(
+        review: &Value,
+    ) -> Result<aikit_tui::backend::AgentProfileSaveReceipt> {
+        let profile = &review["profile"];
+        Ok(aikit_tui::backend::AgentProfileSaveReceipt {
+            profile_ref: text_field(&profile["ref"], "profile ref")?,
+            agent_ref: text_field(&profile["agent_ref"], "agent ref")?,
+            revision: text_field(&profile["revision"], "revision")?,
+            content_digest: review["content_digest"].as_str().map(str::to_owned),
+        })
+    }
+
+    /// Launch the encounter through the one native owner daemon: the session
+    /// must already be prepared and attached, the provider is the configured
+    /// encounter provider, and the owner's own receipt is the answer.
+    #[cfg(unix)]
+    pub(crate) fn start_encounter(service: &mut Service, agent_session: &str) -> Result<aikit_tui::backend::EncounterLaunch> {
+        let session = ResourceRef::parse(agent_session)
+            .map_err(|error| refusal("encounter.session_invalid", error.to_string()))?;
+        let Some(binding) = crate::direct_agent_session::read(service.home(), &session)? else {
+            return Err(refusal(
+                "encounter.session_unprepared",
+                format!("no prepared Direct session named {agent_session}; prepare it before launch"),
+            ));
+        };
+        let encounter = crate::encounter_service::EncounterService::new(service.home().clone())?;
+        let providers = encounter.providers()?;
+        let provider = match providers.as_slice() {
+            [one] => one.id.clone(),
+            [] => {
+                return Err(refusal(
+                    "encounter.provider_unconfigured",
+                    "no encounter provider is configured; configure the harness provider before launching",
+                ))
+            }
+            many => {
+                let names = many
+                    .iter()
+                    .map(|provider| provider.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(refusal(
+                    "encounter.provider_ambiguous",
+                    format!("several encounter providers are configured ({names}); keep one before launching from the surface"),
+                ));
+            }
+        };
+        crate::encounter_service::start(service.home(), &binding.cwd)?;
+        let receipt = crate::encounter_service::request(
+            &crate::encounter_service::socket_path(service.home()),
+            &crate::encounter_service::EncounterRequest::Open {
+                space: binding.space.clone(),
+                agent_session: session,
+                provider,
+                cwd: binding.cwd.clone(),
+            },
+        )?;
+        Ok(aikit_tui::backend::EncounterLaunch {
+            agent_session: receipt["agent_session"]
+                .as_str()
+                .unwrap_or(agent_session)
+                .to_owned(),
+            carrier: receipt["provider"].as_str().map(str::to_owned),
+        })
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn start_encounter(
+        _service: &mut Service,
+        _agent_session: &str,
+    ) -> Result<aikit_tui::backend::EncounterLaunch> {
+        Err(refusal(
+            "encounter.start_unavailable",
+            "the encounter owner transport is not available on this platform",
+        ))
+    }
 }
 
 /// Build a terminal profile from an environment lookup and the `--fullscreen`
@@ -328,6 +772,12 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::Path;
     use std::process::Command;
+    use std::sync::Mutex;
+
+    /// The native owner resolution reads process environment variables
+    /// (`CENTRAL_ROOT`, `CENTRAL_CTRL_BIN`); the env-mutating tests serialise
+    /// on this lock so parallel tests never observe each other's world.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn git(root: &Path, args: &[&str]) {
         let status = Command::new("git")
@@ -515,5 +965,175 @@ mod tests {
             backend.model_roster().unwrap().is_some(),
             "the decorator carries Service's composed roster, not the trait default"
         );
+    }
+
+    /// The native Agent-work lifecycle wiring: before the production
+    /// implementations existed on `V2SurfaceService`, every stage silently ran
+    /// the refusing `PaletteBackend` trait default, so the TUI could not save,
+    /// accept, prepare or launch anything no matter what the machine had. The
+    /// guard drives the decorator itself against a fake Central owner and
+    /// asserts the exact owner argv, the CAS values, and the receipt mapping —
+    /// the stage machine is proven separately in `aikit-tui`'s lifecycle tests.
+    fn central_world() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("central");
+        std::fs::create_dir_all(&root).unwrap();
+        // The same minimal native identity `project()` builds: the folded
+        // readiness reading requires a real Project binding at the cwd, so the
+        // fixture root carries one.
+        project(&root);
+        (tmp, root)
+    }
+
+    fn fake_ctrl(dir: &Path, log: &Path) -> PathBuf {
+        let path = dir.join("ctrl");
+        let dir = dir.display().to_string();
+        let log = log.display().to_string();
+        script(
+            &path,
+            &format!(
+                r#"echo "$*" >> "{log}"
+case "$6" in
+  agent-profile.express) echo '{{"ok":true,"data":{{"allocation":{{"profile_ref":"agent-profile:expressed-fake","agent_ref":"agent:expressed-fake","revision":"r1","recognition":"unrecognised"}},"profile":{{"ref":"agent-profile:expressed-fake","agent_ref":"agent:expressed-fake","revision":"r1"}}}}}}' ;;
+  agent-profile.accept) touch "{dir}/accepted" ; echo '{{"ok":true,"data":{{}}}}' ;;
+  agent-profile.review)
+    if [ -f "{dir}/accepted" ]; then accepted=true; else accepted=false; fi
+    echo "{{\"ok\":true,\"data\":{{\"schema\":\"central.agent-profile-review/v1\",\"scope_ref\":\"control:root\",\"accepted\":$accepted,\"content_digest\":\"sha256:fake\",\"profile\":{{\"ref\":\"agent-profile:expressed-fake\",\"agent_ref\":\"agent:expressed-fake\",\"revision\":\"r1\"}},\"acceptance\":{{\"schema\":\"central.agent-profile-acceptance/v1\",\"acceptance_ref\":\"acceptance:fake\",\"profile_ref\":\"agent-profile:expressed-fake\",\"profile_revision\":\"r1\",\"content_digest\":\"sha256:fake\",\"scope_ref\":\"control:root\"}}}}}}" ;;
+  central.world.effective-sources) echo '{{"ok":true,"data":{{"world_ref":"control:root","sources":[]}}}}' ;;
+  *) echo '{{"ok":false,"error":{{"code":"invalid_input","message":"Unknown Action"}}}}'; exit 2 ;;
+esac"#
+            ),
+        );
+        path
+    }
+
+    fn script(path: &Path, body: &str) {
+        std::fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_surface_binds_the_agent_work_lifecycle_over_a_central_root_only() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (tmp, root) = central_world();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
+        std::env::set_var("CENTRAL_ROOT", &canonical_root);
+        let mut env = BTreeMap::new();
+        env.insert(
+            "AIKIT_CONTEXT_ID".to_owned(),
+            aikit_core::ContextId::generate().to_string(),
+        );
+        let mut svc =
+            Service::open(aikit_store::AikitHome::at(&home), &root, |key| env.get(key).cloned())
+                .unwrap();
+        let backend = V2SurfaceService::new(&mut svc);
+        let bindings = backend.agent_work_bindings();
+        assert!(
+            bindings.save && bindings.accept && bindings.readiness && bindings.prepare,
+            "standing in Central binds every native Agent-work stage: {bindings:?}"
+        );
+
+        // Outside Central nothing is bound: the honest unavailability the
+        // world-entry rows name, not a stage that fails halfway through.
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let mut svc =
+            Service::open(aikit_store::AikitHome::at(&home), &elsewhere, |key| {
+                env.get(key).cloned()
+            })
+            .unwrap();
+        let backend = V2SurfaceService::new(&mut svc);
+        let bindings = backend.agent_work_bindings();
+        assert!(
+            !bindings.save && !bindings.accept && !bindings.readiness && !bindings.prepare,
+            "outside Central no stage is bound: {bindings:?}"
+        );
+        std::env::remove_var("CENTRAL_ROOT");
+    }
+
+    #[test]
+    fn save_and_accept_route_through_central_with_exact_cas_and_review_readback() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (tmp, root) = central_world();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let log = tmp.path().join("ctrl.log");
+        let ctrl = fake_ctrl(tmp.path(), &log);
+        std::env::set_var("CENTRAL_ROOT", std::fs::canonicalize(&root).unwrap());
+        std::env::set_var("CENTRAL_CTRL_BIN", &ctrl);
+        let mut env = BTreeMap::new();
+        env.insert(
+            "AIKIT_CONTEXT_ID".to_owned(),
+            aikit_core::ContextId::generate().to_string(),
+        );
+        let mut svc =
+            Service::open(aikit_store::AikitHome::at(&home), &root, |key| env.get(key).cloned())
+                .unwrap();
+        let mut backend = V2SurfaceService::new(&mut svc);
+
+        let saved = backend
+            .save_agent_profile("Guard the day's close", Some("Daykeeper"))
+            .expect("save routes through the Central owner");
+        assert_eq!(saved.profile_ref, "agent-profile:expressed-fake");
+        assert_eq!(saved.agent_ref, "agent:expressed-fake");
+        assert_eq!(saved.revision, "r1");
+        assert_eq!(saved.content_digest.as_deref(), Some("sha256:fake"));
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            calls.contains("agent-profile.express"),
+            "save goes through the express authoring Action: {calls}"
+        );
+        assert!(
+            calls.contains("\"intent_expression\":\"Guard the day's close\""),
+            "the purpose is carried verbatim: {calls}"
+        );
+        assert!(
+            calls.contains("\"world_ref\":\"control:root\""),
+            "the composed World ref is carried: {calls}"
+        );
+        assert!(
+            calls.contains("agent-profile.review"),
+            "revision and digest come from the owner's review reading: {calls}"
+        );
+
+        // Accept is a CAS on the exact reviewed source: the owner receives the
+        // exact revision and digest, and the stage reads acceptance back from
+        // the review before reporting success.
+        let accepted = backend
+            .accept_agent_profile("r1", Some("sha256:fake"))
+            .expect("accept routes through the Central owner with the exact CAS");
+        assert_eq!(accepted.profile_ref, "agent-profile:expressed-fake");
+        assert_eq!(accepted.revision, "r1");
+        assert_eq!(accepted.content_digest, "sha256:fake");
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            calls.contains("\"expected_revision\":\"r1\"")
+                && calls.contains("\"expected_content_digest\":\"sha256:fake\""),
+            "the accept call carries the exact CAS values: {calls}"
+        );
+
+        // The world readiness reading is the folded native scope answer.
+        let readiness = backend.world_readiness().expect("readiness reads natively");
+        assert!(readiness.ready, "the fake answers a bound world: {readiness:?}");
+
+        // A fresh surface holds no saved correlation: accept without this
+        // surface's own save refuses instead of guessing a profile.
+        let mut svc = Service::open(aikit_store::AikitHome::at(&home), &root, |key| {
+            env.get(key).cloned()
+        })
+        .unwrap();
+        let mut backend = V2SurfaceService::new(&mut svc);
+        let error = backend
+            .accept_agent_profile("r1", Some("sha256:fake"))
+            .expect_err("accept without this surface's save refuses");
+        assert_eq!(error.code(), "agent_profile.accept_without_save");
+        std::env::remove_var("CENTRAL_ROOT");
+        std::env::remove_var("CENTRAL_CTRL_BIN");
     }
 }

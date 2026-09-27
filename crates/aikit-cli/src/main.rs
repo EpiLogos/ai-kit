@@ -3634,27 +3634,54 @@ fn cmd_act(cwd: &std::path::Path, a: ActGroup, json_mode: bool) -> Result<Reply>
             Ok(reply(&service, data, diagnostic_warnings(&service)))
         }
         Some(ActGroupCommand::Invoke(args)) => {
-            let (run, digest) = aikit_cli::act::invoke(&mut service, args)?;
-            for line in &run.report.output {
-                println!("{line}");
+            match aikit_cli::act::invoke(&mut service, args)? {
+                aikit_cli::act::ActOutcome::Capability { run, digest } => {
+                    for line in &run.report.output {
+                        println!("{line}");
+                    }
+                    if json_mode {
+                        eprintln!(
+                            "{}",
+                            json::line(&json::success(
+                                &EnvelopeContext::default(),
+                                jval!({
+                                    "schema": "aikit.act-invocation/v1",
+                                    "capability": run.capsule.to_string(),
+                                    "status": run.report.status,
+                                    "detached": run.report.detached,
+                                    "result_digest": digest,
+                                }),
+                                vec![],
+                            ))
+                        );
+                    }
+                    Ok(Reply::Status(run.report.status))
+                }
+                aikit_cli::act::ActOutcome::Owner { action, owner, subject, output, digest } => {
+                    for line in output.lines() {
+                        println!("{line}");
+                    }
+                    if json_mode {
+                        eprintln!(
+                            "{}",
+                            json::line(&json::success(
+                                &EnvelopeContext::default(),
+                                jval!({
+                                    "schema": "aikit.act-invocation/v1",
+                                    "action": action.to_string(),
+                                    "owner": owner,
+                                    "subject": subject,
+                                    "status": "ok",
+                                    "detached": false,
+                                    "result_digest": digest,
+                                }),
+                                vec![],
+                            ))
+                        );
+                    }
+                    Ok(Reply::Status(0))
+                }
             }
-            if json_mode {
-                eprintln!(
-                    "{}",
-                    json::line(&json::success(
-                        &EnvelopeContext::default(),
-                        jval!({
-                            "schema": "aikit.act-invocation/v1",
-                            "capability": run.capsule.to_string(),
-                            "status": run.report.status,
-                            "detached": run.report.detached,
-                            "result_digest": digest,
-                        }),
-                        vec![],
-                    ))
-                );
-            }
-            Ok(Reply::Status(run.report.status))
         }
     }
 }
@@ -3769,12 +3796,19 @@ fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
         })
         .collect();
 
+    // Contextual Actions join the same search answer: what becomes possible
+    // includes the Actions this scope holds, each with its subjects, owner and
+    // the describe/invoke routes of the one doorway. Search stays inert —
+    // these rows are readings, never observation events.
+    let action_rows = aikit_cli::act::search_rows(&service, &a.query, a.limit)?;
+
     Ok(reply(
         &service,
         jval!({
             "expression": resolved.expression,
             "path": resolved.path,
             "rows": rows,
+            "actions": action_rows,
             "alias_families": family_rows,
             "alias_family_problems": problems,
             "inert": true,
