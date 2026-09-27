@@ -441,8 +441,45 @@ pub struct GatewayQueryArgs {
 
 #[derive(Debug, Args)]
 pub struct GatewayCmd {
+    /// Route this command through the gateway declared for this remote
+    /// Workcell (`aikit gateway remote list`), instead of this home's own.
+    /// The answer names the gateway that produced it; nothing is implicit.
+    #[arg(long = "at", value_name = "WORKCELL_REF", global = true)]
+    pub at: Option<String>,
     #[command(subcommand)]
     pub command: GatewaySub,
+}
+
+/// `aikit gateway hoist` — place this gateway's posture on another Workcell
+/// (`--to workcell:X [--apply]`), or receive one staged here (`--receive`).
+#[derive(Debug, Args)]
+pub struct GatewayHoistArgs {
+    /// The Workcell the posture moves to, e.g. `workcell:omarchy`.
+    #[arg(long, value_name = "WORKCELL_REF")]
+    pub to: Option<String>,
+    /// Stage the packed posture (without it: plan only — print what would
+    /// move, what the target re-resolves, what identity keeps).
+    #[arg(long)]
+    pub apply: bool,
+    /// Unpack a staged bundle into this home (the target side).
+    #[arg(long, conflicts_with = "to")]
+    pub receive: bool,
+    /// Receive over this home's existing posture.
+    #[arg(long)]
+    pub force: bool,
+    /// Execute the remote steps over the --ssh channel after staging.
+    #[arg(long, requires = "ssh")]
+    pub yes: bool,
+    /// The ssh target the staging reaches (`user@host`). Never invented here.
+    #[arg(long, value_name = "TARGET", requires = "apply")]
+    pub ssh: Option<String>,
+    /// With --ssh --yes: copy each packed `file:` token file to the target.
+    /// Without it, token files are the operator's to stage.
+    #[arg(long, requires = "yes")]
+    pub include_tokens: bool,
+    /// The target gateway ref (default: `agency-gateway/<workcell-slug>`).
+    #[arg(long = "gateway-ref", value_name = "REF")]
+    pub gateway_ref: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -985,6 +1022,10 @@ pub enum GatewaySub {
     /// foreign harness gateways (Hermes, OpenClaw), show the policy, and —
     /// with `--policy` — set it. Detection is inspect-only.
     Coexistence(GatewayCoexistenceArgs),
+    /// Place this gateway's posture on another Workcell, or receive one
+    /// staged here: plan (the default), `--apply` to stage, `--receive` to
+    /// unpack. Token locations move; token files stay the operator's.
+    Hoist(GatewayHoistArgs),
 }
 
 /// `aikit gateway agent` — the canonical conversation-control operations,

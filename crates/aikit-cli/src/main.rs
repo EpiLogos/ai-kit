@@ -1167,7 +1167,56 @@ fn read_body_file(path: &std::path::Path) -> Result<String> {
 /// Gateway commands address an external service, so they carry no resolved
 /// context — the envelope context stays empty rather than pretending a scope.
 /// Carriers default to the well-known home endpoint (`gateway_ops`).
+///
+/// `--at WORKCELL_REF` is one routing fact for the whole invocation: the
+/// flattened carriers are replaced with the endpoint declared for that remote
+/// Workcell, and the reply discloses that it came from there. Nothing hides.
 fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
+    let mut command = command;
+    let at = command.at.clone();
+    if let Some(reference) = &at {
+        if !aikit_cli::gateway_ops::takes_carrier(&command.command) {
+            return Err(AikitError::new(
+                "cli.usage",
+                format!(
+                    "--at {reference} routes a gateway-carrier verb (status, who, send, inbox, \
+                     conversation, delegate, forward, agent, protocol, discover, ecology, \
+                     snapshot) through the endpoint declared for that Workcell; this verb names \
+                     no gateway carrier, so nothing was routed"
+                ),
+            ));
+        }
+        let home = AikitHome::discover()?;
+        let carrier = aikit_cli::gateway_ops::at_carrier(&home, reference)?;
+        aikit_cli::gateway_ops::override_carriers(&mut command, carrier);
+    }
+    let reply = cmd_gateway_dispatch(command)?;
+    Ok(match at {
+        Some(reference) => disclose_at(reply, &reference),
+        None => reply,
+    })
+}
+
+/// The disclosure that keeps `--at` honest: the envelope says the answer came
+/// from the declared remote, and a population reading records it in-band.
+fn disclose_at(mut reply: Reply, reference: &str) -> Reply {
+    if let Reply::Data { warnings, data, .. } = &mut reply {
+        warnings.push(format!(
+            "routed via {reference}: this answer came from the gateway declared for {reference}, \
+             not this home's own"
+        ));
+        if data.get("schema")
+            == Some(&serde_json::Value::from(
+                aikit_cli::gateway_contact::POPULATION_READING_SCHEMA,
+            ))
+        {
+            data["answered_by"] = serde_json::json!({ "declared_for": reference });
+        }
+    }
+    reply
+}
+
+fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
     use aikit_adapters::GatewayTickLoop;
     use aikit_cli::routine_cli::{gateway_tick, production_dispatcher, GatewayDispatcherTick};
     let home = AikitHome::discover()?;
@@ -1459,6 +1508,19 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 aikit_cli::gateway_ops::CoexistenceOutput::Data(data) => gateway_data(data),
             }
         }
+        GatewaySub::Hoist(a) => gateway_data(aikit_cli::gateway_hoist::hoist_command(
+            &home,
+            &aikit_cli::gateway_hoist::HoistArgs {
+                to: a.to.clone(),
+                apply: a.apply,
+                receive: a.receive,
+                force: a.force,
+                yes: a.yes,
+                ssh: a.ssh.clone(),
+                include_tokens: a.include_tokens,
+                gateway_ref: a.gateway_ref.clone(),
+            },
+        )?),
         query => {
             let command = match query {
                 GatewaySub::Protocol(_) => aikit_adapters::GatewayCommand::Protocol,
@@ -1479,7 +1541,8 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Remote(_)
                 | GatewaySub::Connector(_)
                 | GatewaySub::Agent(_)
-                | GatewaySub::Coexistence(_) => unreachable!("handled above"),
+                | GatewaySub::Coexistence(_)
+                | GatewaySub::Hoist(_) => unreachable!("handled above"),
             };
             let args = match query {
                 GatewaySub::Protocol(a)
@@ -1500,7 +1563,8 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Remote(_)
                 | GatewaySub::Connector(_)
                 | GatewaySub::Agent(_)
-                | GatewaySub::Coexistence(_) => unreachable!("handled above"),
+                | GatewaySub::Coexistence(_)
+                | GatewaySub::Hoist(_) => unreachable!("handled above"),
             };
             let target = aikit_cli::gateway_ops::carrier_target(&home, &args)?;
             let response =

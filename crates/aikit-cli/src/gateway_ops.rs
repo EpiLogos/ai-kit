@@ -20,7 +20,7 @@ use aikit_store::home::AikitHome;
 use serde_json::Value;
 
 use crate::cli::{
-    GatewayAgentArgs, GatewayCoexistenceArgs, GatewayQueryArgs, GatewayServeArgs,
+    GatewayAgentArgs, GatewayCoexistenceArgs, GatewayQueryArgs, GatewayServeArgs, GatewaySub,
 };
 
 /// Resolve the serve carriers. The state file always defaults to the home
@@ -123,6 +123,115 @@ pub fn unreachable_hint(error: &AikitError) -> Option<AikitError> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// `--at WORKCELL_REF`: route a gateway verb through a declared remote.
+// ---------------------------------------------------------------------------
+
+/// The gateway verb's carrier, resolved from the endpoint declared for a
+/// remote Workcell (`aikit gateway remote add`). The token is resolved from
+/// its declared location at call time and lives only in the one request.
+pub fn at_carrier(home: &AikitHome, workcell_ref: &str) -> Result<GatewayQueryArgs> {
+    let declared = crate::gateway_contact::load_remotes(home)?
+        .remotes
+        .into_iter()
+        .find(|remote| remote.workcell_ref == workcell_ref);
+    let Some(remote) = declared else {
+        return Err(crate::gateway_contact::three_part(
+            "gateway.remote_undeclared",
+            format!(
+                "No gateway endpoint is declared for {workcell_ref}, so --at cannot route there."
+            ),
+            "Nothing was run.",
+            format!(
+                "Declare the endpoint first: aikit gateway remote add --workcell {workcell_ref} \
+                 --ws HOST:PORT --token-location file:/ABSOLUTE/PATH"
+            ),
+        ));
+    };
+    let token = crate::secret_location::SecretLocation::parse(&remote.token_location)
+        .and_then(|location| location.resolve())
+        .map_err(|error| {
+            crate::gateway_contact::three_part(
+                "gateway.at_token_unusable",
+                format!(
+                    "The token declared for {workcell_ref} at {} cannot be used: {error}.",
+                    remote.token_location
+                ),
+                "Nothing was run.",
+                format!(
+                    "Make it an owner-only, non-empty file (chmod 600 {}) or re-declare the \
+                     endpoint with `aikit gateway remote add`.",
+                    remote.token_location.trim_start_matches("file:")
+                ),
+            )
+        })?;
+    Ok(GatewayQueryArgs {
+        unix_socket: None,
+        websocket_bind: Some(remote.websocket_bind.clone()),
+        websocket_path: remote.websocket_path.clone(),
+        websocket_token: Some(token.expose().to_owned()),
+    })
+}
+
+/// Whether this verb addresses a gateway carrier at all. The local-file and
+/// service-management verbs do not; `--at` on them is a refusal, not a silent
+/// no-op.
+pub fn takes_carrier(command: &GatewaySub) -> bool {
+    matches!(
+        command,
+        GatewaySub::Protocol(_)
+            | GatewaySub::Discover(_)
+            | GatewaySub::Status(_)
+            | GatewaySub::Ecology(_)
+            | GatewaySub::Snapshot(_)
+            | GatewaySub::Who(_)
+            | GatewaySub::Send(_)
+            | GatewaySub::Inbox(_)
+            | GatewaySub::Conversation(_)
+            | GatewaySub::Delegate(_)
+            | GatewaySub::Forward(_)
+            | GatewaySub::Agent(_)
+    )
+}
+
+/// Replace every flattened carrier in the command with `carrier`. `--at` is
+/// one fact about the whole invocation; the walk keeps it out of every verb's
+/// dispatch branch.
+pub fn override_carriers(command: &mut crate::cli::GatewayCmd, carrier: GatewayQueryArgs) {
+    use GatewaySub as G;
+    match &mut command.command {
+        G::Protocol(a)
+        | G::Discover(a)
+        | G::Status(a)
+        | G::Ecology(a)
+        | G::Snapshot(a)
+        | G::Forward(a) => *a = carrier,
+        G::Who(a) => a.carrier = carrier,
+        G::Send(a) => a.carrier = carrier,
+        G::Inbox(a) => a.carrier = carrier,
+        G::Conversation(a) => a.carrier = carrier,
+        G::Delegate(a) => a.carrier = carrier,
+        G::Agent(a) => a.carrier = carrier,
+        G::Serve(_)
+        | G::Tick
+        | G::InstallService(_)
+        | G::UninstallService
+        | G::Remote(_)
+        | G::Connector(_)
+        | G::Coexistence(_)
+        | G::Hoist(_) => {}
+    }
+}
+
+/// The hoist verb's own arguments carry no carrier: hoisting plans from this
+/// home and stages to the target; it never routes through `--at`.
+pub fn hoist_args(command: &crate::cli::GatewayCmd) -> Option<&crate::cli::GatewayHoistArgs> {
+    match &command.command {
+        GatewaySub::Hoist(args) => Some(args),
+        _ => None,
+    }
+}
+
 /// Read the WebSocket bearer token from its declared location, refusing a
 /// location that does not parse and a `file:` that is not owner-only.
 fn token_from_location(location: &str) -> Result<String> {
@@ -213,10 +322,12 @@ pub fn coexistence_command(
                 document
                     .foreign_bot_identities
                     .iter()
-                    .map(|identity| format!(
-                        "{} on {} (bot {})",
-                        identity.harness, identity.platform, identity.bot_id
-                    ))
+                    .map(|identity| {
+                        format!(
+                            "{} on {} (bot {})",
+                            identity.harness, identity.platform, identity.bot_id
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("; ")
             }

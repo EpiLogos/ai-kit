@@ -55,12 +55,23 @@ const FIRST_RETRY: Duration = Duration::from_millis(500);
 const RETRY_STEP: Duration = Duration::from_secs(1);
 
 /// Which gateway carrier the aperture addresses: the well-known same-host
-/// Unix socket, resolved exactly as the CLI resolves its default query
-/// carrier.
+/// Unix socket, the endpoint declared for a remote Workcell
+/// (`AIKIT_GATEWAY_AT=<workcell-ref>`, resolved from `state/gateway-remotes.json`
+/// exactly as `aikit gateway --at` resolves it), or nothing resolvable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConversationCarrier {
     #[cfg(unix)]
     UnixSocket(std::path::PathBuf),
+    /// The authenticated WebSocket carrier of the gateway declared for the
+    /// named Workcell. The surface's status pane still shows whichever
+    /// `gateway_ref` answers, so an addressed remote never masquerades as
+    /// this home's own gateway.
+    WebSocket {
+        bind: String,
+        path: String,
+        bearer_token: String,
+        workcell_ref: String,
+    },
     /// No socket carrier was resolved: either this platform has no default
     /// Unix carrier, or no AIKit home could be resolved to find one under.
     /// The aperture can still open and say so, which is more honest than
@@ -70,6 +81,9 @@ pub enum ConversationCarrier {
 
 impl ConversationCarrier {
     pub fn for_home(home: &AikitHome) -> Self {
+        if let Some(carrier) = Self::for_env(home) {
+            return carrier;
+        }
         #[cfg(unix)]
         {
             Self::UnixSocket(home.gateway_socket())
@@ -80,6 +94,73 @@ impl ConversationCarrier {
             Self::Absent
         }
     }
+
+    /// `AIKIT_GATEWAY_AT=<workcell-ref>`: address the gateway declared for
+    /// that remote Workcell. An undeclared Workcell or an unusable token
+    /// location resolves to `Absent`, and the aperture says the gateway is
+    /// unreachable rather than silently falling back to the local one — a
+    /// pointing error must never become a quiet conversation with the wrong
+    /// gateway.
+    fn for_env(home: &AikitHome) -> Option<Self> {
+        let reference = std::env::var("AIKIT_GATEWAY_AT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())?;
+        let bytes = std::fs::read(home.state().join("gateway-remotes.json")).ok()?;
+        #[derive(serde::Deserialize)]
+        struct Remotes {
+            #[serde(default)]
+            remotes: Vec<Remote>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Remote {
+            workcell_ref: String,
+            websocket_bind: String,
+            #[serde(default = "default_ws_path")]
+            websocket_path: String,
+            token_location: String,
+        }
+        fn default_ws_path() -> String {
+            "/".into()
+        }
+        let remotes: Remotes = serde_json::from_slice(&bytes).ok()?;
+        let remote = remotes
+            .remotes
+            .into_iter()
+            .find(|remote| remote.workcell_ref == reference)?;
+        let token = resolve_token(&remote.token_location)?;
+        Some(Self::WebSocket {
+            bind: remote.websocket_bind,
+            path: remote.websocket_path,
+            bearer_token: token,
+            workcell_ref: remote.workcell_ref,
+        })
+    }
+}
+
+/// Resolve a declared token location the way the CLI's `SecretLocation` does:
+/// an owner-only `file:` path, or a declared secret ref through the resolver
+/// suite. Material lives only as long as one request.
+fn resolve_token(location: &str) -> Option<String> {
+    if let Some(path) = location.trim().strip_prefix("file:") {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = std::fs::metadata(path).ok()?;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return None;
+            }
+        }
+        return std::fs::read_to_string(path)
+            .ok()
+            .map(|text| text.trim().to_owned())
+            .filter(|text| !text.is_empty());
+    }
+    let secret_ref = aikit_core::secret_ref::SecretRef::parse(location).ok()?;
+    use aikit_core::SecretResolver as _;
+    aikit_adapters::secret_resolver::SuiteSecretResolver::default()
+        .resolve(&secret_ref)
+        .ok()
+        .map(|secret| secret.expose().to_owned())
 }
 
 /// One bound conversation the gateway discloses: a connector conversation
@@ -273,6 +354,16 @@ impl ConversationSurface {
             ConversationCarrier::UnixSocket(path) => {
                 Some(GatewayCarrierTarget::UnixSocket(path.clone()))
             }
+            ConversationCarrier::WebSocket {
+                bind,
+                path,
+                bearer_token,
+                ..
+            } => Some(GatewayCarrierTarget::WebSocket {
+                bind: bind.clone(),
+                path: path.clone(),
+                bearer_token: bearer_token.clone(),
+            }),
             ConversationCarrier::Absent => None,
         }
     }
@@ -712,10 +803,12 @@ impl ConversationSurface {
                     .as_ref()
                     .map(|gateway_ref| gateway_ref.to_string())
                     .unwrap_or_else(|| "unreachable".into());
-                lines.push(Line::from(Span::styled(
-                    format!("gateway {gateway}"),
-                    theme.heading(),
-                )));
+                let addressed = std::env::var("AIKIT_GATEWAY_AT")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|workcell| format!("gateway {gateway} (via {workcell})"))
+                    .unwrap_or_else(|| format!("gateway {gateway}"));
+                lines.push(Line::from(Span::styled(addressed, theme.heading())));
                 if let Some(authority) = &self.authority {
                     lines.push(Line::from(Span::styled(authority.clone(), theme.dim())));
                 }
