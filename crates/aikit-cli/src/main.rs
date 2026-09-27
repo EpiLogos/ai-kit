@@ -1167,7 +1167,56 @@ fn read_body_file(path: &std::path::Path) -> Result<String> {
 /// Gateway commands address an external service, so they carry no resolved
 /// context — the envelope context stays empty rather than pretending a scope.
 /// Carriers default to the well-known home endpoint (`gateway_ops`).
+///
+/// `--at WORKCELL_REF` is one routing fact for the whole invocation: the
+/// flattened carriers are replaced with the endpoint declared for that remote
+/// Workcell, and the reply discloses that it came from there. Nothing hides.
 fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
+    let mut command = command;
+    let at = command.at.clone();
+    if let Some(reference) = &at {
+        if !aikit_cli::gateway_ops::takes_carrier(&command.command) {
+            return Err(AikitError::new(
+                "cli.usage",
+                format!(
+                    "--at {reference} routes a gateway-carrier verb (status, who, send, inbox, \
+                     conversation, delegate, forward, agent, protocol, discover, ecology, \
+                     snapshot) through the endpoint declared for that Workcell; this verb names \
+                     no gateway carrier, so nothing was routed"
+                ),
+            ));
+        }
+        let home = AikitHome::discover()?;
+        let carrier = aikit_cli::gateway_ops::at_carrier(&home, reference)?;
+        aikit_cli::gateway_ops::override_carriers(&mut command, carrier);
+    }
+    let reply = cmd_gateway_dispatch(command)?;
+    Ok(match at {
+        Some(reference) => disclose_at(reply, &reference),
+        None => reply,
+    })
+}
+
+/// The disclosure that keeps `--at` honest: the envelope says the answer came
+/// from the declared remote, and a population reading records it in-band.
+fn disclose_at(mut reply: Reply, reference: &str) -> Reply {
+    if let Reply::Data { warnings, data, .. } = &mut reply {
+        warnings.push(format!(
+            "routed via {reference}: this answer came from the gateway declared for {reference}, \
+             not this home's own"
+        ));
+        if data.get("schema")
+            == Some(&serde_json::Value::from(
+                aikit_cli::gateway_contact::POPULATION_READING_SCHEMA,
+            ))
+        {
+            data["answered_by"] = serde_json::json!({ "declared_for": reference });
+        }
+    }
+    reply
+}
+
+fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
     use aikit_adapters::GatewayTickLoop;
     use aikit_cli::routine_cli::{gateway_tick, production_dispatcher, GatewayDispatcherTick};
     let home = AikitHome::discover()?;
@@ -1242,10 +1291,37 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
                     },
                 ));
+            // The connectors file names what this service runs. Building the
+            // factories here is the startup gate: an unknown implementation or
+            // an unusable token location stops the service before any carrier
+            // binds, naming the connector. The same file names agent-backed
+            // conversations: the turn sources resolve here too, so a declared
+            // harness that no encounter provider answers stops the service
+            // before it can accept conversations it could never respond to.
+            let connectors = aikit_cli::gateway_connectors::connector_factories(&home)?;
+            let conversation = aikit_cli::gateway_connectors::conversation_turn_resolver(&home)?;
+            // Coexistence: read the policy, observe the machine, disclose the
+            // decision before any carrier binds, and gate connector starts
+            // when the exclusive policy holds against a detected foreign
+            // harness gateway. Inspection only — no foreign service is
+            // touched.
+            let coexistence = aikit_cli::gateway_ops::serve_coexistence(&home)?;
+            for line in &coexistence.lines {
+                eprintln!("gateway coexistence: {line}");
+            }
             aikit_adapters::run_gateway_service_with_hooks(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
-                aikit_adapters::GatewayServiceHooks { ticks, occupancy },
+                aikit_adapters::GatewayServiceHooks {
+                    ticks,
+                    occupancy,
+                    connectors,
+                    conversation: Some(aikit_adapters::GatewayConversationHooks {
+                        turn_sources: Some(conversation),
+                        policy: None,
+                    }),
+                    coexistence: coexistence.gate,
+                },
             )?;
             Ok(Reply::Text("gateway service stopped cleanly".into()))
         }
@@ -1385,6 +1461,66 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 aikit_cli::gateway_contact::remote_remove(&home, &workcell)?
             }
         }),
+        GatewaySub::Connector(c) => {
+            match aikit_cli::gateway_connectors::connector_command(&home, c)? {
+                aikit_cli::gateway_connectors::ConnectorOutput::Text(text) => Ok(Reply::Text(text)),
+                aikit_cli::gateway_connectors::ConnectorOutput::Data(data) => gateway_data(data),
+            }
+        }
+        GatewaySub::Agent(a) => {
+            let operation = aikit_cli::gateway_ops::conversation_operation(&a)?;
+            let target = aikit_cli::gateway_ops::carrier_target(&home, &a.carrier)?;
+            let command = aikit_adapters::GatewayCommand::Conversation {
+                binding_ref: aikit_core::resource::ResourceRef::parse(&a.binding_ref).map_err(
+                    |error| {
+                        AikitError::new(
+                            "cli.gateway_binding_ref_invalid",
+                            format!("parse binding ref {}: {error}", a.binding_ref),
+                        )
+                    },
+                )?,
+                operation,
+            };
+            let response =
+                aikit_adapters::gateway_command(&target, command, None).map_err(|error| {
+                    aikit_cli::gateway_ops::unreachable_hint(&error).unwrap_or(error)
+                })?;
+            let data = serde_json::to_value(&response).map_err(|error| {
+                AikitError::new(
+                    "cli.gateway_response_encode",
+                    format!("encode gateway response: {error}"),
+                )
+            })?;
+            Ok(Reply::Data {
+                context: EnvelopeContext {
+                    context_id: None,
+                    session_id: None,
+                    project_root: None,
+                },
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
+        GatewaySub::Coexistence(a) => {
+            match aikit_cli::gateway_ops::coexistence_command(&home, &a)? {
+                aikit_cli::gateway_ops::CoexistenceOutput::Text(text) => Ok(Reply::Text(text)),
+                aikit_cli::gateway_ops::CoexistenceOutput::Data(data) => gateway_data(data),
+            }
+        }
+        GatewaySub::Hoist(a) => gateway_data(aikit_cli::gateway_hoist::hoist_command(
+            &home,
+            &aikit_cli::gateway_hoist::HoistArgs {
+                to: a.to.clone(),
+                apply: a.apply,
+                receive: a.receive,
+                force: a.force,
+                yes: a.yes,
+                ssh: a.ssh.clone(),
+                include_tokens: a.include_tokens,
+                gateway_ref: a.gateway_ref.clone(),
+            },
+        )?),
         query => {
             let command = match query {
                 GatewaySub::Protocol(_) => aikit_adapters::GatewayCommand::Protocol,
@@ -1402,7 +1538,11 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Conversation(_)
                 | GatewaySub::Delegate(_)
                 | GatewaySub::Forward(_)
-                | GatewaySub::Remote(_) => unreachable!("handled above"),
+                | GatewaySub::Remote(_)
+                | GatewaySub::Connector(_)
+                | GatewaySub::Agent(_)
+                | GatewaySub::Coexistence(_)
+                | GatewaySub::Hoist(_) => unreachable!("handled above"),
             };
             let args = match query {
                 GatewaySub::Protocol(a)
@@ -1420,7 +1560,11 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Conversation(_)
                 | GatewaySub::Delegate(_)
                 | GatewaySub::Forward(_)
-                | GatewaySub::Remote(_) => unreachable!("handled above"),
+                | GatewaySub::Remote(_)
+                | GatewaySub::Connector(_)
+                | GatewaySub::Agent(_)
+                | GatewaySub::Coexistence(_)
+                | GatewaySub::Hoist(_) => unreachable!("handled above"),
             };
             let target = aikit_cli::gateway_ops::carrier_target(&home, &args)?;
             let response =
@@ -3477,13 +3621,32 @@ fn cmd_praxis(cwd: &std::path::Path, a: PraxisCmd) -> Result<Reply> {
             profile_json,
             activity_json,
             select,
+            now_workcell,
+            now_machine,
+            now_register,
+            now_root,
+            now_branch,
+            now_primary,
         } => aikit_cli::praxis_cli::disclose(
             service.home(),
             service.resolved(),
             profile_json,
             activity_json.as_deref(),
             select,
+            now_workcell
+                .clone()
+                .map(|workcell_ref| aikit_core::agent_praxis::NowLocationFacts {
+                    workcell_ref,
+                    machine_ref: now_machine.clone(),
+                    register: now_register.clone(),
+                    checkout_root: now_root.clone(),
+                    branch: now_branch.clone(),
+                    primary_on_main: if *now_primary { Some(true) } else { None },
+                }),
         )?,
+        PraxisSub::InstantiateCheck { invocation_json } => {
+            aikit_cli::praxis_cli::instantiate_check(invocation_json)?
+        }
     };
     Ok(reply(&service, data, diagnostic_warnings(&service)))
 }

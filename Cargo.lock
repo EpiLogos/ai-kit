@@ -143,6 +143,7 @@ dependencies = [
 name = "aikit-tui"
 version = "0.1.0"
 dependencies = [
+ "aikit-adapters",
  "aikit-core",
  "aikit-store",
  "crossterm",

@@ -441,8 +441,45 @@ pub struct GatewayQueryArgs {
 
 #[derive(Debug, Args)]
 pub struct GatewayCmd {
+    /// Route this command through the gateway declared for this remote
+    /// Workcell (`aikit gateway remote list`), instead of this home's own.
+    /// The answer names the gateway that produced it; nothing is implicit.
+    #[arg(long = "at", value_name = "WORKCELL_REF", global = true)]
+    pub at: Option<String>,
     #[command(subcommand)]
     pub command: GatewaySub,
+}
+
+/// `aikit gateway hoist` — place this gateway's posture on another Workcell
+/// (`--to workcell:X [--apply]`), or receive one staged here (`--receive`).
+#[derive(Debug, Args)]
+pub struct GatewayHoistArgs {
+    /// The Workcell the posture moves to, e.g. `workcell:omarchy`.
+    #[arg(long, value_name = "WORKCELL_REF")]
+    pub to: Option<String>,
+    /// Stage the packed posture (without it: plan only — print what would
+    /// move, what the target re-resolves, what identity keeps).
+    #[arg(long)]
+    pub apply: bool,
+    /// Unpack a staged bundle into this home (the target side).
+    #[arg(long, conflicts_with = "to")]
+    pub receive: bool,
+    /// Receive over this home's existing posture.
+    #[arg(long)]
+    pub force: bool,
+    /// Execute the remote steps over the --ssh channel after staging.
+    #[arg(long, requires = "ssh")]
+    pub yes: bool,
+    /// The ssh target the staging reaches (`user@host`). Never invented here.
+    #[arg(long, value_name = "TARGET", requires = "apply")]
+    pub ssh: Option<String>,
+    /// With --ssh --yes: copy each packed `file:` token file to the target.
+    /// Without it, token files are the operator's to stage.
+    #[arg(long, requires = "yes")]
+    pub include_tokens: bool,
+    /// The target gateway ref (default: `agency-gateway/<workcell-slug>`).
+    #[arg(long = "gateway-ref", value_name = "REF")]
+    pub gateway_ref: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -976,6 +1013,57 @@ pub enum GatewaySub {
     Forward(GatewayQueryArgs),
     /// Declare, list or remove the gateway endpoints of other Workcells.
     Remote(GatewayRemoteCmd),
+    /// Declare, list or remove the connectors this gateway service runs.
+    Connector(GatewayConnectorCmd),
+    /// Canonical conversation control against a running gateway:
+    /// `aikit gateway agent status|stop|new|sessions|restart|pause|resume`.
+    Agent(GatewayAgentArgs),
+    /// Inspect the coexistence of harness gateways on this machine: detect
+    /// foreign harness gateways (Hermes, OpenClaw), show the policy, and —
+    /// with `--policy` — set it. Detection is inspect-only.
+    Coexistence(GatewayCoexistenceArgs),
+    /// Place this gateway's posture on another Workcell, or receive one
+    /// staged here: plan (the default), `--apply` to stage, `--receive` to
+    /// unpack. Token locations move; token files stay the operator's.
+    Hoist(GatewayHoistArgs),
+}
+
+/// `aikit gateway agent` — the canonical conversation-control operations,
+/// executable from any surface that can carry a gateway command.
+#[derive(Debug, Args)]
+pub struct GatewayAgentArgs {
+    /// The operation: `status`, `stop`, `new`, `sessions`, `restart`,
+    /// `pause`, `resume`, `model`, `harness` or `skills`.
+    #[arg(value_name = "OP")]
+    pub operation: String,
+    /// The gateway binding whose conversation is controlled, e.g.
+    /// `gateway-binding/telegram`.
+    #[arg(long = "binding", value_name = "REF")]
+    pub binding_ref: String,
+    /// Connector ref for `pause`/`resume` (default: the binding's own
+    /// connector).
+    #[arg(long = "connector", value_name = "REF")]
+    pub connector_ref: Option<String>,
+    /// Provider model id for `model` (omit it to list the harness's own
+    /// model selector).
+    #[arg(long, value_name = "MODEL")]
+    pub model: Option<String>,
+    #[command(flatten)]
+    pub carrier: GatewayQueryArgs,
+}
+
+/// `aikit gateway coexistence` — what harness gateways share this machine,
+/// and the policy between them.
+#[derive(Debug, Args)]
+pub struct GatewayCoexistenceArgs {
+    /// Print the coexistence reading as JSON.
+    #[arg(long)]
+    pub json: bool,
+    /// Set the coexistence policy: `exclusive` (the default) refuses to start
+    /// connectors a detected foreign gateway is recorded to own;
+    /// `coexist` starts alongside detected foreign gateways.
+    #[arg(long, value_name = "POLICY")]
+    pub policy: Option<String>,
 }
 
 /// `aikit gateway who`.
@@ -1096,6 +1184,68 @@ pub enum GatewayRemoteSub {
     Remove {
         #[arg(long, value_name = "WORKCELL_REF")]
         workcell: String,
+    },
+}
+
+/// `aikit gateway connector` — the connectors a gateway service runs.
+#[derive(Debug, Args)]
+pub struct GatewayConnectorCmd {
+    #[command(subcommand)]
+    pub command: GatewayConnectorSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GatewayConnectorSub {
+    /// Declare (or replace) a connector the gateway service runs.
+    Add {
+        /// The connector platform, e.g. `telegram`.
+        #[arg(long, value_name = "PLATFORM")]
+        platform: String,
+        /// The connector ref, e.g. `gateway-connector/telegram/main`.
+        #[arg(long = "ref", value_name = "REF")]
+        connector_ref: String,
+        /// Where the connector's token lives: `file:/abs/path` (owner-only,
+        /// chmod 600) or a keychain:// / pass:// / op:// / varlock:// ref.
+        /// Never the token itself.
+        #[arg(long = "token-location", value_name = "LOCATION")]
+        token_location: Option<String>,
+        /// Implementation the service builds (default: the platform name).
+        #[arg(long, value_name = "NAME")]
+        implementation: Option<String>,
+        /// External connector command for the `stdio` implementation
+        /// (shell-quoted argv, spawned with JSON wire frames on stdio).
+        #[arg(long, value_name = "COMMAND")]
+        program: Option<String>,
+        /// Non-secret configuration ref recorded for provenance.
+        #[arg(long = "configuration-ref", value_name = "REF")]
+        configuration_ref: Option<String>,
+        /// The harness backing this connector's conversations, named as the
+        /// encounter plane names its providers (e.g. `pi`). The gateway
+        /// conversation engine resolves the name at serve time and runs real
+        /// agent turns; without it, connector conversations stay journal-only.
+        #[arg(long = "agent-backing", value_name = "HARNESS")]
+        agent_backing: Option<String>,
+        /// Deliver each reply as one final message instead of streaming it:
+        /// no anchor message, no growing edits.
+        #[arg(long = "no-stream-replies")]
+        no_stream_replies: bool,
+        /// Declare the connector but do not run it.
+        #[arg(long)]
+        disable: bool,
+        /// Refused: a token value never travels on the command line.
+        #[arg(long, value_name = "TOKEN", hide = true)]
+        token: Option<String>,
+    },
+    /// List the declared connectors (token locations, never secrets).
+    List {
+        /// Emit the connectors document as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a declared connector.
+    Remove {
+        #[arg(long = "ref", value_name = "REF")]
+        connector_ref: String,
     },
 }
 
@@ -2796,6 +2946,38 @@ pub enum PraxisSub {
         /// Skills selected for the current act. Repeatable.
         #[arg(long = "select", value_name = "SKILL")]
         select: Vec<String>,
+        /// The Workcell the session stands in — the NOW location (the
+        /// owner's "where": Workcells are where sessions are; a project's
+        /// bounded worktrees are Workcells on its machine).
+        #[arg(long = "now-workcell", value_name = "WORKCELL_REF")]
+        now_workcell: Option<String>,
+        /// The machine that Workcell runs on.
+        #[arg(long = "now-machine", value_name = "MACHINE_REF")]
+        now_machine: Option<String>,
+        /// Which register this session's work lands in (project:<name> or root).
+        #[arg(long = "now-register", value_name = "REGISTER")]
+        now_register: Option<String>,
+        /// The checkout root the seat occupies.
+        #[arg(long = "now-root", value_name = "PATH")]
+        now_root: Option<String>,
+        /// The branch the seat stands on.
+        #[arg(long = "now-branch", value_name = "BRANCH")]
+        now_branch: Option<String>,
+        /// This seat is the project's primary checkout standing on main.
+        #[arg(long = "now-primary")]
+        now_primary: bool,
+    },
+    /// Decide, per carried Methodology, whether this skill invocation should
+    /// instantiate (load) it or keep it carried: Jev's standing question of
+    /// whether the Methodology orients this act or the Skill carries enough
+    /// context. Pure: answered from the invocation facts supplied.
+    InstantiateCheck {
+        /// Skill-invocation facts (`aikit.methodology-instantiation/v1`
+        /// input: the invoked Skill's id/description, the carried
+        /// Methodologies, optional undertaking hints). Prefix a path with @
+        /// to read a file.
+        #[arg(long = "invocation-json", value_name = "JSON|@FILE")]
+        invocation_json: String,
     },
 }
 

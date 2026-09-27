@@ -33,6 +33,8 @@ aikit gateway remote add --workcell workcell:omarchy --ws 100.92.62.101:7800 --t
 aikit gateway serve --ws HOST:PORT --ws-token-location file:/ABS/PATH --unix
 aikit gateway install-service [--ws HOST:PORT --ws-token-location file:/ABS/PATH] [--workcell-ref W] [--gateway-ref G]
 aikit gateway remote list | remove --workcell W
+aikit gateway hoist --to workcell:omarchy [--apply [--ssh user@host] [--yes]] | --receive [--force]
+aikit gateway --at workcell:omarchy status | who | send | inbox | conversation | forward
 ```
 
 `who` returns `aikit.population-reading/v1`: every Position of the Project
@@ -256,6 +258,71 @@ Shell commands run outside the service, such as `aikit gateway send` and the
 hook dispatcher, need the same identity. Set `AIKIT_WORKCELL_REF` in the
 shell profile on each machine, unless `central.world.here` already names the
 current Workcell there.
+
+### Hoisting the gateway to another Workcell
+
+One verb, two phases, honest everywhere:
+
+```sh
+aikit gateway hoist --to workcell:omarchy                 # plan: print everything
+aikit gateway hoist --to workcell:omarchy --apply --ssh frank@100.92.62.101
+aikit gateway hoist --receive                             # on the target
+aikit gateway hoist --receive --force                     # over existing posture
+```
+
+- **plan** packs the posture — connector entries (token by LOCATION, never
+  value), the semantic gateway state (bindings, stream journals, Communiques),
+  the coexistence document, and the resolved agent-provider entries the
+  connectors' `--agent-backing` names — and prints exactly what would move,
+  what the target must re-resolve (owner-only token files at their packed
+  paths; provider argv, re-resolved at serve time), and what identity each
+  thing keeps. Bindings, streams and Communiques keep their refs; the
+  gateway's own ref and Workcell become the target's (`agency-gateway/omarchy`
+  on `workcell:omarchy`): material moves, semantics hold, and the plan says
+  so.
+- **apply** reaches the Workcell the posture is already declared for
+  (`gateway remote add` first — an undeclared target is refused, never
+  invented). With `--ssh user@host` the bundle stages into the target home's
+  `state/gateway-hoist-pending.json` over that channel; without it the bundle
+  stages locally beside the exact carry-over commands. With `--yes` the apply
+  also runs the target's own `hoist --receive` and
+  `gateway install-service` over the channel. Every step prints; the first
+  refusal stops the apply with the exact remedy. `--include-tokens` (with
+  `--ssh --yes` only) copies each packed `file:` token file — and this
+  machine's declared copy of the target's gateway token, to the target's
+  `gateway.token` — each copy a printed step; without it, token files are the
+  operator's to stage.
+- **receive** unpacks a staged bundle into this home under the gateway state
+  lock (a running service is a refusal, not a race), validating the snapshot
+  through the kernel's own restore law before anything is written. A home
+  that already holds posture is refused without `--force`. The staged bundle
+  is consumed by the receive that unpacked it, and the output prints the
+  exact `install-service` command for the target.
+
+After the target answers (`aikit gateway --at <workcell> status`), retire the
+gateway on the old machine (`aikit gateway uninstall-service`) and swap every
+machine's `gateway remote add` to the new endpoint. The apply output prints
+each of those commands.
+
+### Addressing a remote gateway: `--at`
+
+Any gateway-carrier verb routes through the endpoint declared for a remote
+Workcell instead of this home's own:
+
+```sh
+aikit gateway --at workcell:omarchy status --json
+aikit gateway --at workcell:omarchy who --json
+AIKIT_GATEWAY_AT=workcell:omarchy aikit tui    # the conversation aperture too
+```
+
+The token comes from the declared location at call time and lives only in the
+one request. Nothing hides: the envelope carries a warning naming the
+routing, a population reading records `answered_by`, `status` and `ecology`
+name the `gateway_ref` that answered, and the TUI header shows the addressed
+Workcell beside the answering gateway's ref. `--at` on a verb that names no
+gateway carrier (connectors, coexistence, remote, install-service, hoist) is
+refused, not silently ignored; an undeclared Workcell is refused with the
+exact `remote add` command.
 
 ## The environmental DAY Routine
 

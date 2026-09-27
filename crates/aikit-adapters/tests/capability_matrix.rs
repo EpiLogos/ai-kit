@@ -216,3 +216,233 @@ fn world_discovery_compiles_project_matrices_in_their_project_space() {
         "project placement rides the project wiki space"
     );
 }
+
+#[test]
+fn world_compilation_attributes_project_matrix_objects_and_carriers() {
+    // A world with a root composition matrix and one project matrix. The
+    // project's objects — and the plain filesystem carrier paths they cite —
+    // must carry their owning Project display; the root composition stays
+    // unattributed, because the root lineage is a legitimately broader
+    // aperture, never a Project's own.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "aikit-matrix-attribution-{}-{nonce}-{sequence}",
+        std::process::id()
+    ));
+    let root_user = root.join("ProjectCentral/user");
+    let project_user = root.join("Work/garden/ProjectCentral/user");
+    fs::create_dir_all(&root_user).unwrap();
+    fs::create_dir_all(&project_user).unwrap();
+    let manifest = json!({
+        "protocol": "ql-capability-matrix/1",
+        "matrix_id": "matrix.attribution",
+        "anchor_ref": "test:doc:overview",
+        "default_view": "product-field",
+        "views": []
+    })
+    .to_string();
+    // Distinct matrix ids: identical ids would collide on first-home-wins
+    // and the project home would compile nothing to attribute.
+    fs::write(root_user.join("capability-matrix.json"), &manifest).unwrap();
+    fs::write(root_user.join("capability-matrix.csv"), CSV_V1).unwrap();
+    let project_manifest = json!({
+        "protocol": "ql-capability-matrix/1",
+        "matrix_id": "matrix.garden",
+        "anchor_ref": "garden:doc:overview",
+        "default_view": "product-field",
+        "views": []
+    })
+    .to_string();
+    fs::write(
+        project_user.join("capability-matrix.json"),
+        project_manifest,
+    )
+    .unwrap();
+    fs::write(project_user.join("capability-matrix.csv"), CSV_GARDEN).unwrap();
+
+    let reading = compile_world_matrices(&root);
+    assert!(reading.absences.is_empty(), "{:?}", reading.absences);
+    let carrier_csv = project_user
+        .join("capability-matrix.csv")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let carrier_json = project_user
+        .join("capability-matrix.json")
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    // Every garden object and carrier path names Work/garden.
+    let matrix_ref = "wiki:node:capability-matrix:matrix.garden";
+    assert_eq!(
+        reading.object_projects.get(matrix_ref).map(String::as_str),
+        Some("Work/garden"),
+        "the project matrix node is attributed to its project"
+    );
+    assert_eq!(
+        reading
+            .object_projects
+            .get("wiki:node:capability:cap.garden.root")
+            .map(String::as_str),
+        Some("Work/garden"),
+        "project capability nodes are attributed"
+    );
+    for carrier in [&carrier_csv, &carrier_json] {
+        assert_eq!(
+            reading.object_projects.get(carrier).map(String::as_str),
+            Some("Work/garden"),
+            "carrier path {carrier} is attributed — plain paths carry no ownership in their text"
+        );
+    }
+    assert!(
+        reading.object_projects.keys().any(
+            |reference| reference.starts_with("wiki:edge:wiki:node:capability:cap.garden.root")
+        ),
+        "compiled matrix edges are attributed too"
+    );
+
+    // The root composition stays unattributed.
+    assert!(
+        !reading
+            .object_projects
+            .contains_key("wiki:node:capability-matrix:matrix.attribution"),
+        "root composition objects belong to no Project"
+    );
+    assert!(
+        !reading
+            .object_projects
+            .keys()
+            .any(|reference| reference.contains("matrix.attribution")),
+        "no root-composition ref carries a Project attribution"
+    );
+}
+
+const CSV_GARDEN: &str = r#"id,record_type,view_id,row_id,column_id,capability_refs,need,operation,outcome,implementation_status,standing,source_refs,code_refs,test_refs,account_ref,relation,coverage,extensions,question
+cap.garden.root,capability,,,,[],A person needs a durable root.,ctrl resolves the root.,The root contains Control and Work.,source-inspected,agent-inference,src/a.md,ctrl/src/root.rs,ctrl/tests/a.rs,test.html#q1,,seeds,"{""cli_commands"": [""central.root""]}",
+rel.garden.1,relation,product-field,q1,S1,["cap.garden.root"],,,,,,,,,,the root seeds the field,H,"{}",
+"#;
+
+#[test]
+fn world_compilation_attributes_project_matrices_and_leaves_the_root_composition_unattributed() {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "aikit-matrix-attribution-{}-{nonce}-{sequence}",
+        std::process::id()
+    ));
+    // The root composition matrix and one Work Project's matrix, in the two
+    // placements the world compiler walks.
+    let root_user = root.join("ProjectCentral/user");
+    fs::create_dir_all(&root_user).unwrap();
+    fs::write(
+        root_user.join("capability-matrix.json"),
+        json!({
+            "protocol": "ql-capability-matrix/1",
+            "matrix_id": "matrix.rootcomp",
+            "anchor_ref": "root:doc:overview",
+            "default_view": "product-field",
+            "views": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(root_user.join("capability-matrix.csv"), CSV_ROOTCOMP).unwrap();
+    let garden_user = root.join("Work/garden/ProjectCentral/user");
+    fs::create_dir_all(&garden_user).unwrap();
+    fs::write(
+        garden_user.join("capability-matrix.json"),
+        json!({
+            "protocol": "ql-capability-matrix/1",
+            "matrix_id": "matrix.garden",
+            "anchor_ref": "garden:doc:overview",
+            "default_view": "product-field",
+            "views": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(garden_user.join("capability-matrix.csv"), CSV_GARDEN).unwrap();
+
+    let reading = compile_world_matrices(&root);
+    assert!(reading.absences.is_empty(), "{:?}", reading.absences);
+    assert!(
+        reading.project_absences.is_empty(),
+        "{:?}",
+        reading.project_absences
+    );
+
+    // Every object the garden home compiled — nodes, the compiled
+    // verification edge and the relation edge — and the carrier paths those
+    // objects cite, ride the garden's Work-relative display.
+    for reference in [
+        "wiki:node:capability-matrix:matrix.garden",
+        "wiki:node:capability:cap.garden.root",
+        "wiki:edge:wiki:node:capability:cap.garden.root->wiki:node:capability-matrix:matrix.garden:verification",
+    ] {
+        assert_eq!(
+            reading.object_projects.get(reference),
+            Some(&"Work/garden".to_string()),
+            "{reference} is not attributed to its compiling Project"
+        );
+    }
+    // The relation edge's identity carries a content digest, so it is
+    // matched by its stable prefix.
+    assert!(reading.object_projects.iter().any(|(reference, project)| {
+        reference.starts_with(
+            "wiki:edge:wiki:node:capability:cap.garden.root->wiki:node:capability-matrix:matrix.garden:field-contribution:",
+        ) && project == "Work/garden"
+    }));
+    let garden_manifest = garden_user
+        .join("capability-matrix.json")
+        .to_string_lossy()
+        .to_string();
+    let garden_csv = garden_user
+        .join("capability-matrix.csv")
+        .to_string_lossy()
+        .to_string();
+    assert_eq!(
+        reading.object_projects.get(garden_manifest.as_str()),
+        Some(&"Work/garden".to_string()),
+        "the carrier manifest path is not attributed to its Project"
+    );
+    assert_eq!(
+        reading.object_projects.get(garden_csv.as_str()),
+        Some(&"Work/garden".to_string()),
+        "the carrier csv path is not attributed to its Project"
+    );
+
+    // The root composition stays unattributed: the root lineage is a
+    // distinct, legitimately broader aperture, never a Project's.
+    assert!(!reading
+        .object_projects
+        .contains_key("wiki:node:capability-matrix:matrix.rootcomp"));
+    assert!(!reading
+        .object_projects
+        .contains_key("wiki:node:capability:cap.rootcomp"));
+    let root_manifest = root_user
+        .join("capability-matrix.json")
+        .to_string_lossy()
+        .to_string();
+    assert!(!reading
+        .object_projects
+        .contains_key(root_manifest.as_str()));
+    // And nothing at all is attributed to a path outside the garden home.
+    for key in reading.object_projects.keys() {
+        assert!(
+            key.contains("/Work/garden/") || key.starts_with("wiki:"),
+            "unexpected attribution key {key}"
+        );
+    }
+}
+
+const CSV_ROOTCOMP: &str = r#"id,record_type,view_id,row_id,column_id,capability_refs,need,operation,outcome,implementation_status,standing,source_refs,code_refs,test_refs,account_ref,relation,coverage,extensions,question
+cap.rootcomp,capability,,,,[],The composition needs a root.,resolve the root.,The root holds the composition.,source-inspected,agent-inference,src/r.md,_,_,_,,,seeds,"{}",
+"#;

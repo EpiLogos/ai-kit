@@ -17,7 +17,7 @@ use crossterm::event::{
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use crate::application::{
@@ -28,6 +28,7 @@ use crate::application::{
 use crate::application_service::ApplicationService;
 use crate::backend::FactoryWorkEntry;
 use crate::backend::PaletteBackend;
+use crate::conversation_surface::{ConversationCarrier, ConversationSurface};
 use crate::event::{CrosstermEvents, EventSource, PaletteEvent};
 use crate::explain_history_service::ExplainHistoryApplicationService;
 use crate::graph_layout::{self, GraphLayout, GraphLayoutRequest, GraphViewport, RelationBand};
@@ -76,6 +77,12 @@ pub struct ApplicationSurfaceRequest {
     /// process-global environment variables (which `nextest`'s parallel test
     /// execution makes racy).
     glyphs: Option<Glyphs>,
+    /// Explicit gateway carrier for the Conversation aperture — the same
+    /// kind of pinned injection point as `glyphs`. `None` (every real run)
+    /// resolves the well-known AIKit home socket once at construction, the
+    /// same default the CLI resolves; `Some` lets a test address an
+    /// in-process gateway endpoint deterministically.
+    conversation_carrier: Option<ConversationCarrier>,
 }
 
 impl ApplicationSurfaceRequest {
@@ -86,12 +93,22 @@ impl ApplicationSurfaceRequest {
             initial_relation_view: RelationView::List,
             initial_workspace_section: WorkspaceSection::Worlds,
             glyphs: None,
+            conversation_carrier: None,
         }
     }
 
     #[must_use]
     pub fn with_query(mut self, query: impl Into<String>) -> Self {
         self.initial_query = Some(query.into());
+        self
+    }
+
+    /// Pin the gateway carrier the Conversation aperture addresses. For tests
+    /// only; real callers leave this unset so the well-known home socket
+    /// governs.
+    #[must_use]
+    pub fn with_conversation_carrier(mut self, carrier: ConversationCarrier) -> Self {
+        self.conversation_carrier = Some(carrier);
         self
     }
 
@@ -201,6 +218,13 @@ pub struct ApplicationSurfaceController {
     /// Witness for [`Self::refresh_inspector`]'s actual `explain`/
     /// `explain_evidence` fetch.
     inspector_refreshed: u64,
+    /// The Conversation aperture over the running Agency Gateway: roster,
+    /// live subscription, compose lane and honest link state. Controller-
+    /// owned like the Graph's layout cache — a live carrier connection cannot
+    /// live in the cloned, reducer-owned `TuiState`, and nothing here is a
+    /// transcript store: the gateway's journal stays the only record, and the
+    /// pane's window is rebuilt from its cursor on every open and reconnect.
+    conversation: ConversationSurface,
 }
 
 impl ApplicationSurfaceController {
@@ -268,7 +292,22 @@ impl ApplicationSurfaceController {
             world_reads_refreshed: 0,
             relation_refreshed: 0,
             inspector_refreshed: 0,
+            conversation: ConversationSurface::default(),
         };
+        controller.conversation.set_carrier(
+            request.conversation_carrier.unwrap_or_else(|| {
+                #[cfg(unix)]
+                {
+                    aikit_store::home::AikitHome::discover()
+                        .map(|home| ConversationCarrier::for_home(&home))
+                        .unwrap_or(ConversationCarrier::Absent)
+                }
+                #[cfg(not(unix))]
+                {
+                    ConversationCarrier::Absent
+                }
+            }),
+        );
         controller.refresh_relation(backend)?;
         controller.refresh_inspector(backend)?;
         Ok(controller)
@@ -324,6 +363,13 @@ impl ApplicationSurfaceController {
         backend: &mut B,
         event: PaletteEvent,
     ) -> Result<ApplicationSurfaceStep> {
+        // The aperture rides the loop's idle tick: its subscription is polled
+        // for pushed events and reconnect attempts only here, so the event
+        // loop's own cadence governs everything this surface does. A gateway
+        // that goes away is the aperture's problem, never the loop's.
+        if event == PaletteEvent::Idle {
+            self.conversation.poll();
+        }
         match event {
             PaletteEvent::Resize(cols, rows) => {
                 self.dispatch(backend, UiAction::Resize(cols, rows))?;
@@ -372,6 +418,54 @@ impl ApplicationSurfaceController {
             self.draw_relations(frame);
         }
         self.draw_inspector(frame);
+        self.draw_conversation(frame);
+    }
+
+    /// The Conversation aperture, drawn over the body — everything between
+    /// the query line and the footer — the same later-in-the-frame overlay
+    /// the Relations panel draws over `panes.list`. Opening it hides the
+    /// shell content beneath rather than sharing space with it: a live
+    /// conversation is one surface, not a column beside a navigator.
+    fn draw_conversation(&self, frame: &mut ratatui::Frame) {
+        if !self.conversation.is_open() {
+            return;
+        }
+        let area = frame.area();
+        if area.width < 3 || area.height < 4 {
+            return;
+        }
+        let inner = Rect::new(
+            area.x + 1,
+            area.y + 1,
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        );
+        // The body between the query row and the footer row, exactly the rows
+        // `Layout::split` assigns to list/preview/inspector together.
+        let body = Rect {
+            y: inner.y.saturating_add(1),
+            height: inner.height.saturating_sub(2),
+            ..inner
+        };
+        if body.width == 0 || body.height == 0 {
+            return;
+        }
+        // Content rows: the bordered pane's inside.
+        let visible_rows = body.height.saturating_sub(2) as usize;
+        let (title, lines) =
+            self.conversation
+                .pane(self.shell_glyphs, visible_rows);
+        frame.render_widget(Clear, body);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(self.shell_glyphs.border_set())
+            .title(title);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            body,
+        );
     }
 
     /// Spec §2.1: in a wide Workspace shell the Inspector is a persistent
@@ -460,6 +554,16 @@ impl ApplicationSurfaceController {
         if ctrl && matches!(code, KeyCode::Char('c') | KeyCode::Char('q')) {
             return self.dispatch(backend, UiAction::Exit);
         }
+        // The Conversation aperture claims the keys it renders for while it
+        // is open — Esc, arrows, Enter, typing — the same claim the Graph
+        // makes while it is the projection on screen. Every whole-application
+        // combo above it keeps working; everything below it would silently
+        // mutate state the pane hides (the resource query) or navigate
+        // somewhere the operator cannot see, so it is deliberately
+        // unreachable until the aperture is closed again.
+        if self.conversation.is_open() {
+            return self.handle_conversation_key(code, ctrl, alt);
+        }
         if code == KeyCode::Esc {
             // Esc inside an active Graph projection first unwinds the Graph's
             // own recenter history (spec §8.3: "Esc / Back  previous graph
@@ -539,6 +643,9 @@ impl ApplicationSurfaceController {
         }
         if ctrl && matches!(code, KeyCode::Char('d') | KeyCode::Char('D')) {
             return self.dispatch(backend, UiAction::RequestDoctorFix);
+        }
+        if ctrl && matches!(code, KeyCode::Char('g') | KeyCode::Char('G')) {
+            return self.toggle_conversation();
         }
         if code == KeyCode::Insert || (ctrl && code == KeyCode::Char(' ')) {
             return self.stage_selected(backend);
@@ -690,6 +797,60 @@ impl ApplicationSurfaceController {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Ctrl+G: open the Conversation aperture over the running Agency
+    /// Gateway, or close it. Opening reads the gateway's status and ecology;
+    /// a gateway that is down opens anyway and says so.
+    fn toggle_conversation(&mut self) -> Result<()> {
+        if self.conversation.is_open() {
+            self.conversation.close_aperture();
+        } else {
+            self.conversation.open_aperture();
+        }
+        Ok(())
+    }
+
+    /// Key handling while the Conversation aperture is open. Roster mode:
+    /// Up/Down choose, Enter opens, Esc closes. Open-conversation mode:
+    /// typing composes into the lane, Enter sends through the gateway's own
+    /// ingest path, Up/Down page the history, Esc returns to the roster.
+    fn handle_conversation_key(
+        &mut self,
+        code: KeyCode,
+        ctrl: bool,
+        alt: bool,
+    ) -> Result<()> {
+        match code {
+            KeyCode::Esc => self.conversation.back(),
+            KeyCode::Up => {
+                if self.conversation.has_open_conversation() {
+                    self.conversation.scroll_up();
+                } else {
+                    self.conversation.select_previous();
+                }
+            }
+            KeyCode::Down => {
+                if self.conversation.has_open_conversation() {
+                    self.conversation.scroll_down();
+                } else {
+                    self.conversation.select_next();
+                }
+            }
+            KeyCode::Enter => {
+                if self.conversation.has_open_conversation() {
+                    self.conversation.submit_compose();
+                } else {
+                    self.conversation.open_selected();
+                }
+            }
+            KeyCode::Backspace if !ctrl && !alt => self.conversation.compose_pop(),
+            KeyCode::Char(character) if !ctrl && !alt => {
+                self.conversation.compose_push(character)
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn handle_mouse<B: PaletteBackend>(
