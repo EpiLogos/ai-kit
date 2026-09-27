@@ -588,7 +588,9 @@ fn providers_and_views_name_the_harness_from_its_launch_not_its_label() {
             "protocol": "acp",
             "command": "python3",
             "entry": "agent_session_protocol.py",
-            "sandboxed": false
+            "sandboxed": false,
+            "body_ref": null,
+            "body_revision": null
         }])
     );
     let provider = &rig.view()["connection"]["provider"];

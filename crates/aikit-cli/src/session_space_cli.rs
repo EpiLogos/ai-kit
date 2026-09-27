@@ -157,6 +157,16 @@ enum Command {
         #[arg(long)]
         provider_id: String,
     },
+    /// Configure explicit machine-local speech stages; never starts an inference.
+    EncounterSpeechConfigure {
+        #[arg(long)]
+        config_json: String,
+    },
+    /// Disclose local stages around the actual admitted native text body.
+    EncounterSpeechRead {
+        #[arg(long)]
+        agent_session: String,
+    },
     /// Configure the installable Epi-Logos Prime-QL body over Prime RPC.
     /// Paths are resolved now; mode selection later starts nothing until the
     /// ordinary Encounter open/first-Send boundary.
@@ -436,6 +446,18 @@ fn run(cli: Cli) -> Result<()> {
         Command::EncounterDeconfigure { provider_id } => {
             crate::encounter_service::EncounterService::deconfigure(service.home(), &provider_id)?;
             emit(&serde_json::json!({"withdrawn":provider_id}))
+        }
+        Command::EncounterSpeechConfigure { config_json } => {
+            emit(&crate::encounter_service::configure_local_speech(
+                service.home(),
+                parse_json_arg(&config_json)?,
+            )?)
+        }
+        Command::EncounterSpeechRead { agent_session } => {
+            emit(&crate::encounter_service::disclose_local_speech(
+                service.home(),
+                &ResourceRef::parse(agent_session)?,
+            )?)
         }
         Command::EncounterEpiPrimeConfigure { args } => {
             let EpiPrimeConfigureArgs {

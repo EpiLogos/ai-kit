@@ -31,6 +31,9 @@ mod queue_tests;
 #[path = "encounter_model.rs"]
 pub(crate) mod model;
 
+#[path = "encounter_speech.rs"]
+pub(crate) mod speech;
+
 #[path = "encounter_task.rs"]
 mod task;
 #[path = "encounter_task_expectation.rs"]
