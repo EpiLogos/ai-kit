@@ -188,7 +188,7 @@ pub use gateway_conversation_engine::{
     parse_slash, AgentHostTurnSource, ConversationHarnessProtocol, ConversationTurn,
     ConversationTurnOutcome, ConversationTurnRequest, ConversationTurnSource, EnginePolicy,
     FixtureScript, FixtureTurnSource, GatewayConversationEngine, GatewayTurnSourceResolver,
-    SlashParse, StreamTiming, TurnProgress, TurnProgressView,
+    SlashParse, StreamTiming, TurnProgress, TurnStreamItem,
 };
 pub use gateway_runtime::{
     connector_descriptor, execute_gateway_command, text_send, AgencyGateway,

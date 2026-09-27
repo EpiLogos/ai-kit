@@ -325,7 +325,10 @@ impl Harness {
 
     /// A harness whose connector registers `descriptor` — the non-streaming
     /// default, or the Streaming variant for the progressive-reply suite.
-    fn with_descriptor(policy: aikit_adapters::EnginePolicy, descriptor: ConnectorDescriptor) -> Self {
+    fn with_descriptor(
+        policy: aikit_adapters::EnginePolicy,
+        descriptor: ConnectorDescriptor,
+    ) -> Self {
         let dir = TempDir::new().unwrap();
         let mut gateway = AgencyGateway::new(r("agency-gateway/test"));
         gateway.register_connector(descriptor.clone()).unwrap();
@@ -461,22 +464,6 @@ impl Harness {
             .collect()
     }
 
-    fn executed_edits(&self) -> Vec<(String, String)> {
-        self.recording
-            .executed
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|operation| match &operation.operation {
-                aikit_adapters::OutboundOperationKind::Edit {
-                    native_message_id,
-                    text,
-                } => Some((native_message_id.clone(), text.clone())),
-                _ => None,
-            })
-            .collect()
-    }
-
     fn executed_typings(&self) -> Vec<bool> {
         self.recording
             .executed
@@ -577,16 +564,15 @@ fn an_admitted_message_runs_a_turn_answers_on_the_same_stream_and_rides_the_outb
 }
 
 // ---------------------------------------------------------------------------
-// Progressive replies (the Streaming capability)
+// Live replies (the Streaming capability)
 // ---------------------------------------------------------------------------
 
-/// Fast, deterministic streaming timing: a 10 ms poll, a 500 ms edit
-/// throttle, a 100 ms typing refresh.
+/// Fast, deterministic streaming timing: a 10 ms poll, a 100 ms typing
+/// refresh.
 fn streaming_policy() -> aikit_adapters::EnginePolicy {
     aikit_adapters::EnginePolicy {
         stream: aikit_adapters::StreamTiming {
             poll: Duration::from_millis(10),
-            edit_throttle: Duration::from_millis(500),
             typing_refresh: Duration::from_millis(100),
         },
         ..aikit_adapters::EnginePolicy::default()
@@ -598,7 +584,7 @@ fn streaming_harness() -> Harness {
 }
 
 #[test]
-fn a_streaming_turn_anchors_edits_under_throttle_and_settles_the_final_text() {
+fn a_streaming_turn_delivers_each_segment_and_tool_use_as_its_own_message() {
     let harness = streaming_harness();
     harness.source.script_park();
     harness.admit(fixture_inbound("stream me", "st1"));
@@ -608,128 +594,116 @@ fn a_streaming_turn_anchors_edits_under_throttle_and_settles_the_final_text() {
         |harness| harness.source.parked_turns() == 1,
     );
 
-    // Before any text arrives, the honest activity line is what the sender
-    // sees — and it is journalled once on the stream.
-    harness.source.emit_activity("running fixture-tool");
+    // A tool use is announced as its own short message while the turn runs,
+    // and journalled once on the stream.
+    harness.source.emit_tool_line("· fixture-tool");
     harness.wait_until(
-        "the anchor Send carries the activity line",
-        Duration::from_secs(30),
-        |harness| harness.executed_sends() == vec!["running fixture-tool".to_owned()],
-    );
-    harness.wait_until(
-        "the activity line is journalled on the stream",
+        "the tool use is its own message and is journalled",
         Duration::from_secs(30),
         |harness| {
-            harness
-                .stream_events()
-                .iter()
-                .any(|event| event["content"] == "running fixture-tool")
-        },
-    );
-
-    // The first text delta lands as an edit of the anchor message.
-    harness.source.emit_delta("Hel");
-    harness.wait_until(
-        "the first delta edits the anchor message",
-        Duration::from_secs(30),
-        |harness| {
-            harness
-                .executed_edits()
-                .iter()
-                .any(|(_, text)| text.contains("Hel"))
-        },
-    );
-
-    // A second delta inside the throttle window is held: one edit per
-    // window, never more, even though the poll loop wakes every 10 ms.
-    harness.source.emit_delta("lo world");
-    thread::sleep(Duration::from_millis(150));
-    assert_eq!(
-        harness.executed_edits().len(),
-        1,
-        "the throttle held the second delta: {:?}",
-        harness.executed_edits()
-    );
-
-    // Completion settles the final text on the same message.
-    harness.source.respond("Hello world");
-    harness.wait_until(
-        "the turn settles and the settle edit reaches the connector",
-        Duration::from_secs(30),
-        |harness| {
-            harness
-                .stream_events()
-                .iter()
-                .any(|event| event["kind"] == "agent-message")
+            harness.executed_sends() == vec!["· fixture-tool".to_owned()]
                 && harness
-                    .executed_edits()
-                    .last()
-                    .is_some_and(|(_, text)| text == "Hello world")
+                    .stream_events()
+                    .iter()
+                    .any(|event| event["content"] == "· fixture-tool")
         },
     );
 
+    // The first completed segment is its own message; a second tool use and
+    // a second segment follow as their own messages, in wire order.
+    harness.source.emit_segment("First part.");
+    harness.source.emit_tool_line("· bash");
+    harness.source.emit_segment("Second part.");
+    harness.wait_until(
+        "every segment and tool use arrived as its own message, in order",
+        Duration::from_secs(30),
+        |harness| {
+            harness.executed_sends()
+                == vec![
+                    "· fixture-tool".to_owned(),
+                    "First part.".to_owned(),
+                    "· bash".to_owned(),
+                    "Second part.".to_owned(),
+                ]
+        },
+    );
+
+    // The first segment answered the inbound message; every later message
+    // stands plain in the same conversation.
+    let reply_tos: Vec<Option<String>> = harness
+        .recording
+        .executed
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|operation| match &operation.operation {
+            aikit_adapters::OutboundOperationKind::Send {
+                reply_to_native_message_id,
+                ..
+            } => Some(reply_to_native_message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reply_tos,
+        vec![None, Some("message-st1".to_owned()), None, None],
+        "only the first segment answers the inbound message: {reply_tos:?}"
+    );
+
+    // The turn's reply equals what was delivered: the completion sends
+    // nothing more, and the journal carries one agent-message per segment.
+    harness.source.respond("First part.Second part.");
+    harness.wait_until(
+        "the turn completes with every segment journalled",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .stream_events()
+                .iter()
+                .filter(|event| event["kind"] == "agent-message")
+                .count()
+                == 2
+        },
+    );
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        harness.executed_sends(),
+        vec![
+            "· fixture-tool".to_owned(),
+            "First part.".to_owned(),
+            "· bash".to_owned(),
+            "Second part.".to_owned(),
+        ],
+        "a fully streamed reply is not sent again at completion: {:?}",
+        harness.executed_sends()
+    );
     let events = harness.stream_events();
-    let reply: Vec<&Value> = events
+    let replies: Vec<&Value> = events
         .iter()
         .filter(|event| event["kind"] == "agent-message")
         .collect();
-    assert_eq!(reply.len(), 1, "exactly one reply event: {events:?}");
-    assert_eq!(reply[0]["content"], "Hello world");
+    assert_eq!(
+        replies.len(),
+        2,
+        "one journal event per segment: {events:?}"
+    );
+    assert_eq!(replies[0]["content"], "First part.");
+    assert_eq!(replies[1]["content"], "Second part.");
     let activity: Vec<&Value> = events
         .iter()
         .filter(|event| event["custom_kind"] == "gateway-agent/turn-activity")
         .collect();
     assert_eq!(
         activity.len(),
-        1,
-        "the activity line is journalled once, not per frame: {events:?}"
+        2,
+        "one journal event per tool use: {events:?}"
     );
 
-    // Every edit — the intermediate one and the settle — targets the anchor
-    // message, and the settle carries exactly the final text.
-    let edits = harness.executed_edits();
-    assert!(edits.len() >= 2, "an intermediate edit and the settle: {edits:?}");
-    let target = edits[0].0.clone();
-    assert!(
-        edits.iter().all(|(native_message_id, _)| *native_message_id == target),
-        "every edit grows the same message: {edits:?}"
-    );
-    assert_eq!(
-        edits.last().unwrap().1,
-        "Hello world",
-        "the settle carries the final text: {edits:?}"
-    );
-    // The anchor was a real Send answering the inbound message; its receipt
-    // named the id every edit targets.
-    let kernel = harness.gateway.lock().unwrap();
-    let anchor_receipt = kernel
-        .delivery_receipt(&{
-            let executed = harness.recording.executed.lock().unwrap();
-            executed
-                .iter()
-                .find(|operation| {
-                    matches!(
-                        operation.operation,
-                        aikit_adapters::OutboundOperationKind::Send { .. }
-                    )
-                })
-                .unwrap()
-                .operation_ref
-                .clone()
-        })
-        .cloned()
-        .unwrap();
-    drop(kernel);
-    assert_eq!(
-        anchor_receipt.native_message_id.as_deref(),
-        Some(target.as_str()),
-        "the anchor's receipt named the edit target"
-    );
-    assert_eq!(
-        harness.executed_sends().len(),
-        1,
-        "exactly one Send happened: the anchor {:?}",
-        harness.executed_sends()
+    // The turn is over: typing stopped, and nothing re-activates it.
+    harness.wait_until(
+        "typing stopped at completion",
+        Duration::from_secs(30),
+        |harness| harness.executed_typings().last() == Some(&false),
     );
 }
 
@@ -758,7 +732,10 @@ fn a_streaming_turn_whose_source_never_streams_replies_as_one_final_send() {
         "the final reply lands and reaches the connector",
         Duration::from_secs(30),
         |harness| {
-            harness.stream_events().iter().any(|event| event["kind"] == "agent-message")
+            harness
+                .stream_events()
+                .iter()
+                .any(|event| event["kind"] == "agent-message")
                 && harness.executed_sends() == vec!["all at once".to_owned()]
         },
     );
@@ -773,14 +750,10 @@ fn a_streaming_turn_whose_source_never_streams_replies_as_one_final_send() {
         vec!["all at once".to_owned()],
         "the reply lands as one final Send"
     );
-    assert!(
-        harness.executed_edits().is_empty(),
-        "nothing streamed, so nothing was edited"
-    );
 }
 
 #[test]
-fn a_failed_anchor_send_falls_back_to_the_final_only_reply_and_journals_why() {
+fn a_failed_segment_send_does_not_kill_the_turn_and_the_reply_still_lands() {
     let harness = streaming_harness();
     harness.source.script_park();
     harness.admit(fixture_inbound("stream against a failing platform", "st3"));
@@ -790,50 +763,24 @@ fn a_failed_anchor_send_falls_back_to_the_final_only_reply_and_journals_why() {
         |harness| harness.source.parked_turns() == 1,
     );
 
-    harness
-        .recording
-        .fail_sends
-        .store(true, Ordering::SeqCst);
-    harness.source.emit_delta("partial text");
+    // The platform refuses the segment's Send; the turn keeps running and
+    // the segment's journal record stands.
+    harness.recording.fail_sends.store(true, Ordering::SeqCst);
+    harness.source.emit_segment("doomed segment");
     harness.wait_until(
-        "the anchor's failure is journalled on the stream",
+        "the refused segment reached the connector and the journal",
         Duration::from_secs(30),
         |harness| {
-            harness
-                .stream_events()
-                .iter()
-                .any(|event| {
-                    event["custom_kind"] == "gateway-agent/turn-activity"
-                        && event["content"]
-                            .as_str()
-                            .is_some_and(|line| line.contains("could not start"))
-                })
+            harness.executed_sends() == vec!["doomed segment".to_owned()]
+                && harness
+                    .stream_events()
+                    .iter()
+                    .any(|event| event["content"] == "doomed segment")
         },
-    );
-
-    harness.source.respond("final answer");
-    harness.wait_until(
-        "the fallback reply lands and reaches the connector",
-        Duration::from_secs(30),
-        |harness| {
-            harness.stream_events().iter().any(|event| event["kind"] == "agent-message")
-                && harness.executed_sends().last() == Some(&"final answer".to_owned())
-        },
-    );
-    let events = harness.stream_events();
-    assert_eq!(events.last().unwrap()["content"], json!("final answer"));
-    // The honest wire: the anchor Send was executed and refused by the
-    // platform (its receipt says Failed), and the turn's completion then
-    // delivered the reply as one message of its own.
-    assert_eq!(
-        harness.executed_sends(),
-        vec!["partial text".to_owned(), "final answer".to_owned()],
-        "the refused anchor, then the reply as one message: {:?}",
-        harness.executed_sends()
     );
     {
         let executed = harness.recording.executed.lock().unwrap();
-        let anchor_ref = executed
+        let segment_ref = executed
             .iter()
             .find(|operation| {
                 matches!(
@@ -845,17 +792,109 @@ fn a_failed_anchor_send_falls_back_to_the_final_only_reply_and_journals_why() {
             .operation_ref
             .clone();
         let kernel = harness.gateway.lock().unwrap();
-        let anchor_receipt = kernel.delivery_receipt(&anchor_ref).cloned().unwrap();
+        let receipt = kernel.delivery_receipt(&segment_ref).cloned().unwrap();
         assert_eq!(
-            anchor_receipt.state,
+            receipt.state,
             aikit_adapters::DeliveryState::Failed,
-            "the anchor's receipt records the refusal: {anchor_receipt:?}"
+            "the segment's receipt records the refusal: {receipt:?}"
         );
     }
+
+    // The turn is still alive: a later tool line and segment are journalled
+    // (the sends still fail), and the turn's own completion still lands.
+    harness.source.emit_tool_line("· bash");
+    harness.wait_until(
+        "the turn survived the failed segment send",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .stream_events()
+                .iter()
+                .any(|event| event["content"] == "· bash")
+        },
+    );
+
+    harness.recording.fail_sends.store(false, Ordering::SeqCst);
+    harness.source.respond("final answer");
+    harness.wait_until(
+        "the reply lands as one message and reaches the connector",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .stream_events()
+                .iter()
+                .any(|event| event["kind"] == "agent-message")
+                && harness.executed_sends().last() == Some(&"final answer".to_owned())
+        },
+    );
+    let events = harness.stream_events();
+    assert_eq!(events.last().unwrap()["content"], json!("final answer"));
+    // The honest wire: the refused segment and the refused tool line were
+    // both executed and recorded as Failed; because the delivered segments
+    // no longer equal the reply, the completion delivered the reply as one
+    // message of its own.
+    assert_eq!(
+        harness.executed_sends(),
+        vec![
+            "doomed segment".to_owned(),
+            "· bash".to_owned(),
+            "final answer".to_owned()
+        ],
+        "the refused streaming sends, then the reply as one message: {:?}",
+        harness.executed_sends()
+    );
+}
+
+#[test]
+fn typing_begins_at_admission_before_the_turn_source_spawns() {
+    let harness = streaming_harness();
+    // The turn source stalls inside `prompt` — the stand-in for a harness
+    // process spawning. Typing must already be with the connector while that
+    // spawn is still happening, not seconds later when it returns.
+    harness.source.stall_next_prompt();
+    harness.admit(fixture_inbound("hello before you are ready", "st0"));
+
+    harness.wait_until(
+        "typing is live while the turn source has not even spawned",
+        Duration::from_secs(30),
+        |harness| {
+            harness.source.prompt_stalled() && harness.executed_typings().first() == Some(&true)
+        },
+    );
+
+    harness.source.release_prompt();
+    // The released prompt parks (no script): wait for the turn to exist
+    // before resolving it, so the resolution cannot race the registration.
+    harness.wait_until(
+        "the released turn registers in flight",
+        Duration::from_secs(30),
+        |harness| harness.source.parked_turns() == 1,
+    );
+    harness.source.respond("made it");
+    harness.wait_until(
+        "the stalled turn still completes and answers",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .stream_events()
+                .iter()
+                .any(|event| event["content"] == "made it")
+        },
+    );
+    // The turn's very first outbound operation was the typing pulse.
+    let first = harness
+        .recording
+        .executed
+        .lock()
+        .unwrap()
+        .first()
+        .map(|operation| operation.operation.clone());
     assert!(
-        harness.executed_edits().is_empty(),
-        "a failed anchor is never edited: {:?}",
-        harness.executed_edits()
+        matches!(
+            first,
+            Some(aikit_adapters::OutboundOperationKind::Typing { active: true })
+        ),
+        "the first operation of the turn is Typing(active): {first:?}"
     );
 }
 
@@ -886,16 +925,15 @@ fn the_typing_indicator_pulses_for_the_whole_turn_and_stops_at_completion() {
     );
 
     harness.source.respond("done");
-    harness.wait_until(
-        "the turn settles",
-        Duration::from_secs(30),
-        |harness| {
-            harness
-                .stream_events()
-                .iter()
-                .any(|event| event["kind"] == "agent-message")
-        },
-    );
+    harness.wait_until("the turn settles", Duration::from_secs(30), |harness| {
+        harness
+            .stream_events()
+            .iter()
+            .any(|event| event["kind"] == "agent-message")
+    });
+    // Let any in-flight loop work land; the loop is done once the reply is
+    // on the stream, so nothing may type after that point.
+    thread::sleep(Duration::from_millis(300));
     harness.wait_until(
         "typing stops at completion",
         Duration::from_secs(30),
@@ -905,6 +943,44 @@ fn the_typing_indicator_pulses_for_the_whole_turn_and_stops_at_completion() {
     assert!(
         typings.last() == Some(&false),
         "typing stops at completion: {typings:?}"
+    );
+
+    // The ordering law: the reply Send is queued after the typing stop, so
+    // no Typing(active) is ever delivered after the final message. After the
+    // completion nothing re-activates the indicator.
+    thread::sleep(Duration::from_millis(300));
+    let executed = harness.recording.executed.lock().unwrap();
+    let last_send = executed
+        .iter()
+        .rposition(|operation| {
+            matches!(
+                operation.operation,
+                aikit_adapters::OutboundOperationKind::Send { .. }
+            )
+        })
+        .expect("the reply Send reached the connector");
+    let last_active = executed.iter().rposition(|operation| {
+        matches!(
+            operation.operation,
+            aikit_adapters::OutboundOperationKind::Typing { active: true }
+        )
+    });
+    assert!(
+        last_active.is_none_or(|position| position < last_send),
+        "no Typing(active) after the final Send: {last_active:?} vs {last_send}"
+    );
+    let stop = executed
+        .iter()
+        .position(|operation| {
+            matches!(
+                operation.operation,
+                aikit_adapters::OutboundOperationKind::Typing { active: false }
+            )
+        })
+        .expect("typing was stopped");
+    assert!(
+        stop < last_send,
+        "typing stops before the final message is queued"
     );
 }
 
@@ -919,19 +995,25 @@ fn a_connector_that_does_not_declare_streaming_keeps_the_final_reply_only() {
         |harness| harness.source.parked_turns() == 1,
     );
 
-    // Progress exists on the turn, but the connector cannot stream: nothing
-    // is sent early, whatever the turn produces.
-    harness.source.emit_activity("running fixture-tool");
-    harness.source.emit_delta("growing text");
+    // The connector cannot stream: whatever the turn produces while it runs,
+    // nothing is sent early. Tool uses are journalled, never delivered.
+    harness.source.emit_tool_line("· fixture-tool");
+    harness.source.emit_segment("growing text");
+    harness.wait_until(
+        "the tool use is journalled although nothing may be sent",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .stream_events()
+                .iter()
+                .any(|event| event["content"] == "· fixture-tool")
+        },
+    );
     thread::sleep(Duration::from_millis(300));
     assert!(
         harness.executed_sends().is_empty(),
         "a non-streaming connector receives no early delivery: {:?}",
         harness.executed_sends()
-    );
-    assert!(
-        harness.executed_edits().is_empty(),
-        "a non-streaming connector is never edited"
     );
 
     harness.source.respond("one final reply");
@@ -939,7 +1021,10 @@ fn a_connector_that_does_not_declare_streaming_keeps_the_final_reply_only() {
         "the final reply lands and reaches the connector",
         Duration::from_secs(30),
         |harness| {
-            harness.stream_events().iter().any(|event| event["kind"] == "agent-message")
+            harness
+                .stream_events()
+                .iter()
+                .any(|event| event["kind"] == "agent-message")
                 && harness.executed_sends() == vec!["one final reply".to_owned()]
         },
     );
@@ -949,15 +1034,26 @@ fn a_connector_that_does_not_declare_streaming_keeps_the_final_reply_only() {
         "exactly the final reply, as always: {:?}",
         harness.executed_sends()
     );
-    // And the stream carries no activity journal: nothing streamed, so
-    // nothing was narrated.
+    // The streamed segment was never sent on its own: the single agent
+    // message on the stream is the turn's final reply, and the only journal
+    // narration is the tool line.
     let events = harness.stream_events();
-    assert!(
-        !events
-            .iter()
-            .any(|event| event["custom_kind"] == "gateway-agent/turn-activity"),
-        "no activity events on a non-streaming connector: {events:?}"
+    let replies: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["kind"] == "agent-message")
+        .collect();
+    assert_eq!(replies.len(), 1, "exactly one reply event: {events:?}");
+    assert_eq!(replies[0]["content"], "one final reply");
+    let activity: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["custom_kind"] == "gateway-agent/turn-activity")
+        .collect();
+    assert_eq!(
+        activity.len(),
+        1,
+        "tool uses are journalled on a non-streaming connector: {events:?}"
     );
+    assert_eq!(activity[0]["content"], "· fixture-tool");
 }
 
 #[test]
@@ -1528,15 +1624,20 @@ fn conversation_operations_round_trip_as_portable_json() {
     .unwrap();
     assert_eq!(model["op"], "model");
     assert_eq!(model["model"], "fixture/haiku");
-    let list = serde_json::to_value(aikit_adapters::GatewayConversationOperation::Model {
-        model: None,
-    })
-    .unwrap();
+    let list =
+        serde_json::to_value(aikit_adapters::GatewayConversationOperation::Model { model: None })
+            .unwrap();
     assert_eq!(list["op"], "model");
     assert!(list.get("model").is_none(), "{list}");
     for (operation, op) in [
-        (aikit_adapters::GatewayConversationOperation::Harness, "harness"),
-        (aikit_adapters::GatewayConversationOperation::Skills, "skills"),
+        (
+            aikit_adapters::GatewayConversationOperation::Harness,
+            "harness",
+        ),
+        (
+            aikit_adapters::GatewayConversationOperation::Skills,
+            "skills",
+        ),
     ] {
         let encoded = serde_json::to_value(operation).unwrap();
         assert_eq!(encoded["op"], op, "{encoded}");
@@ -1577,7 +1678,11 @@ fn model_listing_and_selection_ride_the_harness_native_seam() {
     let GatewayResponse::Conversation { result, .. } = execution.response else {
         panic!("model answers with a conversation response");
     };
-    assert_eq!(result["controls"]["model_selection"], json!(true), "{result}");
+    assert_eq!(
+        result["controls"]["model_selection"],
+        json!(true),
+        "{result}"
+    );
     assert_eq!(
         result["controls"]["available"],
         json!(["fixture/opus", "fixture/sonnet", "fixture/haiku"]),
@@ -1682,14 +1787,11 @@ fn harness_listing_discloses_the_backing_the_providers_and_the_switch_law() {
         "the /harness alias surfaces backing and providers",
         Duration::from_secs(30),
         |harness| {
-            harness
-                .executed_sends()
-                .iter()
-                .any(|text| {
-                    text.contains("harness: backing fixture-harness")
-                        && text.contains("provider-alpha")
-                        && text.contains("session-replacement")
-                })
+            harness.executed_sends().iter().any(|text| {
+                text.contains("harness: backing fixture-harness")
+                    && text.contains("provider-alpha")
+                    && text.contains("session-replacement")
+            })
         },
     );
 }
@@ -1729,13 +1831,10 @@ fn skills_listing_discloses_the_surface_and_names_the_invocation_law() {
         "the /skills alias surfaces the skill surface",
         Duration::from_secs(30),
         |harness| {
-            harness
-                .executed_sends()
-                .iter()
-                .any(|text| {
-                    text.contains("skills: 2 available on harness fixture-harness")
-                        && text.contains("does not execute")
-                })
+            harness.executed_sends().iter().any(|text| {
+                text.contains("skills: 2 available on harness fixture-harness")
+                    && text.contains("does not execute")
+            })
         },
     );
 

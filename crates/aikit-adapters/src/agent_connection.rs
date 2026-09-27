@@ -570,6 +570,13 @@ pub enum ConnectionSignalKind {
     AgentMessageChunk {
         text: String,
     },
+    /// One completed assistant text message, as the wire closed it. Some
+    /// wires complete whole messages (no fine-grained deltas between): the
+    /// honest progress fact they publish is the finished segment, not a
+    /// growing partial.
+    AgentMessageSegment {
+        text: String,
+    },
     /// Provider-exposed thinking, never reconstructed hidden reasoning.
     AgentThoughtChunk {
         text: String,
