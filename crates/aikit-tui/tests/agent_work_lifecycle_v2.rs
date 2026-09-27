@@ -28,6 +28,7 @@ use aikit_core::resolve::{resolve, ResolveRequest, ResolvedView};
 use aikit_core::scope::ScopeKind;
 use aikit_core::trust::MemoryTrust;
 use aikit_tui::application::{AgentWorkStage, ComposeIntent, WorkStageName};
+use aikit_tui::SkillSetFieldRow;
 use aikit_tui::application_surface::{ApplicationSurfaceController, ApplicationSurfaceRequest};
 use aikit_tui::backend::{
     AgentProfileAcceptReceipt, AgentProfileSaveReceipt, AgentSessionPreparation, EncounterLaunch,
@@ -44,6 +45,10 @@ fn key(code: KeyCode) -> PaletteEvent {
 
 fn alt_down() -> PaletteEvent {
     PaletteEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT))
+}
+
+fn alt_up() -> PaletteEvent {
+    PaletteEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT))
 }
 
 /// What the double's owner operations do. `true` operations return real
@@ -67,6 +72,7 @@ struct LifecycleBackend {
     view: ResolvedView,
     behaviour: Behaviour,
     saves: std::cell::Cell<usize>,
+    saved_skill_sets: Vec<String>,
     accepts: std::cell::Cell<usize>,
     readiness_checks: std::cell::Cell<usize>,
     prepares: std::cell::Cell<usize>,
@@ -91,6 +97,7 @@ impl LifecycleBackend {
             view,
             behaviour,
             saves: std::cell::Cell::new(0),
+            saved_skill_sets: Vec::new(),
             accepts: std::cell::Cell::new(0),
             readiness_checks: std::cell::Cell::new(0),
             prepares: std::cell::Cell::new(0),
@@ -154,7 +161,9 @@ impl PaletteBackend for LifecycleBackend {
         &mut self,
         _purpose: &str,
         _name: Option<&str>,
+        skill_sets: &[String],
     ) -> Result<AgentProfileSaveReceipt> {
+        self.saved_skill_sets = skill_sets.to_vec();
         self.saves.set(self.saves.get() + 1);
         if !self.behaviour.save_ok {
             return Err(aikit_core::AikitError::new(
@@ -565,5 +574,69 @@ fn reducer_state_semantics() {
         reduction.effects.as_slice(),
         [aikit_tui::UiEffect::SaveAgentProfile { .. }]
     ));
+
 }
 
+/// SkillSet-first composition (§1.3): the Praxis step's digit toggles select
+/// the disclosed sets, and the selected repertoire rides the save exactly as
+/// selected — the save request carries it, the stage machine is unchanged.
+#[test]
+fn the_praxis_step_selects_skill_sets_and_the_save_carries_them() {
+    let (mut surface, mut backend) = enter_work_surface(Behaviour {
+        save_ok: true,
+        ..Behaviour::default()
+    });
+
+    // The disclosed field, as a configured boundary reads it from the shared
+    // store. (The read path itself is exercised by the ApplicationService
+    // test over a real AIKit home; this double has no home on purpose.)
+    surface.semantic_mut_for_test().compose_skill_set_field = vec![
+        SkillSetFieldRow {
+            name: "central-engineering".into(),
+            provenance: "local".into(),
+            summary: "engineering practice".into(),
+            members: 6,
+            projected: 6,
+            withheld: 0,
+        },
+        SkillSetFieldRow {
+            name: "research-deep".into(),
+            provenance: "local".into(),
+            summary: "research practice".into(),
+            members: 4,
+            projected: 3,
+            withheld: 1,
+        },
+    ];
+
+    // Walk back to Praxis: nine ups to Intention, three downs to Praxis.
+    for _ in 0..9 {
+        surface.handle(&mut backend, alt_up()).unwrap();
+    }
+    for _ in 0..3 {
+        surface.handle(&mut backend, alt_down()).unwrap();
+    }
+    // Digit 1 toggles the first disclosed set; digit 1 again would untoggle.
+    surface.handle(&mut backend, key(KeyCode::Char('1'))).unwrap();
+    assert_eq!(
+        surface.semantic().compose_skill_sets,
+        vec!["central-engineering".to_owned()],
+        "the first disclosed set is selected by its digit"
+    );
+    // Walk forward to Enter work and save.
+    for _ in 0..6 {
+        surface.handle(&mut backend, alt_down()).unwrap();
+    }
+    surface.handle(&mut backend, key(KeyCode::Char('1'))).unwrap();
+
+    assert_eq!(backend.saves.get(), 1);
+    assert_eq!(
+        backend.saved_skill_sets,
+        vec!["central-engineering".to_owned()],
+        "the selected repertoire rides the save request"
+    );
+    assert!(matches!(
+        surface.semantic().agent_work,
+        AgentWorkStage::Saved { .. }
+    ));
+}

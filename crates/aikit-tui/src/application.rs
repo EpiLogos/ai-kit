@@ -440,11 +440,22 @@ pub trait TuiApplicationService {
         ))
     }
 
+    /// The SkillSet field of this boundary, read from the shared store below
+    /// the CLI/TUI split: the repertoire a person selects FIRST. A boundary
+    /// with no AIKit home discloses an empty field — the compose Praxis step
+    /// names that absence, it never invents sets.
+    fn skill_set_field(&self) -> Result<Vec<SkillSetFieldRow>> {
+        Ok(Vec::new())
+    }
+
     /// Save the composed Agent source through Central's agent-profile save.
+    /// `skill_sets` are the selected SkillSet names — a request the owner
+    /// resolves, never activation.
     fn save_agent_profile(
         &mut self,
         purpose: &str,
         name: Option<&str>,
+        _skill_sets: &[String],
     ) -> Result<crate::backend::AgentProfileSaveReceipt> {
         Err(AikitError::new(
             "agent_profile.save_not_exposed",
@@ -792,6 +803,16 @@ pub struct TuiState {
     /// normal; the owner derives identity, not the UI.
     #[serde(default)]
     pub compose_agent_name: String,
+    /// The SkillSet field this boundary disclosed, read through the shared
+    /// application service when Compose is entered. Empty means the boundary
+    /// disclosed no sets — a named absence in the Praxis step, never fake
+    /// rows.
+    #[serde(default)]
+    pub compose_skill_set_field: Vec<SkillSetFieldRow>,
+    /// The SkillSet names selected so far, in selection order. A set is a
+    /// request the owner resolves; selection is not activation.
+    #[serde(default)]
+    pub compose_skill_sets: Vec<String>,
     /// Where the native Agent-work lifecycle stands (see [`AgentWorkStage`]).
     /// Survives navigation and presentation changes: a draft and its stage
     /// ladder are not lost because the operator looked at Work.
@@ -834,6 +855,8 @@ impl Default for TuiState {
             exit_intent: None,
             compose_purpose: String::new(),
             compose_agent_name: String::new(),
+            compose_skill_set_field: Vec::new(),
+            compose_skill_sets: Vec::new(),
             agent_work: AgentWorkStage::default(),
             compose_intent: None,
         }
@@ -940,6 +963,14 @@ pub enum UiAction {
     SetComposePurpose(String),
     /// Author the optional Agent name. Absence stays normal.
     SetComposeAgentName(String),
+    /// The SkillSet field reading arrived from the application service.
+    SkillSetsLoaded {
+        rows: Vec<SkillSetFieldRow>,
+    },
+    /// Toggle one disclosed SkillSet in the compose repertoire selection.
+    ToggleComposeSkillSet {
+        name: String,
+    },
     /// Save the composed Agent source through the owner's profile save
     /// operation. Ends at saved: "Saved; not running" is its success.
     ComposeSaveAgent,
@@ -1020,9 +1051,11 @@ pub enum UiEffect {
     /// Owner-native Agent-work lifecycle effects. Each one crosses exactly
     /// one owner operation; a failure comes back as a semantic
     /// `AgentWorkStageFailed`, never as a surface-killing error.
+    LoadSkillSets,
     SaveAgentProfile {
         purpose: String,
         name: Option<String>,
+        skill_sets: Vec<String>,
     },
     AcceptAgentProfile {
         expected_revision: String,
@@ -1036,6 +1069,19 @@ pub enum UiEffect {
         agent_session: String,
     },
     StartFactoryWork,
+}
+
+/// One row of the SkillSet field as the application service read it from the
+/// shared store: what a person can select as repertoire, with the projection
+/// facts the resolver itself computed. A set is a request, never activation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SkillSetFieldRow {
+    pub name: String,
+    pub provenance: String,
+    pub summary: String,
+    pub members: usize,
+    pub projected: usize,
+    pub withheld: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1102,7 +1148,10 @@ impl TuiRuntime {
             // or an unbound operation comes back as the semantic stage
             // failure, so "Saved; not running" and stage-only resume stay
             // reachable states rather than a crashed TUI.
-            UiEffect::SaveAgentProfile { purpose, name } => Ok(match service.save_agent_profile(&purpose, name.as_deref()) {
+            UiEffect::LoadSkillSets => Ok(UiAction::SkillSetsLoaded {
+                rows: service.skill_set_field()?,
+            }),
+            UiEffect::SaveAgentProfile { purpose, name, skill_sets } => Ok(match service.save_agent_profile(&purpose, name.as_deref(), &skill_sets) {
                 Ok(receipt) => UiAction::AgentProfileSaved {
                     profile_ref: receipt.profile_ref,
                     agent_ref: receipt.agent_ref,
@@ -1416,7 +1465,15 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             }
         }
         UiAction::SetPresentation(presentation) => state.presentation = presentation,
-        UiAction::SetWorkspaceSection(section) => state.workspace_section = section,
+        UiAction::SetWorkspaceSection(section) => {
+            if section == WorkspaceSection::Compose {
+                // The Praxis step renders the real SkillSet field; load it on
+                // every explicit entry so the reading is current. A cheap
+                // bounded local read — never a provider probe.
+                effects.push(UiEffect::LoadSkillSets);
+            }
+            state.workspace_section = section;
+        }
         UiAction::NextWorkspaceSection => {
             state.workspace_section = state.workspace_section.relative(1)
         }
@@ -1664,6 +1721,19 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             state.compose_agent_name = name;
             state.preview = None;
         }
+        UiAction::SkillSetsLoaded { rows } => {
+            state.compose_skill_set_field = rows;
+        }
+        UiAction::ToggleComposeSkillSet { name } => {
+            if state.compose_skill_sets.contains(&name) {
+                state.compose_skill_sets.retain(|selected| selected != &name);
+            } else {
+                state.compose_skill_sets.push(name);
+            }
+            // The repertoire changed: the previous preview no longer
+            // describes what this composition resolves to.
+            state.preview = None;
+        }
         UiAction::ComposeSaveAgent => {
             if state.compose_purpose.trim().is_empty() {
                 state.status = Some(UiStatus {
@@ -1675,6 +1745,7 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             effects.push(UiEffect::SaveAgentProfile {
                 purpose: state.compose_purpose.clone(),
                 name: non_empty_name(&state.compose_agent_name),
+                skill_sets: state.compose_skill_sets.clone(),
             });
         }
         UiAction::ComposeStartDirectWork => {
@@ -1702,7 +1773,12 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             let purpose = state.compose_purpose.clone();
             let name = non_empty_name(&state.compose_agent_name);
             state.compose_intent = Some(ComposeIntent::SaveAndStartDirect);
-            effects.push(resume_stage_effect(&state.agent_work, purpose, name));
+            effects.push(resume_stage_effect(
+                &state.agent_work,
+                purpose,
+                name,
+                state.compose_skill_sets.clone(),
+            ));
         }
         UiAction::StartFactoryWork => {
             effects.push(UiEffect::StartFactoryWork);
@@ -1851,9 +1927,14 @@ fn stage_failed(state: &mut TuiState, failed: WorkStageName, detail: String) {
 /// The one effect that continues the lifecycle from `stage`'s honest
 /// position: the next unset stage for a fresh run, or exactly the failed
 /// stage for a resume. Never an earlier, already-landed stage.
-fn resume_stage_effect(stage: &AgentWorkStage, purpose: String, name: Option<String>) -> UiEffect {
+fn resume_stage_effect(
+    stage: &AgentWorkStage,
+    purpose: String,
+    name: Option<String>,
+    skill_sets: Vec<String>,
+) -> UiEffect {
     match stage.stable() {
-        AgentWorkStage::Draft => UiEffect::SaveAgentProfile { purpose, name },
+        AgentWorkStage::Draft => UiEffect::SaveAgentProfile { purpose, name, skill_sets },
         AgentWorkStage::Saved {
             revision, ..
         } => UiEffect::AcceptAgentProfile {

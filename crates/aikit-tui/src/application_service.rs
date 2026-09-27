@@ -32,8 +32,7 @@ use serde_json::{json, to_string_pretty, to_value, Value};
 use crate::application::{
     ActionInvocationReceipt, ActionOutcome, ActivationIntent, ApplyReceipt, CompositionPreview,
     HistoryEntry, RelationReadModel, ResolvedActionReadModel, ResolvedSearchReadModel,
-    ResourceListItem, ResourceListReadModel, StagedChanges, TuiApplicationService,
-};
+    ResourceListItem, ResourceListReadModel, StagedChanges, TuiApplicationService, SkillSetFieldRow};
 use crate::backend::{
     AgentProfileAcceptReceipt, AgentProfileSaveReceipt, AgentSessionPreparation, EncounterLaunch,
     FactoryWorkEntry, FactoryWorkStartReceipt, PaletteBackend, Toggle, WorldReadiness,
@@ -567,12 +566,38 @@ impl TuiApplicationService for ApplicationService<'_> {
         self.backend.start_factory_work()
     }
 
+    fn skill_set_field(&self) -> Result<Vec<SkillSetFieldRow>> {
+        // The read sits below the CLI/TUI split: the same store the CLI's
+        // `aikit set list` reads, projected by the same resolved view. No
+        // home — no disclosed field; the Praxis step names the absence.
+        let Some(home) = self.backend.application_home() else {
+            return Ok(Vec::new());
+        };
+        let view = self.backend.view();
+        let sets = aikit_store::skillsets::load_all(home)?;
+        Ok(sets
+            .iter()
+            .map(|set| {
+                let projection = aikit_core::skillset::project(set, view);
+                SkillSetFieldRow {
+                    name: set.label(),
+                    provenance: set.provenance.as_str().to_owned(),
+                    summary: projection.summarize(&format!("sets/{}", set.name)),
+                    members: set.len(),
+                    projected: projection.projected.len(),
+                    withheld: projection.withheld.len(),
+                }
+            })
+            .collect())
+    }
+
     fn save_agent_profile(
         &mut self,
         purpose: &str,
         name: Option<&str>,
+        skill_sets: &[String],
     ) -> Result<AgentProfileSaveReceipt> {
-        self.backend.save_agent_profile(purpose, name)
+        self.backend.save_agent_profile(purpose, name, skill_sets)
     }
 
     fn accept_agent_profile(

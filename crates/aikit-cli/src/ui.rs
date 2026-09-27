@@ -288,6 +288,7 @@ impl PaletteBackend for V2SurfaceService<'_> {
         &mut self,
         purpose: &str,
         name: Option<&str>,
+        skill_sets: &[String],
     ) -> Result<aikit_tui::backend::AgentProfileSaveReceipt> {
         let scope = agent_work::central_scope(self.service)?;
         let world_ref = agent_work::expected_world_ref(&scope)?;
@@ -298,7 +299,7 @@ impl PaletteBackend for V2SurfaceService<'_> {
             "world_ref": world_ref,
             "ratified_world_refs": [world_ref],
             "skill_refs": [],
-            "skill_set_refs": [],
+            "skill_set_refs": skill_sets,
         });
         if let Some(project) = &scope.project {
             input["project"] = serde_json::json!(project);
@@ -1078,7 +1079,7 @@ esac"#
         let mut backend = V2SurfaceService::new(&mut svc);
 
         let saved = backend
-            .save_agent_profile("Guard the day's close", Some("Daykeeper"))
+            .save_agent_profile("Guard the day's close", Some("Daykeeper"), &[])
             .expect("save routes through the Central owner");
         assert_eq!(saved.profile_ref, "agent-profile:expressed-fake");
         assert_eq!(saved.agent_ref, "agent:expressed-fake");

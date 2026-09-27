@@ -3824,10 +3824,19 @@ fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
 /// situated operational patterns visible as such, with their effective
 /// state in the current context.
 fn cmd_method(cwd: &std::path::Path, a: MethodArgs) -> Result<Reply> {
-    let service = Service::discover(cwd)?;
+    let mut service = Service::discover(cwd)?;
     if let MethodCommand::Prove { method, proof_json } = &a.command {
         let data = aikit_cli::routine_cli::method_prove(service.home(), method, proof_json)?;
         return Ok(reply(&service, data, vec![]));
+    }
+    if let MethodCommand::Run { method, input, confirm } = &a.command {
+        let receipt = aikit_cli::routine_cli::method_run(&mut service, method, input.as_deref(), *confirm)?;
+        if let Some(lines) = receipt.get("output_lines") {
+            for line in lines.as_array().unwrap_or(&vec![]) {
+                println!("{line}");
+            }
+        }
+        return Ok(reply(&service, receipt, vec![]));
     }
     let MethodCommand::List { filter } = a.command else {
         unreachable!("method prove is handled above");

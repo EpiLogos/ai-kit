@@ -1007,6 +1007,7 @@ fn method_route(command: &MethodCommand) -> &'static str {
     match command {
         MethodCommand::List { .. } => "cmd_method_list",
         MethodCommand::Prove { .. } => "cmd_method_prove",
+        MethodCommand::Run { .. } => "cmd_method_run",
     }
 }
 
@@ -3745,6 +3746,25 @@ pub enum MethodCommand {
         /// MethodProofInput JSON. Prefix a path with @ to read a file.
         #[arg(long = "proof-json", value_name = "JSON|@FILE")]
         proof_json: String,
+    },
+    /// Run one Method's deterministic support through the native runner.
+    ///
+    /// The encounter route §2.2 prescribes: exact ref, exact JSON input, one
+    /// execution through the same runner `aikit run` uses (trust and confirm
+    /// included), and a native execution receipt carrying the input/output
+    /// digests a later `method prove` verification consumes. Postconditions
+    /// are never claimed here — a successful exit is not proof.
+    Run {
+        /// The Method ref (`aikit method list` shows the ids).
+        #[arg(value_name = "REF")]
+        method: String,
+        /// One JSON value contributed to the Method's support as one
+        /// argument. Prefix a path with @ to read a file.
+        #[arg(long, value_name = "JSON|@FILE")]
+        input: Option<String>,
+        /// Confirm an untrusted Method's execution.
+        #[arg(long)]
+        confirm: bool,
     },
 }
 

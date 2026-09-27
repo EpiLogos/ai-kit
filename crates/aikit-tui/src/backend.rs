@@ -544,12 +544,15 @@ pub trait PaletteBackend {
 
     /// Save the composed Agent source through the owner's Central
     /// agent-profile save/express operation (exact revision + content
-    /// digest). The default refuses: no owner operation is bound, and no
+    /// digest). `skill_sets` are the SkillSet names the person selected
+    /// first — the repertoire is a request the owner resolves, never
+    /// activation. The default refuses: no owner operation is bound, and no
     /// receipt may be manufactured.
     fn save_agent_profile(
         &mut self,
         _purpose: &str,
         _name: Option<&str>,
+        _skill_sets: &[String],
     ) -> Result<AgentProfileSaveReceipt> {
         Err(aikit_core::AikitError::new(
             "agent_profile.save_not_exposed",

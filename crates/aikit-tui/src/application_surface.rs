@@ -210,6 +210,10 @@ pub struct ApplicationSurfaceController {
     /// rows' "unavailable" reasons come from here — never from probing the
     /// backend at render time.
     agent_work_bindings: world_entry::AgentWorkBindings,
+    /// The composed World the containing O:I surface supplied through the
+    /// environment boundary, read exactly once at construction. `None` for
+    /// standalone AIKit: the view then operates over what is actually here.
+    composed_world: Option<world_entry::ComposedWorld>,
     /// The Compose Enter-work text lane currently capturing keystrokes, if
     /// any. Controller-only input-routing state (the graph filter lane's
     /// sibling): it decides which method the next keystroke reaches. The
@@ -294,6 +298,7 @@ impl ApplicationSurfaceController {
             relation_refreshed: 0,
             inspector_refreshed: 0,
             agent_work_bindings: backend.agent_work_bindings(),
+            composed_world: world_entry::ComposedWorld::from_env(),
             compose_text_lane: None,
             compose_text_buffer: String::new(),
         };
@@ -389,7 +394,8 @@ impl ApplicationSurfaceController {
                 &self.ambient,
                 WorkspaceReading::new(world, &self.session_spaces, &self.history)
                     .with_factory_work_entry(&self.factory_work_entry)
-                    .with_agent_work_bindings(self.agent_work_bindings),
+                    .with_agent_work_bindings(self.agent_work_bindings)
+                    .with_composed_world(self.composed_world.as_ref()),
                 self.shell_glyphs,
             );
         } else {
@@ -517,6 +523,27 @@ impl ApplicationSurfaceController {
         if code == KeyCode::Enter && self.enter_opens_compose_text_lane() {
             self.compose_text_lane = Some(ComposeTextField::Purpose);
             self.compose_text_buffer.clear();
+            return Ok(());
+        }
+        // The Praxis step's SkillSet field: digits toggle the numbered set
+        // rows while the query is empty. The row plan is the one the step
+        // detail renders, so keyboard and rendering can never disagree.
+        if self.semantic.workspace_section == WorkspaceSection::Compose
+            && self.semantic.compose_step == crate::compose_spine::ComposeStep::Praxis
+            && self.semantic.query.is_empty()
+            && self.semantic.overlay.is_none()
+            && matches!(code, KeyCode::Char('1'..='9'))
+        {
+            let KeyCode::Char(digit) = code else {
+                return Ok(());
+            };
+            let index = digit.to_digit(10).unwrap_or(0) as usize;
+            if index >= 1 {
+                if let Some(row) = self.semantic.compose_skill_set_field.get(index - 1) {
+                    let name = row.name.clone();
+                    return self.dispatch(backend, UiAction::ToggleComposeSkillSet { name });
+                }
+            }
             return Ok(());
         }
         if ctrl && matches!(code, KeyCode::Char('c') | KeyCode::Char('q')) {

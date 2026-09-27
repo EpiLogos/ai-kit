@@ -221,6 +221,112 @@ fn direct_work_availability(bindings: AgentWorkBindings) -> StepAvailability {
     }
 }
 
+/// The composed World supplied by the containing O:I surface through the
+/// established environment boundary (`OI_COMPOSED_WORLD`, schema
+/// `oi.world-orientation/v1` — the exact document `oi world --json` emits).
+/// Read once at surface construction, never per render. Standalone AIKit has
+/// no supply and renders nothing extra: it operates over what is actually
+/// available. A malformed or foreign supply renders nothing — the containing
+/// surface's answer is never guessed into shape here.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ComposedWorld {
+    pub ground: Option<String>,
+    pub machine: Option<String>,
+    pub requested_mode: Option<String>,
+    pub surfaces: Vec<(String, String)>,
+    pub warnings: Vec<String>,
+}
+
+impl ComposedWorld {
+    /// Parse one disclosure. A degraded reading inside it is carried named —
+    /// an error object becomes a warning line, never an empty list.
+    pub fn parse(value: &serde_json::Value) -> Option<ComposedWorld> {
+        if value["schema"] != serde_json::json!("oi.world-orientation/v1") {
+            return None;
+        }
+        let world = &value["current_world"];
+        let ground = world["personal_ground"].as_str().map(str::to_owned);
+        let machine = world["current_machine"].as_object().map(|machine| {
+            let role = machine["role"].as_str().unwrap_or("machine");
+            match machine["workcell_ref"].as_str() {
+                Some(workcell) => format!("{role} ↔ {workcell}"),
+                None => role.to_owned(),
+            }
+        });
+        let requested_mode = world["requested_mode"].as_object().map(|mode| {
+            let name = mode["mode"].as_str().unwrap_or("?");
+            match mode["set_by"].as_str() {
+                Some(set_by) => format!("{name} (set by {set_by})"),
+                None => name.to_owned(),
+            }
+        });
+        let mut warnings: Vec<String> = world["warnings"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(error) = world["error"].as_str() {
+            warnings.push(format!("current world unavailable: {error}"));
+        }
+        let mut surfaces = Vec::new();
+        if let Some(rows) = value["surfaces"].as_array() {
+            for row in rows {
+                if let (Some(name), Some(state)) =
+                    (row["public_name"].as_str(), row["state"].as_str())
+                {
+                    surfaces.push((name.to_owned(), state.to_owned()));
+                }
+            }
+        }
+        if let Some(error) = value["surfaces"]["error"].as_str() {
+            warnings.push(format!("composition unavailable: {error}"));
+        }
+        Some(ComposedWorld {
+            ground,
+            machine,
+            requested_mode,
+            surfaces,
+            warnings,
+        })
+    }
+
+    /// The one construction-time read of the environment boundary.
+    pub fn from_env() -> Option<ComposedWorld> {
+        let raw = std::env::var("OI_COMPOSED_WORLD").ok()?;
+        let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        Self::parse(&value)
+    }
+}
+
+/// The composed-World block of the resting view: where the containing O:I
+/// surface says the session stands — ground, machine, requested mode, the
+/// six-product presence, and its named warnings. Degraded readings arrive
+/// named from the supplier; nothing is derived or collapsed here.
+pub fn composed_world_lines(composed: &ComposedWorld, glyphs: Glyphs) -> Vec<String> {
+    let sep = glyphs.separator();
+    let mut lines = vec![format!("World {sep} composed supply from oi")];
+    if let Some(ground) = &composed.ground {
+        lines.push(format!("Ground  {ground}"));
+    }
+    if let Some(machine) = &composed.machine {
+        lines.push(format!("Machine {machine}"));
+    }
+    if let Some(mode) = &composed.requested_mode {
+        lines.push(format!("Mode    {mode}"));
+    }
+    for (name, state) in &composed.surfaces {
+        lines.push(format!("  {name:<18} {state}"));
+    }
+    for warning in &composed.warnings {
+        lines.push(format!("warning: {warning}"));
+    }
+    lines.push(String::new());
+    lines
+}
+
 /// Whether the readings show something needing repair. Every source is a
 /// real reading the world already carries; nothing here probes or guesses.
 fn needs_repair(world: &ProjectWorldReadModel) -> bool {
@@ -920,5 +1026,39 @@ mod tests {
             }),
             "Quick is the Navigator"
         );
+    }
+
+    #[test]
+    fn a_composed_world_supply_parses_and_renders_named_degraded_readings() {
+        // The exact document `oi world --json` emits (serde sorts keys), with
+        // one present surface and a degraded current world.
+        let document = serde_json::json!({
+            "schema": "oi.world-orientation/v1",
+            "current_world": {"error": "composition unavailable in this fixture"},
+            "surfaces": [
+                {"public_name": "Central", "state": "installed"},
+                {"public_name": "Factory", "state": "unavailable"}
+            ],
+            "next_actions": [],
+        });
+        let composed = ComposedWorld::parse(&document)
+            .expect("a real oi.world-orientation/v1 document parses");
+        assert_eq!(composed.surfaces.len(), 2);
+        assert_eq!(composed.surfaces[0].0, "Central");
+        assert!(
+            composed.warnings.iter().any(|warning| warning.contains("current world unavailable")),
+            "a degraded reading is carried named, never collapsed: {:?}",
+            composed.warnings
+        );
+
+        let lines = composed_world_lines(&composed, Glyphs::ascii());
+        let joined = lines.join("\n");
+        assert!(joined.contains("composed supply from oi"), "{joined}");
+        assert!(joined.contains("Central"), "{joined}");
+        assert!(joined.contains("warning: current world unavailable"), "{joined}");
+
+        // A foreign or malformed supply renders nothing: the containing
+        // surface's answer is never guessed into shape.
+        assert!(ComposedWorld::parse(&serde_json::json!({"schema": "other/v1"})).is_none());
     }
 }

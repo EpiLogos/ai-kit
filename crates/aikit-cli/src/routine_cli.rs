@@ -15,6 +15,7 @@ use aikit_core::resource::routine::{
     MethodProofInput, ProvenMethodBasis, Routine, RoutineAuthority, RoutineSchedulerBinding,
     RoutineSchedulerState, RoutineState, RoutineTrigger,
 };
+use aikit_core::id::CapsuleId;
 use aikit_core::resource::{ProviderRef, ResourceRef, SourceRef};
 use aikit_core::schedule::{ScheduleRecord, TIME_SCHEDULE_VERSION};
 use aikit_core::{AikitError, Result};
@@ -1053,4 +1054,89 @@ mod tests {
         assert_eq!(slug("Daily Nara Flow"), "daily-nara-flow");
         assert_eq!(slug("!!!"), "routine");
     }
+}
+
+
+/// `aikit method run <ref> [--input <json>|@file] [--confirm]` — the
+/// deterministic invocation route of one Method (§2.2). Preflight refuses
+/// before any effect: an unknown ref, a Skill that is not a Method, an
+/// input that is not one JSON value, and an untrusted Method without
+/// `--confirm`. One execution then goes through the same native runner
+/// `aikit run` uses — never a second transport — and the receipt carries the
+/// digests a later `method prove` verification consumes. It never claims
+/// postconditions: a successful shell exit is not proof.
+pub fn method_run(
+    service: &mut crate::app::Service,
+    method: &str,
+    input: Option<&str>,
+    confirm: bool,
+) -> Result<Value> {
+    let reference = ResourceRef::parse(method)?;
+    let id = CapsuleId::parse(reference.as_str())
+        .map_err(|_| AikitError::new("method.ref_invalid", format!("`{reference}` is not a capability ref")))?;
+    let view = service.resolved();
+    let entry = view.catalog_index.get(&id).ok_or_else(|| {
+        AikitError::new(
+            "method.unknown",
+            format!("`{reference}` is not present in the resolved catalogue"),
+        )
+        .with("recovery", "list the detected Methods with `aikit method list`")
+    })?;
+    if aikit_core::method::method_payload(&entry.description).is_none() {
+        return Err(AikitError::new(
+            "method.not_a_method",
+            format!("`{reference}` is a plain Skill, not a Method; `method run` is the Method invocation route"),
+        )
+        .with("recovery", format!("run it directly: `aikit act invoke {reference}`")));
+    }
+    if !view.can_run(&id) {
+        return Err(AikitError::new(
+            "method.not_runnable",
+            format!("`{reference}` resolves but cannot run here: {}", 
+                view.unavailable_reason(&id).map(|reason| reason.describe()).unwrap_or_else(|| "no scope enables it in this context".into())),
+        ));
+    }
+    if entry.trust != aikit_core::TrustState::Trusted && !confirm {
+        return Err(AikitError::new(
+            "trust.required",
+            format!("`{reference}` is not trusted; re-run with --confirm once you accept the risk"),
+        ));
+    }
+    let input_json = match input {
+        Some(raw) => match raw.strip_prefix('@') {
+            Some(path) => std::fs::read_to_string(path).map_err(|error| {
+                AikitError::new("method.input_unreadable", format!("could not read the Method input from {path}: {error}"))
+            })?,
+            None => raw.to_owned(),
+        },
+        None => serde_json::json!({}).to_string(),
+    };
+    serde_json::from_str::<serde_json::Value>(input_json.trim()).map_err(|error| {
+        AikitError::new("method.input_invalid", format!("Method input must be one JSON value: {error}"))
+    })?;
+
+    let method_name = entry.name.clone();
+    let input_for_run = input_json.clone();
+    let run = crate::app::AikitApplication::run(
+        service,
+        crate::app::RunRequest {
+            name: reference.to_string(),
+            args: vec![input_for_run],
+            export: None,
+            confirmed: confirm,
+        },
+    )?;
+    let output_text = run.report.output.join("\n");
+    Ok(serde_json::json!({
+        "schema": "aikit.method-execution/v1",
+        "method": reference.to_string(),
+        "name": method_name,
+        "status": if run.report.detached { "detached".to_owned() } else if run.report.status == 0 { "ok".to_owned() } else { format!("exit {}", run.report.status) },
+        "exit_status": run.report.status,
+        "detached": run.report.detached,
+        "input_digest": blake3::hash(input_json.as_bytes()).to_hex().to_string(),
+        "output_digest": blake3::hash(output_text.as_bytes()).to_hex().to_string(),
+        "result_digest": crate::scoped_invocation::run_result_digest(&run).to_string(),
+        "postconditions": "not claimed by this route; `aikit method prove` promotes this receipt into a proven basis only when explicit verification passes",
+    }))
 }

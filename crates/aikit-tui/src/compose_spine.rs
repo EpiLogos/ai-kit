@@ -213,13 +213,31 @@ fn standing_for(
         // resolve, so the row says what it has rather than reading as a total
         // blank on a step that is partly answerable.
         ComposeStep::Praxis => {
-            StepStanding::NotExposed(format!(
-            "no Profile/SkillSet/Skill/Method contract here; {} capabilit{}, {} action{} resolve",
-            world.capability_horizon.capabilities.len(),
-            if world.capability_horizon.capabilities.len() == 1 { "y" } else { "ies" },
-            world.capability_horizon.actions.len(),
-            s(world.capability_horizon.actions.len()),
-        ))
+            // SkillSet-first: the field is the repertoire a person selects
+            // from. A boundary disclosing no sets keeps the named absence —
+            // it never renders fake rows.
+            if state.compose_skill_set_field.is_empty() {
+                StepStanding::NotExposed(format!(
+                    "no SkillSet field disclosed here; {} capabilit{}, {} action{} resolve",
+                    world.capability_horizon.capabilities.len(),
+                    if world.capability_horizon.capabilities.len() == 1 { "y" } else { "ies" },
+                    world.capability_horizon.actions.len(),
+                    s(world.capability_horizon.actions.len()),
+                ))
+            } else if state.compose_skill_sets.is_empty() {
+                StepStanding::Open(format!(
+                    "choose a SkillSet first; {} set{} disclosed",
+                    state.compose_skill_set_field.len(),
+                    if state.compose_skill_set_field.len() == 1 { "" } else { "s" },
+                ))
+            } else {
+                StepStanding::Determined(format!(
+                    "{} set{} selected ({}) - a request the owner resolves at preparation",
+                    state.compose_skill_sets.len(),
+                    if state.compose_skill_sets.len() == 1 { "" } else { "s" },
+                    state.compose_skill_sets.join(", "),
+                ))
+            }
         }
 
         ComposeStep::Information => {
@@ -506,11 +524,33 @@ fn step_detail(
             lines
         }
 
-        ComposeStep::Praxis => vec![
-            "  aikit-core publishes praxis - resolve_praxis, PraxisResolution,".into(),
-            "  SelectedMethod - but no praxis contract crosses this application".into(),
-            "  boundary, so no Profile/SkillSet/Skill/Method can be chosen here.".into(),
-            format!(
+        ComposeStep::Praxis => {
+            let mut lines = Vec::new();
+            if state.compose_skill_set_field.is_empty() {
+                lines.push(
+                    "  no SkillSet field is disclosed at this boundary, so no".into(),
+                );
+                lines.push("  repertoire can be chosen here.".into());
+            } else {
+                lines.push("  Choose a SkillSet first; individual exceptions ride beside".into());
+                lines.push("  them later. A set is a request: the owner's own resolution at".into());
+                lines.push("  preparation decides what projects and what is withheld.".into());
+                lines.push(String::new());
+                for (index, row) in state.compose_skill_set_field.iter().enumerate() {
+                    let selected = state.compose_skill_sets.contains(&row.name);
+                    lines.push(format!(
+                        "  {} {} {:<24} {}",
+                        index + 1,
+                        if selected { "[x]" } else { "[ ]" },
+                        row.name,
+                        row.summary,
+                    ));
+                }
+                lines.push(String::new());
+                lines.push("  Digits toggle the numbered sets; the selection rides the".into());
+                lines.push("  save exactly as shown here.".into());
+            }
+            lines.push(format!(
                 "  What does resolve: {} capabilit{}, {} action{}.",
                 world.capability_horizon.capabilities.len(),
                 if world.capability_horizon.capabilities.len() == 1 {
@@ -520,8 +560,9 @@ fn step_detail(
                 },
                 world.capability_horizon.actions.len(),
                 s(world.capability_horizon.actions.len()),
-            ),
-        ],
+            ));
+            lines
+        }
 
         ComposeStep::Information => {
             let mut lines = Vec::new();
