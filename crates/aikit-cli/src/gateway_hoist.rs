@@ -542,9 +542,9 @@ fn declared_remote(home: &AikitHome, workcell_ref: &str) -> Result<GatewayRemote
 fn include_token_sources(
     posture: &PackedPosture,
     remote: &GatewayRemote,
-) -> Result<Vec<(String, PathBuf, Vec<u8>)>> {
-    let mut rows: Vec<(String, PathBuf, Vec<u8>)> = Vec::new();
-    let mut push = |what: String, location: &str| -> Result<()> {
+) -> Result<Vec<(String, PathBuf, Vec<u8>, Option<String>)>> {
+    let mut rows: Vec<(String, PathBuf, Vec<u8>, Option<String>)> = Vec::new();
+    let mut push = |what: String, location: &str, target_name: Option<String>| -> Result<()> {
         let secret = SecretLocation::parse(location)
             .and_then(|parsed| parsed.resolve())
             .map_err(|error| {
@@ -562,7 +562,7 @@ fn include_token_sources(
             SecretLocation::File(path) => path,
             SecretLocation::Declared(_) => return Ok(()),
         };
-        rows.push((what, path, secret.expose().as_bytes().to_vec()));
+        rows.push((what, path, secret.expose().as_bytes().to_vec(), target_name));
         Ok(())
     };
     // The declared token is this machine's copy of the target gateway's own
@@ -575,6 +575,7 @@ fn include_token_sources(
                 remote.workcell_ref
             ),
             &remote.token_location,
+            Some("gateway.token".to_owned()),
         )?;
     } else {
         return Err(three_part(
@@ -591,7 +592,7 @@ fn include_token_sources(
     for entry in &posture.connectors {
         if let Some(raw) = &entry.token_location {
             if matches!(SecretLocation::parse(raw)?, SecretLocation::File(_)) {
-                push(format!("connector {}", entry.connector_ref), raw)?;
+                push(format!("connector {}", entry.connector_ref), raw, None)?;
             }
         }
     }
@@ -681,19 +682,32 @@ pub fn apply_over_channel(
     // 3. Token files, each its own printed step. A token lands at the
     // target's own .aikit path — the source machine's absolute path has no
     // meaning there, and receive rewrites the posture's locations to match.
-    for (what, path, bytes) in &tokens {
-        let file_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .ok_or_else(|| {
-                step_failure(
-                    "stage-token",
-                    &channel.describe(),
-                    format!("token path {} has no file name", path.display()),
-                )
-            })?;
-        let target_dir = format!("{target_home}/.aikit/credentials");
-        let target_path = format!("{target_dir}/{file_name}");
+    // The target gateway's own bearer token lands at the conventional
+    // gateway.token path its install-service checks.
+    for (what, path, bytes, target_name) in &tokens {
+        let file_name = match target_name {
+            Some(name) => name.clone(),
+            None => path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .ok_or_else(|| {
+                    step_failure(
+                        "stage-token",
+                        &channel.describe(),
+                        format!("token path {} has no file name", path.display()),
+                    )
+                })?,
+        };
+        let (target_dir, target_path) = match target_name {
+            Some(_) => (
+                format!("{target_home}/.aikit"),
+                format!("{target_home}/.aikit/{file_name}"),
+            ),
+            None => (
+                format!("{target_home}/.aikit/credentials"),
+                format!("{target_home}/.aikit/credentials/{file_name}"),
+            ),
+        };
         let token_argv = vec![
             "sh".to_owned(),
             "-c".to_owned(),
@@ -714,7 +728,11 @@ pub fn apply_over_channel(
     }
 
     let gateway_token_location = format!("{target_home}/.aikit/gateway.token");
-    let receive_command = "aikit gateway hoist --receive".to_owned();
+    let receive_command = if args.force {
+        "aikit gateway hoist --receive --force".to_owned()
+    } else {
+        "aikit gateway hoist --receive".to_owned()
+    };
     let install_command = format!(
         "aikit gateway install-service --ws {} --ws-token-location file:{gateway_token_location} \
          --workcell-ref {} --gateway-ref {}",
@@ -723,12 +741,15 @@ pub fn apply_over_channel(
 
     // 4–5. With --yes the remote steps execute over the same channel.
     let (receive_done, install_done) = if args.yes {
-        let receive_argv = vec![
+        let mut receive_argv = vec![
             "aikit".to_owned(),
             "gateway".to_owned(),
             "hoist".to_owned(),
             "--receive".to_owned(),
         ];
+        if args.force {
+            receive_argv.push("--force".to_owned());
+        }
         let out = channel.run("receive-on-target", &receive_argv, None)?;
         record(
             &mut steps,
@@ -998,7 +1019,8 @@ pub fn receive(home: &AikitHome, force: bool) -> Result<Value> {
             if let Some(location) = &entry.token_location {
                 if let Some(rest) = location.strip_prefix("file:") {
                     if let Some(index) = rest.find("/.aikit/") {
-                        let relocated = format!("file:{}{}", target_home, &rest[index..]);
+                        let after = &rest[index + "/.aikit/".len()..];
+                        let relocated = format!("file:{target_home}/.aikit/{after}");
                         if relocated != *location {
                             relocations.push(format!("{} -> {}", location, relocated));
                             entry.token_location = Some(relocated);
