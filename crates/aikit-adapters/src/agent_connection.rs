@@ -570,6 +570,13 @@ pub enum ConnectionSignalKind {
     AgentMessageChunk {
         text: String,
     },
+    /// One completed assistant text message, as the wire closed it. Some
+    /// wires complete whole messages (no fine-grained deltas between): the
+    /// honest progress fact they publish is the finished segment, not a
+    /// growing partial.
+    AgentMessageSegment {
+        text: String,
+    },
     /// Provider-exposed thinking, never reconstructed hidden reasoning.
     AgentThoughtChunk {
         text: String,
@@ -634,6 +641,16 @@ pub struct ConnectionSignal {
 pub trait AgentConnectionAdapter {
     fn descriptor(&self) -> ConnectionDescriptor;
     fn initialize(&mut self) -> Result<ConnectionCommand>;
+    /// Optional native preparation before the identity-bearing open command.
+    /// The host awaits this acknowledgement under its control gate, then asks
+    /// open_session for the final native identity readback. No binding exists
+    /// merely because preparation succeeded.
+    fn prepare_open_session(
+        &mut self,
+        _request: &SessionOpenRequest,
+    ) -> Result<Option<ConnectionCommand>> {
+        Ok(None)
+    }
     fn open_session(&mut self, request: SessionOpenRequest) -> Result<ConnectionCommand>;
     fn prompt(&mut self, request: PromptRequest) -> Result<ConnectionCommand>;
     fn cancel(&mut self, request: CancelRequest) -> Result<ConnectionCommand>;

@@ -496,9 +496,20 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
                         result["errorMessage"].as_str().map(str::to_owned),
                     ));
                 }
-                Some(ConnectionSignalKind::Status {
+                let mut signals = Vec::new();
+                // A completed assistant message is real progress: this wire
+                // closes whole messages, so the finished segment is what a
+                // turn observer can honestly show while the turn goes on.
+                if result["role"] == "assistant" {
+                    if let Some(text) = assistant_message_text(result) {
+                        signals
+                            .push(self.signal(ConnectionSignalKind::AgentMessageSegment { text }));
+                    }
+                }
+                signals.push(self.signal(ConnectionSignalKind::Status {
                     message: message.to_string(),
-                })
+                }));
+                return Ok(signals);
             }
             Some("agent_settled") => {
                 let (reason, detail) = self.stop.take().unwrap_or(("unknown".into(), None));
@@ -684,4 +695,25 @@ impl InteractiveAgentConnectionAdapter for PiRpcConnectionAdapter {
 
 fn error(code: &'static str, detail: &str) -> AikitError {
     AikitError::new(code, detail)
+}
+
+/// The text of a completed assistant message, in the content shapes Pi's wire
+/// produces: a plain string, or an array of typed blocks carrying the text
+/// ones. Absent content means None. Explicit empty content closes and replaces
+/// any provisional text just as a nonempty completed message does.
+pub(crate) fn assistant_message_text(message: &Value) -> Option<String> {
+    let text = match &message["content"] {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(blocks) => {
+            let joined = blocks
+                .iter()
+                .filter(|block| block["type"] == "text")
+                .filter_map(|block| block["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("");
+            Some(joined)
+        }
+        _ => None,
+    }?;
+    Some(text)
 }

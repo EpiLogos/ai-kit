@@ -20,7 +20,8 @@ pub const PRIME_AGENT_RELEASE_REVISION: &str = "f771dfcedd684d1afff84ca2c6fa95c7
 #[derive(Debug, Clone)]
 enum Pending {
     Initialize,
-    Attach(ResourceRef),
+    Attach(ResourceRef, SessionOpenMode),
+    ResumeSwitch,
     Prompt,
     Control,
 }
@@ -39,6 +40,8 @@ pub struct PrimeRpcConnectionAdapter {
     model_observation: Option<NativeModelObservation>,
     stop: Option<(String, Option<String>)>,
     abort_acknowledged: bool,
+    resume_target: Option<(String, String)>,
+    resume_switched: bool,
 }
 
 impl PrimeRpcConnectionAdapter {
@@ -56,7 +59,25 @@ impl PrimeRpcConnectionAdapter {
             model_observation: None,
             stop: None,
             abort_acknowledged: false,
+            resume_target: None,
+            resume_switched: false,
         }
+    }
+
+    /// The owner resolves this exact id/path through Prime's native SDK for
+    /// the same cwd before starting a replacement transport.
+    pub fn with_resume_target(mut self, native_id: String, session_file: String) -> Result<Self> {
+        if native_id.trim().is_empty()
+            || native_id.len() > 256
+            || !std::path::Path::new(&session_file).is_absolute()
+        {
+            return Err(error(
+                "connection.prime_rpc.resume_target",
+                "Native resume requires an exact id and absolute session file",
+            ));
+        }
+        self.resume_target = Some((native_id, session_file));
+        Ok(self)
     }
 
     pub fn with_selected_model(mut self, provider: &str, model_id: &str) -> Result<Self> {
@@ -212,7 +233,7 @@ impl AgentConnectionAdapter for PrimeRpcConnectionAdapter {
                 version: PRIME_AGENT_RELEASE.into(),
             },
             capabilities: ConnectionCapabilities {
-                session_open: BTreeSet::from([SessionOpenMode::Attach]),
+                session_open: BTreeSet::from([SessionOpenMode::Attach, SessionOpenMode::Resume]),
                 ordered_streaming: true,
                 cancellation: true,
                 ..Default::default()
@@ -225,18 +246,51 @@ impl AgentConnectionAdapter for PrimeRpcConnectionAdapter {
         Ok(self.request("get_state", json!({}), Pending::Initialize))
     }
 
+    fn prepare_open_session(
+        &mut self,
+        request: &SessionOpenRequest,
+    ) -> Result<Option<ConnectionCommand>> {
+        if request.mode != SessionOpenMode::Resume {
+            return Ok(None);
+        }
+        let (id, path) = self.resume_target.clone().ok_or_else(|| {
+            error(
+                "connection.prime_rpc.resume_target",
+                "The owner has not resolved the exact previous native session",
+            )
+        })?;
+        if self.binding.is_some()
+            || self.resume_switched
+            || request.native_session_id.as_deref() != Some(&id)
+            || request.agent_session.is_none()
+            || request.cwd != self.cwd
+            || !request.additional_directories.is_empty()
+            || !request.mcp_servers.is_empty()
+        {
+            return Err(error("connection.prime_rpc.resume_basis", "Resume requires the same admitted cwd, exact native identity and an unbound connection"));
+        }
+        Ok(Some(self.request(
+            "switch_session",
+            json!({"sessionPath":path}),
+            Pending::ResumeSwitch,
+        )))
+    }
+
     fn open_session(&mut self, request: SessionOpenRequest) -> Result<ConnectionCommand> {
-        if request.mode != SessionOpenMode::Attach {
+        if !matches!(
+            request.mode,
+            SessionOpenMode::Attach | SessionOpenMode::Resume
+        ) {
             return Err(error(
                 "connection.prime_rpc.unsupported_open",
-                "Prime RPC binds the process's observed native session; create/load/resume are not claimed",
+                "Prime RPC supports native attachment and explicitly resolved native resume; create/load are not claimed",
             ));
         }
         if self.binding.is_some()
             || self
                 .pending
                 .values()
-                .any(|pending| matches!(pending, Pending::Attach(_)))
+                .any(|pending| matches!(pending, Pending::Attach(_, _) | Pending::ResumeSwitch))
         {
             return Err(error(
                 "connection.prime_rpc.single_session",
@@ -252,16 +306,23 @@ impl AgentConnectionAdapter for PrimeRpcConnectionAdapter {
                 "Prime World/Skill context belongs to its admitted process launch; this adapter does not rewrite cwd, additional directories or MCP servers",
             ));
         }
-        if self.observed_session.is_none() {
+        if request.mode == SessionOpenMode::Resume && !self.resume_switched {
+            return Err(error(
+                "connection.prime_rpc.resume_unprepared",
+                "Native switch_session has not acknowledged the requested resume",
+            ));
+        }
+        if self.observed_session.is_none() && request.mode != SessionOpenMode::Resume {
             return Err(error(
                 "connection.prime_rpc.not_initialized",
                 "Read Prime native state before attachment",
             ));
         }
-        if request
-            .native_session_id
-            .as_ref()
-            .is_some_and(|id| Some(id) != self.observed_session.as_ref())
+        if request.mode != SessionOpenMode::Resume
+            && request
+                .native_session_id
+                .as_ref()
+                .is_some_and(|id| Some(id) != self.observed_session.as_ref())
         {
             return Err(error(
                 "connection.prime_rpc.session_mismatch",
@@ -274,7 +335,11 @@ impl AgentConnectionAdapter for PrimeRpcConnectionAdapter {
                 "An explicit canonical AgentSession is required",
             )
         })?;
-        Ok(self.request("get_state", json!({}), Pending::Attach(canonical)))
+        Ok(self.request(
+            "get_state",
+            json!({}),
+            Pending::Attach(canonical, request.mode),
+        ))
     }
 
     fn prompt(&mut self, request: PromptRequest) -> Result<ConnectionCommand> {
@@ -291,7 +356,14 @@ impl AgentConnectionAdapter for PrimeRpcConnectionAdapter {
             })?;
         self.stop = None;
         self.abort_acknowledged = false;
-        Ok(self.request("prompt", json!({"message": text}), Pending::Prompt))
+        // Prime's daemon-backed RPC route keeps input suspended after abort.
+        // Its documented follow-up admission resumes an idle session; the
+        // native AIKit lane still refuses prompts while a turn is in flight.
+        Ok(self.request(
+            "prompt",
+            json!({"message": text, "streamingBehavior": "followUp"}),
+            Pending::Prompt,
+        ))
     }
 
     fn cancel(&mut self, request: CancelRequest) -> Result<ConnectionCommand> {
@@ -324,10 +396,34 @@ impl AgentConnectionAdapter for PrimeRpcConnectionAdapter {
                         ),
                     })])
                 }
-                Pending::Attach(canonical) => {
+                Pending::ResumeSwitch => {
+                    if message["data"]["cancelled"] != false {
+                        return Err(error(
+                            "connection.prime_rpc.resume_refused",
+                            "Prime did not acknowledge native session replacement",
+                        ));
+                    }
+                    self.observed_session = None;
+                    self.resume_switched = true;
+                    Ok(Vec::new())
+                }
+                Pending::Attach(canonical, mode) => {
+                    if mode == SessionOpenMode::Resume {
+                        let (id, path) = self.resume_target.as_ref().ok_or_else(|| {
+                            error(
+                                "connection.prime_rpc.resume_target",
+                                "Native resume basis is missing",
+                            )
+                        })?;
+                        if message["data"]["sessionId"].as_str() != Some(id)
+                            || message["data"]["sessionFile"].as_str() != Some(path)
+                        {
+                            return Err(error("connection.prime_rpc.resume_mismatch", "Prime get_state did not confirm the exact previous native session and file"));
+                        }
+                    }
                     let id = self.observe_state(&message["data"], true)?;
-                    let mut binding = NativeSessionBinding::unbound(id, SessionOpenMode::Attach)
-                        .bind_agent_session(canonical);
+                    let mut binding =
+                        NativeSessionBinding::unbound(id, mode).bind_agent_session(canonical);
                     binding.provenance = self.provenance.clone();
                     binding.model_observation = self.model_observation.clone();
                     self.binding = Some(binding.clone());
@@ -377,9 +473,16 @@ impl AgentConnectionAdapter for PrimeRpcConnectionAdapter {
                         result["errorMessage"].as_str().map(str::to_owned),
                     ));
                 }
-                Some(ConnectionSignalKind::Status {
+                let mut signals = Vec::new();
+                if result["role"] == "assistant" {
+                    if let Some(text) = crate::pi_rpc_connection::assistant_message_text(result) {
+                        signals.push(self.signal(ConnectionSignalKind::AgentMessageSegment { text }));
+                    }
+                }
+                signals.push(self.signal(ConnectionSignalKind::Status {
                     message: message.to_string(),
-                })
+                }));
+                return Ok(signals);
             }
             Some("agent_end") => {
                 let (reason, detail) = self.stop.take().unwrap_or(("unknown".into(), None));
@@ -557,6 +660,74 @@ mod tests {
     }
 
     #[test]
+    fn resume_requires_native_switch_ack_and_exact_idle_identity_readback() {
+        for refusal in ["none", "cancelled", "wrong-file", "wrong-id", "busy"] {
+            let mut adapter = PrimeRpcConnectionAdapter::new(
+                ResourceRef::parse("connection/prime/resume-test").unwrap(),
+                "/work".into(),
+                vec![],
+            )
+            .with_resume_target(
+                "prime-native-1".into(),
+                "/sessions/prime-native-1.jsonl".into(),
+            )
+            .unwrap();
+            let init = adapter.initialize().unwrap();
+            adapter.ingest(json!({"type":"response","id":init.payload["id"],"success":true,"data":state(false)})).unwrap();
+            let request = SessionOpenRequest {
+                mode: SessionOpenMode::Resume,
+                native_session_id: Some("prime-native-1".into()),
+                cwd: "/work".into(),
+                additional_directories: vec![],
+                mcp_servers: vec![],
+                agent_session: Some(ResourceRef::parse("agent-session/prime-resume-test").unwrap()),
+            };
+            assert!(adapter.open_session(request.clone()).is_err());
+            let switch = adapter.prepare_open_session(&request).unwrap().unwrap();
+            assert_eq!(switch.payload["type"], "switch_session");
+            assert_eq!(
+                switch.payload["sessionPath"],
+                "/sessions/prime-native-1.jsonl"
+            );
+            let ack=adapter.ingest(json!({"type":"response","id":switch.payload["id"],"success":true,"data":{"cancelled":refusal=="cancelled"}}));
+            if refusal == "cancelled" {
+                assert!(ack.is_err());
+                assert!(adapter.binding.is_none());
+                continue;
+            }
+            ack.unwrap();
+            let read = adapter.open_session(request).unwrap();
+            let mut actual = state(refusal == "busy");
+            actual["sessionFile"] = json!(if refusal == "wrong-file" {
+                "/sessions/other.jsonl"
+            } else {
+                "/sessions/prime-native-1.jsonl"
+            });
+            if refusal == "wrong-id" {
+                actual["sessionId"] = json!("another-native-id");
+            }
+            let outcome = adapter.ingest(
+                json!({"type":"response","id":read.payload["id"],"success":true,"data":actual}),
+            );
+            if refusal != "none" {
+                assert!(outcome.is_err());
+                assert!(adapter.binding.is_none());
+                continue;
+            }
+            let signals = outcome.unwrap();
+            let ConnectionSignalKind::SessionOpened { binding } = &signals[0].kind else {
+                panic!("native binding missing")
+            };
+            assert_eq!(binding.opened_as, SessionOpenMode::Resume);
+            assert_eq!(
+                binding.agent_session.as_ref().unwrap().as_str(),
+                "agent-session/prime-resume-test"
+            );
+            assert_eq!(binding.native_session_id, "prime-native-1");
+        }
+    }
+
+    #[test]
     fn a_changed_or_busy_prime_state_is_refused() {
         let mut adapter = PrimeRpcConnectionAdapter::new(
             ResourceRef::parse("connection/prime/test").unwrap(),
@@ -569,6 +740,52 @@ mod tests {
             .ingest(json!({"type":"response","id":id,"command":"get_state","success":true,"data":state(true)}))
             .unwrap_err();
         assert_eq!(error.code(), "connection.prime_rpc.session_busy");
+    }
+
+    #[test]
+    fn completed_prime_message_retains_full_native_text_not_only_streamed_fragments() {
+        let mut adapter = PrimeRpcConnectionAdapter::new(
+            ResourceRef::parse("connection/prime/completed").unwrap(),
+            "/work".into(),
+            vec![],
+        );
+        let partial = adapter.ingest(json!({"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Your saved person Keys"}})).unwrap();
+        assert!(
+            matches!(&partial[0].kind, ConnectionSignalKind::AgentMessageChunk { text } if text == "Your saved person Keys")
+        );
+        let complete =
+            "Your saved person is Controlled native identity one. Gene Keys has not been supplied.";
+        let final_wire = json!({"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"thinking","thinking":"not public message text"},{"type":"text","text":complete}]}});
+        let signals = adapter.ingest(final_wire.clone()).unwrap();
+        assert!(
+            matches!(&signals[0].kind, ConnectionSignalKind::AgentMessageSegment { text } if text == complete)
+        );
+        assert!(
+            matches!(&signals[1].kind, ConnectionSignalKind::Status { message } if serde_json::from_str::<Value>(message).unwrap() == final_wire)
+        );
+        assert!(matches!(
+            adapter.ingest(json!({"type":"agent_end"})).unwrap()[0].kind,
+            ConnectionSignalKind::Completed { .. }
+        ));
+    }
+
+    #[test]
+    fn explicitly_empty_completed_content_closes_provisional_text() {
+        let mut adapter = PrimeRpcConnectionAdapter::new(
+            ResourceRef::parse("connection/prime/empty").unwrap(),
+            "/work".into(),
+            vec![],
+        );
+        for content in [
+            json!(""),
+            json!([]),
+            json!([{ "type":"thinking", "thinking":"not message text" }]),
+        ] {
+            let signals = adapter.ingest(json!({"type":"message_end","message":{"role":"assistant","content":content,"stopReason":"stop"}})).unwrap();
+            assert!(
+                matches!(&signals[0].kind,ConnectionSignalKind::AgentMessageSegment { text } if text.is_empty())
+            );
+        }
     }
 
     #[test]
@@ -590,6 +807,7 @@ mod tests {
             })
             .unwrap();
         let prompt_id = prompt.payload["id"].as_str().unwrap().to_owned();
+        assert_eq!(prompt.payload["streamingBehavior"], "followUp");
         adapter
             .ingest(json!({"type":"response","id":prompt_id,"command":"prompt","success":true}))
             .unwrap();
@@ -607,5 +825,13 @@ mod tests {
             .unwrap();
         let ended = adapter.ingest(json!({"type":"agent_end"})).unwrap();
         assert!(matches!(ended[0].kind, ConnectionSignalKind::Cancelled));
+        let continued = adapter
+            .prompt(PromptRequest {
+                native_session_id: "prime-native-1".into(),
+                prompt: json!("continue this conversation"),
+            })
+            .unwrap();
+        assert_eq!(continued.payload["message"], "continue this conversation");
+        assert_eq!(continued.payload["streamingBehavior"], "followUp");
     }
 }
