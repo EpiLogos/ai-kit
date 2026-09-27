@@ -678,23 +678,38 @@ pub fn apply_over_channel(
         format!("{} bytes staged at {bundle_path}", bundle.len()),
     );
 
-    // 3. Token files, each its own printed step.
+    // 3. Token files, each its own printed step. A token lands at the
+    // target's own .aikit path — the source machine's absolute path has no
+    // meaning there, and receive rewrites the posture's locations to match.
     for (what, path, bytes) in &tokens {
-        let dir = path
-            .parent()
-            .map(|parent| parent.display().to_string())
-            .unwrap_or_else(|| "/".into());
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .ok_or_else(|| {
+                step_failure(
+                    "stage-token",
+                    &channel.describe(),
+                    format!("token path {} has no file name", path.display()),
+                )
+            })?;
+        let target_dir = format!("{target_home}/.aikit/credentials");
+        let target_path = format!("{target_dir}/{file_name}");
         let token_argv = vec![
             "sh".to_owned(),
             "-c".to_owned(),
-            format!("umask 077; mkdir -p '{dir}' && cat > '{}'", path.display()),
+            format!("umask 077; mkdir -p '{target_dir}' && cat > '{target_path}'"),
         ];
         channel.run("stage-token", &token_argv, Some(bytes))?;
         record(
             &mut steps,
             "stage-token",
             &token_argv,
-            format!("{what}: {} bytes to {}", bytes.len(), path.display()),
+            format!(
+                "{what}: {} bytes from {} to {}",
+                bytes.len(),
+                path.display(),
+                target_path
+            ),
         );
     }
 
@@ -973,11 +988,30 @@ pub fn receive(home: &AikitHome, force: bool) -> Result<Value> {
 
     if !posture.connectors.is_empty() {
         let connectors_path = crate::gateway_connectors::connectors_path(home);
+        // Token locations are material facts: an .aikit-relative file:
+        // location re-resolves to this home, so the declared posture lands
+        // valid here instead of inheriting the source machine's paths.
+        let target_home = home.root().display().to_string();
+        let mut connectors = posture.connectors.clone();
+        let mut relocations: Vec<String> = Vec::new();
+        for entry in &mut connectors {
+            if let Some(location) = &entry.token_location {
+                if let Some(rest) = location.strip_prefix("file:") {
+                    if let Some(index) = rest.find("/.aikit/") {
+                        let relocated = format!("file:{}{}", target_home, &rest[index..]);
+                        if relocated != *location {
+                            relocations.push(format!("{} -> {}", location, relocated));
+                            entry.token_location = Some(relocated);
+                        }
+                    }
+                }
+            }
+        }
         store_gateway_connectors(
             &connectors_path,
             &GatewayConnectorsFile {
                 schema: GATEWAY_CONNECTORS_SCHEMA.into(),
-                connectors: posture.connectors.clone(),
+                connectors,
             },
         )?;
         landed.push(format!(
@@ -985,6 +1019,9 @@ pub fn receive(home: &AikitHome, force: bool) -> Result<Value> {
             posture.connectors.len(),
             connectors_path.display()
         ));
+        for relocation in relocations {
+            landed.push(format!("token location re-resolved: {}", relocation));
+        }
     }
     if let Some(document) = &posture.coexistence {
         let path = crate::gateway_ops::coexistence_path(home);
