@@ -7,7 +7,7 @@
   "limits": {
     "timeout_ms": 60000,
     "max_attempts": 2,
-    "max_input_tokens_per_attempt": 30000,
+    "max_input_tokens_per_attempt": 16384,
     "max_output_tokens_per_attempt": 4000,
     "model": "kev-latest"
   },
@@ -20,6 +20,8 @@
     "backend": "mlx",
     "precision": "bf16-as-stored",
     "calibration": "checkpoint-fitted-temperature (fitted on upstream held-out data; reported by GET /v1/models)",
-    "license": "Apache-2.0"
+    "license": "Apache-2.0",
+    "trained_state_tokens": 7552,
+    "notes": "input ceiling admits packed selections while staying near the trained envelope; keep shared states lean and put per-candidate detail in question entries (small models lose accuracy on long states)"
   }
 }

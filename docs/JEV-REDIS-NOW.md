@@ -234,7 +234,15 @@ installs and records SHA-256s in a material manifest;
 serving process through Workcell's existing declared-services path (loopback
 bind, readiness probe, idempotent start, owned stop); starting runs with
 `HF_HUB_OFFLINE=1`, proving cached weights can start and answer without
-outbound network.
+outbound network. The launcher also carries the serving optimizations this
+recipe depends on: `KEV_PREFIX_CACHE=8` (the knowledge-driven pattern repeats
+one state across many questions; upstream measures ~5x on repeat state) and a
+warm-at-start packed Noul/Choice/Score request, so Metal kernel compilation
+happens at start and "started" means ready-at-speed. The input ceiling
+(16 384 tokens) admits packed selections while staying near the checkpoint's
+trained state envelope (~7.5k tokens): keep the shared state lean and put
+per-candidate detail in the question entries — small models lose accuracy on
+long states, so narrowing scope beats fattening the state.
 
 ### Meaning, disclosure and evaluation
 

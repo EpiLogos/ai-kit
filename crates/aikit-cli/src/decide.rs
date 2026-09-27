@@ -65,6 +65,13 @@ pub struct DecisionModelIdentity {
     pub weights_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_path: Option<String>,
+    /// The checkpoint's trained state envelope in tokens. Inputs beyond it
+    /// work but degrade on small models, so keep shared states lean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trained_state_tokens: Option<u64>,
+    /// Operator-recorded serving notes (cache, warm-up, ceiling rationale).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,11 +400,14 @@ pub fn decide_status(args: DecideStatusArgs) -> Result<Value> {
                 "explicitly unauthenticated local serving"
             });
             // Load state is what the endpoint actually answers, not what was
-            // declared: reachability plus its own model card.
+            // declared: reachability plus its own model card. The probe
+            // borrows the elected invocation timeout (bounded to 30s) so a
+            // busy machine shows slow-but-loaded rather than flapping to
+            // unavailable while the same status run's probe answers.
             match probe_models(
                 curl.clone().expect("curl path"),
                 &endpoint,
-                2000,
+                limits.timeout_ms.min(30_000).max(2_000),
                 resolve_optional_credential(&config, args.allow_env_import)?.as_ref(),
             ) {
                 Ok(card) => {
