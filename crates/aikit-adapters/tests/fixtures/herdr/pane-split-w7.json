@@ -1,0 +1,22 @@
+{
+ "id": "cli:pane:split",
+ "result": {
+  "type": "pane_info",
+  "pane": {
+   "agent_status": "unknown",
+   "cwd": "/repo",
+   "focused": false,
+   "foreground_cwd": "/repo",
+   "pane_id": "w7:p2",
+   "revision": 0,
+   "scroll": {
+    "max_offset_from_bottom": 0,
+    "offset_from_bottom": 0,
+    "viewport_rows": 23
+   },
+   "tab_id": "w7:t1",
+   "terminal_id": "term_second",
+   "workspace_id": "w7"
+  }
+ }
+}

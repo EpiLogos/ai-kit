@@ -510,8 +510,9 @@ fn act_via_registered(
                     provider: provider.clone(),
                     subject: subject.clone(),
                     reason: format!(
-                        "{provider} ensured its place but has no live pane bound to {subject}; \
-                         pane ids enter the plan only through an explicit open that creates them"
+                        "{provider} reconciled its place but no live pane is bound to {subject}; \
+                         the plan declares no way to create it (no bound split source), and the \
+                         observation's provenance names what was skipped"
                     ),
                 });
             };
