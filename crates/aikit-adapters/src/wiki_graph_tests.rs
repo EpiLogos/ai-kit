@@ -14,7 +14,6 @@ fn hit(reference: &str) -> KnowledgeSearchHit {
         corroborated_by: Vec::new(),
         authority: SourceAuthority::Authored,
         ranking: None,
-        corroborated_by: Vec::new(),
     }
 }
 fn objects() -> Vec<WikiObject> {
