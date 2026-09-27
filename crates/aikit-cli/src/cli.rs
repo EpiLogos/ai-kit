@@ -1184,6 +1184,10 @@ pub enum GatewayConnectorSub {
         /// agent turns; without it, connector conversations stay journal-only.
         #[arg(long = "agent-backing", value_name = "HARNESS")]
         agent_backing: Option<String>,
+        /// Deliver each reply as one final message instead of streaming it:
+        /// no anchor message, no growing edits.
+        #[arg(long = "no-stream-replies")]
+        no_stream_replies: bool,
         /// Declare the connector but do not run it.
         #[arg(long)]
         disable: bool,

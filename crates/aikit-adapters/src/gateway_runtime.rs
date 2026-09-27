@@ -1048,6 +1048,84 @@ impl AgencyGateway {
         stream.append(Value::Object(event))
     }
 
+    /// Append one honest turn-activity record to the binding's Stream journal
+    /// — the additive record of what an in-flight agent turn is doing right
+    /// now: a tool line, or a named streaming fallback. One custom event per
+    /// line, attributed to the binding's agent session like a reply. This is
+    /// the kernel's only door for in-turn notes; it never fabricates inbound
+    /// or reply events, and a note never stands in for the turn's answer.
+    pub fn record_agent_activity(
+        &mut self,
+        binding_ref: &ResourceRef,
+        in_reply_to_sequence: u64,
+        line: &str,
+    ) -> Result<GatewayStreamEvent> {
+        let binding = self.bindings.get(binding_ref).ok_or_else(|| {
+            AikitError::new(
+                "agency_gateway.unknown_binding",
+                format!(
+                    "agent activity cites binding {} which does not exist",
+                    binding_ref
+                ),
+            )
+        })?;
+        let binding = binding.clone();
+        let stream = self
+            .streams
+            .entry(binding.actuation_stream_ref.clone())
+            .or_insert_with(|| GatewayStreamJournal::for_binding(&binding));
+        stream.ensure_binding(&binding)?;
+        let sequence = stream.next_sequence;
+        let mut metadata = Map::new();
+        metadata.insert(
+            "agent_session_ref".into(),
+            json!(binding.agent_session_ref.to_string()),
+        );
+        metadata.insert("agency_ref".into(), json!(binding.agency_ref.to_string()));
+        metadata.insert(
+            "actuation_ref".into(),
+            json!(binding.actuation_ref.to_string()),
+        );
+        metadata.insert(
+            "in_reply_to_sequence".into(),
+            json!(in_reply_to_sequence),
+        );
+        let mut event = Map::new();
+        event.insert(
+            "event_ref".into(),
+            json!(format!(
+                "{}/gateway-event/{sequence}",
+                binding.actuation_stream_ref
+            )),
+        );
+        event.insert("sequence".into(), json!(sequence));
+        event.insert("kind".into(), json!("custom"));
+        event.insert(
+            "custom_kind".into(),
+            json!("gateway-agent/turn-activity"),
+        );
+        event.insert(
+            "native_trace_ref".into(),
+            json!(format!("gateway-agent-activity/{in_reply_to_sequence}")),
+        );
+        event.insert("disclosure".into(), json!("portable"));
+        event.insert("metadata".into(), Value::Object(metadata));
+        if let Some(surface_ref) = &binding.surface_ref {
+            event.insert("surface_ref".into(), json!(surface_ref.to_string()));
+        }
+        event.insert("content".into(), json!(line));
+        stream.append(Value::Object(event))
+    }
+
+    /// The recorded delivery receipt for one prepared operation, once its
+    /// receipt has arrived. The streaming reply path reads the anchor Send's
+    /// native message id here — the id its edits then target.
+    pub fn delivery_receipt(&self, operation_ref: &ResourceRef) -> Option<&DeliveryReceipt> {
+        self.delivery_receipts
+            .iter()
+            .find(|receipt| &receipt.operation_ref == operation_ref)
+    }
+
     pub fn discovery(&self) -> GatewayDiscovery {
         GatewayDiscovery {
             version: AGENCY_GATEWAY_VERSION.into(),

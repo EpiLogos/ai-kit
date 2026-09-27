@@ -61,6 +61,7 @@ pub fn connector_command(
             program,
             configuration_ref,
             agent_backing,
+            no_stream_replies,
             disable,
             token,
         } => add(
@@ -72,6 +73,7 @@ pub fn connector_command(
             program,
             configuration_ref,
             agent_backing,
+            !no_stream_replies,
             disable,
             token,
         ),
@@ -90,6 +92,7 @@ fn add(
     program: Option<String>,
     configuration_ref: Option<String>,
     agent_backing: Option<String>,
+    stream_replies: bool,
     disable: bool,
     token: Option<String>,
 ) -> Result<ConnectorOutput> {
@@ -143,6 +146,7 @@ fn add(
         configuration_ref,
         program,
         agent_backing,
+        stream_replies,
         provenance: vec!["aikit gateway connector add".into()],
     };
     entry.validate()?;

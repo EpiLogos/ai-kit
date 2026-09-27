@@ -782,6 +782,7 @@ pub mod tests {
             configuration_ref: None,
             program: Vec::new(),
             agent_backing: None,
+            stream_replies: true,
             provenance: Vec::new(),
         }
     }

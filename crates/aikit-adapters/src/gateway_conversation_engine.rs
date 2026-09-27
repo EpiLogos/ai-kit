@@ -31,6 +31,17 @@
 //! [`AgentHostTurnSource`] backed by [`AgentSessionHost`] for a connector
 //! config that names a harness. Deterministic proof never requires a harness
 //! binary.
+//!
+//! Progressive replies: when the binding's connector declares the Streaming
+//! capability (and Edit — the streamed message must be able to grow), the
+//! engine lets the sender watch the reply being written. A typing indicator
+//! pulses for the whole turn; the first visible content lands as a real
+//! message (the anchor); later content lands as throttled edits of that same
+//! message; the turn's completion settles the final text. While no text has
+//! arrived, the streamed message may carry one honest activity line (what the
+//! agent is doing now), also journalled as an additive turn-activity event.
+//! A connector that does not declare Streaming, and a turn whose source
+//! produces no live progress, keeps the exact send-one-final-reply behaviour.
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -50,13 +61,41 @@ use serde_json::{json, Value};
 
 use crate::agent_connection::{ConnectionSignalKind, SessionOpenMode, SessionOpenRequest};
 use crate::agent_session_host::{AgentSessionHost, AgentSessionHostLimits, HostEvent, TurnStop};
-use crate::gateway_connector::OutboundOperationKind;
+use crate::gateway_connector::{
+    ConnectorOperation, DeliveryState, OutboundOperation, OutboundOperationKind,
+};
 use crate::gateway_connector_pump::{ConnectorPumpControls, ConnectorQueues};
 use crate::gateway_runtime::{
     AgencyGateway, GatewayAgentReply, GatewayAgentReplyFailure, GatewayBinding,
     GatewayConversationOperation, GatewayResponse, GatewayStreamEvent,
 };
 use crate::gateway_service::{persist_gateway_state, SubscriptionHub};
+
+/// Timing discipline for the streaming reply path: explicit, bounded, and
+/// deterministic-testable. The defaults are what production runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamTiming {
+    /// How often the streaming wait wakes to read the turn's progress and
+    /// refresh the typing indicator's schedule.
+    pub poll: Duration,
+    /// Minimum spacing between edits of the streamed message. The platform
+    /// rate-disciplines edits; the engine never argues with it. The turn's
+    /// completion settles the final text immediately, throttle aside.
+    pub edit_throttle: Duration,
+    /// How often the typing indicator is refreshed while a turn runs, so it
+    /// reads as "responding…" for the whole turn, not a five-second blip.
+    pub typing_refresh: Duration,
+}
+
+impl Default for StreamTiming {
+    fn default() -> Self {
+        Self {
+            poll: Duration::from_millis(150),
+            edit_throttle: Duration::from_millis(1_500),
+            typing_refresh: Duration::from_secs(4),
+        }
+    }
+}
 
 /// Bounded policy for resolving work at a restart drain and for interruption
 /// waits. Explicit, never ambient.
@@ -68,6 +107,8 @@ pub struct EnginePolicy {
     /// How long an interrupted turn is waited for after the interrupt was
     /// issued, before the drain records the interruption and moves on.
     pub interrupt_grace: Duration,
+    /// The streaming reply path's timing. Explicit, never ambient.
+    pub stream: StreamTiming,
 }
 
 impl Default for EnginePolicy {
@@ -75,6 +116,7 @@ impl Default for EnginePolicy {
         Self {
             turn_grace: Duration::from_secs(3),
             interrupt_grace: Duration::from_secs(5),
+            stream: StreamTiming::default(),
         }
     }
 }
@@ -98,6 +140,79 @@ pub enum ConversationTurnOutcome {
     Interrupted { detail: Option<String> },
 }
 
+/// A read of [`TurnProgress`] at one moment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnProgressView {
+    /// The reply text the turn has produced so far.
+    pub text: String,
+    /// The latest honest activity line — what the agent is doing now. Absent
+    /// until the turn's first usable tool line; never fabricated.
+    pub activity: Option<String>,
+    /// Changes whenever text or activity does; a poll skips identical views.
+    pub version: u64,
+}
+
+/// One running turn's live progress: the reply text so far and the latest
+/// activity line, shared between the turn's reader thread and the engine's
+/// streaming loop. A poll cell, not a queue: an observer reads what is true
+/// now and composes the streamed message from it.
+#[derive(Default)]
+pub struct TurnProgress {
+    state: Mutex<TurnProgressState>,
+}
+
+#[derive(Default)]
+struct TurnProgressState {
+    text: String,
+    activity: Option<String>,
+    version: u64,
+}
+
+impl TurnProgress {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append one text delta to the growing reply.
+    pub fn push_text(&self, chunk: &str) {
+        if chunk.is_empty() {
+            return;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.text.push_str(chunk);
+            state.version += 1;
+        }
+    }
+
+    /// Record the latest honest activity line. An empty line is ignored.
+    pub fn set_activity(&self, line: impl Into<String>) {
+        let line = line.into();
+        if line.trim().is_empty() {
+            return;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.activity = Some(line);
+            state.version += 1;
+        }
+    }
+
+    /// What is true now.
+    pub fn snapshot(&self) -> TurnProgressView {
+        match self.state.lock() {
+            Ok(state) => TurnProgressView {
+                text: state.text.clone(),
+                activity: state.activity.clone(),
+                version: state.version,
+            },
+            Err(_) => TurnProgressView {
+                text: String::new(),
+                activity: None,
+                version: 0,
+            },
+        }
+    }
+}
+
 /// A live turn: waitable to its outcome, interruptible on request. The receipt
 /// returned by [`ConversationTurn::interrupt`] is what the host actually
 /// issued — recorded honestly, never invented.
@@ -105,6 +220,18 @@ pub trait ConversationTurn: Send + Sync {
     fn wait(&self) -> ConversationTurnOutcome;
     fn wait_timeout(&self, timeout: Duration) -> Option<ConversationTurnOutcome>;
     fn interrupt(&self, reason: Option<String>) -> Result<String>;
+    /// Whether a terminal outcome was recorded. A finished turn whose
+    /// `wait_timeout` still answers None has had its outcome taken by another
+    /// owner — the restart drain — and this waiter's duty is over.
+    fn finished(&self) -> bool {
+        false
+    }
+    /// The turn's live progress cell, when its source produces one. The
+    /// default is None: a source without progress streams nothing and its
+    /// reply lands exactly as it did before.
+    fn progress(&self) -> Option<Arc<TurnProgress>> {
+        None
+    }
 }
 
 /// Where turns come from. One implementation per agent backing: the scripted
@@ -175,9 +302,26 @@ pub struct TurnSlot {
     /// Set once a terminal outcome was recorded; stays set after a waiter
     /// consumes the outcome, so a finished turn never reads as unfinished.
     finished: std::sync::atomic::AtomicBool,
+    /// The turn's live progress cell, when its source attached one.
+    progress: Option<Arc<TurnProgress>>,
 }
 
 impl TurnSlot {
+    /// A slot that also carries the turn's live progress cell.
+    pub fn with_progress(progress: Arc<TurnProgress>) -> Self {
+        Self {
+            outcome: Mutex::new(None),
+            signal: Condvar::new(),
+            finished: std::sync::atomic::AtomicBool::new(false),
+            progress: Some(progress),
+        }
+    }
+
+    /// The turn's live progress cell, when the source attached one.
+    pub fn progress(&self) -> Option<Arc<TurnProgress>> {
+        self.progress.clone()
+    }
+
     pub fn complete(&self, outcome: ConversationTurnOutcome) {
         self.finished
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -195,6 +339,10 @@ impl TurnSlot {
 }
 
 impl ConversationTurn for TurnSlot {
+    fn progress(&self) -> Option<Arc<TurnProgress>> {
+        self.progress.clone()
+    }
+
     fn wait(&self) -> ConversationTurnOutcome {
         let mut guard = self.outcome.lock().expect("turn slot");
         loop {
@@ -232,6 +380,10 @@ impl ConversationTurn for TurnSlot {
             Some(reason) => format!("interrupt issued: {reason}"),
             None => "interrupt issued".into(),
         })
+    }
+
+    fn finished(&self) -> bool {
+        self.finished.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -338,6 +490,31 @@ impl FixtureTurnSource {
             .count()
     }
 
+    /// Script one text delta into the oldest unfinished turn's live progress
+    /// — the deterministic stand-in for a harness streaming its reply.
+    pub fn emit_delta(&self, chunk: impl Into<String>) {
+        self.with_live_progress(|progress| progress.push_text(&chunk.into()));
+    }
+
+    /// Script one activity line (what the agent is doing now) into the oldest
+    /// unfinished turn's live progress.
+    pub fn emit_activity(&self, line: impl Into<String>) {
+        self.with_live_progress(|progress| progress.set_activity(line.into()));
+    }
+
+    fn with_live_progress(&self, act: impl FnOnce(&TurnProgress)) {
+        let progress = {
+            let turns = self.turns.lock().expect("fixture turns");
+            turns
+                .iter()
+                .find(|turn| !turn.is_finished())
+                .and_then(|turn| turn.progress())
+        };
+        if let Some(progress) = progress {
+            act(&progress);
+        }
+    }
+
     pub fn resets(&self) -> usize {
         self.resets.load(Ordering::SeqCst)
     }
@@ -349,7 +526,7 @@ impl ConversationTurnSource for FixtureTurnSource {
     }
 
     fn prompt(&self, request: ConversationTurnRequest) -> Result<Arc<dyn ConversationTurn>> {
-        let slot = Arc::new(TurnSlot::default());
+        let slot = Arc::new(TurnSlot::with_progress(Arc::new(TurnProgress::new())));
         self.contexts
             .lock()
             .expect("fixture contexts")
@@ -587,16 +764,29 @@ impl ConversationTurnSource for AgentHostTurnSource {
         let lane = locked.lane(&request.agent_session_ref)?;
         let handle = lane.prompt(self.prompt_payload(&request.prompt))?;
         drop(locked);
-        let slot = Arc::new(TurnSlot::default());
+        let slot = Arc::new(TurnSlot::with_progress(Arc::new(TurnProgress::new())));
         let reader_slot = Arc::clone(&slot);
+        let progress = slot.progress();
         thread::spawn(move || {
             let mut text = String::new();
             loop {
                 let outcome = match handle.recv() {
                     Some(HostEvent::Signal(signal)) => {
-                        if let ConnectionSignalKind::AgentMessageChunk { text: chunk } = signal.kind
-                        {
-                            text.push_str(&chunk);
+                        match signal.kind {
+                            ConnectionSignalKind::AgentMessageChunk { text: chunk } => {
+                                text.push_str(&chunk);
+                                if let Some(progress) = &progress {
+                                    progress.push_text(&chunk);
+                                }
+                            }
+                            ConnectionSignalKind::ToolCall { payload } => {
+                                if let (Some(progress), Some(line)) =
+                                    (&progress, tool_activity_line(&payload))
+                                {
+                                    progress.set_activity(line);
+                                }
+                            }
+                            _ => {}
                         }
                         continue;
                     }
@@ -716,7 +906,46 @@ fn lane_state_name(state: crate::agent_session_host::SessionLaneState) -> &'stat
     match state {
         crate::agent_session_host::SessionLaneState::Resident => "resident",
         crate::agent_session_host::SessionLaneState::TurnInFlight => "turn-in-flight",
-        crate::agent_session_host::SessionLaneState::InterruptRequested => "interrupt-requested",
+        crate::agent_session_host::SessionLaneState::InterruptRequested => {
+            "interrupt-requested"
+        }
+    }
+}
+
+/// One plain activity line from a tool-call signal payload, in the shapes the
+/// connection adapters actually produce: an ACP tool-call update names its
+/// `title`, a pi-rpc execution event names its `toolName`. Nothing usable
+/// means no line — never a fabricated one. Kept to one short, plain line.
+fn tool_activity_line(payload: &Value) -> Option<String> {
+    const KEYS: [&str; 5] = ["title", "toolName", "tool_name", "name", "tool"];
+    const MAX_NAME_CHARS: usize = 80;
+    for key in KEYS {
+        if let Some(name) = payload.get(key).and_then(Value::as_str) {
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let short: String = name.chars().take(MAX_NAME_CHARS).collect();
+            return Some(format!("running {short}"));
+        }
+    }
+    None
+}
+
+/// The text a streamed message shows at one moment: the growing reply, and —
+/// while it is the latest activity — one honest activity line as a prefix
+/// above it, so the sender sees the agent working. Before any text arrives
+/// the line stands alone; with neither, there is nothing to show.
+fn composed_stream_text(view: &TurnProgressView) -> Option<String> {
+    if view.text.is_empty() {
+        view.activity
+            .clone()
+            .filter(|line| !line.trim().is_empty())
+    } else {
+        Some(match &view.activity {
+            Some(activity) => format!("{activity}\n{}", view.text),
+            None => view.text.clone(),
+        })
     }
 }
 
@@ -796,6 +1025,18 @@ struct InFlightTurn {
     turn: Arc<dyn ConversationTurn>,
     in_reply_to_sequence: u64,
     native_message_id: Option<String>,
+}
+
+/// The streamed delivery state of one running turn: the anchor message, the
+/// edit target its receipt named, and the throttle's memory. `failed` means
+/// the anchor could not be delivered or cannot be edited — the turn then
+/// falls back to the exact final-only reply.
+struct StreamedAnchor {
+    operation_ref: ResourceRef,
+    native_message_id: Option<String>,
+    failed: bool,
+    last_edit_at: Option<Instant>,
+    last_content: Option<String>,
 }
 
 struct EngineInner {
@@ -965,6 +1206,7 @@ impl GatewayConversationEngine {
                     },
                     in_reply_to_sequence,
                     native_message_id,
+                    None,
                 );
                 return;
             }
@@ -998,10 +1240,18 @@ impl GatewayConversationEngine {
                     detail: Some(receipt),
                 },
             );
-            self.record_outcome(&binding, outcome, in_reply_to_sequence, native_message_id);
+            self.record_outcome(&binding, outcome, in_reply_to_sequence, native_message_id, None);
             return;
         }
-        let outcome = turn.wait();
+        // The whole wait: typing pulses for the turn's full duration, and —
+        // when the connector streams — the reply grows into the anchor
+        // message as the turn produces it.
+        let (outcome, streamed_anchor) = self.await_outcome(
+            &binding,
+            &turn,
+            in_reply_to_sequence,
+            native_message_id.as_deref(),
+        );
         // Whoever removed the in-flight record owns the recording: this worker
         // when the turn finished on its own, the restart drain when it took
         // the turn over. Exactly one of them journals the outcome.
@@ -1014,20 +1264,308 @@ impl GatewayConversationEngine {
             .is_some();
         self.try_typing(&binding, false);
         if owner {
-            self.record_outcome(&binding, outcome, in_reply_to_sequence, native_message_id);
+            self.record_outcome(
+                &binding,
+                outcome,
+                in_reply_to_sequence,
+                native_message_id,
+                streamed_anchor,
+            );
+        }
+    }
+
+    /// Whether this binding's connector streams: it must declare the
+    /// Streaming capability and be able to edit its own messages — a
+    /// streamed reply that could not grow would be a claim nothing could
+    /// keep. A connector that does not declare Streaming never streams.
+    fn streaming_enabled(&self, binding: &GatewayBinding) -> bool {
+        let kernel = match self.gateway.lock() {
+            Ok(kernel) => kernel,
+            Err(_) => return false,
+        };
+        kernel.connector_supports(&binding.connector_ref, ConnectorOperation::Streaming)
+            && kernel.connector_supports(&binding.connector_ref, ConnectorOperation::Edit)
+    }
+
+    /// The turn wait for one running turn: wait bounded slices, refresh the
+    /// typing indicator on its schedule for the turn's whole duration, and —
+    /// when the connector streams and the turn produces live progress —
+    /// anchor and grow the streamed message. Answers the turn's outcome and
+    /// the anchor message's native id, when one was delivered (the settle's
+    /// edit target).
+    fn await_outcome(
+        &self,
+        binding: &GatewayBinding,
+        turn: &Arc<dyn ConversationTurn>,
+        in_reply_to_sequence: u64,
+        native_message_id: Option<&str>,
+    ) -> (ConversationTurnOutcome, Option<String>) {
+        let timing = self.policy.stream;
+        let progress = if self.streaming_enabled(binding) {
+            turn.progress()
+        } else {
+            None
+        };
+        let mut anchor: Option<StreamedAnchor> = None;
+        let mut typing_at = Instant::now();
+        // First sight journals against nothing-seen: activity may already be
+        // true when the wait begins (the turn registered before the engine
+        // arrived), and that first line is a change worth journalling too.
+        let mut seen_version = 0u64;
+        let mut journalled_activity: Option<String> = None;
+        loop {
+            if let Some(outcome) = turn.wait_timeout(timing.poll) {
+                let settle_target = anchor
+                    .as_ref()
+                    .and_then(|anchor| anchor.native_message_id.clone());
+                return (outcome, settle_target);
+            }
+            if turn.finished() {
+                // The turn reached a terminal outcome whose record another
+                // owner — the restart drain — already took: this waiter's
+                // recording and streaming duty ends here. The caller's owner
+                // check finds no in-flight record and journals nothing.
+                return (
+                    ConversationTurnOutcome::Interrupted {
+                        detail: Some("the turn was taken over by the restart drain".into()),
+                    },
+                    None,
+                );
+            }
+            if typing_at.elapsed() >= timing.typing_refresh {
+                self.try_typing(binding, true);
+                typing_at = Instant::now();
+            }
+            let Some(progress) = &progress else {
+                continue;
+            };
+            let view = progress.snapshot();
+            // New activity is journalled once per change, never per tick.
+            if view.version != seen_version {
+                seen_version = view.version;
+                if view.activity != journalled_activity {
+                    if let Some(line) = &view.activity {
+                        self.journal_activity(binding, in_reply_to_sequence, line);
+                    }
+                    journalled_activity = view.activity.clone();
+                }
+            }
+            // The anchor's progress does not wait for the next delta: every
+            // tick advances the anchor state — resolving its receipt,
+            // emitting a due edit — so a quiet turn still streams and falls
+            // back the moment its anchor fails.
+            self.stream_frame(
+                binding,
+                in_reply_to_sequence,
+                native_message_id,
+                &view,
+                &mut anchor,
+                timing,
+            );
+        }
+    }
+
+    /// One streaming frame, one poll tick: send the anchor when nothing is
+    /// in flight yet, resolve its receipt, and emit a throttled edit when
+    /// the composed text changed. Runs every tick, not only on progress
+    /// changes — a quiet turn still resolves its anchor and falls back the
+    /// moment the anchor fails. Best effort at every step: a frame that
+    /// cannot act falls back honestly and the turn's completion still
+    /// delivers the reply.
+    fn stream_frame(
+        &self,
+        binding: &GatewayBinding,
+        in_reply_to_sequence: u64,
+        native_message_id: Option<&str>,
+        view: &TurnProgressView,
+        anchor: &mut Option<StreamedAnchor>,
+        timing: StreamTiming,
+    ) {
+        let Some(composed) = composed_stream_text(view) else {
+            return;
+        };
+        match anchor {
+            None => {
+                // First visible content: the anchor Send, answering the
+                // inbound message. Its receipt's native id becomes the edit
+                // target; a failed anchor falls back to the final-only reply.
+                let prepared = (|| -> Result<OutboundOperation> {
+                    let mut kernel = self.gateway.lock().map_err(|_| poisoned())?;
+                    kernel.prepare_operation(
+                        &binding.binding_ref,
+                        OutboundOperationKind::Send {
+                            text: Some(composed.clone()),
+                            media: Vec::new(),
+                            reply_to_native_message_id: native_message_id.map(str::to_owned),
+                        },
+                    )
+                })();
+                match prepared {
+                    Ok(prepared) => {
+                        *anchor = Some(StreamedAnchor {
+                            operation_ref: prepared.operation_ref.clone(),
+                            native_message_id: None,
+                            failed: false,
+                            last_edit_at: None,
+                            last_content: Some(composed),
+                        });
+                        self.queues.queue_for(&prepared.connector_ref).push(prepared);
+                    }
+                    Err(error) => {
+                        eprintln!("conversation engine could not prepare the anchor send: {error}");
+                        self.journal_stream_fallback(
+                            binding,
+                            in_reply_to_sequence,
+                            &format!(
+                                "the streaming reply could not start ({error}); the reply \
+                                 arrives as one message when the turn ends"
+                            ),
+                        );
+                        anchor.replace(StreamedAnchor {
+                            operation_ref: ResourceRef::parse("gateway-operation/anchor-failed")
+                                .expect("static ref"),
+                            native_message_id: None,
+                            failed: true,
+                            last_edit_at: None,
+                            last_content: None,
+                        });
+                    }
+                }
+            }
+            Some(state) if state.failed => {}
+            Some(state) if state.native_message_id.is_none() => {
+                let receipt = match self.gateway.lock() {
+                    Ok(kernel) => kernel.delivery_receipt(&state.operation_ref).cloned(),
+                    Err(_) => {
+                        eprintln!("conversation engine could not read the anchor receipt");
+                        return;
+                    }
+                };
+                match receipt {
+                    Some(receipt)
+                        if matches!(
+                            receipt.state,
+                            DeliveryState::Delivered | DeliveryState::Accepted
+                        ) =>
+                    {
+                        if receipt.native_message_id.is_some() {
+                            state.native_message_id = receipt.native_message_id;
+                        } else {
+                            state.failed = true;
+                            self.journal_stream_fallback(
+                                binding,
+                                in_reply_to_sequence,
+                                "the anchor message delivered without a native id to edit; \
+                                 the reply arrives as one message when the turn ends",
+                            );
+                        }
+                    }
+                    Some(receipt)
+                        if matches!(
+                            receipt.state,
+                            DeliveryState::Failed | DeliveryState::Rejected
+                        ) =>
+                    {
+                        state.failed = true;
+                        let detail = receipt.detail.as_deref().unwrap_or("no detail recorded");
+                        self.journal_stream_fallback(
+                            binding,
+                            in_reply_to_sequence,
+                            &format!(
+                                "the streaming reply could not start ({detail}); the reply \
+                                 arrives as one message when the turn ends"
+                            ),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            Some(state) => {
+                let due = state
+                    .last_edit_at
+                    .is_none_or(|at| at.elapsed() >= timing.edit_throttle);
+                if !due || state.last_content.as_deref() == Some(composed.as_str()) {
+                    return;
+                }
+                let target = match &state.native_message_id {
+                    Some(target) => target.clone(),
+                    None => return,
+                };
+                let prepared = (|| -> Result<OutboundOperation> {
+                    let mut kernel = self.gateway.lock().map_err(|_| poisoned())?;
+                    kernel.prepare_operation(
+                        &binding.binding_ref,
+                        OutboundOperationKind::Edit {
+                            native_message_id: target,
+                            text: composed.clone(),
+                        },
+                    )
+                })();
+                match prepared {
+                    Ok(prepared) => {
+                        state.last_edit_at = Some(Instant::now());
+                        state.last_content = Some(composed);
+                        self.queues.queue_for(&prepared.connector_ref).push(prepared);
+                    }
+                    Err(error) => {
+                        eprintln!("conversation engine could not prepare a streamed edit: {error}")
+                    }
+                }
+            }
+        }
+    }
+
+    /// The honest note that streaming fell back to the final-only reply,
+    /// journalled on the stream so the history says why.
+    fn journal_stream_fallback(
+        &self,
+        binding: &GatewayBinding,
+        in_reply_to_sequence: u64,
+        line: &str,
+    ) {
+        let result = (|| -> Result<()> {
+            let mut kernel = self.gateway.lock().map_err(|_| poisoned())?;
+            let event =
+                kernel.record_agent_activity(&binding.binding_ref, in_reply_to_sequence, line)?;
+            self.hub.publish(&binding.actuation_stream_ref, &event);
+            persist_gateway_state(&kernel, self.state_file.as_deref())?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            eprintln!("conversation engine could not journal the streaming fallback: {error}");
+        }
+    }
+
+    /// Journal one honest activity line on the binding's stream (the additive
+    /// turn-activity record), publish it to live subscribers, and persist.
+    /// Best effort: a line that cannot be journaled is said on stderr.
+    fn journal_activity(&self, binding: &GatewayBinding, in_reply_to_sequence: u64, line: &str) {
+        let result = (|| -> Result<()> {
+            let mut kernel = self.gateway.lock().map_err(|_| poisoned())?;
+            let event =
+                kernel.record_agent_activity(&binding.binding_ref, in_reply_to_sequence, line)?;
+            self.hub.publish(&binding.actuation_stream_ref, &event);
+            persist_gateway_state(&kernel, self.state_file.as_deref())?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            eprintln!("conversation engine could not journal turn activity: {error}");
         }
     }
 
     /// Journal one turn outcome on the binding's stream, publish it to live
     /// subscribers, and hand the answer to the surface through the outbound
     /// queue. A failed or interrupted turn produces an honest failure line —
-    /// never silence.
+    /// never silence. A streamed turn that replied settles its anchor message
+    /// with one final edit carrying the settled text; every other outcome —
+    /// and any turn whose anchor never streamed — sends exactly as before.
     fn record_outcome(
         &self,
         binding: &GatewayBinding,
         outcome: ConversationTurnOutcome,
         in_reply_to_sequence: u64,
         native_message_id: Option<String>,
+        streamed_anchor: Option<String>,
     ) {
         let (text, failure) = match outcome {
             ConversationTurnOutcome::Replied { text } => (text, None),
@@ -1045,6 +1583,18 @@ impl GatewayConversationEngine {
                 Some(GatewayAgentReplyFailure::Interrupted { detail }),
             ),
         };
+        let operation = match (&failure, &streamed_anchor) {
+            // The settle: the streamed message takes the turn's final text.
+            (None, Some(native_message_id)) => OutboundOperationKind::Edit {
+                native_message_id: native_message_id.clone(),
+                text: text.clone(),
+            },
+            _ => OutboundOperationKind::Send {
+                text: Some(text.clone()),
+                media: Vec::new(),
+                reply_to_native_message_id: native_message_id,
+            },
+        };
         if let Err(error) = self.journal_and_queue(
             binding,
             GatewayAgentReply {
@@ -1053,11 +1603,7 @@ impl GatewayConversationEngine {
                 text: text.clone(),
                 failure,
             },
-            OutboundOperationKind::Send {
-                text: Some(text),
-                media: Vec::new(),
-                reply_to_native_message_id: native_message_id,
-            },
+            operation,
         ) {
             eprintln!("conversation engine could not deliver a reply: {error}");
         }
@@ -1653,22 +2199,14 @@ impl GatewayConversationEngine {
     /// the bounded policy, record honestly, persist. The service exits after
     /// answering so its service manager rematerialises it.
     fn restart(self: &Arc<Self>) -> Result<(Value, Option<String>, Option<ResourceRef>, bool)> {
+        // The drain takes the in-flight turns out — removing each record is
+        // what makes the drain its outcome's owner, so the turn's own worker
+        // stands down and exactly one of the two journals the outcome.
         let taken: Vec<(ResourceRef, InFlightTurn)> = {
             let mut inner = self.inner.lock().expect("conversation engine");
             inner.draining = true;
-            inner
-                .in_flight
-                .iter_mut()
-                .map(|(binding_ref, in_flight)| {
-                    (
-                        binding_ref.clone(),
-                        InFlightTurn {
-                            turn: Arc::clone(&in_flight.turn),
-                            in_reply_to_sequence: in_flight.in_reply_to_sequence,
-                            native_message_id: in_flight.native_message_id.clone(),
-                        },
-                    )
-                })
+            std::mem::take(&mut inner.in_flight)
+                .into_iter()
                 .collect()
         };
         let mut resolved = 0usize;
@@ -1703,6 +2241,7 @@ impl GatewayConversationEngine {
                     outcome,
                     in_flight.in_reply_to_sequence,
                     in_flight.native_message_id,
+                    None,
                 );
             }
         }

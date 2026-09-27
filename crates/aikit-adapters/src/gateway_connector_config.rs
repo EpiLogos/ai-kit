@@ -19,7 +19,9 @@ use aikit_core::{AikitError, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::gateway_connector::{
-    ConnectorDescriptor, GatewayConnector, GATEWAY_CONNECTOR_SDK_VERSION,
+    ConnectorDescriptor, ConnectorFuture, ConnectorHello, ConnectorHealth, ConnectorOperation,
+    GatewayConnector, InboundEvent, OutboundOperation, DeliveryReceipt,
+    GATEWAY_CONNECTOR_SDK_VERSION,
 };
 use crate::gateway_connector_wire::StdioWireConnector;
 use crate::slack_bot_api::{SlackConnector, SlackConnectorConfig};
@@ -55,11 +57,24 @@ pub struct GatewayConnectorEntry {
     /// owner already declared — never credentials, never a model key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_backing: Option<String>,
+    /// Progressive replies: when allowed (the default) and the built
+    /// connector can edit its own messages, the deployed connector declares
+    /// the Streaming capability and the conversation engine lets the sender
+    /// watch a reply grow — a typing pulse for the whole turn, the first
+    /// text as a real message, later text as throttled edits of it, the
+    /// final text settled at completion. `false` keeps the reply to one
+    /// final message. A connector that cannot edit never declares Streaming.
+    #[serde(default = "default_stream_replies")]
+    pub stream_replies: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provenance: Vec<String>,
 }
 
 fn default_enabled() -> bool {
+    true
+}
+
+fn default_stream_replies() -> bool {
     true
 }
 
@@ -303,23 +318,124 @@ pub trait GatewayConnectorFactory: Send + Sync {
 }
 
 /// Map an entry to its implementation's factory. An unknown implementation is
-/// a named startup error, never a silent skip.
+/// a named startup error, never a silent skip. When the entry allows
+/// progressive replies (the default), the built connector gains the
+/// Streaming declaration — composing the owner's allowance with the
+/// connector's own ability to edit; see [`declare_streaming`].
 pub fn build_connector_factory(
     entry: GatewayConnectorEntry,
 ) -> Result<Box<dyn GatewayConnectorFactory>> {
     entry.validate()?;
-    match entry.implementation.as_str() {
-        "telegram" => Ok(Box::new(TelegramConnectorFactory { entry })),
-        "slack" => Ok(Box::new(SlackConnectorFactory { entry })),
-        "stdio" => Ok(Box::new(StdioConnectorFactory { entry })),
-        other => Err(AikitError::new(
-            "gateway_connector_config.unknown_implementation",
-            format!(
-                "connector {} names implementation {other:?}; this build knows `telegram`, \
-                 `slack` and `stdio`",
-                entry.connector_ref
-            ),
-        )),
+    let inner: Box<dyn GatewayConnectorFactory> = match entry.implementation.as_str() {
+        "telegram" => Box::new(TelegramConnectorFactory {
+            entry: entry.clone(),
+        }),
+        "slack" => Box::new(SlackConnectorFactory { entry: entry.clone() }),
+        "stdio" => Box::new(StdioConnectorFactory { entry: entry.clone() }),
+        other => {
+            return Err(AikitError::new(
+                "gateway_connector_config.unknown_implementation",
+                format!(
+                    "connector {} names implementation {other:?}; this build knows `telegram`, \
+                     `slack` and `stdio`",
+                    entry.connector_ref
+                ),
+            ))
+        }
+    };
+    if !entry.stream_replies {
+        return Ok(inner);
+    }
+    Ok(Box::new(StreamingDeclarationFactory { inner }))
+}
+
+/// The streaming declaration a connectors entry composes. The owner allows
+/// progressive replies on this connector; when the connector can edit its own
+/// messages, the deployed connector advertises Streaming so the conversation
+/// engine may let a reply grow. Nothing else about the connector changes: its
+/// operations, ingress, delivery and health are exactly the built
+/// connector's, and its own descriptor is what still validates every
+/// operation it executes (no operation requires Streaming).
+struct StreamingDeclarationFactory {
+    inner: Box<dyn GatewayConnectorFactory>,
+}
+
+impl GatewayConnectorFactory for StreamingDeclarationFactory {
+    fn entry(&self) -> &GatewayConnectorEntry {
+        self.inner.entry()
+    }
+
+    fn build(&self) -> Result<Box<dyn GatewayConnector>> {
+        Ok(declare_streaming(self.inner.build()?))
+    }
+}
+
+/// Add the Streaming capability to a connector that can edit. A connector
+/// that cannot edit — or that already declares Streaming — is returned
+/// unchanged: streaming without the ability to grow a message is a claim
+/// nothing could keep.
+fn declare_streaming(connector: Box<dyn GatewayConnector>) -> Box<dyn GatewayConnector> {
+    let mut descriptor = connector.descriptor();
+    if !descriptor
+        .capabilities
+        .operations
+        .contains(&ConnectorOperation::Edit)
+        || descriptor
+            .capabilities
+            .operations
+            .contains(&ConnectorOperation::Streaming)
+    {
+        return connector;
+    }
+    descriptor
+        .capabilities
+        .operations
+        .insert(ConnectorOperation::Streaming);
+    descriptor
+        .provenance
+        .push("stream_replies: the connectors entry allows progressive replies".into());
+    Box::new(StreamDeclaredConnector {
+        inner: connector,
+        descriptor,
+    })
+}
+
+/// A connector whose hello carries the composed Streaming declaration. Every
+/// lifecycle method delegates to the built connector; only the descriptor
+/// the kernel registers names the extra capability.
+struct StreamDeclaredConnector {
+    inner: Box<dyn GatewayConnector>,
+    descriptor: ConnectorDescriptor,
+}
+
+impl GatewayConnector for StreamDeclaredConnector {
+    fn descriptor(&self) -> ConnectorDescriptor {
+        self.descriptor.clone()
+    }
+
+    fn connect(&mut self) -> ConnectorFuture<'_, ConnectorHello> {
+        let descriptor = self.descriptor.clone();
+        Box::pin(async move {
+            let mut hello = self.inner.connect().await?;
+            hello.descriptor = descriptor;
+            Ok(hello)
+        })
+    }
+
+    fn next_event(&mut self) -> ConnectorFuture<'_, Option<InboundEvent>> {
+        Box::pin(async move { self.inner.next_event().await })
+    }
+
+    fn execute(&mut self, operation: OutboundOperation) -> ConnectorFuture<'_, DeliveryReceipt> {
+        Box::pin(async move { self.inner.execute(operation).await })
+    }
+
+    fn health(&mut self) -> ConnectorFuture<'_, ConnectorHealth> {
+        Box::pin(async move { self.inner.health().await })
+    }
+
+    fn disconnect(&mut self) -> ConnectorFuture<'_, ()> {
+        Box::pin(async move { self.inner.disconnect().await })
     }
 }
 
@@ -491,6 +607,7 @@ pub fn stdio_shell_descriptor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn entry(implementation: &str) -> GatewayConnectorEntry {
         GatewayConnectorEntry {
@@ -502,6 +619,7 @@ mod tests {
             configuration_ref: None,
             program: Vec::new(),
             agent_backing: None,
+            stream_replies: true,
             provenance: Vec::new(),
         }
     }
@@ -652,5 +770,93 @@ mod tests {
             connector.descriptor().capabilities.operations.is_empty(),
             "the pre-Hello shell advertises nothing"
         );
+    }
+
+    #[test]
+    fn a_connectors_entry_allowing_progressive_replies_declares_streaming_on_an_editing_connector()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("bot.token");
+        std::fs::write(&token, "bot-token-value\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let use_token = |entry: &mut GatewayConnectorEntry| {
+            entry.token_location = Some(format!("file:{}", token.display()));
+        };
+
+        // Telegram can edit its own messages, so the default entry declares
+        // Streaming: the owner's allowance composed with the connector's
+        // ability to grow a message.
+        let mut telegram_entry = entry("telegram");
+        use_token(&mut telegram_entry);
+        let connector = build_connector_factory(telegram_entry)
+            .unwrap()
+            .build()
+            .unwrap();
+        let operations = &connector.descriptor().capabilities.operations;
+        assert!(operations.contains(&ConnectorOperation::Edit));
+        assert!(
+            operations.contains(&ConnectorOperation::Streaming),
+            "an editing connector with the default entry declares Streaming"
+        );
+        assert!(
+            connector
+                .descriptor()
+                .provenance
+                .iter()
+                .any(|line| line.contains("stream_replies")),
+            "the declaration says where it came from"
+        );
+
+        // The opt-out keeps the connector exactly as it was built: no
+        // Streaming declaration, reply as one final message.
+        let mut quiet_entry = entry("telegram");
+        quiet_entry.stream_replies = false;
+        use_token(&mut quiet_entry);
+        let connector = build_connector_factory(quiet_entry)
+            .unwrap()
+            .build()
+            .unwrap();
+        let operations = &connector.descriptor().capabilities.operations;
+        assert!(operations.contains(&ConnectorOperation::Edit));
+        assert!(
+            !operations.contains(&ConnectorOperation::Streaming),
+            "the opt-out declares no Streaming"
+        );
+
+        // A connector that cannot edit never declares Streaming, whatever
+        // the entry allows: the claim would be unkeepable. (The stdio shell
+        // advertises nothing before its Hello — same law, empty operations.)
+        let mut shell_entry = entry("stdio");
+        shell_entry.connector_ref = "gateway-connector/specimen/main".into();
+        shell_entry.platform = "specimen".into();
+        shell_entry.token_location = None;
+        shell_entry.program = vec!["/bin/cat".into()];
+        let connector = build_connector_factory(shell_entry)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(
+            !connector
+                .descriptor()
+                .capabilities
+                .operations
+                .contains(&ConnectorOperation::Streaming),
+            "a connector that cannot edit never declares Streaming"
+        );
+
+        // An entry that omits the flag reads as the default (allowed), so
+        // older connectors files load unchanged.
+        let file: GatewayConnectorEntry = serde_json::from_value(json!({
+            "connector_ref": "gateway-connector/telegram/main",
+            "platform": "telegram",
+            "implementation": "telegram",
+            "token_location": "file:/run/token"
+        }))
+        .unwrap();
+        assert!(file.stream_replies, "the flag defaults to allowed");
     }
 }

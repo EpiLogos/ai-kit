@@ -69,6 +69,17 @@ fn fixture_descriptor() -> ConnectorDescriptor {
     }
 }
 
+/// The streaming variant: the connector can edit its own messages and
+/// declares Streaming, so the engine lets a reply grow on it.
+fn streaming_fixture_descriptor() -> ConnectorDescriptor {
+    let mut descriptor = fixture_descriptor();
+    descriptor
+        .capabilities
+        .operations
+        .extend([ConnectorOperation::Edit, ConnectorOperation::Streaming]);
+    descriptor
+}
+
 fn fixture_address() -> ConversationAddress {
     ConversationAddress {
         platform: "fixture".into(),
@@ -108,12 +119,19 @@ fn fixture_inbound(text: &str, id: &str) -> InboundEvent {
 struct RecordingConnector {
     connector_ref: ResourceRef,
     inner: Arc<RecordingInner>,
+    /// The descriptor the harness registered: the connector's hello must
+    /// carry the same capabilities, or the pump's registration would
+    /// silently replace them.
+    descriptor: ConnectorDescriptor,
 }
 
 struct RecordingInner {
     events: Mutex<VecDeque<Option<InboundEvent>>>,
     executed: Mutex<Vec<OutboundOperation>>,
     connected: AtomicBool,
+    /// When set, every Send is answered with a Failed receipt — the standing
+    /// fault the streaming fallback must survive.
+    fail_sends: AtomicBool,
 }
 
 impl RecordingInner {
@@ -122,13 +140,14 @@ impl RecordingInner {
             events: Mutex::new(VecDeque::new()),
             executed: Mutex::new(Vec::new()),
             connected: AtomicBool::new(false),
+            fail_sends: AtomicBool::new(false),
         })
     }
 }
 
 impl GatewayConnector for RecordingConnector {
     fn descriptor(&self) -> ConnectorDescriptor {
-        fixture_descriptor()
+        self.descriptor.clone()
     }
 
     fn connect(&mut self) -> ConnectorFuture<'_, ConnectorHello> {
@@ -163,15 +182,32 @@ impl GatewayConnector for RecordingConnector {
         operation.validate(&self.descriptor()).unwrap();
         self.inner.executed.lock().unwrap().push(operation.clone());
         let name = operation_operation_name(&operation);
-        let result: aikit_core::Result<DeliveryReceipt> = Ok(DeliveryReceipt {
-            operation_ref: operation.operation_ref.clone(),
-            connector_ref: operation.connector_ref.clone(),
-            state: DeliveryState::Delivered,
-            native_message_id: Some(format!("test-out-{}", operation.operation_ref)),
-            detail: Some(format!("test connector executed {name}")),
-            native: Default::default(),
-            provenance: vec!["conversation-test".into()],
-        });
+        let failed_send = self.inner.fail_sends.load(Ordering::SeqCst)
+            && matches!(
+                operation.operation,
+                aikit_adapters::OutboundOperationKind::Send { .. }
+            );
+        let result: aikit_core::Result<DeliveryReceipt> = if failed_send {
+            Ok(DeliveryReceipt {
+                operation_ref: operation.operation_ref,
+                connector_ref: operation.connector_ref,
+                state: DeliveryState::Failed,
+                native_message_id: None,
+                detail: Some("the platform refused the message".into()),
+                native: Default::default(),
+                provenance: vec!["conversation-test".into()],
+            })
+        } else {
+            Ok(DeliveryReceipt {
+                operation_ref: operation.operation_ref.clone(),
+                connector_ref: operation.connector_ref.clone(),
+                state: DeliveryState::Delivered,
+                native_message_id: Some(format!("test-out-{}", operation.operation_ref)),
+                detail: Some(format!("test connector executed {name}")),
+                native: Default::default(),
+                provenance: vec!["conversation-test".into()],
+            })
+        };
         Box::pin(async move { result })
     }
 
@@ -209,6 +245,7 @@ fn operation_operation_name(operation: &OutboundOperation) -> String {
 
 struct RecordingFactory {
     entry: GatewayConnectorEntry,
+    descriptor: ConnectorDescriptor,
     inner: Arc<RecordingInner>,
 }
 
@@ -220,6 +257,7 @@ impl GatewayConnectorFactory for RecordingFactory {
     fn build(&self) -> aikit_core::Result<Box<dyn GatewayConnector>> {
         Ok(Box::new(RecordingConnector {
             connector_ref: r(CONNECTOR_REF),
+            descriptor: self.descriptor.clone(),
             inner: Arc::clone(&self.inner),
         }))
     }
@@ -282,9 +320,15 @@ impl Drop for Harness {
 
 impl Harness {
     fn new(policy: aikit_adapters::EnginePolicy) -> Self {
+        Self::with_descriptor(policy, fixture_descriptor())
+    }
+
+    /// A harness whose connector registers `descriptor` — the non-streaming
+    /// default, or the Streaming variant for the progressive-reply suite.
+    fn with_descriptor(policy: aikit_adapters::EnginePolicy, descriptor: ConnectorDescriptor) -> Self {
         let dir = TempDir::new().unwrap();
         let mut gateway = AgencyGateway::new(r("agency-gateway/test"));
-        gateway.register_connector(fixture_descriptor()).unwrap();
+        gateway.register_connector(descriptor.clone()).unwrap();
         gateway
             .bind(GatewayBinding {
                 binding_ref: r(BINDING_REF),
@@ -362,8 +406,10 @@ impl Harness {
                     configuration_ref: None,
                     program: Vec::new(),
                     agent_backing: None,
+                    stream_replies: true,
                     provenance: Vec::new(),
                 },
+                descriptor: descriptor.clone(),
                 inner: Arc::clone(&harness.recording),
             })],
         );
@@ -410,6 +456,35 @@ impl Harness {
             .iter()
             .filter_map(|operation| match &operation.operation {
                 aikit_adapters::OutboundOperationKind::Send { text, .. } => text.clone(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn executed_edits(&self) -> Vec<(String, String)> {
+        self.recording
+            .executed
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|operation| match &operation.operation {
+                aikit_adapters::OutboundOperationKind::Edit {
+                    native_message_id,
+                    text,
+                } => Some((native_message_id.clone(), text.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn executed_typings(&self) -> Vec<bool> {
+        self.recording
+            .executed
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|operation| match &operation.operation {
+                aikit_adapters::OutboundOperationKind::Typing { active } => Some(*active),
                 _ => None,
             })
             .collect()
@@ -499,6 +574,390 @@ fn an_admitted_message_runs_a_turn_answers_on_the_same_stream_and_rides_the_outb
     let persisted = fs::read_to_string(&harness.state_file).unwrap();
     assert!(persisted.contains("echo: hello there"), "{persisted}");
     assert!(persisted.contains("agent-message"), "{persisted}");
+}
+
+// ---------------------------------------------------------------------------
+// Progressive replies (the Streaming capability)
+// ---------------------------------------------------------------------------
+
+/// Fast, deterministic streaming timing: a 10 ms poll, a 500 ms edit
+/// throttle, a 100 ms typing refresh.
+fn streaming_policy() -> aikit_adapters::EnginePolicy {
+    aikit_adapters::EnginePolicy {
+        stream: aikit_adapters::StreamTiming {
+            poll: Duration::from_millis(10),
+            edit_throttle: Duration::from_millis(500),
+            typing_refresh: Duration::from_millis(100),
+        },
+        ..aikit_adapters::EnginePolicy::default()
+    }
+}
+
+fn streaming_harness() -> Harness {
+    Harness::with_descriptor(streaming_policy(), streaming_fixture_descriptor())
+}
+
+#[test]
+fn a_streaming_turn_anchors_edits_under_throttle_and_settles_the_final_text() {
+    let harness = streaming_harness();
+    harness.source.script_park();
+    harness.admit(fixture_inbound("stream me", "st1"));
+    harness.wait_until(
+        "the turn registers in flight",
+        Duration::from_secs(30),
+        |harness| harness.source.parked_turns() == 1,
+    );
+
+    // Before any text arrives, the honest activity line is what the sender
+    // sees — and it is journalled once on the stream.
+    harness.source.emit_activity("running fixture-tool");
+    harness.wait_until(
+        "the anchor Send carries the activity line",
+        Duration::from_secs(30),
+        |harness| harness.executed_sends() == vec!["running fixture-tool".to_owned()],
+    );
+    harness.wait_until(
+        "the activity line is journalled on the stream",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .stream_events()
+                .iter()
+                .any(|event| event["content"] == "running fixture-tool")
+        },
+    );
+
+    // The first text delta lands as an edit of the anchor message.
+    harness.source.emit_delta("Hel");
+    harness.wait_until(
+        "the first delta edits the anchor message",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_edits()
+                .iter()
+                .any(|(_, text)| text.contains("Hel"))
+        },
+    );
+
+    // A second delta inside the throttle window is held: one edit per
+    // window, never more, even though the poll loop wakes every 10 ms.
+    harness.source.emit_delta("lo world");
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(
+        harness.executed_edits().len(),
+        1,
+        "the throttle held the second delta: {:?}",
+        harness.executed_edits()
+    );
+
+    // Completion settles the final text on the same message.
+    harness.source.respond("Hello world");
+    harness.wait_until(
+        "the turn settles and the settle edit reaches the connector",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .stream_events()
+                .iter()
+                .any(|event| event["kind"] == "agent-message")
+                && harness
+                    .executed_edits()
+                    .last()
+                    .is_some_and(|(_, text)| text == "Hello world")
+        },
+    );
+
+    let events = harness.stream_events();
+    let reply: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["kind"] == "agent-message")
+        .collect();
+    assert_eq!(reply.len(), 1, "exactly one reply event: {events:?}");
+    assert_eq!(reply[0]["content"], "Hello world");
+    let activity: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["custom_kind"] == "gateway-agent/turn-activity")
+        .collect();
+    assert_eq!(
+        activity.len(),
+        1,
+        "the activity line is journalled once, not per frame: {events:?}"
+    );
+
+    // Every edit — the intermediate one and the settle — targets the anchor
+    // message, and the settle carries exactly the final text.
+    let edits = harness.executed_edits();
+    assert!(edits.len() >= 2, "an intermediate edit and the settle: {edits:?}");
+    let target = edits[0].0.clone();
+    assert!(
+        edits.iter().all(|(native_message_id, _)| *native_message_id == target),
+        "every edit grows the same message: {edits:?}"
+    );
+    assert_eq!(
+        edits.last().unwrap().1,
+        "Hello world",
+        "the settle carries the final text: {edits:?}"
+    );
+    // The anchor was a real Send answering the inbound message; its receipt
+    // named the id every edit targets.
+    let kernel = harness.gateway.lock().unwrap();
+    let anchor_receipt = kernel
+        .delivery_receipt(&{
+            let executed = harness.recording.executed.lock().unwrap();
+            executed
+                .iter()
+                .find(|operation| {
+                    matches!(
+                        operation.operation,
+                        aikit_adapters::OutboundOperationKind::Send { .. }
+                    )
+                })
+                .unwrap()
+                .operation_ref
+                .clone()
+        })
+        .cloned()
+        .unwrap();
+    drop(kernel);
+    assert_eq!(
+        anchor_receipt.native_message_id.as_deref(),
+        Some(target.as_str()),
+        "the anchor's receipt named the edit target"
+    );
+    assert_eq!(
+        harness.executed_sends().len(),
+        1,
+        "exactly one Send happened: the anchor {:?}",
+        harness.executed_sends()
+    );
+}
+
+#[test]
+fn a_streaming_turn_whose_source_never_streams_replies_as_one_final_send() {
+    let harness = streaming_harness();
+    harness.source.script_park();
+    harness.admit(fixture_inbound("quiet turn", "st2"));
+    harness.wait_until(
+        "the turn registers in flight",
+        Duration::from_secs(30),
+        |harness| harness.source.parked_turns() == 1,
+    );
+
+    // The turn runs under a streaming connector but produces no deltas and
+    // no activity: nothing is sent while it runs.
+    thread::sleep(Duration::from_millis(300));
+    assert!(
+        harness.executed_sends().is_empty(),
+        "no anchor without any visible content: {:?}",
+        harness.executed_sends()
+    );
+
+    harness.source.respond("all at once");
+    harness.wait_until(
+        "the final reply lands and reaches the connector",
+        Duration::from_secs(30),
+        |harness| {
+            harness.stream_events().iter().any(|event| event["kind"] == "agent-message")
+                && harness.executed_sends() == vec!["all at once".to_owned()]
+        },
+    );
+    let events = harness.stream_events();
+    assert_eq!(
+        events.last().unwrap()["content"],
+        json!("all at once"),
+        "{events:?}"
+    );
+    assert_eq!(
+        harness.executed_sends(),
+        vec!["all at once".to_owned()],
+        "the reply lands as one final Send"
+    );
+    assert!(
+        harness.executed_edits().is_empty(),
+        "nothing streamed, so nothing was edited"
+    );
+}
+
+#[test]
+fn a_failed_anchor_send_falls_back_to_the_final_only_reply_and_journals_why() {
+    let harness = streaming_harness();
+    harness.source.script_park();
+    harness.admit(fixture_inbound("stream against a failing platform", "st3"));
+    harness.wait_until(
+        "the turn registers in flight",
+        Duration::from_secs(30),
+        |harness| harness.source.parked_turns() == 1,
+    );
+
+    harness
+        .recording
+        .fail_sends
+        .store(true, Ordering::SeqCst);
+    harness.source.emit_delta("partial text");
+    harness.wait_until(
+        "the anchor's failure is journalled on the stream",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .stream_events()
+                .iter()
+                .any(|event| {
+                    event["custom_kind"] == "gateway-agent/turn-activity"
+                        && event["content"]
+                            .as_str()
+                            .is_some_and(|line| line.contains("could not start"))
+                })
+        },
+    );
+
+    harness.source.respond("final answer");
+    harness.wait_until(
+        "the fallback reply lands and reaches the connector",
+        Duration::from_secs(30),
+        |harness| {
+            harness.stream_events().iter().any(|event| event["kind"] == "agent-message")
+                && harness.executed_sends().last() == Some(&"final answer".to_owned())
+        },
+    );
+    let events = harness.stream_events();
+    assert_eq!(events.last().unwrap()["content"], json!("final answer"));
+    // The honest wire: the anchor Send was executed and refused by the
+    // platform (its receipt says Failed), and the turn's completion then
+    // delivered the reply as one message of its own.
+    assert_eq!(
+        harness.executed_sends(),
+        vec!["partial text".to_owned(), "final answer".to_owned()],
+        "the refused anchor, then the reply as one message: {:?}",
+        harness.executed_sends()
+    );
+    {
+        let executed = harness.recording.executed.lock().unwrap();
+        let anchor_ref = executed
+            .iter()
+            .find(|operation| {
+                matches!(
+                    operation.operation,
+                    aikit_adapters::OutboundOperationKind::Send { .. }
+                )
+            })
+            .unwrap()
+            .operation_ref
+            .clone();
+        let kernel = harness.gateway.lock().unwrap();
+        let anchor_receipt = kernel.delivery_receipt(&anchor_ref).cloned().unwrap();
+        assert_eq!(
+            anchor_receipt.state,
+            aikit_adapters::DeliveryState::Failed,
+            "the anchor's receipt records the refusal: {anchor_receipt:?}"
+        );
+    }
+    assert!(
+        harness.executed_edits().is_empty(),
+        "a failed anchor is never edited: {:?}",
+        harness.executed_edits()
+    );
+}
+
+#[test]
+fn the_typing_indicator_pulses_for_the_whole_turn_and_stops_at_completion() {
+    // The non-streaming harness: the pulse law is the connector's Typing
+    // capability, not a streaming privilege.
+    let harness = Harness::with_descriptor(streaming_policy(), fixture_descriptor());
+    harness.source.script_park();
+    harness.admit(fixture_inbound("long running question", "st4"));
+    harness.wait_until(
+        "the turn registers in flight",
+        Duration::from_secs(30),
+        |harness| harness.source.parked_turns() == 1,
+    );
+
+    // A 1.2 s parked turn under a 100 ms refresh pulses far more than the
+    // single five-second blip a fire-once indicator would give.
+    thread::sleep(Duration::from_millis(1_200));
+    let pulses = harness
+        .executed_typings()
+        .into_iter()
+        .filter(|active| *active)
+        .count();
+    assert!(
+        pulses >= 5,
+        "typing refreshed across the turn: {pulses} pulse(s)"
+    );
+
+    harness.source.respond("done");
+    harness.wait_until(
+        "the turn settles",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .stream_events()
+                .iter()
+                .any(|event| event["kind"] == "agent-message")
+        },
+    );
+    harness.wait_until(
+        "typing stops at completion",
+        Duration::from_secs(30),
+        |harness| harness.executed_typings().last() == Some(&false),
+    );
+    let typings = harness.executed_typings();
+    assert!(
+        typings.last() == Some(&false),
+        "typing stops at completion: {typings:?}"
+    );
+}
+
+#[test]
+fn a_connector_that_does_not_declare_streaming_keeps_the_final_reply_only() {
+    let harness = Harness::new(streaming_policy());
+    harness.source.script_park();
+    harness.admit(fixture_inbound("plain turn", "st5"));
+    harness.wait_until(
+        "the turn registers in flight",
+        Duration::from_secs(30),
+        |harness| harness.source.parked_turns() == 1,
+    );
+
+    // Progress exists on the turn, but the connector cannot stream: nothing
+    // is sent early, whatever the turn produces.
+    harness.source.emit_activity("running fixture-tool");
+    harness.source.emit_delta("growing text");
+    thread::sleep(Duration::from_millis(300));
+    assert!(
+        harness.executed_sends().is_empty(),
+        "a non-streaming connector receives no early delivery: {:?}",
+        harness.executed_sends()
+    );
+    assert!(
+        harness.executed_edits().is_empty(),
+        "a non-streaming connector is never edited"
+    );
+
+    harness.source.respond("one final reply");
+    harness.wait_until(
+        "the final reply lands and reaches the connector",
+        Duration::from_secs(30),
+        |harness| {
+            harness.stream_events().iter().any(|event| event["kind"] == "agent-message")
+                && harness.executed_sends() == vec!["one final reply".to_owned()]
+        },
+    );
+    assert_eq!(
+        harness.executed_sends(),
+        vec!["one final reply".to_owned()],
+        "exactly the final reply, as always: {:?}",
+        harness.executed_sends()
+    );
+    // And the stream carries no activity journal: nothing streamed, so
+    // nothing was narrated.
+    let events = harness.stream_events();
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["custom_kind"] == "gateway-agent/turn-activity"),
+        "no activity events on a non-streaming connector: {events:?}"
+    );
 }
 
 #[test]
@@ -780,6 +1239,7 @@ fn restart_drains_the_in_flight_turn_persists_state_and_keeps_semantic_identity(
     let harness = Harness::new(aikit_adapters::EnginePolicy {
         turn_grace: Duration::from_millis(200),
         interrupt_grace: Duration::from_secs(5),
+        ..aikit_adapters::EnginePolicy::default()
     });
     harness.source.script_park();
     harness.admit(fixture_inbound("still thinking", "r1"));
@@ -963,8 +1423,10 @@ fn connector_pause_and_resume_stop_ingress_and_show_in_health() {
                 configuration_ref: None,
                 program: Vec::new(),
                 agent_backing: None,
+                stream_replies: true,
                 provenance: Vec::new(),
             },
+            descriptor: fixture_descriptor(),
             inner: Arc::clone(&recording),
         })],
     );
