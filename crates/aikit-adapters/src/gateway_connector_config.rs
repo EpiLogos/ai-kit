@@ -484,7 +484,12 @@ impl GatewayConnectorFactory for TelegramConnectorFactory {
             TelegramConnectorConfig {
                 connector_ref,
                 configuration_ref,
-                poll_timeout_seconds: 30,
+                // The connector worker services its outbound queue (typing
+                // pulses, streamed segments, tool lines) between event polls,
+                // so the poll cycle bounds how live the conversation feels —
+                // and Telegram expires a typing indicator after ~5s. Short
+                // cycle; the Bot API charges nothing for it.
+                poll_timeout_seconds: 3,
                 allowed_updates: Vec::new(),
                 provenance: vec!["gateway connectors file".into()],
             },
