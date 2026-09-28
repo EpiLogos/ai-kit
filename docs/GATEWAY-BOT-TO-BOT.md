@@ -69,7 +69,7 @@ names (the first six minted Positions each wrapped exactly one existing
 
 | # | Vertical | State |
 |---|---|---|
-| V0 | **Agency-identity addressability**: who/ask/send resolve agent profiles, joined with occupancy where present; unembodied ≠ nonexistent | this commission |
+| V0 | **Agency-identity addressability**: who/ask/send resolve agent profiles, joined with occupancy where present; unembodied ≠ nonexistent | landed (`who`/`send`/`/ask` resolve `agent-profile.list` — Central's authoritative registry — joined with the Position whose `eligible_agent_refs` name the agent, occupancy then routing exactly as for any Position; a profile with no Position is addressed at its identity and the Communique holds for the agency; `who` lists every registered agency with `embodied-here` / `embodied-elsewhere` / `not-currently-embodied`, naming its registry; 15 contact + 26 engine proofs, 73 adapters green) |
 | V1 | **Cross-face attributable forward**: `/ask <position> <message>` in a connector chat → attributable Communique → relay → the recipient's Surface | landed (canonical `AskPosition` behind the `/ask` edge; `ContactAskRouter` routes with the exact `gateway send` laws — occupancy, cross-Workcell relay, held/vacant — attribution from Actuation's ledger, origin provenance in the attribution basis; the recipient receives it at their turn boundary, their chat face being V3; 7 ask proofs in `gateway_conversation_engine`, 73 gateway + 13 contact proofs green) |
 | V2 | **Group-chat binding**: bind a group address, admit bots, enforce the loop budget | needs a live two-bot group to prove |
 | V3 | **Bot-initiated outbound** from the engine (an agent messaging a user or peer unprompted through its bound connector) | after V1 exercises the same queue |

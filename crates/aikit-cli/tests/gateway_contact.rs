@@ -65,15 +65,43 @@ impl World {
                 "handle": handle,
             })
         };
+        let mut positions = vec![
+            position("factory-guardian", "@factory-guardian", "project:O-I"),
+            position("cradle-steward", "@cradle-steward", "project:O-I"),
+            position("scribe", "@scribe", "project:O-I"),
+            position("keeper", "@keeper", "control:root"),
+        ];
+        // Two Positions name the agency their occupants carry: the registry
+        // join resolves those identities to these seats.
+        for (slug, agents) in [
+            ("factory-guardian", vec!["agent/pen"]),
+            ("cradle-steward", vec!["agent/veil"]),
+            ("scribe", vec!["agent/quill"]),
+        ] {
+            if let Some(record) = positions.iter_mut().find(|p| p["slug"] == slug) {
+                record["eligible_agent_refs"] = json!(agents);
+            }
+        }
+        let agent_profile = |agent: &str, role: &str| {
+            json!({
+                "schema": "central.agent-profile/v1",
+                "ref": agent.replace('/', ":agent-"),
+                "agent_ref": agent,
+                "role": role,
+                "purpose": format!("{role} (fixture profile)"),
+                "revision": "r1",
+            })
+        };
         std::fs::write(
             &world,
             serde_json::to_vec_pretty(&json!({
                 "world_ref": "project:O-I",
-                "positions": [
-                    position("factory-guardian", "@factory-guardian", "project:O-I"),
-                    position("cradle-steward", "@cradle-steward", "project:O-I"),
-                    position("scribe", "@scribe", "project:O-I"),
-                    position("keeper", "@keeper", "control:root"),
+                "positions": positions,
+                "agent_profiles": [
+                    agent_profile("agent/anuttara", "M0 domain agent"),
+                    agent_profile("agent/quill", "the scribe's agency"),
+                    agent_profile("agent/pen", "the gate keeper's agency"),
+                    agent_profile("agent/veil", "the steward's agency"),
                 ],
                 "occupancy": {},
                 "custody": [],
@@ -661,6 +689,137 @@ fn identity_gaps_are_labelled_and_unknown_positions_are_refused_with_the_next_co
     let (document, _) = base.as_occupant(STEWARD, "steward-1").prompt(false);
     assert!(document.contains("From: <unknown sender> [unknown]"));
     assert!(document.contains("(claimed, not verified) [claimed]"));
+}
+
+#[test]
+fn a_registered_profile_without_a_position_is_addressable_and_its_communique_holds_for_the_agency()
+{
+    let world = World::new();
+    let base = body(&world, "a", "workcell:a", "agency-gateway/a");
+
+    // `@anuttara` names no Position handle; the registry names the agency.
+    let sent = base.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        "@anuttara",
+        "--body",
+        "are you there?",
+    ]);
+    let record = &sent["communique"];
+    assert_eq!(record["to_position_ref"], "agent/anuttara");
+    assert_eq!(record["state"], "held");
+    let basis = record["transitions"][0]["basis"].as_str().unwrap();
+    assert!(
+        basis.contains("registered agent profile")
+            && basis.contains("not currently embodied")
+            && basis.contains("held for the agency"),
+        "{basis}"
+    );
+    assert_eq!(sent["recipient"]["source"], "agent-profile.list");
+    assert_eq!(sent["recipient"]["agency_ref"], "agent/anuttara");
+    let delivery = &sent["delivery"];
+    assert!(delivery["fact"]
+        .as_str()
+        .unwrap()
+        .contains("no Position names it"));
+    assert!(delivery["action"]
+        .as_str()
+        .unwrap()
+        .contains("conversation --with agent/anuttara"));
+
+    // The registry's own ref spelling addresses the same identity.
+    let sent = base.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        "agent/anuttara",
+        "--body",
+        "still here",
+    ]);
+    assert_eq!(sent["communique"]["to_position_ref"], "agent/anuttara");
+    assert_eq!(sent["communique"]["state"], "held");
+
+    // The reading lists the agency with its embodiment state, honest about
+    // which registry the row came from, with its undelivered mail counted.
+    let population = base.ok(&["gateway", "who"]);
+    let agent = population["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["agent_ref"] == "agent/anuttara")
+        .expect("the reading lists every registered agency")
+        .clone();
+    assert_eq!(agent["registry"], "agent-profile.list");
+    assert_eq!(agent["handle"], "@anuttara");
+    assert_eq!(agent["label"], "M0 domain agent");
+    assert_eq!(agent["occupancy"]["state"], "not-currently-embodied");
+    assert_eq!(agent["communiques"]["undelivered"], 2);
+}
+
+#[test]
+fn a_profile_joined_to_its_position_routes_by_that_positions_occupancy() {
+    let world = World::new();
+    let base = body(&world, "a", "workcell:a", "agency-gateway/a");
+
+    // `@pen` names no Position handle; the registry joins it to the
+    // factory-guardian's Position, and its tenure routes the record: the
+    // occupancy, attribution and delivery laws are untouched by the join.
+    let guardian = base.as_occupant(GUARDIAN, "guardian-1");
+    let sent = guardian.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        "@pen",
+        "--body",
+        "for whoever holds the gate",
+    ]);
+    assert_eq!(sent["communique"]["to_position_ref"], GUARDIAN);
+    assert_eq!(sent["communique"]["state"], "pending");
+    assert!(sent["communique"]["transitions"][0]["basis"]
+        .as_str()
+        .unwrap()
+        .contains("occupied by"));
+    assert_eq!(
+        sent["recipient"]["source"],
+        "central.position.list+agent-profile.list"
+    );
+    assert!(sent["recipient"]["agency_ref"].is_null());
+
+    // `@quill` joins to a vacant Position: the ordinary held law governs.
+    let sent = base.ok(&["gateway", "send", "--to", "@quill", "--body", "hold this"]);
+    assert_eq!(sent["communique"]["to_position_ref"], SCRIBE);
+    assert_eq!(sent["communique"]["state"], "held");
+    assert!(sent["communique"]["transitions"][0]["basis"]
+        .as_str()
+        .unwrap()
+        .contains("vacant on this Workcell"));
+
+    // The reading shows each agency's embodiment through its Position:
+    // occupied here, joined-but-vacant, and never named anywhere.
+    let population = base.ok(&["gateway", "who"]);
+    let agent = |agent_ref: &str| {
+        population["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["agent_ref"] == agent_ref)
+            .unwrap()
+            .clone()
+    };
+    let pen = agent("agent/pen");
+    assert_eq!(pen["occupancy"]["state"], "embodied-here");
+    assert_eq!(pen["occupancy"]["position_ref"], GUARDIAN);
+    assert_eq!(
+        pen["positions"],
+        json!(["central:position:project:O-I:factory-guardian"])
+    );
+    let quill = agent("agent/quill");
+    assert_eq!(quill["occupancy"]["state"], "not-currently-embodied");
+    assert_eq!(
+        quill["positions"],
+        json!(["central:position:project:O-I:scribe"])
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1286,6 +1445,21 @@ fn the_population_reading_shows_occupancy_observed_through_a_remote_gateway() {
     let scribe = row(&population, SCRIBE);
     assert_eq!(scribe["occupancy"]["state"], "vacant");
     assert_eq!(scribe["occupancy"]["observed_via"], "local");
+    // The steward's agency is embodied elsewhere through its joined Position:
+    // the reading says so from the remote gateway's own answer.
+    let veil = population["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["agent_ref"] == "agent/veil")
+        .unwrap();
+    assert_eq!(veil["occupancy"]["state"], "embodied-elsewhere");
+    assert_eq!(veil["occupancy"]["via"][0]["position_ref"], STEWARD);
+    assert_eq!(veil["occupancy"]["via"][0]["workcell_ref"], "workcell:b");
+    assert_eq!(
+        veil["occupancy"]["via"][0]["generation_ref"],
+        generation("steward-b")
+    );
     assert_eq!(
         population["remotes"],
         json!([{

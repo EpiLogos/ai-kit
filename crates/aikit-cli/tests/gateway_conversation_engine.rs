@@ -14,6 +14,7 @@ use std::{
     fs,
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
+    path::Path,
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -24,20 +25,24 @@ use std::{
 };
 
 use aikit_adapters::{
-    execute_gateway_command, parse_slash, spawn_connector_workers, AgencyGateway,
-    CommuniqueDraft, CommuniqueForward, CommuniqueForwardOutcome, CommuniqueRouting,
-    CommuniqueState, ConnectorCapabilities, ConnectorConnectionState, ConnectorDescriptor,
-    ConnectorFuture, ConnectorHealth, ConnectorHello, ConnectorOperation, ConnectorPumpControls,
-    ConnectorQueues, ConversationAddress, DeliveryReceipt, DeliveryState, FixtureTurnSource,
-    GatewayAskRequest, GatewayAskRoute, GatewayAskRouter, GatewayBinding, GatewayCommand,
-    GatewayConnector, GatewayConnectorEntry, GatewayConnectorFactory, GatewayIngressDecision,
-    GatewayIngressPolicy, GatewayIngressResult, GatewayResponse, GatewayTurnSourceResolver,
-    InboundEvent, InboundEventKind, OutboundOperation, SenderAttribution, SenderIdentity,
-    SlashParse, CONNECTOR_QUIET_POLL_CODE, GATEWAY_CONNECTOR_SDK_VERSION,
-    GATEWAY_CONNECTOR_WIRE_VERSION,
+    execute_gateway_command, parse_slash, spawn_connector_workers, AgencyGateway, CommuniqueDraft,
+    CommuniqueForward, CommuniqueForwardOutcome, CommuniqueRouting, CommuniqueState,
+    ConnectorCapabilities, ConnectorConnectionState, ConnectorDescriptor, ConnectorFuture,
+    ConnectorHealth, ConnectorHello, ConnectorOperation, ConnectorPumpControls, ConnectorQueues,
+    ConversationAddress, DeliveryReceipt, DeliveryState, FixtureTurnSource, GatewayAskRequest,
+    GatewayAskRoute, GatewayAskRouter, GatewayBinding, GatewayCommand, GatewayConnector,
+    GatewayConnectorEntry, GatewayConnectorFactory, GatewayIngressDecision, GatewayIngressPolicy,
+    GatewayIngressResult, GatewayResponse, GatewayTurnSourceResolver, InboundEvent,
+    InboundEventKind, OutboundOperation, SenderAttribution, SenderIdentity, SlashParse,
+    CONNECTOR_QUIET_POLL_CODE, GATEWAY_CONNECTOR_SDK_VERSION, GATEWAY_CONNECTOR_WIRE_VERSION,
+};
+use aikit_cli::gateway_contact::route_ask_with_owners;
+use aikit_cli::gateway_owners::{
+    ContactOwners, CustodyAssign, OccupancyVerdict, OwnerRefusal, OwnerUnavailable, PositionLookup,
 };
 use aikit_core::resource::ResourceRef;
 use aikit_core::AikitError;
+use aikit_store::AikitHome;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -341,14 +346,24 @@ impl Harness {
         policy: aikit_adapters::EnginePolicy,
         router: Arc<FixtureAskRouter>,
     ) -> Self {
+        Self::with_dyn_router(policy, router as Arc<dyn GatewayAskRouter>)
+    }
+
+    /// A harness with any ask router wired behind `/ask` — the scripted
+    /// fixture, or the production resolution over fixture owners.
+    fn with_dyn_router(
+        policy: aikit_adapters::EnginePolicy,
+        router: Arc<dyn GatewayAskRouter>,
+    ) -> Self {
         Self::assemble(policy, fixture_descriptor(), Some(router))
     }
 
     fn assemble(
         policy: aikit_adapters::EnginePolicy,
         descriptor: ConnectorDescriptor,
-        ask_router: Option<Arc<FixtureAskRouter>>,
-    ) -> Self {        let dir = TempDir::new().unwrap();
+        ask_router: Option<Arc<dyn GatewayAskRouter>>,
+    ) -> Self {
+        let dir = TempDir::new().unwrap();
         let mut gateway = AgencyGateway::new(r("agency-gateway/test"));
         gateway.register_connector(descriptor.clone()).unwrap();
         gateway
@@ -1951,10 +1966,7 @@ impl FixtureAskRouter {
     }
 
     fn script_route(&self, route: GatewayAskRoute) {
-        self.routes
-            .lock()
-            .unwrap()
-            .push_back(Ok(route));
+        self.routes.lock().unwrap().push_back(Ok(route));
     }
 
     fn script_refusal(&self, error: AikitError) {
@@ -1992,8 +2004,12 @@ impl FixtureAskRouter {
                      occupant of {ASKER_POSITION} and its tenure carries this conversation's \
                      agent session {}; asked from connector conversation {} on {} (binding {}, \
                      agent session {}, agency {})",
-                    ask.agent_session_ref, ask.conversation_id, ask.platform, ask.binding_ref,
-                    ask.agent_session_ref, ask.agency_ref
+                    ask.agent_session_ref,
+                    ask.conversation_id,
+                    ask.platform,
+                    ask.binding_ref,
+                    ask.agent_session_ref,
+                    ask.agency_ref
                 ),
                 to_position_ref: RECIPIENT_POSITION.into(),
                 to_workcell_ref: None,
@@ -2085,6 +2101,149 @@ impl GatewayAskRouter for FixtureAskRouter {
     }
 }
 
+/// Central and Actuation answered in memory: the authoritative agent profile
+/// registry (one agency, no Position anywhere naming it) beside an empty
+/// occupancy ledger. The fake owners behind the production resolution stand
+/// exactly where the fixture script stands for the contact suite.
+struct ResidentOwners {
+    positions: Value,
+    profiles: Value,
+}
+
+impl ResidentOwners {
+    fn new() -> Self {
+        Self {
+            positions: json!({
+                "schema": "central.position-listing/v1",
+                "world_ref": "control:root",
+                "positions": [],
+                "inherited": [],
+                "invalid": [],
+            }),
+            profiles: json!({
+                "profiles": [{
+                    "profile": {
+                        "schema": "central.agent-profile/v1",
+                        "ref": "agent-profile:anuttara",
+                        "agent_ref": "agent/anuttara",
+                        "role": "M0 domain agent",
+                        "purpose": "Faculty #0 (proof).",
+                        "revision": "r1",
+                    },
+                    "source_path": "Control/agents/profiles/fixture.json",
+                }],
+                "scope": "root",
+                "source_payloads_disclosed": false,
+            }),
+        }
+    }
+}
+
+impl ContactOwners for ResidentOwners {
+    fn position_list(&self, _project: Option<&str>) -> Result<Value, OwnerUnavailable> {
+        Ok(self.positions.clone())
+    }
+
+    fn agent_profiles(&self) -> Result<Value, OwnerUnavailable> {
+        Ok(self.profiles.clone())
+    }
+
+    fn position_read(&self, position_ref: &str) -> Result<PositionLookup, OwnerUnavailable> {
+        Ok(PositionLookup::NotFound(OwnerRefusal {
+            command: "ctrl --json action run central.position.read".into(),
+            code: "central.position_not_found".into(),
+            fact: format!("No Position definition exists at {position_ref}."),
+            consequence: "Nothing was read.".into(),
+            action: "ctrl --json action run central.position.list '{}'".into(),
+        }))
+    }
+
+    fn world_here(&self, _cwd: &Path) -> Result<Value, OwnerUnavailable> {
+        Ok(json!({
+            "schema": "central.world-here/v1",
+            "local_world": {"ref": "control:root", "root": "/fixture"},
+            "project_world": {"state": "absent"},
+            "workcells": [],
+        }))
+    }
+
+    fn occupancy_list(&self) -> Result<Value, OwnerUnavailable> {
+        Ok(json!({
+            "schema": "actuation.position-occupancy-listing/v1",
+            "store": "proof",
+            "positions": [],
+            "invalid": [],
+        }))
+    }
+
+    fn occupancy_read(&self, position_ref: &str) -> Result<Value, OwnerUnavailable> {
+        Ok(json!({
+            "schema": "actuation.position-occupancy/v1",
+            "position_ref": position_ref,
+            "state": "vacant",
+            "generations": [],
+        }))
+    }
+
+    fn occupancy_verify(
+        &self,
+        position_ref: &str,
+        generation_ref: &str,
+    ) -> Result<OccupancyVerdict, OwnerUnavailable> {
+        Ok(OccupancyVerdict::Refused(OwnerRefusal {
+            command: "actuation occupancy verify".into(),
+            code: "occupancy.unknown_generation".into(),
+            fact: format!("{generation_ref} never held {position_ref}."),
+            consequence: "Nothing was verified.".into(),
+            action: "actuation occupancy read".into(),
+        }))
+    }
+
+    fn current_work(&self, _position_ref: &str, _cwd: &Path) -> Result<Value, OwnerUnavailable> {
+        Ok(json!({
+            "schema": "factory.current-work/v1",
+            "outcome": "none",
+            "candidates": [],
+        }))
+    }
+
+    fn custody_assign(
+        &self,
+        _request: &CustodyAssign,
+        _cwd: &Path,
+    ) -> Result<Result<Value, OwnerRefusal>, OwnerUnavailable> {
+        Err(OwnerUnavailable {
+            command: "factory development custody assign".into(),
+            reason: "no custody is assigned in this proof".into(),
+        })
+    }
+}
+
+/// The production ask resolution the service wires, over the resident owners:
+/// the same `route_ask_with_owners` laws, deterministic.
+struct ProductionResolution {
+    home: AikitHome,
+    owners: Arc<ResidentOwners>,
+}
+
+impl GatewayAskRouter for ProductionResolution {
+    fn route(&self, ask: &GatewayAskRequest) -> Result<GatewayAskRoute, AikitError> {
+        route_ask_with_owners(&self.home, self.owners.as_ref(), Path::new("/fixture"), ask)
+    }
+
+    fn relay(
+        &self,
+        _communique: &aikit_adapters::Communique,
+        _relayed_by: &str,
+    ) -> Result<CommuniqueForwardOutcome, AikitError> {
+        Ok(CommuniqueForwardOutcome::Failed {
+            workcell_ref: "workcell:proof".into(),
+            error: "no relay is exercised in this proof".into(),
+            at_unix_ms: 0,
+        })
+    }
+}
+
 fn ask_engine(harness: &Harness, position: &str, message: &str) -> GatewayResponse {
     harness
         .engine
@@ -2136,12 +2295,10 @@ fn the_ask_edge_parses_the_whole_line_into_one_canonical_operation() {
         }
     }
     // The canonical operation is portable, spelled ask-position.
-    let encoded = serde_json::to_value(
-        aikit_adapters::GatewayConversationOperation::AskPosition {
-            position: "@steward".into(),
-            message: "hello".into(),
-        },
-    )
+    let encoded = serde_json::to_value(aikit_adapters::GatewayConversationOperation::AskPosition {
+        position: "@steward".into(),
+        message: "hello".into(),
+    })
     .unwrap();
     assert_eq!(encoded["op"], "ask-position");
     assert_eq!(encoded["position"], "@steward");
@@ -2149,8 +2306,7 @@ fn the_ask_edge_parses_the_whole_line_into_one_canonical_operation() {
 }
 
 #[test]
-fn an_admitted_ask_appends_an_attributed_communique_with_origin_provenance_and_answers_the_chat(
-) {
+fn an_admitted_ask_appends_an_attributed_communique_with_origin_provenance_and_answers_the_chat() {
     let router = FixtureAskRouter::new();
     let harness = Harness::with_ask_router(aikit_adapters::EnginePolicy::default(), router.clone());
 
@@ -2239,7 +2395,13 @@ fn an_admitted_ask_appends_an_attributed_communique_with_origin_provenance_and_a
         "{result}"
     );
     assert_eq!(result["attribution"], json!("verified"), "{result}");
-    let records = harness.gateway.lock().unwrap().communiques().records().to_vec();
+    let records = harness
+        .gateway
+        .lock()
+        .unwrap()
+        .communiques()
+        .records()
+        .to_vec();
     assert_eq!(records.len(), 2);
     assert_eq!(result["communique_ref"], json!(records[1].communique_ref));
     assert_eq!(records[1].body, "and the western one?");
@@ -2316,14 +2478,102 @@ fn a_held_ask_answers_with_the_vacancy_notice() {
                 .any(|text| text.contains("held") && text.contains("vacant"))
         },
     );
-    let records = harness.gateway.lock().unwrap().communiques().records().to_vec();
+    let records = harness
+        .gateway
+        .lock()
+        .unwrap()
+        .communiques()
+        .records()
+        .to_vec();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].state, CommuniqueState::Held);
     let sends = harness.executed_sends();
     assert!(
-        sends.iter().any(|text| text.contains("no other Workcell is declared")),
+        sends
+            .iter()
+            .any(|text| text.contains("no other Workcell is declared")),
         "the answer carries the vacancy fact: {sends:?}"
     );
+}
+
+#[test]
+fn an_ask_to_a_registered_profile_without_a_position_holds_for_the_agency() {
+    let dir = TempDir::new().unwrap();
+    let router = Arc::new(ProductionResolution {
+        home: AikitHome::at(dir.path()),
+        owners: Arc::new(ResidentOwners::new()),
+    });
+    let harness = Harness::with_dyn_router(aikit_adapters::EnginePolicy::default(), router);
+
+    harness.admit(fixture_inbound(
+        "/ask @anuttara are you embodied anywhere?",
+        "a7",
+    ));
+    harness.wait_until(
+        "the ask to the unembodied agency appends its held Communique and answers the chat",
+        Duration::from_secs(30),
+        |harness| !harness.executed_sends().is_empty(),
+    );
+
+    // The journal holds one Communique addressed to the agency at its own
+    // identity, held for it — the registry answered, and no Position gates
+    // the contact.
+    let records = harness
+        .gateway
+        .lock()
+        .unwrap()
+        .communiques()
+        .records()
+        .to_vec();
+    assert_eq!(records.len(), 1, "{:?}", harness.executed_sends());
+    let record = &records[0];
+    assert_eq!(record.to_position_ref, "agent/anuttara");
+    assert_eq!(record.state, CommuniqueState::Held);
+    let basis = &record.transitions[0].basis;
+    assert!(
+        basis.contains("registered agent profile")
+            && basis.contains("not currently embodied")
+            && basis.contains("held for the agency"),
+        "{basis}"
+    );
+    // Origin provenance still rides the attribution basis.
+    assert!(
+        record.attribution_basis.contains(BINDING_REF),
+        "{}",
+        record.attribution_basis
+    );
+    assert!(
+        record.attribution_basis.contains("chat-1"),
+        "{}",
+        record.attribution_basis
+    );
+    assert!(
+        record.attribution_basis.contains("agent-session/fixture"),
+        "{}",
+        record.attribution_basis
+    );
+
+    // The chat is answered with the held-for-agency notice.
+    let sends = harness.executed_sends();
+    assert!(
+        sends
+            .iter()
+            .any(|text| text.contains("held") && text.contains("not currently embodied")),
+        "the answer carries the held-for-agency fact: {sends:?}"
+    );
+    assert_eq!(harness.source.parked_turns(), 0);
+
+    // A handle the registry does not name either is refused as unknown by the
+    // production resolution, before anything is recorded.
+    let router = Arc::new(ProductionResolution {
+        home: AikitHome::at(dir.path()),
+        owners: Arc::new(ResidentOwners::new()),
+    });
+    let error = router
+        .route(&canned_ask_to("@notregistered", "anyone?"))
+        .err()
+        .expect("an unknown handle is refused");
+    assert_eq!(error.code(), "gateway.unknown_position", "{error}");
 }
 
 #[test]
@@ -2348,14 +2598,23 @@ fn an_ask_relays_across_workcells_and_answers_both_outcomes_honestly() {
                 .any(|text| text.contains("relayed to Workcell workcell:omarchy"))
         },
     );
-    let records = harness.gateway.lock().unwrap().communiques().records().to_vec();
+    let records = harness
+        .gateway
+        .lock()
+        .unwrap()
+        .communiques()
+        .records()
+        .to_vec();
     assert_eq!(records.len(), 1);
     assert!(matches!(
         &records[0].forward,
         Some(CommuniqueForward::Forwarded { remote_gateway_ref, .. })
             if remote_gateway_ref == "agency-gateway/omarchy"
     ));
-    assert_eq!(router.relayed_refs(), vec![records[0].communique_ref.clone()]);
+    assert_eq!(
+        router.relayed_refs(),
+        vec![records[0].communique_ref.clone()]
+    );
     assert!(
         harness
             .executed_sends()
@@ -2387,7 +2646,13 @@ fn an_ask_relays_across_workcells_and_answers_both_outcomes_honestly() {
                 .any(|text| text.contains("queued for relay"))
         },
     );
-    let records = harness.gateway.lock().unwrap().communiques().records().to_vec();
+    let records = harness
+        .gateway
+        .lock()
+        .unwrap()
+        .communiques()
+        .records()
+        .to_vec();
     assert_eq!(records.len(), 2);
     assert!(matches!(
         &records[1].forward,
@@ -2410,6 +2675,13 @@ fn canned_ask(message: &str) -> GatewayAskRequest {
         conversation_id: "chat-1".into(),
         recipient: RECIPIENT_POSITION.into(),
         message: message.into(),
+    }
+}
+
+fn canned_ask_to(recipient: &str, message: &str) -> GatewayAskRequest {
+    GatewayAskRequest {
+        recipient: recipient.into(),
+        ..canned_ask(message)
     }
 }
 
