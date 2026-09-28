@@ -48,7 +48,7 @@ use aikit_core::credential_world::ProviderRosterKnowledge;
 use aikit_core::session_space_application::SessionSpaceAuthoredState;
 use serde::{Deserialize, Serialize};
 
-use crate::application::TuiState;
+use crate::application::{ComposeField, TuiState};
 use crate::compose_preview::availability_label;
 use crate::layout::Glyphs;
 use crate::project_workspace_render::{SessionSpaceRoster, WorkspaceReading};
@@ -215,10 +215,13 @@ fn standing_for(
         ComposeStep::Praxis => {
             // SkillSet-first: the field is the repertoire a person selects
             // from. A boundary disclosing no sets keeps the named absence —
-            // it never renders fake rows.
+            // it never renders fake rows — and names the missing boundary
+            // contract itself: no praxis contract crosses this application,
+            // which is a boundary fact, not a claim that praxis does not
+            // exist in the product.
             if state.compose_skill_set_field.is_empty() {
                 StepStanding::NotExposed(format!(
-                    "no SkillSet field disclosed here; {} capabilit{}, {} action{} resolve",
+                    "no Profile/SkillSet/Skill/Method contract here (no praxis contract crosses this application); {} capabilit{}, {} action{} resolve",
                     world.capability_horizon.capabilities.len(),
                     if world.capability_horizon.capabilities.len() == 1 {
                         "y"
@@ -688,24 +691,44 @@ fn step_detail(
         }
 
         ComposeStep::EnterWork => {
+            // The creator text lane echoes every keystroke while it captures
+            // them: the in-flight draft is semantic state precisely so this
+            // render can show it. A lane whose typing stays invisible has
+            // the operator composing blind — and an empty draft still shows
+            // its visible prompt, never a silent field.
+            let draft_text_on = |field: ComposeField| -> Option<&str> {
+                state
+                    .compose_text_draft
+                    .as_ref()
+                    .filter(|draft| draft.field == field)
+                    .map(|draft| draft.text.as_str())
+            };
+            let purpose_row = match draft_text_on(ComposeField::Purpose) {
+                Some("") => {
+                    "    purpose >   (empty - type the exact purpose; Enter commits, Esc abandons)"
+                        .to_string()
+                }
+                Some(text) => format!("    purpose > {text}  (Enter commits, Esc abandons)"),
+                None if state.compose_purpose.trim().is_empty() => {
+                    "    purpose - not authored yet (Enter authors it)".into()
+                }
+                None => format!("    purpose \"{}\"", state.compose_purpose.trim()),
+            };
+            let name_row = match draft_text_on(ComposeField::Name) {
+                Some("") => {
+                    "    name    >   (empty - optional; Enter keeps the owner-derived identity, Esc abandons)"
+                        .to_string()
+                }
+                Some(text) => format!("    name    > {text}  (Enter commits, Esc abandons)"),
+                None if state.compose_agent_name.trim().is_empty() => {
+                    "    name    - none (the owner derives identity; absence is normal)".into()
+                }
+                None => format!("    name    {}", state.compose_agent_name.trim()),
+            };
             let mut lines = vec![
                 "  Authored here (exact human source, carried verbatim):".into(),
-                format!(
-                    "    purpose {}",
-                    if state.compose_purpose.trim().is_empty() {
-                        "- not authored yet (Enter authors it)".to_string()
-                    } else {
-                        format!("\"{}\"", state.compose_purpose.trim())
-                    }
-                ),
-                format!(
-                    "    name    {}",
-                    if state.compose_agent_name.trim().is_empty() {
-                        "- none (the owner derives identity; absence is normal)".to_string()
-                    } else {
-                        state.compose_agent_name.trim().to_string()
-                    }
-                ),
+                purpose_row,
+                name_row,
                 String::new(),
                 format!("  Lifecycle: {}", state.agent_work.describe()),
                 "  saved is not accepted; accepted is not prepared; prepared is not running".into(),

@@ -24,9 +24,9 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use crate::application::{
-    selected_contextual_action, visible_contextual_actions, ExitIntent, Overlay, PresentationMode,
-    RelationReadModel, RelationView, TuiApplicationService, TuiRuntime, TuiState, UiAction,
-    UiEffect, WorkspaceSection,
+    selected_contextual_action, visible_contextual_actions, ComposeField, ExitIntent, Overlay,
+    PresentationMode, RelationReadModel, RelationView, TuiApplicationService, TuiRuntime, TuiState,
+    UiAction, UiEffect, WorkspaceSection,
 };
 use crate::application_service::ApplicationService;
 use crate::backend::FactoryWorkEntry;
@@ -238,23 +238,13 @@ pub struct ApplicationSurfaceController {
     /// environment boundary, read exactly once at construction. `None` for
     /// standalone AIKit: the view then operates over what is actually here.
     composed_world: Option<world_entry::ComposedWorld>,
-    /// The Compose Enter-work text lane currently capturing keystrokes, if
-    /// any. Controller-only input-routing state (the graph filter lane's
-    /// sibling): it decides which method the next keystroke reaches. The
-    /// authored text itself lives in `TuiState.compose_purpose`/
-    /// `compose_agent_name` once committed.
-    compose_text_lane: Option<ComposeTextField>,
-    /// The in-progress text of the creator lane. Controller-only edit
-    /// buffer; the committed value lands in `TuiState` (authored source).
-    compose_text_buffer: String,
 }
 
-/// Which field of the §1.3 creator path the text lane is editing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComposeTextField {
-    Purpose,
-    Name,
-}
+/// Which field of the §1.3 creator path the text lane is editing. The lane's
+/// in-flight text lives on the semantic state (`TuiState.compose_text_draft`)
+/// so the renderer can echo it; this alias keeps the surface's public name
+/// for the field selector.
+pub use crate::application::ComposeField as ComposeTextField;
 
 impl ApplicationSurfaceController {
     pub fn new<B: PaletteBackend>(
@@ -324,8 +314,6 @@ impl ApplicationSurfaceController {
             conversation: ConversationSurface::default(),
             agent_work_bindings: backend.agent_work_bindings(),
             composed_world: world_entry::ComposedWorld::from_env(),
-            compose_text_lane: None,
-            compose_text_buffer: String::new(),
         };
         controller
             .conversation
@@ -581,11 +569,30 @@ impl ApplicationSurfaceController {
         if self.graph_filter_editing {
             return self.handle_graph_filter_key(backend, code);
         }
-        if let Some(field) = self.compose_text_lane {
-            return self.handle_compose_text_key(backend, code, ctrl, field);
+        if self.semantic.compose_text_draft.is_some() {
+            return self.handle_compose_text_key(backend, code, ctrl);
         }
         if self.semantic.action_query.is_some() {
             return self.handle_action_key(backend, code, ctrl);
+        }
+        if ctrl && matches!(code, KeyCode::Char('c') | KeyCode::Char('q')) {
+            return self.dispatch(backend, UiAction::Exit);
+        }
+        // The Conversation aperture claims the keys it renders for while it
+        // is open — Esc, arrows, Enter, typing — the same claim the Graph
+        // makes while it is the projection on screen. The whole-application
+        // exit above it keeps working; everything below it — the '?' help
+        // claim, the next-step and SkillSet digits, the creator lane's Enter,
+        // the ordinary navigation and query editing — would either silently
+        // mutate state the pane hides or eat characters the operator is
+        // typing into the compose lane, so it is deliberately unreachable
+        // until the aperture is closed again. This claim sits ABOVE those
+        // view-specific claims on purpose: the merge that brought the
+        // aperture and those claims together had let them jump the queue, and
+        // a typed '?' then opened help instead of reaching the message being
+        // composed.
+        if self.conversation.is_open() {
+            return self.handle_conversation_key(code, ctrl, alt);
         }
         // Context-aware help (?): explains what the keys and next steps do
         // where the operator actually stands. Only claimed when the query is
@@ -613,9 +620,7 @@ impl ApplicationSurfaceController {
         // Enter on the Compose Enter-work step opens the purpose lane rather
         // than doing nothing about an empty composition.
         if code == KeyCode::Enter && self.enter_opens_compose_text_lane() {
-            self.compose_text_lane = Some(ComposeTextField::Purpose);
-            self.compose_text_buffer.clear();
-            return Ok(());
+            return self.dispatch(backend, UiAction::BeginComposeText(ComposeField::Purpose));
         }
         // The Praxis step's SkillSet field: digits toggle the numbered set
         // rows while the query is empty. The row plan is the one the step
@@ -637,19 +642,6 @@ impl ApplicationSurfaceController {
                 }
             }
             return Ok(());
-        }
-        if ctrl && matches!(code, KeyCode::Char('c') | KeyCode::Char('q')) {
-            return self.dispatch(backend, UiAction::Exit);
-        }
-        // The Conversation aperture claims the keys it renders for while it
-        // is open — Esc, arrows, Enter, typing — the same claim the Graph
-        // makes while it is the projection on screen. Every whole-application
-        // combo above it keeps working; everything below it would silently
-        // mutate state the pane hides (the resource query) or navigate
-        // somewhere the operator cannot see, so it is deliberately
-        // unreachable until the aperture is closed again.
-        if self.conversation.is_open() {
-            return self.handle_conversation_key(code, ctrl, alt);
         }
         if code == KeyCode::Esc {
             // Esc inside an active Graph projection first unwinds the Graph's
@@ -1145,10 +1137,13 @@ impl ApplicationSurfaceController {
     }
 
     /// The creator text lane currently capturing keystrokes, if any.
-    /// Test/diagnostic access to controller-only input-routing state.
+    /// Test/diagnostic access, derived from the semantic draft.
     #[doc(hidden)]
     pub fn compose_text_lane(&self) -> Option<ComposeTextField> {
-        self.compose_text_lane
+        self.semantic
+            .compose_text_draft
+            .as_ref()
+            .map(|draft| draft.field)
     }
 
     /// Direct mutable access to the semantic state, for tests that must
@@ -1202,61 +1197,32 @@ impl ApplicationSurfaceController {
             && self.semantic.query.is_empty()
             && self.semantic.action_query.is_none()
             && self.semantic.overlay.is_none()
+            && self.semantic.compose_text_draft.is_none()
             && self.project_world.is_some()
     }
 
     /// Key handling for the creator text lane (purpose / optional name).
-    /// The lane claims every ordinary key while open: characters and
-    /// backspace edit the buffer, Tab commits and moves between fields,
-    /// Enter commits (and continues to the name field after the purpose),
-    /// Esc abandons the edit. Ctrl+C/Ctrl+Q keep their whole-application
-    /// meaning even inside the lane.
+    /// The lane claims every ordinary key while it is open: characters and
+    /// backspace edit the in-flight draft — semantic state, so the pane
+    /// echoes every keystroke — Tab commits and moves between fields, Enter
+    /// commits (and continues to the name field after the purpose), Esc
+    /// abandons the edit. Ctrl+C/Ctrl+Q keep their whole-application meaning
+    /// even inside the lane.
     fn handle_compose_text_key<B: PaletteBackend>(
         &mut self,
         backend: &mut B,
         code: KeyCode,
         ctrl: bool,
-        field: ComposeTextField,
     ) -> Result<()> {
         if ctrl && matches!(code, KeyCode::Char('c') | KeyCode::Char('q')) {
             return self.dispatch(backend, UiAction::Exit);
         }
         match code {
-            KeyCode::Esc => {
-                self.compose_text_lane = None;
-                self.compose_text_buffer.clear();
-                Ok(())
-            }
-            KeyCode::Enter | KeyCode::Tab => {
-                let committed = self.compose_text_buffer.trim().to_string();
-                self.compose_text_buffer.clear();
-                match (field, code) {
-                    (ComposeTextField::Purpose, KeyCode::Enter) => {
-                        self.dispatch(backend, UiAction::SetComposePurpose(committed))?;
-                        // The guided path continues to the optional name.
-                        self.compose_text_lane = Some(ComposeTextField::Name);
-                        Ok(())
-                    }
-                    (ComposeTextField::Purpose, KeyCode::Tab) => {
-                        self.dispatch(backend, UiAction::SetComposePurpose(committed))?;
-                        self.compose_text_lane = Some(ComposeTextField::Name);
-                        Ok(())
-                    }
-                    (ComposeTextField::Name, _) => {
-                        self.dispatch(backend, UiAction::SetComposeAgentName(committed))?;
-                        self.compose_text_lane = None;
-                        Ok(())
-                    }
-                    (ComposeTextField::Purpose, _) => Ok(()),
-                }
-            }
-            KeyCode::Backspace => {
-                self.compose_text_buffer.pop();
-                Ok(())
-            }
+            KeyCode::Esc => self.dispatch(backend, UiAction::CancelComposeDraft),
+            KeyCode::Enter | KeyCode::Tab => self.dispatch(backend, UiAction::CommitComposeDraft),
+            KeyCode::Backspace => self.dispatch(backend, UiAction::ComposeDraftBackspace),
             KeyCode::Char(character) if !ctrl => {
-                self.compose_text_buffer.push(character);
-                Ok(())
+                self.dispatch(backend, UiAction::ComposeDraftChar(character))
             }
             _ => Ok(()),
         }

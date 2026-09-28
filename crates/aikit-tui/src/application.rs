@@ -723,6 +723,26 @@ impl GraphPresentation {
     pub const MAX_DEPTH: u8 = 4;
 }
 
+/// Which field of the §1.3 creator path the text lane is editing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ComposeField {
+    Purpose,
+    Name,
+}
+
+/// The creator text lane's in-flight draft: which field it is editing and
+/// the exact text typed so far. This lives on the semantic state — not as
+/// input-routing state beside the renderer — precisely so the drawn frame
+/// can echo every keystroke: a lane whose typing is invisible has the
+/// operator composing blind. `None` means no lane is capturing. Committed
+/// values land in `compose_purpose`/`compose_agent_name`; this carries only
+/// the not-yet-committed text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComposeTextDraft {
+    pub field: ComposeField,
+    pub text: String,
+}
+
 impl Default for GraphPresentation {
     fn default() -> Self {
         Self {
@@ -823,6 +843,10 @@ pub struct TuiState {
     /// clears it and the stage machine stands on the failure for a resume.
     #[serde(default)]
     pub compose_intent: Option<ComposeIntent>,
+    /// The creator text lane's in-flight draft, while the lane captures
+    /// keystrokes. See [`ComposeTextDraft`].
+    #[serde(default)]
+    pub compose_text_draft: Option<ComposeTextDraft>,
 }
 
 impl Default for TuiState {
@@ -859,6 +883,7 @@ impl Default for TuiState {
             compose_skill_sets: Vec::new(),
             agent_work: AgentWorkStage::default(),
             compose_intent: None,
+            compose_text_draft: None,
         }
     }
 }
@@ -966,6 +991,17 @@ pub enum UiAction {
     SetComposePurpose(String),
     /// Author the optional Agent name. Absence stays normal.
     SetComposeAgentName(String),
+    /// Open the creator text lane on one field, clearing any prior draft.
+    BeginComposeText(ComposeField),
+    /// Type one character into the open creator text lane.
+    ComposeDraftChar(char),
+    /// Backspace one character out of the open creator text lane.
+    ComposeDraftBackspace,
+    /// Commit the open creator text lane: the purpose's commit continues to
+    /// the optional name; the name's commit closes the lane.
+    CommitComposeDraft,
+    /// Abandon the open creator text lane without committing anything.
+    CancelComposeDraft,
     /// The SkillSet field reading arrived from the application service.
     SkillSetsLoaded {
         rows: Vec<SkillSetFieldRow>,
@@ -1737,6 +1773,49 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
         UiAction::SetComposeAgentName(name) => {
             state.compose_agent_name = name;
             state.preview = None;
+        }
+        UiAction::BeginComposeText(field) => {
+            state.compose_text_draft = Some(ComposeTextDraft {
+                field,
+                text: String::new(),
+            });
+        }
+        UiAction::ComposeDraftChar(character) => {
+            if let Some(draft) = state.compose_text_draft.as_mut() {
+                draft.text.push(character);
+            }
+        }
+        UiAction::ComposeDraftBackspace => {
+            if let Some(draft) = state.compose_text_draft.as_mut() {
+                draft.text.pop();
+            }
+        }
+        UiAction::CommitComposeDraft => {
+            let Some(draft) = state.compose_text_draft.take() else {
+                return TuiReduction { state, effects };
+            };
+            let committed = draft.text.trim().to_string();
+            match draft.field {
+                // Authored source changed: the previous preview no longer
+                // describes what this composition resolves to — the same
+                // semantics as the explicit Set actions.
+                ComposeField::Purpose => {
+                    state.compose_purpose = committed;
+                    state.preview = None;
+                    // The guided path continues to the optional name.
+                    state.compose_text_draft = Some(ComposeTextDraft {
+                        field: ComposeField::Name,
+                        text: String::new(),
+                    });
+                }
+                ComposeField::Name => {
+                    state.compose_agent_name = committed;
+                    state.preview = None;
+                }
+            }
+        }
+        UiAction::CancelComposeDraft => {
+            state.compose_text_draft = None;
         }
         UiAction::SkillSetsLoaded { rows } => {
             state.compose_skill_set_field = rows;

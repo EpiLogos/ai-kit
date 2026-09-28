@@ -41,10 +41,24 @@ pub struct CrosstermEvents {
     pub poll_interval: Duration,
 }
 
+/// The idle wait one `next()` call may spend before reporting `Idle`.
+///
+/// This constant is the idle surface's whole energy budget. The event loop
+/// calls `next()` again the moment handling returns, so an idle surface
+/// sleeps at exactly this interval and wakes `1s / poll_interval` times per
+/// second — ten polls a second here — with each wake costing one bounded
+/// `poll` and nothing else when the Conversation aperture is closed. The
+/// bound has a floor as well as a ceiling: crossterm's `poll` returns the
+/// instant an event arrives, so this interval is the *maximum* idle wait,
+/// never added keystroke latency, but a near-zero tick would still spin the
+/// loop at full speed, and an orphaned surface (the custody contract) must
+/// not burn CPU merely because nobody is watching it.
+pub const IDLE_POLL_TICK: Duration = Duration::from_millis(100);
+
 impl Default for CrosstermEvents {
     fn default() -> Self {
         Self {
-            poll_interval: Duration::from_millis(100),
+            poll_interval: IDLE_POLL_TICK,
         }
     }
 }
@@ -113,5 +127,46 @@ impl EventSource for ScriptedEvents {
     /// deterministically — no real clock, no real terminal, just a queue.
     fn poll_ready(&mut self) -> Result<bool> {
         Ok(!self.queue.is_empty())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The idle energy contract, pinned at the constant: an idle surface
+    /// sleeps at `IDLE_POLL_TICK` and therefore performs at most
+    /// `1s / tick` polls per second. The band is the bounded tick the
+    /// surface loop depends on — a zero or near-zero tick here would have
+    /// `next()` return immediately and spin the loop at full speed (idle
+    /// CPU burn with no drawing at all), while a tick above a quarter
+    /// second starts to show in how long a surface takes to notice the
+    /// orphan flag and repaint windows it may have missed.
+    #[test]
+    fn the_idle_poll_tick_is_bounded() {
+        assert!(
+            IDLE_POLL_TICK >= Duration::from_millis(100),
+            "an idle tick below 100ms lets the event loop spin: {IDLE_POLL_TICK:?}"
+        );
+        assert!(
+            IDLE_POLL_TICK <= Duration::from_millis(250),
+            "an idle tick above 250ms makes the surface sluggish: {IDLE_POLL_TICK:?}"
+        );
+
+        // The real event source must derive its wait from the constant, not
+        // from a private re-declared value that can drift.
+        assert_eq!(
+            CrosstermEvents::default().poll_interval,
+            IDLE_POLL_TICK,
+            "CrosstermEvents must sleep at the named idle tick"
+        );
+
+        // The cadence the loop actually gets: between four and ten idle
+        // polls a second, each one a bounded sleep and nothing more.
+        let polls_per_second = 1.0f64 / (IDLE_POLL_TICK.as_secs_f64());
+        assert!(
+            (4.0..=10.0).contains(&polls_per_second),
+            "an idle surface must perform a bounded number of polls per second, got {polls_per_second}"
+        );
     }
 }
