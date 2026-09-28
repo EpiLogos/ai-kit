@@ -60,6 +60,7 @@ pub mod multicall;
 pub mod mux_install;
 pub mod orientation_packet;
 pub mod permission_defaults;
+pub mod practice_capsule;
 pub mod praxis_cli;
 pub mod pressure;
 pub mod probe;

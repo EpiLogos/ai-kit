@@ -308,11 +308,7 @@ fn load_profile(profiles_root: &Path, path: &Path) -> Result<Profile> {
 /// name — is a new revision, and lengths are included so that concatenation
 /// cannot be made ambiguous by a crafted filename.
 pub fn compute_revision(dir: &Path, manifest_bytes: &[u8]) -> Result<Revision> {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"aikit-capsule-revision-v2\n");
-    hasher.update(&(manifest_bytes.len() as u64).to_le_bytes());
-    hasher.update(manifest_bytes);
-    hasher.update(&file_mode(&dir.join(MANIFEST_FILE))?.to_le_bytes());
+    let manifest_mode = file_mode(&dir.join(MANIFEST_FILE))?;
 
     let mut files: Vec<(String, PathBuf)> = Vec::new();
     for entry in walkdir::WalkDir::new(dir)
@@ -336,17 +332,55 @@ pub fn compute_revision(dir: &Path, manifest_bytes: &[u8]) -> Result<Revision> {
     }
     files.sort();
 
+    let mut entries = Vec::with_capacity(files.len());
     for (relative, path) in files {
         let contents =
             std::fs::read(&path).map_err(|e| io_error("registry.read_failed", &path, &e))?;
-        hasher.update(&(relative.len() as u64).to_le_bytes());
-        hasher.update(relative.as_bytes());
-        hasher.update(&file_mode(&path)?.to_le_bytes());
-        hasher.update(&(contents.len() as u64).to_le_bytes());
-        hasher.update(&contents);
+        entries.push(RevisionEntry {
+            path: relative,
+            mode: file_mode(&path)?,
+            contents,
+        });
     }
+    Ok(revision_of_entries(manifest_bytes, manifest_mode, &entries))
+}
 
-    Ok(Revision::from_hash(hasher.finalize()))
+/// One non-manifest file of a capsule as the revision reads it: its
+/// `/`-separated path relative to the capsule directory, its permission bits
+/// (`mode & 0o7777` on Unix) and its bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisionEntry {
+    pub path: String,
+    pub mode: u32,
+    pub contents: Vec<u8>,
+}
+
+/// The capsule revision over files already in memory — the one algorithm
+/// [`compute_revision`] applies to a directory, so a capsule carried as data
+/// (an exported archive) proves the same revision its directory would.
+/// `entries` excludes the top-level manifest; they are hashed in path order
+/// whatever order they arrive in.
+pub fn revision_of_entries(
+    manifest_bytes: &[u8],
+    manifest_mode: u32,
+    entries: &[RevisionEntry],
+) -> Revision {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"aikit-capsule-revision-v2\n");
+    hasher.update(&(manifest_bytes.len() as u64).to_le_bytes());
+    hasher.update(manifest_bytes);
+    hasher.update(&manifest_mode.to_le_bytes());
+
+    let mut sorted: Vec<&RevisionEntry> = entries.iter().collect();
+    sorted.sort_by(|left, right| left.path.cmp(&right.path));
+    for entry in sorted {
+        hasher.update(&(entry.path.len() as u64).to_le_bytes());
+        hasher.update(entry.path.as_bytes());
+        hasher.update(&entry.mode.to_le_bytes());
+        hasher.update(&(entry.contents.len() as u64).to_le_bytes());
+        hasher.update(&entry.contents);
+    }
+    Revision::from_hash(hasher.finalize())
 }
 
 #[cfg(unix)]
