@@ -126,17 +126,16 @@ impl GatewayConnectorEntry {
                     ));
                 }
             }
-            "stdio" => {
-                if self.program.is_empty() || self.program[0].trim().is_empty() {
-                    return Err(AikitError::new(
-                        "gateway_connector_config.program_required",
-                        format!(
-                            "connector {} uses the stdio implementation; declare --program COMMAND",
-                            self.connector_ref
-                        ),
-                    ));
-                }
+            "stdio" if self.program.is_empty() || self.program[0].trim().is_empty() => {
+                return Err(AikitError::new(
+                    "gateway_connector_config.program_required",
+                    format!(
+                        "connector {} uses the stdio implementation; declare --program COMMAND",
+                        self.connector_ref
+                    ),
+                ));
             }
+            "stdio" => {}
             _ => {}
         }
         Ok(())
