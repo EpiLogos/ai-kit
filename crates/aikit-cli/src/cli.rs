@@ -4880,6 +4880,12 @@ pub enum SessionSpaceCommand {
         #[arg(long)]
         provider_json: String,
     },
+    /// Withdraw one configured encounter provider by its exact id. Owner-only,
+    /// never IPC input. Refuses an unknown id rather than pretending.
+    EncounterDeconfigure {
+        #[arg(long)]
+        provider_id: String,
+    },
     /// Provision or withdraw a native Agency binding under an exact revision.
     /// This is an owner-only operation, not gateway/IPC input.
     EncounterAgencyConfigure {

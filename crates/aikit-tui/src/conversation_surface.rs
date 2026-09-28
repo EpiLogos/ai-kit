@@ -269,6 +269,7 @@ pub struct ConversationSurface {
 }
 
 impl Default for ConversationSurface {
+    #[allow(clippy::derivable_impls)] // the field order below is the reading order of the pane
     fn default() -> Self {
         Self {
             open: false,
@@ -534,14 +535,14 @@ impl ConversationSurface {
     /// becomes the note. A send that could not be asked keeps the text: the
     /// operator, not a reconnect, decides whether to send it.
     pub fn submit_compose(&mut self) -> Option<CompositionOutcome> {
-        let (connector_ref, address, stream_ref) = match &self.open_conversation {
-            Some(open) => (
-                open.entry.connector_ref.clone(),
-                open.address.clone(),
-                open.stream_ref.clone(),
-            ),
-            None => return None,
+        let Some(open) = &self.open_conversation else {
+            return None;
         };
+        let (connector_ref, address, stream_ref) = (
+            open.entry.connector_ref.clone(),
+            open.address.clone(),
+            open.stream_ref.clone(),
+        );
         if self.compose.trim().is_empty() {
             return None;
         }
@@ -556,9 +557,7 @@ impl ConversationSurface {
         // back as a conversation response and renders in the pane. Anything
         // else rides the gateway's own ingest path exactly as before.
         if let SlashParse::Operation(operation) = parse_slash(&text) {
-            let Some(open) = self.open_conversation.as_ref() else {
-                return None;
-            };
+            let open = self.open_conversation.as_ref()?;
             let binding_ref = open.entry.binding_ref.clone();
             return self.submit_operation(&target, binding_ref, operation);
         }

@@ -80,8 +80,7 @@ pub struct MethodRunBarrier {
 /// does not ask is enablement: explicit invocation through the native runner
 /// has never required it (a script is runnable while inactive; activation
 /// decides ambient exposure), so a script-kind Method runs wherever it
-/// stands, subject to trust.
-///
+/// stands, subject to trust.///
 /// The id must be in the view's catalogue; callers refuse unknown refs before
 /// consulting the barrier.
 pub fn run_barrier(view: &ResolvedView, id: &CapsuleId) -> Option<MethodRunBarrier> {
@@ -102,6 +101,15 @@ pub fn run_barrier(view: &ResolvedView, id: &CapsuleId) -> Option<MethodRunBarri
             recovery,
         });
     }
+    if view.is_declared_disabled(id) {
+        return Some(MethodRunBarrier {
+            code: "method.not_enabled",
+            condition: "is explicitly disabled in this context".to_string(),
+            recovery: format!(
+                "re-enable it in the scope you mean: `aikit enable {id} --scope project --apply` (or `--scope global`)"
+            ),
+        });
+    }
     if entry.kind != Kind::Script {
         let standing = if view.is_active(id) {
             "is enabled and active in this context, but".to_string()
@@ -113,8 +121,7 @@ pub fn run_barrier(view: &ResolvedView, id: &CapsuleId) -> Option<MethodRunBarri
             condition: format!(
                 "{standing} a {} Method carries no deterministic executable body — `method run` \
                  drives the same native runner `aikit run` uses, which only a `[script]` payload \
-                 provides; enabling it could not supply one",
-                entry.kind.as_str()
+                 provides; enabling it could not supply one",                entry.kind.as_str()
             ),
             recovery: format!(
                 "invoke the Skill through the agent: `aikit act invoke {id}`; or give the Method \
@@ -893,8 +900,7 @@ description = "METHOD: a bounded practice for the test field."
             assert_eq!(
                 run_barrier(&view, &CapsuleId::parse("script/practice/compose").unwrap()),
                 None,
-                "the native runner's own contract: no enablement barrier"
-            );
+                "the native runner's own contract: no enablement barrier"            );
         }
 
         #[test]
