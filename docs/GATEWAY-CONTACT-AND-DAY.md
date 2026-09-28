@@ -164,6 +164,19 @@ the same ref stays one record; the same ref with another target is refused as
 an identity rewrite. Out-of-order relays keep the receiving journal's arrival
 order and each sender's `sent_at_unix_ms`.
 
+An exact route is handed only to gateways that keep it. A gateway advertises
+`communique-exact-instance` in its `protocol` answer (`features`); `send
+--instance` refuses with `gateway.exact_instance_unsupported` when this
+Workcell's gateway, or a relay target that answers, does not advertise it (a
+gateway built before exact routes would silently drop `to_instance` and turn
+the Communique into a durable Position route). Every echoed record (send,
+remote ingest, the local relay record) must still carry the instance binding
+it was handed, or the command refuses with
+`gateway.communique_instance_binding_lost` and reports no route over it. In a
+relay pass each exact route stands or falls on its own: a standing that cannot
+be recorded, or a refused relay, is listed in `skipped` with its `code` and
+`reason`, and the pass continues.
+
 ### Delivery at the turn boundary
 
 On `UserPromptSubmit` the hook dispatcher verifies the body's occupancy, reads

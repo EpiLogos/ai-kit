@@ -201,8 +201,9 @@ pub use gateway_runtime::{
     GatewayOccupancyReading, GatewayOwnerUnavailable, GatewayReplay, GatewayRequestEnvelope,
     GatewayResponse, GatewayResponseEnvelope, GatewaySnapshot, GatewayStatus, GatewayStreamEvent,
     GatewayStreamJournal, ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA,
-    AGENCY_GATEWAY_VERSION, GATEWAY_ECOLOGY_AUTHORITY_LAW, GATEWAY_INVOCATION_MODES,
-    GATEWAY_OCCUPANCY_READING_SCHEMA,
+    AGENCY_GATEWAY_VERSION, GATEWAY_ECOLOGY_AUTHORITY_LAW,
+    GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE, GATEWAY_INVOCATION_MODES,
+    GATEWAY_OCCUPANCY_READING_SCHEMA, GATEWAY_PROTOCOL_FEATURES,
 };
 pub use gateway_service::{
     acquire_gateway_state_lock, execute_against_state_file, persist_gateway_state,

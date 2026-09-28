@@ -43,6 +43,16 @@ pub const AGENCY_GATEWAY_VERSION: &str = "aikit.agency-gateway/v1";
 pub const ACTUATION_STREAM_SCHEMA: &str = "actuation.stream/v1";
 pub const GATEWAY_OCCUPANCY_READING_SCHEMA: &str = "aikit.gateway-occupancy-reading/v1";
 
+/// Protocol feature: this gateway keeps a Communique's `to_instance` binding
+/// through send, ingest, relay and its state file. A gateway that does not
+/// advertise it (one built before exact-instance routes) silently drops the
+/// field and would turn an exact-instance Communique into a durable Position
+/// route, so a client never hands it one.
+pub const GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE: &str = "communique-exact-instance";
+
+/// Every protocol feature this gateway advertises in its `protocol` answer.
+pub const GATEWAY_PROTOCOL_FEATURES: [&str; 1] = [GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE];
+
 /// A serving gateway's answer to "who occupies this Position on your
 /// Workcell" (or, with no Position, the whole listing). The gateway keeps no
 /// occupancy: the answer is its own Workcell's Actuation read at the moment of
@@ -1632,6 +1642,10 @@ pub enum GatewayResponse {
         connector_sdk_version: String,
         connector_wire_version: String,
         actuation_stream_schema: String,
+        /// Protocol features this gateway supports. Absent on gateways that
+        /// predate feature advertisement: they support none of them.
+        #[serde(default)]
+        features: Vec<String>,
     },
     Discovery {
         discovery: GatewayDiscovery,
@@ -1720,6 +1734,10 @@ pub fn execute_gateway_command(
             connector_sdk_version: GATEWAY_CONNECTOR_SDK_VERSION.into(),
             connector_wire_version: GATEWAY_CONNECTOR_WIRE_VERSION.into(),
             actuation_stream_schema: ACTUATION_STREAM_SCHEMA.into(),
+            features: GATEWAY_PROTOCOL_FEATURES
+                .iter()
+                .map(|feature| (*feature).to_owned())
+                .collect(),
         }),
         GatewayCommand::Discover => Ok(GatewayResponse::Discovery {
             discovery: gateway.discovery(),

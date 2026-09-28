@@ -49,6 +49,7 @@ use aikit_adapters::{
     Communique, CommuniqueDraft, CommuniqueForwardOutcome, CommuniqueInstance,
     CommuniqueInstanceHold, CommuniqueRouting, CommuniqueState, GatewayCarrierTarget,
     GatewayCommand, GatewayResponse, SenderAttribution, COMMUNIQUE_REF_PREFIX,
+    GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE,
 };
 use aikit_core::{AikitError, Result};
 use aikit_store::AikitHome;
@@ -1504,15 +1505,49 @@ fn accept_and_relay(
     gateway: &dyn GatewayAccess,
     draft: CommuniqueDraft,
     remote: Option<GatewayRemote>,
-    mut context: Value,
+    context: Value,
 ) -> Result<Value> {
+    accept_and_relay_via(gateway, draft, remote, context, &carrier_call)
+}
+
+fn accept_and_relay_via(
+    gateway: &dyn GatewayAccess,
+    draft: CommuniqueDraft,
+    remote: Option<GatewayRemote>,
+    mut context: Value,
+    carrier: RemoteCarrier<'_>,
+) -> Result<Value> {
+    let expected = draft.to_instance.clone();
+    if expected.is_some() {
+        // An exact-instance route is handed only to gateways that keep it:
+        // this Workcell's (running service or state file) must advertise the
+        // feature, and a relay target that answers without it is refused
+        // before anything is recorded. A relay target that cannot be asked
+        // now is asked again by the relay pass before it is ever handed the
+        // record.
+        if let ExactSupport::Missing(refusal) | ExactSupport::Unasked(refusal) =
+            exact_instance_support(gateway.call(GatewayCommand::Protocol), "on this Workcell")
+        {
+            return Err(refusal);
+        }
+        if let Some(entry) = &remote {
+            if let ExactSupport::Missing(refusal) = exact_instance_support(
+                carrier(entry, GatewayCommand::Protocol),
+                &format!("of Workcell {}", entry.workcell_ref),
+            ) {
+                return Err(refusal);
+            }
+        }
+    }
     let (mut communique, replayed, accepted_by) =
         expect_accepted(gateway.call(GatewayCommand::SendCommunique {
             draft: Box::new(draft),
         })?)?;
+    ensure_instance_kept(expected.as_ref(), &communique, "on this Workcell")?;
     let mut forward = Value::Null;
     if let Some(entry) = remote {
-        let (record, report) = forward_one(gateway, &communique, &entry, &accepted_by, None)?;
+        let (record, report) =
+            forward_one_via(gateway, &communique, &entry, &accepted_by, None, carrier)?;
         communique = record;
         forward = report;
     }
@@ -1568,6 +1603,86 @@ fn vacant_everywhere(
 /// Relay one record to a declared remote gateway and record the outcome
 /// locally. A remote that cannot be reached leaves the record queued; the
 /// sender is never blocked on it.
+/// One command to a declared remote Workcell's gateway.
+type RemoteCarrier<'a> = &'a dyn Fn(&GatewayRemote, GatewayCommand) -> Result<GatewayResponse>;
+
+/// The production remote carrier: the remote gateway's authenticated
+/// WebSocket, its bearer token resolved from its declared location.
+fn carrier_call(remote: &GatewayRemote, command: GatewayCommand) -> Result<GatewayResponse> {
+    let token = SecretLocation::parse(&remote.token_location)?.resolve()?;
+    let target = GatewayCarrierTarget::WebSocket {
+        bind: remote.websocket_bind.clone(),
+        path: remote.websocket_path.clone(),
+        bearer_token: token.expose().to_owned(),
+    };
+    aikit_adapters::gateway_command(&target, command, None)
+}
+
+/// Whether a gateway keeps exact-instance bindings, from its `protocol`
+/// answer.
+enum ExactSupport {
+    Advertised,
+    /// It answered, and does not advertise the feature (or predates it).
+    Missing(AikitError),
+    /// It could not be asked.
+    Unasked(AikitError),
+}
+
+fn exact_instance_support(answer: Result<GatewayResponse>, whose: &str) -> ExactSupport {
+    let features = match answer {
+        Ok(GatewayResponse::Protocol { features, .. }) => features,
+        Ok(_) => Vec::new(),
+        Err(error) => return ExactSupport::Unasked(error),
+    };
+    if features
+        .iter()
+        .any(|feature| feature == GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE)
+    {
+        return ExactSupport::Advertised;
+    }
+    ExactSupport::Missing(three_part(
+        "gateway.exact_instance_unsupported",
+        format!(
+            "The gateway {whose} does not advertise `{GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE}` in its protocol answer: it predates exact-instance Communique routes and would silently drop the instance binding, turning the Communique into a durable Position route."
+        ),
+        "Nothing was handed to it.",
+        format!(
+            "Restart that gateway with this aikit (`aikit gateway protocol` must list `{GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE}`), or send a durable Position route by omitting --instance."
+        ),
+    ))
+}
+
+/// A gateway's echoed record must carry exactly the instance binding it was
+/// handed; one that lost it is never reported as an exact-instance route.
+fn ensure_instance_kept(
+    expected: Option<&CommuniqueInstance>,
+    echoed: &Communique,
+    whose: &str,
+) -> Result<()> {
+    if echoed.to_instance.as_ref() == expected {
+        return Ok(());
+    }
+    let describe = |instance: Option<&CommuniqueInstance>| {
+        instance
+            .map(|instance| instance.generation_ref.clone())
+            .unwrap_or_else(|| "no instance (a durable Position route)".into())
+    };
+    Err(three_part(
+        "gateway.communique_instance_binding_lost",
+        format!(
+            "The gateway {whose} answered for {} with {}, but it was handed {}: the exact-instance binding was lost.",
+            echoed.communique_ref,
+            describe(echoed.to_instance.as_ref()),
+            describe(expected)
+        ),
+        "Its record there must not be taken as an exact-instance route, and no route is reported over it.",
+        format!(
+            "Restart that gateway with this aikit (`aikit gateway protocol` must list `{GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE}`), then read it with `aikit gateway read {}`.",
+            echoed.communique_ref
+        ),
+    ))
+}
+
 fn forward_one(
     gateway: &dyn GatewayAccess,
     communique: &Communique,
@@ -1575,25 +1690,58 @@ fn forward_one(
     local_gateway_ref: &str,
     routing: Option<aikit_adapters::CommuniqueRouting>,
 ) -> Result<(Communique, Value)> {
+    forward_one_via(
+        gateway,
+        communique,
+        remote,
+        local_gateway_ref,
+        routing,
+        &carrier_call,
+    )
+}
+
+/// `forward_one` through a given remote carrier. An exact-instance record is
+/// handed only to a remote that advertises the feature, and the remote's
+/// echoed record must still carry the binding; either refusal is recorded as
+/// a failed relay (the record stays queued here) and returned as the typed
+/// error.
+fn forward_one_via(
+    gateway: &dyn GatewayAccess,
+    communique: &Communique,
+    remote: &GatewayRemote,
+    local_gateway_ref: &str,
+    routing: Option<aikit_adapters::CommuniqueRouting>,
+    carrier: RemoteCarrier<'_>,
+) -> Result<(Communique, Value)> {
     let at = now_unix_ms();
-    let attempt = SecretLocation::parse(&remote.token_location)
-        .and_then(|location| location.resolve())
-        .and_then(|token| {
-            let target = GatewayCarrierTarget::WebSocket {
-                bind: remote.websocket_bind.clone(),
-                path: remote.websocket_path.clone(),
-                bearer_token: token.expose().to_owned(),
-            };
-            aikit_adapters::gateway_command(
-                &target,
-                GatewayCommand::IngestCommunique {
-                    communique: Box::new(communique.clone()),
-                    relayed_by: local_gateway_ref.to_owned(),
-                },
-                None,
-            )
-        })
-        .and_then(expect_accepted);
+    let whose = format!("of Workcell {}", remote.workcell_ref);
+    let mut refusal: Option<AikitError> = None;
+    let attempt = (|| {
+        if communique.to_instance.is_some() {
+            match exact_instance_support(carrier(remote, GatewayCommand::Protocol), &whose) {
+                ExactSupport::Advertised => {}
+                ExactSupport::Missing(missing) => {
+                    refusal = Some(missing.clone());
+                    return Err(missing);
+                }
+                ExactSupport::Unasked(error) => return Err(error),
+            }
+        }
+        let accepted = expect_accepted(carrier(
+            remote,
+            GatewayCommand::IngestCommunique {
+                communique: Box::new(communique.clone()),
+                relayed_by: local_gateway_ref.to_owned(),
+            },
+        )?)?;
+        if let Err(lost) =
+            ensure_instance_kept(communique.to_instance.as_ref(), &accepted.0, &whose)
+        {
+            refusal = Some(lost.clone());
+            return Err(lost);
+        }
+        Ok(accepted)
+    })();
     let outcome = match &attempt {
         Ok((_, _, remote_gateway_ref)) => CommuniqueForwardOutcome::Forwarded {
             workcell_ref: remote.workcell_ref.clone(),
@@ -1611,6 +1759,10 @@ fn forward_one(
         outcome,
         routing,
     })?)?;
+    ensure_instance_kept(communique.to_instance.as_ref(), &record, "on this Workcell")?;
+    if let Some(refusal) = refusal {
+        return Err(refusal);
+    }
     let report = match attempt {
         Ok((_, replayed, remote_gateway_ref)) => json!({
             "state": "forwarded",
@@ -1678,6 +1830,16 @@ pub fn forward_pass(
     gateway: &dyn GatewayAccess,
     cwd: &Path,
 ) -> Result<Value> {
+    forward_pass_via(home, owners, gateway, cwd, &carrier_call)
+}
+
+fn forward_pass_via(
+    home: &AikitHome,
+    owners: &dyn ContactOwners,
+    gateway: &dyn GatewayAccess,
+    cwd: &Path,
+    carrier: RemoteCarrier<'_>,
+) -> Result<Value> {
     let queue = expect_list(gateway.call(GatewayCommand::CommuniqueForwardQueue)?)?;
     let (local, basis) = local_workcell(owners, cwd);
     let local_gateway_ref = match gateway.call(GatewayCommand::Status)? {
@@ -1700,110 +1862,132 @@ pub fn forward_pass(
     );
     for record in &queue {
         if let Some(instance) = &record.to_instance {
-            let reading = place_instance(
-                owners,
-                &record.to_position_ref,
-                instance,
-                local.as_deref(),
-                &remotes,
-                &mut |_| {
-                    survey
-                        .get_or_insert_with(|| {
-                            RemoteSurvey::ask(&elsewhere, &GatewayCommand::OccupancyList)
-                        })
-                        .clone()
-                },
-            );
-            let mut restand = |state, hold, basis: &str| -> Result<Communique> {
-                let record =
-                    expect_record(gateway.call(GatewayCommand::RecordCommuniqueStanding {
-                        communique_ref: record.communique_ref.clone(),
-                        state,
-                        instance_hold: hold,
-                        at_unix_ms: now_unix_ms(),
-                        basis: basis.to_owned(),
-                    })?)?;
-                restood.push(json!({
-                    "communique_ref": record.communique_ref,
-                    "state": record.state,
-                    "instance_hold": record.instance_hold,
-                }));
-                Ok(record)
-            };
-            let changes = |state, hold: Option<CommuniqueInstanceHold>| {
-                record.state != state || record.instance_hold != hold
-            };
-            let (entry, routing, current) = match reading.placement {
-                InstancePlacement::Here { basis } => {
-                    if changes(CommuniqueState::Pending, None) {
-                        restand(CommuniqueState::Pending, None, &basis)?;
+            // Each exact-instance Communique stands or falls on its own: a
+            // gateway that cannot record one standing (an older service that
+            // does not know the command, or a record that stopped being
+            // deliverable meanwhile) or a relay refused for it is reported in
+            // `skipped` with its reason, and the pass goes on.
+            let outcome = (|| -> Result<()> {
+                let reading = place_instance(
+                    owners,
+                    &record.to_position_ref,
+                    instance,
+                    local.as_deref(),
+                    &remotes,
+                    &mut |_| {
+                        survey
+                            .get_or_insert_with(|| {
+                                RemoteSurvey::ask(&elsewhere, &GatewayCommand::OccupancyList)
+                            })
+                            .clone()
+                    },
+                );
+                let mut restand = |state, hold, basis: &str| -> Result<Communique> {
+                    let record =
+                        expect_record(gateway.call(GatewayCommand::RecordCommuniqueStanding {
+                            communique_ref: record.communique_ref.clone(),
+                            state,
+                            instance_hold: hold,
+                            at_unix_ms: now_unix_ms(),
+                            basis: basis.to_owned(),
+                        })?)?;
+                    restood.push(json!({
+                        "communique_ref": record.communique_ref,
+                        "state": record.state,
+                        "instance_hold": record.instance_hold,
+                    }));
+                    Ok(record)
+                };
+                let changes = |state, hold: Option<CommuniqueInstanceHold>| {
+                    record.state != state || record.instance_hold != hold
+                };
+                let (entry, routing, current) = match reading.placement {
+                    InstancePlacement::Here { basis } => {
+                        if changes(CommuniqueState::Pending, None) {
+                            restand(CommuniqueState::Pending, None, &basis)?;
+                        }
+                        return Ok(());
                     }
-                    continue;
-                }
-                InstancePlacement::Relay {
-                    remote,
+                    InstancePlacement::Relay {
+                        remote,
+                        routing,
+                        basis,
+                    } => {
+                        let current = if changes(CommuniqueState::Pending, None) {
+                            restand(CommuniqueState::Pending, None, &basis)?
+                        } else {
+                            record.clone()
+                        };
+                        (remote, routing, current)
+                    }
+                    InstancePlacement::Undeclared {
+                        workcell_ref,
+                        basis,
+                    } => {
+                        skipped.push(json!({
+                            "communique_ref": record.communique_ref,
+                            "workcell_ref": workcell_ref,
+                            "basis": basis,
+                            "action": format!("Declare the endpoint: {}", remote_command(&workcell_ref)),
+                        }));
+                        return Ok(());
+                    }
+                    // Not knowing never overwrites what was known.
+                    InstancePlacement::Held {
+                        hold: CommuniqueInstanceHold::InstanceUnverified,
+                        ..
+                    } => return Ok(()),
+                    InstancePlacement::Held { hold, basis } => {
+                        if changes(CommuniqueState::Held, Some(hold)) {
+                            restand(CommuniqueState::Held, Some(hold), &basis)?;
+                        }
+                        held.push(json!({
+                            "communique_ref": record.communique_ref,
+                            "position_ref": record.to_position_ref,
+                            "instance": instance,
+                            "instance_hold": hold,
+                            "basis": basis,
+                        }));
+                        return Ok(());
+                    }
+                    InstancePlacement::Ambiguous(refusal) => {
+                        ambiguous.push(json!({
+                            "communique_ref": record.communique_ref,
+                            "position_ref": record.to_position_ref,
+                            "fact": refusal.details().get("fact"),
+                            "consequence": "It stays in this gateway's journal, undelivered; nothing was relayed.",
+                            "action": refusal.details().get("action"),
+                        }));
+                        return Ok(());
+                    }
+                };
+                let (relayed, report) = forward_one_via(
+                    gateway,
+                    &current,
+                    &entry,
+                    &local_gateway_ref,
                     routing,
-                    basis,
-                } => {
-                    let current = if changes(CommuniqueState::Pending, None) {
-                        restand(CommuniqueState::Pending, None, &basis)?
-                    } else {
-                        record.clone()
-                    };
-                    (remote, routing, current)
-                }
-                InstancePlacement::Undeclared {
-                    workcell_ref,
-                    basis,
-                } => {
-                    skipped.push(json!({
-                        "communique_ref": record.communique_ref,
-                        "workcell_ref": workcell_ref,
-                        "basis": basis,
-                        "action": format!("Declare the endpoint: {}", remote_command(&workcell_ref)),
+                    carrier,
+                )?;
+                if report["state"] == "forwarded" {
+                    forwarded.push(json!({
+                        "communique_ref": relayed.communique_ref,
+                        "workcell_ref": entry.workcell_ref,
+                        "routing": relayed.routing,
+                        "instance": relayed.to_instance,
                     }));
-                    continue;
+                } else {
+                    queued
+                        .push(json!({"communique_ref": relayed.communique_ref, "report": report}));
                 }
-                // Not knowing never overwrites what was known.
-                InstancePlacement::Held {
-                    hold: CommuniqueInstanceHold::InstanceUnverified,
-                    ..
-                } => continue,
-                InstancePlacement::Held { hold, basis } => {
-                    if changes(CommuniqueState::Held, Some(hold)) {
-                        restand(CommuniqueState::Held, Some(hold), &basis)?;
-                    }
-                    held.push(json!({
-                        "communique_ref": record.communique_ref,
-                        "position_ref": record.to_position_ref,
-                        "instance": instance,
-                        "instance_hold": hold,
-                        "basis": basis,
-                    }));
-                    continue;
-                }
-                InstancePlacement::Ambiguous(refusal) => {
-                    ambiguous.push(json!({
-                        "communique_ref": record.communique_ref,
-                        "position_ref": record.to_position_ref,
-                        "fact": refusal.details().get("fact"),
-                        "consequence": "It stays in this gateway's journal, undelivered; nothing was relayed.",
-                        "action": refusal.details().get("action"),
-                    }));
-                    continue;
-                }
-            };
-            let (relayed, report) =
-                forward_one(gateway, &current, &entry, &local_gateway_ref, routing)?;
-            if report["state"] == "forwarded" {
-                forwarded.push(json!({
-                    "communique_ref": relayed.communique_ref,
-                    "workcell_ref": entry.workcell_ref,
-                    "routing": relayed.routing,
-                    "instance": relayed.to_instance,
+                Ok(())
+            })();
+            if let Err(error) = outcome {
+                skipped.push(json!({
+                    "communique_ref": record.communique_ref,
+                    "code": error.code(),
+                    "reason": error.to_string(),
                 }));
-            } else {
-                queued.push(json!({"communique_ref": relayed.communique_ref, "report": report}));
             }
             continue;
         }
@@ -2620,5 +2804,394 @@ impl aikit_adapters::GatewayTick for GatewayServiceTick {
                 "relay": relay.unwrap_or_else(|error| json!({ "error": error.to_string() })),
             })),
         }
+    }
+}
+
+#[cfg(test)]
+mod exact_instance_binding_tests {
+    //! Simulated older peers: gateways that predate exact-instance routes
+    //! (no advertised feature, or a record that comes back without its
+    //! `to_instance`), and a service that does not know
+    //! RecordCommuniqueStanding.
+
+    use std::cell::RefCell;
+
+    use aikit_adapters::GatewayStatus;
+    use aikit_core::resource::ResourceRef;
+
+    use super::*;
+    use crate::gateway_owners::OwnerRefusal;
+
+    fn record(reference: &str, generation: &str, state: &str) -> Communique {
+        serde_json::from_value(json!({
+            "schema": "aikit.communique/v1",
+            "communique_ref": reference,
+            "sequence": 1,
+            "attribution": "unknown",
+            "attribution_basis": "test",
+            "to_position_ref": "position:steward",
+            "to_instance": { "generation_ref": generation },
+            "instance_hold": if state == "held" { json!("instance-absent") } else { Value::Null },
+            "body": "hello",
+            "sent_at_unix_ms": 1,
+            "state": state,
+            "origin_gateway_ref": "agency-gateway/local",
+        }))
+        .unwrap()
+    }
+
+    fn draft(instance: Option<&str>) -> CommuniqueDraft {
+        CommuniqueDraft {
+            communique_ref: "communique:01test".into(),
+            from_position_ref: None,
+            from_generation_ref: None,
+            attribution: SenderAttribution::Unknown,
+            attribution_basis: "test".into(),
+            to_position_ref: "position:steward".into(),
+            to_workcell_ref: None,
+            to_instance: instance.map(|generation| CommuniqueInstance {
+                generation_ref: generation.into(),
+                required_workcell_ref: None,
+                agent_session_ref: None,
+                agency_ref: None,
+            }),
+            instance_hold: None,
+            body: "hello".into(),
+            sent_at_unix_ms: 1,
+            state: CommuniqueState::Pending,
+            state_basis: "test".into(),
+            reply_to: None,
+            forward_to_workcell_ref: None,
+            routing: None,
+        }
+    }
+
+    fn accepted_from(draft: &CommuniqueDraft) -> Communique {
+        let mut communique = record(&draft.communique_ref, "unused", "pending");
+        communique.to_instance = draft.to_instance.clone();
+        communique
+    }
+
+    fn protocol(features: &[&str]) -> GatewayResponse {
+        GatewayResponse::Protocol {
+            gateway_version: "aikit.agency-gateway/v1".into(),
+            connector_sdk_version: "x".into(),
+            connector_wire_version: "x".into(),
+            actuation_stream_schema: "x".into(),
+            features: features.iter().map(|f| (*f).to_owned()).collect(),
+        }
+    }
+
+    /// A gateway double. `features` is what its protocol answer advertises;
+    /// `strip` drops `to_instance` from every record it answers with (what an
+    /// older binary's serde does); `refuse_standing` fails
+    /// RecordCommuniqueStanding for those refs.
+    #[derive(Default)]
+    struct StubGateway {
+        features: Vec<&'static str>,
+        strip: bool,
+        refuse_standing: Vec<String>,
+        queue: Vec<Communique>,
+        log: RefCell<Vec<String>>,
+    }
+
+    impl StubGateway {
+        fn modern() -> Self {
+            Self {
+                features: vec![GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE],
+                ..Self::default()
+            }
+        }
+
+        fn answer(&self, mut communique: Communique) -> Communique {
+            if self.strip {
+                communique.to_instance = None;
+            }
+            communique
+        }
+
+        fn saw(&self, kind: &str) -> bool {
+            self.log.borrow().iter().any(|entry| entry == kind)
+        }
+    }
+
+    impl GatewayAccess for StubGateway {
+        fn call(&self, command: GatewayCommand) -> Result<GatewayResponse> {
+            let kind = serde_json::to_value(&command).unwrap()["type"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            self.log.borrow_mut().push(kind);
+            match command {
+                GatewayCommand::Protocol => Ok(protocol(&self.features)),
+                GatewayCommand::Status => Ok(GatewayResponse::Status {
+                    status: GatewayStatus {
+                        version: "v1".into(),
+                        gateway_ref: ResourceRef::parse("agency-gateway/local").unwrap(),
+                        connector_count: 0,
+                        binding_count: 0,
+                        stream_count: 0,
+                        pending_delivery_count: 0,
+                        delivery_receipt_count: 0,
+                        connector_health: Vec::new(),
+                    },
+                }),
+                GatewayCommand::SendCommunique { draft } => {
+                    Ok(GatewayResponse::CommuniqueAccepted {
+                        communique: self.answer(accepted_from(&draft)),
+                        replayed: false,
+                        accepted_by: "agency-gateway/local".into(),
+                    })
+                }
+                GatewayCommand::IngestCommunique { communique, .. } => {
+                    Ok(GatewayResponse::CommuniqueAccepted {
+                        communique: self.answer(*communique),
+                        replayed: false,
+                        accepted_by: "agency-gateway/remote".into(),
+                    })
+                }
+                GatewayCommand::CommuniqueForwardQueue => Ok(GatewayResponse::CommuniqueList {
+                    communiques: self.queue.clone(),
+                }),
+                GatewayCommand::RecordCommuniqueForward { communique_ref, .. } => {
+                    let found = self
+                        .queue
+                        .iter()
+                        .find(|c| c.communique_ref == communique_ref)
+                        .cloned()
+                        .unwrap_or_else(|| record(&communique_ref, "g", "pending"));
+                    Ok(GatewayResponse::CommuniqueRecord {
+                        communique: self.answer(found),
+                    })
+                }
+                GatewayCommand::RecordCommuniqueStanding {
+                    communique_ref,
+                    state,
+                    instance_hold,
+                    ..
+                } => {
+                    if self.refuse_standing.contains(&communique_ref) {
+                        return Err(AikitError::new(
+                            "agency_gateway.unknown_command",
+                            "unknown variant `record-communique-standing`",
+                        ));
+                    }
+                    let mut found = self
+                        .queue
+                        .iter()
+                        .find(|c| c.communique_ref == communique_ref)
+                        .cloned()
+                        .unwrap();
+                    found.state = state;
+                    found.instance_hold = instance_hold;
+                    Ok(GatewayResponse::CommuniqueRecord { communique: found })
+                }
+                other => panic!("unexpected command {other:?}"),
+            }
+        }
+    }
+
+    fn remote_b() -> GatewayRemote {
+        GatewayRemote {
+            workcell_ref: "workcell:b".into(),
+            websocket_bind: "127.0.0.1:1".into(),
+            websocket_path: "/".into(),
+            token_location: "env:AIKIT_TEST_UNUSED_TOKEN".into(),
+        }
+    }
+
+    fn code(error: &AikitError) -> &str {
+        error.code()
+    }
+
+    #[test]
+    fn an_exact_route_is_refused_by_a_local_gateway_that_does_not_advertise_the_feature() {
+        let old = StubGateway::default();
+        let error = accept_and_relay_via(&old, draft(Some("g1")), None, json!({}), &|_, _| {
+            unreachable!("no remote")
+        })
+        .unwrap_err();
+        assert_eq!(code(&error), "gateway.exact_instance_unsupported");
+        assert!(!old.saw("send-communique"), "nothing is handed to it");
+
+        // A durable Position route still goes to an older gateway.
+        let sent = accept_and_relay_via(&old, draft(None), None, json!({}), &|_, _| {
+            unreachable!("no remote")
+        })
+        .unwrap();
+        assert!(sent["communique"].get("to_instance").is_none());
+    }
+
+    #[test]
+    fn an_exact_route_whose_binding_the_local_gateway_drops_is_refused_not_reported() {
+        let stripping = StubGateway {
+            strip: true,
+            ..StubGateway::modern()
+        };
+        let error = accept_and_relay_via(
+            &stripping,
+            draft(Some("g1")),
+            None,
+            json!({"route": "exact-instance"}),
+            &|_, _| unreachable!("no remote"),
+        )
+        .unwrap_err();
+        assert_eq!(code(&error), "gateway.communique_instance_binding_lost");
+    }
+
+    #[test]
+    fn an_exact_relay_to_an_older_remote_gateway_is_refused_before_anything_is_recorded() {
+        let local = StubGateway::modern();
+        let old_remote = StubGateway::default();
+        let error = accept_and_relay_via(
+            &local,
+            draft(Some("g1")),
+            Some(remote_b()),
+            json!({}),
+            &|_, command| old_remote.call(command),
+        )
+        .unwrap_err();
+        assert_eq!(code(&error), "gateway.exact_instance_unsupported");
+        assert!(!local.saw("send-communique"));
+        assert!(!old_remote.saw("ingest-communique"));
+    }
+
+    #[test]
+    fn a_remote_that_drops_the_binding_on_ingest_is_recorded_failed_and_refused() {
+        let queued = record("communique:01relay", "g1", "pending");
+        let local = StubGateway {
+            queue: vec![queued.clone()],
+            ..StubGateway::modern()
+        };
+        let stripping_remote = StubGateway {
+            strip: true,
+            ..StubGateway::modern()
+        };
+        let error = forward_one_via(
+            &local,
+            &queued,
+            &remote_b(),
+            "agency-gateway/local",
+            None,
+            &|_, command| stripping_remote.call(command),
+        )
+        .unwrap_err();
+        assert_eq!(code(&error), "gateway.communique_instance_binding_lost");
+        assert!(stripping_remote.saw("ingest-communique"));
+        assert!(
+            local.saw("record-communique-forward"),
+            "the refused relay is recorded here, so the record stays queued"
+        );
+
+        // A remote that never advertised the feature is never handed it.
+        let old_remote = StubGateway::default();
+        let error = forward_one_via(
+            &local,
+            &queued,
+            &remote_b(),
+            "agency-gateway/local",
+            None,
+            &|_, command| old_remote.call(command),
+        )
+        .unwrap_err();
+        assert_eq!(code(&error), "gateway.exact_instance_unsupported");
+        assert!(!old_remote.saw("ingest-communique"));
+    }
+
+    struct StubOwners;
+
+    impl ContactOwners for StubOwners {
+        fn position_list(&self, _: Option<&str>) -> std::result::Result<Value, OwnerUnavailable> {
+            Err(unavailable())
+        }
+        fn position_read(&self, _: &str) -> std::result::Result<PositionLookup, OwnerUnavailable> {
+            Err(unavailable())
+        }
+        fn world_here(&self, _: &Path) -> std::result::Result<Value, OwnerUnavailable> {
+            Ok(json!({"workcells": [{"ref": "workcell:a", "role": "current"}]}))
+        }
+        fn occupancy_list(&self) -> std::result::Result<Value, OwnerUnavailable> {
+            Err(unavailable())
+        }
+        fn occupancy_read(&self, _: &str) -> std::result::Result<Value, OwnerUnavailable> {
+            Err(unavailable())
+        }
+        fn occupancy_verify(
+            &self,
+            _: &str,
+            generation_ref: &str,
+        ) -> std::result::Result<OccupancyVerdict, OwnerUnavailable> {
+            // gen-here stands on this Workcell; gen-there on workcell:b.
+            let workcell = if generation_ref == "gen-here" {
+                "workcell:a"
+            } else {
+                "workcell:b"
+            };
+            Ok(OccupancyVerdict::Current(json!({
+                "generation_ref": generation_ref,
+                "workcell_ref": workcell,
+            })))
+        }
+        fn current_work(&self, _: &str, _: &Path) -> std::result::Result<Value, OwnerUnavailable> {
+            Err(unavailable())
+        }
+        fn custody_assign(
+            &self,
+            _: &CustodyAssign,
+            _: &Path,
+        ) -> std::result::Result<std::result::Result<Value, OwnerRefusal>, OwnerUnavailable>
+        {
+            Err(unavailable())
+        }
+    }
+
+    fn unavailable() -> OwnerUnavailable {
+        OwnerUnavailable {
+            command: "stub".into(),
+            reason: "not in this test".into(),
+        }
+    }
+
+    #[test]
+    fn one_failing_restand_does_not_stop_the_pass_relaying_the_others() {
+        if std::env::var(WORKCELL_ENV).is_ok() {
+            // The local Workcell must come from the stub owners.
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let path = remotes_path(&home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&GatewayRemotes {
+                schema: GATEWAY_REMOTES_SCHEMA.into(),
+                remotes: vec![remote_b()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        // The first record's standing cannot be recorded (an older service,
+        // or a delivered-meanwhile race); the second must still be relayed.
+        let local = StubGateway {
+            queue: vec![
+                record("communique:01first", "gen-here", "held"),
+                record("communique:02second", "gen-there", "pending"),
+            ],
+            refuse_standing: vec!["communique:01first".into()],
+            ..StubGateway::modern()
+        };
+        let remote = StubGateway::modern();
+        let pass = forward_pass_via(&home, &StubOwners, &local, dir.path(), &|_, command| {
+            remote.call(command)
+        })
+        .unwrap();
+        let forwarded = pass["forwarded"].as_array().unwrap();
+        assert_eq!(forwarded.len(), 1, "{pass:#}");
+        assert_eq!(forwarded[0]["communique_ref"], "communique:02second");
+        let skipped = pass["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1, "{pass:#}");
+        assert_eq!(skipped[0]["communique_ref"], "communique:01first");
+        assert_eq!(skipped[0]["code"], "agency_gateway.unknown_command");
     }
 }
