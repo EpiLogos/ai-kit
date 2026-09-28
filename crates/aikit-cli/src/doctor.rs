@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use aikit_adapters::runner::CommandRunner;
 use aikit_adapters::NativeSecureStoreProvider;
 use aikit_core::credential::{CredentialRef, SecretProvider};
 use aikit_core::id::CapsuleId;
@@ -207,6 +208,42 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
             descriptor.headless_capable, descriptor.binding_provenance
         )),
     );
+
+    // Git↔GitHub credential wiring. `gh` logged in while git carries no
+    // github.com credential helper is the silent push failure: a session
+    // meets it mid-landing, headless, where the username prompt cannot be
+    // answered. Read-only two-leg probe; `gh auth setup-git` is the fix.
+    let gh_authenticated = aikit_adapters::runner::SystemRunner::probe()
+        .with_timeout(std::time::Duration::from_secs(10))
+        .run(&["gh".into(), "auth".into(), "status".into()])
+        .map(|output| output.ok())
+        .unwrap_or(false);
+    let github_helper_wired = aikit_adapters::runner::SystemRunner::probe()
+        .with_timeout(std::time::Duration::from_secs(10))
+        .run(&[
+            "git".into(),
+            "config".into(),
+            "--get-all".into(),
+            "credential.https://github.com.helper".into(),
+        ])
+        .map(|output| output.ok() && !output.stdout.trim().is_empty())
+        .unwrap_or(false);
+    if gh_authenticated && !github_helper_wired {
+        findings.push(
+            Finding::new(
+                "git.github-credential-wiring",
+                Severity::Warning,
+                "gh holds a GitHub login but git has no github.com credential helper",
+            )
+            .with_detail(
+                "non-interactive pushes to https://github.com fail with \
+                 \"could not read Username\"; wire them with `gh auth setup-git` \
+                 (idempotent). If pushes already work through another helper, \
+                 ignore this finding."
+                    .to_string(),
+            ),
+        );
+    }
 
     for binding in CredentialBindingStore::new(home).list()? {
         findings.push(
