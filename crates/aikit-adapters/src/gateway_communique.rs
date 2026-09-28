@@ -133,6 +133,57 @@ pub struct CommuniqueRouting {
     pub observed_at_unix_ms: u64,
 }
 
+/// An exact-instance binding on a Communique's target. A Communique without
+/// one is a durable Position route: it follows succession and is delivered to
+/// whichever generation occupies the Position when it is delivered. A
+/// Communique with one is addressed to one occupancy generation (Actuation's
+/// `generation_ref`, e.g. `actuation:generation:<id>`) and, when
+/// `required_workcell_ref` is set, only while that generation stands on that
+/// Workcell. It is never delivered to a successor, to a same-named occupant on
+/// another Workcell, nor to the right generation on the wrong Workcell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommuniqueInstance {
+    pub generation_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_workcell_ref: Option<String>,
+    /// The AgentSession Actuation's tenure named for that generation when the
+    /// sender resolved it. Informative: delivery is decided on the generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_ref: Option<String>,
+    /// The Agency Actuation's tenure named for that generation, likewise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agency_ref: Option<String>,
+}
+
+/// Why an exact-instance Communique is held rather than awaiting its
+/// instance's turn. Recorded from the owners' answers (Actuation's verify, a
+/// remote gateway's occupancy reading); the kernel never decides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommuniqueInstanceHold {
+    /// No ledger asked records the generation as a current occupant (the
+    /// Position is vacant, or held only by other generations elsewhere, or
+    /// the Workcell that might hold it could not be asked).
+    InstanceAbsent,
+    /// Actuation records the generation as ended: the address has moved on.
+    InstanceSuperseded,
+    /// The generation is current, but not on the required Workcell.
+    WorkcellMismatch,
+    /// Actuation could not say whether the generation is current.
+    InstanceUnverified,
+}
+
+impl CommuniqueInstanceHold {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InstanceAbsent => "instance-absent",
+            Self::InstanceSuperseded => "instance-superseded",
+            Self::WorkcellMismatch => "workcell-mismatch",
+            Self::InstanceUnverified => "instance-unverified",
+        }
+    }
+}
+
 /// One state change, appended in order. The journal never rewrites a
 /// transition; the record's `state` is always the last entry's state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +211,12 @@ pub struct Communique {
     pub to_position_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to_workcell_ref: Option<String>,
+    /// Present on an exact-instance route; absent on a durable Position route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_instance: Option<CommuniqueInstance>,
+    /// Why an exact-instance Communique is currently held (state `held`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_hold: Option<CommuniqueInstanceHold>,
     pub body: String,
     pub sent_at_unix_ms: u64,
     pub state: CommuniqueState,
@@ -192,6 +249,23 @@ impl Communique {
             && !matches!(self.forward, Some(CommuniqueForward::Forwarded { .. }))
     }
 
+    /// Whether an occupant generation standing on `workcell_ref` may receive
+    /// this Communique: always for a durable Position route; for an
+    /// exact-instance route only the named generation, and only on the
+    /// required Workcell when one is required.
+    pub fn deliverable_to(&self, generation_ref: &str, workcell_ref: Option<&str>) -> bool {
+        match &self.to_instance {
+            None => true,
+            Some(instance) => {
+                instance.generation_ref == generation_ref
+                    && instance
+                        .required_workcell_ref
+                        .as_deref()
+                        .is_none_or(|required| workcell_ref == Some(required))
+            }
+        }
+    }
+
     /// The sender identity as it is attributed — never taken from the body.
     pub fn sender_label(&self) -> String {
         match (self.attribution, self.from_position_ref.as_deref()) {
@@ -220,6 +294,12 @@ pub struct CommuniqueDraft {
     pub to_position_ref: String,
     #[serde(default)]
     pub to_workcell_ref: Option<String>,
+    /// An exact-instance route; `None` is a durable Position route.
+    #[serde(default)]
+    pub to_instance: Option<CommuniqueInstance>,
+    /// Why the exact instance is held at acceptance (requires state `held`).
+    #[serde(default)]
+    pub instance_hold: Option<CommuniqueInstanceHold>,
     pub body: String,
     pub sent_at_unix_ms: u64,
     pub state: CommuniqueState,
@@ -299,6 +379,36 @@ fn check_attribution(
         ));
     }
     Ok(())
+}
+
+/// An exact-instance binding names a generation, and a hold reason exists
+/// only on a held exact-instance Communique.
+fn check_instance(
+    instance: Option<&CommuniqueInstance>,
+    hold: Option<CommuniqueInstanceHold>,
+    state: CommuniqueState,
+) -> Result<()> {
+    if let Some(instance) = instance {
+        non_empty("to_instance.generation_ref", &instance.generation_ref)?;
+        if let Some(workcell) = &instance.required_workcell_ref {
+            non_empty("to_instance.required_workcell_ref", workcell)?;
+        }
+    }
+    match (instance, hold, state) {
+        (None, Some(_), _) => Err(invalid(
+            "agency_gateway.communique_invalid",
+            "an instance hold is recorded only on an exact-instance Communique",
+        )),
+        (Some(_), Some(_), CommuniqueState::Held) | (_, None, _) => Ok(()),
+        (Some(_), Some(hold), state) => Err(invalid(
+            "agency_gateway.communique_invalid",
+            format!(
+                "an exact-instance Communique held for {} must be in state held, not {}",
+                hold.as_str(),
+                state.as_str()
+            ),
+        )),
+    }
 }
 
 fn check_body(body: &str) -> Result<()> {
@@ -408,6 +518,11 @@ impl CommuniqueJournal {
                     ),
                 ));
             }
+            check_instance(
+                record.to_instance.as_ref(),
+                record.instance_hold,
+                record.state,
+            )?;
             previous = record.sequence;
             journal.push(record);
         }
@@ -444,6 +559,7 @@ impl CommuniqueJournal {
                 "a Communique is accepted held or pending; delivery and escalation are later transitions",
             ));
         }
+        check_instance(draft.to_instance.as_ref(), draft.instance_hold, draft.state)?;
         if let Some(reply_to) = &draft.reply_to {
             self.get(reply_to).map_err(|_| {
                 invalid(
@@ -459,6 +575,7 @@ impl CommuniqueJournal {
             let same = existing.from_position_ref == draft.from_position_ref
                 && existing.from_generation_ref == draft.from_generation_ref
                 && existing.to_position_ref == draft.to_position_ref
+                && existing.to_instance == draft.to_instance
                 && existing.body == draft.body
                 && existing.sent_at_unix_ms == draft.sent_at_unix_ms
                 && existing.reply_to == draft.reply_to;
@@ -493,6 +610,8 @@ impl CommuniqueJournal {
             attribution_basis: draft.attribution_basis,
             to_position_ref: draft.to_position_ref,
             to_workcell_ref: draft.to_workcell_ref,
+            to_instance: draft.to_instance,
+            instance_hold: draft.instance_hold,
             body: draft.body,
             sent_at_unix_ms: draft.sent_at_unix_ms,
             state: draft.state,
@@ -545,10 +664,16 @@ impl CommuniqueJournal {
                 "only an undelivered Communique can be relayed",
             ));
         }
+        check_instance(
+            communique.to_instance.as_ref(),
+            communique.instance_hold,
+            communique.state,
+        )?;
         if let Some(existing) = self.index.get(&communique.communique_ref) {
             let existing = &self.records[*existing];
             if existing.body == communique.body
                 && existing.to_position_ref == communique.to_position_ref
+                && existing.to_instance == communique.to_instance
                 && existing.from_position_ref == communique.from_position_ref
                 && existing.origin_gateway_ref == communique.origin_gateway_ref
             {
@@ -586,12 +711,16 @@ impl CommuniqueJournal {
             .collect()
     }
 
-    /// Mark Communiques delivered to one occupant generation. All refs are
-    /// checked before any is changed, so a partial acknowledgement never lands.
+    /// Mark Communiques delivered to one occupant generation standing on
+    /// `workcell_ref` (when known). All refs are checked before any is
+    /// changed, so a partial acknowledgement never lands. An exact-instance
+    /// Communique is refused to any other generation, and to its generation
+    /// on any Workcell but the one it requires.
     pub fn acknowledge(
         &mut self,
         position_ref: &str,
         generation_ref: &str,
+        workcell_ref: Option<&str>,
         communique_refs: &[String],
         delivered_at_unix_ms: u64,
         via: &str,
@@ -623,6 +752,28 @@ impl CommuniqueJournal {
                     ),
                 ));
             }
+            if let Some(instance) = &record.to_instance {
+                if instance.generation_ref != generation_ref {
+                    return Err(invalid(
+                        "agency_gateway.communique_wrong_instance",
+                        format!(
+                            "Communique {communique_ref} is addressed to the exact instance {}, not {generation_ref}; it is never delivered to another occupant of {position_ref}",
+                            instance.generation_ref
+                        ),
+                    ));
+                }
+                if let Some(required) = &instance.required_workcell_ref {
+                    if workcell_ref != Some(required.as_str()) {
+                        return Err(invalid(
+                            "agency_gateway.communique_workcell_mismatch",
+                            format!(
+                                "Communique {communique_ref} requires its instance on Workcell {required}, and this delivery stands on {}",
+                                workcell_ref.unwrap_or("an unknown Workcell")
+                            ),
+                        ));
+                    }
+                }
+            }
         }
         let mut delivered = Vec::new();
         for communique_ref in communique_refs {
@@ -630,6 +781,7 @@ impl CommuniqueJournal {
             record.state = CommuniqueState::Delivered;
             record.delivered_to_generation_ref = Some(generation_ref.into());
             record.delivered_at_unix_ms = Some(delivered_at_unix_ms);
+            record.instance_hold = None;
             // Delivered here: any queued relay is moot.
             if matches!(record.forward, Some(CommuniqueForward::Queued { .. })) {
                 record.forward = None;
@@ -656,6 +808,51 @@ impl CommuniqueJournal {
             })
             .cloned()
             .collect()
+    }
+
+    /// Record a changed standing of an exact-instance Communique that is still
+    /// this gateway's to deliver: `pending` when its instance is current where
+    /// required, `held` with the reason when it is not. The caller read the
+    /// owners; the kernel only appends the transition. An unchanged standing
+    /// records nothing (`changed == false`).
+    pub fn restand(
+        &mut self,
+        communique_ref: &str,
+        state: CommuniqueState,
+        hold: Option<CommuniqueInstanceHold>,
+        at_unix_ms: u64,
+        basis: &str,
+    ) -> Result<(Communique, bool)> {
+        non_empty("basis", basis)?;
+        let record = self.get_mut(communique_ref)?;
+        if record.to_instance.is_none() {
+            return Err(invalid(
+                "agency_gateway.communique_invalid",
+                format!("Communique {communique_ref} is a durable Position route; only an exact-instance route is re-stood"),
+            ));
+        }
+        if !record.awaits_local_delivery() || !state.is_undelivered() {
+            return Err(invalid(
+                "agency_gateway.communique_not_deliverable",
+                format!(
+                    "Communique {communique_ref} is {}; its standing is no longer this gateway's to change",
+                    record.state.as_str()
+                ),
+            ));
+        }
+        check_instance(record.to_instance.as_ref(), hold, state)?;
+        if record.state == state && record.instance_hold == hold {
+            return Ok((record.clone(), false));
+        }
+        record.state = state;
+        record.instance_hold = hold;
+        record.transitions.push(CommuniqueTransition {
+            at_unix_ms,
+            state,
+            basis: basis.into(),
+            generation_ref: None,
+        });
+        Ok((record.clone(), true))
     }
 
     /// Record the explicit crossing into Factory custody. The custody ref is
@@ -818,6 +1015,8 @@ mod tests {
             attribution_basis: "fixture".into(),
             to_position_ref: to.into(),
             to_workcell_ref: None,
+            to_instance: None,
+            instance_hold: None,
             body: format!("body {reference}"),
             sent_at_unix_ms: 10,
             state,
@@ -845,6 +1044,7 @@ mod tests {
             .acknowledge(
                 B,
                 "actuation:generation:b1",
+                None,
                 std::slice::from_ref(&sent.communique_ref),
                 20,
                 "at the turn boundary",
@@ -859,6 +1059,7 @@ mod tests {
         let again = journal.acknowledge(
             B,
             "actuation:generation:b2",
+            None,
             std::slice::from_ref(&sent.communique_ref),
             30,
             "again",
@@ -890,6 +1091,7 @@ mod tests {
         let refused = journal.acknowledge(
             B,
             "actuation:generation:b1",
+            None,
             &[first.communique_ref.clone(), other.communique_ref.clone()],
             5,
             "turn",
@@ -1118,5 +1320,313 @@ mod tests {
             CommuniqueJournal::restore(vec![record]).unwrap_err().code(),
             "agency_gateway.communique_state_drift"
         );
+    }
+
+    fn exact(
+        reference: &str,
+        generation: &str,
+        workcell: Option<&str>,
+        state: CommuniqueState,
+        hold: Option<CommuniqueInstanceHold>,
+    ) -> CommuniqueDraft {
+        CommuniqueDraft {
+            to_instance: Some(CommuniqueInstance {
+                generation_ref: generation.into(),
+                required_workcell_ref: workcell.map(str::to_owned),
+                agent_session_ref: None,
+                agency_ref: None,
+            }),
+            instance_hold: hold,
+            ..draft(reference, Some(A), B, state)
+        }
+    }
+
+    #[test]
+    fn a_durable_route_is_delivered_to_whichever_generation_holds_the_position() {
+        let mut journal = CommuniqueJournal::default();
+        let (sent, _) = journal
+            .send("g", draft("one", Some(A), B, CommuniqueState::Pending))
+            .unwrap();
+        assert!(sent.to_instance.is_none());
+        assert!(sent.deliverable_to("actuation:generation:b2", Some("workcell:z")));
+        let delivered = journal
+            .acknowledge(
+                B,
+                "actuation:generation:b2",
+                None,
+                std::slice::from_ref(&sent.communique_ref),
+                20,
+                "successor turn",
+            )
+            .unwrap();
+        assert_eq!(
+            delivered[0].delivered_to_generation_ref.as_deref(),
+            Some("actuation:generation:b2")
+        );
+    }
+
+    #[test]
+    fn an_exact_route_is_refused_to_a_successor_and_to_the_wrong_workcell() {
+        let mut journal = CommuniqueJournal::default();
+        let (sent, _) = journal
+            .send(
+                "g",
+                exact(
+                    "one",
+                    "actuation:generation:b1",
+                    Some("workcell:b"),
+                    CommuniqueState::Pending,
+                    None,
+                ),
+            )
+            .unwrap();
+        let refs = std::slice::from_ref(&sent.communique_ref);
+        assert!(!sent.deliverable_to("actuation:generation:b2", Some("workcell:b")));
+        assert!(!sent.deliverable_to("actuation:generation:b1", Some("workcell:a")));
+        assert!(!sent.deliverable_to("actuation:generation:b1", None));
+        assert!(sent.deliverable_to("actuation:generation:b1", Some("workcell:b")));
+        let successor = journal.acknowledge(
+            B,
+            "actuation:generation:b2",
+            Some("workcell:b"),
+            refs,
+            5,
+            "turn",
+        );
+        assert_eq!(
+            successor.unwrap_err().code(),
+            "agency_gateway.communique_wrong_instance"
+        );
+        let elsewhere = journal.acknowledge(
+            B,
+            "actuation:generation:b1",
+            Some("workcell:a"),
+            refs,
+            5,
+            "turn",
+        );
+        assert_eq!(
+            elsewhere.unwrap_err().code(),
+            "agency_gateway.communique_workcell_mismatch"
+        );
+        let unknown = journal.acknowledge(B, "actuation:generation:b1", None, refs, 5, "turn");
+        assert_eq!(
+            unknown.unwrap_err().code(),
+            "agency_gateway.communique_workcell_mismatch"
+        );
+        // Nothing was marked by the refusals; the instance itself receives it.
+        assert_eq!(journal.inbox(B).len(), 1);
+        let delivered = journal
+            .acknowledge(
+                B,
+                "actuation:generation:b1",
+                Some("workcell:b"),
+                refs,
+                6,
+                "turn",
+            )
+            .unwrap();
+        assert_eq!(delivered[0].state, CommuniqueState::Delivered);
+        assert_eq!(
+            delivered[0].delivered_to_generation_ref.as_deref(),
+            Some("actuation:generation:b1")
+        );
+    }
+
+    #[test]
+    fn an_exact_route_is_held_with_its_reason_and_re_stood_truthfully() {
+        let mut journal = CommuniqueJournal::default();
+        // A hold reason belongs to a held exact route only.
+        let mut durable_hold = draft("x", Some(A), B, CommuniqueState::Held);
+        durable_hold.instance_hold = Some(CommuniqueInstanceHold::InstanceAbsent);
+        assert_eq!(
+            journal.send("g", durable_hold).unwrap_err().code(),
+            "agency_gateway.communique_invalid"
+        );
+        assert_eq!(
+            journal
+                .send(
+                    "g",
+                    exact(
+                        "y",
+                        "actuation:generation:b1",
+                        None,
+                        CommuniqueState::Pending,
+                        Some(CommuniqueInstanceHold::InstanceAbsent),
+                    )
+                )
+                .unwrap_err()
+                .code(),
+            "agency_gateway.communique_invalid"
+        );
+        let (held, _) = journal
+            .send(
+                "g",
+                exact(
+                    "one",
+                    "actuation:generation:b1",
+                    None,
+                    CommuniqueState::Held,
+                    Some(CommuniqueInstanceHold::InstanceAbsent),
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            held.instance_hold,
+            Some(CommuniqueInstanceHold::InstanceAbsent)
+        );
+        let (pending, changed) = journal
+            .restand(
+                &held.communique_ref,
+                CommuniqueState::Pending,
+                None,
+                11,
+                "current on workcell:b",
+            )
+            .unwrap();
+        assert!(changed);
+        assert_eq!(pending.state, CommuniqueState::Pending);
+        assert!(pending.instance_hold.is_none());
+        let (_, changed) = journal
+            .restand(
+                &held.communique_ref,
+                CommuniqueState::Pending,
+                None,
+                12,
+                "again",
+            )
+            .unwrap();
+        assert!(!changed, "an unchanged standing appends nothing");
+        let (superseded, _) = journal
+            .restand(
+                &held.communique_ref,
+                CommuniqueState::Held,
+                Some(CommuniqueInstanceHold::InstanceSuperseded),
+                13,
+                "actuation: b1 superseded by b2",
+            )
+            .unwrap();
+        assert_eq!(
+            superseded
+                .transitions
+                .iter()
+                .map(|t| t.state)
+                .collect::<Vec<_>>(),
+            vec![
+                CommuniqueState::Held,
+                CommuniqueState::Pending,
+                CommuniqueState::Held
+            ]
+        );
+        // A durable route is never re-stood.
+        let (durable, _) = journal
+            .send("g", draft("two", Some(A), B, CommuniqueState::Held))
+            .unwrap();
+        assert!(journal
+            .restand(
+                &durable.communique_ref,
+                CommuniqueState::Pending,
+                None,
+                1,
+                "x"
+            )
+            .is_err());
+        // The standing survives a restore.
+        let restored = CommuniqueJournal::restore(journal.records().to_vec()).unwrap();
+        assert_eq!(
+            restored.get(&held.communique_ref).unwrap().instance_hold,
+            Some(CommuniqueInstanceHold::InstanceSuperseded)
+        );
+    }
+
+    #[test]
+    fn a_duplicate_exact_send_or_relay_stays_single_and_a_retargeted_one_is_refused() {
+        let mut journal = CommuniqueJournal::default();
+        let one = || {
+            exact(
+                "one",
+                "actuation:generation:b1",
+                Some("workcell:b"),
+                CommuniqueState::Pending,
+                None,
+            )
+        };
+        let (sent, _) = journal.send("g", one()).unwrap();
+        assert!(journal.send("g", one()).unwrap().1);
+        let retargeted = exact(
+            "one",
+            "actuation:generation:b2",
+            None,
+            CommuniqueState::Pending,
+            None,
+        );
+        assert_eq!(
+            journal.send("g", retargeted).unwrap_err().code(),
+            "agency_gateway.communique_identity_rewrite"
+        );
+        // A durable draft under the same ref is also a different message.
+        assert_eq!(
+            journal
+                .send("g", draft("one", Some(A), B, CommuniqueState::Pending))
+                .unwrap_err()
+                .code(),
+            "agency_gateway.communique_identity_rewrite"
+        );
+        assert_eq!(journal.len(), 1);
+
+        let mut remote = CommuniqueJournal::default();
+        assert!(!remote.ingest(sent.clone(), "g", 20).unwrap().1);
+        assert!(remote.ingest(sent.clone(), "g", 21).unwrap().1);
+        let mut widened = sent.clone();
+        widened.to_instance = None;
+        assert_eq!(
+            remote.ingest(widened, "g", 22).unwrap_err().code(),
+            "agency_gateway.communique_identity_rewrite"
+        );
+        assert_eq!(remote.len(), 1);
+        assert_eq!(remote.records()[0].to_instance, sent.to_instance);
+    }
+
+    #[test]
+    fn out_of_order_relays_keep_the_receiving_journal_order_and_the_senders_times() {
+        let mut origin = CommuniqueJournal::default();
+        let mut first = exact(
+            "one",
+            "actuation:generation:b1",
+            None,
+            CommuniqueState::Pending,
+            None,
+        );
+        first.sent_at_unix_ms = 100;
+        let mut second = exact(
+            "two",
+            "actuation:generation:b1",
+            None,
+            CommuniqueState::Pending,
+            None,
+        );
+        second.sent_at_unix_ms = 200;
+        let (first, _) = origin.send("g", first).unwrap();
+        let (second, _) = origin.send("g", second).unwrap();
+
+        let mut remote = CommuniqueJournal::default();
+        // The later one arrives first.
+        remote.ingest(second.clone(), "g", 300).unwrap();
+        remote.ingest(first.clone(), "g", 400).unwrap();
+        let inbox = remote.inbox(B);
+        assert_eq!(
+            inbox
+                .iter()
+                .map(|r| (r.communique_ref.as_str(), r.sequence, r.sent_at_unix_ms))
+                .collect::<Vec<_>>(),
+            vec![
+                (second.communique_ref.as_str(), 1, 200),
+                (first.communique_ref.as_str(), 2, 100)
+            ]
+        );
+        // Each record keeps its origin's transitions and adds its arrival.
+        assert_eq!(inbox[0].transitions.last().unwrap().at_unix_ms, 300);
+        assert_eq!(inbox[1].transitions.last().unwrap().at_unix_ms, 400);
+        assert!(CommuniqueJournal::restore(remote.records().to_vec()).is_ok());
     }
 }
