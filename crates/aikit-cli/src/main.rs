@@ -2842,6 +2842,7 @@ fn cmd_collate(cwd: &std::path::Path, a: CollateArgs) -> Result<Reply> {
 fn cmd_z(cwd: &std::path::Path, a: ZArgs, json_mode: bool) -> Result<Reply> {
     use aikit_cli::jump::{self, JumpAction};
     use aikit_core::frecency::Jump;
+    use std::io::IsTerminal as _;
 
     let mut service = Service::discover(cwd)?;
     let query = a.words.join(" ");
@@ -2880,11 +2881,17 @@ fn cmd_z(cwd: &std::path::Path, a: ZArgs, json_mode: bool) -> Result<Reply> {
                 "candidates": candidates,
                 "tied": ids.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
             });
-            if dry_run {
+            // Ambiguity is the interactive case, not an error — but only when
+            // the terminal can actually host the palette. A bare non-TTY text
+            // invocation prints the bounded candidate list and exits rather
+            // than dying in raw mode.
+            let interactive = !dry_run
+                && std::io::stdin().is_terminal()
+                && std::io::stdout().is_terminal();
+            if !interactive {
                 return Ok(reply(&service, data, vec![]));
             }
-            // Ambiguity is the interactive case, not an error: open the palette
-            // pre-filtered to what was meant.
+            // Open the palette pre-filtered to what was meant.
             ui::run(&mut service, Some(plan.query.clone()), false)?;
             Ok(Reply::Silent)
         }
