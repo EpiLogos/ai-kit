@@ -214,6 +214,10 @@ mod telegram_gateway_curl_tests {
     use crate::telegram_bot_api::TELEGRAM_BOT_API_BASE;
     use serde_json::json;
 
+    fn r(value: &str) -> aikit_core::resource::ResourceRef {
+        aikit_core::resource::ResourceRef::parse(value).unwrap()
+    }
+
     #[test]
     fn curl_transport_request_carries_method_body_and_long_poll_margin() {
         let transport = TelegramCurlTransport::from_token("1234:secret-token").unwrap();

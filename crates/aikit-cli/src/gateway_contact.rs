@@ -21,6 +21,17 @@
 //!   is `held` for its next occupant; an occupant on another Workcell is
 //!   relayed through the gateway's authenticated WebSocket carrier, and a
 //!   remote that is down leaves the record queued for the next relay pass.
+//! - **Agency identity is addressable by default** (the V0 reconciliation).
+//!   `who`, `send` and `/ask` resolve the recipient as agency identity first:
+//!   every registered agent profile (`agent-profile.list`, the registry the
+//!   minted Positions' `eligible_agent_refs` point into) answers at its
+//!   identity, joined with the Position that names it when one exists —
+//!   occupancy then routes exactly as for any Position. A profile with no
+//!   Position is **not currently embodied**, never nonexistent: the Communique
+//!   is recorded held for the agency, at the agency's identity. A handle with
+//!   neither profile nor Position is refused as unknown, naming the listing
+//!   remedy. Position stays what it is: the occupancy projection — tenure,
+//!   succession, attribution verification.
 //! - **Occupancy is each Workcell's own.** This Workcell's Actuation ledger
 //!   is read first; only when it records no current occupant are the declared
 //!   remote gateways asked, and each answers from its own Actuation at the
@@ -46,10 +57,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use aikit_adapters::{
-    Communique, CommuniqueDraft, CommuniqueForwardOutcome, CommuniqueInstance,
-    CommuniqueInstanceHold, CommuniqueRouting, CommuniqueState, GatewayCarrierTarget,
-    GatewayCommand, GatewayResponse, SenderAttribution, COMMUNIQUE_REF_PREFIX,
-    GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE,
+    Communique, CommuniqueDraft, CommuniqueForward, CommuniqueForwardOutcome, CommuniqueInstance,
+    CommuniqueInstanceHold, CommuniqueRouting, CommuniqueState, GatewayAskRequest, GatewayAskRoute,
+    GatewayCarrierTarget, GatewayCommand, GatewayResponse, SenderAttribution,
+    COMMUNIQUE_REF_PREFIX, GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE,
 };
 use aikit_core::{AikitError, Result};
 use aikit_store::AikitHome;
@@ -57,8 +68,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::gateway_owners::{
-    current_tenure, position_record, ContactOwners, CustodyAssign, OccupancyVerdict,
-    OwnerUnavailable, PositionLookup,
+    current_tenure, position_record, profile_answers_to, profile_handle, profile_record,
+    ContactOwners, CustodyAssign, OccupancyVerdict, OwnerUnavailable, PositionLookup,
 };
 use crate::secret_location::SecretLocation;
 
@@ -831,7 +842,9 @@ pub fn resolve_sender(
     }
 }
 
-/// The recipient Position as Central defines it.
+/// The recipient as the contact plane addresses it: a Position (the occupancy
+/// projection) or — with no Position naming it — a registered agent profile,
+/// held at the agency's own identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Recipient {
     pub position_ref: String,
@@ -840,10 +853,104 @@ pub struct Recipient {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub source: String,
+    /// The agency identity (`agent/<slug>`) when the recipient is a registered
+    /// agent profile with no Position: the record's address and the body its
+    /// mail holds for. `None` for Position-resolved recipients.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agency_ref: Option<String>,
 }
 
 fn nothing_sent() -> &'static str {
     "Nothing was sent; no Communique was recorded."
+}
+
+/// The profile rows of Central's `agent-profile.list` answer.
+fn profile_entries(listing: &Value) -> impl Iterator<Item = &Value> {
+    listing
+        .get("profiles")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+}
+
+/// The Positions (present and inherited) whose `eligible_agent_refs` name
+/// `agent_ref` — the occupancy seats the agency may be embodied in.
+fn positions_naming<'a>(position_listing: &'a Value, agent_ref: &str) -> Vec<&'a Value> {
+    ["positions", "inherited"]
+        .iter()
+        .flat_map(|key| {
+            position_listing
+                .get(*key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .map(position_record)
+        .filter(|record| {
+            record
+                .get("eligible_agent_refs")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .any(|reference| reference == agent_ref)
+        })
+        .collect()
+}
+
+/// Join one matched profile with the Position that names it. Exactly one
+/// naming Position resolves the recipient to that Position — occupancy then
+/// routes exactly as for any directly-addressed Position. No naming Position
+/// resolves to the agency's own identity: not currently embodied, never
+/// nonexistent — the Communique holds for the agency. Several naming
+/// Positions are refused: the gateway does not choose between two addresses.
+fn resolve_agency(
+    position_listing: &Value,
+    profile: &Value,
+    agent_ref: &str,
+    handle: Option<String>,
+) -> Result<Recipient> {
+    let eligible = positions_naming(position_listing, agent_ref);
+    match eligible.as_slice() {
+        [record] => Ok(Recipient {
+            position_ref: record
+                .get("ref")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            handle,
+            label: record
+                .get("label")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            source: "central.position.list+agent-profile.list".into(),
+            agency_ref: None,
+        }),
+        [] => Ok(Recipient {
+            position_ref: agent_ref.to_owned(),
+            handle,
+            label: profile
+                .get("role")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            source: "agent-profile.list".into(),
+            agency_ref: Some(agent_ref.to_owned()),
+        }),
+        _ => Err(three_part(
+            "gateway.ambiguous_position",
+            format!(
+                "{} Positions ({}) name {agent_ref} as eligible.",
+                eligible.len(),
+                eligible
+                    .iter()
+                    .filter_map(|record| record.get("ref").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            nothing_sent(),
+            "Address the Position by its full ref from `aikit gateway who --json`.",
+        )),
+    }
 }
 
 pub fn resolve_recipient(
@@ -889,19 +996,48 @@ pub fn resolve_recipient(
                     .and_then(Value::as_str)
                     .map(str::to_owned),
                 source: "central.position.list".into(),
+                agency_ref: None,
             }),
-            [] => Err(three_part(
-                "gateway.unknown_position",
-                format!(
-                    "No Position with handle {wanted} is defined in {}.",
-                    listing
-                        .get("world_ref")
-                        .and_then(Value::as_str)
-                        .unwrap_or("this World")
-                ),
-                nothing_sent(),
-                "List the Positions and their handles with `aikit gateway who --json`.",
-            )),
+            // No Position carries this handle: the agency the system already
+            // names may still be addressable through its registered profile.
+            [] => {
+                let profiles = owners.agent_profiles().map_err(|unavailable| {
+                    owner_unavailable_refusal("Central could not list agent profiles", &unavailable)
+                })?;
+                let matches: Vec<(&Value, &str)> = profile_entries(&profiles)
+                    .map(profile_record)
+                    .filter_map(|profile| {
+                        profile
+                            .get("agent_ref")
+                            .and_then(Value::as_str)
+                            .map(|agent_ref| (profile, agent_ref))
+                    })
+                    .filter(|(_, agent_ref)| profile_answers_to(agent_ref, handle))
+                    .collect();
+                match matches.as_slice() {
+                    [(profile, agent_ref)] => {
+                        resolve_agency(&listing, profile, agent_ref, Some(wanted))
+                    }
+                    [] => Err(three_part(
+                        "gateway.unknown_position",
+                        format!(
+                            "No Position with handle {wanted} is defined in {}.",
+                            listing
+                                .get("world_ref")
+                                .and_then(Value::as_str)
+                                .unwrap_or("this World")
+                        ),
+                        nothing_sent(),
+                        "List the Positions and their handles with `aikit gateway who --json`.",
+                    )),
+                    _ => Err(three_part(
+                        "gateway.ambiguous_recipient",
+                        format!("{} agent profiles answer to {wanted}.", matches.len()),
+                        nothing_sent(),
+                        "List the registered agencies with `aikit gateway who --json`.",
+                    )),
+                }
+            }
             _ => Err(three_part(
                 "gateway.ambiguous_position",
                 format!("{} Positions answer to {wanted}.", matches.len()),
@@ -911,12 +1047,44 @@ pub fn resolve_recipient(
         };
     }
     if !to.starts_with("central:position:") {
-        return Err(three_part(
-            "gateway.invalid_recipient",
-            format!("{to:?} is neither a Position ref (central:position:<world>:<slug>) nor an @handle."),
-            nothing_sent(),
-            "List the Positions with `aikit gateway who --json`.",
-        ));
+        // An agent identity (`agent/<slug>`, the registry's own spelling) is
+        // a recipient when the registry names it.
+        let profiles = owners.agent_profiles().map_err(|unavailable| {
+            owner_unavailable_refusal("Central could not list agent profiles", &unavailable)
+        })?;
+        let matches: Vec<(&Value, &str)> = profile_entries(&profiles)
+            .map(profile_record)
+            .filter_map(|profile| {
+                profile
+                    .get("agent_ref")
+                    .and_then(Value::as_str)
+                    .map(|agent_ref| (profile, agent_ref))
+            })
+            .filter(|(_, agent_ref)| *agent_ref == to)
+            .collect();
+        return match matches.as_slice() {
+            [(profile, agent_ref)] => {
+                let listing = owners.position_list(None).map_err(|unavailable| {
+                    owner_unavailable_refusal("Central could not list Positions", &unavailable)
+                })?;
+                resolve_agency(&listing, profile, agent_ref, None)
+            }
+            [] => Err(three_part(
+                "gateway.invalid_recipient",
+                format!(
+                    "{to:?} is neither a Position ref (central:position:<world>:<slug>), a \
+                     registered agent ref (agent/<slug>), nor an @handle."
+                ),
+                nothing_sent(),
+                "List the Positions and the registered agencies with `aikit gateway who --json`.",
+            )),
+            _ => Err(three_part(
+                "gateway.ambiguous_recipient",
+                format!("{} agent profiles answer to {to}.", matches.len()),
+                nothing_sent(),
+                "List the registered agencies with `aikit gateway who --json`.",
+            )),
+        };
     }
     match owners.position_read(to).map_err(|unavailable| {
         owner_unavailable_refusal("Central could not read the Position", &unavailable)
@@ -938,6 +1106,7 @@ pub fn resolve_recipient(
                     .and_then(Value::as_str)
                     .map(str::to_owned),
                 source: "central.position.read".into(),
+                agency_ref: None,
             })
         }
         PositionLookup::NotFound(refusal) => Err(three_part(
@@ -1221,6 +1390,163 @@ fn instance_held_notice(
     })
 }
 
+/// How a recipient's occupancy routes a Communique: the one decision every
+/// sender shares, exactly as the module doc states it. This Workcell's ledger
+/// is read first; only a vacant recipient sends the declared remotes to survey.
+pub(crate) struct OccupancyRouting {
+    pub state: CommuniqueState,
+    pub state_basis: String,
+    pub occupant_workcell: Option<String>,
+    pub delivery_notice: Option<Value>,
+    pub remote: Option<GatewayRemote>,
+    pub routing: Option<CommuniqueRouting>,
+    pub remotes_asked: Vec<Value>,
+}
+
+/// Route a resolved recipient by occupancy, or refuse before anything is
+/// recorded (ambiguous occupancy, an occupant on an undeclared Workcell).
+pub(crate) fn route_to_occupancy(
+    home: &AikitHome,
+    owners: &dyn ContactOwners,
+    local_workcell: Option<&str>,
+    recipient: &Recipient,
+) -> Result<OccupancyRouting> {
+    let mut remote = None;
+    let mut routing = None;
+    let mut remotes_asked = Vec::new();
+    let (state, state_basis, occupant_workcell, delivery_notice) =
+        match owners.occupancy_read(&recipient.position_ref) {
+            Ok(reading) => match current_tenure(&reading) {
+                Some(tenure) => {
+                    let generation = tenure
+                        .get("generation_ref")
+                        .and_then(Value::as_str)
+                        .unwrap_or("an unnamed generation");
+                    (
+                        CommuniqueState::Pending,
+                        format!("{} is occupied by {generation}; delivered at its next turn boundary", recipient.position_ref),
+                        tenure.get("workcell_ref").and_then(Value::as_str).map(str::to_owned),
+                        None,
+                    )
+                }
+                None => {
+                    let elsewhere = remotes_elsewhere(home, local_workcell)?;
+                    let survey = RemoteSurvey::ask(
+                        &elsewhere,
+                        &GatewayCommand::OccupancyRead {
+                            position_ref: recipient.position_ref.clone(),
+                        },
+                    );
+                    remotes_asked = survey.statuses();
+                    let claims = survey.claims(&recipient.position_ref);
+                    match claims.as_slice() {
+                        [claim] => {
+                            let route = claim.routing(&recipient.position_ref);
+                            let basis = format!(
+                                "{}; relayed to that Workcell's gateway, delivered at the occupant's next turn boundary there",
+                                route.basis
+                            );
+                            remote = Some(claim.remote.clone());
+                            routing = Some(route);
+                            (
+                                CommuniqueState::Pending,
+                                basis,
+                                Some(claim.remote.workcell_ref.clone()),
+                                None,
+                            )
+                        }
+                        [] => {
+                            let (basis, notice) =
+                                vacant_everywhere(&recipient.position_ref, &elsewhere, &survey);
+                            (CommuniqueState::Held, basis, None, Some(notice))
+                        }
+                        _ => return Err(ambiguous_occupancy(&recipient.position_ref, &claims)),
+                    }
+                }
+            },
+            Err(unavailable) => (
+                CommuniqueState::Pending,
+                format!("occupancy of {} could not be read ({unavailable}); pending for whichever occupant takes its next turn here", recipient.position_ref),
+                None,
+                Some(json!({
+                    "fact": format!("Actuation could not say who occupies {}: {unavailable}.", recipient.position_ref),
+                    "consequence": "The Communique is recorded pending in this gateway's journal; it was not relayed to any other Workcell.",
+                    "action": format!("It is delivered at the next turn boundary of an occupant reading this gateway; check occupancy with `actuation occupancy read --position {}`.", recipient.position_ref),
+                })),
+            ),
+        };
+
+    // This Workcell's ledger places the occupant on another Workcell: relay
+    // there, or refuse before recording.
+    if let (None, Some(occupant), Some(local)) = (&routing, &occupant_workcell, local_workcell) {
+        if occupant != local {
+            let remotes = load_remotes(home)?;
+            match remotes
+                .remotes
+                .into_iter()
+                .find(|entry| &entry.workcell_ref == occupant)
+            {
+                Some(entry) => remote = Some(entry),
+                None => {
+                    return Err(three_part(
+                        "gateway.remote_undeclared",
+                        format!(
+                            "The occupant of {} stands on Workcell {occupant}, which is not reachable from here ({local}): no gateway endpoint is declared for it.",
+                            recipient.position_ref
+                        ),
+                        nothing_sent(),
+                        format!("Declare the endpoint: {}", remote_command(occupant)),
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(OccupancyRouting {
+        state,
+        state_basis,
+        occupant_workcell,
+        delivery_notice,
+        remote,
+        routing,
+        remotes_asked,
+    })
+}
+
+/// The recipient is a registered agent profile with no Position naming it:
+/// no Workcell embodies the agency, so there is no occupancy to read and no
+/// relay to survey. The record holds for the agency itself, at its identity —
+/// the existing held law, minus the false "does not exist" refusal.
+pub(crate) fn held_for_agency(recipient: &Recipient) -> OccupancyRouting {
+    let agency_ref = recipient
+        .agency_ref
+        .clone()
+        .unwrap_or_else(|| recipient.position_ref.clone());
+    OccupancyRouting {
+        state: CommuniqueState::Held,
+        state_basis: format!(
+            "{agency_ref} is a registered agent profile with no Position — not currently \
+             embodied; held for the agency"
+        ),
+        occupant_workcell: None,
+        delivery_notice: Some(json!({
+            "fact": format!(
+                "{agency_ref} is a registered agent profile and no Position names it: the \
+                 agency is not currently embodied, and there is no occupancy to read."
+            ),
+            "consequence": "The Communique is recorded held in this gateway's journal at the agency's identity; nothing has been delivered yet.",
+            "action": format!(
+                "It stays held for the agency; follow it with `aikit gateway conversation \
+                 --with {agency_ref}`, and `aikit gateway who --json` shows its embodiment \
+                 state."
+            ),
+        })),
+        remote: None,
+        routing: None,
+        remotes_asked: Vec::new(),
+    }
+}
+
 pub fn send(
     home: &AikitHome,
     owners: &dyn ContactOwners,
@@ -1236,19 +1562,24 @@ pub fn send(
             "Pass the words with --body TEXT or --body-file PATH.",
         ));
     }
-    if request.require_workcell.is_some() && request.instance.is_none() {
-        return Err(three_part(
-            "gateway.require_workcell_without_instance",
-            "--require-workcell binds an exact instance, and no --instance was named.",
-            nothing_sent(),
-            "Name the generation with --instance GENERATION_REF (read it from `aikit gateway who --json`), or drop --require-workcell for a durable Position route.",
-        ));
-    }
     let sender = resolve_sender(owners, request.from_position)?;
     let recipient = resolve_recipient(owners, request.to, request.project_world, cwd)?;
     let (local_workcell, workcell_basis) = local_workcell(owners, cwd);
     let now = now_unix_ms();
+
+    // An exact-instance route never reaches the durable-occupancy decision
+    // below: its placement is asked of Actuation directly (`occupancy verify`
+    // here first, then only the required Workcell's remote), and a same-named
+    // peer under another generation is never a route.
     if let Some(generation) = request.instance {
+        if request.require_workcell.is_some() && generation.trim().is_empty() {
+            return Err(three_part(
+                "gateway.invalid_instance",
+                "--instance must name a generation ref.",
+                nothing_sent(),
+                "Read the current instance with `aikit gateway who --json` (occupancy.generation_ref).",
+            ));
+        }
         let mut instance = CommuniqueInstance {
             generation_ref: generation.trim().to_owned(),
             required_workcell_ref: request.require_workcell.map(|w| w.trim().to_owned()),
@@ -1263,6 +1594,14 @@ pub fn send(
                 "--instance and --require-workcell must name refs, and one of them is empty.",
                 nothing_sent(),
                 "Read the current instance with `aikit gateway who --json` (occupancy.generation_ref, occupancy.workcell_ref).",
+            ));
+        }
+        if recipient.agency_ref.is_some() {
+            return Err(three_part(
+                "gateway.instance_without_position",
+                "An exact-instance route binds a Position's occupancy generation, and the recipient resolves to an agency with no Position.",
+                nothing_sent(),
+                "Send a durable route (omit --instance); it holds for the agency.",
             ));
         }
         let declared = load_remotes(home)?;
@@ -1366,98 +1705,21 @@ pub fn send(
         );
     }
 
-    // Where the occupant stands. This Workcell's own ledger first; only when
-    // it records no current occupant are the declared remotes asked.
-    let mut remote = None;
-    let mut routing = None;
-    let mut remotes_asked = Vec::new();
-    let (state, state_basis, occupant_workcell, delivery_notice) =
-        match owners.occupancy_read(&recipient.position_ref) {
-            Ok(reading) => match current_tenure(&reading) {
-                Some(tenure) => {
-                    let generation = tenure
-                        .get("generation_ref")
-                        .and_then(Value::as_str)
-                        .unwrap_or("an unnamed generation");
-                    (
-                        CommuniqueState::Pending,
-                        format!("{} is occupied by {generation}; delivered at its next turn boundary", recipient.position_ref),
-                        tenure.get("workcell_ref").and_then(Value::as_str).map(str::to_owned),
-                        None,
-                    )
-                }
-                None => {
-                    let elsewhere = remotes_elsewhere(home, local_workcell.as_deref())?;
-                    let survey = RemoteSurvey::ask(
-                        &elsewhere,
-                        &GatewayCommand::OccupancyRead {
-                            position_ref: recipient.position_ref.clone(),
-                        },
-                    );
-                    remotes_asked = survey.statuses();
-                    let claims = survey.claims(&recipient.position_ref);
-                    match claims.as_slice() {
-                        [claim] => {
-                            let route = claim.routing(&recipient.position_ref);
-                            let basis = format!(
-                                "{}; relayed to that Workcell's gateway, delivered at the occupant's next turn boundary there",
-                                route.basis
-                            );
-                            remote = Some(claim.remote.clone());
-                            routing = Some(route);
-                            (
-                                CommuniqueState::Pending,
-                                basis,
-                                Some(claim.remote.workcell_ref.clone()),
-                                None,
-                            )
-                        }
-                        [] => {
-                            let (basis, notice) =
-                                vacant_everywhere(&recipient.position_ref, &elsewhere, &survey);
-                            (CommuniqueState::Held, basis, None, Some(notice))
-                        }
-                        _ => return Err(ambiguous_occupancy(&recipient.position_ref, &claims)),
-                    }
-                }
-            },
-            Err(unavailable) => (
-                CommuniqueState::Pending,
-                format!("occupancy of {} could not be read ({unavailable}); pending for whichever occupant takes its next turn here", recipient.position_ref),
-                None,
-                Some(json!({
-                    "fact": format!("Actuation could not say who occupies {}: {unavailable}.", recipient.position_ref),
-                    "consequence": "The Communique is recorded pending in this gateway's journal; it was not relayed to any other Workcell.",
-                    "action": format!("It is delivered at the next turn boundary of an occupant reading this gateway; check occupancy with `actuation occupancy read --position {}`.", recipient.position_ref),
-                })),
-            ),
-        };
-
-    // This Workcell's ledger places the occupant on another Workcell: relay
-    // there, or refuse before recording.
-    if let (None, Some(occupant), Some(local)) = (&routing, &occupant_workcell, &local_workcell) {
-        if occupant != local {
-            let remotes = load_remotes(home)?;
-            match remotes
-                .remotes
-                .into_iter()
-                .find(|entry| &entry.workcell_ref == occupant)
-            {
-                Some(entry) => remote = Some(entry),
-                None => {
-                    return Err(three_part(
-                        "gateway.remote_undeclared",
-                        format!(
-                            "The occupant of {} stands on Workcell {occupant}, which is not reachable from here ({local}): no gateway endpoint is declared for it.",
-                            recipient.position_ref
-                        ),
-                        nothing_sent(),
-                        format!("Declare the endpoint: {}", remote_command(occupant)),
-                    ));
-                }
-            }
-        }
-    }
+    // Where the occupant stands, and how the record must be routed: the one
+    // decision every sender shares (see the module doc). An agency with no
+    // Position is not routed by occupancy at all — its mail holds for it.
+    let OccupancyRouting {
+        state,
+        state_basis,
+        occupant_workcell,
+        delivery_notice,
+        remote,
+        routing,
+        remotes_asked,
+    } = match &recipient.agency_ref {
+        Some(_) => held_for_agency(&recipient),
+        None => route_to_occupancy(home, owners, local_workcell.as_deref(), &recipient)?,
+    };
 
     let draft = CommuniqueDraft {
         communique_ref: new_communique_ref(),
@@ -1779,6 +2041,319 @@ fn forward_one_via(
         }),
     };
     Ok((record, report))
+}
+
+// ---------------------------------------------------------------------------
+// The conversation engine's ask router (the connector edge's /ask)
+// ---------------------------------------------------------------------------
+
+/// The inverted hook the gateway service wires behind a connector
+/// conversation's `/ask`: it resolves the ask with the exact `gateway send`
+/// laws (this module's), and the engine does the appending — kernel work, in
+/// process, against the journal the service owns. Nothing here shells out.
+pub struct ContactAskRouter {
+    pub home: AikitHome,
+    pub cwd: PathBuf,
+}
+
+impl aikit_adapters::GatewayAskRouter for ContactAskRouter {
+    fn route(&self, ask: &GatewayAskRequest) -> Result<GatewayAskRoute> {
+        route_ask(&self.home, &self.cwd, ask)
+    }
+
+    fn relay(&self, communique: &Communique, relayed_by: &str) -> Result<CommuniqueForwardOutcome> {
+        relay_appended(&self.home, communique, relayed_by)
+    }
+}
+
+/// The asking agency's Position, named by occupancy — never by the chat. A
+/// current tenure that carries this conversation's agent session verifies the
+/// asker (`verified`); when the ledger cannot say that but the bound agency
+/// holds exactly one occupied Position, that Position is named for it
+/// (`claimed`); anything else delivers labelled `<unknown sender>`, with the
+/// connector provenance carried beside whatever basis resolved.
+fn resolve_ask_sender(owners: &dyn ContactOwners, ask: &GatewayAskRequest) -> SenderResolution {
+    let unknown = |basis: String| SenderResolution {
+        from_position_ref: None,
+        from_generation_ref: None,
+        attribution: SenderAttribution::Unknown,
+        basis,
+    };
+    let listing = match owners.occupancy_list() {
+        Ok(listing) => listing,
+        Err(unavailable) => {
+            return unknown(format!(
+                "Actuation's occupancy ledger could not be read (`{}` failed: {}), so this \
+                 conversation's sender could not be attributed from occupancy",
+                unavailable.command, unavailable.reason
+            ));
+        }
+    };
+    let rows = listing
+        .get("positions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten();
+    let mut by_session: Vec<(&Value, &Value)> = Vec::new();
+    let mut by_agency: Vec<(&Value, &Value)> = Vec::new();
+    for row in rows {
+        let Some(tenure) = current_tenure(row) else {
+            continue;
+        };
+        if tenure.get("agent_session_ref").and_then(Value::as_str)
+            == Some(ask.agent_session_ref.as_str())
+        {
+            by_session.push((row, tenure));
+        }
+        if tenure.get("agency_ref").and_then(Value::as_str) == Some(ask.agency_ref.as_str()) {
+            by_agency.push((row, tenure));
+        }
+    }
+    let position_ref = |(row, _): &(&Value, &Value)| {
+        row.get("position_ref")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let generation_ref = |(_, tenure): &(&Value, &Value)| {
+        tenure
+            .get("generation_ref")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    // One session match is the verification the send path requires: the
+    // ledger itself names this conversation's session as a current occupant.
+    if let [match_] = by_session.as_slice() {
+        let position = position_ref(match_);
+        let generation = generation_ref(match_);
+        return SenderResolution {
+            from_position_ref: Some(position.clone()),
+            from_generation_ref: generation.clone(),
+            attribution: SenderAttribution::Verified,
+            basis: format!(
+                "actuation occupancy list: {} is the current occupant of {position} and its \
+                 tenure carries this conversation's agent session {}",
+                generation.as_deref().unwrap_or("an unnamed generation"),
+                ask.agent_session_ref
+            ),
+        };
+    }
+    // The bound agency holds exactly one occupied Position: it is named for
+    // the asking agency, claimed rather than verified — this conversation's
+    // session is not the tenure the ledger names.
+    if by_session.is_empty() {
+        if let [match_] = by_agency.as_slice() {
+            let position = position_ref(match_);
+            let generation = generation_ref(match_);
+            return SenderResolution {
+                from_position_ref: Some(position.clone()),
+                from_generation_ref: generation.clone(),
+                attribution: SenderAttribution::Claimed,
+                basis: format!(
+                    "the asking agency {} holds exactly one occupied Position, {position}; the \
+                     conversation is attributed to it as claimed, not verified against this \
+                     conversation's agent session {}",
+                    ask.agency_ref, ask.agent_session_ref
+                ),
+            };
+        }
+        if by_agency.len() > 1 {
+            return unknown(format!(
+                "the asking agency {} holds several occupied Positions ({}), and a connector \
+                 conversation names none of them",
+                ask.agency_ref,
+                by_agency
+                    .iter()
+                    .map(position_ref)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    unknown(format!(
+        "no current occupant in Actuation's ledger names this conversation's agent session {} \
+         or its agency {}",
+        ask.agent_session_ref, ask.agency_ref
+    ))
+}
+
+/// Resolve one connector-originated ask into an accepted-shaped draft: the
+/// sender attributed from occupancy, the recipient resolved by Central, the
+/// route taken from occupancy (`route_to_occupancy` — the same decision
+/// `gateway send` makes), and the origin provenance — asking agent session,
+/// bound agency, connector conversation — carried in the attribution basis.
+/// Every refusal answers before anything is appended.
+///
+/// This is the production resolution `ContactAskRouter` serves; the owners are
+/// a parameter so the same laws can be proven against fixture owners.
+pub fn route_ask_with_owners(
+    home: &AikitHome,
+    owners: &dyn ContactOwners,
+    cwd: &Path,
+    ask: &GatewayAskRequest,
+) -> Result<GatewayAskRoute> {
+    if ask.message.trim().is_empty() {
+        return Err(three_part(
+            "gateway.empty_body",
+            "The ask's message is empty.",
+            nothing_sent(),
+            "Ask with /ask <position-ref-or-@handle> <message>.",
+        ));
+    }
+    let (local_workcell, _) = local_workcell(owners, cwd);
+    let sender = resolve_ask_sender(owners, ask);
+    let recipient = resolve_recipient(owners, &ask.recipient, None, cwd)?;
+    let OccupancyRouting {
+        state,
+        state_basis,
+        occupant_workcell,
+        delivery_notice,
+        remote,
+        routing,
+        remotes_asked: _,
+    } = match &recipient.agency_ref {
+        Some(_) => held_for_agency(&recipient),
+        None => route_to_occupancy(home, owners, local_workcell.as_deref(), &recipient)?,
+    };
+    let attribution_basis = format!(
+        "{}; asked from connector conversation {} on {} (binding {}, agent session {}, agency \
+         {})",
+        sender.basis,
+        ask.conversation_id,
+        ask.platform,
+        ask.binding_ref,
+        ask.agent_session_ref,
+        ask.agency_ref
+    );
+    let delivery = delivery_notice.unwrap_or_else(|| {
+        json!({
+            "fact": state_basis,
+            "consequence": "The Communique is recorded in this gateway's journal; nothing has been delivered yet.",
+            "action": format!("It is delivered at the recipient occupant's next turn boundary; follow it with `aikit gateway conversation --with {}`.", recipient.position_ref),
+        })
+    });
+    Ok(GatewayAskRoute {
+        draft: CommuniqueDraft {
+            communique_ref: format!(
+                "{COMMUNIQUE_REF_PREFIX}{}",
+                ulid::Ulid::generate().to_string().to_ascii_lowercase()
+            ),
+            from_position_ref: sender.from_position_ref.clone(),
+            from_generation_ref: sender.from_generation_ref.clone(),
+            attribution: sender.attribution,
+            attribution_basis,
+            to_position_ref: recipient.position_ref.clone(),
+            to_workcell_ref: occupant_workcell,
+            to_instance: None,
+            instance_hold: None,
+            body: ask.message.clone(),
+            sent_at_unix_ms: now_unix_ms(),
+            state,
+            state_basis,
+            reply_to: None,
+            forward_to_workcell_ref: remote.as_ref().map(|entry| entry.workcell_ref.clone()),
+            routing,
+        },
+        recipient_position_ref: recipient.position_ref,
+        delivery,
+    })
+}
+
+fn route_ask(home: &AikitHome, cwd: &Path, ask: &GatewayAskRequest) -> Result<GatewayAskRoute> {
+    let owners = crate::gateway_owners::ProcessOwners::from_env();
+    route_ask_with_owners(home, &owners, cwd, ask)
+}
+
+/// One relay attempt of an already-appended ask to the Workcell its route
+/// names. A remote that cannot be reached is a `Failed` outcome — the record
+/// stays queued for the next relay pass — never an error; a route naming no
+/// declared Workcell endpoint is.
+/// One relay attempt to a declared remote: resolve its token, offer the
+/// Communique to its gateway. Answers `(replayed, remote gateway ref)`. An
+/// exact-instance record is handed only to a remote that advertises the
+/// feature, and the remote's echo must still carry the binding.
+fn relay_attempt(
+    remote: &GatewayRemote,
+    communique: &Communique,
+    relayed_by: &str,
+) -> Result<(bool, String)> {
+    let whose = format!("of Workcell {}", remote.workcell_ref);
+    let carrier = |command: GatewayCommand| -> Result<GatewayResponse> {
+        let token = SecretLocation::parse(&remote.token_location)?.resolve()?;
+        let target = GatewayCarrierTarget::WebSocket {
+            bind: remote.websocket_bind.clone(),
+            path: remote.websocket_path.clone(),
+            bearer_token: token.expose().to_owned(),
+        };
+        aikit_adapters::gateway_command(&target, command, None)
+    };
+    if communique.to_instance.is_some() {
+        match exact_instance_support(carrier(GatewayCommand::Protocol), &whose) {
+            ExactSupport::Advertised => {}
+            ExactSupport::Missing(missing) => return Err(missing),
+            ExactSupport::Unasked(error) => return Err(error),
+        }
+    }
+    let (communique, replayed, remote_gateway_ref) =
+        expect_accepted(carrier(GatewayCommand::IngestCommunique {
+            communique: Box::new(communique.clone()),
+            relayed_by: relayed_by.to_owned(),
+        })?)?;
+    ensure_instance_kept(communique.to_instance.as_ref(), &communique, &whose)?;
+    Ok((replayed, remote_gateway_ref))
+}
+
+fn relay_appended(
+    home: &AikitHome,
+    communique: &Communique,
+    relayed_by: &str,
+) -> Result<CommuniqueForwardOutcome> {
+    let workcell_ref = match &communique.forward {
+        Some(CommuniqueForward::Queued { workcell_ref, .. }) => Some(workcell_ref.clone()),
+        Some(CommuniqueForward::Forwarded { .. }) => None,
+        None => communique
+            .routing
+            .as_ref()
+            .map(|routing| routing.workcell_ref.clone()),
+    }
+    .ok_or_else(|| {
+        AikitError::new(
+            "gateway.remote_unnamed",
+            format!(
+                "{} names no Workcell to relay to; it is recorded here undelivered",
+                communique.communique_ref
+            ),
+        )
+    })?;
+    let remotes = load_remotes(home)?;
+    let entry = remotes
+        .remotes
+        .iter()
+        .find(|entry| entry.workcell_ref == workcell_ref)
+        .ok_or_else(|| {
+            three_part(
+                "gateway.remote_undeclared",
+                format!(
+                    "The route of {} names Workcell {workcell_ref}, which is not reachable from here: no gateway endpoint is declared for it.",
+                    communique.communique_ref
+                ),
+                "The Communique is recorded and stays queued for relay; nothing was lost.",
+                format!("Declare the endpoint: {}", remote_command(&workcell_ref)),
+            )
+        })?;
+    let at = now_unix_ms();
+    Ok(match relay_attempt(entry, communique, relayed_by) {
+        Ok((_, remote_gateway_ref)) => CommuniqueForwardOutcome::Forwarded {
+            workcell_ref,
+            remote_gateway_ref,
+            at_unix_ms: at,
+        },
+        Err(error) => CommuniqueForwardOutcome::Failed {
+            workcell_ref,
+            error: error.to_string(),
+            at_unix_ms: at,
+        },
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2421,6 +2996,9 @@ pub fn who(
 
     // Definitions (Central).
     let mut rows: BTreeMap<String, Value> = BTreeMap::new();
+    // Which Position names which agency as eligible: the join that turns the
+    // registry's identities into occupancy seats.
+    let mut eligibility: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut project_world_ref = project_world
         .map(|world| {
             if world.contains(':') {
@@ -2447,6 +3025,18 @@ pub fn who(
                     let Some(reference) = record.get("ref").and_then(Value::as_str) else {
                         continue;
                     };
+                    for agent_ref in record
+                        .get("eligible_agent_refs")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                    {
+                        eligibility
+                            .entry(agent_ref.to_owned())
+                            .or_default()
+                            .push(reference.to_owned());
+                    }
                     rows.insert(
                         reference.to_owned(),
                         json!({
@@ -2611,6 +3201,50 @@ pub fn who(
             }
         };
 
+    // Agency identities (Central's agent-profile registry): every registered
+    // profile is addressable by default, and its row says where — if
+    // anywhere — the agency is currently embodied, and which registry the row
+    // came from.
+    let mut agents = Vec::new();
+    match owners.agent_profiles() {
+        Ok(listing) => {
+            for entry in profile_entries(&listing) {
+                let profile = profile_record(entry);
+                let Some(agent_ref) = profile.get("agent_ref").and_then(Value::as_str) else {
+                    continue;
+                };
+                let eligible = eligibility.get(agent_ref).cloned().unwrap_or_default();
+                agents.push(json!({
+                    "agent_ref": agent_ref,
+                    "handle": profile_handle(agent_ref),
+                    "label": profile.get("role").cloned().unwrap_or(Value::Null),
+                    "purpose": profile.get("purpose").cloned().unwrap_or(Value::Null),
+                    "registry": "agent-profile.list",
+                    "positions": eligible,
+                    "occupancy": agency_occupancy(
+                        eligibility.get(agent_ref).map(Vec::as_slice),
+                        occupancy.as_ref(),
+                        &survey,
+                        local_workcell_ref.as_deref(),
+                    ),
+                    "communiques": match &counts {
+                        Some(counts) => {
+                            json!({ "undelivered": counts.get(agent_ref).copied().unwrap_or(0) })
+                        }
+                        None => json!({ "undelivered": Value::Null }),
+                    },
+                }));
+            }
+        }
+        Err(unavailable) => {
+            absences.push(absence(
+                "agents",
+                unavailable.reason.clone(),
+                unavailable.command.clone(),
+            ));
+        }
+    }
+
     let mut positions = Vec::new();
     for (reference, mut row) in rows {
         let local_tenure = occupancy.as_ref().map(|occupancy| {
@@ -2705,9 +3339,66 @@ pub fn who(
         "local_world_ref": local_world_ref,
         "local_workcell_ref": local_workcell_ref,
         "positions": positions,
+        "agents": agents,
         "remotes": survey.statuses(),
         "absences": absences,
     }))
+}
+
+/// One agency's embodiment, joined from the occupancy its eligible Positions
+/// hold: `embodied-here` when this Workcell's ledger (or the reporting
+/// gateway) places a current occupant here, `embodied-elsewhere` when a
+/// declared Workcell reports one, `not-currently-embodied` when none does —
+/// and `unavailable` when occupancy could not be read at all.
+fn agency_occupancy(
+    eligible: Option<&[String]>,
+    occupancy: Option<&BTreeMap<String, Value>>,
+    survey: &RemoteSurvey,
+    local_workcell: Option<&str>,
+) -> Value {
+    let Some(occupancy) = occupancy else {
+        return json!({ "state": "unavailable" });
+    };
+    // No Position naming the agency is the unembodied case itself, not an
+    // absence: with an empty eligibility the agency is simply nowhere.
+    let eligible = eligible.unwrap_or(&[]);
+    let mut elsewhere: Vec<Value> = Vec::new();
+    for reference in eligible {
+        if let Some(tenure) = occupancy.get(reference).and_then(current_tenure) {
+            let workcell = tenure.get("workcell_ref").and_then(Value::as_str);
+            let embodied_here = match (workcell, local_workcell) {
+                (Some(workcell), Some(local)) => workcell == local,
+                // A tenure naming no Workcell is this ledger's own.
+                _ => true,
+            };
+            if embodied_here {
+                return json!({
+                    "state": "embodied-here",
+                    "position_ref": reference,
+                    "generation_ref": tenure.get("generation_ref"),
+                    "workcell_ref": tenure.get("workcell_ref"),
+                });
+            }
+            elsewhere.push(json!({
+                "position_ref": reference,
+                "generation_ref": tenure.get("generation_ref"),
+                "workcell_ref": workcell,
+            }));
+            continue;
+        }
+        if let Some(claim) = survey.claims(reference).first() {
+            elsewhere.push(json!({
+                "position_ref": reference,
+                "generation_ref": claim.generation_ref,
+                "workcell_ref": claim.remote.workcell_ref,
+            }));
+        }
+    }
+    if elsewhere.is_empty() {
+        json!({ "state": "not-currently-embodied", "positions": eligible })
+    } else {
+        json!({ "state": "embodied-elsewhere", "via": elsewhere })
+    }
 }
 
 /// The population reading's occupancy facet for a current tenure. A remote
@@ -3102,6 +3793,9 @@ mod exact_instance_binding_tests {
 
     impl ContactOwners for StubOwners {
         fn position_list(&self, _: Option<&str>) -> std::result::Result<Value, OwnerUnavailable> {
+            Err(unavailable())
+        }
+        fn agent_profiles(&self) -> std::result::Result<Value, OwnerUnavailable> {
             Err(unavailable())
         }
         fn position_read(&self, _: &str) -> std::result::Result<PositionLookup, OwnerUnavailable> {

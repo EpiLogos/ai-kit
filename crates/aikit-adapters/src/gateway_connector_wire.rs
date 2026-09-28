@@ -337,9 +337,6 @@ impl GatewayConnector for StdioWireConnector {
         Box::pin(async move { result })
     }
 
-    // A single pass with explicit exits: every arm breaks with the outcome
-    // or returns, so the loop is a scoped block, never a second iteration.
-    #[allow(clippy::never_loop)]
     fn next_event(&mut self) -> ConnectorFuture<'_, Option<InboundEvent>> {
         let result = (|| -> Result<Option<InboundEvent>> {
             let mut session = match self.session.take() {

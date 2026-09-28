@@ -194,7 +194,7 @@ fn the_coexistence_document_round_trips_and_defaults_to_exclusive() {
     let wrong = root.path().join("wrong.json");
     std::fs::write(
         &wrong,
-        "{\"schema\": \"aikit.gateway-connectors/v1\", \"policy\": \"coexist\"}",
+        format!("{{\"schema\": \"aikit.gateway-connectors/v1\", \"policy\": \"coexist\"}}"),
     )
     .unwrap();
     let error = load_coexistence(&wrong).unwrap_err();

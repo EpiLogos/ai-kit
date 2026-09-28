@@ -402,6 +402,15 @@ pub enum GatewayConversationOperation {
     /// invocation law disclosed: the harness carries skills in-turn; the
     /// gateway does not execute skills.
     Skills,
+    /// A connector-originated ask: one attributable Communique from the asking
+    /// agency to the named Position, routed exactly as `gateway send` routes
+    /// (local occupancy, cross-Workcell relay, held/vacant), with the asking
+    /// agent session and connector conversation carried as origin provenance.
+    /// The connector edge spells it `/ask <position-or-@handle> <message>`;
+    /// the routing behind it is resolved by the ask router the service wires
+    /// (`GatewayConversationHooks::ask_router`), and the append is this
+    /// kernel's own journal work.
+    AskPosition { position: String, message: String },
 }
 
 /// One agent reply (or honest turn failure) to be journaled on the same

@@ -126,16 +126,17 @@ impl GatewayConnectorEntry {
                     ));
                 }
             }
-            "stdio" if self.program.is_empty() || self.program[0].trim().is_empty() => {
-                return Err(AikitError::new(
-                    "gateway_connector_config.program_required",
-                    format!(
-                        "connector {} uses the stdio implementation; declare --program COMMAND",
-                        self.connector_ref
-                    ),
-                ));
+            "stdio" => {
+                if self.program.is_empty() || self.program[0].trim().is_empty() {
+                    return Err(AikitError::new(
+                        "gateway_connector_config.program_required",
+                        format!(
+                            "connector {} uses the stdio implementation; declare --program COMMAND",
+                            self.connector_ref
+                        ),
+                    ));
+                }
             }
-            "stdio" => {}
             _ => {}
         }
         Ok(())
@@ -487,7 +488,12 @@ impl GatewayConnectorFactory for TelegramConnectorFactory {
             TelegramConnectorConfig {
                 connector_ref,
                 configuration_ref,
-                poll_timeout_seconds: 30,
+                // The connector worker services its outbound queue (typing
+                // pulses, streamed segments, tool lines) between event polls,
+                // so the poll cycle bounds how live the conversation feels —
+                // and Telegram expires a typing indicator after ~5s. Short
+                // cycle; the Bot API charges nothing for it.
+                poll_timeout_seconds: 3,
                 allowed_updates: Vec::new(),
                 provenance: vec!["gateway connectors file".into()],
             },
