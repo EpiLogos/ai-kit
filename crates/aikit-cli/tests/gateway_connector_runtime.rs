@@ -371,7 +371,7 @@ fn subscribe_delivers_live_pushes_and_reconnect_replays_cover_the_gap() {
 
     let socket = home.path().join("state/gateway.sock");
     let far_deadline = Instant::now() + Duration::from_secs(30);
-    let mut read_line = |stream: &UnixStream| -> Value {
+    let read_line = |stream: &UnixStream| -> Value {
         stream
             .set_read_timeout(Some(Duration::from_millis(100)))
             .unwrap();
@@ -818,7 +818,6 @@ fn a_disabled_connector_is_declared_but_not_run() {
 fn the_specimen_binary_itself_speaks_the_wire_protocol() {
     // Direct child conformance: hello, scripted inbound echo, receipt marker,
     // shutdown. This is the same protocol the service drives over the pump.
-    use std::process::Stdio as _;
 
     let mut child = Command::new(specimen_bin())
         .args([
