@@ -11,6 +11,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod act;
 pub mod activity_evidence;
 pub mod adopt;
 pub mod alias_family;
@@ -20,6 +21,7 @@ pub mod client;
 pub mod closeout;
 mod cmux_config;
 pub mod collate;
+pub mod command_metadata;
 pub mod communique_turn;
 pub mod config_plane;
 pub mod contemplation_field;
@@ -36,7 +38,9 @@ pub mod env;
 pub mod file_context;
 pub mod foreign;
 pub mod foreign_cron;
+pub mod gateway_connectors;
 pub mod gateway_contact;
+pub mod gateway_hoist;
 pub mod gateway_install;
 pub mod gateway_ops;
 pub mod gateway_owners;

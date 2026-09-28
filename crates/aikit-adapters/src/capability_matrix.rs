@@ -31,10 +31,18 @@ pub struct MatrixReading {
 
 /// A world compilation keeps errors from the root composition common and
 /// errors from a Work Project attached to their producer.
+///
+/// `object_projects` carries each compiled object's owning Project
+/// (`Work/<name>`), keyed by the object's ref and by every source ref it
+/// cites (the matrix's own carrier paths, which are plain filesystem paths
+/// and so carry no Project ownership in their text). Objects compiled from
+/// the root composition are unattributed: the root lineage stays a
+/// distinct, legitimately broader aperture.
 pub struct WorldMatrixReading {
     pub objects: Vec<WikiObject>,
     pub absences: Vec<String>,
     pub project_absences: Vec<ProjectMatrixAbsence>,
+    pub object_projects: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -298,6 +306,7 @@ pub fn compile_world_matrices(central_root: &Path) -> WorldMatrixReading {
     // from an earlier home is skipped with a disclosure — first home wins
     // (canonical order), and genuinely distinct matrices still compile.
     let mut seen_refs = std::collections::BTreeSet::new();
+    let mut object_projects: BTreeMap<String, String> = BTreeMap::new();
     for (dir, space_ref, project) in homes {
         if !dir.join("capability-matrix.json").is_file() {
             continue;
@@ -306,7 +315,22 @@ pub fn compile_world_matrices(central_root: &Path) -> WorldMatrixReading {
         let mut reading = compile_capability_matrix(&dir, space_ref);
         for object in reading.objects.drain(..) {
             let object_ref = object.ref_id().as_str().to_owned();
-            if seen_refs.insert(object_ref.clone()) {
+            let fresh = seen_refs.insert(object_ref.clone());
+            // Project-owned compilation is attributed at the source: the
+            // owning Project display rides every kept object ref this home
+            // produced and every source ref those objects cite (the carrier
+            // paths), so a scoped reply can keep another Project's matrix
+            // material out without re-deriving ownership from path text.
+            // Attribution follows the same first-home-wins rule as the
+            // compilation itself: a re-declared ref stays owned by the home
+            // that actually kept it.
+            if fresh {
+                if let Some(project) = &project {
+                    object_projects.insert(object_ref.clone(), project.clone());
+                    for source in object_source_refs(&object) {
+                        object_projects.insert(source, project.clone());
+                    }
+                }
                 objects.push(object);
             } else {
                 let message = format!(
@@ -337,6 +361,7 @@ pub fn compile_world_matrices(central_root: &Path) -> WorldMatrixReading {
         objects,
         absences,
         project_absences,
+        object_projects,
     }
 }
 
@@ -354,6 +379,20 @@ fn matrix_provenance(carrier: &str, revision: &str) -> WikiProvenanceRef {
 fn source_ref_of(dir: &Path, carrier: &str) -> SourceRef {
     SourceRef::parse(dir.join(carrier).to_string_lossy().replace('\\', "/"))
         .expect("matrix paths are valid source refs")
+}
+
+/// Every source ref a compiled matrix object cites: the carrier paths on
+/// nodes, and nothing on the compiled edges (their provenance is the
+/// producer, not a carrier).
+fn object_source_refs(object: &WikiObject) -> Vec<String> {
+    match object {
+        WikiObject::Node(node) => node
+            .source_refs
+            .iter()
+            .map(|source| source.as_str().to_owned())
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn matrix_extension(matrix_id: &str, extra: Value) -> BTreeMap<String, Value> {

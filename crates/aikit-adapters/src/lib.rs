@@ -31,8 +31,14 @@ pub mod factory_developmental;
 pub mod factory_run_thought_authored_wiki;
 pub mod flow_authored_wiki;
 pub mod gateway_client;
+pub mod gateway_coexistence;
 pub mod gateway_communique;
 pub mod gateway_connector;
+pub mod gateway_connector_config;
+pub mod gateway_connector_pump;
+pub mod gateway_connector_specimen;
+pub mod gateway_connector_wire;
+pub mod gateway_conversation_engine;
 #[allow(unused_imports)]
 pub mod gateway_runtime;
 pub mod gateway_service;
@@ -67,8 +73,12 @@ pub mod session_space_connection;
 pub mod session_space_observation;
 pub mod session_space_reconstruction;
 pub mod shells;
+mod slack_bot_api;
+pub mod slack_gateway;
+pub mod slack_gateway_curl;
 mod telegram_bot_api;
 pub mod telegram_gateway;
+pub mod telegram_gateway_curl;
 pub mod tool_sources;
 pub mod wiki_document;
 pub mod wiki_graph;
@@ -142,6 +152,12 @@ pub use gateway_client::{
     gateway_command, gateway_command_within, gateway_request, GatewayCarrierTarget,
     GATEWAY_CLIENT_VERSION,
 };
+pub use gateway_coexistence::{
+    coexistence_report, decide, detect, exclusive_gate, load_coexistence, probe_live,
+    store_coexistence, CoexistenceDecision, CoexistenceDocument, CoexistencePolicy,
+    CoexistenceProbe, ExclusiveCoexistenceGate, ForeignBotIdentity, ForeignGateway,
+    GatewayCoexistenceGate, GATEWAY_COEXISTENCE_FILE_NAME, GATEWAY_COEXISTENCE_SCHEMA,
+};
 pub use gateway_communique::{
     Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForward, CommuniqueForwardOutcome,
     CommuniqueJournal, CommuniqueRouting, CommuniqueState, CommuniqueTransition, SenderAttribution,
@@ -155,10 +171,30 @@ pub use gateway_connector::{
     OutboundOperation, OutboundOperationKind, SenderIdentity, SenderKind,
     GATEWAY_CONNECTOR_SCHEMA_PATH, GATEWAY_CONNECTOR_SDK_VERSION, GATEWAY_CONNECTOR_WIRE_VERSION,
 };
+pub use gateway_connector_config::{
+    build_connector_factory, load_gateway_connectors, store_gateway_connectors,
+    ConnectorTokenLocation, GatewayConnectorEntry, GatewayConnectorFactory, GatewayConnectorsFile,
+    GATEWAY_CONNECTORS_FILE_NAME, GATEWAY_CONNECTORS_SCHEMA,
+};
+pub use gateway_connector_pump::{
+    spawn_connector_workers, ConnectorOutbound, ConnectorPumpControls, ConnectorQueues,
+    CONNECTOR_QUIET_POLL_CODE,
+};
+pub use gateway_connector_specimen::{
+    run_specimen_connector, SpecimenOptions, SPECIMEN_CONNECTOR_VERSION,
+};
+pub use gateway_connector_wire::StdioWireConnector;
+pub use gateway_conversation_engine::{
+    parse_slash, AgentHostTurnSource, ConversationHarnessProtocol, ConversationTurn,
+    ConversationTurnOutcome, ConversationTurnRequest, ConversationTurnSource, EnginePolicy,
+    FixtureScript, FixtureTurnSource, GatewayConversationEngine, GatewayTurnSourceResolver,
+    SlashParse, StreamTiming, TurnProgress, TurnStreamItem,
+};
 pub use gateway_runtime::{
     connector_descriptor, execute_gateway_command, text_send, AgencyGateway,
-    GatewayActuationControlIntent, GatewayActuationControlOperation, GatewayBinding,
-    GatewayCommand, GatewayDiscovery, GatewayEcology, GatewayEcologyAgency, GatewayEcologySession,
+    GatewayActuationControlIntent, GatewayActuationControlOperation, GatewayAgentReply,
+    GatewayAgentReplyFailure, GatewayBinding, GatewayCommand, GatewayConversationOperation,
+    GatewayDiscovery, GatewayEcology, GatewayEcologyAgency, GatewayEcologySession,
     GatewayEcologyStream, GatewayEcologySurface, GatewayErrorEnvelope, GatewayForkOrigin,
     GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult, GatewayInvocationMode,
     GatewayOccupancyReading, GatewayOwnerUnavailable, GatewayReplay, GatewayRequestEnvelope,
@@ -170,8 +206,9 @@ pub use gateway_runtime::{
 pub use gateway_service::{
     acquire_gateway_state_lock, execute_against_state_file, persist_gateway_state,
     restore_gateway_state, run_gateway_service, run_gateway_service_with_hooks,
-    run_gateway_service_with_ticks, GatewayOccupancyReader, GatewayServiceConfig,
-    GatewayServiceHooks, GatewayStateLock, GatewayTick, GatewayTickLoop,
+    run_gateway_service_with_ticks, GatewayConversationHooks, GatewayOccupancyReader,
+    GatewayServiceConfig, GatewayServiceHooks, GatewayServiceRuntime, GatewayStateLock,
+    GatewayTick, GatewayTickLoop, SubscriptionHub, SubscriptionSink,
     DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION,
 };
 pub use harness_disclosure::{
@@ -217,6 +254,10 @@ pub use session_space_observation::{
     SESSION_SPACE_OBSERVATION_FILE_VERSION,
 };
 pub use session_space_reconstruction::session_space_native_observations;
+pub use slack_gateway::{
+    SlackBotApiTransport, SlackBotIdentity, SlackConnector, SlackConnectorConfig,
+    SLACK_GATEWAY_CONNECTOR_VERSION, SLACK_WEB_API_BASE,
+};
 pub use telegram_gateway::{
     TelegramBotApiTransport, TelegramBotIdentity, TelegramConnector, TelegramConnectorConfig,
     TELEGRAM_BOT_API_BASE, TELEGRAM_GATEWAY_CONNECTOR_VERSION,

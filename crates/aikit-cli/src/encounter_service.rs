@@ -660,7 +660,7 @@ impl EncounterService {
             _ => error(format!("withdraw {}: {e}", path.display())),
         })
     }
-    fn providers(&self) -> Result<Vec<EncounterProvider>> {
+    pub(crate) fn providers(&self) -> Result<Vec<EncounterProvider>> {
         let root = self.home.state().join("encounter-providers");
         if !root.exists() {
             return Ok(Vec::new());
