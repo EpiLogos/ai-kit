@@ -388,7 +388,7 @@ impl Service {
         }
         let table = self
             .active_provider_config("tool/search/jev-rerank")
-            .map(|config| config.clone());
+            .cloned();
         crate::knowledge_jev::maybe_rerank(table.as_ref(), result, limit);
     }
 

@@ -11,11 +11,11 @@ use crate::cli::{
     JevInvokeArgs, JevValidateArgs, NowAppendChangeArgs, NowFactorySensingArgs, NowInspectArgs,
     NowPrepareArgs, NowPublishArgs, NowRevokeArgs, NowStatusArgs,
 };
+use crate::decide::{invoke_selected, DecisionProviderMode, DecisionReceipt};
 use aikit_adapters::central_file_map::{self, CentralFileMapProvider};
 use aikit_adapters::jev::{
     CurlJevProvider, JevBoundary, JevCancellation, JevEndpoint, JevInvocation,
 };
-use crate::decide::{invoke_selected, DecisionProviderMode, DecisionReceipt};
 use aikit_adapters::runner::{CommandRunner, SystemRunner};
 use aikit_adapters::secret_resolver::SuiteSecretResolver;
 use aikit_core::context_source::{AgentVisibility, ExternalEgress};
@@ -101,7 +101,11 @@ pub(crate) fn minted_invocation_ref(request: &JevRequest) -> Result<ResourceRef>
 
 pub fn jev_validate(args: JevValidateArgs) -> Result<Value> {
     let request = JevRequest::parse(&read_bytes(&args.request_file, "Jev request", 1024 * 1024)?)?;
-    let response = JevResponse::parse(&read_bytes(&args.response_file, "Jev response", 1024 * 1024)?)?;
+    let response = JevResponse::parse(&read_bytes(
+        &args.response_file,
+        "Jev response",
+        1024 * 1024,
+    )?)?;
     response.validate_typesafe_for(&request)?;
     Ok(json!({
         "schema":"aikit.jev-validation/v1",

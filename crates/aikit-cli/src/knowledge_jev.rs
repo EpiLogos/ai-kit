@@ -3,20 +3,20 @@
 //! The search faculty already federates every provider it holds; what it did
 //! not have was the commissioned selection step (JEV-REDIS-NOW-INTEGRATION §2:
 //! "Jev helps interpret the matrices and select relevant material") applied to
-//! its own oversized pulls. This module is that join: when a pull carries more
-//! candidates than the surface will show and the `tool/search/jev-rerank`
-//! capability is configured, one bounded, budgeted, cancellable Jev invocation
-//! scores the candidates and the merged order re-ranks accordingly. Without
-//! the configuration the faculty behaves exactly as before; nothing here is
-//! ever required, and a failed selection degrades to the unranked order with
-//! a named absence.
+//! its own oversized pulls. This module is that join — and it is deliberately
+//! **not** a second decision system: the invocation goes through the elected
+//! provider of the provider-neutral decide route (`decide::invoke_selected`),
+//! so a configured pull is scored by whatever the operator elected — the local
+//! Kev recipe by default — under that route's laws (local unauthenticated
+//! serving, no invented tariff, model-identity drift refusal). Without the
+//! `tool/search/jev-rerank` capability — or with no provider elected — the
+//! faculty behaves exactly as before; a failed selection degrades to the
+//! unranked order with a named absence.
 
+use crate::decide::{invoke_selected, parse_provider_config, DecisionProviderMode};
 use crate::jev_now::minted_invocation_ref;
-use aikit_adapters::jev::{CurlJevProvider, JevBoundary, JevCancellation, JevEndpoint};
-use aikit_adapters::secret_resolver::SuiteSecretResolver;
-use aikit_core::jev::{JevLimits, JevRequest, JevResponse, Question};
+use aikit_core::jev::{JevRequest, JevResponse, Question};
 use aikit_core::knowledge_navigation::{KnowledgeSearchHit, KnowledgeSearchResult};
-use aikit_core::secret_ref::{SecretRef, SecretResolver};
 use aikit_core::{AikitError, Result};
 use serde_json::json;
 use std::path::PathBuf;
@@ -27,7 +27,8 @@ fn invalid(message: impl std::fmt::Display) -> AikitError {
 
 /// Hard bound on candidates scored in one pull. One Score question per
 /// candidate, and the protocol accepts at most 256 questions; staying well
-/// under it keeps the request bounded and the spend predictable.
+/// under it keeps the request bounded and the elected model's trained-state
+/// envelope respected.
 const MAX_CANDIDATES_CAP: usize = 64;
 
 /// The five-step relevance scale every candidate is scored against. Criteria
@@ -41,86 +42,45 @@ const SCALE: [&str; 5] = [
     "4 — exact subject: the query is essentially this item",
 ];
 
-/// Parsed `tool/search/jev-rerank` capability configuration. Absent means the
-/// join is off; present-but-invalid means the faculty says so and searches on.
+/// Search-side configuration: what the join needs beyond the elected
+/// provider. The provider itself is never named here — it is whatever the
+/// operator elected in the decision-provider file.
 #[derive(Debug, Clone)]
 pub struct JevRerankConfig {
-    pub credential_ref: String,
-    pub model: String,
-    pub controlled_endpoint: Option<std::net::SocketAddr>,
+    pub provider_file: PathBuf,
     pub max_candidates: usize,
-    pub limits: JevLimits,
+    pub curl: Option<PathBuf>,
+    pub allow_env_import: bool,
 }
 
 impl JevRerankConfig {
     /// Read the configuration from a capability table. `Ok(None)` — capability
     /// not configured; the search path must not change behaviour at all.
     pub fn from_table(table: &toml::Table) -> Result<Option<Self>> {
-        let Some(credential_ref) = table
-            .get("credential_ref")
+        let Some(provider_file) = table
+            .get("provider_file")
             .and_then(|value| value.as_str())
-            .map(str::to_owned)
+            .map(PathBuf::from)
         else {
             return Ok(None);
         };
-        let model = table
-            .get("model")
-            .and_then(|value| value.as_str())
-            .map(str::to_owned)
-            .ok_or_else(|| {
-                invalid("tool/search/jev-rerank requires a Jev model selector (jev-…)")
-            })?;
-        let tariff = table.get("tariff").ok_or_else(|| {
-            invalid("tool/search/jev-rerank requires a declared tariff (never invented prices)")
-        })?;
         let max_candidates = table
             .get("max_candidates")
             .and_then(|value| value.as_integer())
             .map(|value| value as usize)
             .unwrap_or(24)
             .clamp(1, MAX_CANDIDATES_CAP);
-        let controlled_endpoint = match table.get("controlled_endpoint") {
-            None => None,
-            Some(value) => Some(
-                value
-                    .as_str()
-                    .ok_or_else(|| invalid("tool/search/jev-rerank controlled_endpoint must be host:port"))?
-                    .parse::<std::net::SocketAddr>()
-                    .map_err(|_| {
-                        invalid("tool/search/jev-rerank controlled_endpoint is not a valid socket address")
-                    })?,
-            ),
-        };
-        let limits = JevLimits {
-            timeout_ms: table
-                .get("timeout_ms")
-                .and_then(|value| value.as_integer())
-                .map(|value| value as u64)
-                .unwrap_or(60_000),
-            max_attempts: table
-                .get("max_attempts")
-                .and_then(|value| value.as_integer())
-                .map(|value| value as u32)
-                .unwrap_or(2),
-            max_total_reserved_microusd: table
-                .get("max_total_reserved_microusd")
-                .and_then(|value| value.as_integer())
-                .map(|value| value as u64)
-                .unwrap_or(20_000),
-            tariff: serde_json::from_value(
-                serde_json::to_value(tariff)
-                    .map_err(|e| invalid(format!("tariff round-trip failed: {e}")))?,
-            )
-            .map_err(|_| {
-                invalid("tool/search/jev-rerank tariff does not satisfy the Jev tariff contract")
-            })?,
-        };
         Ok(Some(Self {
-            credential_ref,
-            model,
-            controlled_endpoint,
+            provider_file,
             max_candidates,
-            limits,
+            curl: table
+                .get("curl")
+                .and_then(|value| value.as_str())
+                .map(PathBuf::from),
+            allow_env_import: table
+                .get("allow_env_import")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
         }))
     }
 }
@@ -129,13 +89,17 @@ impl JevRerankConfig {
 pub struct JevRerankOutcome {
     pub candidates: usize,
     pub reordered: usize,
-    pub reserved_microusd: u64,
     pub returned_model: String,
 }
 
 /// One typed Score question per candidate: "how relevant is this candidate to
-/// the query", scored on the shared five-step scale.
-fn build_rerank_request(query: &str, candidates: &[KnowledgeSearchHit]) -> JevRequest {
+/// the query", scored on the shared five-step scale. The model selector comes
+/// from the elected provider, never from this module.
+fn build_rerank_request(
+    query: &str,
+    model: String,
+    candidates: &[KnowledgeSearchHit],
+) -> JevRequest {
     let state = json!({
         "query": query,
         "candidates": candidates
@@ -163,16 +127,16 @@ fn build_rerank_request(query: &str, candidates: &[KnowledgeSearchHit]) -> JevRe
         );
     }
     JevRequest {
-        model: String::new(),
+        model,
         state,
         questions,
     }
 }
 
-/// Per-candidate scores in candidate order. The provider path already ran
-/// `JevResponse::parse_for` against this request — every requested question
-/// has exactly one validated Score answer — so a complete pull is the only
-/// success; this just lifts the scores out in candidate order.
+/// Per-candidate scores in candidate order. The decide receipt already ran
+/// the protocol's `parse_for` validation against this request — every
+/// requested question has exactly one answer, or there is no receipt — so a
+/// complete pull is the only success; this lifts the scores out in order.
 fn scores_from_response(response: &JevResponse, candidates: usize) -> Result<Vec<f64>> {
     let mut scores = Vec::with_capacity(candidates);
     for index in 0..candidates {
@@ -219,67 +183,76 @@ fn apply_rerank(hits: &mut [KnowledgeSearchHit], scores: &[f64]) -> usize {
     moved
 }
 
-/// The full join: build the bounded question set, resolve the credential
-/// natively, invoke once through the real provider seam, and re-order by the
-/// validated scores. Credential rotation mid-invocation refuses, exactly as
-/// `jev_now` and `contemplation_intel` do.
+/// The full join through the elected decision provider: build the bounded
+/// question set under the elected model identity, let the decide route
+/// validate bounds and invoke (local Kev by default, hosted only when
+/// elected), and re-order by the validated scores.
 pub fn rerank(
     query: &str,
     hits: &mut [KnowledgeSearchHit],
     config: &JevRerankConfig,
 ) -> Result<JevRerankOutcome> {
     let candidates = hits.len().min(config.max_candidates);
-    let mut request = build_rerank_request(query, &hits[..candidates]);
-    request.model = config.model.clone();
-    request.validate()?;
-    let limits = &config.limits;
-    limits.validate(&request)?;
-
-    let resolver = SuiteSecretResolver::default();
-    let credential_ref = SecretRef::parse(&config.credential_ref)?;
-    let secret = resolver.resolve(&credential_ref)?;
-    let initial_material_digest = blake3::hash(secret.expose().as_bytes());
-    let endpoint = config
-        .controlled_endpoint
-        .map(JevEndpoint::Controlled)
-        .unwrap_or(JevEndpoint::Official);
-    let provider = CurlJevProvider::new(PathBuf::from("curl"), endpoint);
-    let cancellation = JevCancellation::default();
-    let invocation_ref = minted_invocation_ref(&request)?;
-    let mut guard = |_: JevBoundary| -> Result<()> {
-        let current = resolver.resolve(&credential_ref)?;
-        if blake3::hash(current.expose().as_bytes()) != initial_material_digest {
-            return Err(AikitError::new(
-                "knowledge.jev_rerank_credential_changed",
-                "The native credential changed during the Jev rerank; re-run explicitly",
-            ));
-        }
-        Ok(())
+    let config_bytes = std::fs::read(&config.provider_file)
+        .map_err(|e| invalid(format!("decision provider file unreadable: {e}")))?;
+    if config_bytes.len() > 256 * 1024 {
+        return Err(invalid(
+            "decision provider file exceeds the bounded read size",
+        ));
+    }
+    let elected = parse_provider_config(&config_bytes)?;
+    elected.validate()?;
+    if elected.mode == DecisionProviderMode::None {
+        return Err(AikitError::new(
+            "decision.provider_disabled",
+            "The elected decision provider is none; the rerank has nothing to invoke",
+        ));
+    }
+    let model = match elected.mode {
+        DecisionProviderMode::Hosted => elected
+            .jev_limits
+            .as_ref()
+            .map(|limits| limits.tariff.model_version.clone())
+            .ok_or_else(|| invalid("hosted election requires JevLimits"))?,
+        _ => elected.limits()?.model.clone(),
     };
-
-    let invocation = provider.invoke(
-        invocation_ref,
+    let request = build_rerank_request(query, model, &hits[..candidates]);
+    request.validate()?;
+    if let Some(limits) = &elected.limits {
+        limits.validate(&request)?;
+    }
+    if let Some(limits) = &elected.jev_limits {
+        limits.validate(&request)?;
+    }
+    let invocation_ref = minted_invocation_ref(&request)?;
+    let receipt = invoke_selected(
+        &elected,
         &request,
-        limits,
-        &secret,
-        &cancellation,
-        &mut guard,
+        invocation_ref,
+        config.curl.clone(),
+        config.allow_env_import,
+        &mut || Ok(()),
     )?;
-    let reserved = invocation.total_reserved_microusd;
-    let returned_model = invocation.answer.as_ref().map(|a| a.model.clone());
-    let answer = invocation.answer.as_ref().ok_or_else(|| {
+    let answer = receipt.answer().ok_or_else(|| {
         AikitError::new(
             "knowledge.jev_rerank_no_answer",
-            "The Jev rerank invocation completed without an answer; the unranked order stands",
+            receipt
+                .failure_message()
+                .unwrap_or_else(|| "The elected decision provider produced no answer".into()),
         )
     })?;
+    if !receipt.outcome_completed() {
+        return Err(AikitError::new(
+            "knowledge.jev_rerank_incomplete",
+            "The elected decision provider did not complete the determination",
+        ));
+    }
     let scores = scores_from_response(answer, candidates)?;
     let moved = apply_rerank(hits, &scores);
     Ok(JevRerankOutcome {
         candidates,
         reordered: moved,
-        reserved_microusd: reserved,
-        returned_model: returned_model.unwrap_or_default(),
+        returned_model: answer.model.clone(),
     })
 }
 
@@ -311,12 +284,12 @@ pub fn maybe_rerank(
     }
     match rerank(&result.query.clone(), &mut result.hits, &config) {
         Ok(outcome) => result.absences.push(format!(
-            "Jev rerank applied: {} candidates scored by {} ({} positions reordered, {} µ$ reserved)",
-            outcome.candidates, outcome.returned_model, outcome.reordered, outcome.reserved_microusd
+            "Jev rerank applied: {} candidates scored by {} ({} positions reordered)",
+            outcome.candidates, outcome.returned_model, outcome.reordered
         )),
-        Err(error) => result
-            .absences
-            .push(format!("Jev rerank unavailable, unranked order stands: {error:#}")),
+        Err(error) => result.absences.push(format!(
+            "Jev rerank unavailable, unranked order stands: {error:#}"
+        )),
     }
 }
 
@@ -344,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_rerank_orders_by_score_and_reports_moved_positions() {
+    fn apply_rerank_orders_by_score_and_counts_moved_positions() {
         let mut hits: Vec<_> = (0..4).map(hit).collect();
         // Candidate 2 scores highest; candidate 0 lowest.
         let moved = apply_rerank(&mut hits, &[1.0, 2.0, 4.0, 0.0]);
@@ -374,21 +347,24 @@ mod tests {
     #[test]
     fn build_rerank_request_carries_one_scored_question_per_candidate() {
         let candidates: Vec<_> = (0..3).map(hit).collect();
-        let mut request = build_rerank_request("eight determinations", &candidates);
-        request.model = "jev-test.1.0".into();
+        let request =
+            build_rerank_request("eight determinations", "kev-test.1.0".into(), &candidates);
         request
             .validate()
             .expect("a bounded candidate set satisfies the Jev request contract");
         assert_eq!(request.questions.len(), 3);
+        assert_eq!(request.model, "kev-test.1.0");
         assert!(request.state["candidates"].as_array().unwrap().len() == 3);
     }
 
     #[test]
-    fn config_absent_means_off_and_credential_only_is_invalid() {
+    fn config_absent_means_off_and_provider_file_is_required() {
         assert!(JevRerankConfig::from_table(&toml::Table::new())
             .unwrap()
             .is_none());
-        let with_credential: toml::Table = toml::from_str("credential_ref = \"suite:x\"").unwrap();
-        assert!(JevRerankConfig::from_table(&with_credential).is_err());
+        let without_file: toml::Table = toml::from_str("max_candidates = 8").unwrap();
+        assert!(JevRerankConfig::from_table(&without_file)
+            .unwrap()
+            .is_none());
     }
 }
