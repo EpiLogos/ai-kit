@@ -654,9 +654,9 @@ impl EncounterService {
             .join("encounter-providers")
             .join(format!("{}.json", provider_id));
         std::fs::remove_file(&path).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => {
-                error(format!("No configured encounter provider named {provider_id}"))
-            }
+            std::io::ErrorKind::NotFound => error(format!(
+                "No configured encounter provider named {provider_id}"
+            )),
             _ => error(format!("withdraw {}: {e}", path.display())),
         })
     }
