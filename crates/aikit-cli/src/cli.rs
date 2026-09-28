@@ -795,6 +795,7 @@ fn praxis_route(command: &PraxisSub) -> &'static str {
         PraxisSub::List { .. } => "cmd_praxis_list",
         PraxisSub::Disclose { .. } => "cmd_praxis_disclose",
         PraxisSub::InstantiateCheck { .. } => "cmd_praxis_instantiate_check",
+        PraxisSub::Read { .. } => "cmd_praxis_read",
         PraxisSub::Skill(c) => skill_route(&c.command),
         PraxisSub::Set(c) => set_route(&c.command),
         PraxisSub::Family(_) => "cmd_family",
@@ -831,6 +832,7 @@ fn source_route(command: &SourceSub) -> &'static str {
         SourceSub::BindCentral(_) => "cmd_source_bind_central",
         SourceSub::AddDirectory(_) => "cmd_source_add_directory",
         SourceSub::AddGit(_) => "cmd_source_add_git",
+        SourceSub::AddCapsule(_) => "cmd_source_add_capsule",
         SourceSub::SetRevision(_) => "cmd_source_set_revision",
         SourceSub::Sync(_) => "cmd_source_sync",
         SourceSub::Show(_) => "cmd_source_show",
@@ -937,6 +939,7 @@ fn skill_route(command: &SkillSub) -> &'static str {
             SkillOverlaySub::Show(_) => "cmd_skill_overlay_show",
             SkillOverlaySub::Clear(_) => "cmd_skill_overlay_clear",
         },
+        SkillSub::Export(_) => "cmd_skill_export",
     }
 }
 
@@ -2304,6 +2307,23 @@ pub struct SkillCmd {
 pub enum SkillSub {
     /// Manage additive Skill Usage Overlays.
     Overlay(SkillOverlayCmd),
+    /// Export a practice as a portable, content-addressed capsule archive
+    /// (`aikit.practice-capsule/v1`) another World can adopt with
+    /// `system source add-capsule`.
+    Export(SkillExportArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SkillExportArgs {
+    /// The practice's capsule id, e.g. `skill/ql/darshana`.
+    #[arg(value_name = "PRACTICE")]
+    pub practice: String,
+    /// Export this retained revision instead of the active one.
+    #[arg(long, value_name = "REVISION")]
+    pub revision: Option<String>,
+    /// Where to write the archive.
+    #[arg(long, value_name = "FILE")]
+    pub out: std::path::PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -2429,6 +2449,11 @@ pub enum SourceSub {
     AddDirectory(SourceAddDirectoryArgs),
     /// Register a Git repository and exact revision without fetching it yet.
     AddGit(SourceAddGitArgs),
+    /// Register one practice capsule from an exported archive
+    /// (`aikit.practice-capsule/v1`) without making it active; the capsule
+    /// keeps its original id and revision, and the upstream provenance is
+    /// recorded in the registration.
+    AddCapsule(SourceAddCapsuleArgs),
     /// Move an existing Git source to a new exact revision without syncing it.
     SetRevision(SourceSetRevisionArgs),
     /// Copy the source into a new immutable candidate snapshot.
@@ -2464,6 +2489,28 @@ pub struct SourceAddDirectoryArgs {
     /// become capability metadata and a retired standing never projects.
     #[arg(long)]
     pub control_ground: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SourceAddCapsuleArgs {
+    /// The archive `praxis skill export` wrote.
+    #[arg(value_name = "ARCHIVE")]
+    pub archive: std::path::PathBuf,
+    /// The source id; defaults to `capsule-<practice-slug>-<revision12>`, so
+    /// each adopted revision stands in its own source.
+    #[arg(long, value_name = "ID")]
+    pub id: Option<String>,
+    /// The publication entry the practice was read from (provenance).
+    #[arg(long = "upstream-ref", value_name = "REF")]
+    pub upstream_ref: Option<String>,
+    /// The World that offered the practice (provenance).
+    #[arg(long = "world-ref", value_name = "REF")]
+    pub world_ref: Option<String>,
+    /// Provenance as JSON (`{"world_ref"?, "entry_ref"?, "practice_id"?,
+    /// "revision"?}`); practice_id and revision, when given, must match the
+    /// archive. Prefix a path with @ to read a file.
+    #[arg(long = "provenance", value_name = "JSON|@FILE")]
+    pub provenance: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -3988,6 +4035,18 @@ pub enum PraxisSub {
         /// to read a file.
         #[arg(long = "invocation-json", value_name = "JSON|@FILE")]
         invocation_json: String,
+    },
+    /// Read a practice's capsule files at its active revision (or a named
+    /// revision its source still retains), as AIKit proves them
+    /// (`aikit.practice-reading/v1`). Refuses a revision it cannot prove.
+    Read {
+        /// The practice's capsule id, e.g. `skill/ql/darshana`.
+        #[arg(value_name = "PRACTICE")]
+        practice: String,
+        /// Read this revision instead of the active one; it must still be
+        /// retained by the practice's managed source.
+        #[arg(long, value_name = "REVISION")]
+        revision: Option<String>,
     },
     /// Author scoped, additive guidance for Agent Skills. (The `skill` root
     /// spelling is the same command.)

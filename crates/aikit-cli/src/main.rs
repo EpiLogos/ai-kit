@@ -1808,7 +1808,20 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
 }
 
 fn cmd_skill(cwd: &std::path::Path, command: SkillCmd) -> Result<Reply> {
-    let SkillSub::Overlay(overlay) = command.command;
+    let overlay = match command.command {
+        SkillSub::Overlay(overlay) => overlay,
+        SkillSub::Export(args) => {
+            let service = Service::discover(cwd)?;
+            let proven = aikit_cli::practice_capsule::prove(
+                service.home(),
+                service.snapshot(),
+                &args.practice,
+                args.revision.as_deref(),
+            )?;
+            let data = aikit_cli::practice_capsule::export(&proven, &args.out)?;
+            return Ok(reply(&service, data, vec![]));
+        }
+    };
     match overlay.command {
         SkillOverlaySub::Set(args) => {
             let mut service = Service::discover(cwd)?;
@@ -2199,12 +2212,56 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                 vec![],
             ))
         }
+        SourceSub::AddCapsule(args) => {
+            let mut provenance: skill_sources::CapsuleProvenance = match args.provenance.as_deref()
+            {
+                Some(raw) => {
+                    serde_json::from_value(aikit_cli::praxis_cli::read_json(raw, "provenance")?)
+                        .map_err(|error| {
+                            AikitError::new(
+                                "source.provenance_invalid",
+                                format!("the provenance is not a readable record: {error}"),
+                            )
+                        })?
+                }
+                None => Default::default(),
+            };
+            if args.world_ref.is_some() {
+                provenance.world_ref = args.world_ref.clone();
+            }
+            if args.upstream_ref.is_some() {
+                provenance.entry_ref = args.upstream_ref.clone();
+            }
+            let added =
+                skill_sources::add_capsule(home, &args.archive, args.id.as_deref(), &provenance)?;
+            let skill_sources::SourceKind::Capsule {
+                capsule_id,
+                revision,
+                upstream,
+            } = &added.spec.kind
+            else {
+                unreachable!("add_capsule registers a capsule source");
+            };
+            Ok(source_reply(
+                jval!({
+                    "id": added.spec.id,
+                    "kind": added.spec.kind.label(),
+                    "portable": added.spec.kind.portable(),
+                    "capsule": {"id": capsule_id, "revision": revision},
+                    "upstream": upstream,
+                    "already_registered": added.already_registered,
+                    "next": "sync and promote",
+                }),
+                vec![],
+            ))
+        }
         SourceSub::SetRevision(args) => {
             let spec = skill_sources::set_revision(home, &args.id, &args.revision)?;
             let revision = match spec.kind {
                 skill_sources::SourceKind::Git { revision, .. } => revision,
                 skill_sources::SourceKind::Directory { .. }
-                | skill_sources::SourceKind::Central { .. } => unreachable!(),
+                | skill_sources::SourceKind::Central { .. }
+                | skill_sources::SourceKind::Capsule { .. } => unreachable!(),
             };
             Ok(source_reply(
                 jval!({
@@ -2275,6 +2332,16 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                     "candidate_rejected": status.candidate.as_ref().map(|record| record.rejected.clone()),
                     "active_rejected": status.active.as_ref().map(|record| record.rejected.clone()),
                     "rollback_points": status.state.history,
+                    "capsule": match &status.spec.kind {
+                        skill_sources::SourceKind::Capsule { capsule_id, revision, .. } => {
+                            jval!({"id": capsule_id, "revision": revision})
+                        }
+                        _ => Value::Null,
+                    },
+                    "upstream": match &status.spec.kind {
+                        skill_sources::SourceKind::Capsule { upstream, .. } => jval!(upstream),
+                        _ => Value::Null,
+                    },
                 }),
                 vec![],
             ))
@@ -4125,6 +4192,16 @@ fn cmd_praxis(cwd: &std::path::Path, a: PraxisCmd) -> Result<Reply> {
             let service = Service::discover(cwd)?;
             let data = aikit_cli::praxis_cli::instantiate_check(&invocation_json)?;
             Ok(reply(&service, data, diagnostic_warnings(&service)))
+        }
+        PraxisSub::Read { practice, revision } => {
+            let service = Service::discover(cwd)?;
+            let proven = aikit_cli::practice_capsule::prove(
+                service.home(),
+                service.snapshot(),
+                &practice,
+                revision.as_deref(),
+            )?;
+            Ok(reply(&service, proven.reading(), vec![]))
         }
         PraxisSub::Skill(c) => cmd_skill(cwd, c),
         PraxisSub::Set(c) => cmd_set(cwd, c),
