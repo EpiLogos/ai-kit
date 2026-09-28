@@ -85,6 +85,30 @@ pub struct CapsuleUpstream {
     pub archive_sha256: String,
 }
 
+impl CapsuleUpstream {
+    /// The upstream record as `source show` and `add-capsule` print it.
+    /// `exported_from` is the archive's own claim about where it was
+    /// exported: nothing here can check it against the exporting World, so
+    /// the reading carries `verified: false` beside it. The practice id and
+    /// revision, by contrast, are proven from the archive's bytes.
+    pub fn reading(&self) -> serde_json::Value {
+        let mut value = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
+        if let Some(claim) = value
+            .get_mut("exported_from")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            claim.insert("verified".into(), serde_json::Value::Bool(false));
+            claim.insert(
+                "basis".into(),
+                serde_json::Value::String(
+                    "the archive's own claim; not verified against the exporting World".into(),
+                ),
+            );
+        }
+        value
+    }
+}
+
 impl SourceKind {
     pub fn label(&self) -> &'static str {
         match self {
@@ -478,37 +502,70 @@ fn build_capsule_snapshot(
     Ok(record)
 }
 
-/// Refuse to activate an adopted capsule while another active source already
-/// catalogues the same practice id: two sources cannot both speak for one id,
-/// and a silent shadow would hide which revision is operative.
-fn refuse_active_identity_collision(home: &AikitHome, id: &str, capsule_id: &str) -> Result<()> {
+/// Refuse a promotion that would make two active sources speak for one
+/// practice id when an adopted capsule is on either side.
+///
+/// The rule: promoting source `id` is refused when any id in its candidate
+/// snapshot is already catalogued by another source's active snapshot and
+/// either the promoted source or that other source is a capsule source. Two
+/// non-capsule sources (directory, git, central) that provide one id are left
+/// as they were before capsules existed: their precedence is the catalogue's
+/// existing layering. A capsule, though, is a proven revision adopted from
+/// another World; a silent shadow in either direction would hide which
+/// revision is operative.
+fn refuse_active_identity_collision(
+    home: &AikitHome,
+    id: &str,
+    promoting_capsule: bool,
+    candidate: &SnapshotRecord,
+) -> Result<()> {
     let root = home.root().join("sources");
     let Ok(entries) = fs::read_dir(&root) else {
         return Ok(());
     };
-    for entry in entries.flatten() {
-        let other = entry.file_name().to_string_lossy().to_string();
-        if other == id || !entry.path().is_dir() {
-            continue;
-        }
+    let mut others: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|other| other != id)
+        .collect();
+    others.sort();
+    for other in others {
         let Ok(state) = load_state(home, &other) else {
             continue;
         };
         let Some(active) = state.active_snapshot else {
             continue;
         };
+        let other_capsule = matches!(
+            load_spec(home, &other).map(|spec| spec.kind),
+            Ok(SourceKind::Capsule { .. })
+        );
+        if !promoting_capsule && !other_capsule {
+            continue;
+        }
         let Ok(record) = load_snapshot(home, &other, &active) else {
             continue;
         };
-        if record.skills.iter().any(|skill| skill.id == capsule_id) {
+        if let Some(shared) = candidate
+            .skills
+            .iter()
+            .find(|skill| record.skills.iter().any(|theirs| theirs.id == skill.id))
+        {
+            let capability = shared.id.clone();
             return Err(AikitError::new(
                 "source.capsule_identity_active",
                 format!(
-                    "`{capsule_id}` is already active through source `{other}`; roll back or \
-                     remove that source before promoting `{id}`, so one revision speaks for the id"
+                    "`{capability}` is already active through source `{other}`{}; roll back or \
+                     remove that source before promoting `{id}`, so one revision speaks for the id",
+                    if other_capsule {
+                        " (an adopted capsule)"
+                    } else {
+                        ""
+                    }
                 ),
             )
-            .with("capability", capsule_id)
+            .with("capability", capability)
             .with("active_source", other));
         }
     }
@@ -957,9 +1014,6 @@ pub fn promote(
         spec.kind,
         SourceKind::Directory { .. } | SourceKind::Central { .. } | SourceKind::Capsule { .. }
     );
-    if let SourceKind::Capsule { capsule_id, .. } = &spec.kind {
-        refuse_active_identity_collision(home, id, capsule_id)?;
-    }
     let trust_all = trust_all || (local && trust_skills.is_empty());
     let mut state = load_state(home, id)?;
     let digest = state.candidate_snapshot.clone().ok_or_else(|| {
@@ -970,6 +1024,12 @@ pub fn promote(
     })?;
     let record = load_snapshot(home, id, &digest)?;
     validate_owner_snapshot(&load_spec(home, id)?, &record)?;
+    refuse_active_identity_collision(
+        home,
+        id,
+        matches!(spec.kind, SourceKind::Capsule { .. }),
+        &record,
+    )?;
     let registry = snapshot_dir(home, id, &digest).join("registry");
     let mut trusted = 0;
     let requested: BTreeSet<&str> = trust_skills.iter().map(String::as_str).collect();

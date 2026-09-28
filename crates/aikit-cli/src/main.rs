@@ -2248,7 +2248,7 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                     "kind": added.spec.kind.label(),
                     "portable": added.spec.kind.portable(),
                     "capsule": {"id": capsule_id, "revision": revision},
-                    "upstream": upstream,
+                    "upstream": upstream.reading(),
                     "already_registered": added.already_registered,
                     "next": "sync and promote",
                 }),
@@ -2339,7 +2339,7 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                         _ => Value::Null,
                     },
                     "upstream": match &status.spec.kind {
-                        skill_sources::SourceKind::Capsule { upstream, .. } => jval!(upstream),
+                        skill_sources::SourceKind::Capsule { upstream, .. } => upstream.reading(),
                         _ => Value::Null,
                     },
                 }),

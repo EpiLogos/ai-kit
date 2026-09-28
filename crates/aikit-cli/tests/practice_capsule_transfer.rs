@@ -204,6 +204,9 @@ fn an_exported_capsule_is_adopted_at_its_original_identity_and_revision() {
     assert_eq!(shown["upstream"]["practice_id"], "skill/ql/darshana");
     assert_eq!(shown["upstream"]["revision"], revision.as_str());
     assert_eq!(shown["upstream"]["exported_from"]["source_id"], "ql");
+    // Where it was exported from is the archive's claim, never verified here.
+    assert_eq!(shown["upstream"]["exported_from"]["verified"], false);
+    assert_eq!(added["upstream"]["exported_from"]["verified"], false);
     assert_eq!(
         refused(
             &visitor.home,
@@ -373,4 +376,73 @@ fn a_tampered_archive_or_contradicting_provenance_is_refused_and_registers_nothi
         !visitor.home.join("sources").exists()
             || fs::read_dir(visitor.home.join("sources")).unwrap().count() == 0
     );
+}
+
+fn export_darshana(offer: &World) -> std::path::PathBuf {
+    let archive = offer.root.join("darshana.capsule.json");
+    aikit(
+        &offer.home,
+        &offer.cwd,
+        &[
+            "praxis",
+            "skill",
+            "export",
+            "skill/ql/darshana",
+            "--out",
+            archive.to_str().unwrap(),
+        ],
+    );
+    archive
+}
+
+#[test]
+fn an_active_capsule_and_a_non_capsule_source_never_both_speak_for_one_id() {
+    // Directory active first: the capsule's promotion is refused.
+    let offer = offering();
+    let archive = export_darshana(&offer);
+    let added = aikit(
+        &offer.home,
+        &offer.cwd,
+        &["source", "add-capsule", archive.to_str().unwrap()],
+    );
+    let capsule = added["id"].as_str().unwrap().to_string();
+    aikit(&offer.home, &offer.cwd, &["source", "sync", &capsule]);
+    assert_eq!(
+        refused(&offer.home, &offer.cwd, &["source", "promote", &capsule]),
+        "source.capsule_identity_active"
+    );
+
+    // Capsule active first: a directory source cataloguing the same id is
+    // refused at its promotion, not silently layered over the capsule.
+    let visitor = world();
+    let added = aikit(
+        &visitor.home,
+        &visitor.cwd,
+        &["source", "add-capsule", archive.to_str().unwrap()],
+    );
+    let capsule = added["id"].as_str().unwrap().to_string();
+    aikit(&visitor.home, &visitor.cwd, &["source", "sync", &capsule]);
+    aikit(
+        &visitor.home,
+        &visitor.cwd,
+        &["source", "promote", &capsule],
+    );
+    let local = visitor.root.join("ql-source");
+    practice(&local.join("darshana"), "local");
+    aikit(
+        &visitor.home,
+        &visitor.cwd,
+        &["source", "add-directory", "ql", local.to_str().unwrap()],
+    );
+    aikit(&visitor.home, &visitor.cwd, &["source", "sync", "ql"]);
+    assert_eq!(
+        refused(&visitor.home, &visitor.cwd, &["source", "promote", "ql"]),
+        "source.capsule_identity_active"
+    );
+    let reading = aikit(
+        &visitor.home,
+        &visitor.cwd,
+        &["praxis", "read", "skill/ql/darshana"],
+    );
+    assert_eq!(reading["source_id"], capsule.as_str());
 }
