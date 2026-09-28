@@ -1952,7 +1952,10 @@ pub enum GatewaySub {
     Who(GatewayWhoArgs),
     /// Address a Communique to a Position. Never blocks: a vacant Position
     /// holds it for its next occupant; an occupant on another Workcell gets it
-    /// relayed through that Workcell's gateway.
+    /// relayed through that Workcell's gateway. `--instance GENERATION_REF`
+    /// (from `who --json`) binds it to that exact occupancy generation instead:
+    /// never delivered to a successor or a same-named peer, held with its
+    /// reason while that instance is not current (on `--require-workcell`).
     Send(GatewaySendArgs),
     /// The Communiques waiting for an occupant; `--ack` marks them delivered
     /// to this body's verified occupant generation.
@@ -2053,6 +2056,20 @@ pub struct GatewaySendArgs {
     /// Project World an @handle is looked up in.
     #[arg(long = "project-world", value_name = "WORLD")]
     pub project_world: Option<String>,
+    /// Exact-instance route: the occupancy generation to deliver to and to no
+    /// other (Actuation's `generation_ref`, e.g. `actuation:generation:<id>`,
+    /// as `aikit gateway who --json` shows it). Without it the Communique is a
+    /// durable Position route that follows succession.
+    #[arg(long, value_name = "GENERATION_REF")]
+    pub instance: Option<String>,
+    /// With --instance: deliver only while that generation stands on this
+    /// Workcell, and relay only to its gateway.
+    #[arg(
+        long = "require-workcell",
+        value_name = "WORKCELL_REF",
+        requires = "instance"
+    )]
+    pub require_workcell: Option<String>,
     #[command(flatten)]
     pub carrier: GatewayQueryArgs,
 }

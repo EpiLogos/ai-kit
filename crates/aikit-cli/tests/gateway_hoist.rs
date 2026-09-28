@@ -192,7 +192,7 @@ fn seed_state(home: &Path) {
         AgencyGateway::new(r("agency-gateway/local")),
         &state_file,
         GatewayCommand::SendCommunique {
-            draft: CommuniqueDraft {
+            draft: Box::new(CommuniqueDraft {
                 communique_ref: format!("{}fixture", aikit_adapters::COMMUNIQUE_REF_PREFIX),
                 from_position_ref: Some("central:position:project:O-I:factory-guardian".into()),
                 from_generation_ref: None,
@@ -200,6 +200,8 @@ fn seed_state(home: &Path) {
                 attribution_basis: "fixture".into(),
                 to_position_ref: "central:position:project:O-I:cradle-steward".into(),
                 to_workcell_ref: None,
+                to_instance: None,
+                instance_hold: None,
                 body: "carry me to the other Workcell".into(),
                 sent_at_unix_ms: 1,
                 state: CommuniqueState::Held,
@@ -207,7 +209,7 @@ fn seed_state(home: &Path) {
                 reply_to: None,
                 forward_to_workcell_ref: None,
                 routing: None,
-            },
+            }),
         },
         Duration::from_secs(2),
     )

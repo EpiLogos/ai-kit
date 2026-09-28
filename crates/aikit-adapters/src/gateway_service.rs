@@ -1941,6 +1941,8 @@ mod tests {
             attribution_basis: "test".into(),
             to_position_ref: "central:position:control:root:keeper".into(),
             to_workcell_ref: None,
+            to_instance: None,
+            instance_hold: None,
             body: "offline".into(),
             sent_at_unix_ms: 1,
             state: crate::gateway_communique::CommuniqueState::Held,
@@ -1956,7 +1958,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("gateway.json");
         let send = |reference: &str| GatewayCommand::SendCommunique {
-            draft: communique_draft(reference),
+            draft: Box::new(communique_draft(reference)),
         };
 
         // A service holds the state: the offline writer waits, then refuses.

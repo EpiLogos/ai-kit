@@ -160,8 +160,9 @@ pub use gateway_coexistence::{
 };
 pub use gateway_communique::{
     Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForward, CommuniqueForwardOutcome,
-    CommuniqueJournal, CommuniqueRouting, CommuniqueState, CommuniqueTransition, SenderAttribution,
-    COMMUNIQUE_REF_PREFIX, COMMUNIQUE_SCHEMA, MAX_COMMUNIQUE_BODY_BYTES,
+    CommuniqueInstance, CommuniqueInstanceHold, CommuniqueJournal, CommuniqueRouting,
+    CommuniqueState, CommuniqueTransition, SenderAttribution, COMMUNIQUE_REF_PREFIX,
+    COMMUNIQUE_SCHEMA, MAX_COMMUNIQUE_BODY_BYTES,
 };
 pub use gateway_connector::{
     verify_connector_descriptor, ConnectorCapabilities, ConnectorConformance,

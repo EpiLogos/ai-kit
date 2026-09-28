@@ -34,6 +34,10 @@ use crate::gateway_owners::{ContactOwners, OccupancyVerdict};
 pub struct TurnOccupant {
     pub position_ref: String,
     pub generation_ref: String,
+    /// Where the verified generation stands (its tenure's Workcell, else this
+    /// home's), when known; an exact-instance Communique that requires a
+    /// Workcell is carried only when this matches.
+    pub workcell_ref: Option<String>,
 }
 
 /// What one turn will carry and, once written, acknowledge.
@@ -60,6 +64,14 @@ pub fn pending_communiques_for_turn(
         GatewayResponse::CommuniqueList { communiques } => communiques,
         _ => return Ok(None),
     };
+    // A durable Position route is every occupant's; an exact-instance route
+    // is only its own generation's, on its required Workcell.
+    let records: Vec<Communique> = records
+        .into_iter()
+        .filter(|record| {
+            record.deliverable_to(&occupant.generation_ref, occupant.workcell_ref.as_deref())
+        })
+        .collect();
     if records.is_empty() {
         return Ok(None);
     }
@@ -95,7 +107,12 @@ fn render(occupant: &TurnOccupant, records: &[Communique]) -> String {
         if let Some(reply_to) = &record.reply_to {
             out.push_str(&format!("   In reply to: {reply_to}\n"));
         }
-        if record.state == aikit_adapters::CommuniqueState::Held {
+        if let Some(instance) = &record.to_instance {
+            out.push_str(&format!(
+                "   Addressed to this exact instance ({}), not to the Position's next occupant.\n",
+                instance.generation_ref
+            ));
+        } else if record.state == aikit_adapters::CommuniqueState::Held {
             out.push_str("   Held while the Position was vacant; you are its next occupant.\n");
         }
         for line in record.body.lines() {
@@ -133,9 +150,13 @@ pub fn turn_occupant(
         ));
     };
     match owners.occupancy_verify(&position, &generation) {
-        Ok(OccupancyVerdict::Current(_)) => Ok(Some(TurnOccupant {
+        Ok(OccupancyVerdict::Current(tenure)) => Ok(Some(TurnOccupant {
             position_ref: position,
             generation_ref: generation,
+            workcell_ref: crate::gateway_contact::tenure_workcell(&tenure).or_else(|| {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+                crate::gateway_contact::local_workcell(owners, &cwd).0
+            }),
         })),
         Ok(OccupancyVerdict::Refused(refusal)) => Err(format!(
             "Communiques for {position} were not delivered to this body: Actuation refuses generation {generation} ({}: {}); they wait for the current occupant",
@@ -210,6 +231,7 @@ pub fn commit_staged_delivery(
     gateway.call(GatewayCommand::AcknowledgeCommuniques {
         position_ref: delivery.occupant.position_ref.clone(),
         generation_ref: delivery.occupant.generation_ref.clone(),
+        workcell_ref: delivery.occupant.workcell_ref.clone(),
         communique_refs: delivery.communique_refs.clone(),
         delivered_at_unix_ms: now_unix_ms(),
         via: "at the occupant's turn boundary".into(),

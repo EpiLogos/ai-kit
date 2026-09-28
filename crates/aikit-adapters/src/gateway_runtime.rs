@@ -35,8 +35,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::gateway_communique::{
-    Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForwardOutcome, CommuniqueJournal,
-    CommuniqueRouting,
+    Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForwardOutcome, CommuniqueInstanceHold,
+    CommuniqueJournal, CommuniqueRouting, CommuniqueState,
 };
 
 pub const AGENCY_GATEWAY_VERSION: &str = "aikit.agency-gateway/v1";
@@ -1504,11 +1504,11 @@ pub enum GatewayCommand {
     },
     /// Append a sender's Communique (non-blocking contact).
     SendCommunique {
-        draft: CommuniqueDraft,
+        draft: Box<CommuniqueDraft>,
     },
     /// Accept a Communique relayed by another Workcell's gateway.
     IngestCommunique {
-        communique: Communique,
+        communique: Box<Communique>,
         relayed_by: String,
     },
     /// Undelivered Communiques addressed to one Position.
@@ -1519,6 +1519,11 @@ pub enum GatewayCommand {
     AcknowledgeCommuniques {
         position_ref: String,
         generation_ref: String,
+        /// The Workcell the acknowledging generation stands on, when known;
+        /// an exact-instance Communique that requires a Workcell is refused
+        /// without it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workcell_ref: Option<String>,
         communique_refs: Vec<String>,
         delivered_at_unix_ms: u64,
         via: String,
@@ -1546,6 +1551,16 @@ pub enum GatewayCommand {
         /// The remote occupancy answer this relay followed, when it did.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         routing: Option<CommuniqueRouting>,
+    },
+    /// Record a changed standing of an exact-instance Communique (pending, or
+    /// held with its reason), read by the caller from the owners.
+    RecordCommuniqueStanding {
+        communique_ref: String,
+        state: CommuniqueState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance_hold: Option<CommuniqueInstanceHold>,
+        at_unix_ms: u64,
+        basis: String,
     },
     /// Who occupies this Position on the serving gateway's Workcell. Answered
     /// by the service from its own Workcell's Actuation; the kernel holds no
@@ -1792,7 +1807,7 @@ pub fn execute_gateway_command(
         }
         GatewayCommand::SendCommunique { draft } => {
             let gateway_ref = gateway.gateway_ref.to_string();
-            let (communique, replayed) = gateway.communiques.send(&gateway_ref, draft)?;
+            let (communique, replayed) = gateway.communiques.send(&gateway_ref, *draft)?;
             Ok(GatewayResponse::CommuniqueAccepted {
                 communique,
                 replayed,
@@ -1804,7 +1819,7 @@ pub fn execute_gateway_command(
             relayed_by,
         } => {
             let at = communique_now_unix_ms();
-            let (communique, replayed) = gateway.communiques.ingest(communique, &relayed_by, at)?;
+            let (communique, replayed) = gateway.communiques.ingest(*communique, &relayed_by, at)?;
             Ok(GatewayResponse::CommuniqueAccepted {
                 communique,
                 replayed,
@@ -1817,6 +1832,7 @@ pub fn execute_gateway_command(
         GatewayCommand::AcknowledgeCommuniques {
             position_ref,
             generation_ref,
+            workcell_ref,
             communique_refs,
             delivered_at_unix_ms,
             via,
@@ -1824,6 +1840,7 @@ pub fn execute_gateway_command(
             communiques: gateway.communiques.acknowledge(
                 &position_ref,
                 &generation_ref,
+                workcell_ref.as_deref(),
                 &communique_refs,
                 delivered_at_unix_ms,
                 &via,
@@ -1865,6 +1882,18 @@ pub fn execute_gateway_command(
         }),
         GatewayCommand::CommuniqueForwardQueue => Ok(GatewayResponse::CommuniqueList {
             communiques: gateway.communiques.forward_queue(),
+        }),
+        GatewayCommand::RecordCommuniqueStanding {
+            communique_ref,
+            state,
+            instance_hold,
+            at_unix_ms,
+            basis,
+        } => Ok(GatewayResponse::CommuniqueRecord {
+            communique: gateway
+                .communiques
+                .restand(&communique_ref, state, instance_hold, at_unix_ms, &basis)?
+                .0,
         }),
         GatewayCommand::RecordCommuniqueForward {
             communique_ref,
