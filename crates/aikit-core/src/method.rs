@@ -121,7 +121,8 @@ pub fn run_barrier(view: &ResolvedView, id: &CapsuleId) -> Option<MethodRunBarri
             condition: format!(
                 "{standing} a {} Method carries no deterministic executable body — `method run` \
                  drives the same native runner `aikit run` uses, which only a `[script]` payload \
-                 provides; enabling it could not supply one",                entry.kind.as_str()
+                 provides; enabling it could not supply one",
+                entry.kind.as_str()
             ),
             recovery: format!(
                 "invoke the Skill through the agent: `aikit act invoke {id}`; or give the Method \
@@ -900,7 +901,8 @@ description = "METHOD: a bounded practice for the test field."
             assert_eq!(
                 run_barrier(&view, &CapsuleId::parse("script/practice/compose").unwrap()),
                 None,
-                "the native runner's own contract: no enablement barrier"            );
+                "the native runner's own contract: no enablement barrier"
+            );
         }
 
         #[test]
