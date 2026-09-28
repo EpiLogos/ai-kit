@@ -539,11 +539,15 @@ fn declared_remote(home: &AikitHome, workcell_ref: &str) -> Result<GatewayRemote
 /// The token files `--include-tokens` would copy, verified to resolve here
 /// before any step runs: first this machine's declared copy of the target's
 /// own gateway token, then each connector's `file:` token.
+/// One resolved token secret: what it is for, where it lives, its bytes, and
+/// the optional remote name it rides under.
+type TokenSourceRow = (String, PathBuf, Vec<u8>, Option<String>);
+
 fn include_token_sources(
     posture: &PackedPosture,
     remote: &GatewayRemote,
-) -> Result<Vec<(String, PathBuf, Vec<u8>, Option<String>)>> {
-    let mut rows: Vec<(String, PathBuf, Vec<u8>, Option<String>)> = Vec::new();
+) -> Result<Vec<TokenSourceRow>> {
+    let mut rows: Vec<TokenSourceRow> = Vec::new();
     let mut push = |what: String, location: &str, target_name: Option<String>| -> Result<()> {
         let secret = SecretLocation::parse(location)
             .and_then(|parsed| parsed.resolve())
