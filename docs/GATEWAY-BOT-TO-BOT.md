@@ -52,7 +52,7 @@ dissolves into "a chat said".
 
 | # | Vertical | State |
 |---|---|---|
-| V1 | **Cross-face attributable forward**: `/ask <position> <message>` in a connector chat → attributable Communique → relay → the recipient's Surface | this commission |
+| V1 | **Cross-face attributable forward**: `/ask <position> <message>` in a connector chat → attributable Communique → relay → the recipient's Surface | landed (canonical `AskPosition` behind the `/ask` edge; `ContactAskRouter` routes with the exact `gateway send` laws — occupancy, cross-Workcell relay, held/vacant — attribution from Actuation's ledger, origin provenance in the attribution basis; the recipient receives it at their turn boundary, their chat face being V3; 7 ask proofs in `gateway_conversation_engine`, 73 gateway + 13 contact proofs green) |
 | V2 | **Group-chat binding**: bind a group address, admit bots, enforce the loop budget | needs a live two-bot group to prove |
 | V3 | **Bot-initiated outbound** from the engine (an agent messaging a user or peer unprompted through its bound connector) | after V1 exercises the same queue |
 | V4 | **A2A endpoint face**: card + transport mapped to Communiques | after V1–V3 prove the native core |

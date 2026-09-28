@@ -17,6 +17,21 @@
 //! the only place strings become operations. The same operations are callable
 //! from any carrier through `GatewayCommand::Conversation`.
 //!
+//! `/ask` is the cross-face edge: in a connector conversation it sends one
+//! attributable Communique from the asking agency to the named Position,
+//! routed exactly as `gateway send` routes — local occupancy, cross-Workcell
+//! relay, held/vacant — and answers the chat honestly with the same three-part
+//! outcomes. Attribution comes from occupancy, never from the chat: the ask
+//! router names the asking agency's Position from Actuation's ledger (this
+//! conversation's agent session, or the agency it is bound to), or the
+//! Communique is labelled `<unknown sender>` with the connector provenance
+//! carried in its attribution basis. The append is kernel work done here, in
+//! process, through the gateway's own journal; what the engine does not hold —
+//! Central's Positions, Actuation's ledger, the declared remotes — is resolved
+//! by the [`GatewayAskRouter`] the service wires (the same inversion as the
+//! occupancy reader). A refusal answers before anything is appended: nothing
+//! is recorded on a refusal.
+//!
 //! Restart law: a requested restart is a drained, state-preserving
 //! rematerialisation. The engine stops admitting new work, resolves the
 //! in-flight turn under an explicit bounded policy (grace, then interrupt,
@@ -63,11 +78,15 @@ use serde_json::{json, Value};
 
 use crate::agent_connection::{ConnectionSignalKind, SessionOpenMode, SessionOpenRequest};
 use crate::agent_session_host::{AgentSessionHost, AgentSessionHostLimits, HostEvent, TurnStop};
+use crate::gateway_communique::{
+    Communique, CommuniqueDraft, CommuniqueForwardOutcome, CommuniqueState, SenderAttribution,
+};
 use crate::gateway_connector::{ConnectorOperation, OutboundOperationKind};
 use crate::gateway_connector_pump::{ConnectorPumpControls, ConnectorQueues};
 use crate::gateway_runtime::{
-    AgencyGateway, GatewayAgentReply, GatewayAgentReplyFailure, GatewayBinding,
-    GatewayConversationOperation, GatewayResponse, GatewayStreamEvent,
+    execute_gateway_command, AgencyGateway, GatewayAgentReply, GatewayAgentReplyFailure,
+    GatewayBinding, GatewayCommand, GatewayConversationOperation, GatewayResponse,
+    GatewayStreamEvent,
 };
 use crate::gateway_service::{persist_gateway_state, SubscriptionHub};
 
@@ -268,6 +287,60 @@ pub trait GatewayTurnSourceResolver: Send + Sync {
     fn available_backings(&self) -> Vec<Value> {
         Vec::new()
     }
+}
+
+/// One connector-originated ask, as the world around the gateway must read
+/// it: who is asking (the binding's semantic identity and the connector
+/// conversation it arrived through) and what is asked of whom. The chat text
+/// never carries identity; this request does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayAskRequest {
+    pub binding_ref: ResourceRef,
+    pub connector_ref: String,
+    pub agent_session_ref: String,
+    pub agency_ref: String,
+    pub platform: String,
+    pub conversation_id: String,
+    /// The recipient as the asker spelled it: a Position ref or an @handle.
+    pub recipient: String,
+    pub message: String,
+}
+
+/// A routed ask: the draft shaped for acceptance (attribution, recipient and
+/// routing already resolved by the owners, origin provenance carried in the
+/// attribution basis), and the delivery notice the asker's chat is owed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GatewayAskRoute {
+    pub draft: CommuniqueDraft,
+    pub recipient_position_ref: String,
+    /// The structured delivery notice for a held or occupancy-unreadable
+    /// route, in `gateway send`'s three-part shape (`fact`, `consequence`,
+    /// `action`); `Value::Null` when the plain pending sentence says
+    /// everything.
+    pub delivery: Value,
+}
+
+/// The inverted hook behind `/ask`. Resolves a connector-originated ask with
+/// the exact `gateway send` laws — Central names the recipient, Actuation
+/// names occupancy and the asking agency's own Position, the declared remotes
+/// carry relay — and relays an appended record to the Workcell its route
+/// names. The engine holds the journal; the router holds the owners. It is
+/// the same inversion as `GatewayOccupancyReader`: production wires it at
+/// service assembly, and the deterministic suite scripts it.
+pub trait GatewayAskRouter: Send + Sync {
+    /// Resolve recipient, attribution and routing, or refuse with the
+    /// three-part send refusal. Nothing is recorded on a refusal: the engine
+    /// appends only after this answers.
+    fn route(&self, ask: &GatewayAskRequest) -> Result<GatewayAskRoute>;
+    /// One relay attempt of an already-appended record to the Workcell its
+    /// route names, `relayed_by` naming this gateway. A remote that cannot be
+    /// reached is a `Failed` outcome (the record stays queued for the next
+    /// relay pass), never an error.
+    fn relay(
+        &self,
+        communique: &Communique,
+        relayed_by: &str,
+    ) -> Result<CommuniqueForwardOutcome>;
 }
 
 /// A completion slot shared between a turn's worker thread and its waiters.
@@ -1014,16 +1087,20 @@ pub enum SlashParse {
 
 /// Parse connector ingress text into a canonical operation at the engine
 /// edge. `/new` and `/reset` are the same operation; `/pause`/`/resume` with
-/// no argument target the speaking conversation's own connector.
+/// no argument target the speaking conversation's own connector; `/ask
+/// <position-or-@handle> <message>` carries the whole rest of the line as the
+/// asked message.
 pub fn parse_slash(text: &str) -> SlashParse {
     let trimmed = text.trim();
     let Some(rest) = trimmed.strip_prefix('/') else {
         return SlashParse::NotACommand;
     };
-    let mut parts = rest.split_whitespace();
-    let Some(head) = parts.next() else {
-        return SlashParse::Unknown("/".into());
+    let rest = rest.trim_start();
+    let (head, remainder) = match rest.split_once(char::is_whitespace) {
+        Some((head, after)) => (head, after.trim_start()),
+        None => (rest, ""),
     };
+    let mut parts = remainder.split_whitespace();
     let argument = parts.next();
     let connector_argument = || -> Result<Option<ResourceRef>> {
         argument
@@ -1042,6 +1119,26 @@ pub fn parse_slash(text: &str) -> SlashParse {
         "new" | "reset" => SlashParse::Operation(GatewayConversationOperation::New),
         "sessions" => SlashParse::Operation(GatewayConversationOperation::Sessions),
         "restart" => SlashParse::Operation(GatewayConversationOperation::Restart),
+        "ask" => {
+            let mut words = remainder.split_whitespace();
+            let Some(recipient) = words.next() else {
+                return SlashParse::Unknown(
+                    "usage: /ask <position-ref-or-@handle> <message>".into(),
+                );
+            };
+            // The recipient is the first word; the whole rest of the line is
+            // the asked message, whitespace and all.
+            let message = remainder[recipient.len()..].trim();
+            if message.is_empty() {
+                return SlashParse::Unknown(format!(
+                    "/ask {recipient} needs a message: /ask <position-ref-or-@handle> <message>"
+                ));
+            }
+            SlashParse::Operation(GatewayConversationOperation::AskPosition {
+                position: recipient.to_owned(),
+                message: message.to_owned(),
+            })
+        }
         "pause" => match connector_argument() {
             Ok(connector_ref) => {
                 SlashParse::Operation(GatewayConversationOperation::PauseConnector {
@@ -1112,10 +1209,15 @@ pub struct GatewayConversationEngine {
     state_file: Option<PathBuf>,
     resolver: Option<Arc<dyn GatewayTurnSourceResolver>>,
     policy: EnginePolicy,
+    /// The inverted hook behind `/ask`, wired once at service assembly
+    /// (`GatewayConversationHooks::ask_router`). Absent, `/ask` refuses
+    /// honestly: no occupancy or recipient owners stand behind this gateway.
+    ask: OnceLock<Arc<dyn GatewayAskRouter>>,
     inner: Mutex<EngineInner>,
 }
 
 impl GatewayConversationEngine {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         gateway: Arc<Mutex<AgencyGateway>>,
         hub: Arc<SubscriptionHub>,
@@ -1133,11 +1235,23 @@ impl GatewayConversationEngine {
             state_file,
             resolver,
             policy,
+            ask: OnceLock::new(),
             inner: Mutex::new(EngineInner {
                 in_flight: BTreeMap::new(),
                 draining: false,
             }),
         })
+    }
+
+    /// Wire the ask router behind `/ask`. Called once at service assembly,
+    /// before any connector pump runs; a second attach is refused on stderr,
+    /// never silently replaced.
+    pub fn attach_ask_router(&self, router: Arc<dyn GatewayAskRouter>) {
+        if self.ask.set(router).is_err() {
+            eprintln!(
+                "conversation engine: an ask router was already attached; the second was refused"
+            );
+        }
     }
 
     /// The engine's view of one appended inbound event. The service and the
@@ -1203,7 +1317,7 @@ impl GatewayConversationEngine {
                         &binding_ref,
                         format!(
                             "unknown command {name}; the conversation commands are: /status /stop \
-                             /new /sessions /restart /pause /resume /model /harness /skills"
+                             /new /sessions /restart /pause /resume /model /harness /skills /ask"
                         ),
                     );
                 });
@@ -1708,7 +1822,162 @@ impl GatewayConversationEngine {
             }
             GatewayConversationOperation::Harness => self.harness(binding_ref),
             GatewayConversationOperation::Skills => self.skills(binding_ref),
+            GatewayConversationOperation::AskPosition { position, message } => {
+                self.ask_position(binding_ref, position, message)
+            }
         }
+    }
+
+    /// Canonical AskPosition: one attributable Communique from the asking
+    /// agency to the named Position, appended to this gateway's own journal
+    /// and routed exactly as `gateway send` routes — local occupancy, cross
+    /// Workcell relay, held/vacant. The chat's answer mirrors send's outcomes
+    /// honestly, and every refusal answers before anything is appended, so
+    /// nothing is recorded on a refusal.
+    fn ask_position(
+        self: &Arc<Self>,
+        binding_ref: &ResourceRef,
+        recipient: &str,
+        message: &str,
+    ) -> Result<(Value, Option<String>, Option<ResourceRef>, bool)> {
+        let router = self.ask.get().ok_or_else(|| {
+            AikitError::new(
+                "gateway_conversation.ask_router_absent",
+                "/ask has no routing behind this gateway: no occupancy or recipient owners are \
+                 wired into this service. Nothing was sent; nothing was recorded. Ask against a \
+                 gateway served with its owners (`aikit gateway serve`).",
+            )
+        })?;
+        let request = {
+            let kernel = self.gateway.lock().map_err(|_| poisoned())?;
+            let binding = kernel
+                .binding(binding_ref)
+                .ok_or_else(|| unknown_binding(binding_ref))?;
+            GatewayAskRequest {
+                binding_ref: binding.binding_ref.clone(),
+                connector_ref: binding.connector_ref.to_string(),
+                agent_session_ref: binding.agent_session_ref.to_string(),
+                agency_ref: binding.agency_ref.to_string(),
+                platform: binding.address.platform.clone(),
+                conversation_id: binding.address.conversation_id.clone(),
+                recipient: recipient.trim().to_owned(),
+                message: message.to_owned(),
+            }
+        };
+        let route = router.route(&request)?;
+        // The append is kernel work, in process: the same command the send
+        // plane uses, executed against this gateway's own journal.
+        let (communique, replayed, accepted_by) = {
+            let mut kernel = self.gateway.lock().map_err(|_| poisoned())?;
+            match execute_gateway_command(
+                &mut kernel,
+                GatewayCommand::SendCommunique {
+                    draft: route.draft.clone(),
+                },
+            )? {
+                GatewayResponse::CommuniqueAccepted {
+                    communique,
+                    replayed,
+                    accepted_by,
+                } => (communique, replayed, accepted_by),
+                other => return Err(unexpected_answer(&other)),
+            }
+        };
+        self.persist()?;
+        // The route named another Workcell: one relay attempt now. A remote
+        // that cannot be reached stays queued for the next relay pass — the
+        // sender is never blocked on it.
+        let mut relayed = None;
+        if matches!(
+            communique.forward,
+            Some(crate::gateway_communique::CommuniqueForward::Queued { .. })
+        ) {
+            let outcome = router.relay(&communique, &accepted_by)?;
+            {
+                let mut kernel = self.gateway.lock().map_err(|_| poisoned())?;
+                match execute_gateway_command(
+                    &mut kernel,
+                    GatewayCommand::RecordCommuniqueForward {
+                        communique_ref: communique.communique_ref.clone(),
+                        outcome: outcome.clone(),
+                        routing: None,
+                    },
+                )? {
+                    GatewayResponse::CommuniqueRecord { .. } => {}
+                    other => return Err(unexpected_answer(&other)),
+                }
+            }
+            self.persist()?;
+            relayed = Some(outcome);
+        }
+        let result = json!({
+            "ask": true,
+            "communique_ref": communique.communique_ref,
+            "replayed": replayed,
+            "accepted_by": accepted_by,
+            "to_position_ref": communique.to_position_ref,
+            "from_position_ref": communique.from_position_ref,
+            "attribution": communique.attribution,
+            "state": communique.state,
+            "forward": communique.forward,
+            "routing": communique.routing,
+            "relay": relayed,
+            "delivery": route.delivery,
+        });
+        let provenance = match communique.attribution {
+            SenderAttribution::Verified => String::new(),
+            SenderAttribution::Claimed => " (claimed, not verified)".into(),
+            SenderAttribution::Unknown => {
+                " (no occupancy on this gateway names this conversation; attributed \
+                 <unknown sender>)"
+                    .into()
+            }
+        };
+        let replay_note = if replayed {
+            " (replayed; it was already recorded)"
+        } else {
+            ""
+        };
+        let line = match &relayed {
+            Some(CommuniqueForwardOutcome::Forwarded {
+                workcell_ref,
+                remote_gateway_ref,
+                ..
+            }) => format!(
+                "ask: {}{replay_note} relayed to Workcell {workcell_ref} through gateway \
+                 {remote_gateway_ref}; it is delivered at the occupant of {}'s next turn \
+                 boundary there{provenance}",
+                communique.communique_ref, communique.to_position_ref
+            ),
+            Some(CommuniqueForwardOutcome::Failed {
+                workcell_ref,
+                error,
+                ..
+            }) => format!(
+                "ask: {}{replay_note} is recorded and queued for relay to Workcell \
+                 {workcell_ref}; the remote gateway could not be reached ({error}) and the next \
+                 relay pass delivers it{provenance}",
+                communique.communique_ref
+            ),
+            None => match communique.state {
+                CommuniqueState::Held => format!(
+                    "ask: {}{replay_note} held — {}; it is delivered to the next occupant that \
+                     claims {}{provenance}",
+                    communique.communique_ref,
+                    route.delivery
+                        .get("fact")
+                        .and_then(Value::as_str)
+                        .unwrap_or("the recipient Position is vacant"),
+                    communique.to_position_ref
+                ),
+                _ => format!(
+                    "ask: {}{replay_note} queued for {}; delivered at the recipient occupant's \
+                     next turn boundary{provenance}",
+                    communique.communique_ref, communique.to_position_ref
+                ),
+            },
+        };
+        Ok((result, Some(line), None, false))
     }
 
     fn status(&self, binding_ref: &ResourceRef) -> Result<(Value, String)> {
@@ -2253,5 +2522,18 @@ fn unknown_binding(binding_ref: &ResourceRef) -> AikitError {
     AikitError::new(
         "agency_gateway.unknown_binding",
         format!("gateway binding {binding_ref} does not exist"),
+    )
+}
+
+fn unexpected_answer(response: &GatewayResponse) -> AikitError {
+    AikitError::new(
+        "gateway_conversation.unexpected_kernel_answer",
+        format!(
+            "the kernel answered {} to a Communique command",
+            serde_json::to_value(response)
+                .ok()
+                .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned))
+                .unwrap_or_else(|| "an unknown response".into())
+        ),
     )
 }

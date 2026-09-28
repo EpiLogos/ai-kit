@@ -368,6 +368,12 @@ pub struct GatewayConversationHooks {
         Option<Arc<dyn crate::gateway_conversation_engine::GatewayTurnSourceResolver>>,
     /// Bounded restart-drain and interruption policy. Defaults when absent.
     pub policy: Option<crate::gateway_conversation_engine::EnginePolicy>,
+    /// The inverted hook behind the connector edge's `/ask`: resolves a
+    /// connector-originated ask with the exact `gateway send` laws (Central's
+    /// recipients, Actuation's occupancy and asker attribution, the declared
+    /// remotes) and relays what the engine appends. `None` leaves `/ask`
+    /// refusing honestly on this gateway.
+    pub ask_router: Option<Arc<dyn crate::gateway_conversation_engine::GatewayAskRouter>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -716,6 +722,7 @@ pub fn run_gateway_service_with_hooks(
     let GatewayConversationHooks {
         turn_sources,
         policy,
+        ask_router,
     } = conversation.unwrap_or_default();
     let engine = crate::gateway_conversation_engine::GatewayConversationEngine::new(
         Arc::clone(&gateway),
@@ -726,6 +733,9 @@ pub fn run_gateway_service_with_hooks(
         turn_sources,
         policy.unwrap_or_default(),
     );
+    if let Some(ask_router) = ask_router {
+        engine.attach_ask_router(ask_router);
+    }
     let runtime = Arc::new(GatewayServiceRuntime {
         hub,
         queues,

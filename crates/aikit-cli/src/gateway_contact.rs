@@ -36,8 +36,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use aikit_adapters::{
-    Communique, CommuniqueDraft, CommuniqueForwardOutcome, CommuniqueState, GatewayCarrierTarget,
-    GatewayCommand, GatewayResponse, SenderAttribution, COMMUNIQUE_REF_PREFIX,
+    Communique, CommuniqueDraft, CommuniqueForward, CommuniqueForwardOutcome, CommuniqueRouting,
+    CommuniqueState, GatewayAskRequest, GatewayAskRoute, GatewayCarrierTarget, GatewayCommand,
+    GatewayResponse, SenderAttribution, COMMUNIQUE_REF_PREFIX,
 };
 use aikit_core::{AikitError, Result};
 use aikit_store::AikitHome;
@@ -960,36 +961,27 @@ fn owner_unavailable_refusal(what: &str, unavailable: &OwnerUnavailable) -> Aiki
 // send
 // ---------------------------------------------------------------------------
 
-pub struct SendRequest<'a> {
-    pub to: &'a str,
-    pub body: String,
-    pub reply_to: Option<String>,
-    pub from_position: Option<&'a str>,
-    pub project_world: Option<&'a str>,
+/// How a recipient's occupancy routes a Communique: the one decision every
+/// sender shares, exactly as the module doc states it. This Workcell's ledger
+/// is read first; only a vacant recipient sends the declared remotes to survey.
+pub(crate) struct OccupancyRouting {
+    pub state: CommuniqueState,
+    pub state_basis: String,
+    pub occupant_workcell: Option<String>,
+    pub delivery_notice: Option<Value>,
+    pub remote: Option<GatewayRemote>,
+    pub routing: Option<CommuniqueRouting>,
+    pub remotes_asked: Vec<Value>,
 }
 
-pub fn send(
+/// Route a resolved recipient by occupancy, or refuse before anything is
+/// recorded (ambiguous occupancy, an occupant on an undeclared Workcell).
+pub(crate) fn route_to_occupancy(
     home: &AikitHome,
     owners: &dyn ContactOwners,
-    gateway: &dyn GatewayAccess,
-    cwd: &Path,
-    request: SendRequest<'_>,
-) -> Result<Value> {
-    if request.body.trim().is_empty() {
-        return Err(three_part(
-            "gateway.empty_body",
-            "The Communique body is empty.",
-            nothing_sent(),
-            "Pass the words with --body TEXT or --body-file PATH.",
-        ));
-    }
-    let sender = resolve_sender(owners, request.from_position)?;
-    let recipient = resolve_recipient(owners, request.to, request.project_world, cwd)?;
-    let (local_workcell, workcell_basis) = local_workcell(owners, cwd);
-    let now = now_unix_ms();
-
-    // Where the occupant stands. This Workcell's own ledger first; only when
-    // it records no current occupant are the declared remotes asked.
+    local_workcell: Option<&str>,
+    recipient: &Recipient,
+) -> Result<OccupancyRouting> {
     let mut remote = None;
     let mut routing = None;
     let mut remotes_asked = Vec::new();
@@ -1009,7 +1001,7 @@ pub fn send(
                     )
                 }
                 None => {
-                    let elsewhere = remotes_elsewhere(home, local_workcell.as_deref())?;
+                    let elsewhere = remotes_elsewhere(home, local_workcell)?;
                     let survey = RemoteSurvey::ask(
                         &elsewhere,
                         &GatewayCommand::OccupancyRead {
@@ -1057,7 +1049,7 @@ pub fn send(
 
     // This Workcell's ledger places the occupant on another Workcell: relay
     // there, or refuse before recording.
-    if let (None, Some(occupant), Some(local)) = (&routing, &occupant_workcell, &local_workcell) {
+    if let (None, Some(occupant), Some(local)) = (&routing, &occupant_workcell, local_workcell) {
         if occupant != local {
             let remotes = load_remotes(home)?;
             match remotes
@@ -1080,6 +1072,57 @@ pub fn send(
             }
         }
     }
+
+    Ok(OccupancyRouting {
+        state,
+        state_basis,
+        occupant_workcell,
+        delivery_notice,
+        remote,
+        routing,
+        remotes_asked,
+    })
+}
+
+pub struct SendRequest<'a> {
+    pub to: &'a str,
+    pub body: String,
+    pub reply_to: Option<String>,
+    pub from_position: Option<&'a str>,
+    pub project_world: Option<&'a str>,
+}
+
+pub fn send(
+    home: &AikitHome,
+    owners: &dyn ContactOwners,
+    gateway: &dyn GatewayAccess,
+    cwd: &Path,
+    request: SendRequest<'_>,
+) -> Result<Value> {
+    if request.body.trim().is_empty() {
+        return Err(three_part(
+            "gateway.empty_body",
+            "The Communique body is empty.",
+            nothing_sent(),
+            "Pass the words with --body TEXT or --body-file PATH.",
+        ));
+    }
+    let sender = resolve_sender(owners, request.from_position)?;
+    let recipient = resolve_recipient(owners, request.to, request.project_world, cwd)?;
+    let (local_workcell, workcell_basis) = local_workcell(owners, cwd);
+    let now = now_unix_ms();
+
+    // Where the occupant stands, and how the record must be routed: the one
+    // decision every sender shares (see the module doc).
+    let OccupancyRouting {
+        state,
+        state_basis,
+        occupant_workcell,
+        delivery_notice,
+        remote,
+        routing,
+        remotes_asked,
+    } = route_to_occupancy(home, owners, local_workcell.as_deref(), &recipient)?;
 
     let draft = CommuniqueDraft {
         communique_ref: format!(
@@ -1165,18 +1208,14 @@ fn vacant_everywhere(
     (basis, notice)
 }
 
-/// Relay one record to a declared remote gateway and record the outcome
-/// locally. A remote that cannot be reached leaves the record queued; the
-/// sender is never blocked on it.
-fn forward_one(
-    gateway: &dyn GatewayAccess,
-    communique: &Communique,
+/// One relay attempt to a declared remote: resolve its token, offer the
+/// Communique to its gateway. Answers `(replayed, remote gateway ref)`.
+fn relay_attempt(
     remote: &GatewayRemote,
-    local_gateway_ref: &str,
-    routing: Option<aikit_adapters::CommuniqueRouting>,
-) -> Result<(Communique, Value)> {
-    let at = now_unix_ms();
-    let attempt = SecretLocation::parse(&remote.token_location)
+    communique: &Communique,
+    relayed_by: &str,
+) -> Result<(bool, String)> {
+    SecretLocation::parse(&remote.token_location)
         .and_then(|location| location.resolve())
         .and_then(|token| {
             let target = GatewayCarrierTarget::WebSocket {
@@ -1188,14 +1227,29 @@ fn forward_one(
                 &target,
                 GatewayCommand::IngestCommunique {
                     communique: communique.clone(),
-                    relayed_by: local_gateway_ref.to_owned(),
+                    relayed_by: relayed_by.to_owned(),
                 },
                 None,
             )
         })
-        .and_then(expect_accepted);
+        .and_then(expect_accepted)
+        .map(|(_, replayed, remote_gateway_ref)| (replayed, remote_gateway_ref))
+}
+
+/// Relay one record to a declared remote gateway and record the outcome
+/// locally. A remote that cannot be reached leaves the record queued; the
+/// sender is never blocked on it.
+fn forward_one(
+    gateway: &dyn GatewayAccess,
+    communique: &Communique,
+    remote: &GatewayRemote,
+    local_gateway_ref: &str,
+    routing: Option<aikit_adapters::CommuniqueRouting>,
+) -> Result<(Communique, Value)> {
+    let at = now_unix_ms();
+    let attempt = relay_attempt(remote, communique, local_gateway_ref);
     let outcome = match &attempt {
-        Ok((_, _, remote_gateway_ref)) => CommuniqueForwardOutcome::Forwarded {
+        Ok((_, remote_gateway_ref)) => CommuniqueForwardOutcome::Forwarded {
             workcell_ref: remote.workcell_ref.clone(),
             remote_gateway_ref: remote_gateway_ref.clone(),
             at_unix_ms: at,
@@ -1212,7 +1266,7 @@ fn forward_one(
         routing,
     })?)?;
     let report = match attempt {
-        Ok((_, replayed, remote_gateway_ref)) => json!({
+        Ok((replayed, remote_gateway_ref)) => json!({
             "state": "forwarded",
             "workcell_ref": remote.workcell_ref,
             "remote_gateway_ref": remote_gateway_ref,
@@ -1227,6 +1281,267 @@ fn forward_one(
         }),
     };
     Ok((record, report))
+}
+
+// ---------------------------------------------------------------------------
+// The conversation engine's ask router (the connector edge's /ask)
+// ---------------------------------------------------------------------------
+
+/// The inverted hook the gateway service wires behind a connector
+/// conversation's `/ask`: it resolves the ask with the exact `gateway send`
+/// laws (this module's), and the engine does the appending — kernel work, in
+/// process, against the journal the service owns. Nothing here shells out.
+pub struct ContactAskRouter {
+    pub home: AikitHome,
+    pub cwd: PathBuf,
+}
+
+impl aikit_adapters::GatewayAskRouter for ContactAskRouter {
+    fn route(&self, ask: &GatewayAskRequest) -> Result<GatewayAskRoute> {
+        route_ask(&self.home, &self.cwd, ask)
+    }
+
+    fn relay(
+        &self,
+        communique: &Communique,
+        relayed_by: &str,
+    ) -> Result<CommuniqueForwardOutcome> {
+        relay_appended(&self.home, communique, relayed_by)
+    }
+}
+
+/// The asking agency's Position, named by occupancy — never by the chat. A
+/// current tenure that carries this conversation's agent session verifies the
+/// asker (`verified`); when the ledger cannot say that but the bound agency
+/// holds exactly one occupied Position, that Position is named for it
+/// (`claimed`); anything else delivers labelled `<unknown sender>`, with the
+/// connector provenance carried beside whatever basis resolved.
+fn resolve_ask_sender(owners: &dyn ContactOwners, ask: &GatewayAskRequest) -> SenderResolution {
+    let unknown = |basis: String| SenderResolution {
+        from_position_ref: None,
+        from_generation_ref: None,
+        attribution: SenderAttribution::Unknown,
+        basis,
+    };
+    let listing = match owners.occupancy_list() {
+        Ok(listing) => listing,
+        Err(unavailable) => {
+            return unknown(format!(
+                "Actuation's occupancy ledger could not be read (`{}` failed: {}), so this \
+                 conversation's sender could not be attributed from occupancy",
+                unavailable.command, unavailable.reason
+            ));
+        }
+    };
+    let rows = listing
+        .get("positions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten();
+    let mut by_session: Vec<(&Value, &Value)> = Vec::new();
+    let mut by_agency: Vec<(&Value, &Value)> = Vec::new();
+    for row in rows {
+        let Some(tenure) = current_tenure(row) else {
+            continue;
+        };
+        if tenure.get("agent_session_ref").and_then(Value::as_str)
+            == Some(ask.agent_session_ref.as_str())
+        {
+            by_session.push((row, tenure));
+        }
+        if tenure.get("agency_ref").and_then(Value::as_str) == Some(ask.agency_ref.as_str()) {
+            by_agency.push((row, tenure));
+        }
+    }
+    let position_ref = |(row, _): &(&Value, &Value)| {
+        row.get("position_ref")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let generation_ref = |(_, tenure): &(&Value, &Value)| {
+        tenure
+            .get("generation_ref")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    // One session match is the verification the send path requires: the
+    // ledger itself names this conversation's session as a current occupant.
+    if let [match_] = by_session.as_slice() {
+        let position = position_ref(match_);
+        let generation = generation_ref(match_);
+        return SenderResolution {
+            from_position_ref: Some(position.clone()),
+            from_generation_ref: generation.clone(),
+            attribution: SenderAttribution::Verified,
+            basis: format!(
+                "actuation occupancy list: {} is the current occupant of {position} and its \
+                 tenure carries this conversation's agent session {}",
+                generation.as_deref().unwrap_or("an unnamed generation"),
+                ask.agent_session_ref
+            ),
+        };
+    }
+    // The bound agency holds exactly one occupied Position: it is named for
+    // the asking agency, claimed rather than verified — this conversation's
+    // session is not the tenure the ledger names.
+    if by_session.is_empty() {
+        if let [match_] = by_agency.as_slice() {
+            let position = position_ref(match_);
+            let generation = generation_ref(match_);
+            return SenderResolution {
+                from_position_ref: Some(position.clone()),
+                from_generation_ref: generation.clone(),
+                attribution: SenderAttribution::Claimed,
+                basis: format!(
+                    "the asking agency {} holds exactly one occupied Position, {position}; the \
+                     conversation is attributed to it as claimed, not verified against this \
+                     conversation's agent session {}",
+                    ask.agency_ref, ask.agent_session_ref
+                ),
+            };
+        }
+        if by_agency.len() > 1 {
+            return unknown(format!(
+                "the asking agency {} holds several occupied Positions ({}), and a connector \
+                 conversation names none of them",
+                ask.agency_ref,
+                by_agency
+                    .iter()
+                    .map(position_ref)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    unknown(format!(
+        "no current occupant in Actuation's ledger names this conversation's agent session {} \
+         or its agency {}",
+        ask.agent_session_ref, ask.agency_ref
+    ))
+}
+
+/// Resolve one connector-originated ask into an accepted-shaped draft: the
+/// sender attributed from occupancy, the recipient resolved by Central, the
+/// route taken from occupancy (`route_to_occupancy` — the same decision
+/// `gateway send` makes), and the origin provenance — asking agent session,
+/// bound agency, connector conversation — carried in the attribution basis.
+/// Every refusal answers before anything is appended.
+fn route_ask(home: &AikitHome, cwd: &Path, ask: &GatewayAskRequest) -> Result<GatewayAskRoute> {
+    if ask.message.trim().is_empty() {
+        return Err(three_part(
+            "gateway.empty_body",
+            "The ask's message is empty.",
+            nothing_sent(),
+            "Ask with /ask <position-ref-or-@handle> <message>.",
+        ));
+    }
+    let owners = crate::gateway_owners::ProcessOwners::from_env();
+    let (local_workcell, _) = local_workcell(&owners, cwd);
+    let sender = resolve_ask_sender(&owners, ask);
+    let recipient = resolve_recipient(&owners, &ask.recipient, None, cwd)?;
+    let OccupancyRouting {
+        state,
+        state_basis,
+        occupant_workcell,
+        delivery_notice,
+        remote,
+        routing,
+        remotes_asked: _,
+    } = route_to_occupancy(home, &owners, local_workcell.as_deref(), &recipient)?;
+    let attribution_basis = format!(
+        "{}; asked from connector conversation {} on {} (binding {}, agent session {}, agency \
+         {})",
+        sender.basis, ask.conversation_id, ask.platform, ask.binding_ref, ask.agent_session_ref,
+        ask.agency_ref
+    );
+    let delivery = delivery_notice.unwrap_or_else(|| {
+        json!({
+            "fact": state_basis,
+            "consequence": "The Communique is recorded in this gateway's journal; nothing has been delivered yet.",
+            "action": format!("It is delivered at the recipient occupant's next turn boundary; follow it with `aikit gateway conversation --with {}`.", recipient.position_ref),
+        })
+    });
+    Ok(GatewayAskRoute {
+        draft: CommuniqueDraft {
+            communique_ref: format!(
+                "{COMMUNIQUE_REF_PREFIX}{}",
+                ulid::Ulid::generate().to_string().to_ascii_lowercase()
+            ),
+            from_position_ref: sender.from_position_ref.clone(),
+            from_generation_ref: sender.from_generation_ref.clone(),
+            attribution: sender.attribution,
+            attribution_basis,
+            to_position_ref: recipient.position_ref.clone(),
+            to_workcell_ref: occupant_workcell,
+            body: ask.message.clone(),
+            sent_at_unix_ms: now_unix_ms(),
+            state,
+            state_basis,
+            reply_to: None,
+            forward_to_workcell_ref: remote.as_ref().map(|entry| entry.workcell_ref.clone()),
+            routing,
+        },
+        recipient_position_ref: recipient.position_ref,
+        delivery,
+    })
+}
+
+/// One relay attempt of an already-appended ask to the Workcell its route
+/// names. A remote that cannot be reached is a `Failed` outcome — the record
+/// stays queued for the next relay pass — never an error; a route naming no
+/// declared Workcell endpoint is.
+fn relay_appended(
+    home: &AikitHome,
+    communique: &Communique,
+    relayed_by: &str,
+) -> Result<CommuniqueForwardOutcome> {
+    let workcell_ref = match &communique.forward {
+        Some(CommuniqueForward::Queued { workcell_ref, .. }) => Some(workcell_ref.clone()),
+        Some(CommuniqueForward::Forwarded { .. }) => None,
+        None => communique
+            .routing
+            .as_ref()
+            .map(|routing| routing.workcell_ref.clone()),
+    }
+    .ok_or_else(|| {
+        AikitError::new(
+            "gateway.remote_unnamed",
+            format!(
+                "{} names no Workcell to relay to; it is recorded here undelivered",
+                communique.communique_ref
+            ),
+        )
+    })?;
+    let remotes = load_remotes(home)?;
+    let entry = remotes
+        .remotes
+        .iter()
+        .find(|entry| entry.workcell_ref == workcell_ref)
+        .ok_or_else(|| {
+            three_part(
+                "gateway.remote_undeclared",
+                format!(
+                    "The route of {} names Workcell {workcell_ref}, which is not reachable from here: no gateway endpoint is declared for it.",
+                    communique.communique_ref
+                ),
+                "The Communique is recorded and stays queued for relay; nothing was lost.",
+                format!("Declare the endpoint: {}", remote_command(&workcell_ref)),
+            )
+        })?;
+    let at = now_unix_ms();
+    Ok(match relay_attempt(entry, communique, relayed_by) {
+        Ok((_, remote_gateway_ref)) => CommuniqueForwardOutcome::Forwarded {
+            workcell_ref,
+            remote_gateway_ref,
+            at_unix_ms: at,
+        },
+        Err(error) => CommuniqueForwardOutcome::Failed {
+            workcell_ref,
+            error: error.to_string(),
+            at_unix_ms: at,
+        },
+    })
 }
 
 // ---------------------------------------------------------------------------

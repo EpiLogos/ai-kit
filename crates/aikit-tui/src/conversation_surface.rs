@@ -1112,6 +1112,9 @@ fn operation_name(operation: &GatewayConversationOperation) -> &'static str {
         GatewayConversationOperation::Model { .. } => "model",
         GatewayConversationOperation::Harness => "harness",
         GatewayConversationOperation::Skills => "skills",
+        // Compile-compat with the connector edge's cross-face ask: the TUI
+        // names the operation; the answer document renders field by field.
+        GatewayConversationOperation::AskPosition { .. } => "ask",
     }
 }
 
