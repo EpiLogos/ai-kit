@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(flag) = args.first().cloned() {
         args.remove(0);
         let value = |args: &mut Vec<String>| -> Result<String, String> {
-            if args.first().is_none() {
+            if args.is_empty() {
                 return Err(format!("{flag} requires a value"));
             }
             Ok(args.remove(0))
