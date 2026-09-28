@@ -438,13 +438,7 @@ fn build_snapshot(
         let skill = match agent_skills::validate(&root) {
             Ok(skill) => skill,
             Err(error) => {
-                record_rejection(
-                    &relative_text,
-                    scan_root,
-                    &mut rejected,
-                    &mut hasher,
-                    error,
-                )?;
+                record_rejection(&relative_text, scan_root, &mut rejected, &mut hasher, error)?;
                 continue;
             }
         };
@@ -469,13 +463,7 @@ fn build_snapshot(
         };
         let id = format!("skill/{}/{capsule_tail}", spec.id);
         if let Err(error) = aikit_core::CapsuleId::parse(&id) {
-            record_rejection(
-                &relative_text,
-                scan_root,
-                &mut rejected,
-                &mut hasher,
-                error,
-            )?;
+            record_rejection(&relative_text, scan_root, &mut rejected, &mut hasher, error)?;
             continue;
         }
         if !ids.insert(id.clone()) {
