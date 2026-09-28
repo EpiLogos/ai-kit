@@ -89,7 +89,10 @@ pub fn run_barrier(view: &ResolvedView, id: &CapsuleId) -> Option<MethodRunBarri
         };
         return Some(MethodRunBarrier {
             code: "method.withheld",
-            condition: format!("is withheld by resolution in this context: {}", reason.describe()),
+            condition: format!(
+                "is withheld by resolution in this context: {}",
+                reason.describe()
+            ),
             recovery,
         });
     }
@@ -125,7 +128,6 @@ pub fn run_barrier(view: &ResolvedView, id: &CapsuleId) -> Option<MethodRunBarri
     }
     None
 }
-
 
 /// The common classification of one Skill identity.
 ///
@@ -806,13 +808,18 @@ description = "METHOD: a bounded practice for the test field."
         fn an_enabled_active_skill_method_names_the_missing_executable_body() {
             let mut catalog = MemoryCatalog::default();
             catalog.insert(method_capsule("skill/practice/day-close", "skill"));
-            let view = view_with(&catalog, &trusted("skill/practice/day-close"),
-                &["skill/practice/day-close"]);
+            let view = view_with(
+                &catalog,
+                &trusted("skill/practice/day-close"),
+                &["skill/practice/day-close"],
+            );
 
             // The seam the verifier walked: declared, enabled, active — and
             // still not runnable, because the capsule carries no `[script]`
             // body. The refusal must say exactly that.
-            assert!(view.is_declared_enabled(&CapsuleId::parse("skill/practice/day-close").unwrap()));
+            assert!(
+                view.is_declared_enabled(&CapsuleId::parse("skill/practice/day-close").unwrap())
+            );
             assert!(view.is_active(&CapsuleId::parse("skill/practice/day-close").unwrap()));
             assert!(!view.can_run(&CapsuleId::parse("skill/practice/day-close").unwrap()));
 
