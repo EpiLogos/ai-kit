@@ -252,6 +252,109 @@ pub fn search_rows(
     Ok(rows)
 }
 
+/// One nearby-suggestion row: a real descriptor record with its next routes.
+fn suggestion_row(
+    index: &aikit_core::resource::ResourceSearchIndex,
+    reference: &ResourceRef,
+) -> Option<serde_json::Value> {
+    let record = ResourceIndex::resource(index, reference)?;
+    Some(serde_json::json!({
+        "ref": record.descriptor.id.to_string(),
+        "kind": record.descriptor.kind.as_str(),
+        "label": record.descriptor.name,
+        "next": {
+            "describe": format!("aikit act describe {}", record.descriptor.id),
+            "open": format!("aikit knowledge open {}", record.descriptor.id),
+        },
+    }))
+}
+
+/// The bounded answer when a task-phrase query resolves to nothing at all:
+/// which corpora were searched — named, with their record counts, an absent
+/// corpus a zero rather than a collapsed silence — and up to `limit` nearby
+/// records from the same field, found by word agreement on the query's
+/// significant words, or the field's own head when nothing agrees. Never a
+/// bare expression dump; inert like every search reading.
+pub fn empty_query_disclosure(
+    service: &Service,
+    query: &str,
+    limit: usize,
+) -> Result<serde_json::Value> {
+    let index = shared_index(service)?;
+    let (readings, _) = crate::alias_family::read_all(service.home(), None);
+    let terms = aikit_core::resource::significant_terms(query);
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut suggestions: Vec<serde_json::Value> = Vec::new();
+    let consider = |hit: &aikit_core::resource::ResourceSearchHit,
+                        seen: &mut std::collections::BTreeSet<String>,
+                        suggestions: &mut Vec<serde_json::Value>| {
+        if seen.insert(hit.resource.to_string()) {
+            if let Some(row) = suggestion_row(&index, &hit.resource) {
+                suggestions.push(row);
+            }
+        }
+    };
+
+    // Nearby first: field records whose words agree with the query's own.
+    for term in terms.iter().take(4) {
+        for hit in index.search(term, limit) {
+            consider(&hit, &mut seen, &mut suggestions);
+            if suggestions.len() >= limit {
+                break;
+            }
+        }
+        if suggestions.len() >= limit {
+            break;
+        }
+    }
+    // Then the field's own head: nothing in the query agrees with the field,
+    // and the answer should still name where to look.
+    if suggestions.is_empty() && !index.is_empty() {
+        for hit in index.search("", limit) {
+            consider(&hit, &mut seen, &mut suggestions);
+            if suggestions.len() >= limit {
+                break;
+            }
+        }
+    }
+    // A head with no navigation evidence still names its records, in ref order.
+    if suggestions.is_empty() && !index.is_empty() {
+        for record in ResourceIndex::resources(&index) {
+            if seen.insert(record.descriptor.id.to_string()) {
+                if let Some(row) = suggestion_row(&index, &record.descriptor.id) {
+                    suggestions.push(row);
+                }
+            }
+            if suggestions.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "schema": "aikit.search-empty/v1",
+        "query": query,
+        "searched": [
+            {
+                "corpus": "resource-field",
+                "what": "capability, skill, method, action and navigation descriptors: names, descriptions, ids, search tags",
+                "records": index.len(),
+            },
+            {
+                "corpus": "alias-families",
+                "what": "authored command families and their entries",
+                "records": readings.len(),
+            },
+        ],
+        "suggestions": suggestions,
+        "next": [
+            "aikit act discover",
+            "aikit search   (empty query shows the field's own head)",
+        ],
+    }))
+}
+
 /// `aikit act describe <ref>` — the exact input/output/effect contract, from
 /// the real descriptor. Read-only.
 pub fn describe(service: &Service, args: ActDescribeArgs) -> Result<serde_json::Value> {
@@ -641,5 +744,44 @@ mod tests {
         let error = invoke_ref(&mut service, "action/workspace/open-destination")
             .expect_err("navigation Actions are the surface's own acts");
         assert_eq!(error.code(), "act.surface_internal");
+    }
+
+    /// X2: task language — not a handle — still surfaces the applicable
+    /// Actions, each row carrying type, owner/source and the next route, and
+    /// a query that resolves to nothing is answered with the bounded helpful
+    /// form. Both readings are inert: no familiarity or observation event.
+    #[test]
+    fn task_phrase_surfaces_actions_and_an_empty_query_is_answered() {
+        let service = service();
+
+        // Task phrase through the Action lane: "this" breaks the strict
+        // all-terms match, so the row surfaces through the significant-word
+        // overlap fallback ("commission", "work").
+        let rows = search_rows(&service, "commission this work", 24).unwrap();
+        let factory = rows
+            .iter()
+            .find(|row| row["ref"] == "action/factory/start-work")
+            .expect("task language surfaces the applicable Action");
+        assert_eq!(factory["kind"], "action", "the row carries its type");
+        assert_eq!(factory["owner"], "factory", "the row carries its owner");
+        assert_eq!(
+            factory["routes"]["describe"], "aikit act describe action/factory/start-work",
+            "the row carries the next route"
+        );
+
+        // A query that resolves to nothing at all: corpora named, suggestions
+        // bounded, routes attached — never a bare expression dump.
+        let inert_before = aikit_tui::backend::PaletteBackend::familiarity(&service).unwrap();
+        let disclosure = empty_query_disclosure(&service, "zzqx wobble flurb", 3).unwrap();
+        assert_eq!(disclosure["schema"], "aikit.search-empty/v1");
+        assert!(disclosure["searched"].as_array().is_some_and(|s| !s.is_empty()));
+        let suggestions = disclosure["suggestions"].as_array().unwrap();
+        assert!(!suggestions.is_empty() && suggestions.len() <= 3);
+        assert!(suggestions.iter().all(|s| s["next"]["describe"].is_string()));
+
+        // Inert like every search reading (the standing familiarity
+        // invariant): nothing above recorded an event.
+        let inert_after = aikit_tui::backend::PaletteBackend::familiarity(&service).unwrap();
+        assert_eq!(format!("{inert_before:?}"), format!("{inert_after:?}"));
     }
 }

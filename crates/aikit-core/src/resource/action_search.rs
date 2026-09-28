@@ -42,6 +42,112 @@ pub fn search_contextual_actions(
     ranked.into_iter().map(|(_, action)| action).collect()
 }
 
+// ---------------------------------------------------------------------------
+// Task-phrase matching: significant-word overlap over descriptor text.
+//
+// A task phrase ("verify this implementation") is not a handle: no resource is
+// named by it, so exact/containment matching resolves to nothing. These
+// helpers score the words the phrase actually carries against the searchable
+// descriptor corpus — names, descriptions, ids, tags — so task language
+// surfaces the practices and Actions that speak the same words. This is still
+// ranking of already-searchable descriptors only: no new registry, no
+// natural-language execution, search stays an inert reading.
+// ---------------------------------------------------------------------------
+
+/// English function words and generic interrogatives that name no resource.
+/// They are dropped before scoring so a phrase is judged by the words that
+/// carry its meaning.
+const STOP_WORDS: &[&str] = &[
+    "a", "an", "and", "are", "do", "does", "for", "from", "how", "i", "in", "is", "it", "its",
+    "me", "my", "of", "on", "or", "our", "show", "that", "the", "these", "this", "those", "to",
+    "was", "were", "what", "when", "where", "which", "who", "why", "with", "you", "your",
+];
+
+/// The significant words of a task-language query: lowercased, stripped of
+/// punctuation, stop-words dropped. A query made only of stop-words keeps its
+/// raw terms — the phrase is what the searcher meant, and an empty term list
+/// would agree with every record.
+pub fn significant_terms(query: &str) -> Vec<String> {
+    fn clean(term: &str) -> Vec<String> {
+        term.trim_matches(|c: char| !c.is_alphanumeric())
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .map(|word| word.to_lowercase())
+            .collect()
+    }
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .flat_map(clean)
+        .filter(|term| !STOP_WORDS.contains(&term.as_str()))
+        .collect();
+    if terms.is_empty() {
+        query.split_whitespace().flat_map(clean).collect()
+    } else {
+        terms
+    }
+}
+
+/// Two words name the same thing when they are equal or share a stem: a
+/// common prefix of at least four characters ("verify" and "verification",
+/// "implement" and "implementation"). A shorter shared prefix is accident,
+/// not agreement.
+fn words_agree(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    let common = left
+        .chars()
+        .zip(right.chars())
+        .take_while(|(left_char, right_char)| left_char == right_char)
+        .count();
+    common >= 4
+}
+
+/// Word-overlap score of one descriptor against the significant words of a
+/// task-language query. `primary` is the descriptor's own name and id; `text`
+/// the rest of its searchable corpus text (description, tags, relations).
+///
+/// The score is the count of query terms some word of the descriptor agrees
+/// with, plus a bonus for each term the primary text agrees with — a practice
+/// named by the task's word is a stronger answer than one that merely mentions
+/// it — and a small exact-word bonus. `None` when nothing overlaps. This is
+/// the resolver's fallback lane: it always ranks below an explicit containment
+/// match and never mints a second identity.
+pub fn word_overlap_score(terms: &[String], primary: &str, text: &str) -> Option<i64> {
+    if terms.is_empty() {
+        return None;
+    }
+    fn agreeing_terms(terms: &[String], text: &str) -> (usize, bool) {
+        let mut matched = 0_usize;
+        let mut exact = false;
+        for term in terms {
+            let mut term_match = false;
+            for word in text
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .map(str::to_lowercase)
+            {
+                if word == *term {
+                    term_match = true;
+                    exact = true;
+                    break;
+                }
+                if words_agree(&word, term) {
+                    term_match = true;
+                }
+            }
+            matched += usize::from(term_match);
+        }
+        (matched, exact)
+    }
+    let (matched_text, exact_text) = agreeing_terms(terms, text);
+    let (matched_primary, _) = agreeing_terms(terms, primary);
+    let matched = matched_text.max(matched_primary);
+    (matched > 0).then_some(
+        matched as i64 * 100 + matched_primary as i64 * 80 + i64::from(exact_text) * 40,
+    )
+}
+
 fn fuzzy_score(query: &str, candidate: &str) -> Option<i64> {
     let candidate = candidate.to_lowercase();
     if let Some(position) = candidate.find(query) {
@@ -117,5 +223,62 @@ mod tests {
         let results = search_contextual_actions(&actions, "prov");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].action.as_str(), "action/project/explain");
+    }
+
+    #[test]
+    fn significant_terms_drop_stop_words_and_punctuation() {
+        assert_eq!(
+            significant_terms("verify this implementation"),
+            vec!["verify".to_owned(), "implementation".to_owned()]
+        );
+        assert_eq!(significant_terms("the how a this"), vec!["the".to_owned(), "how".to_owned(), "a".to_owned(), "this".to_owned()]);
+        assert_eq!(
+            significant_terms("Verify, the implementation."),
+            vec!["verify".to_owned(), "implementation".to_owned()]
+        );
+    }
+
+    #[test]
+    fn word_overlap_counts_agreeing_terms_and_ranks_by_count() {
+        let terms = significant_terms("verify this implementation");
+        let two = word_overlap_score(
+            &terms,
+            "verification-before-completion",
+            "Verify the implementation before claiming completion",
+        );
+        let one = word_overlap_score(&terms, "closure", "verification runs and closure evidence");
+        assert!(
+            two.unwrap() > one.unwrap(),
+            "more agreeing terms outrank fewer"
+        );
+        assert_eq!(
+            word_overlap_score(&terms, "entry", "an unrelated catalogue entry"),
+            None
+        );
+        assert_eq!(word_overlap_score(&[], "verification", "verification"), None);
+    }
+
+    #[test]
+    fn word_overlap_agrees_by_stem_not_by_accident() {
+        // Stems agree: verify/verification, implement/implementation.
+        assert!(word_overlap_score(&significant_terms("verify"), "runs", "verification runs").is_some());
+        assert!(
+            word_overlap_score(&significant_terms("implement"), "plan", "implementation plan")
+                .is_some()
+        );
+        // A three-character shared prefix is not agreement.
+        assert!(word_overlap_score(&significant_terms("act"), "catalogue", "action catalogue").is_none());
+        assert!(word_overlap_score(&significant_terms("rat"), "manual", "operation manual").is_none());
+    }
+
+    #[test]
+    fn word_overlap_weights_a_name_agreement_above_a_mention() {
+        let terms = significant_terms("verify this implementation");
+        let named = word_overlap_score(&terms, "verification-before-completion", "never claim completion without proof");
+        let mentioned = word_overlap_score(&terms, "receiving-code-review", "before implementing suggestions from review");
+        assert!(
+            named.unwrap() > mentioned.unwrap(),
+            "a practice named by the task's word outranks one that merely mentions it"
+        );
     }
 }

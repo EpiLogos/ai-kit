@@ -3946,17 +3946,30 @@ fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
     // these rows are readings, never observation events.
     let action_rows = aikit_cli::act::search_rows(&service, &a.query, a.limit)?;
 
+    let mut data = jval!({
+        "expression": resolved.expression,
+        "path": resolved.path,
+        "rows": rows,
+        "actions": action_rows,
+        "alias_families": family_rows,
+        "alias_family_problems": problems,
+        "inert": true,
+    });
+    // A task-phrase query that resolved to nothing at all is an answered
+    // absence, never a bare expression dump: what was searched, and what is
+    // nearby in the same field.
+    if !a.query.trim().is_empty() && data["rows"].as_array().is_some_and(Vec::is_empty) {
+        let no_actions = data["actions"].as_array().is_some_and(Vec::is_empty);
+        let no_families = data["alias_families"].as_array().is_some_and(Vec::is_empty);
+        if no_actions && no_families {
+            data["empty_query"] =
+                aikit_cli::act::empty_query_disclosure(&service, &a.query, 3)?;
+        }
+    }
+
     Ok(reply(
         &service,
-        jval!({
-            "expression": resolved.expression,
-            "path": resolved.path,
-            "rows": rows,
-            "actions": action_rows,
-            "alias_families": family_rows,
-            "alias_family_problems": problems,
-            "inert": true,
-        }),
+        data,
         diagnostic_warnings(&service),
     ))
 }
