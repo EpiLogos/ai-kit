@@ -1614,14 +1614,17 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                     reply_to: a.reply_to,
                     from_position: a.from_position.as_deref(),
                     project_world: a.project_world.as_deref(),
+                    instance: a.instance.as_deref(),
+                    require_workcell: a.require_workcell.as_deref(),
                 },
             )?)
         }
         GatewaySub::Inbox(a) => {
-            let (owners, gateway, _) = contact_seams(&home, &a.carrier)?;
+            let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
             gateway_data(aikit_cli::gateway_contact::inbox(
                 &owners,
                 &gateway,
+                &cwd,
                 a.position.as_deref(),
                 a.ack,
             )?)

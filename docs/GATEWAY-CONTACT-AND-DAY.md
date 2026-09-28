@@ -25,6 +25,7 @@ answer is reported as `unavailable` with the exact command that failed.
 aikit gateway who [--project-world project:O-I] --json
 aikit gateway send --to @cradle-steward --body "Cradle build is red on main." --json
 aikit gateway send --to central:position:project:O-I:factory-guardian --reply-to aikit:communique:… --body-file reply.md
+aikit gateway send --to @cradle-steward --instance actuation:generation:… [--require-workcell workcell:omarchy] --body "…" --json
 aikit gateway inbox [--position P] [--ack] --json
 aikit gateway conversation --with @factory-guardian --json
 aikit gateway delegate --communique aikit:communique:… --work work:cradle-fix [--run R] [--journey J] [--workflow-unit U] --reason "…"
@@ -118,6 +119,63 @@ carry `observed_via: "local"`. Two Workcells claiming one Position show
 `state: unavailable` with both `claims` and an absence. `data.remotes` lists
 every declared remote as `{workcell_ref, gateway_ref, status: reachable |
 unreachable, detail}`.
+
+### Durable Position routes and exact-instance routes
+
+`--to P` alone is a **durable Position route**: everything above applies, it
+follows succession, and it reaches whichever generation occupies P when it is
+delivered. `--instance G` makes it an **exact-instance route** bound to one
+occupancy generation — Actuation's `generation_ref`, the same ref `who --json`
+shows as `occupancy.generation_ref` (with `occupancy.workcell_ref`,
+`agency_ref` and `agent_session_ref` beside it). `--require-workcell W` further
+binds it to that generation standing on W. The record carries
+`to_instance: {generation_ref, required_workcell_ref?, agency_ref?,
+agent_session_ref?}` (the last two as Actuation's tenure named them at send
+time; delivery is decided on the generation).
+
+An exact route is placed by asking `actuation occupancy verify --position P
+--generation G` here first. Current here (and on W when required): `pending`,
+delivered at that instance's next turn. Current on another declared Workcell:
+relayed to that Workcell's gateway only. A generation this ledger never knew
+is looked for on the declared remotes (only W's gateway when W is required);
+a remote holding P under another generation is a same-named peer and is never
+a route. Otherwise the Communique is `held` with `instance_hold`:
+
+| `instance_hold` | meaning |
+|---|---|
+| `instance-absent` | no ledger asked records G current (vacant, only other generations, or the Workcell that might hold it could not be asked) |
+| `instance-superseded` | Actuation records G as ended: the address moved on; the successor never receives it |
+| `workcell-mismatch` | G is current, but not on the required Workcell |
+| `instance-unverified` | Actuation could not answer at send time |
+
+The relay pass re-reads every exact route and records a changed standing as a
+transition (`restood` in its output): a held route whose instance becomes
+reachable is relayed there; a pending one whose instance was superseded
+becomes `held: instance-superseded`. Not knowing never overwrites what was
+known. `inbox` annotates exact routes `pending` only for their own verified
+instance, else `awaiting-instance` or `held-<reason>`; `inbox --ack` and the
+turn boundary deliver only what the reader's generation and Workcell may
+receive and list the rest as `withheld`. The gateway kernel enforces the same
+law: acknowledging an exact route by another generation is refused
+(`agency_gateway.communique_wrong_instance`), and by its generation on another
+or an unknown Workcell when one is required
+(`agency_gateway.communique_workcell_mismatch`). A replayed send or relay of
+the same ref stays one record; the same ref with another target is refused as
+an identity rewrite. Out-of-order relays keep the receiving journal's arrival
+order and each sender's `sent_at_unix_ms`.
+
+An exact route is handed only to gateways that keep it. A gateway advertises
+`communique-exact-instance` in its `protocol` answer (`features`); `send
+--instance` refuses with `gateway.exact_instance_unsupported` when this
+Workcell's gateway, or a relay target that answers, does not advertise it (a
+gateway built before exact routes would silently drop `to_instance` and turn
+the Communique into a durable Position route). Every echoed record (send,
+remote ingest, the local relay record) must still carry the instance binding
+it was handed, or the command refuses with
+`gateway.communique_instance_binding_lost` and reports no route over it. In a
+relay pass each exact route stands or falls on its own: a standing that cannot
+be recorded, or a refused relay, is listed in `skipped` with its `code` and
+`reason`, and the pass continues.
 
 ### Delivery at the turn boundary
 
@@ -366,7 +424,9 @@ civil-time policy must say `automatic_day_rollover: true`, and
 ## Proof
 
 - `crates/aikit-adapters/src/gateway_communique.rs`: journal laws (atomic
-  acknowledgement, replay versus rewrite, relay, escalation, restore).
+  acknowledgement, replay versus rewrite, relay, escalation, restore; durable
+  versus exact-instance delivery, wrong-generation and wrong-Workcell ack
+  refused, hold re-standing, duplicate and out-of-order relay).
 - `crates/aikit-cli/tests/gateway_contact.rs`: the real binary and gateway.
   Covers same-Workcell send, inbox and ack; turn-boundary delivery; vacant →
   held → next claim; occupant replacement; unknown and forged attribution;
@@ -379,7 +439,11 @@ civil-time policy must say `automatic_day_rollover: true`, and
   had and nothing twice; two Workcells claiming one Position are refused as
   ambiguous; `who` shows occupancy observed through a remote gateway; a tenure
   A's own ledger places on B is relayed, retried after B was down, or refused
-  when B is undeclared.
+  when B is undeclared. Exact-instance routes: the durable route follows
+  succession while the exact route is withheld from the successor and re-stood
+  `instance-superseded`; a required-Workcell mismatch is held; the exact route
+  reaches its instance on B and never the same-named peer on C; a down B holds
+  it `instance-absent` until a relay pass relays it there once.
 - `crates/aikit-adapters/src/gateway_service.rs`: the occupancy query is
   answered by the service's owner hook on every ask (nothing cached), writes
   no gateway state, and the kernel alone refuses it.
