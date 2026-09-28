@@ -428,17 +428,17 @@ fn build_snapshot(
         } else {
             relative_text
         };
-        // Control-ground and Central sources refuse the whole sync at the
-        // first invalid skill — their standing is authored, not discovered.
-        // Git and plain Directory sources record the refusal and keep the
-        // valid remainder: a repository can carry an unrelated broken tree
-        // beside the skills that are wanted.
-        let strict = spec.kind.control_ground();
+        // Every source kind records an invalid skill as a rejection and keeps
+        // the valid remainder — sources hold skills, not promises of
+        // perfection: one broken tree beside sixty-four good ones must not
+        // silence the whole source. A source whose candidates ALL fail
+        // validation still refuses below, naming the rejections; a cleanly
+        // empty Control-ground source stays a real, successful state.
+        let control_ground_source = spec.kind.control_ground();
         let skill = match agent_skills::validate(&root) {
             Ok(skill) => skill,
             Err(error) => {
                 record_rejection(
-                    strict,
                     &relative_text,
                     scan_root,
                     &mut rejected,
@@ -450,7 +450,7 @@ fn build_snapshot(
         };
         // A Control-ground source reads the sibling contract beside each skill;
         // every other source never opens skill.json at all.
-        let control = if strict {
+        let control = if control_ground_source {
             let directory_name = root
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -470,7 +470,6 @@ fn build_snapshot(
         let id = format!("skill/{}/{capsule_tail}", spec.id);
         if let Err(error) = aikit_core::CapsuleId::parse(&id) {
             record_rejection(
-                strict,
                 &relative_text,
                 scan_root,
                 &mut rejected,
@@ -553,7 +552,11 @@ fn build_snapshot(
         });
     }
     skills.sort_by(|left, right| left.id.cmp(&right.id));
-    if skills.is_empty() && !spec.kind.control_ground() {
+    // A clean empty ground is a real state for a Control-ground source (an
+    // authored collection can be emptied on purpose) — but candidates that
+    // all failed validation are a defect in any source kind: refuse, naming
+    // every rejection.
+    if skills.is_empty() && (!rejected.is_empty() || !spec.kind.control_ground()) {
         return Err(no_valid_skills(spec, &rejected));
     }
     let digest = hasher.finalize().to_hex().to_string();
@@ -603,21 +606,18 @@ fn no_valid_skills(spec: &SourceSpec, rejected: &[RejectedSkill]) -> AikitError 
     AikitError::new("source.no_skills", message)
 }
 
-/// Either refuse the whole sync (Control-ground and Central sources) or record
-/// the refusal as part of the snapshot — the rejected path, code and message
-/// participate in the digest so a rejection that appears or disappears is a new
-/// candidate, never a stale record under an old name.
+/// Record the refusal as part of the snapshot — the rejected path, code and
+/// message participate in the digest so a rejection that appears or
+/// disappears is a new candidate, never a stale record under an old name.
+/// Every source kind rejects per skill; the sync reply and `source show`
+/// carry the rejections, and a source with no valid skills left refuses.
 fn record_rejection(
-    strict: bool,
     path: &str,
     scan_root: &Path,
     rejected: &mut Vec<RejectedSkill>,
     hasher: &mut blake3::Hasher,
     error: AikitError,
 ) -> Result<()> {
-    if strict {
-        return Err(error);
-    }
     // Validator diagnostics can embed a checkout path. Git sync stages at a
     // fresh ULID every time: keep diagnostics and snapshot identity source-relative.
     let message = error

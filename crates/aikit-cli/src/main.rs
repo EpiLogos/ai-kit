@@ -1858,6 +1858,19 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
         SourceSub::Sync(args) => {
             let snapshot = skill_sources::sync(home, &args.id)?;
             let status = skill_sources::status(home, &args.id)?;
+            // A rejected skill must never be silent: the reply's warnings
+            // name every skip and its reason, while the structured
+            // `rejected` array stays machine-readable.
+            let warnings = snapshot
+                .rejected
+                .iter()
+                .map(|rejection| {
+                    format!(
+                        "skill `{}` was rejected and is NOT projected: [{}] {} — fix or retire it; `source show` names it",
+                        rejection.path, rejection.code, rejection.message
+                    )
+                })
+                .collect();
             Ok(source_reply(
                 jval!({
                     "id": args.id,
@@ -1868,7 +1881,7 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                     "skills": snapshot.skills.len(),
                     "rejected": snapshot.rejected,
                 }),
-                vec![],
+                warnings,
             ))
         }
         SourceSub::Show(args) => {
