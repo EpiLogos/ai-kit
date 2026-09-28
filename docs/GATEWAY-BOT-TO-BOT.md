@@ -50,8 +50,26 @@ dissolves into "a chat said".
 
 ## Verticals
 
+**V0 — Addressability derives from agency identity (the reconciliation, commissioned 2026-09-28).**
+The owner's finding: the Position registry gated the entire contact plane
+while remaining unpopulated — a second name for agents the system already
+names (the first six minted Positions each wrapped exactly one existing
+`agent/*` ref, 1:1). The model correction:
+
+- Every registered agent profile is **addressable by default** at its
+  identity. `/ask`, `send` and `who` resolve the agency registry; a missing
+  Position means **"addressable, not currently embodied here"** — mail holds
+  for the agency — never "does not exist".
+- **Position survives as the occupancy projection**: tenure, succession and
+  attribution verification (which Workcell embodies the agency now), valuable
+  exactly where the relay needs material handover facts. It stops being a
+  gate on contact.
+- The decision to mint or not mint a Position therefore never mints or mutes
+  an agent.
+
 | # | Vertical | State |
 |---|---|---|
+| V0 | **Agency-identity addressability**: who/ask/send resolve agent profiles, joined with occupancy where present; unembodied ≠ nonexistent | this commission |
 | V1 | **Cross-face attributable forward**: `/ask <position> <message>` in a connector chat → attributable Communique → relay → the recipient's Surface | landed (canonical `AskPosition` behind the `/ask` edge; `ContactAskRouter` routes with the exact `gateway send` laws — occupancy, cross-Workcell relay, held/vacant — attribution from Actuation's ledger, origin provenance in the attribution basis; the recipient receives it at their turn boundary, their chat face being V3; 7 ask proofs in `gateway_conversation_engine`, 73 gateway + 13 contact proofs green) |
 | V2 | **Group-chat binding**: bind a group address, admit bots, enforce the loop budget | needs a live two-bot group to prove |
 | V3 | **Bot-initiated outbound** from the engine (an agent messaging a user or peer unprompted through its bound connector) | after V1 exercises the same queue |
