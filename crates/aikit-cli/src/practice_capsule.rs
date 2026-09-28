@@ -423,14 +423,44 @@ pub fn verify_archive(value: &Value) -> Result<VerifiedArchive> {
         {
             return Err(tampered(format!("unsafe archive path `{path}`")));
         }
-        if files.iter().any(|file| file.path == path) {
-            return Err(tampered(format!("duplicate archive path `{path}`")));
+        // `Path::components` normalises `a/./b`, `a//b` and a trailing `/`,
+        // so a path is accepted only in its one canonical spelling; otherwise
+        // two spellings of one file would pass the duplicate check below.
+        let canonical = relative
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        if canonical != path {
+            return Err(tampered(format!(
+                "archive path `{path}` is not in canonical form (`{canonical}`)"
+            )));
+        }
+        // Duplicates are compared case-insensitively: on a case-insensitive
+        // filesystem `a/B` and `a/b` are one file, and the later would
+        // silently overwrite the earlier.
+        let folded = path.to_lowercase();
+        if let Some(existing) = files.iter().find(|file| file.path.to_lowercase() == folded) {
+            return Err(tampered(format!(
+                "duplicate archive path `{path}` (collides with `{}`)",
+                existing.path
+            )));
         }
         let mode = row["mode"]
             .as_u64()
-            .filter(|mode| *mode <= 0o7777)
-            .ok_or_else(|| tampered(format!("`{path}` has no valid mode")))?
-            as u32;
+            .ok_or_else(|| tampered(format!("`{path}` has no valid mode")))?;
+        // Only permission bits cross from a foreign archive: setuid, setgid
+        // and sticky are refused, never applied.
+        if mode & !0o777 != 0 {
+            return Err(AikitError::new(
+                "capsule.archive_mode_unsafe",
+                format!(
+                    "`{path}` declares mode {mode:#o}, which carries bits beyond rwx (setuid, setgid, sticky or out of range); refusing to apply it from an archive"
+                ),
+            )
+            .with("path", path.to_string()));
+        }
+        let mode = mode as u32;
         let contents = match (row["text"].as_str(), row["base64"].as_str()) {
             (Some(text), None) => text.as_bytes().to_vec(),
             (None, Some(data)) => base64::engine::general_purpose::STANDARD
@@ -670,5 +700,92 @@ mod tests {
             verify_archive(&escape).unwrap_err().code(),
             "capsule.archive_invalid"
         );
+    }
+
+    fn with_path_rewritten(archive: &Value, from: &str, to: &str) -> Value {
+        let mut changed = archive.clone();
+        for row in changed["files"].as_array_mut().unwrap() {
+            if row["path"] == from {
+                row["path"] = json!(to);
+            }
+        }
+        changed
+    }
+
+    fn with_extra_copy(archive: &Value, of: &str, spelled: &str) -> Value {
+        let mut changed = archive.clone();
+        let rows = changed["files"].as_array_mut().unwrap();
+        let mut copy = rows.iter().find(|row| row["path"] == of).unwrap().clone();
+        copy["path"] = json!(spelled);
+        rows.push(copy);
+        changed
+    }
+
+    #[test]
+    fn non_canonical_and_case_only_duplicate_paths_are_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        capsule_dir(temp.path());
+        let archive = archive_of(temp.path());
+        verify_archive(&archive).unwrap();
+
+        for spelled in [
+            "payload/./SKILL.md",
+            "payload//SKILL.md",
+            "payload/SKILL.md/",
+            "manifest.toml/",
+        ] {
+            let original = if spelled.starts_with("manifest") {
+                MANIFEST_FILE
+            } else {
+                "payload/SKILL.md"
+            };
+            // A second spelling of an existing file beside it.
+            let duplicate = with_extra_copy(&archive, original, spelled);
+            let error = verify_archive(&duplicate).unwrap_err();
+            assert_eq!(error.code(), "capsule.archive_invalid", "{spelled}");
+            assert!(error.message().contains("canonical"), "{spelled}: {error}");
+            // The file itself under the non-canonical spelling.
+            let alone = with_path_rewritten(&archive, original, spelled);
+            let error = verify_archive(&alone).unwrap_err();
+            assert!(error.message().contains("canonical"), "{spelled}: {error}");
+        }
+
+        let case_only = with_extra_copy(&archive, "payload/SKILL.md", "payload/skill.md");
+        let error = verify_archive(&case_only).unwrap_err();
+        assert_eq!(error.code(), "capsule.archive_invalid");
+        assert!(error.message().contains("duplicate"), "{error}");
+    }
+
+    #[test]
+    fn special_mode_bits_from_an_archive_are_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        capsule_dir(temp.path());
+        for mode in [0o4755_u32, 0o2755, 0o1755, 0o10000] {
+            // A self-consistent archive: the revision is recomputed over the
+            // special mode, so only the mode rule can refuse it.
+            let mut files = read_capsule_dir(temp.path()).unwrap();
+            for file in &mut files {
+                if file.path == "payload/scripts/run.py" {
+                    file.mode = mode;
+                }
+            }
+            let changed = ProvenCapsule {
+                id: CapsuleId::parse("skill/ql/darshana").unwrap(),
+                name: "darshana".into(),
+                form: "method",
+                revision: revision_of(&files).unwrap(),
+                from: ExportedFrom {
+                    source_id: "ql".into(),
+                    snapshot: None,
+                },
+                files,
+            }
+            .archive();
+            assert_eq!(
+                verify_archive(&changed).unwrap_err().code(),
+                "capsule.archive_mode_unsafe",
+                "{mode:#o}"
+            );
+        }
     }
 }
