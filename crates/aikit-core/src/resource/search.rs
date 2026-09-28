@@ -484,11 +484,9 @@ impl ResourceSearchIndex {
                         }
                     }
                 }
-                if let Some(overlap) = super::action_search::word_overlap_score(
-                    &phrase_terms,
-                    &primary,
-                    &searchable,
-                ) {
+                if let Some(overlap) =
+                    super::action_search::word_overlap_score(&phrase_terms, &primary, &searchable)
+                {
                     score = Some(overlap);
                 }
             }

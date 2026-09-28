@@ -82,8 +82,8 @@ fn live_telegram_bot_api_connect_send_and_poll() {
     );
 
     // 2. Delivery: a real message lands in the recipient's Telegram.
-    let chat = std::env::var("AIKIT_TELEGRAM_TEST_CHAT")
-        .unwrap_or_else(|_| "6381957258".to_string());
+    let chat =
+        std::env::var("AIKIT_TELEGRAM_TEST_CHAT").unwrap_or_else(|_| "6381957258".to_string());
     let receipt = connector
         .execute_now(proof_operation(&chat))
         .expect("send must execute");

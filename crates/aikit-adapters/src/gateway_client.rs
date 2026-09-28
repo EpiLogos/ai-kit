@@ -487,7 +487,10 @@ impl std::fmt::Debug for GatewaySubscription {
         formatter
             .debug_struct("GatewaySubscription")
             .field("replay", &self.replay)
-            .field("pending_line_fragment", &self.carry.as_ref().map(|carry| carry.len()))
+            .field(
+                "pending_line_fragment",
+                &self.carry.as_ref().map(|carry| carry.len()),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -523,10 +526,7 @@ pub fn gateway_subscribe(
     let mut stream = UnixStream::connect(socket_path).map_err(|error| {
         AikitError::new(
             "agency_gateway_client.unix_connect",
-            format!(
-                "connect gateway socket {}: {error}",
-                socket_path.display()
-            ),
+            format!("connect gateway socket {}: {error}", socket_path.display()),
         )
     })?;
     stream
@@ -610,11 +610,11 @@ impl GatewaySubscription {
             .get_ref()
             .set_read_timeout(Some(wait))
             .map_err(|error| {
-            AikitError::new(
-                "agency_gateway_client.unix_timeout",
-                format!("set gateway socket read timeout: {error}"),
-            )
-        })?;
+                AikitError::new(
+                    "agency_gateway_client.unix_timeout",
+                    format!("set gateway socket read timeout: {error}"),
+                )
+            })?;
         let mut line = self.carry.take().unwrap_or_default();
         let before = line.len();
         let read = match self.reader.read_line(&mut line) {
@@ -622,7 +622,9 @@ impl GatewaySubscription {
             Err(error)
                 if matches!(
                     error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
                 ) =>
             {
                 // Whatever arrived before the wait expired was a partial

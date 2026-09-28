@@ -143,9 +143,8 @@ pub fn word_overlap_score(terms: &[String], primary: &str, text: &str) -> Option
     let (matched_text, exact_text) = agreeing_terms(terms, text);
     let (matched_primary, _) = agreeing_terms(terms, primary);
     let matched = matched_text.max(matched_primary);
-    (matched > 0).then_some(
-        matched as i64 * 100 + matched_primary as i64 * 80 + i64::from(exact_text) * 40,
-    )
+    (matched > 0)
+        .then_some(matched as i64 * 100 + matched_primary as i64 * 80 + i64::from(exact_text) * 40)
 }
 
 fn fuzzy_score(query: &str, candidate: &str) -> Option<i64> {
@@ -231,7 +230,15 @@ mod tests {
             significant_terms("verify this implementation"),
             vec!["verify".to_owned(), "implementation".to_owned()]
         );
-        assert_eq!(significant_terms("the how a this"), vec!["the".to_owned(), "how".to_owned(), "a".to_owned(), "this".to_owned()]);
+        assert_eq!(
+            significant_terms("the how a this"),
+            vec![
+                "the".to_owned(),
+                "how".to_owned(),
+                "a".to_owned(),
+                "this".to_owned()
+            ]
+        );
         assert_eq!(
             significant_terms("Verify, the implementation."),
             vec!["verify".to_owned(), "implementation".to_owned()]
@@ -255,27 +262,47 @@ mod tests {
             word_overlap_score(&terms, "entry", "an unrelated catalogue entry"),
             None
         );
-        assert_eq!(word_overlap_score(&[], "verification", "verification"), None);
+        assert_eq!(
+            word_overlap_score(&[], "verification", "verification"),
+            None
+        );
     }
 
     #[test]
     fn word_overlap_agrees_by_stem_not_by_accident() {
         // Stems agree: verify/verification, implement/implementation.
-        assert!(word_overlap_score(&significant_terms("verify"), "runs", "verification runs").is_some());
         assert!(
-            word_overlap_score(&significant_terms("implement"), "plan", "implementation plan")
-                .is_some()
+            word_overlap_score(&significant_terms("verify"), "runs", "verification runs").is_some()
         );
+        assert!(word_overlap_score(
+            &significant_terms("implement"),
+            "plan",
+            "implementation plan"
+        )
+        .is_some());
         // A three-character shared prefix is not agreement.
-        assert!(word_overlap_score(&significant_terms("act"), "catalogue", "action catalogue").is_none());
-        assert!(word_overlap_score(&significant_terms("rat"), "manual", "operation manual").is_none());
+        assert!(
+            word_overlap_score(&significant_terms("act"), "catalogue", "action catalogue")
+                .is_none()
+        );
+        assert!(
+            word_overlap_score(&significant_terms("rat"), "manual", "operation manual").is_none()
+        );
     }
 
     #[test]
     fn word_overlap_weights_a_name_agreement_above_a_mention() {
         let terms = significant_terms("verify this implementation");
-        let named = word_overlap_score(&terms, "verification-before-completion", "never claim completion without proof");
-        let mentioned = word_overlap_score(&terms, "receiving-code-review", "before implementing suggestions from review");
+        let named = word_overlap_score(
+            &terms,
+            "verification-before-completion",
+            "never claim completion without proof",
+        );
+        let mentioned = word_overlap_score(
+            &terms,
+            "receiving-code-review",
+            "before implementing suggestions from review",
+        );
         assert!(
             named.unwrap() > mentioned.unwrap(),
             "a practice named by the task's word outranks one that merely mentions it"

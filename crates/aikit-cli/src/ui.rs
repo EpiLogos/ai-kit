@@ -308,12 +308,8 @@ impl PaletteBackend for V2SurfaceService<'_> {
             input["name"] = serde_json::json!(name);
         }
         let runner = aikit_adapters::runner::SystemRunner::new();
-        let expressed = agent_work::run_central_action(
-            &runner,
-            &scope,
-            "agent-profile.express",
-            input,
-        )?;
+        let expressed =
+            agent_work::run_central_action(&runner, &scope, "agent-profile.express", input)?;
         let profile_ref = expressed["allocation"]["profile_ref"]
             .as_str()
             .or_else(|| expressed["profile"]["ref"].as_str())
@@ -519,7 +515,9 @@ mod agent_work {
                 Some(
                     relative
                         .to_str()
-                        .ok_or_else(|| refusal("direct_agent.source_io", "Project name is not UTF-8"))?
+                        .ok_or_else(|| {
+                            refusal("direct_agent.source_io", "Project name is not UTF-8")
+                        })?
                         .to_owned(),
                 ),
             )
@@ -540,12 +538,14 @@ mod agent_work {
             return Ok("control:root".to_owned());
         }
         scope.project.as_deref().ok_or_else(|| {
-            refusal("direct_agent.scope_invalid", "project scope names no Project")
+            refusal(
+                "direct_agent.scope_invalid",
+                "project scope names no Project",
+            )
         })?;
         let manifest: Value = serde_json::from_slice(
-            &std::fs::read(scope.cwd.join("ProjectCentral/project.json")).map_err(|error| {
-                refusal("direct_agent.source_io", error.to_string())
-            })?,
+            &std::fs::read(scope.cwd.join("ProjectCentral/project.json"))
+                .map_err(|error| refusal("direct_agent.source_io", error.to_string()))?,
         )
         .map_err(|error| refusal("direct_agent.source_io", error.to_string()))?;
         let id = manifest["project_id"].as_str().ok_or_else(|| {
@@ -602,7 +602,12 @@ mod agent_work {
         if envelope["ok"] != json!(true) {
             return Err(refusal(
                 "central.action_refused",
-                format!("Central refused `{action}`: {}", envelope["error"]["message"].as_str().unwrap_or("no reason given")),
+                format!(
+                    "Central refused `{action}`: {}",
+                    envelope["error"]["message"]
+                        .as_str()
+                        .unwrap_or("no reason given")
+                ),
             ));
         }
         Ok(envelope["data"].clone())
@@ -637,13 +642,18 @@ mod agent_work {
     /// must already be prepared and attached, the provider is the configured
     /// encounter provider, and the owner's own receipt is the answer.
     #[cfg(unix)]
-    pub(crate) fn start_encounter(service: &mut Service, agent_session: &str) -> Result<aikit_tui::backend::EncounterLaunch> {
+    pub(crate) fn start_encounter(
+        service: &mut Service,
+        agent_session: &str,
+    ) -> Result<aikit_tui::backend::EncounterLaunch> {
         let session = ResourceRef::parse(agent_session)
             .map_err(|error| refusal("encounter.session_invalid", error.to_string()))?;
         let Some(binding) = crate::direct_agent_session::read(service.home(), &session)? else {
             return Err(refusal(
                 "encounter.session_unprepared",
-                format!("no prepared Direct session named {agent_session}; prepare it before launch"),
+                format!(
+                    "no prepared Direct session named {agent_session}; prepare it before launch"
+                ),
             ));
         };
         let encounter = crate::encounter_service::EncounterService::new(service.home().clone())?;
@@ -1019,7 +1029,9 @@ esac"#
 
     #[test]
     fn the_surface_binds_the_agent_work_lifecycle_over_a_central_root_only() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (tmp, root) = central_world();
         let home = tmp.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
@@ -1030,9 +1042,10 @@ esac"#
             "AIKIT_CONTEXT_ID".to_owned(),
             aikit_core::ContextId::generate().to_string(),
         );
-        let mut svc =
-            Service::open(aikit_store::AikitHome::at(&home), &root, |key| env.get(key).cloned())
-                .unwrap();
+        let mut svc = Service::open(aikit_store::AikitHome::at(&home), &root, |key| {
+            env.get(key).cloned()
+        })
+        .unwrap();
         let backend = V2SurfaceService::new(&mut svc);
         let bindings = backend.agent_work_bindings();
         assert!(
@@ -1044,11 +1057,10 @@ esac"#
         // world-entry rows name, not a stage that fails halfway through.
         let elsewhere = tmp.path().join("elsewhere");
         std::fs::create_dir_all(&elsewhere).unwrap();
-        let mut svc =
-            Service::open(aikit_store::AikitHome::at(&home), &elsewhere, |key| {
-                env.get(key).cloned()
-            })
-            .unwrap();
+        let mut svc = Service::open(aikit_store::AikitHome::at(&home), &elsewhere, |key| {
+            env.get(key).cloned()
+        })
+        .unwrap();
         let backend = V2SurfaceService::new(&mut svc);
         let bindings = backend.agent_work_bindings();
         assert!(
@@ -1060,7 +1072,9 @@ esac"#
 
     #[test]
     fn save_and_accept_route_through_central_with_exact_cas_and_review_readback() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (tmp, root) = central_world();
         let home = tmp.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
@@ -1073,9 +1087,10 @@ esac"#
             "AIKIT_CONTEXT_ID".to_owned(),
             aikit_core::ContextId::generate().to_string(),
         );
-        let mut svc =
-            Service::open(aikit_store::AikitHome::at(&home), &root, |key| env.get(key).cloned())
-                .unwrap();
+        let mut svc = Service::open(aikit_store::AikitHome::at(&home), &root, |key| {
+            env.get(key).cloned()
+        })
+        .unwrap();
         let mut backend = V2SurfaceService::new(&mut svc);
 
         let saved = backend
@@ -1121,7 +1136,10 @@ esac"#
 
         // The world readiness reading is the folded native scope answer.
         let readiness = backend.world_readiness().expect("readiness reads natively");
-        assert!(readiness.ready, "the fake answers a bound world: {readiness:?}");
+        assert!(
+            readiness.ready,
+            "the fake answers a bound world: {readiness:?}"
+        );
 
         // A fresh surface holds no saved correlation: accept without this
         // surface's own save refuses instead of guessing a profile.

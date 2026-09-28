@@ -57,9 +57,7 @@ impl CoexistencePolicy {
             "coexist" => Ok(Self::Coexist),
             other => Err(AikitError::new(
                 "gateway_coexistence.policy_unknown",
-                format!(
-                    "{other:?} is not a coexistence policy; use `exclusive` or `coexist`"
-                ),
+                format!("{other:?} is not a coexistence policy; use `exclusive` or `coexist`"),
             )),
         }
     }
@@ -222,11 +220,7 @@ pub fn detect(probe: &CoexistenceProbe) -> Vec<ForeignGateway> {
                 }
             }
             for dir in spec.state_dir_names {
-                if probe
-                    .state_dirs
-                    .iter()
-                    .any(|seen| seen.ends_with(dir))
-                {
+                if probe.state_dirs.iter().any(|seen| seen.ends_with(dir)) {
                     evidence.push(format!(
                         "the harness state directory {dir} exists in the home"
                     ));

@@ -19,7 +19,6 @@
 
 mod common;
 use aikit_core::capsule::Capsule;
-use aikit_core::Result;
 use aikit_core::catalog::MemoryCatalog;
 use aikit_core::context::ContextDescriptor;
 use aikit_core::id::{CapsuleId, GenerationId};
@@ -27,8 +26,8 @@ use aikit_core::policy::ManagedPolicy;
 use aikit_core::resolve::{resolve, ResolveRequest, ResolvedView};
 use aikit_core::scope::ScopeKind;
 use aikit_core::trust::MemoryTrust;
+use aikit_core::Result;
 use aikit_tui::application::{AgentWorkStage, ComposeIntent, WorkStageName};
-use aikit_tui::SkillSetFieldRow;
 use aikit_tui::application_surface::{ApplicationSurfaceController, ApplicationSurfaceRequest};
 use aikit_tui::backend::{
     AgentProfileAcceptReceipt, AgentProfileSaveReceipt, AgentSessionPreparation, EncounterLaunch,
@@ -37,6 +36,7 @@ use aikit_tui::backend::{
 use aikit_tui::event::PaletteEvent;
 use aikit_tui::host::UiHost;
 use aikit_tui::world_entry::AgentWorkBindings;
+use aikit_tui::SkillSetFieldRow;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 fn key(code: KeyCode) -> PaletteEvent {
@@ -214,10 +214,7 @@ impl PaletteBackend for LifecycleBackend {
         })
     }
 
-    fn prepare_agent_session(
-        &mut self,
-        _profile_ref: &str,
-    ) -> Result<AgentSessionPreparation> {
+    fn prepare_agent_session(&mut self, _profile_ref: &str) -> Result<AgentSessionPreparation> {
         self.prepares.set(self.prepares.get() + 1);
         if !self.behaviour.prepare_ok {
             return Err(aikit_core::AikitError::new(
@@ -251,9 +248,7 @@ impl PaletteBackend for LifecycleBackend {
 /// authored exactly as the §1.3 path prescribes. The walk itself needs no
 /// lifecycle operation, so the returned backend starts with every counter
 /// at zero and the behaviour the test scripted.
-fn enter_work_surface(
-    behaviour: Behaviour,
-) -> (ApplicationSurfaceController, LifecycleBackend) {
+fn enter_work_surface(behaviour: Behaviour) -> (ApplicationSurfaceController, LifecycleBackend) {
     let mut seed = LifecycleBackend::new(Behaviour::default());
     let mut surface = ApplicationSurfaceController::new(
         &mut seed,
@@ -270,7 +265,9 @@ fn enter_work_surface(
     }
     surface.handle(&mut seed, key(KeyCode::Enter)).unwrap();
     for character in "command-encounter-probe".chars() {
-        surface.handle(&mut seed, key(KeyCode::Char(character))).unwrap();
+        surface
+            .handle(&mut seed, key(KeyCode::Char(character)))
+            .unwrap();
     }
     surface.handle(&mut seed, key(KeyCode::Enter)).unwrap();
     (surface, LifecycleBackend::new(behaviour))
@@ -290,13 +287,19 @@ fn the_compound_walks_every_stage_and_lands_running() {
         launch_ok: true,
     });
 
-    surface.handle(&mut backend, key(KeyCode::Char('2'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('2')))
+        .unwrap();
 
     assert_eq!(backend.saves.get(), 1);
     assert_eq!(backend.accepts.get(), 1);
     assert_eq!(backend.readiness_checks.get(), 1);
     assert_eq!(backend.prepares.get(), 1);
-    assert_eq!(backend.launches.get(), 1, "the compound launched exactly once");
+    assert_eq!(
+        backend.launches.get(),
+        1,
+        "the compound launched exactly once"
+    );
     assert_eq!(
         surface.semantic().agent_work,
         AgentWorkStage::Running {
@@ -304,8 +307,16 @@ fn the_compound_walks_every_stage_and_lands_running() {
         }
     );
     let status = surface.semantic().status.as_ref().unwrap();
-    assert!(status.message.contains("Direct work running"), "{}", status.message);
-    assert!(status.message.contains("agent-session/probe-1"), "{}", status.message);
+    assert!(
+        status.message.contains("Direct work running"),
+        "{}",
+        status.message
+    );
+    assert!(
+        status.message.contains("agent-session/probe-1"),
+        "{}",
+        status.message
+    );
     assert_eq!(surface.semantic().compose_intent, None);
 }
 
@@ -318,7 +329,9 @@ fn save_only_ends_at_saved_and_says_not_running() {
         ..Behaviour::default()
     });
 
-    surface.handle(&mut backend, key(KeyCode::Char('1'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('1')))
+        .unwrap();
 
     assert_eq!(backend.saves.get(), 1);
     assert_eq!(backend.accepts.get(), 0, "save-only never accepts");
@@ -347,7 +360,9 @@ fn launch_failure_preserves_saved_source_and_resume_does_not_replay_earlier_stag
         launch_ok: false,
     });
 
-    surface.handle(&mut backend, key(KeyCode::Char('2'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('2')))
+        .unwrap();
     assert_eq!(backend.saves.get(), 1);
     assert_eq!(backend.accepts.get(), 1);
     assert_eq!(backend.launches.get(), 1);
@@ -382,14 +397,25 @@ fn launch_failure_preserves_saved_source_and_resume_does_not_replay_earlier_stag
 
     // Repair the condition and retry: only the launch runs again.
     backend.behaviour.launch_ok = true;
-    surface.handle(&mut backend, key(KeyCode::Char('2'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('2')))
+        .unwrap();
     assert_eq!(backend.saves.get(), 1, "the retry must not replay the save");
-    assert_eq!(backend.accepts.get(), 1, "the retry must not replay the accept");
     assert_eq!(
-        backend.prepares.get(), 1,
+        backend.accepts.get(),
+        1,
+        "the retry must not replay the accept"
+    );
+    assert_eq!(
+        backend.prepares.get(),
+        1,
         "the retry must not replay a landed preparation"
     );
-    assert_eq!(backend.launches.get(), 2, "the retry re-ran the launch only");
+    assert_eq!(
+        backend.launches.get(),
+        2,
+        "the retry re-ran the launch only"
+    );
     assert!(matches!(
         surface.semantic().agent_work,
         AgentWorkStage::Running { .. }
@@ -407,7 +433,9 @@ fn a_not_ready_world_names_its_reason_and_action() {
         ..Behaviour::default()
     });
 
-    surface.handle(&mut backend, key(KeyCode::Char('2'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('2')))
+        .unwrap();
 
     assert!(matches!(
         surface.semantic().agent_work,
@@ -418,7 +446,9 @@ fn a_not_ready_world_names_its_reason_and_action() {
     ));
     let status = surface.semantic().status.as_ref().unwrap();
     assert!(
-        status.message.contains("no provider credential is configured"),
+        status
+            .message
+            .contains("no provider credential is configured"),
         "{}",
         status.message
     );
@@ -428,7 +458,8 @@ fn a_not_ready_world_names_its_reason_and_action() {
         status.message
     );
     assert_eq!(
-        backend.prepares.get(), 0,
+        backend.prepares.get(),
+        0,
         "preparation must not run when the world is not ready"
     );
 }
@@ -447,10 +478,13 @@ fn preparation_reporting_a_started_provider_fails_the_contract() {
         launch_ok: true,
     });
 
-    surface.handle(&mut backend, key(KeyCode::Char('2'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('2')))
+        .unwrap();
 
     assert_eq!(
-        backend.launches.get(), 0,
+        backend.launches.get(),
+        0,
         "a contract-violating preparation must not launch"
     );
     assert!(matches!(
@@ -480,14 +514,18 @@ fn a_running_session_is_never_launched_twice() {
         prepare_reports_provider_started: false,
         launch_ok: true,
     });
-    surface.handle(&mut backend, key(KeyCode::Char('2'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('2')))
+        .unwrap();
     assert!(matches!(
         surface.semantic().agent_work,
         AgentWorkStage::Running { .. }
     ));
     assert_eq!(backend.launches.get(), 1);
 
-    surface.handle(&mut backend, key(KeyCode::Char('2'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('2')))
+        .unwrap();
     assert_eq!(backend.launches.get(), 1, "no duplicate launch");
     let status = surface.semantic().status.as_ref().unwrap();
     assert!(
@@ -508,8 +546,8 @@ fn a_running_session_is_never_launched_twice() {
 /// rides an old review).
 #[test]
 fn reducer_state_semantics() {
-    use aikit_tui::{reduce_tui, CompositionPreview, StagedChanges, UiAction};
     use aikit_core::scope::ScopeKind;
+    use aikit_tui::{reduce_tui, CompositionPreview, StagedChanges, UiAction};
 
     // Saved is not accepted: Start-style receipt ladders cannot skip stages.
     let reduction = reduce_tui(
@@ -525,7 +563,10 @@ fn reducer_state_semantics() {
         reduction.state.agent_work,
         AgentWorkStage::Saved { .. }
     ));
-    assert!(reduction.effects.is_empty(), "no intent, no downstream stage");
+    assert!(
+        reduction.effects.is_empty(),
+        "no intent, no downstream stage"
+    );
 
     // An accepted receipt with no compound intent does not prepare.
     let reduction = reduce_tui(
@@ -552,7 +593,10 @@ fn reducer_state_semantics() {
         }),
         ..aikit_tui::TuiState::default()
     };
-    let reduction = reduce_tui(state, UiAction::SetComposePurpose("new exact purpose".into()));
+    let reduction = reduce_tui(
+        state,
+        UiAction::SetComposePurpose("new exact purpose".into()),
+    );
     assert_eq!(reduction.state.compose_purpose, "new exact purpose");
     assert!(
         reduction.state.preview.is_none(),
@@ -574,7 +618,6 @@ fn reducer_state_semantics() {
         reduction.effects.as_slice(),
         [aikit_tui::UiEffect::SaveAgentProfile { .. }]
     ));
-
 }
 
 /// SkillSet-first composition (§1.3): the Praxis step's digit toggles select
@@ -617,7 +660,9 @@ fn the_praxis_step_selects_skill_sets_and_the_save_carries_them() {
         surface.handle(&mut backend, alt_down()).unwrap();
     }
     // Digit 1 toggles the first disclosed set; digit 1 again would untoggle.
-    surface.handle(&mut backend, key(KeyCode::Char('1'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('1')))
+        .unwrap();
     assert_eq!(
         surface.semantic().compose_skill_sets,
         vec!["central-engineering".to_owned()],
@@ -627,7 +672,9 @@ fn the_praxis_step_selects_skill_sets_and_the_save_carries_them() {
     for _ in 0..6 {
         surface.handle(&mut backend, alt_down()).unwrap();
     }
-    surface.handle(&mut backend, key(KeyCode::Char('1'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('1')))
+        .unwrap();
 
     assert_eq!(backend.saves.get(), 1);
     assert_eq!(

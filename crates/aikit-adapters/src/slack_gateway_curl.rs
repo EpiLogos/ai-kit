@@ -67,7 +67,10 @@ impl SlackCurlTransport {
             .map_err(|error| {
                 AikitError::new(
                     "slack_curl.token_unreadable",
-                    format!("Slack token file {} cannot be read: {error}", token_path.display()),
+                    format!(
+                        "Slack token file {} cannot be read: {error}",
+                        token_path.display()
+                    ),
                 )
             })?
             .permissions()
@@ -86,7 +89,10 @@ impl SlackCurlTransport {
             .map_err(|error| {
                 AikitError::new(
                     "slack_curl.token_unreadable",
-                    format!("Slack token file {} cannot be read: {error}", token_path.display()),
+                    format!(
+                        "Slack token file {} cannot be read: {error}",
+                        token_path.display()
+                    ),
                 )
             })?
             .trim()
@@ -187,10 +193,7 @@ impl SlackBotApiTransport for SlackCurlTransport {
         if envelope.get("ok").is_none() {
             return Err(AikitError::new(
                 "slack_curl.invalid_response",
-                format!(
-                    "Slack {method}: response carries no ok field: {}",
-                    envelope
-                ),
+                format!("Slack {method}: response carries no ok field: {}", envelope),
             ));
         }
         Ok(envelope)
@@ -249,8 +252,7 @@ mod slack_gateway_curl_tests {
         assert_eq!(error.code(), "slack_curl.token_unusable");
         assert!(error.to_string().contains("chmod 600"));
 
-        let error =
-            SlackCurlTransport::from_token_location("file:/nonexistent/token").unwrap_err();
+        let error = SlackCurlTransport::from_token_location("file:/nonexistent/token").unwrap_err();
         assert_eq!(error.code(), "slack_curl.token_unreadable");
 
         let error = SlackCurlTransport::from_token_location("keychain:slack").unwrap_err();

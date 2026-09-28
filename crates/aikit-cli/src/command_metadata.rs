@@ -23,10 +23,7 @@ fn walk(command: &clap::Command) -> serde_json::Value {
         "name": command.get_name(),
         "about": command.get_about().map(|about| about.to_string()),
     });
-    let mut aliases: Vec<String> = command
-        .get_visible_aliases()
-        .map(str::to_owned)
-        .collect();
+    let mut aliases: Vec<String> = command.get_visible_aliases().map(str::to_owned).collect();
     aliases.sort();
     if !aliases.is_empty() {
         node["aliases"] = serde_json::Value::from(aliases);
@@ -77,8 +74,7 @@ fn walk(command: &clap::Command) -> serde_json::Value {
         node["positionals"] = serde_json::Value::from(positionals);
     }
 
-    let mut subcommands: Vec<serde_json::Value> =
-        command.get_subcommands().map(walk).collect();
+    let mut subcommands: Vec<serde_json::Value> = command.get_subcommands().map(walk).collect();
     if !subcommands.is_empty() {
         subcommands.sort_by(|left, right| {
             left["name"]
@@ -112,13 +108,32 @@ mod tests {
             .collect();
 
         for head in [
-            "world", "search", "act", "compose", "work", "knowledge", "praxis", "history",
-            "system", "explain", "ui",
+            "world",
+            "search",
+            "act",
+            "compose",
+            "work",
+            "knowledge",
+            "praxis",
+            "history",
+            "system",
+            "explain",
+            "ui",
         ] {
-            assert!(names.contains(&head.to_owned()), "missing everyday head {head}");
+            assert!(
+                names.contains(&head.to_owned()),
+                "missing everyday head {head}"
+            );
         }
         for root in [
-            "status", "whoami", "refocus", "source", "init", "config", "session-space", "run",
+            "status",
+            "whoami",
+            "refocus",
+            "source",
+            "init",
+            "config",
+            "session-space",
+            "run",
             "inhabit",
         ] {
             assert!(names.contains(&root.to_owned()), "missing old root {root}");
@@ -148,23 +163,47 @@ mod tests {
         // world: orientation and binding.
         let world = member_names(&group("world"));
         for member in [
-            "project", "status", "context", "development-field", "a2a", "now-context", "whoami",
-            "refocus", "inhabit",
+            "project",
+            "status",
+            "context",
+            "development-field",
+            "a2a",
+            "now-context",
+            "whoami",
+            "refocus",
+            "inhabit",
         ] {
             assert!(world.contains(&member.to_owned()), "world lacks {member}");
         }
         // work: entry into real work, including the folded space forward.
         let work = member_names(&group("work"));
-        for member in ["session", "space", "task", "jobs", "harness", "factory", "client"] {
+        for member in [
+            "session", "space", "task", "jobs", "harness", "factory", "client",
+        ] {
             assert!(work.contains(&member.to_owned()), "work lacks {member}");
         }
         // system: the operator family, the folded generations group and the
         // generated reference itself.
         let system = member_names(&group("system"));
         for member in [
-            "source", "init", "collate", "adopt", "procedure", "config", "config-contribution",
-            "doctor", "credential", "client", "mux", "hook", "model-catalogue", "trust", "gateway",
-            "shell", "generations", "commands",
+            "source",
+            "init",
+            "collate",
+            "adopt",
+            "procedure",
+            "config",
+            "config-contribution",
+            "doctor",
+            "credential",
+            "client",
+            "mux",
+            "hook",
+            "model-catalogue",
+            "trust",
+            "gateway",
+            "shell",
+            "generations",
+            "commands",
         ] {
             assert!(system.contains(&member.to_owned()), "system lacks {member}");
         }
@@ -179,20 +218,44 @@ mod tests {
 
         // compose, knowledge, praxis, history: grouped members.
         let compose = member_names(&group("compose"));
-        for member in ["plan", "profile", "diff", "enable", "disable", "use", "apply", "rollback", "alias", "model"] {
-            assert!(compose.contains(&member.to_owned()), "compose lacks {member}");
+        for member in [
+            "plan", "profile", "diff", "enable", "disable", "use", "apply", "rollback", "alias",
+            "model",
+        ] {
+            assert!(
+                compose.contains(&member.to_owned()),
+                "compose lacks {member}"
+            );
         }
         let knowledge = member_names(&group("knowledge"));
         for member in ["flow", "wiki", "wiki-shape", "wiki-construct", "jev"] {
-            assert!(knowledge.contains(&member.to_owned()), "knowledge lacks {member}");
+            assert!(
+                knowledge.contains(&member.to_owned()),
+                "knowledge lacks {member}"
+            );
         }
         let praxis = member_names(&group("praxis"));
-        for member in ["skill", "set", "family", "run", "inbox", "capture", "promote", "capabilities", "method", "routine", "unused"] {
+        for member in [
+            "skill",
+            "set",
+            "family",
+            "run",
+            "inbox",
+            "capture",
+            "promote",
+            "capabilities",
+            "method",
+            "routine",
+            "unused",
+        ] {
             assert!(praxis.contains(&member.to_owned()), "praxis lacks {member}");
         }
         let history = member_names(&group("history"));
         for member in ["recent", "stats", "log", "failures", "bypasses"] {
-            assert!(history.contains(&member.to_owned()), "history lacks {member}");
+            assert!(
+                history.contains(&member.to_owned()),
+                "history lacks {member}"
+            );
         }
         // act: the bounded doorway.
         let act = member_names(&group("act"));

@@ -374,9 +374,7 @@ pub fn material(
                 let reason = view
                     .unavailable_reason(&member)
                     .map(|reason| reason.describe())
-                    .unwrap_or_else(|| {
-                        "not effective in this context".to_string()
-                    });
+                    .unwrap_or_else(|| "not effective in this context".to_string());
                 withheld.push(WithheldMember {
                     reference: member.to_string(),
                     reason,

@@ -101,14 +101,16 @@ fn continue_dispatches_to_work_without_a_world_reread() {
     let (_dir, mut backend) = fixture();
     let mut surface = surface(&mut backend);
     assert_eq!(surface.semantic().presentation, PresentationMode::Workspace);
-    assert_eq!(surface.semantic().workspace_section, WorkspaceSection::Worlds);
-
-    let world_reads_before = surface.world_reads_refresh_count();
-    surface.handle(&mut backend, key(KeyCode::Char('1'))).unwrap();
     assert_eq!(
         surface.semantic().workspace_section,
-        WorkspaceSection::Work
+        WorkspaceSection::Worlds
     );
+
+    let world_reads_before = surface.world_reads_refresh_count();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('1')))
+        .unwrap();
+    assert_eq!(surface.semantic().workspace_section, WorkspaceSection::Work);
     assert_eq!(
         surface.world_reads_refresh_count(),
         world_reads_before,
@@ -125,7 +127,9 @@ fn compose_and_explore_steps_route_their_destinations() {
     let (_dir, mut backend) = fixture();
     let mut surface = surface(&mut backend);
 
-    surface.handle(&mut backend, key(KeyCode::Char('4'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('4')))
+        .unwrap();
     assert_eq!(
         surface.semantic().workspace_section,
         WorkspaceSection::Compose
@@ -133,8 +137,13 @@ fn compose_and_explore_steps_route_their_destinations() {
 
     // Back to Worlds (Alt+Left crosses the Workspace field), then Explore.
     surface.handle(&mut backend, alt_left()).unwrap();
-    assert_eq!(surface.semantic().workspace_section, WorkspaceSection::Worlds);
-    surface.handle(&mut backend, key(KeyCode::Char('5'))).unwrap();
+    assert_eq!(
+        surface.semantic().workspace_section,
+        WorkspaceSection::Worlds
+    );
+    surface
+        .handle(&mut backend, key(KeyCode::Char('5')))
+        .unwrap();
     assert_eq!(
         surface.semantic().presentation,
         PresentationMode::Quick,
@@ -148,8 +157,12 @@ fn compose_and_explore_steps_route_their_destinations() {
 fn a_live_query_owns_the_digits() {
     let (_dir, mut backend) = fixture();
     let mut surface = surface(&mut backend);
-    surface.handle(&mut backend, key(KeyCode::Char('a'))).unwrap();
-    surface.handle(&mut backend, key(KeyCode::Char('1'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('a')))
+        .unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('1')))
+        .unwrap();
     assert_eq!(surface.semantic().query, "a1");
     assert_eq!(
         surface.semantic().workspace_section,
@@ -165,7 +178,9 @@ fn a_live_query_owns_the_digits() {
 fn unbound_direct_work_names_its_gap_rather_than_faking_a_start() {
     let (_dir, mut backend) = fixture();
     let mut surface = surface(&mut backend);
-    surface.handle(&mut backend, key(KeyCode::Char('2'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('2')))
+        .unwrap();
     let status = surface
         .semantic()
         .status
@@ -228,7 +243,9 @@ fn help_explains_the_steps_here_and_esc_returns() {
     let (_dir, mut backend) = fixture();
     let mut surface = surface(&mut backend);
 
-    surface.handle(&mut backend, key(KeyCode::Char('?'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('?')))
+        .unwrap();
     assert_eq!(surface.semantic().overlay, Some(Overlay::Help));
     let screen = rendered(&surface);
     assert!(
@@ -295,7 +312,11 @@ fn a_click_on_a_disabled_step_names_the_reason() {
         .status
         .as_ref()
         .expect("the click must surface the reason");
-    assert!(status.message.contains("unavailable: "), "{}", status.message);
+    assert!(
+        status.message.contains("unavailable: "),
+        "{}",
+        status.message
+    );
     assert!(
         status.message.contains("agent-profile save"),
         "{}",
@@ -311,7 +332,9 @@ fn enter_work_authors_purpose_then_name_and_esc_abandons() {
     let (_dir, mut backend) = fixture();
     let mut surface = surface(&mut backend);
 
-    surface.handle(&mut backend, key(KeyCode::Char('4'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('4')))
+        .unwrap();
     // Walk the spine to its last step; Alt+Down clamps at Enter-work.
     for _ in 0..9 {
         surface.handle(&mut backend, alt_down()).unwrap();
@@ -324,7 +347,9 @@ fn enter_work_authors_purpose_then_name_and_esc_abandons() {
         Some(aikit_tui::application_surface::ComposeTextField::Purpose)
     );
     for character in "Prove the slice exactly".chars() {
-        surface.handle(&mut backend, key(KeyCode::Char(character))).unwrap();
+        surface
+            .handle(&mut backend, key(KeyCode::Char(character)))
+            .unwrap();
     }
     surface.handle(&mut backend, key(KeyCode::Enter)).unwrap();
     assert_eq!(
@@ -334,7 +359,9 @@ fn enter_work_authors_purpose_then_name_and_esc_abandons() {
     );
     // The guided path continues to the optional name.
     for character in "probe".chars() {
-        surface.handle(&mut backend, key(KeyCode::Char(character))).unwrap();
+        surface
+            .handle(&mut backend, key(KeyCode::Char(character)))
+            .unwrap();
     }
     surface.handle(&mut backend, key(KeyCode::Enter)).unwrap();
     assert_eq!(surface.semantic().compose_agent_name, "probe");
@@ -342,9 +369,14 @@ fn enter_work_authors_purpose_then_name_and_esc_abandons() {
 
     // Esc inside the lane abandons the edit without committing.
     surface.handle(&mut backend, key(KeyCode::Enter)).unwrap();
-    surface.handle(&mut backend, key(KeyCode::Char('x'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('x')))
+        .unwrap();
     surface.handle(&mut backend, key(KeyCode::Esc)).unwrap();
-    assert_eq!(surface.semantic().compose_purpose, "Prove the slice exactly");
+    assert_eq!(
+        surface.semantic().compose_purpose,
+        "Prove the slice exactly"
+    );
 }
 
 /// B3 persistence: the authored draft and the lifecycle stage ladder survive
@@ -356,13 +388,17 @@ fn drafts_and_the_stage_ladder_survive_navigation() {
     let (_dir, mut backend) = fixture();
     let mut surface = surface(&mut backend);
 
-    surface.handle(&mut backend, key(KeyCode::Char('4'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('4')))
+        .unwrap();
     for _ in 0..9 {
         surface.handle(&mut backend, alt_down()).unwrap();
     }
     surface.handle(&mut backend, key(KeyCode::Enter)).unwrap();
     for character in "hold this draft".chars() {
-        surface.handle(&mut backend, key(KeyCode::Char(character))).unwrap();
+        surface
+            .handle(&mut backend, key(KeyCode::Char(character)))
+            .unwrap();
     }
     surface.handle(&mut backend, key(KeyCode::Enter)).unwrap();
     surface.handle(&mut backend, key(KeyCode::Esc)).unwrap(); // abandon the name lane
@@ -370,15 +406,20 @@ fn drafts_and_the_stage_ladder_survive_navigation() {
     surface.handle(&mut backend, ctrl_w()).unwrap(); // to Quick
     surface.handle(&mut backend, ctrl_w()).unwrap(); // back to Workspace
     surface.handle(&mut backend, alt_left()).unwrap(); // Compose -> Worlds
-    surface.handle(&mut backend, key(KeyCode::Char('1'))).unwrap(); // Continue -> Work
+    surface
+        .handle(&mut backend, key(KeyCode::Char('1')))
+        .unwrap(); // Continue -> Work
 
     assert_eq!(surface.semantic().workspace_section, WorkspaceSection::Work);
     assert_eq!(
-        surface.semantic().compose_purpose, "hold this draft",
+        surface.semantic().compose_purpose,
+        "hold this draft",
         "the authored purpose survives navigation"
     );
 
-    surface.handle(&mut backend, key(KeyCode::Char('4'))).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Char('4')))
+        .unwrap();
     assert_eq!(surface.semantic().compose_purpose, "hold this draft");
     assert!(matches!(
         surface.semantic().agent_work.stable(),

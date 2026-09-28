@@ -139,9 +139,7 @@ root = "payload"
         );
         write(
             &capsule.join("payload/SKILL.md"),
-            &format!(
-                "---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"
-            ),
+            &format!("---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"),
         );
     }
 
@@ -155,11 +153,26 @@ root = "payload"
         fs::create_dir_all(&project).unwrap();
 
         // member-a: in the parent set, enabled → delivered.
-        skill(&home_path, "skill/test/member-a", "member-a", "Set member that projects.");
+        skill(
+            &home_path,
+            "skill/test/member-a",
+            "member-a",
+            "Set member that projects.",
+        );
         // member-b: in the NESTED child set, not enabled → withheld, named.
-        skill(&home_path, "skill/test/member-b", "member-b", "Nested member that does not project.");
+        skill(
+            &home_path,
+            "skill/test/member-b",
+            "member-b",
+            "Nested member that does not project.",
+        );
         // extra: outside the set, individually named → the exception, preserved.
-        skill(&home_path, "skill/test/extra", "extra", "Individually named exception.");
+        skill(
+            &home_path,
+            "skill/test/extra",
+            "extra",
+            "Individually named exception.",
+        );
 
         // The nested set membership: demo -> demo-inner -> member-b.
         write(
@@ -170,7 +183,10 @@ root = "payload"
             &home_path.join("skillsets/demo/set.toml"),
             "children = [\"demo-inner\"]\n",
         );
-        write(&home_path.join("skillsets/demo/members"), "skill/test/member-a\n");
+        write(
+            &home_path.join("skillsets/demo/members"),
+            "skill/test/member-a\n",
+        );
 
         write(
             &project.join(".aikit/profile.toml"),
@@ -184,15 +200,18 @@ root = "payload"
         let home = AikitHome::at(&home_path);
         home.ensure_layout().unwrap();
         let index = Index::open(&home.database()).unwrap();
-        let load = load_registry(&home.registry("personal"), RegistrySource::new("personal"))
-            .unwrap();
+        let load =
+            load_registry(&home.registry("personal"), RegistrySource::new("personal")).unwrap();
         for id in ["skill/test/member-a", "skill/test/extra"] {
             let capsule_id = CapsuleId::parse(id).unwrap();
             let capsule = load
                 .catalog
                 .get(&capsule_id)
                 .unwrap_or_else(|| panic!("the seeded registry holds {id}"));
-            let revision = capsule.revision.clone().expect("a loaded capsule has a revision");
+            let revision = capsule
+                .revision
+                .clone()
+                .expect("a loaded capsule has a revision");
             TrustStore::new(&index)
                 .record(
                     &TrustKey::new(RegistrySource::new("personal"), capsule_id, revision),
@@ -223,7 +242,10 @@ root = "payload"
     }
 
     fn references(digests: &[SkillDigest]) -> Vec<String> {
-        digests.iter().map(|digest| digest.reference.clone()).collect()
+        digests
+            .iter()
+            .map(|digest| digest.reference.clone())
+            .collect()
     }
 
     #[test]
@@ -263,8 +285,7 @@ root = "payload"
     fn re_resolution_round_trips_to_identical_repertoire() {
         let (_root, service, profile) = fixture();
         let (digests, withheld, text) = material(&service, &profile).unwrap();
-        let (digests_again, withheld_again, text_again) =
-            material(&service, &profile).unwrap();
+        let (digests_again, withheld_again, text_again) = material(&service, &profile).unwrap();
         assert_eq!(digests, digests_again);
         assert_eq!(withheld, withheld_again);
         assert_eq!(text, text_again);
@@ -275,10 +296,10 @@ root = "payload"
     #[test]
     fn an_individually_named_unavailable_skill_refuses() {
         let (_root, service, mut profile) = fixture();
-        profile.skill_refs
+        profile
+            .skill_refs
             .push(ResourceRef::parse("skill/test/member-b").unwrap());
         let error = material(&service, &profile).unwrap_err();
         assert_eq!(error.code(), "capabilities.not_active", "{error:?}");
     }
 }
-

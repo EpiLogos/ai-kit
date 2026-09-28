@@ -21,8 +21,8 @@
 //! `navigator_groups` keeps `draw_resources` and mouse hit-testing on one
 //! row plan.
 
-use aikit_core::doctor_world::DoctorSeverity;
 use aikit_core::credential_world::ProviderRosterKnowledge;
+use aikit_core::doctor_world::DoctorSeverity;
 use aikit_core::ProjectWorldReadModel;
 use ratatui::text::{Line, Span};
 
@@ -382,7 +382,11 @@ pub fn step_action(step: &NextStep) -> Option<UiAction> {
 /// about which steps are on screen.
 pub fn steps_for_view(state: &TuiState, reading: &WorkspaceReading<'_>) -> Vec<NextStep> {
     if state.workspace_section == WorkspaceSection::Compose {
-        return enter_work_steps(state, reading.factory_work_entry, reading.agent_work_bindings);
+        return enter_work_steps(
+            state,
+            reading.factory_work_entry,
+            reading.agent_work_bindings,
+        );
     }
     world_next_steps(
         reading.world,
@@ -529,7 +533,9 @@ fn step_availability(
         StepAvailability::Ready
     } else {
         StepAvailability::Disabled {
-            reason: format!("this application boundary does not bind {operation} (owner operation pending)"),
+            reason: format!(
+                "this application boundary does not bind {operation} (owner operation pending)"
+            ),
         }
     }
 }
@@ -574,11 +580,15 @@ fn start_availability(
     match stage {
         S::Accepted { .. } if bindings.prepare && bindings.launch => StepAvailability::Ready,
         S::Accepted { .. } => StepAvailability::Disabled {
-            reason: "this application boundary does not bind prepare/launch (owner operations pending)".into(),
+            reason:
+                "this application boundary does not bind prepare/launch (owner operations pending)"
+                    .into(),
         },
         S::Prepared { .. } if bindings.launch => StepAvailability::Ready,
         S::Prepared { .. } => StepAvailability::Disabled {
-            reason: "this application boundary does not bind encounter launch (owner operation pending)".into(),
+            reason:
+                "this application boundary does not bind encounter launch (owner operation pending)"
+                    .into(),
         },
         S::Running { .. } => StepAvailability::Ready,
         S::Saved { .. } => StepAvailability::Disabled {
@@ -1046,7 +1056,10 @@ mod tests {
         assert_eq!(composed.surfaces.len(), 2);
         assert_eq!(composed.surfaces[0].0, "Central");
         assert!(
-            composed.warnings.iter().any(|warning| warning.contains("current world unavailable")),
+            composed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("current world unavailable")),
             "a degraded reading is carried named, never collapsed: {:?}",
             composed.warnings
         );
@@ -1055,7 +1068,10 @@ mod tests {
         let joined = lines.join("\n");
         assert!(joined.contains("composed supply from oi"), "{joined}");
         assert!(joined.contains("Central"), "{joined}");
-        assert!(joined.contains("warning: current world unavailable"), "{joined}");
+        assert!(
+            joined.contains("warning: current world unavailable"),
+            "{joined}"
+        );
 
         // A foreign or malformed supply renders nothing: the containing
         // surface's answer is never guessed into shape.

@@ -31,7 +31,8 @@ fn fixture() -> (TempDir, TempDir) {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     // The native seam speaks argv: the JSON input arrives as one argument.
-    let support = "#!/bin/sh\nprintf '%s' \"$1\" > \"$0.received.json\"\nprintf '{\"received\":true}\\n'\n";
+    let support =
+        "#!/bin/sh\nprintf '%s' \"$1\" > \"$0.received.json\"\nprintf '{\"received\":true}\\n'\n";
     let compose = home
         .path()
         .join("registries/personal/capsules/script/practice/compose-project");
@@ -129,11 +130,16 @@ fn method_runs_the_two_practices_and_the_receipt_carries_the_evidence() {
     );
     assert!(ok, "method run should succeed: {envelope}");
     assert_eq!(envelope["data"]["schema"], "aikit.method-execution/v1");
-    assert_eq!(envelope["data"]["method"], "script/practice/compose-project");
+    assert_eq!(
+        envelope["data"]["method"],
+        "script/practice/compose-project"
+    );
     assert_eq!(envelope["data"]["status"], "ok");
     assert_eq!(envelope["data"]["exit_status"], 0);
     assert!(
-        envelope["data"]["result_digest"].as_str().is_some_and(|d| !d.is_empty()),
+        envelope["data"]["result_digest"]
+            .as_str()
+            .is_some_and(|d| !d.is_empty()),
         "the receipt carries the result digest: {envelope}"
     );
     assert!(
@@ -142,10 +148,9 @@ fn method_runs_the_two_practices_and_the_receipt_carries_the_evidence() {
             .is_some_and(|text| text.contains("not claimed")),
         "the receipt never claims postconditions: {envelope}"
     );
-    let received = fs::read_to_string(
-        home.path()
-            .join("registries/personal/capsules/script/practice/compose-project/payload/run.sh.received.json"),
-    )
+    let received = fs::read_to_string(home.path().join(
+        "registries/personal/capsules/script/practice/compose-project/payload/run.sh.received.json",
+    ))
     .unwrap();
     assert_eq!(
         received.trim(),
@@ -202,7 +207,10 @@ fn preflight_refusals_land_before_any_effect() {
         &["method", "run", "script/demo/greet", "--confirm"],
     );
     assert!(!ok);
-    assert_eq!(envelope["error"]["code"], "method.not_a_method", "{envelope}");
+    assert_eq!(
+        envelope["error"]["code"], "method.not_a_method",
+        "{envelope}"
+    );
 
     // An unknown ref is refused.
     let (envelope, _stderr, ok) = run(
@@ -227,7 +235,10 @@ fn preflight_refusals_land_before_any_effect() {
         ],
     );
     assert!(!ok);
-    assert_eq!(envelope["error"]["code"], "method.input_invalid", "{envelope}");
+    assert_eq!(
+        envelope["error"]["code"], "method.input_invalid",
+        "{envelope}"
+    );
     assert!(
         !home
             .path()

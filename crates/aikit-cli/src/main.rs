@@ -219,11 +219,12 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
             Some(ComposeGroupCommand::Model(m)) => match m.command {
                 ComposeModelCommand::Resolve(a) => cmd_model_resolve(cwd, a),
                 ComposeModelCommand::Catalogue(c) => match c.command {
-                    ComposeModelCatalogueCommand::Show(a) => {
-                        cmd_model_catalogue(cwd, ModelCatalogueCmd {
+                    ComposeModelCatalogueCommand::Show(a) => cmd_model_catalogue(
+                        cwd,
+                        ModelCatalogueCmd {
                             command: ModelCatalogueSub::Show(a),
-                        })
-                    }
+                        },
+                    ),
                 },
             },
         },
@@ -232,13 +233,14 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
             WorkGroupCommand::Session(c) => cmd_session(cwd, c),
             // The folded SessionSpace owner surface: identical forwarding to
             // the `session-space` root spelling, down to the `-C` handling.
-            WorkGroupCommand::Space { args } => {
-                forward_session_space(cwd, args)
-            }
+            WorkGroupCommand::Space { args } => forward_session_space(cwd, args),
             WorkGroupCommand::Client(client) => match client.command {
-                ClientWorkCommand::Launch(a) => cmd_client(cwd, ClientCmd {
-                    command: ClientSub::Launch(a),
-                }),
+                ClientWorkCommand::Launch(a) => cmd_client(
+                    cwd,
+                    ClientCmd {
+                        command: ClientSub::Launch(a),
+                    },
+                ),
             },
             WorkGroupCommand::Task(c) => cmd_task(cwd, c),
             WorkGroupCommand::Jobs(_) => cmd_jobs(cwd),
@@ -260,10 +262,12 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
             Some(SystemGroupCommand::ConfigContribution(_)) => Ok(Reply::RawJson(
                 aikit_cli::config_plane::contribution_document(cwd),
             )),
-            Some(SystemGroupCommand::Config(c)) => match aikit_cli::config_plane::dispatch(cwd, c) {
-                Ok(document) => Ok(Reply::RawJsonWithStatus(document, json::EXIT_OK)),
-                Err(failure) => Ok(Reply::RawJsonWithStatus(failure.doc, failure.exit)),
-            },
+            Some(SystemGroupCommand::Config(c)) => {
+                match aikit_cli::config_plane::dispatch(cwd, c) {
+                    Ok(document) => Ok(Reply::RawJsonWithStatus(document, json::EXIT_OK)),
+                    Err(failure) => Ok(Reply::RawJsonWithStatus(failure.doc, failure.exit)),
+                }
+            }
             Some(SystemGroupCommand::Doctor(a)) => cmd_doctor(cwd, a),
             Some(SystemGroupCommand::Credential(c)) => cmd_credential(cwd, c, json_mode),
             Some(SystemGroupCommand::Bypass(c)) => cmd_bypass(cwd, c),
@@ -501,10 +505,8 @@ fn inhabitation_orientation(
         aikit_core::probe::probe_budget(),
         std::time::Duration::from_secs(90),
     );
-    let input = aikit_cli::inhabitation::JoinInput::from_process(
-        cwd.to_path_buf(),
-        ReadingDepth::Standard,
-    );
+    let input =
+        aikit_cli::inhabitation::JoinInput::from_process(cwd.to_path_buf(), ReadingDepth::Standard);
     let home = AikitHome::discover().ok();
     let joined = aikit_cli::inhabitation::join(
         &owners,
@@ -2885,9 +2887,8 @@ fn cmd_z(cwd: &std::path::Path, a: ZArgs, json_mode: bool) -> Result<Reply> {
             // the terminal can actually host the palette. A bare non-TTY text
             // invocation prints the bounded candidate list and exits rather
             // than dying in raw mode.
-            let interactive = !dry_run
-                && std::io::stdin().is_terminal()
-                && std::io::stdout().is_terminal();
+            let interactive =
+                !dry_run && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
             if !interactive {
                 return Ok(reply(&service, data, vec![]));
             }
@@ -3769,11 +3770,14 @@ fn cmd_act(cwd: &std::path::Path, a: ActGroup, json_mode: bool) -> Result<Reply>
     let mut service = Service::discover(cwd)?;
     match a.command {
         None => {
-            let data = aikit_cli::act::discover(&mut service, ActDiscoverArgs {
-                subject: None,
-                query: None,
-                limit: 24,
-            })?;
+            let data = aikit_cli::act::discover(
+                &mut service,
+                ActDiscoverArgs {
+                    subject: None,
+                    query: None,
+                    limit: 24,
+                },
+            )?;
             Ok(reply(&service, data, diagnostic_warnings(&service)))
         }
         Some(ActGroupCommand::Discover(args)) => {
@@ -3784,56 +3788,60 @@ fn cmd_act(cwd: &std::path::Path, a: ActGroup, json_mode: bool) -> Result<Reply>
             let data = aikit_cli::act::describe(&service, args)?;
             Ok(reply(&service, data, diagnostic_warnings(&service)))
         }
-        Some(ActGroupCommand::Invoke(args)) => {
-            match aikit_cli::act::invoke(&mut service, args)? {
-                aikit_cli::act::ActOutcome::Capability { run, digest } => {
-                    for line in &run.report.output {
-                        println!("{line}");
-                    }
-                    if json_mode {
-                        eprintln!(
-                            "{}",
-                            json::line(&json::success(
-                                &EnvelopeContext::default(),
-                                jval!({
-                                    "schema": "aikit.act-invocation/v1",
-                                    "capability": run.capsule.to_string(),
-                                    "status": run.report.status,
-                                    "detached": run.report.detached,
-                                    "result_digest": digest,
-                                }),
-                                vec![],
-                            ))
-                        );
-                    }
-                    Ok(Reply::Status(run.report.status))
+        Some(ActGroupCommand::Invoke(args)) => match aikit_cli::act::invoke(&mut service, args)? {
+            aikit_cli::act::ActOutcome::Capability { run, digest } => {
+                for line in &run.report.output {
+                    println!("{line}");
                 }
-                aikit_cli::act::ActOutcome::Owner { action, owner, subject, output, digest } => {
-                    for line in output.lines() {
-                        println!("{line}");
-                    }
-                    if json_mode {
-                        eprintln!(
-                            "{}",
-                            json::line(&json::success(
-                                &EnvelopeContext::default(),
-                                jval!({
-                                    "schema": "aikit.act-invocation/v1",
-                                    "action": action.to_string(),
-                                    "owner": owner,
-                                    "subject": subject,
-                                    "status": "ok",
-                                    "detached": false,
-                                    "result_digest": digest,
-                                }),
-                                vec![],
-                            ))
-                        );
-                    }
-                    Ok(Reply::Status(0))
+                if json_mode {
+                    eprintln!(
+                        "{}",
+                        json::line(&json::success(
+                            &EnvelopeContext::default(),
+                            jval!({
+                                "schema": "aikit.act-invocation/v1",
+                                "capability": run.capsule.to_string(),
+                                "status": run.report.status,
+                                "detached": run.report.detached,
+                                "result_digest": digest,
+                            }),
+                            vec![],
+                        ))
+                    );
                 }
+                Ok(Reply::Status(run.report.status))
             }
-        }
+            aikit_cli::act::ActOutcome::Owner {
+                action,
+                owner,
+                subject,
+                output,
+                digest,
+            } => {
+                for line in output.lines() {
+                    println!("{line}");
+                }
+                if json_mode {
+                    eprintln!(
+                        "{}",
+                        json::line(&json::success(
+                            &EnvelopeContext::default(),
+                            jval!({
+                                "schema": "aikit.act-invocation/v1",
+                                "action": action.to_string(),
+                                "owner": owner,
+                                "subject": subject,
+                                "status": "ok",
+                                "detached": false,
+                                "result_digest": digest,
+                            }),
+                            vec![],
+                        ))
+                    );
+                }
+                Ok(Reply::Status(0))
+            }
+        },
     }
 }
 
@@ -3969,16 +3977,11 @@ fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
         let no_actions = data["actions"].as_array().is_some_and(Vec::is_empty);
         let no_families = data["alias_families"].as_array().is_some_and(Vec::is_empty);
         if no_actions && no_families {
-            data["empty_query"] =
-                aikit_cli::act::empty_query_disclosure(&service, &a.query, 3)?;
+            data["empty_query"] = aikit_cli::act::empty_query_disclosure(&service, &a.query, 3)?;
         }
     }
 
-    Ok(reply(
-        &service,
-        data,
-        diagnostic_warnings(&service),
-    ))
+    Ok(reply(&service, data, diagnostic_warnings(&service)))
 }
 
 /// `aikit method` — Methods are skills whose description carries the
@@ -3993,8 +3996,14 @@ fn cmd_method(cwd: &std::path::Path, a: MethodArgs) -> Result<Reply> {
         let data = aikit_cli::routine_cli::method_prove(service.home(), method, proof_json)?;
         return Ok(reply(&service, data, vec![]));
     }
-    if let MethodCommand::Run { method, input, confirm } = &a.command {
-        let receipt = aikit_cli::routine_cli::method_run(&mut service, method, input.as_deref(), *confirm)?;
+    if let MethodCommand::Run {
+        method,
+        input,
+        confirm,
+    } = &a.command
+    {
+        let receipt =
+            aikit_cli::routine_cli::method_run(&mut service, method, input.as_deref(), *confirm)?;
         if let Some(lines) = receipt.get("output_lines") {
             for line in lines.as_array().unwrap_or(&vec![]) {
                 println!("{line}");

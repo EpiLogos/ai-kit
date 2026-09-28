@@ -31,13 +31,13 @@ pub mod factory_developmental;
 pub mod factory_run_thought_authored_wiki;
 pub mod flow_authored_wiki;
 pub mod gateway_client;
+pub mod gateway_coexistence;
 pub mod gateway_communique;
 pub mod gateway_connector;
 pub mod gateway_connector_config;
 pub mod gateway_connector_pump;
 pub mod gateway_connector_specimen;
 pub mod gateway_connector_wire;
-pub mod gateway_coexistence;
 pub mod gateway_conversation_engine;
 #[allow(unused_imports)]
 pub mod gateway_runtime;
@@ -152,6 +152,12 @@ pub use gateway_client::{
     gateway_command, gateway_command_within, gateway_request, GatewayCarrierTarget,
     GATEWAY_CLIENT_VERSION,
 };
+pub use gateway_coexistence::{
+    coexistence_report, decide, detect, exclusive_gate, load_coexistence, probe_live,
+    store_coexistence, CoexistenceDecision, CoexistenceDocument, CoexistencePolicy,
+    CoexistenceProbe, ExclusiveCoexistenceGate, ForeignBotIdentity, ForeignGateway,
+    GatewayCoexistenceGate, GATEWAY_COEXISTENCE_FILE_NAME, GATEWAY_COEXISTENCE_SCHEMA,
+};
 pub use gateway_communique::{
     Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForward, CommuniqueForwardOutcome,
     CommuniqueJournal, CommuniqueRouting, CommuniqueState, CommuniqueTransition, SenderAttribution,
@@ -178,12 +184,6 @@ pub use gateway_connector_specimen::{
     run_specimen_connector, SpecimenOptions, SPECIMEN_CONNECTOR_VERSION,
 };
 pub use gateway_connector_wire::StdioWireConnector;
-pub use gateway_coexistence::{
-    coexistence_report, decide, detect, exclusive_gate, load_coexistence, probe_live,
-    store_coexistence, CoexistenceDecision, CoexistenceDocument, CoexistencePolicy,
-    CoexistenceProbe, ExclusiveCoexistenceGate, ForeignBotIdentity, ForeignGateway,
-    GatewayCoexistenceGate, GATEWAY_COEXISTENCE_FILE_NAME, GATEWAY_COEXISTENCE_SCHEMA,
-};
 pub use gateway_conversation_engine::{
     parse_slash, AgentHostTurnSource, ConversationHarnessProtocol, ConversationTurn,
     ConversationTurnOutcome, ConversationTurnRequest, ConversationTurnSource, EnginePolicy,

@@ -1425,9 +1425,10 @@ fn execute_serialized_request(
             let execution = match engine.execute(binding_ref, operation) {
                 Ok(execution) => execution,
                 Err(error) => {
-                    let encoded = serde_json::to_string(
-                        &GatewayResponseEnvelope::from_result(request.request_id, Err(error)),
-                    )
+                    let encoded = serde_json::to_string(&GatewayResponseEnvelope::from_result(
+                        request.request_id,
+                        Err(error),
+                    ))
                     .map_err(|error| {
                         AikitError::new(
                             "agency_gateway_service.response_encode",
@@ -2243,7 +2244,6 @@ mod tests {
         assert!(state.exists());
         assert!(!socket.exists());
     }
-
 
     /// Wait until the socket accepts a connection. The socket file appears at
     /// bind(), but connect is refused until listen() — waiting for the file

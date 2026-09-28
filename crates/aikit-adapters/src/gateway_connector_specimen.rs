@@ -113,7 +113,9 @@ pub fn run_specimen_connector<R: BufRead, W: Write + Send + 'static>(
         // Send and typing only: an operation needing edit/react must fail
         // conformance against this descriptor.
         capabilities: ConnectorCapabilities {
-            operations: [ConnectorOperation::Send, ConnectorOperation::Typing].into_iter().collect(),
+            operations: [ConnectorOperation::Send, ConnectorOperation::Typing]
+                .into_iter()
+                .collect(),
             max_text_bytes: Some(16_384),
             max_media_bytes: None,
             media_types: Default::default(),
@@ -122,7 +124,9 @@ pub fn run_specimen_connector<R: BufRead, W: Write + Send + 'static>(
         configuration_ref: None,
         provenance: vec![SPECIMEN_CONNECTOR_VERSION.into()],
     };
-    let writer = Arc::new(SharedWriter { inner: Mutex::new(output) });
+    let writer = Arc::new(SharedWriter {
+        inner: Mutex::new(output),
+    });
     writer.write_frame(&ConnectorWireFrame::Hello {
         hello: ConnectorHello {
             wire_version: GATEWAY_CONNECTOR_WIRE_VERSION.into(),
@@ -179,10 +183,8 @@ pub fn run_specimen_connector<R: BufRead, W: Write + Send + 'static>(
                 }
                 let sequence = index + 1;
                 let event = InboundEvent {
-                    event_ref: ResourceRef::parse(format!(
-                        "gateway-ingress/specimen/{sequence}"
-                    ))
-                    .expect("fixed specimen ingress ref"),
+                    event_ref: ResourceRef::parse(format!("gateway-ingress/specimen/{sequence}"))
+                        .expect("fixed specimen ingress ref"),
                     connector_ref: connector_ref.clone(),
                     address: crate::gateway_connector::ConversationAddress {
                         platform: platform.clone(),
@@ -268,17 +270,11 @@ pub fn run_specimen_connector<R: BufRead, W: Write + Send + 'static>(
     loop_exit
 }
 
-fn execute_specimen_operation(
-    operation: &OutboundOperation,
-    sequence: u64,
-) -> DeliveryReceipt {
+fn execute_specimen_operation(operation: &OutboundOperation, sequence: u64) -> DeliveryReceipt {
     let (state, detail, native_message_id) = match &operation.operation {
         OutboundOperationKind::Send { text, .. } => (
             DeliveryState::Delivered,
-            format!(
-                "specimen executed send: {}",
-                text.as_deref().unwrap_or("")
-            ),
+            format!("specimen executed send: {}", text.as_deref().unwrap_or("")),
             Some(format!("specimen-message-out-{sequence}")),
         ),
         OutboundOperationKind::Typing { active } => (
@@ -303,7 +299,10 @@ fn execute_specimen_operation(
         native_message_id,
         detail: Some(detail),
         native: [
-            ("specimen_marker".to_owned(), json!(format!("executed-{sequence}"))),
+            (
+                "specimen_marker".to_owned(),
+                json!(format!("executed-{sequence}")),
+            ),
             ("specimen".to_owned(), echo),
         ]
         .into_iter()

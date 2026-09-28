@@ -16,7 +16,9 @@
 //! against the same channel (a token cannot push; Socket Mode / Events API
 //! webhooks are the named real-time carriers, not built in this cut).
 
-use aikit_adapters::gateway_connector::{ConversationAddress, DeliveryState, OutboundOperation, OutboundOperationKind};
+use aikit_adapters::gateway_connector::{
+    ConversationAddress, DeliveryState, OutboundOperation, OutboundOperationKind,
+};
 use aikit_adapters::slack_gateway::{SlackConnector, SlackConnectorConfig};
 use aikit_adapters::slack_gateway_curl::SlackCurlTransport;
 use aikit_core::resource::ResourceRef;
@@ -44,8 +46,9 @@ fn proof_operation(channel: &str) -> OutboundOperation {
             thread_id: None,
         },
         operation: OutboundOperationKind::Send {
-            text: Some("[aikit gateway live proof] auth.test/chat.postMessage/history round trip"
-                .into()),
+            text: Some(
+                "[aikit gateway live proof] auth.test/chat.postMessage/history round trip".into(),
+            ),
             media: vec![],
             reply_to_native_message_id: None,
         },
@@ -83,7 +86,10 @@ fn live_slack_web_api_connect_send_and_poll() {
         "live auth.test: team {} ({}) bot {}",
         identity.team.as_deref().unwrap_or("(unnamed)"),
         identity.team_id.as_deref().unwrap_or("(no team id)"),
-        identity.bot_id.as_deref().unwrap_or("(user token, no bot id)")
+        identity
+            .bot_id
+            .as_deref()
+            .unwrap_or("(user token, no bot id)")
     );
     println!(
         "live health: {}",
@@ -95,10 +101,7 @@ fn live_slack_web_api_connect_send_and_poll() {
         .execute_now(proof_operation(&channel))
         .expect("send must execute");
     assert_eq!(receipt.state, DeliveryState::Delivered, "{receipt:?}");
-    let ts = receipt
-        .native_message_id
-        .clone()
-        .expect("slack message ts");
+    let ts = receipt.native_message_id.clone().expect("slack message ts");
     println!("live chat.postMessage: delivered ts {ts} to channel {channel}");
 
     // 3. Ingress truth: the history poll answers cleanly and the watermark

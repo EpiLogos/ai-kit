@@ -695,7 +695,10 @@ fn slack_connector_declaration_flows_through_the_service_config_plane() {
             "gateway-connector/slack/main",
         ],
     );
-    assert!(!ok, "a slack declaration without a token location must be refused: {envelope}");
+    assert!(
+        !ok,
+        "a slack declaration without a token location must be refused: {envelope}"
+    );
     let message = envelope["error"]["message"].as_str().unwrap();
     assert!(message.contains("--token-location"), "{message}");
 
@@ -723,7 +726,10 @@ fn slack_connector_declaration_flows_through_the_service_config_plane() {
     assert!(ok, "{envelope}");
     let connectors = envelope["data"]["connectors"].as_array().unwrap();
     assert_eq!(connectors.len(), 1);
-    assert_eq!(connectors[0]["connector_ref"], "gateway-connector/slack/main");
+    assert_eq!(
+        connectors[0]["connector_ref"],
+        "gateway-connector/slack/main"
+    );
     assert_eq!(connectors[0]["platform"], "slack");
     assert_eq!(connectors[0]["implementation"], "slack");
     assert_eq!(

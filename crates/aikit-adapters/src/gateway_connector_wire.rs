@@ -258,7 +258,11 @@ impl StdioWireConnector {
             let shutdown = ConnectorWireFrame::Shutdown {
                 reason: "gateway disconnecting the connector".into(),
             };
-            let _ = writeln!(stdin, "{}", serde_json::to_string(&shutdown).unwrap_or_default());
+            let _ = writeln!(
+                stdin,
+                "{}",
+                serde_json::to_string(&shutdown).unwrap_or_default()
+            );
             let _ = stdin.flush();
         }
         session.stdin = None;
@@ -278,10 +282,18 @@ impl StdioWireConnector {
     }
 
     fn child_alive(session: &mut WireSession) -> bool {
-        session.child.try_wait().map(|status| status.is_none()).unwrap_or(false)
+        session
+            .child
+            .try_wait()
+            .map(|status| status.is_none())
+            .unwrap_or(false)
     }
 
-    fn failed_receipt(operation: &OutboundOperation, connector_ref: &ResourceRef, detail: String) -> DeliveryReceipt {
+    fn failed_receipt(
+        operation: &OutboundOperation,
+        connector_ref: &ResourceRef,
+        detail: String,
+    ) -> DeliveryReceipt {
         DeliveryReceipt {
             operation_ref: operation.operation_ref.clone(),
             connector_ref: connector_ref.clone(),
@@ -346,9 +358,7 @@ impl GatewayConnector for StdioWireConnector {
                     }
                     let deadline = Instant::now() + Duration::from_millis(200);
                     let mut trailing = None;
-                    while !session.reader_done.load(Ordering::SeqCst)
-                        && Instant::now() < deadline
-                    {
+                    while !session.reader_done.load(Ordering::SeqCst) && Instant::now() < deadline {
                         std::thread::sleep(Duration::from_millis(10));
                         if let Ok(event) = session.inbound_rx.try_recv() {
                             trailing = Some(event);
@@ -364,10 +374,12 @@ impl GatewayConnector for StdioWireConnector {
                 }
                 match session.inbound_rx.recv_timeout(self.poll_window) {
                     Ok(event) => break Ok(Some(event)),
-                    Err(mpsc::RecvTimeoutError::Timeout) => break Err(AikitError::new(
-                        CONNECTOR_QUIET_POLL_CODE,
-                        "no connector frame within the poll window",
-                    )),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        break Err(AikitError::new(
+                            CONNECTOR_QUIET_POLL_CODE,
+                            "no connector frame within the poll window",
+                        ))
+                    }
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
                         self.teardown_session(session);
                         return Ok(None);
@@ -401,9 +413,13 @@ impl GatewayConnector for StdioWireConnector {
             };
             let write = (|| -> std::io::Result<()> {
                 let stdin = session.stdin.as_mut().expect("open session stdin");
-                writeln!(stdin, "{}", serde_json::to_string(&frame).map_err(|error| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, error)
-                })?)?;
+                writeln!(
+                    stdin,
+                    "{}",
+                    serde_json::to_string(&frame).map_err(|error| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+                    })?
+                )?;
                 stdin.flush()?;
                 Ok(())
             })();
@@ -433,10 +449,7 @@ impl GatewayConnector for StdioWireConnector {
                         &operation,
                         &self.connector_ref,
                         recent.unwrap_or_else(|| {
-                            format!(
-                                "no delivery receipt within {:?}",
-                                self.execute_timeout
-                            )
+                            format!("no delivery receipt within {:?}", self.execute_timeout)
                         }),
                     ))
                 }
@@ -665,7 +678,10 @@ done
 
         // Health reported by the child is what the host observes.
         let health = block_on(connector.health()).unwrap();
-        assert_eq!(health.state, crate::gateway_connector::ConnectorConnectionState::Connected);
+        assert_eq!(
+            health.state,
+            crate::gateway_connector::ConnectorConnectionState::Connected
+        );
         assert_eq!(health.detail.as_deref(), Some("scripted specimen alive"));
 
         block_on(connector.disconnect()).unwrap();

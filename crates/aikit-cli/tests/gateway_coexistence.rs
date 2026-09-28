@@ -4,19 +4,15 @@
 //! collectors only fill it in.
 
 use aikit_adapters::{
-    detect, decide, exclusive_gate, load_coexistence, store_coexistence, CoexistenceDecision,
-    CoexistenceDocument, CoexistencePolicy, CoexistenceProbe, ForeignBotIdentity,
-    ForeignGateway, GatewayCoexistenceGate, GATEWAY_COEXISTENCE_FILE_NAME,
-    GATEWAY_COEXISTENCE_SCHEMA,
+    decide, detect, exclusive_gate, load_coexistence, store_coexistence, CoexistenceDecision,
+    CoexistenceDocument, CoexistencePolicy, CoexistenceProbe, ForeignBotIdentity, ForeignGateway,
+    GatewayCoexistenceGate, GATEWAY_COEXISTENCE_FILE_NAME, GATEWAY_COEXISTENCE_SCHEMA,
 };
 use tempfile::TempDir;
 
 fn hermes_probe() -> CoexistenceProbe {
     CoexistenceProbe {
-        service_labels: vec![
-            "com.apple.Finder".into(),
-            "ai.hermes.gateway".into(),
-        ],
+        service_labels: vec!["com.apple.Finder".into(), "ai.hermes.gateway".into()],
         path_binaries: vec![],
         state_dirs: vec![],
     }
@@ -49,10 +45,7 @@ fn detection_reads_every_evidence_channel_and_reports_what_it_saw_and_where() {
         "the binary sighting is evidence: {hermes:?}"
     );
     assert!(
-        hermes
-            .evidence
-            .iter()
-            .any(|line| line.contains(".hermes")),
+        hermes.evidence.iter().any(|line| line.contains(".hermes")),
         "the state-dir sighting is evidence: {hermes:?}"
     );
 
@@ -78,8 +71,7 @@ fn detection_reads_every_evidence_channel_and_reports_what_it_saw_and_where() {
 fn the_policy_read_against_the_sightings_decides_honestly() {
     let hermes = [ForeignGateway {
         harness: "hermes".into(),
-        evidence: vec!["service ai.hermes.gateway is loaded in the user's service manager"
-            .into()],
+        evidence: vec!["service ai.hermes.gateway is loaded in the user's service manager".into()],
     }];
 
     // No sighting: exclusively ours, whatever the policy says.
@@ -135,7 +127,11 @@ fn the_exclusive_gate_refuses_recorded_identity_conflicts_and_allows_everything_
     let error = gate
         .admit_connector("gateway-connector/telegram/main", "telegram")
         .unwrap_err();
-    assert_eq!(error.code(), "gateway_coexistence.exclusive_conflict", "{error}");
+    assert_eq!(
+        error.code(),
+        "gateway_coexistence.exclusive_conflict",
+        "{error}"
+    );
     let message = error.to_string();
     assert!(message.contains("hermes"), "{message}");
     assert!(message.contains("@hermes_bot"), "{message}");

@@ -38,8 +38,8 @@ pub mod theme;
 pub mod tree;
 pub mod v2_render;
 pub mod working_field;
-pub mod world_entry;
 pub mod workspace_navigation;
+pub mod world_entry;
 
 use aikit_core::id::{CapsuleId, GenerationId};
 
@@ -48,8 +48,8 @@ pub use application::{
     ActionOutcome, ActivationIntent, ApplyReceipt, CompositionPreview, HistoryEntry,
     NavigationPoint, Overlay, PresentationMode, RelationReadModel, RelationView, ResourceListItem,
     ResourceListReadModel, SelectionInvalidation, SkillSetFieldRow, StagedChanges,
-    TuiApplicationService,
-    TuiReduction, TuiRuntime, TuiState, UiAction, UiEffect, UiStatus, WorkspaceSection,
+    TuiApplicationService, TuiReduction, TuiRuntime, TuiState, UiAction, UiEffect, UiStatus,
+    WorkspaceSection,
 };
 pub use application_service::ApplicationService;
 pub use application_surface::{

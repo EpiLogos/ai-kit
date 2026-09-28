@@ -1086,10 +1086,7 @@ impl AgencyGateway {
             "actuation_ref".into(),
             json!(binding.actuation_ref.to_string()),
         );
-        metadata.insert(
-            "in_reply_to_sequence".into(),
-            json!(in_reply_to_sequence),
-        );
+        metadata.insert("in_reply_to_sequence".into(), json!(in_reply_to_sequence));
         let mut event = Map::new();
         event.insert(
             "event_ref".into(),
@@ -1100,10 +1097,7 @@ impl AgencyGateway {
         );
         event.insert("sequence".into(), json!(sequence));
         event.insert("kind".into(), json!("custom"));
-        event.insert(
-            "custom_kind".into(),
-            json!("gateway-agent/turn-activity"),
-        );
+        event.insert("custom_kind".into(), json!("gateway-agent/turn-activity"));
         event.insert(
             "native_trace_ref".into(),
             json!(format!("gateway-agent-activity/{in_reply_to_sequence}")),

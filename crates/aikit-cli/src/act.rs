@@ -16,13 +16,13 @@
 //! resolves the ref first — an unknown or ambiguous ref fails before any
 //! change is possible.
 
+use crate::app::{AikitApplication, RunRequest, Service};
+use crate::cli::{ActDescribeArgs, ActDiscoverArgs, ActInvokeArgs};
 use aikit_core::id::CapsuleId;
 use aikit_core::resource::{
     ResourceIndex, ResourceKind, ResourceRef, ResourceSource, SourceAuthority, SourceState,
 };
 use aikit_core::{AikitError, Result};
-use crate::app::{AikitApplication, RunRequest, Service};
-use crate::cli::{ActDescribeArgs, ActDiscoverArgs, ActInvokeArgs};
 
 /// The one shared resource field: discovery, description and invocation read
 /// the same index the terminal surface renders — destination navigation, the
@@ -96,7 +96,8 @@ pub fn discover(service: &mut Service, args: ActDiscoverArgs) -> Result<serde_js
             )
         })?;
         let mut actions = index.actions_for(&subject);
-        actions.sort_by(|left, right| (&left.label, &left.action).cmp(&(&right.label, &right.action)));
+        actions
+            .sort_by(|left, right| (&left.label, &left.action).cmp(&(&right.label, &right.action)));
         rows.reserve(actions.len());
         for action in actions {
             let mut row = action_row(&index, action);
@@ -228,11 +229,7 @@ fn availability(service: &Service, reference: &ResourceRef) -> serde_json::Value
 /// Action records the shared index holds in this scope, ranked by the same
 /// search order discovery uses, each carrying its subjects and next routes.
 /// Inert like every search reading: it records no observation event.
-pub fn search_rows(
-    service: &Service,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<serde_json::Value>> {
+pub fn search_rows(service: &Service, query: &str, limit: usize) -> Result<Vec<serde_json::Value>> {
     let index = shared_index(service)?;
     let mut rows = Vec::new();
     for hit in index.search(query, limit) {
@@ -287,8 +284,8 @@ pub fn empty_query_disclosure(
     let mut seen = std::collections::BTreeSet::new();
     let mut suggestions: Vec<serde_json::Value> = Vec::new();
     let consider = |hit: &aikit_core::resource::ResourceSearchHit,
-                        seen: &mut std::collections::BTreeSet<String>,
-                        suggestions: &mut Vec<serde_json::Value>| {
+                    seen: &mut std::collections::BTreeSet<String>,
+                    suggestions: &mut Vec<serde_json::Value>| {
         if seen.insert(hit.resource.to_string()) {
             if let Some(row) = suggestion_row(&index, &hit.resource) {
                 suggestions.push(row);
@@ -378,7 +375,11 @@ pub fn describe(service: &Service, args: ActDescribeArgs) -> Result<serde_json::
             .map(|owner| serde_json::Value::from(owner.to_string()))
             .unwrap_or(serde_json::Value::Null);
         document["sources"] = serde_json::Value::from(
-            descriptor.sources.iter().map(source_json).collect::<Vec<_>>(),
+            descriptor
+                .sources
+                .iter()
+                .map(source_json)
+                .collect::<Vec<_>>(),
         );
         let return_forms = descriptor
             .annotations
@@ -586,14 +587,12 @@ pub fn invoke(service: &mut Service, args: ActInvokeArgs) -> Result<ActOutcome> 
 
     let input = match &args.input {
         Some(raw) => match raw.strip_prefix('@') {
-            Some(path) => Some(
-                std::fs::read_to_string(path).map_err(|error| {
-                    AikitError::new(
-                        "act.input_unreadable",
-                        format!("could not read the action input from {path}: {error}"),
-                    )
-                })?,
-            ),
+            Some(path) => Some(std::fs::read_to_string(path).map_err(|error| {
+                AikitError::new(
+                    "act.input_unreadable",
+                    format!("could not read the action input from {path}: {error}"),
+                )
+            })?),
             None => Some(raw.clone()),
         },
         None => None,
@@ -670,8 +669,7 @@ mod tests {
         );
         // The temporary lives for the process lifetime of the test; the
         // service holds no handle to the directory after reads.
-        Service::open(AikitHome::at(tmp.path()), &cwd, |key| env.get(key).cloned())
-            .unwrap()
+        Service::open(AikitHome::at(tmp.path()), &cwd, |key| env.get(key).cloned()).unwrap()
     }
 
     fn invoke_ref(service: &mut Service, reference: &str) -> Result<ActOutcome> {
@@ -704,7 +702,9 @@ mod tests {
             .expect("the Factory Action joins the search answer");
         assert_eq!(factory["owner"], "factory");
         assert!(
-            factory["subjects"].as_array().is_some_and(|s| !s.is_empty()),
+            factory["subjects"]
+                .as_array()
+                .is_some_and(|s| !s.is_empty()),
             "the Action's subject relation rides the row"
         );
         assert_eq!(
@@ -721,7 +721,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(described["input"]["form"], "owner-native");
-        assert_eq!(described["expected_return_forms"], "factory.commission-receipt/v1");
+        assert_eq!(
+            described["expected_return_forms"],
+            "factory.commission-receipt/v1"
+        );
 
         // Invoke: dispatch reaches the owner operation. The bare test service
         // holds no Factory binding, so the owner's own entry refusal is the
@@ -774,10 +777,14 @@ mod tests {
         let inert_before = aikit_tui::backend::PaletteBackend::familiarity(&service).unwrap();
         let disclosure = empty_query_disclosure(&service, "zzqx wobble flurb", 3).unwrap();
         assert_eq!(disclosure["schema"], "aikit.search-empty/v1");
-        assert!(disclosure["searched"].as_array().is_some_and(|s| !s.is_empty()));
+        assert!(disclosure["searched"]
+            .as_array()
+            .is_some_and(|s| !s.is_empty()));
         let suggestions = disclosure["suggestions"].as_array().unwrap();
         assert!(!suggestions.is_empty() && suggestions.len() <= 3);
-        assert!(suggestions.iter().all(|s| s["next"]["describe"].is_string()));
+        assert!(suggestions
+            .iter()
+            .all(|s| s["next"]["describe"].is_string()));
 
         // Inert like every search reading (the standing familiarity
         // invariant): nothing above recorded an event.

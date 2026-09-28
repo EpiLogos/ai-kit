@@ -220,7 +220,11 @@ fn standing_for(
                 StepStanding::NotExposed(format!(
                     "no SkillSet field disclosed here; {} capabilit{}, {} action{} resolve",
                     world.capability_horizon.capabilities.len(),
-                    if world.capability_horizon.capabilities.len() == 1 { "y" } else { "ies" },
+                    if world.capability_horizon.capabilities.len() == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    },
                     world.capability_horizon.actions.len(),
                     s(world.capability_horizon.actions.len()),
                 ))
@@ -228,13 +232,21 @@ fn standing_for(
                 StepStanding::Open(format!(
                     "choose a SkillSet first; {} set{} disclosed",
                     state.compose_skill_set_field.len(),
-                    if state.compose_skill_set_field.len() == 1 { "" } else { "s" },
+                    if state.compose_skill_set_field.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
                 ))
             } else {
                 StepStanding::Determined(format!(
                     "{} set{} selected ({}) - a request the owner resolves at preparation",
                     state.compose_skill_sets.len(),
-                    if state.compose_skill_sets.len() == 1 { "" } else { "s" },
+                    if state.compose_skill_sets.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
                     state.compose_skill_sets.join(", "),
                 ))
             }
@@ -527,13 +539,12 @@ fn step_detail(
         ComposeStep::Praxis => {
             let mut lines = Vec::new();
             if state.compose_skill_set_field.is_empty() {
-                lines.push(
-                    "  no SkillSet field is disclosed at this boundary, so no".into(),
-                );
+                lines.push("  no SkillSet field is disclosed at this boundary, so no".into());
                 lines.push("  repertoire can be chosen here.".into());
             } else {
                 lines.push("  Choose a SkillSet first; individual exceptions ride beside".into());
-                lines.push("  them later. A set is a request: the owner's own resolution at".into());
+                lines
+                    .push("  them later. A set is a request: the owner's own resolution at".into());
                 lines.push("  preparation decides what projects and what is withheld.".into());
                 lines.push(String::new());
                 for (index, row) in state.compose_skill_set_field.iter().enumerate() {
@@ -697,8 +708,7 @@ fn step_detail(
                 ),
                 String::new(),
                 format!("  Lifecycle: {}", state.agent_work.describe()),
-                "  saved is not accepted; accepted is not prepared; prepared is not running"
-                    .into(),
+                "  saved is not accepted; accepted is not prepared; prepared is not running".into(),
                 String::new(),
                 "  Primary actions (digits dispatch where drawn):".into(),
             ];
@@ -719,15 +729,11 @@ fn step_detail(
             lines.push(
                 "  Save and start Direct work names each component effect before it runs:".into(),
             );
-            lines.push(
-                "    save (Central) -> accept (human token) -> readiness -> prepare".into(),
-            );
+            lines.push("    save (Central) -> accept (human token) -> readiness -> prepare".into());
             lines.push(
                 "    (provider not started) -> launch. A failed stage preserves every".into(),
             );
-            lines.push(
-                "    earlier one and a retry resumes that stage only.".into(),
-            );
+            lines.push("    earlier one and a retry resumes that stage only.".into());
             lines
         }
     }

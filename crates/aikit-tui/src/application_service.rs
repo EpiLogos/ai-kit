@@ -32,7 +32,9 @@ use serde_json::{json, to_string_pretty, to_value, Value};
 use crate::application::{
     ActionInvocationReceipt, ActionOutcome, ActivationIntent, ApplyReceipt, CompositionPreview,
     HistoryEntry, RelationReadModel, ResolvedActionReadModel, ResolvedSearchReadModel,
-    ResourceListItem, ResourceListReadModel, StagedChanges, TuiApplicationService, SkillSetFieldRow};
+    ResourceListItem, ResourceListReadModel, SkillSetFieldRow, StagedChanges,
+    TuiApplicationService,
+};
 use crate::backend::{
     AgentProfileAcceptReceipt, AgentProfileSaveReceipt, AgentSessionPreparation, EncounterLaunch,
     FactoryWorkEntry, FactoryWorkStartReceipt, PaletteBackend, Toggle, WorldReadiness,

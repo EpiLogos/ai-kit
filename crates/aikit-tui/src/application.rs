@@ -872,7 +872,10 @@ pub enum UiAction {
     /// stays alive, the last good read model stands, and the reason is
     /// named on the status line — a query failure is visible, never fatal,
     /// and never able to overwrite a newer query's model.
-    SearchUnresolved { query: String, reason: String },
+    SearchUnresolved {
+        query: String,
+        reason: String,
+    },
     Refresh(ResourceListReadModel),
     Select(ResourceRef),
     SelectNext,
@@ -1151,32 +1154,42 @@ impl TuiRuntime {
             UiEffect::LoadSkillSets => Ok(UiAction::SkillSetsLoaded {
                 rows: service.skill_set_field()?,
             }),
-            UiEffect::SaveAgentProfile { purpose, name, skill_sets } => Ok(match service.save_agent_profile(&purpose, name.as_deref(), &skill_sets) {
-                Ok(receipt) => UiAction::AgentProfileSaved {
-                    profile_ref: receipt.profile_ref,
-                    agent_ref: receipt.agent_ref,
-                    revision: receipt.revision,
-                    content_digest: receipt.content_digest,
+            UiEffect::SaveAgentProfile {
+                purpose,
+                name,
+                skill_sets,
+            } => Ok(
+                match service.save_agent_profile(&purpose, name.as_deref(), &skill_sets) {
+                    Ok(receipt) => UiAction::AgentProfileSaved {
+                        profile_ref: receipt.profile_ref,
+                        agent_ref: receipt.agent_ref,
+                        revision: receipt.revision,
+                        content_digest: receipt.content_digest,
+                    },
+                    Err(error) => UiAction::AgentWorkStageFailed {
+                        failed: WorkStageName::Save,
+                        detail: error.to_string(),
+                    },
                 },
-                Err(error) => UiAction::AgentWorkStageFailed {
-                    failed: WorkStageName::Save,
-                    detail: error.to_string(),
-                },
-            }),
+            ),
             UiEffect::AcceptAgentProfile {
                 expected_revision,
                 expected_content_digest,
-            } => Ok(match service.accept_agent_profile(&expected_revision, expected_content_digest.as_deref()) {
-                Ok(receipt) => UiAction::AgentProfileAccepted {
-                    profile_ref: receipt.profile_ref,
-                    revision: receipt.revision,
-                    content_digest: receipt.content_digest,
+            } => Ok(
+                match service
+                    .accept_agent_profile(&expected_revision, expected_content_digest.as_deref())
+                {
+                    Ok(receipt) => UiAction::AgentProfileAccepted {
+                        profile_ref: receipt.profile_ref,
+                        revision: receipt.revision,
+                        content_digest: receipt.content_digest,
+                    },
+                    Err(error) => UiAction::AgentWorkStageFailed {
+                        failed: WorkStageName::Accept,
+                        detail: error.to_string(),
+                    },
                 },
-                Err(error) => UiAction::AgentWorkStageFailed {
-                    failed: WorkStageName::Accept,
-                    detail: error.to_string(),
-                },
-            }),
+            ),
             UiEffect::CheckWorldReadiness => Ok(match service.world_readiness() {
                 Ok(reading) => UiAction::WorldReadinessChecked {
                     ready: reading.ready,
@@ -1188,27 +1201,31 @@ impl TuiRuntime {
                     detail: error.to_string(),
                 },
             }),
-            UiEffect::PrepareAgentSession { profile_ref } => Ok(match service.prepare_agent_session(&profile_ref) {
-                Ok(preparation) => UiAction::AgentSessionPrepared {
-                    agent_session: preparation.agent_session,
-                    space: preparation.space,
-                    provider_started: preparation.provider_started,
-                },
-                Err(error) => UiAction::AgentWorkStageFailed {
-                    failed: WorkStageName::Prepare,
-                    detail: error.to_string(),
-                },
-            }),
-            UiEffect::StartEncounter { agent_session } => Ok(match service.start_encounter(&agent_session) {
-                Ok(launch) => UiAction::EncounterLaunched {
-                    agent_session: launch.agent_session,
-                    carrier: launch.carrier,
-                },
-                Err(error) => UiAction::AgentWorkStageFailed {
-                    failed: WorkStageName::Launch,
-                    detail: error.to_string(),
-                },
-            }),
+            UiEffect::PrepareAgentSession { profile_ref } => {
+                Ok(match service.prepare_agent_session(&profile_ref) {
+                    Ok(preparation) => UiAction::AgentSessionPrepared {
+                        agent_session: preparation.agent_session,
+                        space: preparation.space,
+                        provider_started: preparation.provider_started,
+                    },
+                    Err(error) => UiAction::AgentWorkStageFailed {
+                        failed: WorkStageName::Prepare,
+                        detail: error.to_string(),
+                    },
+                })
+            }
+            UiEffect::StartEncounter { agent_session } => {
+                Ok(match service.start_encounter(&agent_session) {
+                    Ok(launch) => UiAction::EncounterLaunched {
+                        agent_session: launch.agent_session,
+                        carrier: launch.carrier,
+                    },
+                    Err(error) => UiAction::AgentWorkStageFailed {
+                        failed: WorkStageName::Launch,
+                        detail: error.to_string(),
+                    },
+                })
+            }
             UiEffect::StartFactoryWork => Ok(match service.start_factory_work() {
                 Ok(receipt) => UiAction::ActionFinished(ActionOutcome::FactoryWorkStarted {
                     summary: receipt.summary,
@@ -1726,7 +1743,9 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
         }
         UiAction::ToggleComposeSkillSet { name } => {
             if state.compose_skill_sets.contains(&name) {
-                state.compose_skill_sets.retain(|selected| selected != &name);
+                state
+                    .compose_skill_sets
+                    .retain(|selected| selected != &name);
             } else {
                 state.compose_skill_sets.push(name);
             }
@@ -1934,23 +1953,22 @@ fn resume_stage_effect(
     skill_sets: Vec<String>,
 ) -> UiEffect {
     match stage.stable() {
-        AgentWorkStage::Draft => UiEffect::SaveAgentProfile { purpose, name, skill_sets },
-        AgentWorkStage::Saved {
-            revision, ..
-        } => UiEffect::AcceptAgentProfile {
+        AgentWorkStage::Draft => UiEffect::SaveAgentProfile {
+            purpose,
+            name,
+            skill_sets,
+        },
+        AgentWorkStage::Saved { revision, .. } => UiEffect::AcceptAgentProfile {
             expected_revision: revision.clone(),
             expected_content_digest: None,
         },
-        AgentWorkStage::Accepted { profile_ref, .. } => {
-            UiEffect::PrepareAgentSession {
-                profile_ref: profile_ref.clone(),
-            }
-        }
-        AgentWorkStage::Prepared { agent_session, .. } | AgentWorkStage::Running { agent_session } => {
-            UiEffect::StartEncounter {
-                agent_session: agent_session.clone(),
-            }
-        }
+        AgentWorkStage::Accepted { profile_ref, .. } => UiEffect::PrepareAgentSession {
+            profile_ref: profile_ref.clone(),
+        },
+        AgentWorkStage::Prepared { agent_session, .. }
+        | AgentWorkStage::Running { agent_session } => UiEffect::StartEncounter {
+            agent_session: agent_session.clone(),
+        },
         AgentWorkStage::Failed { .. } => {
             unreachable!("stable() never returns Failed")
         }

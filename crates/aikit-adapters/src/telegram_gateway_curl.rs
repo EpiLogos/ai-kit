@@ -70,7 +70,10 @@ impl TelegramCurlTransport {
             .map_err(|error| {
                 AikitError::new(
                     "telegram_curl.token_unreadable",
-                    format!("Telegram token file {} cannot be read: {error}", token_path.display()),
+                    format!(
+                        "Telegram token file {} cannot be read: {error}",
+                        token_path.display()
+                    ),
                 )
             })?
             .permissions()
@@ -89,7 +92,10 @@ impl TelegramCurlTransport {
             .map_err(|error| {
                 AikitError::new(
                     "telegram_curl.token_unreadable",
-                    format!("Telegram token file {} cannot be read: {error}", token_path.display()),
+                    format!(
+                        "Telegram token file {} cannot be read: {error}",
+                        token_path.display()
+                    ),
                 )
             })?
             .trim()
@@ -205,8 +211,8 @@ impl TelegramBotApiTransport for TelegramCurlTransport {
 #[cfg(test)]
 mod telegram_gateway_curl_tests {
     use super::*;
-    use serde_json::json;
     use crate::telegram_bot_api::TELEGRAM_BOT_API_BASE;
+    use serde_json::json;
 
     fn r(value: &str) -> aikit_core::resource::ResourceRef {
         aikit_core::resource::ResourceRef::parse(value).unwrap()
@@ -255,13 +261,14 @@ mod telegram_gateway_curl_tests {
         let shared = home.path().join("shared.token");
         std::fs::write(&shared, "1234:token").unwrap();
         std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let error = TelegramCurlTransport::from_token_location(&format!("file:{}", shared.display()))
-            .unwrap_err();
+        let error =
+            TelegramCurlTransport::from_token_location(&format!("file:{}", shared.display()))
+                .unwrap_err();
         assert_eq!(error.code(), "telegram_curl.token_unusable");
         assert!(error.to_string().contains("chmod 600"));
 
-        let error = TelegramCurlTransport::from_token_location("file:/nonexistent/token")
-            .unwrap_err();
+        let error =
+            TelegramCurlTransport::from_token_location("file:/nonexistent/token").unwrap_err();
         assert_eq!(error.code(), "telegram_curl.token_unreadable");
 
         let error = TelegramCurlTransport::from_token_location("keychain:telegram").unwrap_err();
@@ -279,8 +286,7 @@ mod telegram_gateway_curl_tests {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&curl_fail, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut transport =
-            TelegramCurlTransport::from_token("1234:secret-token").unwrap();
+        let mut transport = TelegramCurlTransport::from_token("1234:secret-token").unwrap();
         transport = transport.with_curl_path(&curl_fail);
         let error = transport.call("getMe", json!({})).unwrap_err();
         assert_eq!(error.code(), "telegram_curl.transport_failed");
@@ -298,11 +304,7 @@ mod telegram_gateway_curl_tests {
 
         let envelope_fail = home.path().join("curl-envelope.sh");
         std::fs::write(&envelope_fail, "#!/bin/sh\necho '{\"unexpected\": true}'\n").unwrap();
-        std::fs::set_permissions(
-            &envelope_fail,
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
+        std::fs::set_permissions(&envelope_fail, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut transport = TelegramCurlTransport::from_token("1234:secret-token")
             .unwrap()
             .with_curl_path(&envelope_fail);

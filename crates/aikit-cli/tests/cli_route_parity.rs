@@ -30,7 +30,10 @@ fn route_of(argv: &[&str]) -> String {
 /// argv for the parser to reach the leaf. Both spellings are asserted to
 /// carry the same handler route.
 const PARITY: &[(&[&str], &[&str])] = &[
-    (&["source", "show", "src"], &["system", "source", "show", "src"]),
+    (
+        &["source", "show", "src"],
+        &["system", "source", "show", "src"],
+    ),
     (
         &["skill", "overlay", "show", "script/a/b"],
         &["praxis", "skill", "overlay", "show", "script/a/b"],
@@ -38,9 +41,15 @@ const PARITY: &[(&[&str], &[&str])] = &[
     (&["project", "list"], &["world", "project", "list"]),
     (&["init"], &["system", "init"]),
     (&["collate"], &["system", "collate"]),
-    (&["adopt", "/tmp/foreign-root"], &["system", "adopt", "/tmp/foreign-root"]),
+    (
+        &["adopt", "/tmp/foreign-root"],
+        &["system", "adopt", "/tmp/foreign-root"],
+    ),
     (&["procedure", "list"], &["system", "procedure", "list"]),
-    (&["profile", "diff", "p"], &["compose", "profile", "diff", "p"]),
+    (
+        &["profile", "diff", "p"],
+        &["compose", "profile", "diff", "p"],
+    ),
     (
         &["harness-profile", "validate", "/tmp/h.toml"],
         &["system", "harness-profile", "validate", "/tmp/h.toml"],
@@ -58,11 +67,30 @@ const PARITY: &[(&[&str], &[&str])] = &[
     ),
     (
         &["wiki-shape", "validate", "--file", "/tmp/w.json"],
-        &["knowledge", "wiki-shape", "validate", "--file", "/tmp/w.json"],
+        &[
+            "knowledge",
+            "wiki-shape",
+            "validate",
+            "--file",
+            "/tmp/w.json",
+        ],
     ),
     (
-        &["wiki-construct", "inspect", "--file", "/tmp/f.json", "FRAME"],
-        &["knowledge", "wiki-construct", "inspect", "--file", "/tmp/f.json", "FRAME"],
+        &[
+            "wiki-construct",
+            "inspect",
+            "--file",
+            "/tmp/f.json",
+            "FRAME",
+        ],
+        &[
+            "knowledge",
+            "wiki-construct",
+            "inspect",
+            "--file",
+            "/tmp/f.json",
+            "FRAME",
+        ],
     ),
     (&["status"], &["world", "status"]),
     (&["family"], &["praxis", "family"]),
@@ -81,15 +109,24 @@ const PARITY: &[(&[&str], &[&str])] = &[
     (&["apply"], &["compose", "apply"]),
     (&["rollback"], &["compose", "rollback"]),
     (&["context", "current"], &["world", "context", "current"]),
-    (&["continuity", "commands"], &["work", "continuity", "commands"]),
+    (
+        &["continuity", "commands"],
+        &["work", "continuity", "commands"],
+    ),
     (&["session", "list"], &["work", "session", "list"]),
     (&["session-space", "list"], &["work", "space", "list"]),
     (&["model-resolve"], &["compose", "model", "resolve"]),
-    (&["model-catalogue", "show"], &["system", "model-catalogue", "show"]),
+    (
+        &["model-catalogue", "show"],
+        &["system", "model-catalogue", "show"],
+    ),
     (&["task", "list"], &["work", "task", "list"]),
     (&["inbox"], &["praxis", "inbox"]),
     (&["capture", "title"], &["praxis", "capture", "title"]),
-    (&["promote", "candidate"], &["praxis", "promote", "candidate"]),
+    (
+        &["promote", "candidate"],
+        &["praxis", "promote", "candidate"],
+    ),
     (&["prune"], &["system", "generations", "prune"]),
     (&["bypass", "list"], &["system", "bypass", "list"]),
     (&["client", "status"], &["system", "client", "status"]),
@@ -104,11 +141,21 @@ const PARITY: &[(&[&str], &[&str])] = &[
         &["hook", "dispatch", "claude", "PreToolUse"],
         &["system", "hook", "dispatch", "claude", "PreToolUse"],
     ),
-    (&["capabilities", "list"], &["praxis", "capabilities", "list"]),
+    (
+        &["capabilities", "list"],
+        &["praxis", "capabilities", "list"],
+    ),
     (&["jobs"], &["work", "jobs"]),
     (&["method", "list"], &["praxis", "method", "list"]),
     (
-        &["a2a", "card", "--participation-json", "{}", "--interface-url", "http://x"],
+        &[
+            "a2a",
+            "card",
+            "--participation-json",
+            "{}",
+            "--interface-url",
+            "http://x",
+        ],
         &[
             "world",
             "a2a",
@@ -141,7 +188,13 @@ const PARITY: &[(&[&str], &[&str])] = &[
     ),
     (
         &["now-context", "status", "--config-file", "/tmp/n.toml"],
-        &["world", "now-context", "status", "--config-file", "/tmp/n.toml"],
+        &[
+            "world",
+            "now-context",
+            "status",
+            "--config-file",
+            "/tmp/n.toml",
+        ],
     ),
     (
         &[
@@ -162,11 +215,17 @@ const PARITY: &[(&[&str], &[&str])] = &[
             "/tmp/req.json",
         ],
     ),
-    (&["trust", "show", "script/a/b"], &["system", "trust", "show", "script/a/b"]),
+    (
+        &["trust", "show", "script/a/b"],
+        &["system", "trust", "show", "script/a/b"],
+    ),
     (&["recent"], &["history", "recent"]),
     (&["stats"], &["history", "stats"]),
     (&["log", "export"], &["history", "log", "export"]),
-    (&["shell", "init", "bash"], &["system", "shell", "init", "bash"]),
+    (
+        &["shell", "init", "bash"],
+        &["system", "shell", "init", "bash"],
+    ),
     (&["unused"], &["praxis", "unused"]),
     (&["failures"], &["history", "failures"]),
     (&["bypasses"], &["history", "bypasses"]),
@@ -174,23 +233,102 @@ const PARITY: &[(&[&str], &[&str])] = &[
     (&["whoami"], &["world", "whoami"]),
     (&["refocus"], &["world", "refocus"]),
     (
-        &["inhabit", "--position", "central:position:x", "--reason", "why"],
-        &["world", "inhabit", "--position", "central:position:x", "--reason", "why"],
+        &[
+            "inhabit",
+            "--position",
+            "central:position:x",
+            "--reason",
+            "why",
+        ],
+        &[
+            "world",
+            "inhabit",
+            "--position",
+            "central:position:x",
+            "--reason",
+            "why",
+        ],
     ),
 ];
 
 /// Every one of the 76 old roots, including the ten that keep their root seat.
 const OLD_ROOTS: &[&str] = &[
-    "source", "skill", "project", "init", "collate", "adopt", "procedure", "profile",
-    "harness-profile", "z", "set", "tree", "ui", "search", "development-field", "worktree",
-    "knowledge", "flow", "wiki", "wiki-shape", "wiki-construct", "status", "system", "family",
-    "config-contribution", "config", "explain", "history", "diff", "doctor", "credential", "run",
-    "enable", "disable", "use", "apply", "rollback", "context", "continuity", "session",
-    "session-space", "compose", "model-resolve", "model-catalogue", "task", "inbox", "capture",
-    "promote", "prune", "bypass", "client", "harness", "alias", "mux", "hook", "capabilities",
-    "jobs", "method", "praxis", "a2a", "routine", "jev", "now-context", "factory", "trust",
-    "recent", "stats", "log", "shell", "unused", "failures", "bypasses", "gateway", "whoami",
-    "refocus", "inhabit",
+    "source",
+    "skill",
+    "project",
+    "init",
+    "collate",
+    "adopt",
+    "procedure",
+    "profile",
+    "harness-profile",
+    "z",
+    "set",
+    "tree",
+    "ui",
+    "search",
+    "development-field",
+    "worktree",
+    "knowledge",
+    "flow",
+    "wiki",
+    "wiki-shape",
+    "wiki-construct",
+    "status",
+    "system",
+    "family",
+    "config-contribution",
+    "config",
+    "explain",
+    "history",
+    "diff",
+    "doctor",
+    "credential",
+    "run",
+    "enable",
+    "disable",
+    "use",
+    "apply",
+    "rollback",
+    "context",
+    "continuity",
+    "session",
+    "session-space",
+    "compose",
+    "model-resolve",
+    "model-catalogue",
+    "task",
+    "inbox",
+    "capture",
+    "promote",
+    "prune",
+    "bypass",
+    "client",
+    "harness",
+    "alias",
+    "mux",
+    "hook",
+    "capabilities",
+    "jobs",
+    "method",
+    "praxis",
+    "a2a",
+    "routine",
+    "jev",
+    "now-context",
+    "factory",
+    "trust",
+    "recent",
+    "stats",
+    "log",
+    "shell",
+    "unused",
+    "failures",
+    "bypasses",
+    "gateway",
+    "whoami",
+    "refocus",
+    "inhabit",
 ];
 
 /// Enough argv for each root to parse. The point is parse-level reachability
@@ -209,7 +347,13 @@ fn argv_that_parses(root: &'static str) -> Vec<&'static str> {
         "flow" => &["flow", "preflight"],
         "wiki" => &["wiki", "validate", "/tmp/w.json"],
         "wiki-shape" => &["wiki-shape", "validate", "--file", "/tmp/w.json"],
-        "wiki-construct" => &["wiki-construct", "inspect", "--file", "/tmp/f.json", "FRAME"],
+        "wiki-construct" => &[
+            "wiki-construct",
+            "inspect",
+            "--file",
+            "/tmp/f.json",
+            "FRAME",
+        ],
         "config" => &["config", "validate", "--setting", "ai-kit:s:k"],
         "credential" => &["credential", "list"],
         "run" => &["run", "name"],
@@ -262,7 +406,13 @@ fn argv_that_parses(root: &'static str) -> Vec<&'static str> {
         "log" => &["log", "export"],
         "shell" => &["shell", "init", "bash"],
         "gateway" => &["gateway", "status"],
-        "inhabit" => &["inhabit", "--position", "central:position:x", "--reason", "why"],
+        "inhabit" => &[
+            "inhabit",
+            "--position",
+            "central:position:x",
+            "--reason",
+            "why",
+        ],
         "z" => &["z", "greet"],
         "search" => &["search", "greet"],
         "knowledge" => &["knowledge", "status"],
@@ -291,7 +441,8 @@ fn every_old_root_and_its_group_path_reach_the_same_handler() {
         let old_route = route_of(old);
         let canonical_route = route_of(canonical);
         assert_eq!(
-            old_route, canonical_route,
+            old_route,
+            canonical_route,
             "`aikit {}` and `aikit {}` must dispatch to the same handler",
             old.join(" "),
             canonical.join(" ")
@@ -350,9 +501,9 @@ fn bare_invocation_parses_to_no_command() {
 fn the_act_doorway_routes() {
     assert_eq!(route_of(&["act"]), "cmd_act_discover");
     assert_eq!(route_of(&["act", "discover"]), "cmd_act_discover");
-    assert_eq!(route_of(&["act", "describe", "script/a/b"]), "cmd_act_describe");
     assert_eq!(
-        route_of(&["act", "invoke", "script/a/b"]),
-        "cmd_act_invoke"
+        route_of(&["act", "describe", "script/a/b"]),
+        "cmd_act_describe"
     );
+    assert_eq!(route_of(&["act", "invoke", "script/a/b"]), "cmd_act_invoke");
 }

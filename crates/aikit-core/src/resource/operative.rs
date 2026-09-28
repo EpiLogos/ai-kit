@@ -1711,7 +1711,10 @@ mod tests {
         );
         assert!(path.candidates.len() >= 2, "partial overlap still joins");
         assert!(
-            !path.candidates.iter().any(|c| c.resource.as_str() == "skill/parity/orient"),
+            !path
+                .candidates
+                .iter()
+                .any(|c| c.resource.as_str() == "skill/parity/orient"),
             "records sharing no significant word stay out of the answer"
         );
 

@@ -923,7 +923,10 @@ impl ConversationTurnSource for AgentHostTurnSource {
                     // One broken skill never takes the disclosure down; it is
                     // named on stderr instead of silently skipped.
                     Err(error) => {
-                        eprintln!("gateway conversation engine: skill {}: {error}", dir.display());
+                        eprintln!(
+                            "gateway conversation engine: skill {}: {error}",
+                            dir.display()
+                        );
                     }
                 }
             }
@@ -937,9 +940,7 @@ fn lane_state_name(state: crate::agent_session_host::SessionLaneState) -> &'stat
     match state {
         crate::agent_session_host::SessionLaneState::Resident => "resident",
         crate::agent_session_host::SessionLaneState::TurnInFlight => "turn-in-flight",
-        crate::agent_session_host::SessionLaneState::InterruptRequested => {
-            "interrupt-requested"
-        }
+        crate::agent_session_host::SessionLaneState::InterruptRequested => "interrupt-requested",
     }
 }
 
@@ -1292,7 +1293,13 @@ impl GatewayConversationEngine {
                     detail: Some(receipt),
                 },
             );
-            self.record_outcome(&binding, outcome, in_reply_to_sequence, native_message_id, None);
+            self.record_outcome(
+                &binding,
+                outcome,
+                in_reply_to_sequence,
+                native_message_id,
+                None,
+            );
             return;
         }
         // The whole wait: typing pulses for the turn's full duration, and —
@@ -1950,10 +1957,7 @@ impl GatewayConversationEngine {
     fn binding_and_source(
         &self,
         binding_ref: &ResourceRef,
-    ) -> Result<(
-        GatewayBinding,
-        Option<Arc<dyn ConversationTurnSource>>,
-    )> {
+    ) -> Result<(GatewayBinding, Option<Arc<dyn ConversationTurnSource>>)> {
         let binding = {
             let kernel = self.gateway.lock().map_err(|_| poisoned())?;
             kernel
@@ -1993,10 +1997,7 @@ impl GatewayConversationEngine {
         match model {
             None => {
                 let controls = source.model_controls(&binding.agent_session_ref)?;
-                let line = if controls
-                    .get("available")
-                    .is_some_and(Value::is_array)
-                {
+                let line = if controls.get("available").is_some_and(Value::is_array) {
                     let roster = controls["available"]
                         .as_array()
                         .expect("checked array")
@@ -2004,8 +2005,13 @@ impl GatewayConversationEngine {
                         .filter_map(Value::as_str)
                         .collect::<Vec<_>>()
                         .join(", ");
-                    format!("model: harness {harness} offers {roster}; select one with /model <name>")
-                } else if controls.get("model_selection").is_some_and(Value::is_boolean) {
+                    format!(
+                        "model: harness {harness} offers {roster}; select one with /model <name>"
+                    )
+                } else if controls
+                    .get("model_selection")
+                    .is_some_and(Value::is_boolean)
+                {
                     if controls["model_selection"] == json!(true) {
                         format!(
                             "model: harness {harness} exposes a native model selector; name the \
@@ -2156,9 +2162,7 @@ impl GatewayConversationEngine {
         let taken: Vec<(ResourceRef, InFlightTurn)> = {
             let mut inner = self.inner.lock().expect("conversation engine");
             inner.draining = true;
-            std::mem::take(&mut inner.in_flight)
-                .into_iter()
-                .collect()
+            std::mem::take(&mut inner.in_flight).into_iter().collect()
         };
         let mut resolved = 0usize;
         let mut interrupted = 0usize;

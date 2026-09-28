@@ -19,8 +19,8 @@ use aikit_core::{AikitError, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::gateway_connector::{
-    ConnectorDescriptor, ConnectorFuture, ConnectorHello, ConnectorHealth, ConnectorOperation,
-    GatewayConnector, InboundEvent, OutboundOperation, DeliveryReceipt,
+    ConnectorDescriptor, ConnectorFuture, ConnectorHealth, ConnectorHello, ConnectorOperation,
+    DeliveryReceipt, GatewayConnector, InboundEvent, OutboundOperation,
     GATEWAY_CONNECTOR_SDK_VERSION,
 };
 use crate::gateway_connector_wire::StdioWireConnector;
@@ -330,8 +330,12 @@ pub fn build_connector_factory(
         "telegram" => Box::new(TelegramConnectorFactory {
             entry: entry.clone(),
         }),
-        "slack" => Box::new(SlackConnectorFactory { entry: entry.clone() }),
-        "stdio" => Box::new(StdioConnectorFactory { entry: entry.clone() }),
+        "slack" => Box::new(SlackConnectorFactory {
+            entry: entry.clone(),
+        }),
+        "stdio" => Box::new(StdioConnectorFactory {
+            entry: entry.clone(),
+        }),
         other => {
             return Err(AikitError::new(
                 "gateway_connector_config.unknown_implementation",
@@ -742,10 +746,14 @@ mod tests {
         use crate::gateway_connector::ConnectorOperation;
         let operations = &connector.descriptor().capabilities.operations;
         assert!(operations.contains(&ConnectorOperation::Send));
-        assert!(!operations.contains(&ConnectorOperation::Typing),
-            "Slack has no typing API; the capability is never advertised");
-        assert!(!operations.contains(&ConnectorOperation::Media),
-            "files.upload v2 is outside this cut; the capability is never advertised");
+        assert!(
+            !operations.contains(&ConnectorOperation::Typing),
+            "Slack has no typing API; the capability is never advertised"
+        );
+        assert!(
+            !operations.contains(&ConnectorOperation::Media),
+            "files.upload v2 is outside this cut; the capability is never advertised"
+        );
 
         let mut no_token = entry("slack");
         no_token.connector_ref = "gateway-connector/slack/main".into();

@@ -390,7 +390,9 @@ impl<T: SlackBotApiTransport> SlackConnector<T> {
         }
         if let (Some(bot_id), Some(identity)) = (
             message.get("bot_id").and_then(Value::as_str),
-            self.identity.as_ref().and_then(|identity| identity.bot_id.as_deref()),
+            self.identity
+                .as_ref()
+                .and_then(|identity| identity.bot_id.as_deref()),
         ) {
             if bot_id == identity {
                 return false;
@@ -416,10 +418,7 @@ impl<T: SlackBotApiTransport> SlackConnector<T> {
                     operation_ref: operation.operation_ref,
                     connector_ref: operation.connector_ref,
                     state: DeliveryState::Delivered,
-                    native_message_id: result
-                        .get("ts")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
+                    native_message_id: result.get("ts").and_then(Value::as_str).map(str::to_owned),
                     detail: None,
                     native: BTreeMap::from([
                         ("method".into(), json!(method)),
@@ -505,8 +504,7 @@ impl<T: SlackBotApiTransport> SlackConnector<T> {
             reply_to_native_message_id: None,
             text,
             media,
-            observed_at: slack_ts_parse(ts)
-                .map(|(secs, _)| format!("unix:{secs}")),
+            observed_at: slack_ts_parse(ts).map(|(secs, _)| format!("unix:{secs}")),
             native,
             provenance: vec![
                 SLACK_GATEWAY_CONNECTOR_VERSION.into(),
@@ -522,7 +520,8 @@ impl<T: SlackBotApiTransport> SlackConnector<T> {
                 cached.clone()
             } else {
                 let resolved = self.resolve_display_name(user_id);
-                self.display_names.insert(user_id.to_owned(), resolved.clone());
+                self.display_names
+                    .insert(user_id.to_owned(), resolved.clone());
                 resolved
             };
             return SenderIdentity {
@@ -636,15 +635,17 @@ fn slack_outbound_request(operation: &OutboundOperation) -> Result<(&'static str
     // Slack threading is one dimensional: a reply to a message *is* a post in
     // that message's thread. An explicit thread_id wins; otherwise a reply
     // target names the thread to reply within.
-    let thread_ts = operation.address.thread_id.clone().or_else(|| {
-        match &operation.operation {
+    let thread_ts = operation
+        .address
+        .thread_id
+        .clone()
+        .or_else(|| match &operation.operation {
             OutboundOperationKind::Send {
                 reply_to_native_message_id,
                 ..
             } => reply_to_native_message_id.clone(),
             _ => None,
-        }
-    });
+        });
     match &operation.operation {
         OutboundOperationKind::Send {
             text,
@@ -664,10 +665,7 @@ fn slack_outbound_request(operation: &OutboundOperation) -> Result<(&'static str
                 ));
             }
             let text = text.as_deref().ok_or_else(|| {
-                AikitError::new(
-                    "slack_gateway.empty_send",
-                    "Slack text send requires text",
-                )
+                AikitError::new("slack_gateway.empty_send", "Slack text send requires text")
             })?;
             let mut params = Map::from_iter([
                 ("channel".into(), json!(channel)),
@@ -678,7 +676,10 @@ fn slack_outbound_request(operation: &OutboundOperation) -> Result<(&'static str
             }
             Ok(("chat.postMessage", Value::Object(params)))
         }
-        OutboundOperationKind::Edit { native_message_id, text } => Ok((
+        OutboundOperationKind::Edit {
+            native_message_id,
+            text,
+        } => Ok((
             "chat.update",
             json!({"channel": channel, "ts": native_message_id, "text": text}),
         )),
@@ -686,16 +687,17 @@ fn slack_outbound_request(operation: &OutboundOperation) -> Result<(&'static str
             "chat.delete",
             json!({"channel": channel, "ts": native_message_id}),
         )),
-        OutboundOperationKind::React { native_message_id, reaction } => {
-            Ok((
-                "reactions.add",
-                json!({
-                    "channel": channel,
-                    "timestamp": native_message_id,
-                    "name": slack_emoji_name(reaction),
-                }),
-            ))
-        }
+        OutboundOperationKind::React {
+            native_message_id,
+            reaction,
+        } => Ok((
+            "reactions.add",
+            json!({
+                "channel": channel,
+                "timestamp": native_message_id,
+                "name": slack_emoji_name(reaction),
+            }),
+        )),
         OutboundOperationKind::Typing { .. } => {
             // Not advertised; unreachable through the contract. Slack has no
             // typing indicator API and this connector never fakes one.
@@ -768,7 +770,11 @@ fn slack_ts_parse(ts: &str) -> Option<(u64, u64)> {
     while digits.len() < 6 {
         digits.push('0');
     }
-    let frac: u64 = if digits.is_empty() { 0 } else { digits.parse().ok()? };
+    let frac: u64 = if digits.is_empty() {
+        0
+    } else {
+        digits.parse().ok()?
+    };
     Some((secs, frac))
 }
 
@@ -845,11 +851,8 @@ mod tests {
     fn connected_connector(replies: Vec<Value>) -> SlackConnector<FakeSlackTransport> {
         let mut all = vec![auth_test_reply()];
         all.extend(replies);
-        let mut connector = SlackConnector::new(
-            FakeSlackTransport::with_replies(all),
-            config(),
-        )
-        .unwrap();
+        let mut connector =
+            SlackConnector::new(FakeSlackTransport::with_replies(all), config()).unwrap();
         connector.connect_now().unwrap();
         connector
     }
@@ -859,13 +862,23 @@ mod tests {
         let transport = FakeSlackTransport::with_replies(vec![auth_test_reply()]);
         let mut connector = SlackConnector::new(transport, config()).unwrap();
         let hello = connector.connect_now().unwrap();
-        assert_eq!(connector.identity().unwrap().team_id.as_deref(), Some("T0TEAM"));
-        assert_eq!(connector.identity().unwrap().bot_id.as_deref(), Some("B0BOT"));
+        assert_eq!(
+            connector.identity().unwrap().team_id.as_deref(),
+            Some("T0TEAM")
+        );
+        assert_eq!(
+            connector.identity().unwrap().bot_id.as_deref(),
+            Some("B0BOT")
+        );
         assert_eq!(hello.descriptor.platform, "slack");
         let encoded = serde_json::to_string(&hello).unwrap();
         assert!(!encoded.contains("token"));
         assert!(
-            connector.health_now().detail.unwrap().contains("Socket Mode"),
+            connector
+                .health_now()
+                .detail
+                .unwrap()
+                .contains("Socket Mode"),
             "health names the real-time ingress carrier"
         );
         assert_eq!(connector.transport_ref().calls[0].0, "auth.test");
@@ -899,22 +912,35 @@ mod tests {
         assert_eq!(first.address.platform, "slack");
         assert_eq!(first.address.scope_id.as_deref(), Some("T0TEAM"));
         assert_eq!(first.address.conversation_id, "C0123456789");
-        assert_eq!(first.address.thread_id.as_deref(), Some("1690000001.000100"));
-        assert_eq!(first.native_message_id.as_deref(), Some("1690000001.000100"));
+        assert_eq!(
+            first.address.thread_id.as_deref(),
+            Some("1690000001.000100")
+        );
+        assert_eq!(
+            first.native_message_id.as_deref(),
+            Some("1690000001.000100")
+        );
         assert_eq!(first.sender.native_sender_id, "U0HUMAN");
         assert_eq!(first.sender.display_name.as_deref(), Some("Ada"));
         assert_eq!(first.text.as_deref(), Some("thread root"));
         assert_eq!(first.observed_at.as_deref(), Some("unix:1690000001"));
         let second = connector.next_event_now().unwrap().unwrap();
-        assert_eq!(second.native_message_id.as_deref(), Some("1690000002.000200"));
+        assert_eq!(
+            second.native_message_id.as_deref(),
+            Some("1690000002.000200")
+        );
         assert!(second.address.thread_id.is_none());
-        assert_eq!(connector.watermark("C0123456789").unwrap(), "1690000002.000200");
+        assert_eq!(
+            connector.watermark("C0123456789").unwrap(),
+            "1690000002.000200"
+        );
 
         // The next poll carries the watermark as `oldest`.
         connector.transport_mut().replies.clear();
-        connector.transport_mut().replies.push_back(
-            json!({"ok": true, "messages": [], "has_more": false}),
-        );
+        connector
+            .transport_mut()
+            .replies
+            .push_back(json!({"ok": true, "messages": [], "has_more": false}));
         connector.next_event_now().unwrap();
         let poll = connector
             .transport_ref()
@@ -934,16 +960,21 @@ mod tests {
         ], "has_more": false})];
         let mut config = config();
         config.ingest_backlog = false;
-        let mut connector =
-            SlackConnector::new(FakeSlackTransport::with_replies({
+        let mut connector = SlackConnector::new(
+            FakeSlackTransport::with_replies({
                 let mut all = vec![auth_test_reply()];
                 all.extend(replies);
                 all
-            }), config)
-            .unwrap();
+            }),
+            config,
+        )
+        .unwrap();
         connector.connect_now().unwrap();
         assert!(connector.next_event_now().unwrap().is_none());
-        assert_eq!(connector.watermark("C0123456789").unwrap(), "1690000005.000001");
+        assert_eq!(
+            connector.watermark("C0123456789").unwrap(),
+            "1690000005.000001"
+        );
     }
 
     #[test]
@@ -965,10 +996,16 @@ mod tests {
         ];
         let mut connector = connected_connector(replies);
         let first = connector.next_event_now().unwrap().unwrap();
-        assert_eq!(first.native_message_id.as_deref(), Some("1690000001.000001"));
+        assert_eq!(
+            first.native_message_id.as_deref(),
+            Some("1690000001.000001")
+        );
         assert_eq!(first.sender.kind, SenderKind::Human);
         let second = connector.next_event_now().unwrap().unwrap();
-        assert_eq!(second.native_message_id.as_deref(), Some("1690000002.000002"));
+        assert_eq!(
+            second.native_message_id.as_deref(),
+            Some("1690000002.000002")
+        );
         assert_eq!(second.sender.kind, SenderKind::Bot);
         assert!(connector.next_event_now().unwrap().is_none());
     }
@@ -1089,7 +1126,10 @@ mod tests {
         };
         let receipt = connector.execute_now(operation).unwrap();
         assert_eq!(receipt.state, DeliveryState::Delivered);
-        assert_eq!(receipt.native_message_id.as_deref(), Some("1690000009.000900"));
+        assert_eq!(
+            receipt.native_message_id.as_deref(),
+            Some("1690000009.000900")
+        );
         let call = &connector.transport_ref().calls[1];
         assert_eq!(call.0, "chat.postMessage");
         assert_eq!(call.1["channel"], "C0123456789");
@@ -1199,9 +1239,8 @@ mod tests {
 
     #[test]
     fn rate_limited_envelope_yields_failed_receipt_and_degraded_health() {
-        let mut connector = connected_connector(vec![
-            json!({"ok": false, "error": "rate_limited"}),
-        ]);
+        let mut connector =
+            connected_connector(vec![json!({"ok": false, "error": "rate_limited"})]);
         let operation = OutboundOperation {
             operation_ref: r("gateway-operation/rate-1"),
             connector_ref: r("gateway-connector/slack/main"),
@@ -1333,7 +1372,10 @@ mod tests {
             "slack_gateway.empty_ingress_channel"
         );
         config.ingress_channels = Vec::new();
-        assert!(config.validate().is_ok(), "delivery-only is a valid posture");
+        assert!(
+            config.validate().is_ok(),
+            "delivery-only is a valid posture"
+        );
     }
 
     #[test]

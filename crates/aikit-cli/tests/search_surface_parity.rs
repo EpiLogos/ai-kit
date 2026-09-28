@@ -138,7 +138,9 @@ fn headless_and_interactive_search_share_typed_expressions_and_order() {
         .as_array()
         .expect("the disclosure names the corpora that were searched");
     assert!(
-        searched.iter().any(|corpus| corpus["corpus"] == "resource-field"),
+        searched
+            .iter()
+            .any(|corpus| corpus["corpus"] == "resource-field"),
         "the resource field corpus is named"
     );
     let suggestions = disclosure["suggestions"].as_array().unwrap();

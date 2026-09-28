@@ -56,7 +56,9 @@ fn surface(backend: &mut Fixture) -> ApplicationSurfaceController {
     .unwrap()
 }
 
-fn zero_query_model(surface: &ApplicationSurfaceController) -> aikit_tui::application::ResourceListReadModel {
+fn zero_query_model(
+    surface: &ApplicationSurfaceController,
+) -> aikit_tui::application::ResourceListReadModel {
     surface.semantic().read_model.clone()
 }
 
@@ -92,8 +94,12 @@ fn the_newest_query_always_wins_no_matter_how_fast_typing_arrives() {
 
     // Backspace twice, then extend differently: the model tracks the newest
     // query, never a ghost of the longer one.
-    surface.handle(&mut backend, key(KeyCode::Backspace)).unwrap();
-    surface.handle(&mut backend, key(KeyCode::Backspace)).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Backspace))
+        .unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Backspace))
+        .unwrap();
     assert_eq!(surface.semantic().query, "alp");
     type_char(&mut surface, &mut backend, 't');
     assert_eq!(surface.semantic().query, "alpt");
@@ -112,7 +118,8 @@ fn the_newest_query_always_wins_no_matter_how_fast_typing_arrives() {
 
     type_char(&mut surface, &mut backend, 'x');
     assert_eq!(
-        surface.semantic().query, "x",
+        surface.semantic().query,
+        "x",
         "the live query still holds the keystroke"
     );
     let status = surface
@@ -125,10 +132,13 @@ fn the_newest_query_always_wins_no_matter_how_fast_typing_arrives() {
         "{}",
         status.message
     );
-    surface.handle(&mut backend, key(KeyCode::Backspace)).unwrap();
+    surface
+        .handle(&mut backend, key(KeyCode::Backspace))
+        .unwrap();
     assert_eq!(surface.semantic().query, "");
     assert_eq!(
-        surface.semantic().read_model.resources, cleared_model.resources,
+        surface.semantic().read_model.resources,
+        cleared_model.resources,
         "backspacing out of an unsearchable query restores the cleared field"
     );
 }
@@ -216,18 +226,21 @@ fn operator_state_survives_navigation_untouched() {
             PaletteEvent::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)),
         )
         .unwrap();
+    surface.handle(&mut backend, key(KeyCode::Right)).unwrap(); // inert without Alt
     surface
-        .handle(&mut backend, key(KeyCode::Right))
-        .unwrap(); // inert without Alt
-    surface.handle(&mut backend, key(KeyCode::Char('1'))).unwrap();
+        .handle(&mut backend, key(KeyCode::Char('1')))
+        .unwrap();
 
     let state = surface.semantic();
     assert_eq!(state.staged.len(), staged_before, "staged changes survive");
-    assert_eq!(state.compose_purpose, "a held exact purpose", "draft survives");
-    assert!(matches!(
-        state.agent_work,
-        AgentWorkStage::Saved { .. }
-    ), "the lifecycle ladder survives");
+    assert_eq!(
+        state.compose_purpose, "a held exact purpose",
+        "draft survives"
+    );
+    assert!(
+        matches!(state.agent_work, AgentWorkStage::Saved { .. }),
+        "the lifecycle ladder survives"
+    );
     assert_eq!(
         state.compose_intent,
         Some(aikit_tui::application::ComposeIntent::SaveAndStartDirect)

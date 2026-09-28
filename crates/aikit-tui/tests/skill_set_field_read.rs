@@ -8,7 +8,7 @@
 
 use aikit_core::context::ContextDescriptor;
 use aikit_core::id::{CapsuleId, GenerationId};
-use aikit_core::resolve::{resolve, ResolvedView, ResolveRequest};
+use aikit_core::resolve::{resolve, ResolveRequest, ResolvedView};
 use aikit_core::scope::{ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
 use aikit_core::trust::MemoryTrust;
@@ -104,10 +104,16 @@ fn the_skill_set_field_reads_the_real_store() {
     let service = ApplicationService::new(&mut backend);
     let rows = service.skill_set_field().unwrap();
 
-    let names: Vec<&str> = rows.iter().map(|row: &SkillSetFieldRow| row.name.as_str()).collect();
+    let names: Vec<&str> = rows
+        .iter()
+        .map(|row: &SkillSetFieldRow| row.name.as_str())
+        .collect();
     assert!(names.contains(&"central-engineering"), "{names:?}");
     assert!(names.contains(&"research-deep"), "{names:?}");
-    let engineering = rows.iter().find(|row| row.name == "central-engineering").unwrap();
+    let engineering = rows
+        .iter()
+        .find(|row| row.name == "central-engineering")
+        .unwrap();
     assert_eq!(engineering.members, 1, "the real set's own member count");
     assert!(
         !engineering.provenance.is_empty(),

@@ -431,9 +431,7 @@ fn world_compilation_attributes_project_matrices_and_leaves_the_root_composition
         .join("capability-matrix.json")
         .to_string_lossy()
         .to_string();
-    assert!(!reading
-        .object_projects
-        .contains_key(root_manifest.as_str()));
+    assert!(!reading.object_projects.contains_key(root_manifest.as_str()));
     // And nothing at all is attributed to a path outside the garden home.
     for key in reading.object_projects.keys() {
         assert!(
