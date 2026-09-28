@@ -1025,11 +1025,14 @@ pub fn observe_factory_change(
 /// `aikit method run <ref> [--input <json>|@file] [--confirm]` — the
 /// deterministic invocation route of one Method (§2.2). Preflight refuses
 /// before any effect: an unknown ref, a Skill that is not a Method, an
-/// input that is not one JSON value, and an untrusted Method without
-/// `--confirm`. One execution then goes through the same native runner
-/// `aikit run` uses — never a second transport — and the receipt carries the
-/// digests a later `method prove` verification consumes. It never claims
-/// postconditions: a successful shell exit is not proof.
+/// input that is not one JSON value, and a Method whose run barrier has not
+/// been met — each refusal naming the exact missing condition and the route
+/// that supplies it (`aikit_core::method::run_barrier`), never a claim that
+/// no scope enables what the scopes do enable. One execution then goes
+/// through the same native runner `aikit run` uses — never a second
+/// transport — and the receipt carries the digests a later `method prove`
+/// verification consumes. It never claims postconditions: a successful shell
+/// exit is not proof.
 pub fn method_run(
     service: &mut crate::app::Service,
     method: &str,
@@ -1061,16 +1064,11 @@ pub fn method_run(
         )
         .with("recovery", format!("run it directly: `aikit act invoke {reference}`")));
     }
-    if !view.can_run(&id) {
-        return Err(AikitError::new(
-            "method.not_runnable",
-            format!(
-                "`{reference}` resolves but cannot run here: {}",
-                view.unavailable_reason(&id)
-                    .map(|reason| reason.describe())
-                    .unwrap_or_else(|| "no scope enables it in this context".into())
-            ),
-        ));
+    if let Some(barrier) = aikit_core::method::run_barrier(view, &id) {
+        return Err(
+            AikitError::new(barrier.code, format!("`{reference}` {}", barrier.condition))
+                .with("recovery", barrier.recovery),
+        );
     }
     if entry.trust != aikit_core::TrustState::Trusted && !confirm {
         return Err(AikitError::new(

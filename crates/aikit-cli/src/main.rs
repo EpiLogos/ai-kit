@@ -4027,6 +4027,11 @@ fn cmd_method(cwd: &std::path::Path, a: MethodArgs) -> Result<Reply> {
                     return None;
                 }
             }
+            // Discovery teaches the same condition the run route refuses on:
+            // whether `method run` can execute the Method here and, when it
+            // cannot, the exact missing condition and the route that supplies
+            // it — the same `run_barrier` answer, never a second opinion.
+            let barrier = aikit_core::method::run_barrier(view, &entry.id);
             Some(jval!({
                 "id": entry.id.to_string(),
                 "name": entry.name,
@@ -4034,6 +4039,12 @@ fn cmd_method(cwd: &std::path::Path, a: MethodArgs) -> Result<Reply> {
                 "kind": entry.kind.as_str(),
                 "active": view.is_active(&entry.id),
                 "declared": view.is_declared_enabled(&entry.id),
+                "runnable": barrier.is_none(),
+                "run_barrier": barrier.map(|barrier| jval!({
+                    "code": barrier.code,
+                    "condition": barrier.condition,
+                    "recovery": barrier.recovery,
+                })),
             }))
         })
         .collect();

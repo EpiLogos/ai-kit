@@ -65,6 +65,26 @@ entry = "payload/run.sh"
 "#,
     );
     write_executable(&closeout.join("payload/run.sh"), support);
+    // A skill-kind Method: authored faculty with no `[script]` body — the
+    // common authored form, and the one the verifier's defect hid behind.
+    let dayclose = home
+        .path()
+        .join("registries/personal/capsules/skill/practice/day-close");
+    write(
+        &dayclose.join("manifest.toml"),
+        r#"schema = 1
+id = "skill/practice/day-close"
+kind = "skill"
+name = "day-close"
+description = "METHOD: close the working day in the field with a bounded reading and a NOW return."
+
+[skill]
+"#,
+    );
+    write(
+        &dayclose.join("payload/SKILL.md"),
+        "# Day close\n\nClose the working day in the field.\n",
+    );
     let plain = home
         .path()
         .join("registries/personal/capsules/script/demo/greet");
@@ -245,5 +265,136 @@ fn preflight_refusals_land_before_any_effect() {
             .join("registries/personal/capsules/script/practice/compose-project/payload/run.sh.received.json")
             .exists(),
         "the support never ran on an invalid input"
+    );
+}
+
+/// The verifier's defect, walked end to end: a declared, trusted, enabled,
+/// active skill-kind Method refused as "no scope enables it in this context"
+/// — while `method list` disclosed the same scope as enabling it. The enable
+/// seam was never broken; the runner's gate was the palette's `can_run`
+/// ("runnable while inactive"), false for every skill-kind Method whatever
+/// the scopes say. The refusal now names the real condition — the Method
+/// carries no deterministic `[script]` body — and `method list` discloses
+/// the same barrier, so discovery teaches what the route demands.
+#[test]
+fn enabled_active_skill_method_refuses_by_naming_its_missing_body() {
+    let (home, project) = fixture();
+
+    // 1. Enable in the project scope — the seam the verifier drove.
+    let (envelope, _stderr, ok) = run(
+        home.path(),
+        project.path(),
+        &[
+            "enable",
+            "skill/practice/day-close",
+            "--scope",
+            "project",
+            "--apply",
+        ],
+    );
+    assert!(ok, "the project-scope enable succeeds: {envelope}");
+    assert_eq!(envelope["data"]["scope"], "project", "{envelope}");
+
+    // 2. Review the revision, so trust is not the interposing condition.
+    let (envelope, _stderr, ok) = run(
+        home.path(),
+        project.path(),
+        &[
+            "trust",
+            "record",
+            "skill/practice/day-close",
+            "--note",
+            "test review",
+        ],
+    );
+    assert!(ok, "the trust record succeeds: {envelope}");
+
+    // 3. `method list` discloses enablement and the run barrier together:
+    //    active, yet not runnable, with the exact condition named.
+    let (envelope, _stderr, ok) = run(home.path(), project.path(), &["method", "list"]);
+    assert!(ok, "method list succeeds: {envelope}");
+    let row = envelope["data"]["methods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "skill/practice/day-close")
+        .expect("the skill Method is listed");
+    assert_eq!(row["declared"], true, "{row}");
+    assert_eq!(row["active"], true, "{row}");
+    assert_eq!(row["runnable"], false, "{row}");
+    assert_eq!(
+        row["run_barrier"]["code"], "method.no_executable_body",
+        "{row}"
+    );
+    assert!(
+        row["run_barrier"]["recovery"]
+            .as_str()
+            .unwrap()
+            .contains("aikit act invoke"),
+        "discovery teaches the agent route: {row}"
+    );
+
+    // 4. `method run` refuses with the same precise condition — never the
+    //    mislabel that blamed the scopes.
+    let (envelope, _stderr, ok) = run(
+        home.path(),
+        project.path(),
+        &["method", "run", "skill/practice/day-close", "--confirm"],
+    );
+    assert!(!ok, "a skill Method with no executable body refuses");
+    assert_eq!(
+        envelope["error"]["code"], "method.no_executable_body",
+        "{envelope}"
+    );
+    let message = envelope["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("enabled and active"),
+        "the refusal credits the enablement that landed: {message}"
+    );
+    assert!(
+        message.contains("[script]"),
+        "the refusal names the missing body: {message}"
+    );
+    assert!(
+        !message.contains("no scope enables it"),
+        "the mislabel is the defect: {message}"
+    );
+    assert!(
+        envelope["error"]["details"]["recovery"]
+            .as_str()
+            .unwrap()
+            .contains("aikit act invoke"),
+        "the refusal carries its route: {envelope}"
+    );
+
+    // 5. From a scope that has never enabled the Method, the answer is the
+    //    same precise condition: the missing body, not the scopes — enabling
+    //    could not supply one, and the route says so wherever you stand.
+    let elsewhere = TempDir::new().unwrap();
+    write(
+        &elsewhere.path().join(".aikit/profile.toml"),
+        "schema = 1\n",
+    );
+    let (envelope, _stderr, ok) = run(
+        home.path(),
+        elsewhere.path(),
+        &["method", "run", "skill/practice/day-close", "--confirm"],
+    );
+    assert!(
+        !ok,
+        "a skill Method with no executable body refuses there too"
+    );
+    assert_eq!(
+        envelope["error"]["code"], "method.no_executable_body",
+        "{envelope}"
+    );
+    let message = envelope["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("catalogued in this context"),
+        "the condition does not pretend enablement landed: {message}"
+    );
+    assert!(
+        !message.contains("no scope enables it"),
+        "the mislabel stays dead in every scope: {message}"
     );
 }

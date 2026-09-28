@@ -8,6 +8,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::capsule::Kind;
+use crate::id::CapsuleId;
+use crate::resolve::{ResolvedView, UnavailableReason};
 use crate::resource::{
     ResolveExpression, ResourceIndex, ResourceKind, ResourceRef, SourceRef, SourceRevision,
 };
@@ -46,6 +49,81 @@ pub fn methodology_payload(description: &str) -> Option<&str> {
     let trimmed = description.trim_start();
     let rest = trimmed.strip_prefix(METHODOLOGY_DESCRIPTION_PREFIX)?;
     Some(rest.trim())
+}
+
+/// The exact condition `method run` needs and did not find: the truth a
+/// refusal must name, with the route that supplies it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MethodRunBarrier {
+    /// Stable machine-readable refusal code.
+    pub code: &'static str,
+    /// The missing condition, in the resolver's own terms.
+    pub condition: String,
+    /// The command or authoring act that supplies the missing condition.
+    pub recovery: String,
+}
+
+/// Diagnose whether `method run` can execute this Method in this context and,
+/// when it cannot, name the exact missing condition — never the catch-all.
+///
+/// The first true failure is the one named. Resolution's own withholding
+/// comes first (trust, standing, policy, retirement — each reason carries its
+/// ground). Then the one condition the native runner adds: it executes
+/// `[script]` payloads — script-kind capsules, the executable-praxis pattern
+/// the registered practices follow — and `method run` drives that same
+/// runner, never a second transport. A skill-kind Method is authored faculty,
+/// not an executable body: no scope could supply one by enabling it, so the
+/// refusal names the missing body and both of its routes (`aikit act invoke`
+/// through the agent, or authoring the `[script]` support) — never a claim
+/// that no scope enables what the scopes do enable, and equally never a false
+/// errand to enable what enabling cannot run. What `method run` deliberately
+/// does not ask is enablement: explicit invocation through the native runner
+/// has never required it (a script is runnable while inactive; activation
+/// decides ambient exposure), so a script-kind Method runs wherever it
+/// stands, subject to trust.
+///
+/// The id must be in the view's catalogue; callers refuse unknown refs before
+/// consulting the barrier.
+pub fn run_barrier(view: &ResolvedView, id: &CapsuleId) -> Option<MethodRunBarrier> {
+    let entry = view.catalog_index.get(id)?;
+    if let Some(reason) = view.unavailable_reason(id) {
+        let recovery = match reason {
+            UnavailableReason::TrustRequired => {
+                "review the revision: `aikit trust record <ref>`".to_string()
+            }
+            _ => "the reason names its own ground; resolve it there".to_string(),
+        };
+        return Some(MethodRunBarrier {
+            code: "method.withheld",
+            condition: format!(
+                "is withheld by resolution in this context: {}",
+                reason.describe()
+            ),
+            recovery,
+        });
+    }
+    if entry.kind != Kind::Script {
+        let standing = if view.is_active(id) {
+            "is enabled and active in this context, but".to_string()
+        } else {
+            "is catalogued in this context, but".to_string()
+        };
+        return Some(MethodRunBarrier {
+            code: "method.no_executable_body",
+            condition: format!(
+                "{standing} a {} Method carries no deterministic executable body — `method run` \
+                 drives the same native runner `aikit run` uses, which only a `[script]` payload \
+                 provides; enabling it could not supply one",
+                entry.kind.as_str()
+            ),
+            recovery: format!(
+                "invoke the Skill through the agent: `aikit act invoke {id}`; or give the Method \
+                 executable support: a script-kind capsule whose description carries the `METHOD:` \
+                 prefix, the executable-praxis pattern the registered practices use"
+            ),
+        });
+    }
+    None
 }
 
 /// The common classification of one Skill identity.
@@ -640,5 +718,228 @@ mod tests {
         assert!(!resolved.is_complete());
         assert_eq!(resolved.method, method.id);
         assert!(resolved.warnings[0].contains("lacks the METHOD: prefix"));
+    }
+
+    // -----------------------------------------------------------------------
+    // `run_barrier` — the enable→run seam answers with the truth.
+    //
+    // The verifier's defect: a declared, trusted, enabled, active Method
+    // refused as "no scope enables it in this context" because the runner's
+    // gate was `ResolvedView::can_run` — a palette predicate ("is this kind
+    // runnable while inactive") that is false for every skill-kind Method,
+    // whatever the scopes say. The ladder names the real condition instead.
+    // -----------------------------------------------------------------------
+
+    mod barrier {
+        use super::*;
+        use crate::catalog::MemoryCatalog;
+        use crate::context::ContextDescriptor;
+        use crate::id::RegistrySource;
+        use crate::policy::ManagedPolicy;
+        use crate::resolve::{resolve, ResolveRequest};
+        use crate::scope::{LayerOrigin, ScopeKind, ScopeLayer};
+        use crate::trust::{MemoryTrust, TrustState};
+
+        fn method_capsule(id: &str, kind: &str) -> crate::capsule::Capsule {
+            let leaf = id.rsplit('/').next().unwrap();
+            let support = match kind {
+                "script" => "\n[script]\nentry = \"payload/run.sh\"\n",
+                _ => "\n[skill]\n",
+            };
+            let src = format!(
+                r#"
+schema = 1
+id = "{id}"
+kind = "{kind}"
+name = "{leaf}"
+description = "METHOD: a bounded practice for the test field."
+{support}"#
+            );
+            let mut capsule = crate::capsule::Capsule::from_toml_str(&src).unwrap();
+            capsule.revision = Some(crate::id::Revision::from_raw("r1"));
+            capsule.source = Some(RegistrySource::new("personal"));
+            capsule
+        }
+
+        fn view_with(
+            catalog: &MemoryCatalog,
+            trust: &MemoryTrust,
+            enable: &[&str],
+        ) -> ResolvedView {
+            let mut patch = crate::profile::PoolPatch::default();
+            for id in enable {
+                patch.enable.push(CapsuleId::parse(id).unwrap());
+            }
+            resolve(
+                catalog,
+                trust,
+                &ResolveRequest {
+                    context: ContextDescriptor::for_project("/work/seam"),
+                    layers: if enable.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![ScopeLayer::new(
+                            ScopeKind::Project,
+                            LayerOrigin::new("project profile.toml"),
+                            patch,
+                        )]
+                    },
+                    policy: ManagedPolicy::default(),
+                },
+            )
+            .unwrap()
+        }
+
+        fn trusted(id: &str) -> MemoryTrust {
+            let mut trust = MemoryTrust::default();
+            trust.set(
+                RegistrySource::new("personal"),
+                CapsuleId::parse(id).unwrap(),
+                crate::id::Revision::from_raw("r1"),
+                TrustState::Trusted,
+            );
+            trust
+        }
+
+        #[test]
+        fn an_enabled_active_skill_method_names_the_missing_executable_body() {
+            let mut catalog = MemoryCatalog::default();
+            catalog.insert(method_capsule("skill/practice/day-close", "skill"));
+            let view = view_with(
+                &catalog,
+                &trusted("skill/practice/day-close"),
+                &["skill/practice/day-close"],
+            );
+
+            // The seam the verifier walked: declared, enabled, active — and
+            // still not runnable, because the capsule carries no `[script]`
+            // body. The refusal must say exactly that.
+            assert!(
+                view.is_declared_enabled(&CapsuleId::parse("skill/practice/day-close").unwrap())
+            );
+            assert!(view.is_active(&CapsuleId::parse("skill/practice/day-close").unwrap()));
+            assert!(!view.can_run(&CapsuleId::parse("skill/practice/day-close").unwrap()));
+
+            let barrier = run_barrier(
+                &view,
+                &CapsuleId::parse("skill/practice/day-close").unwrap(),
+            )
+            .expect("a skill Method without executable support refuses");
+            assert_eq!(barrier.code, "method.no_executable_body");
+            let condition = barrier.condition.as_str();
+            let recovery = barrier.recovery.as_str();
+            assert!(
+                condition.contains("enabled and active"),
+                "the condition credits the enablement that landed: {condition}"
+            );
+            assert!(
+                condition.contains("[script]"),
+                "the condition names the missing body: {condition}"
+            );
+            assert!(
+                !condition.contains("no scope enables it"),
+                "the mislabel is the defect: {condition}"
+            );
+            assert!(
+                recovery.contains("aikit act invoke"),
+                "the route names the agent invocation: {recovery}"
+            );
+        }
+
+        #[test]
+        fn an_unenabled_method_still_names_its_body_not_its_scopes() {
+            let mut catalog = MemoryCatalog::default();
+            catalog.insert(method_capsule("skill/practice/day-close", "skill"));
+            let view = view_with(&catalog, &trusted("skill/practice/day-close"), &[]);
+
+            // The Method never had a scope here — and still the refusal names
+            // the missing body, because enabling could not supply one. The
+            // body condition is the same truth wherever the Method stands.
+            let barrier = run_barrier(
+                &view,
+                &CapsuleId::parse("skill/practice/day-close").unwrap(),
+            )
+            .expect("a skill Method without executable support refuses");
+            assert_eq!(barrier.code, "method.no_executable_body");
+            let condition = barrier.condition.as_str();
+            let recovery = barrier.recovery.as_str();
+            assert!(
+                condition.contains("catalogued in this context"),
+                "the condition does not pretend enablement landed: {condition}"
+            );
+            assert!(
+                condition.contains("enabling it could not supply one"),
+                "the condition closes the false errand: {condition}"
+            );
+            assert!(
+                !condition.contains("no scope enables it"),
+                "the mislabel stays dead in every scope: {condition}"
+            );
+            assert!(
+                recovery.contains("aikit act invoke"),
+                "the route names the agent invocation: {recovery}"
+            );
+        }
+
+        #[test]
+        fn a_script_method_runs_wherever_it_stands() {
+            let mut catalog = MemoryCatalog::default();
+            catalog.insert(method_capsule("script/practice/compose", "script"));
+            let view = view_with(&catalog, &MemoryTrust::default(), &[]);
+
+            // Explicit invocation through the native runner has never asked
+            // enablement: a script is runnable while inactive, activation
+            // decides ambient exposure. Trust still gates at `--confirm`.
+            assert_eq!(
+                run_barrier(&view, &CapsuleId::parse("script/practice/compose").unwrap()),
+                None,
+                "the native runner's own contract: no enablement barrier"
+            );
+        }
+
+        #[test]
+        fn an_unreviewed_method_names_the_review_route() {
+            let mut catalog = MemoryCatalog::default();
+            catalog.insert(method_capsule("skill/practice/day-close", "skill"));
+            let view = view_with(
+                &catalog,
+                &MemoryTrust::default(),
+                &["skill/practice/day-close"],
+            );
+
+            let barrier = run_barrier(
+                &view,
+                &CapsuleId::parse("skill/practice/day-close").unwrap(),
+            )
+            .expect("an unreviewed skill Method refuses");
+            assert_eq!(barrier.code, "method.withheld");
+            let condition = barrier.condition.as_str();
+            let recovery = barrier.recovery.as_str();
+            assert!(
+                condition.contains("not been reviewed"),
+                "resolution's own withholding travels: {condition}"
+            );
+            assert!(
+                recovery.contains("aikit trust record"),
+                "the route names the review command: {recovery}"
+            );
+        }
+
+        #[test]
+        fn a_script_method_with_support_runs() {
+            let mut catalog = MemoryCatalog::default();
+            catalog.insert(method_capsule("script/practice/compose", "script"));
+            let view = view_with(
+                &catalog,
+                &MemoryTrust::default(),
+                &["script/practice/compose"],
+            );
+
+            assert_eq!(
+                run_barrier(&view, &CapsuleId::parse("script/practice/compose").unwrap()),
+                None,
+                "the registered-practice shape is exactly what method run executes"
+            );
+        }
     }
 }
