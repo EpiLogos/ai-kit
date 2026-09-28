@@ -51,6 +51,7 @@ pub mod inhabitation;
 pub mod jev_now;
 pub mod json;
 pub mod jump;
+pub mod knowledge_jev;
 pub mod model_defaults;
 pub mod model_roster;
 pub mod multicall;

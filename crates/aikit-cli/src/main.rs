@@ -3084,7 +3084,8 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
     let mut warnings = diagnostic_warnings(&service);
     let data = match command {
         KnowledgeSub::Search(a) => {
-            let result = service.knowledge_search(&a.query, a.limit)?;
+            let mut result = service.knowledge_search(&a.query, a.limit)?;
+            service.jev_rerank_result(&mut result, a.limit);
             warnings.extend(result.absences.clone());
             jval!(result)
         }
@@ -3092,7 +3093,8 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
             // One query path: a plain typed string is legitimate input and is
             // lowered into the Vāk resolver contract before resolution.
             let expression = aikit_core::resource::parse_or_search_expression(&a.query)?;
-            let resolution = service.knowledge_resolve(&expression, a.limit)?;
+            let mut resolution = service.knowledge_resolve(&expression, a.limit)?;
+            service.jev_rerank_result(&mut resolution, a.limit);
             warnings.extend(resolution.absences.clone());
             jval!(resolution)
         }

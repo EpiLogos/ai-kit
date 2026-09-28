@@ -378,6 +378,20 @@ impl Service {
         Ok(result)
     }
 
+    /// The Jev selection join over an oversized pull (`tool/search/jev-rerank`).
+    /// A no-op unless the capability is configured and the pull carries more
+    /// candidates than the surface will show; every outcome is disclosed in
+    /// the result's absences.
+    pub fn jev_rerank_result(&self, result: &mut KnowledgeSearchResult, limit: usize) {
+        if result.hits.len() <= limit {
+            return;
+        }
+        let table = self
+            .active_provider_config("tool/search/jev-rerank")
+            .map(|config| config.clone());
+        crate::knowledge_jev::maybe_rerank(table.as_ref(), result, limit);
+    }
+
     pub fn knowledge_resolve(
         &self,
         expression: &ResolveExpression,
