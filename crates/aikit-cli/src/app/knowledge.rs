@@ -20,7 +20,9 @@ use aikit_core::knowledge_navigation::ProjectAuthoredPending;
 use aikit_core::knowledge_source_pool::{
     material_for_actor, NativeSourcePoolProvider, SourceMaterial, SourcePool, SourcePoolProvider,
 };
-use aikit_core::knowledge_wiki::{parse_wiki_objects, OkfWikiBundle, WikiObject};
+use aikit_core::knowledge_wiki::{
+    parse_wiki_objects, OkfWikiBundle, WikiObject, PROJECT_WIKI_SPACE_REF_PREFIX,
+};
 use aikit_core::knowledge_wiki_index::SemanticWikiIndex;
 use aikit_core::project_map::{ProjectLens, ProjectMap, ProjectMapBinding, ProjectMapEndpoint};
 use aikit_core::repair_absence_lines;
@@ -111,6 +113,149 @@ mod gitnexus_budget_tests {
     }
 }
 
+#[cfg(test)]
+mod project_scope_tests {
+    use super::ref_belongs_to_project_scope;
+    use std::collections::BTreeMap;
+
+    fn belongs(resource: &str, display: &str) -> bool {
+        let work = BTreeMap::new();
+        let central = BTreeMap::new();
+        ref_belongs_to_project_scope(resource, display, &work, &central)
+    }
+
+    #[test]
+    fn a_clearing_drops_whole_from_a_project_scope() {
+        // The packet A incident shape: a clearing's evidence tree holding a
+        // sibling-Project state copy must not re-enter through the graph.
+        assert!(!belongs(
+            "central:source:control:root:Control/agents/now/clearings/a5cbbe83/T/evidence/disposable-held-decision/Central/Work/Factory/.factory/development-state.json",
+            "Work/O-I",
+        ));
+        assert!(!belongs(
+            "central:source:control:root:Control/agents/now/clearings/a5cbbe83/T/acceptance.json",
+            "Work/O-I",
+        ));
+    }
+
+    #[test]
+    fn a_sibling_wiki_space_names_the_sibling_and_the_root_space_passes() {
+        assert!(!belongs("central:wiki:project:Factory", "Work/O-I"));
+        assert!(belongs("central:wiki:project:O-I", "Work/O-I"));
+        // The root composition space is not a Project space: it passes.
+        assert!(belongs("central:wiki:root", "Work/O-I"));
+    }
+
+    #[test]
+    fn a_raw_path_under_another_work_tree_names_the_sibling_by_layout() {
+        assert!(!belongs(
+            "/Users/admin/Central/Work/Factory/ProjectCentral/user/capability-matrix.csv",
+            "Work/O-I",
+        ));
+        // Own-tree raw paths stay inside their Project's scope.
+        assert!(belongs(
+            "/Users/admin/Central/Work/O-I/docs/overview.md",
+            "Work/O-I",
+        ));
+        // Paths outside any Work tree pass: the root lineage is broader.
+        assert!(belongs("/Users/admin/notes/overview.md", "Work/O-I"));
+        // A segment named `Workfile` is not a Work segment.
+        assert!(belongs("/Users/admin/Workfile/x.md", "Work/O-I"));
+    }
+
+    #[test]
+    fn canonical_work_refs_keep_their_owner_rule() {
+        assert!(belongs(
+            "central:source:control:root:Work/O-I/docs/overview.md",
+            "Work/O-I",
+        ));
+        assert!(!belongs(
+            "central:source:control:root:Work/Factory/ProjectCentral/user/capability-matrix.csv",
+            "Work/O-I",
+        ));
+    }
+}
+
+/// True when an attribution map names `resource` as owned by a Project
+/// other than `display` — the check that keeps another Project's compiled
+/// objects (authored edges, folder basis, capability matrices) out of a
+/// scoped reply or graph. Unattributed refs pass: the root lineage is a
+/// distinct, legitimately broader aperture.
+fn attributed_to_other_project(
+    attribution: &BTreeMap<String, String>,
+    resource: &str,
+    display: &str,
+) -> bool {
+    attribution
+        .get(resource)
+        .is_some_and(|project| project != display)
+}
+
+/// Whether `resource` may enter a reply scoped to `display` (`Work/<name>`).
+/// Canonical Source refs retain Project ownership regardless of whether the
+/// caller reaches them through SourcePool or ProjectMap; clearings drop
+/// whole; sibling wiki spaces and sibling raw work-tree paths name the
+/// sibling by layout. The root lineage keeps every shape: this predicate is
+/// consulted only when a reply HAS a Project scope.
+fn ref_belongs_to_project_scope(
+    resource: &str,
+    display: &str,
+    work_repo_scopes: &BTreeMap<String, String>,
+    central_project_source_scopes: &BTreeMap<String, String>,
+) -> bool {
+    if resource.starts_with("source:project:") {
+        return work_repo_scopes
+            .iter()
+            .any(|(prefix, project)| resource.starts_with(prefix.as_str()) && project == display);
+    }
+    if resource.starts_with("central:source:project:") {
+        return central_project_source_scopes
+            .iter()
+            .any(|(prefix, project)| resource.starts_with(prefix.as_str()) && project == display);
+    }
+    if let Some(rest) = resource.strip_prefix("central:source:control:root:Work/") {
+        return rest
+            .split_once('/')
+            .is_some_and(|(project, _)| format!("Work/{project}") == display);
+    }
+    // Project NOW-field law (packet A): a clearing drops whole from a
+    // Project-scoped reply — it is a working horizon, never a common record.
+    // The graph and every other consumer of this predicate obey the scope
+    // the search repair established, so a clearing's evidence tree —
+    // including sibling-Project copies it holds — cannot re-enter a
+    // ProjectWorld through the graph door.
+    if resource.starts_with("central:source:control:root:Control/agents/now/clearings/") {
+        return false;
+    }
+    // Another Project's wiki space names the sibling outright; the root
+    // composition space (`central:wiki:root`) passes.
+    if let Some(project_id) = resource
+        .strip_prefix(PROJECT_WIKI_SPACE_REF_PREFIX)
+        .filter(|id| !id.is_empty() && !id.contains('/'))
+    {
+        return display
+            .strip_prefix("Work/")
+            .is_some_and(|own| project_id.eq_ignore_ascii_case(own));
+    }
+    // An unattributed raw filesystem path under another Project's work tree
+    // names the sibling by machine layout; a ProjectWorld reply discloses
+    // owned refs. Paths outside any `Work/<Project>/` segment pass.
+    if resource.starts_with('/') {
+        let own = display.strip_prefix("Work/");
+        let mut segments = resource.split('/');
+        while let Some(segment) = segments.next() {
+            if segment == "Work" {
+                if let Some(project) = segments.next() {
+                    if own.is_none_or(|name| !project.eq_ignore_ascii_case(name)) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
 /// One project's GitNexus code-index degradation: the binary was present and
 /// index-capable, but building that project's index failed. Held per project
 /// so a scoped reply carries only its own scope's line and `knowledge status`
@@ -187,6 +332,12 @@ pub(super) struct KnowledgeRuntime {
     /// → Work-relative project display, for scoped queries to keep another
     /// project's folder basis out of their results.
     folder_subject_projects: BTreeMap<String, String>,
+    /// Compiled capability-matrix object ref — or its cited carrier path —
+    /// → Work-relative project display, for scoped queries and graphs to
+    /// keep another project's matrix material out of their results. The
+    /// root composition stays unattributed: the root lineage is a distinct,
+    /// legitimately broader aperture.
+    matrix_object_projects: BTreeMap<String, String>,
     /// This invocation's own project in Work-relative display (`Work/demo`),
     /// when the invocation root sits in a Central Work project.
     current_project: Option<String>,
@@ -196,25 +347,12 @@ impl KnowledgeRuntime {
     /// Canonical Source refs retain Project ownership regardless of whether
     /// the caller reaches them through SourcePool or ProjectMap.
     fn source_belongs_to_scope(&self, resource: &str, display: &str) -> bool {
-        if resource.starts_with("source:project:") {
-            return self.work_repo_scopes.iter().any(|(prefix, project)| {
-                resource.starts_with(prefix.as_str()) && project == display
-            });
-        }
-        if resource.starts_with("central:source:project:") {
-            return self
-                .central_project_source_scopes
-                .iter()
-                .any(|(prefix, project)| {
-                    resource.starts_with(prefix.as_str()) && project == display
-                });
-        }
-        if let Some(rest) = resource.strip_prefix("central:source:control:root:Work/") {
-            return rest
-                .split_once('/')
-                .is_some_and(|(project, _)| format!("Work/{project}") == display);
-        }
-        true
+        ref_belongs_to_project_scope(
+            resource,
+            display,
+            &self.work_repo_scopes,
+            &self.central_project_source_scopes,
+        )
     }
 
     /// Flow cognition (W1.4/W1.5) reads identity and material through these
@@ -281,12 +419,23 @@ impl KnowledgeRuntime {
     fn application_with_project_scope<'a>(
         &'a self,
         context: FamiliarityContext,
-        scoped_project: Option<&str>,
+        scoped_project: Option<&'a str>,
         now_field: Option<&'a NowFieldSourcePoolProvider<SystemRunner>>,
         work_repos: Option<&'a WorkReposSourcePoolProvider<SystemRunner>>,
     ) -> KnowledgeApplication<'a> {
         let mut application =
             KnowledgeApplication::new(context).with_project_map(&self.project_map);
+        if let Some(scope) = scoped_project {
+            // Scoped replies consult the runtime's attribution at the
+            // source: sibling-owned authored citations produce neither hits
+            // nor unreadable-source absences (knowledge_navigation).
+            application = application.with_project_attribution(
+                scope,
+                &self.authored_edge_projects,
+                &self.folder_subject_projects,
+                &self.matrix_object_projects,
+            );
+        }
         if let Some(provider) = &self.wiki {
             application = application.with_wiki(provider);
         }
@@ -543,6 +692,9 @@ impl Service {
                                 resource,
                             ) || attributed_to_other_project(
                                 &runtime.folder_subject_projects,
+                                resource,
+                            ) || attributed_to_other_project(
+                                &runtime.matrix_object_projects,
                                 resource,
                             ) {
                                 return false;
@@ -923,7 +1075,7 @@ impl Service {
         let graph_key = format!("graph\x1f{max_nodes}\x1f{max_edges}\x1f{query}");
         self.with_knowledge_cached(BasisScope::Full, &graph_key, || {
             self.with_knowledge(|runtime, _| {
-                let objects: Vec<_> = runtime
+                let mut objects: Vec<_> = runtime
                     .wiki_index()
                     .map(|index| {
                         index
@@ -939,6 +1091,28 @@ impl Service {
                 {
                     material.retain(|item| {
                         runtime.source_belongs_to_scope(item.binding.source.as_str(), &display)
+                    });
+                    objects.retain(|object| {
+                        let reference = object.ref_id().as_str();
+                        // The same scope predicate the material obeys: another
+                        // Project's wiki space (or any ref naming a sibling)
+                        // stays out of a ProjectWorld's graph reply.
+                        runtime.source_belongs_to_scope(reference, &display)
+                            && !attributed_to_other_project(
+                                &runtime.authored_edge_projects,
+                                reference,
+                                &display,
+                            )
+                            && !attributed_to_other_project(
+                                &runtime.folder_subject_projects,
+                                reference,
+                                &display,
+                            )
+                            && !attributed_to_other_project(
+                                &runtime.matrix_object_projects,
+                                reference,
+                                &display,
+                            )
                     });
                 }
                 let mut hits = found.hits.clone();
@@ -1176,6 +1350,7 @@ impl Service {
         let mut project_absences = Vec::new();
         let mut authored_edge_projects = BTreeMap::new();
         let mut folder_subject_projects = BTreeMap::new();
+        let mut matrix_object_projects = BTreeMap::new();
         let central_root = self.knowledge_central_root(root);
         let mut discovered = discover_material(
             root,
@@ -1211,6 +1386,7 @@ impl Service {
             // (project spaces + the Central root composition), origin Compiled.
             let matrices = aikit_adapters::capability_matrix::compile_world_matrices(central_root);
             absences.extend(matrices.absences);
+            matrix_object_projects = matrices.object_projects;
             project_absences.extend(matrices.project_absences.into_iter().map(|absence| {
                 ProjectOwnedAbsence {
                     project: absence.project,
@@ -1696,9 +1872,8 @@ impl Service {
         // survives between CLI processes). Every GitNexus subprocess this
         // provider spawns — capability probe, index, search — now runs under
         // `gitnexus_budget()`, so one huge or hung repository is killed and
-        // disclosed rather than stalling the query; indexing itself runs in
-        // bounded parallel across projects so N repos cost roughly one
-        // budget's wall time, not N of them summed.
+        // disclosed rather than stalling the query. Reads no longer index at
+        // all; per-project admission still runs in bounded parallel.
         let code_budget = gitnexus_budget();
         let parallelism = std::thread::available_parallelism()
             .map(|n| n.get().clamp(1, MAX_GITNEXUS_PARALLELISM))
@@ -1711,13 +1886,6 @@ impl Service {
         // so a test — and an operator — pins code intelligence to a known
         // binary instead of depending on whatever the host happens to have.
         let gitnexus_binary = self.gitnexus_binary.clone();
-        // `gitnexus analyze` records each indexed repo in one global
-        // `registry.json` by an unlocked read-modify-write, and `query --repo`
-        // resolves the repo name through that registry. Two concurrent
-        // analyses can each write back their own copy, silently dropping the
-        // other repo's entry so its code never surfaces. Probes and adoption
-        // stay parallel; the registry-writing index step runs one at a time.
-        let index_lock = std::sync::Mutex::new(());
         let mut gitnexus_unavailable: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut project_sources = Vec::with_capacity(work_projects.len());
         for project in &work_projects {
@@ -1736,7 +1904,6 @@ impl Service {
                         let project = project.clone();
                         let source = source.clone();
                         let binary = gitnexus_binary.clone();
-                        let index_lock = &index_lock;
                         scope.spawn(move || {
                             let runner = SystemRunner::new()
                                 .with_cwd(&project.root)
@@ -1758,22 +1925,15 @@ impl Service {
                                 ),
                             };
                             let status = provider.status();
-                            // A query reads the existing derived index; it
-                            // never re-indexes one that exists (that made
-                            // every `knowledge` call cost minutes). Only an
-                            // unindexed project is indexed here; freshness
-                            // of an existing index is disclosed, not
-                            // re-checked (`aikit knowledge code index`).
-                            let adopted = provider.adopt_existing_index(&project.root);
-                            let index_error =
-                                if status.available && status.capabilities.index && !adopted {
-                                    let _registry = index_lock
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                    provider.index(&project.root, false).err()
-                                } else {
-                                    None
-                                };
+                            // A Knowledge read admits the owner index that
+                            // already exists and queries a private copy of
+                            // it; it never builds, rebuilds or registers one
+                            // (`aikit knowledge code index` does). A Project
+                            // without an admissible index — no index yet, or
+                            // not a Git repository — is disclosed as its own
+                            // degradation instead of being indexed here.
+                            let admission = provider.open_existing(&project.root).err();
+                            let index_error = if status.available { admission } else { None };
                             (project, provider, index_error)
                         })
                     })
@@ -1789,10 +1949,9 @@ impl Service {
             });
             for (project, provider, index_error) in outcomes {
                 if let Some(error) = index_error {
-                    // A timed-out call surfaces here exactly like any other
-                    // index failure: `error` already names the budget it
-                    // violated (`mux.command_timeout`), so the project is
-                    // disclosed as degraded, never silently dropped.
+                    // An index that cannot be admitted — absent, incomplete,
+                    // or without a recorded commit — is disclosed as this
+                    // project's degradation, never silently dropped.
                     // Per-project code state, scoped like `authored_pending`:
                     // never the global per-query absence that leaked another
                     // project's code degradation into a scoped reply.
@@ -1875,6 +2034,7 @@ impl Service {
             project_absences,
             authored_edge_projects,
             folder_subject_projects,
+            matrix_object_projects,
             current_project,
         })
     }

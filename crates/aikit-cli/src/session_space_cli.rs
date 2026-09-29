@@ -151,6 +151,12 @@ enum Command {
         #[arg(long)]
         provider_json: String,
     },
+    /// Withdraw one configured encounter provider by its exact id. Owner-only,
+    /// never IPC input. Refuses an unknown id rather than pretending.
+    EncounterDeconfigure {
+        #[arg(long)]
+        provider_id: String,
+    },
     /// Configure the installable Epi-Logos Prime-QL body over Prime RPC.
     /// Paths are resolved now; mode selection later starts nothing until the
     /// ordinary Encounter open/first-Send boundary.
@@ -426,6 +432,10 @@ fn run(cli: Cli) -> Result<()> {
                 parse_json_arg(&provider_json)?,
             )?;
             emit(&serde_json::json!({"configured":true}))
+        }
+        Command::EncounterDeconfigure { provider_id } => {
+            crate::encounter_service::EncounterService::deconfigure(service.home(), &provider_id)?;
+            emit(&serde_json::json!({"withdrawn":provider_id}))
         }
         Command::EncounterEpiPrimeConfigure { args } => {
             let EpiPrimeConfigureArgs {

@@ -946,14 +946,35 @@ fn text_score(query: &str, record: &ResourceRecord) -> Option<i64> {
             .filter_map(|key| record.descriptor.annotations.get(*key))
             .any(|value| value.to_lowercase().contains(*term))
     };
-    (!terms.is_empty()
+    if !terms.is_empty()
         && terms.iter().all(|term| {
             id.contains(term)
                 || name.contains(term)
                 || description.contains(term)
                 || annotations_match(term)
-        }))
-    .then_some(1_000 - terms.len() as i64)
+        })
+    {
+        return Some(1_000 - terms.len() as i64);
+    }
+
+    // Task-phrase fallback: a phrase that is no handle and misses the strict
+    // all-terms match still surfaces the practices and Actions that speak its
+    // significant words ("verify this implementation" finds the verification
+    // and close-out practices). Ranked below every containment match; it only
+    // ranks already-searchable descriptors, so search stays an inert reading.
+    let primary = format!("{id} {name}");
+    let mut searchable = description.clone();
+    for annotation in ["aikit.search-exports", "aikit.search-tags"] {
+        if let Some(handles) = record.descriptor.annotations.get(annotation) {
+            searchable.push(' ');
+            searchable.push_str(handles);
+        }
+    }
+    super::action_search::word_overlap_score(
+        &super::action_search::significant_terms(query),
+        &primary,
+        &searchable,
+    )
 }
 
 /// Every subject term an expression addresses, sorted and deduplicated.
@@ -1645,6 +1666,74 @@ mod tests {
             Some("script/test/cargo-nextest")
         );
         assert!(path.candidates[0].score > path.candidates[1].score);
+    }
+
+    #[test]
+    fn task_phrase_falls_back_to_significant_word_overlap() {
+        // X2: a task phrase is not a handle. Strict all-terms matching resolves
+        // to nothing; the fallback ranks the practices that speak the phrase's
+        // significant words, most shared words first.
+        let mut verification = ResourceDescriptor::new(
+            ResourceRef::parse("skill/parity/verification-closeout").unwrap(),
+            ResourceKind::Capability,
+            "verification-before-completion",
+            "Verify the implementation before claiming completion and close out with evidence",
+        );
+        verification
+            .annotations
+            .insert("aikit.search-tags".into(), "closeout,verify".into());
+        let mut orient = ResourceDescriptor::new(
+            ResourceRef::parse("skill/parity/orient").unwrap(),
+            ResourceKind::Capability,
+            "orient",
+            "Orient a session in the world and resume canonical work",
+        );
+        orient
+            .annotations
+            .insert("aikit.search-tags".into(), "start,begin".into());
+        let partial = ResourceDescriptor::new(
+            ResourceRef::parse("skill/parity/implementation-notes").unwrap(),
+            ResourceKind::Capability,
+            "implementation notes",
+            "Where the implementation lives and how it is organised",
+        );
+
+        let mut resources = MemoryResourceIndex::default();
+        resources.insert(ResourceRecord::new(verification));
+        resources.insert(ResourceRecord::new(orient));
+        resources.insert(ResourceRecord::new(partial));
+
+        let path = resolve_search("verify this implementation", &resources, 10);
+        assert_eq!(
+            path.destination().map(ResourceRef::as_str),
+            Some("skill/parity/verification-closeout"),
+            "the practice carrying both significant words leads the answer"
+        );
+        assert!(path.candidates.len() >= 2, "partial overlap still joins");
+        assert!(
+            !path
+                .candidates
+                .iter()
+                .any(|c| c.resource.as_str() == "skill/parity/orient"),
+            "records sharing no significant word stay out of the answer"
+        );
+
+        // The strict lane still outranks the fallback: an exact handle wins.
+        let exact = resolve_search("skill/parity/orient", &resources, 10);
+        assert!(exact.candidates[0].exact);
+        assert!(exact.candidates[0].score > path.candidates[0].score);
+    }
+
+    #[test]
+    fn garbage_phrase_resolves_to_an_honest_empty_path() {
+        let mut resources = MemoryResourceIndex::default();
+        resources.insert(record("skill:orient", ResourceKind::Capability));
+        let path = resolve_search("zzqx wobble flurb", &resources, 10);
+        assert!(path.candidates.is_empty());
+        assert!(path.steps.iter().all(|step| match step {
+            ResolvePathStep::Subject { candidates, .. } => candidates.is_empty(),
+            _ => true,
+        }));
     }
 
     #[test]

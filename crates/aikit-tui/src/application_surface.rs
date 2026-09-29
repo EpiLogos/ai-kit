@@ -7,6 +7,9 @@
 
 use std::collections::BTreeMap;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use aikit_core::resource::ActionStageability;
 use aikit_core::{AikitError, KnowledgeRelationView, ProjectWorldReadModel, ResourceRef, Result};
@@ -17,17 +20,18 @@ use crossterm::event::{
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use crate::application::{
-    selected_contextual_action, visible_contextual_actions, ExitIntent, Overlay, PresentationMode,
-    RelationReadModel, RelationView, TuiApplicationService, TuiRuntime, TuiState, UiAction,
-    UiEffect, WorkspaceSection,
+    selected_contextual_action, visible_contextual_actions, ComposeField, ExitIntent, Overlay,
+    PresentationMode, RelationReadModel, RelationView, TuiApplicationService, TuiRuntime, TuiState,
+    UiAction, UiEffect, WorkspaceSection,
 };
 use crate::application_service::ApplicationService;
 use crate::backend::FactoryWorkEntry;
 use crate::backend::PaletteBackend;
+use crate::conversation_surface::{ConversationCarrier, ConversationSurface};
 use crate::event::{CrosstermEvents, EventSource, PaletteEvent};
 use crate::explain_history_service::ExplainHistoryApplicationService;
 use crate::graph_layout::{self, GraphLayout, GraphLayoutRequest, GraphViewport, RelationBand};
@@ -44,6 +48,7 @@ use crate::project_world_api::ProjectWorldApplicationService;
 use crate::session_space_service::SessionSpaceApplicationProjection;
 use crate::theme::Theme;
 use crate::v2_render;
+use crate::world_entry::{self, NextStep, StepAvailability};
 use crate::PaletteOutcome;
 
 /// What [`ApplicationSurfaceController::graph_layout`] was computed from. The
@@ -76,6 +81,12 @@ pub struct ApplicationSurfaceRequest {
     /// process-global environment variables (which `nextest`'s parallel test
     /// execution makes racy).
     glyphs: Option<Glyphs>,
+    /// Explicit gateway carrier for the Conversation aperture — the same
+    /// kind of pinned injection point as `glyphs`. `None` (every real run)
+    /// resolves the well-known AIKit home socket once at construction, the
+    /// same default the CLI resolves; `Some` lets a test address an
+    /// in-process gateway endpoint deterministically.
+    conversation_carrier: Option<ConversationCarrier>,
 }
 
 impl ApplicationSurfaceRequest {
@@ -86,12 +97,22 @@ impl ApplicationSurfaceRequest {
             initial_relation_view: RelationView::List,
             initial_workspace_section: WorkspaceSection::Worlds,
             glyphs: None,
+            conversation_carrier: None,
         }
     }
 
     #[must_use]
     pub fn with_query(mut self, query: impl Into<String>) -> Self {
         self.initial_query = Some(query.into());
+        self
+    }
+
+    /// Pin the gateway carrier the Conversation aperture addresses. For tests
+    /// only; real callers leave this unset so the well-known home socket
+    /// governs.
+    #[must_use]
+    pub fn with_conversation_carrier(mut self, carrier: ConversationCarrier) -> Self {
+        self.conversation_carrier = Some(carrier);
         self
     }
 
@@ -201,7 +222,29 @@ pub struct ApplicationSurfaceController {
     /// Witness for [`Self::refresh_inspector`]'s actual `explain`/
     /// `explain_evidence` fetch.
     inspector_refreshed: u64,
+    /// The Conversation aperture over the running Agency Gateway: roster,
+    /// live subscription, compose lane and honest link state. Controller-
+    /// owned like the Graph's layout cache — a live carrier connection cannot
+    /// live in the cloned, reducer-owned `TuiState`, and nothing here is a
+    /// transcript store: the gateway's journal stays the only record, and the
+    /// pane's window is rebuilt from its cursor on every open and reconnect.
+    conversation: ConversationSurface,
+    /// Which native Agent-work lifecycle operations the backend binds, read
+    /// exactly once at construction like the glyph capability. The next-step
+    /// rows' "unavailable" reasons come from here — never from probing the
+    /// backend at render time.
+    agent_work_bindings: world_entry::AgentWorkBindings,
+    /// The composed World the containing O:I surface supplied through the
+    /// environment boundary, read exactly once at construction. `None` for
+    /// standalone AIKit: the view then operates over what is actually here.
+    composed_world: Option<world_entry::ComposedWorld>,
 }
+
+/// Which field of the §1.3 creator path the text lane is editing. The lane's
+/// in-flight text lives on the semantic state (`TuiState.compose_text_draft`)
+/// so the renderer can echo it; this alias keeps the surface's public name
+/// for the field selector.
+pub use crate::application::ComposeField as ComposeTextField;
 
 impl ApplicationSurfaceController {
     pub fn new<B: PaletteBackend>(
@@ -268,7 +311,24 @@ impl ApplicationSurfaceController {
             world_reads_refreshed: 0,
             relation_refreshed: 0,
             inspector_refreshed: 0,
+            conversation: ConversationSurface::default(),
+            agent_work_bindings: backend.agent_work_bindings(),
+            composed_world: world_entry::ComposedWorld::from_env(),
         };
+        controller
+            .conversation
+            .set_carrier(request.conversation_carrier.unwrap_or_else(|| {
+                #[cfg(unix)]
+                {
+                    aikit_store::home::AikitHome::discover()
+                        .map(|home| ConversationCarrier::for_home(&home))
+                        .unwrap_or(ConversationCarrier::Absent)
+                }
+                #[cfg(not(unix))]
+                {
+                    ConversationCarrier::Absent
+                }
+            }));
         controller.refresh_relation(backend)?;
         controller.refresh_inspector(backend)?;
         Ok(controller)
@@ -324,6 +384,13 @@ impl ApplicationSurfaceController {
         backend: &mut B,
         event: PaletteEvent,
     ) -> Result<ApplicationSurfaceStep> {
+        // The aperture rides the loop's idle tick: its subscription is polled
+        // for pushed events and reconnect attempts only here, so the event
+        // loop's own cadence governs everything this surface does. A gateway
+        // that goes away is the aperture's problem, never the loop's.
+        if event == PaletteEvent::Idle {
+            self.conversation.poll();
+        }
         match event {
             PaletteEvent::Resize(cols, rows) => {
                 self.dispatch(backend, UiAction::Resize(cols, rows))?;
@@ -360,7 +427,9 @@ impl ApplicationSurfaceController {
                 &self.semantic,
                 &self.ambient,
                 WorkspaceReading::new(world, &self.session_spaces, &self.history)
-                    .with_factory_work_entry(&self.factory_work_entry),
+                    .with_factory_work_entry(&self.factory_work_entry)
+                    .with_agent_work_bindings(self.agent_work_bindings)
+                    .with_composed_world(self.composed_world.as_ref()),
                 self.shell_glyphs,
             );
         } else {
@@ -372,6 +441,52 @@ impl ApplicationSurfaceController {
             self.draw_relations(frame);
         }
         self.draw_inspector(frame);
+        self.draw_conversation(frame);
+    }
+
+    /// The Conversation aperture, drawn over the body — everything between
+    /// the query line and the footer — the same later-in-the-frame overlay
+    /// the Relations panel draws over `panes.list`. Opening it hides the
+    /// shell content beneath rather than sharing space with it: a live
+    /// conversation is one surface, not a column beside a navigator.
+    fn draw_conversation(&self, frame: &mut ratatui::Frame) {
+        if !self.conversation.is_open() {
+            return;
+        }
+        let area = frame.area();
+        if area.width < 3 || area.height < 4 {
+            return;
+        }
+        let inner = Rect::new(
+            area.x + 1,
+            area.y + 1,
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        );
+        // The body between the query row and the footer row, exactly the rows
+        // `Layout::split` assigns to list/preview/inspector together.
+        let body = Rect {
+            y: inner.y.saturating_add(1),
+            height: inner.height.saturating_sub(2),
+            ..inner
+        };
+        if body.width == 0 || body.height == 0 {
+            return;
+        }
+        // Content rows: the bordered pane's inside.
+        let visible_rows = body.height.saturating_sub(2) as usize;
+        let (title, lines) = self.conversation.pane(self.shell_glyphs, visible_rows);
+        frame.render_widget(Clear, body);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(self.shell_glyphs.border_set())
+            .title(title);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            body,
+        );
     }
 
     /// Spec §2.1: in a wide Workspace shell the Inspector is a persistent
@@ -454,11 +569,79 @@ impl ApplicationSurfaceController {
         if self.graph_filter_editing {
             return self.handle_graph_filter_key(backend, code);
         }
+        if self.semantic.compose_text_draft.is_some() {
+            return self.handle_compose_text_key(backend, code, ctrl);
+        }
         if self.semantic.action_query.is_some() {
             return self.handle_action_key(backend, code, ctrl);
         }
         if ctrl && matches!(code, KeyCode::Char('c') | KeyCode::Char('q')) {
             return self.dispatch(backend, UiAction::Exit);
+        }
+        // The Conversation aperture claims the keys it renders for while it
+        // is open — Esc, arrows, Enter, typing — the same claim the Graph
+        // makes while it is the projection on screen. The whole-application
+        // exit above it keeps working; everything below it — the '?' help
+        // claim, the next-step and SkillSet digits, the creator lane's Enter,
+        // the ordinary navigation and query editing — would either silently
+        // mutate state the pane hides or eat characters the operator is
+        // typing into the compose lane, so it is deliberately unreachable
+        // until the aperture is closed again. This claim sits ABOVE those
+        // view-specific claims on purpose: the merge that brought the
+        // aperture and those claims together had let them jump the queue, and
+        // a typed '?' then opened help instead of reaching the message being
+        // composed.
+        if self.conversation.is_open() {
+            return self.handle_conversation_key(code, ctrl, alt);
+        }
+        // Context-aware help (?): explains what the keys and next steps do
+        // where the operator actually stands. Only claimed when the query is
+        // empty, so '?' remains an ordinary query character mid-search.
+        if code == KeyCode::Char('?')
+            && self.semantic.query.is_empty()
+            && self.semantic.overlay.is_none()
+        {
+            return self.dispatch(backend, UiAction::ShowOverlay(Overlay::Help));
+        }
+        // The next-step block owns the digit keys only where it is drawn —
+        // the resting Worlds view and Compose's Enter-work step. Everywhere
+        // else, and whenever a query is live, digits keep their ordinary
+        // meaning as query characters.
+        if world_entry::steps_active_here(&self.semantic)
+            && !self.graph_projection_active()
+            && matches!(code, KeyCode::Char('1'..='9'))
+        {
+            let KeyCode::Char(digit) = code else {
+                return Ok(());
+            };
+            return self.dispatch_next_step_key(backend, digit);
+        }
+        // §1.3 starts the creator path from the person's exact purpose, so
+        // Enter on the Compose Enter-work step opens the purpose lane rather
+        // than doing nothing about an empty composition.
+        if code == KeyCode::Enter && self.enter_opens_compose_text_lane() {
+            return self.dispatch(backend, UiAction::BeginComposeText(ComposeField::Purpose));
+        }
+        // The Praxis step's SkillSet field: digits toggle the numbered set
+        // rows while the query is empty. The row plan is the one the step
+        // detail renders, so keyboard and rendering can never disagree.
+        if self.semantic.workspace_section == WorkspaceSection::Compose
+            && self.semantic.compose_step == crate::compose_spine::ComposeStep::Praxis
+            && self.semantic.query.is_empty()
+            && self.semantic.overlay.is_none()
+            && matches!(code, KeyCode::Char('1'..='9'))
+        {
+            let KeyCode::Char(digit) = code else {
+                return Ok(());
+            };
+            let index = digit.to_digit(10).unwrap_or(0) as usize;
+            if index >= 1 {
+                if let Some(row) = self.semantic.compose_skill_set_field.get(index - 1) {
+                    let name = row.name.clone();
+                    return self.dispatch(backend, UiAction::ToggleComposeSkillSet { name });
+                }
+            }
+            return Ok(());
         }
         if code == KeyCode::Esc {
             // Esc inside an active Graph projection first unwinds the Graph's
@@ -539,6 +722,9 @@ impl ApplicationSurfaceController {
         }
         if ctrl && matches!(code, KeyCode::Char('d') | KeyCode::Char('D')) {
             return self.dispatch(backend, UiAction::RequestDoctorFix);
+        }
+        if ctrl && matches!(code, KeyCode::Char('g') | KeyCode::Char('G')) {
+            return self.toggle_conversation();
         }
         if code == KeyCode::Insert || (ctrl && code == KeyCode::Char(' ')) {
             return self.stage_selected(backend);
@@ -692,6 +878,53 @@ impl ApplicationSurfaceController {
         }
     }
 
+    /// Ctrl+G: open the Conversation aperture over the running Agency
+    /// Gateway, or close it. Opening reads the gateway's status and ecology;
+    /// a gateway that is down opens anyway and says so.
+    fn toggle_conversation(&mut self) -> Result<()> {
+        if self.conversation.is_open() {
+            self.conversation.close_aperture();
+        } else {
+            self.conversation.open_aperture();
+        }
+        Ok(())
+    }
+
+    /// Key handling while the Conversation aperture is open. Roster mode:
+    /// Up/Down choose, Enter opens, Esc closes. Open-conversation mode:
+    /// typing composes into the lane, Enter sends through the gateway's own
+    /// ingest path, Up/Down page the history, Esc returns to the roster.
+    fn handle_conversation_key(&mut self, code: KeyCode, ctrl: bool, alt: bool) -> Result<()> {
+        match code {
+            KeyCode::Esc => self.conversation.back(),
+            KeyCode::Up => {
+                if self.conversation.has_open_conversation() {
+                    self.conversation.scroll_up();
+                } else {
+                    self.conversation.select_previous();
+                }
+            }
+            KeyCode::Down => {
+                if self.conversation.has_open_conversation() {
+                    self.conversation.scroll_down();
+                } else {
+                    self.conversation.select_next();
+                }
+            }
+            KeyCode::Enter => {
+                if self.conversation.has_open_conversation() {
+                    self.conversation.submit_compose();
+                } else {
+                    self.conversation.open_selected();
+                }
+            }
+            KeyCode::Backspace if !ctrl && !alt => self.conversation.compose_pop(),
+            KeyCode::Char(character) if !ctrl && !alt => self.conversation.compose_push(character),
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn handle_mouse<B: PaletteBackend>(
         &mut self,
         backend: &mut B,
@@ -715,6 +948,32 @@ impl ApplicationSurfaceController {
         if self.semantic.presentation == PresentationMode::Workspace && row == panes.query.y {
             if let Some(section) = workspace_tab_hit(&self.semantic, panes.query.x, column) {
                 return self.dispatch(backend, UiAction::SetWorkspaceSection(section));
+            }
+        }
+
+        // Next steps: the bottom-pinned block inside the world pane (the
+        // preview pane when one exists, else the list pane carrying the
+        // compact world reading). The exact same rows the renderer draws, in
+        // the exact same rect — a click resolves to the same `UiAction` the
+        // step's digit key dispatches, and a click on a disabled step names
+        // the same reason.
+        if world_entry::steps_active_here(&self.semantic)
+            && !self.graph_projection_active()
+            && self.project_world.is_some()
+        {
+            let steps = self.current_steps();
+            let pane = panes.preview.unwrap_or(panes.list);
+            let block = world_entry::bottom_block(pane, steps.len());
+            if block.height > 0
+                && column >= block.x
+                && column < block.x.saturating_add(block.width)
+                && row >= block.y
+                && row < block.y.saturating_add(block.height)
+            {
+                let local = usize::from(row - block.y);
+                if let Some(step) = steps.get(local).cloned() {
+                    return self.take_next_step(backend, step);
+                }
             }
         }
 
@@ -856,6 +1115,117 @@ impl ApplicationSurfaceController {
             return Ok(());
         }
         self.dispatch(backend, UiAction::InvokeAction(action.action))
+    }
+
+    /// The next steps where the operator stands: the resting World view's
+    /// set, or the Compose Enter-work primary actions. A pure function of
+    /// state and already-held readings — computed for input handling and for
+    /// rendering alike, never by asking the backend.
+    #[doc(hidden)]
+    pub fn current_steps(&self) -> Vec<NextStep> {
+        let Some(world) = self.project_world.as_ref() else {
+            return Vec::new();
+        };
+        if self.semantic.workspace_section == WorkspaceSection::Compose {
+            return world_entry::enter_work_steps(
+                &self.semantic,
+                &self.factory_work_entry,
+                self.agent_work_bindings,
+            );
+        }
+        world_entry::world_next_steps(world, &self.factory_work_entry, self.agent_work_bindings)
+    }
+
+    /// The creator text lane currently capturing keystrokes, if any.
+    /// Test/diagnostic access, derived from the semantic draft.
+    #[doc(hidden)]
+    pub fn compose_text_lane(&self) -> Option<ComposeTextField> {
+        self.semantic
+            .compose_text_draft
+            .as_ref()
+            .map(|draft| draft.field)
+    }
+
+    /// Direct mutable access to the semantic state, for tests that must
+    /// plant a mid-flight draft or ladder before driving navigation.
+    #[doc(hidden)]
+    pub fn semantic_mut_for_test(&mut self) -> &mut TuiState {
+        &mut self.semantic
+    }
+
+    /// Dispatch one next step by its digit key. A ready step dispatches its
+    /// `UiAction`; a disabled step names its specific reason on the status
+    /// line — the same sentence the rendered row carries, so keyboard and
+    /// mouse act identically.
+    fn dispatch_next_step_key<B: PaletteBackend>(
+        &mut self,
+        backend: &mut B,
+        key: char,
+    ) -> Result<()> {
+        let Some(step) = self
+            .current_steps()
+            .into_iter()
+            .find(|step| step.key == key)
+        else {
+            return Ok(());
+        };
+        self.take_next_step(backend, step)
+    }
+
+    fn take_next_step<B: PaletteBackend>(&mut self, backend: &mut B, step: NextStep) -> Result<()> {
+        match world_entry::step_action(&step) {
+            Some(action) => self.dispatch(backend, action),
+            None => {
+                let StepAvailability::Disabled { reason } = &step.availability else {
+                    return Ok(());
+                };
+                self.semantic.status = Some(crate::application::UiStatus {
+                    message: format!("{} is unavailable: {reason}", step.label),
+                });
+                Ok(())
+            }
+        }
+    }
+
+    /// Whether Enter, on the current view, opens the §1.3 creator text lane
+    /// instead of the ordinary open-selected-action route: only on the
+    /// Compose Enter-work step, with an empty query and nothing modal open.
+    fn enter_opens_compose_text_lane(&self) -> bool {
+        self.semantic.presentation == PresentationMode::Workspace
+            && self.semantic.workspace_section == WorkspaceSection::Compose
+            && self.semantic.compose_step == crate::compose_spine::ComposeStep::EnterWork
+            && self.semantic.query.is_empty()
+            && self.semantic.action_query.is_none()
+            && self.semantic.overlay.is_none()
+            && self.semantic.compose_text_draft.is_none()
+            && self.project_world.is_some()
+    }
+
+    /// Key handling for the creator text lane (purpose / optional name).
+    /// The lane claims every ordinary key while it is open: characters and
+    /// backspace edit the in-flight draft — semantic state, so the pane
+    /// echoes every keystroke — Tab commits and moves between fields, Enter
+    /// commits (and continues to the name field after the purpose), Esc
+    /// abandons the edit. Ctrl+C/Ctrl+Q keep their whole-application meaning
+    /// even inside the lane.
+    fn handle_compose_text_key<B: PaletteBackend>(
+        &mut self,
+        backend: &mut B,
+        code: KeyCode,
+        ctrl: bool,
+    ) -> Result<()> {
+        if ctrl && matches!(code, KeyCode::Char('c') | KeyCode::Char('q')) {
+            return self.dispatch(backend, UiAction::Exit);
+        }
+        match code {
+            KeyCode::Esc => self.dispatch(backend, UiAction::CancelComposeDraft),
+            KeyCode::Enter | KeyCode::Tab => self.dispatch(backend, UiAction::CommitComposeDraft),
+            KeyCode::Backspace => self.dispatch(backend, UiAction::ComposeDraftBackspace),
+            KeyCode::Char(character) if !ctrl => {
+                self.dispatch(backend, UiAction::ComposeDraftChar(character))
+            }
+            _ => Ok(()),
+        }
     }
 
     fn open_selected_action<B: PaletteBackend>(&mut self, backend: &mut B) -> Result<()> {
@@ -1423,6 +1793,7 @@ pub fn event_loop<B, T, E>(
     events: &mut E,
     backend: &mut B,
     request: ApplicationSurfaceRequest,
+    orphaned: Arc<AtomicBool>,
 ) -> Result<PaletteOutcome>
 where
     B: PaletteBackend,
@@ -1435,8 +1806,15 @@ where
         .size()
         .map_err(|error| AikitError::new("tui.terminal_size_failed", format!("{error}")))?;
     controller.dispatch(backend, UiAction::Resize(size.width, size.height))?;
+    let mut dirty = true;
     loop {
-        controller.draw_terminal(terminal)?;
+        if orphaned.load(Ordering::Acquire) {
+            return Ok(PaletteOutcome::Closed);
+        }
+        if dirty {
+            controller.draw_terminal(terminal)?;
+            dirty = false;
+        }
         // Drain every event the terminal has already handed the process
         // before drawing again. Fast typing, a held key's autorepeat, or a
         // paste can queue several events ahead of this loop reading them;
@@ -1450,6 +1828,7 @@ where
             let Some(event) = events.next()? else {
                 return Ok(PaletteOutcome::Closed);
             };
+            dirty |= controller.event_dirties_frame(&event);
             match controller.handle(backend, event)? {
                 ApplicationSurfaceStep::Continue => {}
                 ApplicationSurfaceStep::Outcome(outcome) => return Ok(outcome),
@@ -1459,6 +1838,83 @@ where
             }
         }
     }
+}
+
+/// Does this event require the next frame to be redrawn? The controller's
+/// answer extends [`surface_event_dirties`] by one case: while the
+/// Conversation aperture is open, an idle tick may carry pushed stream
+/// events or a reconnect step, so idle is potentially frame-changing. A
+/// closed aperture makes idle a no-op again, exactly as before. (The
+/// aperture's port this base once awaited happened through the guidance
+/// lane's merge: `conversation` is controller-owned here now.)
+impl ApplicationSurfaceController {
+    fn event_dirties_frame(&self, event: &PaletteEvent) -> bool {
+        match event {
+            PaletteEvent::Idle => self.conversation.is_open(),
+            other => surface_event_dirties(other),
+        }
+    }
+}
+
+/// Does handling this event require the next frame to be redrawn?
+///
+/// The controller treats idle ticks and mouse motion as no-ops, so redrawing
+/// on them produces an identical frame at full render cost, over and over —
+/// the cost that kept an orphaned surface spinning at high CPU for days with
+/// nobody watching. Only events whose handling can change the frame (keys,
+/// resizes, mouse presses) mark it dirty; the classification must over-draw
+/// rather than under-draw, so a no-op key release still counts.
+fn surface_event_dirties(event: &PaletteEvent) -> bool {
+    match event {
+        PaletteEvent::Key(_) | PaletteEvent::Resize(..) => true,
+        PaletteEvent::Mouse(mouse) => {
+            matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        }
+        PaletteEvent::Idle => false,
+    }
+}
+
+/// Close the surface when this process is orphaned.
+///
+/// A surface whose session is gone — its shell or terminal emulator died —
+/// never receives another key, yet the loop would keep waiting and redrawing
+/// forever. The watchdog remembers the pid that started this process; once
+/// the operating system reparents the process, the flag rises and the loop
+/// closes through the ordinary exit path, so the terminal is restored by the
+/// same drop that handles a normal quit.
+/// The pid of this process's parent, per platform: the watchdog compares it
+/// against the value recorded at startup, and a change means the original
+/// parent died and the operating system reparented the surface.
+#[cfg(unix)]
+fn current_parent_id() -> u32 {
+    std::os::unix::process::parent_id()
+}
+
+#[cfg(windows)]
+fn current_parent_id() -> u32 {
+    std::os::windows::process::parent_id()
+}
+
+fn arm_orphan_watchdog() -> Result<Arc<AtomicBool>> {
+    let orphaned = Arc::new(AtomicBool::new(false));
+    let original_parent = current_parent_id();
+    let flag = Arc::clone(&orphaned);
+    std::thread::Builder::new()
+        .name("orphan-watchdog".into())
+        .spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(2));
+            if current_parent_id() != original_parent {
+                flag.store(true, Ordering::Release);
+                return;
+            }
+        })
+        .map_err(|error| {
+            AikitError::new(
+                "tui.watchdog_spawn_failed",
+                format!("could not start the orphan watchdog thread: {error}"),
+            )
+        })?;
+    Ok(orphaned)
 }
 
 pub fn run_on_terminal<B: PaletteBackend>(
@@ -1478,7 +1934,8 @@ pub fn run_on_terminal<B: PaletteBackend>(
     let mut terminal = Terminal::with_options(terminal_backend, options)
         .map_err(|error| AikitError::new("tui.terminal_setup_failed", format!("{error}")))?;
     let mut events = CrosstermEvents::default();
-    let outcome = event_loop(&mut terminal, &mut events, backend, request);
+    let orphaned = arm_orphan_watchdog()?;
+    let outcome = event_loop(&mut terminal, &mut events, backend, request, orphaned);
     let _ = terminal.clear();
     let _ = terminal.show_cursor();
     outcome

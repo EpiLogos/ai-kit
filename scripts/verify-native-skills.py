@@ -34,6 +34,7 @@ EXPECTED_SKILLS = {
     "skill/aikit/skillset-package-export",
 }
 EXPECTED_GUIDANCE = {
+    "guidance/aikit/development-world",
     "guidance/aikit/living-project-collaboration",
     "guidance/aikit/world-situated-agency",
 }

@@ -64,6 +64,15 @@ pub struct WorkspaceReading<'a> {
     pub session_spaces: &'a SessionSpaceRoster,
     pub history: &'a HistoryReading,
     pub factory_work_entry: &'a FactoryWorkEntry,
+    /// Which native Agent-work lifecycle operations the surface's backend
+    /// binds, read once at construction. Rendering input, like the factory
+    /// entry: it decides the next-step rows' honest availability, never by
+    /// probing anything at draw time.
+    pub agent_work_bindings: crate::world_entry::AgentWorkBindings,
+    /// The composed World the containing O:I surface supplied through the
+    /// environment boundary, parsed once at construction. `None` when this
+    /// terminal is standalone AIKit over what is actually available.
+    pub composed_world: Option<&'a crate::world_entry::ComposedWorld>,
 }
 
 impl<'a> WorkspaceReading<'a> {
@@ -80,12 +89,32 @@ impl<'a> WorkspaceReading<'a> {
             factory_work_entry: UNAVAILABLE.get_or_init(|| FactoryWorkEntry::Unavailable {
                 reason: "no Factory Commission binding supplied to this application".into(),
             }),
+            agent_work_bindings: crate::world_entry::AgentWorkBindings::none(),
+            composed_world: None,
         }
     }
 
     #[must_use]
     pub fn with_factory_work_entry(mut self, entry: &'a FactoryWorkEntry) -> Self {
         self.factory_work_entry = entry;
+        self
+    }
+
+    #[must_use]
+    pub fn with_agent_work_bindings(
+        mut self,
+        bindings: crate::world_entry::AgentWorkBindings,
+    ) -> Self {
+        self.agent_work_bindings = bindings;
+        self
+    }
+
+    #[must_use]
+    pub fn with_composed_world(
+        mut self,
+        composed: Option<&'a crate::world_entry::ComposedWorld>,
+    ) -> Self {
+        self.composed_world = composed;
         self
     }
 }
@@ -160,7 +189,11 @@ pub fn project_world_lines(
     let world = reading.world;
     match state.workspace_section {
         WorkspaceSection::Worlds => {
-            let mut lines = context_lines(world, glyphs);
+            let mut lines = match reading.composed_world {
+                Some(composed) => crate::world_entry::composed_world_lines(composed, glyphs),
+                None => Vec::new(),
+            };
+            lines.extend(context_lines(world, glyphs));
             lines.extend(live_field_lines(state.live_field.as_ref(), glyphs));
             lines
         }

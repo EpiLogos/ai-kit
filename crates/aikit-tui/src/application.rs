@@ -19,8 +19,8 @@ use aikit_core::resource::{
 };
 use aikit_core::scope::ScopeKind;
 use aikit_core::{
-    ForgetScope, KnowledgeAddress, KnowledgeContextPack, KnowledgeProviderStatus, KnowledgeReading,
-    KnowledgeRoute, KnowledgeSources, Result,
+    AikitError, ForgetScope, KnowledgeAddress, KnowledgeContextPack, KnowledgeProviderStatus,
+    KnowledgeReading, KnowledgeRoute, KnowledgeSources, Result,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -430,6 +430,80 @@ pub trait TuiApplicationService {
             ),
         })
     }
+
+    /// Submit the configured Commission through the native Factory start-work
+    /// operation. The default refuses rather than manufacturing a receipt.
+    fn start_factory_work(&mut self) -> Result<crate::backend::FactoryWorkStartReceipt> {
+        Err(AikitError::new(
+            "factory.start_work_unavailable",
+            "this application backend has no native Factory Commission binding",
+        ))
+    }
+
+    /// The SkillSet field of this boundary, read from the shared store below
+    /// the CLI/TUI split: the repertoire a person selects FIRST. A boundary
+    /// with no AIKit home discloses an empty field — the compose Praxis step
+    /// names that absence, it never invents sets.
+    fn skill_set_field(&self) -> Result<Vec<SkillSetFieldRow>> {
+        Ok(Vec::new())
+    }
+
+    /// Save the composed Agent source through Central's agent-profile save.
+    /// `skill_sets` are the selected SkillSet names — a request the owner
+    /// resolves, never activation.
+    fn save_agent_profile(
+        &mut self,
+        purpose: &str,
+        name: Option<&str>,
+        _skill_sets: &[String],
+    ) -> Result<crate::backend::AgentProfileSaveReceipt> {
+        Err(AikitError::new(
+            "agent_profile.save_not_exposed",
+            format!("no agent-profile save operation is bound for this service: purpose {purpose:?}, name {name:?} would not be saved"),
+        ))
+    }
+
+    /// Accept exactly the reviewed source (revision + digest CAS).
+    fn accept_agent_profile(
+        &mut self,
+        expected_revision: &str,
+        expected_content_digest: Option<&str>,
+    ) -> Result<crate::backend::AgentProfileAcceptReceipt> {
+        Err(AikitError::new(
+            "agent_profile.accept_not_exposed",
+            format!(
+                "no agent-profile accept operation is bound (expected revision {expected_revision}, digest {})",
+                expected_content_digest.unwrap_or("none")
+            ),
+        ))
+    }
+
+    /// The O-I world-readiness reading required before preparation.
+    fn world_readiness(&self) -> Result<crate::backend::WorldReadiness> {
+        Err(AikitError::new(
+            "world.readiness_not_exposed",
+            "no world readiness operation is bound at this application boundary",
+        ))
+    }
+
+    /// Folded `agent-session-prepare` over an accepted profile.
+    fn prepare_agent_session(
+        &mut self,
+        profile_ref: &str,
+    ) -> Result<crate::backend::AgentSessionPreparation> {
+        Err(AikitError::new(
+            "session_space.prepare_not_exposed",
+            format!("no agent-session-prepare operation is bound for {profile_ref}"),
+        ))
+    }
+
+    /// Launch the encounter for a prepared session.
+    fn start_encounter(&mut self, agent_session: &str) -> Result<crate::backend::EncounterLaunch> {
+        Err(AikitError::new(
+            "encounter.start_not_exposed",
+            format!("no encounter launch operation is bound for {agent_session}"),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -456,6 +530,134 @@ pub enum ExitIntent {
     CredentialSetup,
     /// Run the diff-first `doctor` repair flow.
     DoctorFix,
+}
+
+/// What a Compose Enter-work compound was asked to do. `SaveOnly` ends at
+/// saved — "Saved; not running" is its success message, not an error.
+/// `SaveAndStartDirect` walks every native stage in order and stops at the
+/// first failure, leaving the stage machine on that failure for an exact
+/// resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ComposeIntent {
+    SaveOnly,
+    SaveAndStartDirect,
+}
+
+/// The named stages of the native Agent-work lifecycle, in contract order
+/// (E0 operation/owner matrix #3-#8). A stage failure names its stage so a
+/// retry can resume *that stage only* — never replay earlier, already-landed
+/// stages, and never roll back accepted human source to make the flow look
+/// atomic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkStageName {
+    Save,
+    Accept,
+    Readiness,
+    Prepare,
+    Launch,
+}
+
+impl WorkStageName {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Save => "save",
+            Self::Accept => "accept",
+            Self::Readiness => "readiness",
+            Self::Prepare => "prepare",
+            Self::Launch => "launch",
+        }
+    }
+}
+
+/// Where the Agent-work lifecycle stands. The distinctions are law, carried
+/// from the desktop creator controller onto this surface: saved is not
+/// accepted; accepted is not projected; prepared is not a started provider;
+/// none of them is running. `Failed` carries the last *stable* stage it
+/// fell back to, so a resume knows exactly what stands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "stage", rename_all = "kebab-case")]
+pub enum AgentWorkStage {
+    /// Nothing authored in this composition has reached any owner yet.
+    #[default]
+    Draft,
+    /// Central holds the authored source at this revision. Not accepted.
+    Saved {
+        profile_ref: String,
+        agent_ref: String,
+        revision: String,
+    },
+    /// A human accepted exactly the reviewed source (revision + digest CAS).
+    Accepted {
+        profile_ref: String,
+        revision: String,
+        content_digest: String,
+    },
+    /// A session space was prepared. `provider_started` is carried exactly
+    /// as the owner reported it: the contract says `false` at this stage,
+    /// and `true` is recorded as the prepare stage failing the contract
+    /// rather than silently treated as a normal preparation.
+    Prepared {
+        agent_session: String,
+        space: Option<String>,
+        provider_started: bool,
+    },
+    /// The encounter launched and a live body exists.
+    Running { agent_session: String },
+    /// A stage failed. Earlier, landed stages stand exactly as they were —
+    /// `reached` preserves the last stable stage for a stage-only resume.
+    Failed {
+        failed: WorkStageName,
+        detail: String,
+        reached: Box<AgentWorkStage>,
+    },
+}
+
+impl AgentWorkStage {
+    /// The furthest stable stage this lifecycle actually reached, looking
+    /// through failures to what they fell back to.
+    pub fn stable(&self) -> &Self {
+        match self {
+            Self::Failed { reached, .. } => reached,
+            other => other,
+        }
+    }
+
+    /// One-line standing for the review surface. The wording keeps the
+    /// state distinctions visible: what stands is named, what does not is
+    /// not implied.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Draft => "draft: nothing saved yet".into(),
+            Self::Saved {
+                profile_ref,
+                revision,
+                ..
+            } => format!("saved {profile_ref} at {revision}; not accepted"),
+            Self::Accepted {
+                profile_ref,
+                revision,
+                ..
+            } => format!("accepted {profile_ref} at {revision}; not prepared"),
+            Self::Prepared {
+                agent_session,
+                provider_started,
+                ..
+            } => format!(
+                "prepared {agent_session}; provider {}",
+                if *provider_started {
+                    "started (contract violation: preparation must not start the provider)"
+                } else {
+                    "not started"
+                }
+            ),
+            Self::Running { agent_session } => format!("running {agent_session}"),
+            Self::Failed { failed, detail, .. } => {
+                format!("stage {} failed: {detail}", failed.as_str())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -519,6 +721,26 @@ pub struct GraphPresentation {
 impl GraphPresentation {
     pub const MIN_DEPTH: u8 = 1;
     pub const MAX_DEPTH: u8 = 4;
+}
+
+/// Which field of the §1.3 creator path the text lane is editing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ComposeField {
+    Purpose,
+    Name,
+}
+
+/// The creator text lane's in-flight draft: which field it is editing and
+/// the exact text typed so far. This lives on the semantic state — not as
+/// input-routing state beside the renderer — precisely so the drawn frame
+/// can echo every keystroke: a lane whose typing is invisible has the
+/// operator composing blind. `None` means no lane is capturing. Committed
+/// values land in `compose_purpose`/`compose_agent_name`; this carries only
+/// the not-yet-committed text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComposeTextDraft {
+    pub field: ComposeField,
+    pub text: String,
 }
 
 impl Default for GraphPresentation {
@@ -592,6 +814,39 @@ pub struct TuiState {
     /// interactive flow to the restored terminal; `None` is an ordinary close.
     #[serde(default)]
     pub exit_intent: Option<ExitIntent>,
+    /// The exact human purpose authored in Compose. Authored source, carried
+    /// verbatim: presentation never trims, rewrites or summarises it into a
+    /// generated field. Changing it invalidates any staged preview.
+    #[serde(default)]
+    pub compose_purpose: String,
+    /// The optional human-chosen name for the composed Agent. Absence is
+    /// normal; the owner derives identity, not the UI.
+    #[serde(default)]
+    pub compose_agent_name: String,
+    /// The SkillSet field this boundary disclosed, read through the shared
+    /// application service when Compose is entered. Empty means the boundary
+    /// disclosed no sets — a named absence in the Praxis step, never fake
+    /// rows.
+    #[serde(default)]
+    pub compose_skill_set_field: Vec<SkillSetFieldRow>,
+    /// The SkillSet names selected so far, in selection order. A set is a
+    /// request the owner resolves; selection is not activation.
+    #[serde(default)]
+    pub compose_skill_sets: Vec<String>,
+    /// Where the native Agent-work lifecycle stands (see [`AgentWorkStage`]).
+    /// Survives navigation and presentation changes: a draft and its stage
+    /// ladder are not lost because the operator looked at Work.
+    #[serde(default)]
+    pub agent_work: AgentWorkStage,
+    /// What the in-flight Enter-work compound was asked to do, while it is
+    /// in flight. `None` means no compound is mid-flight; a stage failure
+    /// clears it and the stage machine stands on the failure for a resume.
+    #[serde(default)]
+    pub compose_intent: Option<ComposeIntent>,
+    /// The creator text lane's in-flight draft, while the lane captures
+    /// keystrokes. See [`ComposeTextDraft`].
+    #[serde(default)]
+    pub compose_text_draft: Option<ComposeTextDraft>,
 }
 
 impl Default for TuiState {
@@ -622,6 +877,13 @@ impl Default for TuiState {
             model_roster: None,
             exit_requested: false,
             exit_intent: None,
+            compose_purpose: String::new(),
+            compose_agent_name: String::new(),
+            compose_skill_set_field: Vec::new(),
+            compose_skill_sets: Vec::new(),
+            agent_work: AgentWorkStage::default(),
+            compose_intent: None,
+            compose_text_draft: None,
         }
     }
 }
@@ -630,6 +892,15 @@ impl Default for TuiState {
 pub enum UiAction {
     SetQuery(String),
     SearchFinished(ResourceListReadModel),
+    /// The newest query's search could not resolve (a query that is
+    /// momentarily operative syntax, an unavailable provider). The surface
+    /// stays alive, the last good read model stands, and the reason is
+    /// named on the status line — a query failure is visible, never fatal,
+    /// and never able to overwrite a newer query's model.
+    SearchUnresolved {
+        query: String,
+        reason: String,
+    },
     Refresh(ResourceListReadModel),
     Select(ResourceRef),
     SelectNext,
@@ -715,6 +986,77 @@ pub enum UiAction {
     WorkingEnvironmentActed(WorkingEnvironmentOutcome),
     Resize(u16, u16),
     Exit,
+    /// Author the exact human purpose for the composed Agent. Authored text
+    /// is carried verbatim; it invalidates any staged preview.
+    SetComposePurpose(String),
+    /// Author the optional Agent name. Absence stays normal.
+    SetComposeAgentName(String),
+    /// Open the creator text lane on one field, clearing any prior draft.
+    BeginComposeText(ComposeField),
+    /// Type one character into the open creator text lane.
+    ComposeDraftChar(char),
+    /// Backspace one character out of the open creator text lane.
+    ComposeDraftBackspace,
+    /// Commit the open creator text lane: the purpose's commit continues to
+    /// the optional name; the name's commit closes the lane.
+    CommitComposeDraft,
+    /// Abandon the open creator text lane without committing anything.
+    CancelComposeDraft,
+    /// The SkillSet field reading arrived from the application service.
+    SkillSetsLoaded {
+        rows: Vec<SkillSetFieldRow>,
+    },
+    /// Toggle one disclosed SkillSet in the compose repertoire selection.
+    ToggleComposeSkillSet {
+        name: String,
+    },
+    /// Save the composed Agent source through the owner's profile save
+    /// operation. Ends at saved: "Saved; not running" is its success.
+    ComposeSaveAgent,
+    /// Enter Direct work from wherever the lifecycle honestly stands: save
+    /// if draft, accept if saved, prepare if accepted, launch if prepared.
+    /// The review names which stages this will run before it is dispatched.
+    ComposeStartDirectWork,
+    /// Submit the configured Commission through Factory's own owner
+    /// operation. Explicitly separate from Direct work, in both directions.
+    StartFactoryWork,
+    /// The owner accepted the save. Carries the native receipt fields.
+    AgentProfileSaved {
+        profile_ref: String,
+        agent_ref: String,
+        revision: String,
+        content_digest: Option<String>,
+    },
+    /// The owner accepted exactly the reviewed source.
+    AgentProfileAccepted {
+        profile_ref: String,
+        revision: String,
+        content_digest: String,
+    },
+    /// The world-readiness reading returned. `ready: false` is a semantic
+    /// answer with its reason and suggested action, not a transport error.
+    WorldReadinessChecked {
+        ready: bool,
+        reason: Option<String>,
+        suggested_action: Option<String>,
+    },
+    /// A session was prepared. `provider_started` is the owner's own word.
+    AgentSessionPrepared {
+        agent_session: String,
+        space: Option<String>,
+        provider_started: bool,
+    },
+    /// The encounter launched; a live body exists.
+    EncounterLaunched {
+        agent_session: String,
+        carrier: Option<String>,
+    },
+    /// A lifecycle stage failed at the owner. Earlier landed stages stand;
+    /// a retry resumes the failed stage only.
+    AgentWorkStageFailed {
+        failed: WorkStageName,
+        detail: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -745,6 +1087,40 @@ pub enum UiEffect {
         operation: WorkingEnvironmentOperation,
     },
     LoadModelRoster,
+    /// Owner-native Agent-work lifecycle effects. Each one crosses exactly
+    /// one owner operation; a failure comes back as a semantic
+    /// `AgentWorkStageFailed`, never as a surface-killing error.
+    LoadSkillSets,
+    SaveAgentProfile {
+        purpose: String,
+        name: Option<String>,
+        skill_sets: Vec<String>,
+    },
+    AcceptAgentProfile {
+        expected_revision: String,
+        expected_content_digest: Option<String>,
+    },
+    CheckWorldReadiness,
+    PrepareAgentSession {
+        profile_ref: String,
+    },
+    StartEncounter {
+        agent_session: String,
+    },
+    StartFactoryWork,
+}
+
+/// One row of the SkillSet field as the application service read it from the
+/// shared store: what a person can select as repertoire, with the projection
+/// facts the resolver itself computed. A set is a request, never activation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SkillSetFieldRow {
+    pub name: String,
+    pub provenance: String,
+    pub summary: String,
+    pub members: usize,
+    pub projected: usize,
+    pub withheld: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -770,7 +1146,13 @@ impl TuiRuntime {
         effect: UiEffect,
     ) -> Result<UiAction> {
         match effect {
-            UiEffect::Search { query } => Ok(UiAction::SearchFinished(service.search(&query)?)),
+            UiEffect::Search { query } => Ok(match service.search(&query) {
+                Ok(model) => UiAction::SearchFinished(model),
+                Err(error) => UiAction::SearchUnresolved {
+                    query,
+                    reason: error.to_string(),
+                },
+            }),
             UiEffect::ObserveResourceUse { resource } => {
                 service.observe_resource_use(&resource)?;
                 Ok(UiAction::ResourceUseObserved(resource))
@@ -801,6 +1183,94 @@ impl TuiRuntime {
             UiEffect::LoadModelRoster => Ok(UiAction::ModelRosterLoaded(
                 service.model_roster()?.map(Box::new),
             )),
+            // The lifecycle effects never fail the surface: an owner refusal
+            // or an unbound operation comes back as the semantic stage
+            // failure, so "Saved; not running" and stage-only resume stay
+            // reachable states rather than a crashed TUI.
+            UiEffect::LoadSkillSets => Ok(UiAction::SkillSetsLoaded {
+                rows: service.skill_set_field()?,
+            }),
+            UiEffect::SaveAgentProfile {
+                purpose,
+                name,
+                skill_sets,
+            } => Ok(
+                match service.save_agent_profile(&purpose, name.as_deref(), &skill_sets) {
+                    Ok(receipt) => UiAction::AgentProfileSaved {
+                        profile_ref: receipt.profile_ref,
+                        agent_ref: receipt.agent_ref,
+                        revision: receipt.revision,
+                        content_digest: receipt.content_digest,
+                    },
+                    Err(error) => UiAction::AgentWorkStageFailed {
+                        failed: WorkStageName::Save,
+                        detail: error.to_string(),
+                    },
+                },
+            ),
+            UiEffect::AcceptAgentProfile {
+                expected_revision,
+                expected_content_digest,
+            } => Ok(
+                match service
+                    .accept_agent_profile(&expected_revision, expected_content_digest.as_deref())
+                {
+                    Ok(receipt) => UiAction::AgentProfileAccepted {
+                        profile_ref: receipt.profile_ref,
+                        revision: receipt.revision,
+                        content_digest: receipt.content_digest,
+                    },
+                    Err(error) => UiAction::AgentWorkStageFailed {
+                        failed: WorkStageName::Accept,
+                        detail: error.to_string(),
+                    },
+                },
+            ),
+            UiEffect::CheckWorldReadiness => Ok(match service.world_readiness() {
+                Ok(reading) => UiAction::WorldReadinessChecked {
+                    ready: reading.ready,
+                    reason: reading.reason,
+                    suggested_action: reading.suggested_action,
+                },
+                Err(error) => UiAction::AgentWorkStageFailed {
+                    failed: WorkStageName::Readiness,
+                    detail: error.to_string(),
+                },
+            }),
+            UiEffect::PrepareAgentSession { profile_ref } => {
+                Ok(match service.prepare_agent_session(&profile_ref) {
+                    Ok(preparation) => UiAction::AgentSessionPrepared {
+                        agent_session: preparation.agent_session,
+                        space: preparation.space,
+                        provider_started: preparation.provider_started,
+                    },
+                    Err(error) => UiAction::AgentWorkStageFailed {
+                        failed: WorkStageName::Prepare,
+                        detail: error.to_string(),
+                    },
+                })
+            }
+            UiEffect::StartEncounter { agent_session } => {
+                Ok(match service.start_encounter(&agent_session) {
+                    Ok(launch) => UiAction::EncounterLaunched {
+                        agent_session: launch.agent_session,
+                        carrier: launch.carrier,
+                    },
+                    Err(error) => UiAction::AgentWorkStageFailed {
+                        failed: WorkStageName::Launch,
+                        detail: error.to_string(),
+                    },
+                })
+            }
+            UiEffect::StartFactoryWork => Ok(match service.start_factory_work() {
+                Ok(receipt) => UiAction::ActionFinished(ActionOutcome::FactoryWorkStarted {
+                    summary: receipt.summary,
+                    receipt: receipt.receipt,
+                }),
+                Err(error) => UiAction::ActionFinished(ActionOutcome::Status {
+                    summary: error.to_string(),
+                }),
+            }),
         }
     }
 
@@ -870,6 +1340,18 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             if let Some(subject) = state.selected.clone() {
                 clear_contextual_actions(&mut state);
                 effects.push(UiEffect::LoadContextualActions { subject });
+            }
+        }
+        UiAction::SearchUnresolved { query, reason } => {
+            // Newest-wins: only an outcome for the query that is currently
+            // live may touch the state. The effect runtime settles
+            // synchronously today, so this guard is structural law rather
+            // than a race patch — if resolution ever goes asynchronous, an
+            // older, slower failure must land exactly nowhere.
+            if state.query == query {
+                state.status = Some(UiStatus {
+                    message: format!("query {query:?} is not searchable yet: {reason}"),
+                });
             }
         }
         UiAction::Select(resource) => {
@@ -1036,7 +1518,15 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             }
         }
         UiAction::SetPresentation(presentation) => state.presentation = presentation,
-        UiAction::SetWorkspaceSection(section) => state.workspace_section = section,
+        UiAction::SetWorkspaceSection(section) => {
+            if section == WorkspaceSection::Compose {
+                // The Praxis step renders the real SkillSet field; load it on
+                // every explicit entry so the reading is current. A cheap
+                // bounded local read — never a provider probe.
+                effects.push(UiEffect::LoadSkillSets);
+            }
+            state.workspace_section = section;
+        }
         UiAction::NextWorkspaceSection => {
             state.workspace_section = state.workspace_section.relative(1)
         }
@@ -1274,9 +1764,294 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 });
             }
         }
+        UiAction::SetComposePurpose(purpose) => {
+            // Authored source changed: the previous preview no longer
+            // describes what this composition resolves to.
+            state.compose_purpose = purpose;
+            state.preview = None;
+        }
+        UiAction::SetComposeAgentName(name) => {
+            state.compose_agent_name = name;
+            state.preview = None;
+        }
+        UiAction::BeginComposeText(field) => {
+            state.compose_text_draft = Some(ComposeTextDraft {
+                field,
+                text: String::new(),
+            });
+        }
+        UiAction::ComposeDraftChar(character) => {
+            if let Some(draft) = state.compose_text_draft.as_mut() {
+                draft.text.push(character);
+            }
+        }
+        UiAction::ComposeDraftBackspace => {
+            if let Some(draft) = state.compose_text_draft.as_mut() {
+                draft.text.pop();
+            }
+        }
+        UiAction::CommitComposeDraft => {
+            let Some(draft) = state.compose_text_draft.take() else {
+                return TuiReduction { state, effects };
+            };
+            let committed = draft.text.trim().to_string();
+            match draft.field {
+                // Authored source changed: the previous preview no longer
+                // describes what this composition resolves to — the same
+                // semantics as the explicit Set actions.
+                ComposeField::Purpose => {
+                    state.compose_purpose = committed;
+                    state.preview = None;
+                    // The guided path continues to the optional name.
+                    state.compose_text_draft = Some(ComposeTextDraft {
+                        field: ComposeField::Name,
+                        text: String::new(),
+                    });
+                }
+                ComposeField::Name => {
+                    state.compose_agent_name = committed;
+                    state.preview = None;
+                }
+            }
+        }
+        UiAction::CancelComposeDraft => {
+            state.compose_text_draft = None;
+        }
+        UiAction::SkillSetsLoaded { rows } => {
+            state.compose_skill_set_field = rows;
+        }
+        UiAction::ToggleComposeSkillSet { name } => {
+            if state.compose_skill_sets.contains(&name) {
+                state
+                    .compose_skill_sets
+                    .retain(|selected| selected != &name);
+            } else {
+                state.compose_skill_sets.push(name);
+            }
+            // The repertoire changed: the previous preview no longer
+            // describes what this composition resolves to.
+            state.preview = None;
+        }
+        UiAction::ComposeSaveAgent => {
+            if state.compose_purpose.trim().is_empty() {
+                state.status = Some(UiStatus {
+                    message: "an exact purpose must be authored before saving".into(),
+                });
+                return TuiReduction { state, effects };
+            }
+            state.compose_intent = Some(ComposeIntent::SaveOnly);
+            effects.push(UiEffect::SaveAgentProfile {
+                purpose: state.compose_purpose.clone(),
+                name: non_empty_name(&state.compose_agent_name),
+                skill_sets: state.compose_skill_sets.clone(),
+            });
+        }
+        UiAction::ComposeStartDirectWork => {
+            if state.compose_purpose.trim().is_empty() {
+                state.status = Some(UiStatus {
+                    message: "an exact purpose must be authored before starting work".into(),
+                });
+                return TuiReduction { state, effects };
+            }
+            // Enter Direct work from wherever the lifecycle honestly stands:
+            // resume the failed stage when one failed, otherwise run the
+            // next stage after the stable one. Earlier landed stages are
+            // never replayed and never rolled back — and an already-running
+            // session is never launched twice.
+            if let AgentWorkStage::Running { agent_session } = state.agent_work.stable() {
+                if matches!(state.agent_work, AgentWorkStage::Running { .. }) {
+                    state.status = Some(UiStatus {
+                        message: format!(
+                            "Direct work is already running: {agent_session}; nothing was launched twice"
+                        ),
+                    });
+                    return TuiReduction { state, effects };
+                }
+            }
+            let purpose = state.compose_purpose.clone();
+            let name = non_empty_name(&state.compose_agent_name);
+            state.compose_intent = Some(ComposeIntent::SaveAndStartDirect);
+            effects.push(resume_stage_effect(
+                &state.agent_work,
+                purpose,
+                name,
+                state.compose_skill_sets.clone(),
+            ));
+        }
+        UiAction::StartFactoryWork => {
+            effects.push(UiEffect::StartFactoryWork);
+        }
+        UiAction::AgentProfileSaved {
+            profile_ref,
+            agent_ref,
+            revision,
+            content_digest,
+        } => {
+            state.agent_work = AgentWorkStage::Saved {
+                profile_ref: profile_ref.clone(),
+                agent_ref,
+                revision: revision.clone(),
+            };
+            match state.compose_intent {
+                Some(ComposeIntent::SaveOnly) => {
+                    state.compose_intent = None;
+                    state.status = Some(UiStatus {
+                        message: "Saved; not running".into(),
+                    });
+                }
+                Some(ComposeIntent::SaveAndStartDirect) => {
+                    effects.push(UiEffect::AcceptAgentProfile {
+                        expected_revision: revision,
+                        expected_content_digest: content_digest,
+                    });
+                }
+                None => {}
+            }
+        }
+        UiAction::AgentProfileAccepted {
+            profile_ref,
+            revision,
+            content_digest,
+        } => {
+            state.agent_work = AgentWorkStage::Accepted {
+                profile_ref: profile_ref.clone(),
+                revision: revision.clone(),
+                content_digest,
+            };
+            if state.compose_intent == Some(ComposeIntent::SaveAndStartDirect) {
+                effects.push(UiEffect::CheckWorldReadiness);
+            }
+        }
+        UiAction::WorldReadinessChecked {
+            ready,
+            reason,
+            suggested_action,
+        } => {
+            if ready {
+                if state.compose_intent == Some(ComposeIntent::SaveAndStartDirect) {
+                    if let AgentWorkStage::Accepted { profile_ref, .. } =
+                        state.agent_work.stable().clone()
+                    {
+                        effects.push(UiEffect::PrepareAgentSession { profile_ref });
+                    }
+                }
+            } else {
+                let detail = format!(
+                    "world not ready: {}{}",
+                    reason.unwrap_or_else(|| "no reason supplied".into()),
+                    suggested_action
+                        .map(|action| format!("; {action}"))
+                        .unwrap_or_default(),
+                );
+                stage_failed(&mut state, WorkStageName::Readiness, detail);
+            }
+        }
+        UiAction::AgentSessionPrepared {
+            agent_session,
+            space,
+            provider_started,
+        } => {
+            if provider_started {
+                // The preparation contract says the provider must not be
+                // started at this stage. An owner that reports otherwise has
+                // failed the stage, whatever else it returned.
+                stage_failed(
+                    &mut state,
+                    WorkStageName::Prepare,
+                    format!(
+                        "owner reported provider_started=true at preparation of {agent_session}"
+                    ),
+                );
+            } else {
+                state.agent_work = AgentWorkStage::Prepared {
+                    agent_session: agent_session.clone(),
+                    space,
+                    provider_started,
+                };
+                if state.compose_intent == Some(ComposeIntent::SaveAndStartDirect) {
+                    effects.push(UiEffect::StartEncounter { agent_session });
+                }
+            }
+        }
+        UiAction::EncounterLaunched {
+            agent_session,
+            carrier,
+        } => {
+            state.agent_work = AgentWorkStage::Running {
+                agent_session: agent_session.clone(),
+            };
+            state.compose_intent = None;
+            state.status = Some(UiStatus {
+                message: match carrier {
+                    Some(carrier) => format!("Direct work running: {agent_session} on {carrier}"),
+                    None => format!("Direct work running: {agent_session}"),
+                },
+            });
+        }
+        UiAction::AgentWorkStageFailed { failed, detail } => {
+            stage_failed(&mut state, failed, detail);
+        }
     }
 
     TuiReduction { state, effects }
+}
+
+/// The optional Agent name as the owner operation wants it: absent, not an
+/// empty string. An empty authored name is "no name", not a name of "".
+fn non_empty_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Land a stage failure: keep every earlier stage exactly as it stood,
+/// stop the compound, and name the stage and reason on the status line.
+/// Accepted human source is never rolled back to make the flow look atomic.
+fn stage_failed(state: &mut TuiState, failed: WorkStageName, detail: String) {
+    let reached = state.agent_work.stable().clone();
+    state.agent_work = AgentWorkStage::Failed {
+        failed,
+        detail: detail.clone(),
+        reached: Box::new(reached),
+    };
+    state.compose_intent = None;
+    state.status = Some(UiStatus {
+        message: format!(
+            "stage {} failed: {detail}; earlier stages stand and a retry resumes this stage only",
+            failed.as_str()
+        ),
+    });
+}
+
+/// The one effect that continues the lifecycle from `stage`'s honest
+/// position: the next unset stage for a fresh run, or exactly the failed
+/// stage for a resume. Never an earlier, already-landed stage.
+fn resume_stage_effect(
+    stage: &AgentWorkStage,
+    purpose: String,
+    name: Option<String>,
+    skill_sets: Vec<String>,
+) -> UiEffect {
+    match stage.stable() {
+        AgentWorkStage::Draft => UiEffect::SaveAgentProfile {
+            purpose,
+            name,
+            skill_sets,
+        },
+        AgentWorkStage::Saved { revision, .. } => UiEffect::AcceptAgentProfile {
+            expected_revision: revision.clone(),
+            expected_content_digest: None,
+        },
+        AgentWorkStage::Accepted { profile_ref, .. } => UiEffect::PrepareAgentSession {
+            profile_ref: profile_ref.clone(),
+        },
+        AgentWorkStage::Prepared { agent_session, .. }
+        | AgentWorkStage::Running { agent_session } => UiEffect::StartEncounter {
+            agent_session: agent_session.clone(),
+        },
+        AgentWorkStage::Failed { .. } => {
+            unreachable!("stable() never returns Failed")
+        }
+    }
 }
 
 fn request_preview(state: &mut TuiState, effects: &mut Vec<UiEffect>) {

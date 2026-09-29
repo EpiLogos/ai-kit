@@ -410,6 +410,11 @@ impl ResourceSearchIndex {
     }
 
     fn query_hits(&self, query: &str) -> Vec<ResourceSearchHit> {
+        // Task-phrase terms once for the whole field: a phrase that is no
+        // handle ("verify this implementation") still surfaces the practices
+        // and Actions that speak its significant words, ranked below every
+        // containment match. Descriptors only — search stays an inert reading.
+        let phrase_terms = super::action_search::significant_terms(query);
         let mut hits = Vec::new();
         for indexed in self.resources.values() {
             let descriptor = &indexed.record.descriptor;
@@ -448,6 +453,41 @@ impl ResourceSearchIndex {
                     for keyword in &contextual.keywords {
                         score = score.max(fuzzy_score(query, keyword));
                     }
+                }
+            }
+
+            // Task-phrase fallback, only where containment found nothing (its
+            // scores always rank below every containment match): shared
+            // significant words over the same searchable descriptor text.
+            if score.is_none() && !phrase_terms.is_empty() {
+                let primary = format!("{} {}", descriptor.name, descriptor.id);
+                let mut searchable = descriptor.description.clone();
+                for annotation in ["aikit.search-exports", "aikit.search-tags"] {
+                    if let Some(handles) = descriptor.annotations.get(annotation) {
+                        searchable.push(' ');
+                        searchable.push_str(handles);
+                    }
+                }
+                if descriptor.kind == ResourceKind::Action {
+                    for contextual in self
+                        .actions
+                        .values()
+                        .filter(|action| action.action == descriptor.id)
+                    {
+                        searchable.push(' ');
+                        searchable.push_str(&contextual.label);
+                        searchable.push(' ');
+                        searchable.push_str(&contextual.description);
+                        for keyword in &contextual.keywords {
+                            searchable.push(' ');
+                            searchable.push_str(keyword);
+                        }
+                    }
+                }
+                if let Some(overlap) =
+                    super::action_search::word_overlap_score(&phrase_terms, &primary, &searchable)
+                {
+                    score = Some(overlap);
                 }
             }
 

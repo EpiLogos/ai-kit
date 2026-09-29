@@ -694,7 +694,7 @@ fn a_source_with_no_valid_skills_refuses_naming_every_rejection() {
 }
 
 #[test]
-fn control_ground_sources_still_refuse_the_whole_sync_at_an_invalid_skill() {
+fn control_ground_sources_reject_an_invalid_skill_and_keep_the_valid_ones() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("aikit-home");
     let source = temp.path().join("strict-ground");
@@ -714,12 +714,62 @@ fn control_ground_sources_still_refuse_the_whole_sync_at_an_invalid_skill() {
             "--control-ground",
         ],
     );
-    let failed = aikit_failure(&home, &cwd, &["source", "sync", "strict"]);
-    assert_eq!(failed["error"]["code"], "skill.invalid");
+
+    // One broken skill must not silence the whole ground: the sync carries
+    // the valid remainder and names the rejection loudly in the reply's
+    // warnings (2026-09-28 owner correction — a frontmatter-less skill
+    // blocked every personal skill from projecting for days).
+    let synced = aikit(&home, &cwd, &["source", "sync", "strict"]);
+    assert_eq!(
+        data(&synced)["skills"],
+        1,
+        "the valid skill must still make the ground snapshot"
+    );
+    let rejected = data(&synced)["rejected"]
+        .as_array()
+        .expect("the sync reply names the rejections");
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0]["path"], "broken");
+    assert_eq!(rejected[0]["code"], "skill.invalid");
+    assert!(
+        synced.to_string().contains("NOT projected"),
+        "the reply warns that the rejected skill is not projected: {synced}"
+    );
+
+    let promoted = aikit(&home, &cwd, &["source", "promote", "strict", "--trust"]);
+    assert_eq!(data(&promoted)["skills"], 1);
+}
+
+#[test]
+fn control_ground_source_with_no_valid_skills_still_refuses() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("aikit-home");
+    let source = temp.path().join("empty-ground");
+    let cwd = temp.path().join("project");
+    fs::create_dir_all(&cwd).unwrap();
+    broken_skill(&source.join("broken-one"), "no frontmatter");
+    broken_skill(&source.join("broken-two"), "still no frontmatter");
+
+    aikit(
+        &home,
+        &cwd,
+        &[
+            "source",
+            "add-directory",
+            "empty-ground",
+            source.to_str().unwrap(),
+            "--control-ground",
+        ],
+    );
+
+    // Authored ground that validates nothing is a real defect: with zero
+    // valid skills the sync refuses, naming every rejection.
+    let failed = aikit_failure(&home, &cwd, &["source", "sync", "empty-ground"]);
+    assert_eq!(failed["error"]["code"], "source.no_skills");
     let rendered = serde_json::to_string(&failed).unwrap();
     assert!(
-        rendered.contains("broken"),
-        "the refusal names the offending skill: {rendered}"
+        rendered.contains("broken-one") && rendered.contains("broken-two"),
+        "the refusal names every rejected skill: {rendered}"
     );
 }
 

@@ -191,10 +191,105 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
     // not delegating the decision.
     let json_mode = cli.json;
     match cli.command {
+        // -- Everyday heads ------------------------------------------------
+        Some(Command::World(group)) => match group.command {
+            WorldGroupCommand::Project(c) => cmd_project(cwd, c),
+            WorldGroupCommand::Status(a) => cmd_status(cwd, a, json_mode),
+            WorldGroupCommand::Context(c) => cmd_context(cwd, c),
+            WorldGroupCommand::DevelopmentField(a) => cmd_development_field(cwd, a),
+            WorldGroupCommand::A2a(a) => cmd_a2a(cwd, a),
+            WorldGroupCommand::NowContext(c) => cmd_now_context(cwd, c),
+            WorldGroupCommand::Whoami(a) => cmd_whoami(cwd, a, json_mode),
+            WorldGroupCommand::Refocus(a) => cmd_refocus(cwd, a, json_mode),
+            WorldGroupCommand::Inhabit(a) => cmd_inhabit(cwd, a, json_mode),
+        },
+        Some(Command::Search(a)) => cmd_search(cwd, a),
+        Some(Command::Act(a)) => cmd_act(cwd, a, json_mode),
+        Some(Command::Compose(a)) => match a.command {
+            None => cmd_compose(cwd, a),
+            Some(ComposeGroupCommand::Plan(_)) => cmd_compose(cwd, compose_plan_args()),
+            Some(ComposeGroupCommand::Profile(c)) => cmd_profile(cwd, c),
+            Some(ComposeGroupCommand::Diff(_)) => cmd_diff(cwd),
+            Some(ComposeGroupCommand::Enable(a)) => cmd_toggle(cwd, a, true),
+            Some(ComposeGroupCommand::Disable(a)) => cmd_toggle(cwd, a, false),
+            Some(ComposeGroupCommand::Use(a)) => cmd_use(cwd, a),
+            Some(ComposeGroupCommand::Apply(a)) => cmd_apply(cwd, a),
+            Some(ComposeGroupCommand::Rollback(_)) => cmd_rollback(cwd),
+            Some(ComposeGroupCommand::Alias(c)) => cmd_alias(cwd, c, json_mode),
+            Some(ComposeGroupCommand::Model(m)) => match m.command {
+                ComposeModelCommand::Resolve(a) => cmd_model_resolve(cwd, a),
+                ComposeModelCommand::Catalogue(c) => match c.command {
+                    ComposeModelCatalogueCommand::Show(a) => cmd_model_catalogue(
+                        cwd,
+                        ModelCatalogueCmd {
+                            command: ModelCatalogueSub::Show(a),
+                        },
+                    ),
+                },
+            },
+        },
+        Some(Command::Work(group)) => match group.command {
+            WorkGroupCommand::Continuity(c) => cmd_continuity(cwd, c),
+            WorkGroupCommand::Session(c) => cmd_session(cwd, c),
+            // The folded SessionSpace owner surface: identical forwarding to
+            // the `session-space` root spelling, down to the `-C` handling.
+            WorkGroupCommand::Space { args } => forward_session_space(cwd, args),
+            WorkGroupCommand::Client(client) => match client.command {
+                ClientWorkCommand::Launch(a) => cmd_client(
+                    cwd,
+                    ClientCmd {
+                        command: ClientSub::Launch(a),
+                    },
+                ),
+            },
+            WorkGroupCommand::Task(c) => cmd_task(cwd, c),
+            WorkGroupCommand::Jobs(_) => cmd_jobs(cwd),
+            WorkGroupCommand::Harness(c) => cmd_harness(cwd, c, json_mode),
+            WorkGroupCommand::Factory(c) => cmd_factory(c),
+        },
+        Some(Command::Knowledge(c)) => cmd_knowledge(cwd, c),
+        Some(Command::Praxis(a)) => cmd_praxis(cwd, a),
+        Some(Command::History(a)) => cmd_history(cwd, a),
+        Some(Command::System(a)) => match a.command {
+            None => cmd_system(cwd),
+            Some(SystemGroupCommand::Source(c)) => cmd_source(cwd, c),
+            Some(SystemGroupCommand::Init(a)) => cmd_init(cwd, a),
+            Some(SystemGroupCommand::Collate(a)) => cmd_collate(cwd, a),
+            Some(SystemGroupCommand::Adopt(a)) => cmd_adopt(cwd, a),
+            Some(SystemGroupCommand::Procedure(c)) => cmd_procedure(cwd, c),
+            Some(SystemGroupCommand::HarnessProfile(c)) => cmd_harness_profile(cwd, c),
+            Some(SystemGroupCommand::Worktree(c)) => cmd_worktree(cwd, c),
+            Some(SystemGroupCommand::ConfigContribution(_)) => Ok(Reply::RawJson(
+                aikit_cli::config_plane::contribution_document(cwd),
+            )),
+            Some(SystemGroupCommand::Config(c)) => {
+                match aikit_cli::config_plane::dispatch(cwd, c) {
+                    Ok(document) => Ok(Reply::RawJsonWithStatus(document, json::EXIT_OK)),
+                    Err(failure) => Ok(Reply::RawJsonWithStatus(failure.doc, failure.exit)),
+                }
+            }
+            Some(SystemGroupCommand::Doctor(a)) => cmd_doctor(cwd, a),
+            Some(SystemGroupCommand::Credential(c)) => cmd_credential(cwd, c, json_mode),
+            Some(SystemGroupCommand::Bypass(c)) => cmd_bypass(cwd, c),
+            Some(SystemGroupCommand::Client(c)) => cmd_client(cwd, c),
+            Some(SystemGroupCommand::Mux(c)) => cmd_mux(cwd, c),
+            Some(SystemGroupCommand::Hook(c)) => cmd_hook(cwd, c, json_mode),
+            Some(SystemGroupCommand::ModelCatalogue(a)) => cmd_model_catalogue(cwd, a),
+            Some(SystemGroupCommand::Trust(a)) => cmd_trust(cwd, a),
+            Some(SystemGroupCommand::Gateway(c)) => cmd_gateway(c),
+            Some(SystemGroupCommand::Shell(c)) => cmd_shell(c),
+            Some(SystemGroupCommand::Generations(c)) => match c.command {
+                SystemGenerationsCommand::Prune(a) => cmd_prune(cwd, a),
+            },
+            Some(SystemGroupCommand::Commands(_)) => cmd_system_commands(),
+        },
+        Some(Command::Explain(a)) => cmd_explain(cwd, a),
+        Some(Command::Ui(a)) => open_surface(cwd, a.query, a.fullscreen, a.tree),
+
+        // -- Compatibility spellings and the remaining roots ---------------
         Some(Command::Source(c)) => cmd_source(cwd, c),
         Some(Command::Skill(c)) => cmd_skill(cwd, c),
         Some(Command::Project(c)) => cmd_project(cwd, c),
-        None => open_palette(cwd, None, false),
         Some(Command::Init(a)) => cmd_init(cwd, a),
         Some(Command::Collate(a)) => cmd_collate(cwd, a),
         Some(Command::Adopt(a)) => cmd_adopt(cwd, a),
@@ -204,15 +299,14 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Z(a)) => cmd_z(cwd, a, json_mode),
         Some(Command::Set(c)) => cmd_set(cwd, c),
         Some(Command::Tree(a)) => cmd_tree(cwd, a, json_mode),
-        Some(Command::Ui(a)) => open_surface(cwd, a.query, a.fullscreen, a.tree),
 
-        Some(Command::Search(a)) => cmd_search(cwd, a),
         Some(Command::DevelopmentField(a)) => cmd_development_field(cwd, a),
         Some(Command::Worktree(c)) => cmd_worktree(cwd, c),
-        Some(Command::Knowledge(c)) => cmd_knowledge(cwd, c),
         Some(Command::Flow(c)) => cmd_flow(cwd, c),
         Some(Command::Method(a)) => cmd_method(cwd, a),
-        Some(Command::Praxis(a)) => cmd_praxis(cwd, a),
+        Some(Command::Family(_a)) => cmd_family(cwd),
+        Some(Command::Jobs(_a)) => cmd_jobs(cwd),
+        Some(Command::Harness(c)) => cmd_harness(cwd, c, json_mode),
         Some(Command::A2a(a)) => cmd_a2a(cwd, a),
         Some(Command::Routine(c)) => cmd_routine(c),
         Some(Command::Jev(c)) => cmd_jev(c),
@@ -233,8 +327,6 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
             exit_code: json::EXIT_OK,
         }),
         Some(Command::Status(a)) => cmd_status(cwd, a, json_mode),
-        Some(Command::System(_)) => cmd_system(cwd),
-        Some(Command::Family(_)) => cmd_family(cwd),
         Some(Command::ConfigContribution(_)) => Ok(Reply::RawJson(
             aikit_cli::config_plane::contribution_document(cwd),
         )),
@@ -242,8 +334,6 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
             Ok(document) => Ok(Reply::RawJsonWithStatus(document, json::EXIT_OK)),
             Err(failure) => Ok(Reply::RawJsonWithStatus(failure.doc, failure.exit)),
         },
-        Some(Command::Explain(a)) => cmd_explain(cwd, a),
-        Some(Command::History(a)) => cmd_history(cwd, a),
         Some(Command::Run(a)) => cmd_run(cwd, a),
         Some(Command::Enable(a)) => cmd_toggle(cwd, a, true),
         Some(Command::Disable(a)) => cmd_toggle(cwd, a, false),
@@ -267,16 +357,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         // so the resolved `cwd` is forwarded as `-C` to keep both invocations
         // identical (when no `--cwd` was given, `cwd` is the process directory
         // the folded surface would default to anyway).
-        Some(Command::SessionSpace { args }) => {
-            let mut argv: Vec<std::ffi::OsString> = vec![
-                "aikit-session-space".into(),
-                "-C".into(),
-                cwd.as_os_str().to_os_string(),
-            ];
-            argv.extend(args);
-            std::process::exit(aikit_cli::session_space_cli::run_from_args(argv));
-        }
-        Some(Command::Compose(a)) => cmd_compose(cwd, a),
+        Some(Command::SessionSpace { args }) => forward_session_space(cwd, args),
         Some(Command::ModelResolve(a)) => cmd_model_resolve(cwd, a),
         Some(Command::ModelCatalogue(a)) => cmd_model_catalogue(cwd, a),
         Some(Command::Promote(a)) => cmd_promote(cwd, a),
@@ -290,10 +371,8 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Failures(a)) => cmd_failures(cwd, a.limit),
         Some(Command::Stats(_)) => cmd_stats(cwd),
         Some(Command::Unused(_)) => cmd_unused(cwd),
-        Some(Command::Jobs(_)) => cmd_jobs(cwd),
         Some(Command::Log(c)) => cmd_log(cwd, c),
         Some(Command::Client(c)) => cmd_client(cwd, c),
-        Some(Command::Harness(c)) => cmd_harness(cwd, c, json_mode),
         Some(Command::Alias(c)) => cmd_alias(cwd, c, json_mode),
         Some(Command::Mux(c)) => cmd_mux(cwd, c),
         Some(Command::Shell(c)) => cmd_shell(c),
@@ -301,7 +380,144 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Whoami(a)) => cmd_whoami(cwd, a, json_mode),
         Some(Command::Refocus(a)) => cmd_refocus(cwd, a, json_mode),
         Some(Command::Inhabit(a)) => cmd_inhabit(cwd, a, json_mode),
+        // Bare `aikit`: the palette in an interactive terminal; bounded
+        // noninteractive orientation otherwise (never a raw-mode attempt, never
+        // stdin consumption, never durable-state mutation).
+        None => bare_invocation(cwd, json_mode),
     }
+}
+
+/// The folded SessionSpace forward shared by `session-space` and `work space`.
+fn forward_session_space(cwd: &std::path::Path, args: Vec<std::ffi::OsString>) -> ! {
+    let mut argv: Vec<std::ffi::OsString> = vec![
+        "aikit-session-space".into(),
+        "-C".into(),
+        cwd.as_os_str().to_os_string(),
+    ];
+    argv.extend(args);
+    std::process::exit(aikit_cli::session_space_cli::run_from_args(argv));
+}
+
+/// The exact flags bare `compose` starts from, used by `compose plan`: the
+/// launch-plan computation with no realisation and no admission source.
+fn compose_plan_args() -> ComposeArgs {
+    ComposeArgs {
+        agency_source: None,
+        agent: None,
+        world: None,
+        realise: false,
+        resident_target: None,
+        model: None,
+        provider: None,
+        use_type: "compose".into(),
+        ranking_policy: None,
+        command: None,
+    }
+}
+
+/// Bare `aikit`, with no subcommand.
+///
+/// Three bounded behaviours, in order:
+/// * `--json`: one structured orientation reading over the existing
+///   inhabitation join (whoami's machinery). Degraded or absent facets are
+///   named, never collapsed; nothing is published, prepared or launched.
+/// * an interactive terminal: the palette, exactly as before.
+/// * otherwise (pipes, scripts, CI): bounded noninteractive orientation text,
+///   exit 0. No raw mode, no stdin consumption, no state change.
+fn bare_invocation(cwd: &std::path::Path, json_mode: bool) -> Result<Reply> {
+    use std::io::IsTerminal as _;
+    if json_mode {
+        return orientation_reading(cwd);
+    }
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        return open_palette(cwd, None, false);
+    }
+    Ok(Reply::Text(orientation_text(cwd)?))
+}
+
+/// The bounded noninteractive orientation: where am I (the inhabitation
+/// reading, degraded facets named), what to reach for next, and the route to
+/// the complete reference.
+fn orientation_text(cwd: &std::path::Path) -> Result<String> {
+    let reading = inhabitation_orientation(cwd)?;
+    let mut text = String::new();
+    text.push_str("AIKit — orient in your World, find what applies, and act on it.\n\n");
+    text.push_str(&aikit_cli::inhabitation::render_text(&reading));
+    text.push_str("\n\nNext steps:\n");
+    text.push_str("  aikit world status       the effective context reading\n");
+    text.push_str("  aikit search <text>      find a capability, Skill or resource\n");
+    text.push_str("  aikit act                what can be done to the current subject\n");
+    text.push_str("  aikit act describe <ref> the exact contract before you invoke\n");
+    text.push_str("  aikit help               the command surface\n");
+    text.push_str("  aikit system commands --json\n");
+    text.push_str("                           the complete generated command reference\n");
+    Ok(text)
+}
+
+/// The bounded structured orientation reading (`aikit --json` bare): the
+/// compact inhabitation reading — world/project/work/purpose/NOW where known —
+/// plus the named degradations and the next-action routes. Read-only.
+fn orientation_reading(cwd: &std::path::Path) -> Result<Reply> {
+    let reading = inhabitation_orientation(cwd)?;
+    // Degraded facets, named not collapsed: everything that did not answer at
+    // full standing, so an empty `degraded` genuinely means nothing was missing.
+    let degraded: Vec<String> = reading
+        .facets
+        .states()
+        .into_iter()
+        .filter(|(_, state)| *state != aikit_core::inhabitation::FacetState::Present)
+        .map(|(name, state)| format!("{name}: {}", state.as_str()))
+        .collect();
+    let data = jval!({
+        "schema": "aikit.orientation-reading/v1",
+        "interactive": false,
+        "reading": reading.compact(),
+        "degraded": degraded,
+        "next": [
+            "aikit world status",
+            "aikit search <text>",
+            "aikit act",
+            "aikit act describe <ref>",
+            "aikit system commands --json",
+        ],
+    });
+    Ok(Reply::Data {
+        context: EnvelopeContext {
+            context_id: None,
+            session_id: None,
+            project_root: None,
+        },
+        data,
+        warnings: vec![],
+        exit_code: json::EXIT_OK,
+    })
+}
+
+/// The inhabitation join behind both bare orientations, without publication.
+fn inhabitation_orientation(
+    cwd: &std::path::Path,
+) -> Result<aikit_core::inhabitation::InhabitationReading> {
+    use aikit_core::inhabitation::ReadingDepth;
+    let runner = aikit_adapters::runner::SystemRunner::new();
+    let owners = aikit_cli::inhabitation::Owners::new(
+        &runner,
+        aikit_cli::inhabitation::OwnerBins::from_env(),
+        whoami_owners_root(cwd),
+        aikit_core::probe::probe_budget(),
+        std::time::Duration::from_secs(90),
+    );
+    let input =
+        aikit_cli::inhabitation::JoinInput::from_process(cwd.to_path_buf(), ReadingDepth::Standard);
+    let home = AikitHome::discover().ok();
+    let joined = aikit_cli::inhabitation::join(
+        &owners,
+        &input,
+        &aikit_cli::inhabitation::AikitReads {
+            home: home.as_ref(),
+            ..aikit_cli::inhabitation::AikitReads::default()
+        },
+    );
+    Ok(joined.reading)
 }
 
 fn cmd_inhabit(cwd: &std::path::Path, args: InhabitArgs, json_mode: bool) -> Result<Reply> {
@@ -1176,7 +1392,56 @@ fn read_body_file(path: &std::path::Path) -> Result<String> {
 /// Gateway commands address an external service, so they carry no resolved
 /// context — the envelope context stays empty rather than pretending a scope.
 /// Carriers default to the well-known home endpoint (`gateway_ops`).
+///
+/// `--at WORKCELL_REF` is one routing fact for the whole invocation: the
+/// flattened carriers are replaced with the endpoint declared for that remote
+/// Workcell, and the reply discloses that it came from there. Nothing hides.
 fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
+    let mut command = command;
+    let at = command.at.clone();
+    if let Some(reference) = &at {
+        if !aikit_cli::gateway_ops::takes_carrier(&command.command) {
+            return Err(AikitError::new(
+                "cli.usage",
+                format!(
+                    "--at {reference} routes a gateway-carrier verb (status, who, send, inbox, \
+                     conversation, delegate, forward, agent, protocol, discover, ecology, \
+                     snapshot) through the endpoint declared for that Workcell; this verb names \
+                     no gateway carrier, so nothing was routed"
+                ),
+            ));
+        }
+        let home = AikitHome::discover()?;
+        let carrier = aikit_cli::gateway_ops::at_carrier(&home, reference)?;
+        aikit_cli::gateway_ops::override_carriers(&mut command, carrier);
+    }
+    let reply = cmd_gateway_dispatch(command)?;
+    Ok(match at {
+        Some(reference) => disclose_at(reply, &reference),
+        None => reply,
+    })
+}
+
+/// The disclosure that keeps `--at` honest: the envelope says the answer came
+/// from the declared remote, and a population reading records it in-band.
+fn disclose_at(mut reply: Reply, reference: &str) -> Reply {
+    if let Reply::Data { warnings, data, .. } = &mut reply {
+        warnings.push(format!(
+            "routed via {reference}: this answer came from the gateway declared for {reference}, \
+             not this home's own"
+        ));
+        if data.get("schema")
+            == Some(&serde_json::Value::from(
+                aikit_cli::gateway_contact::POPULATION_READING_SCHEMA,
+            ))
+        {
+            data["answered_by"] = serde_json::json!({ "declared_for": reference });
+        }
+    }
+    reply
+}
+
+fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
     use aikit_adapters::GatewayTickLoop;
     use aikit_cli::routine_cli::{gateway_tick, production_dispatcher, GatewayDispatcherTick};
     let home = AikitHome::discover()?;
@@ -1251,10 +1516,37 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
                     },
                 ));
+            // The connectors file names what this service runs. Building the
+            // factories here is the startup gate: an unknown implementation or
+            // an unusable token location stops the service before any carrier
+            // binds, naming the connector. The same file names agent-backed
+            // conversations: the turn sources resolve here too, so a declared
+            // harness that no encounter provider answers stops the service
+            // before it can accept conversations it could never respond to.
+            let connectors = aikit_cli::gateway_connectors::connector_factories(&home)?;
+            let conversation = aikit_cli::gateway_connectors::conversation_turn_resolver(&home)?;
+            // Coexistence: read the policy, observe the machine, disclose the
+            // decision before any carrier binds, and gate connector starts
+            // when the exclusive policy holds against a detected foreign
+            // harness gateway. Inspection only — no foreign service is
+            // touched.
+            let coexistence = aikit_cli::gateway_ops::serve_coexistence(&home)?;
+            for line in &coexistence.lines {
+                eprintln!("gateway coexistence: {line}");
+            }
             aikit_adapters::run_gateway_service_with_hooks(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
-                aikit_adapters::GatewayServiceHooks { ticks, occupancy },
+                aikit_adapters::GatewayServiceHooks {
+                    ticks,
+                    occupancy,
+                    connectors,
+                    conversation: Some(aikit_adapters::GatewayConversationHooks {
+                        turn_sources: Some(conversation),
+                        policy: None,
+                    }),
+                    coexistence: coexistence.gate,
+                },
             )?;
             Ok(Reply::Text("gateway service stopped cleanly".into()))
         }
@@ -1331,14 +1623,17 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                     reply_to: a.reply_to,
                     from_position: a.from_position.as_deref(),
                     project_world: a.project_world.as_deref(),
+                    instance: a.instance.as_deref(),
+                    require_workcell: a.require_workcell.as_deref(),
                 },
             )?)
         }
         GatewaySub::Inbox(a) => {
-            let (owners, gateway, _) = contact_seams(&home, &a.carrier)?;
+            let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
             gateway_data(aikit_cli::gateway_contact::inbox(
                 &owners,
                 &gateway,
+                &cwd,
                 a.position.as_deref(),
                 a.ack,
             )?)
@@ -1394,6 +1689,66 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 aikit_cli::gateway_contact::remote_remove(&home, &workcell)?
             }
         }),
+        GatewaySub::Connector(c) => {
+            match aikit_cli::gateway_connectors::connector_command(&home, c)? {
+                aikit_cli::gateway_connectors::ConnectorOutput::Text(text) => Ok(Reply::Text(text)),
+                aikit_cli::gateway_connectors::ConnectorOutput::Data(data) => gateway_data(data),
+            }
+        }
+        GatewaySub::Agent(a) => {
+            let operation = aikit_cli::gateway_ops::conversation_operation(&a)?;
+            let target = aikit_cli::gateway_ops::carrier_target(&home, &a.carrier)?;
+            let command = aikit_adapters::GatewayCommand::Conversation {
+                binding_ref: aikit_core::resource::ResourceRef::parse(&a.binding_ref).map_err(
+                    |error| {
+                        AikitError::new(
+                            "cli.gateway_binding_ref_invalid",
+                            format!("parse binding ref {}: {error}", a.binding_ref),
+                        )
+                    },
+                )?,
+                operation,
+            };
+            let response =
+                aikit_adapters::gateway_command(&target, command, None).map_err(|error| {
+                    aikit_cli::gateway_ops::unreachable_hint(&error).unwrap_or(error)
+                })?;
+            let data = serde_json::to_value(&response).map_err(|error| {
+                AikitError::new(
+                    "cli.gateway_response_encode",
+                    format!("encode gateway response: {error}"),
+                )
+            })?;
+            Ok(Reply::Data {
+                context: EnvelopeContext {
+                    context_id: None,
+                    session_id: None,
+                    project_root: None,
+                },
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
+        GatewaySub::Coexistence(a) => {
+            match aikit_cli::gateway_ops::coexistence_command(&home, &a)? {
+                aikit_cli::gateway_ops::CoexistenceOutput::Text(text) => Ok(Reply::Text(text)),
+                aikit_cli::gateway_ops::CoexistenceOutput::Data(data) => gateway_data(data),
+            }
+        }
+        GatewaySub::Hoist(a) => gateway_data(aikit_cli::gateway_hoist::hoist_command(
+            &home,
+            &aikit_cli::gateway_hoist::HoistArgs {
+                to: a.to.clone(),
+                apply: a.apply,
+                receive: a.receive,
+                force: a.force,
+                yes: a.yes,
+                ssh: a.ssh.clone(),
+                include_tokens: a.include_tokens,
+                gateway_ref: a.gateway_ref.clone(),
+            },
+        )?),
         query => {
             let command = match query {
                 GatewaySub::Protocol(_) => aikit_adapters::GatewayCommand::Protocol,
@@ -1411,7 +1766,11 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Conversation(_)
                 | GatewaySub::Delegate(_)
                 | GatewaySub::Forward(_)
-                | GatewaySub::Remote(_) => unreachable!("handled above"),
+                | GatewaySub::Remote(_)
+                | GatewaySub::Connector(_)
+                | GatewaySub::Agent(_)
+                | GatewaySub::Coexistence(_)
+                | GatewaySub::Hoist(_) => unreachable!("handled above"),
             };
             let args = match query {
                 GatewaySub::Protocol(a)
@@ -1429,7 +1788,11 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Conversation(_)
                 | GatewaySub::Delegate(_)
                 | GatewaySub::Forward(_)
-                | GatewaySub::Remote(_) => unreachable!("handled above"),
+                | GatewaySub::Remote(_)
+                | GatewaySub::Connector(_)
+                | GatewaySub::Agent(_)
+                | GatewaySub::Coexistence(_)
+                | GatewaySub::Hoist(_) => unreachable!("handled above"),
             };
             let target = aikit_cli::gateway_ops::carrier_target(&home, &args)?;
             let response =
@@ -1457,7 +1820,20 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
 }
 
 fn cmd_skill(cwd: &std::path::Path, command: SkillCmd) -> Result<Reply> {
-    let SkillSub::Overlay(overlay) = command.command;
+    let overlay = match command.command {
+        SkillSub::Overlay(overlay) => overlay,
+        SkillSub::Export(args) => {
+            let service = Service::discover(cwd)?;
+            let proven = aikit_cli::practice_capsule::prove(
+                service.home(),
+                service.snapshot(),
+                &args.practice,
+                args.revision.as_deref(),
+            )?;
+            let data = aikit_cli::practice_capsule::export(&proven, &args.out)?;
+            return Ok(reply(&service, data, vec![]));
+        }
+    };
     match overlay.command {
         SkillOverlaySub::Set(args) => {
             let mut service = Service::discover(cwd)?;
@@ -1848,12 +2224,56 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                 vec![],
             ))
         }
+        SourceSub::AddCapsule(args) => {
+            let mut provenance: skill_sources::CapsuleProvenance = match args.provenance.as_deref()
+            {
+                Some(raw) => {
+                    serde_json::from_value(aikit_cli::praxis_cli::read_json(raw, "provenance")?)
+                        .map_err(|error| {
+                            AikitError::new(
+                                "source.provenance_invalid",
+                                format!("the provenance is not a readable record: {error}"),
+                            )
+                        })?
+                }
+                None => Default::default(),
+            };
+            if args.world_ref.is_some() {
+                provenance.world_ref = args.world_ref.clone();
+            }
+            if args.upstream_ref.is_some() {
+                provenance.entry_ref = args.upstream_ref.clone();
+            }
+            let added =
+                skill_sources::add_capsule(home, &args.archive, args.id.as_deref(), &provenance)?;
+            let skill_sources::SourceKind::Capsule {
+                capsule_id,
+                revision,
+                upstream,
+            } = &added.spec.kind
+            else {
+                unreachable!("add_capsule registers a capsule source");
+            };
+            Ok(source_reply(
+                jval!({
+                    "id": added.spec.id,
+                    "kind": added.spec.kind.label(),
+                    "portable": added.spec.kind.portable(),
+                    "capsule": {"id": capsule_id, "revision": revision},
+                    "upstream": upstream.reading(),
+                    "already_registered": added.already_registered,
+                    "next": "sync and promote",
+                }),
+                vec![],
+            ))
+        }
         SourceSub::SetRevision(args) => {
             let spec = skill_sources::set_revision(home, &args.id, &args.revision)?;
             let revision = match spec.kind {
                 skill_sources::SourceKind::Git { revision, .. } => revision,
                 skill_sources::SourceKind::Directory { .. }
-                | skill_sources::SourceKind::Central { .. } => unreachable!(),
+                | skill_sources::SourceKind::Central { .. }
+                | skill_sources::SourceKind::Capsule { .. } => unreachable!(),
             };
             Ok(source_reply(
                 jval!({
@@ -1867,6 +2287,19 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
         SourceSub::Sync(args) => {
             let snapshot = skill_sources::sync(home, &args.id)?;
             let status = skill_sources::status(home, &args.id)?;
+            // A rejected skill must never be silent: the reply's warnings
+            // name every skip and its reason, while the structured
+            // `rejected` array stays machine-readable.
+            let warnings = snapshot
+                .rejected
+                .iter()
+                .map(|rejection| {
+                    format!(
+                        "skill `{}` was rejected and is NOT projected: [{}] {} — fix or retire it; `source show` names it",
+                        rejection.path, rejection.code, rejection.message
+                    )
+                })
+                .collect();
             Ok(source_reply(
                 jval!({
                     "id": args.id,
@@ -1877,7 +2310,7 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                     "skills": snapshot.skills.len(),
                     "rejected": snapshot.rejected,
                 }),
-                vec![],
+                warnings,
             ))
         }
         SourceSub::Show(args) => {
@@ -1911,6 +2344,16 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                     "candidate_rejected": status.candidate.as_ref().map(|record| record.rejected.clone()),
                     "active_rejected": status.active.as_ref().map(|record| record.rejected.clone()),
                     "rollback_points": status.state.history,
+                    "capsule": match &status.spec.kind {
+                        skill_sources::SourceKind::Capsule { capsule_id, revision, .. } => {
+                            jval!({"id": capsule_id, "revision": revision})
+                        }
+                        _ => Value::Null,
+                    },
+                    "upstream": match &status.spec.kind {
+                        skill_sources::SourceKind::Capsule { upstream, .. } => upstream.reading(),
+                        _ => Value::Null,
+                    },
                 }),
                 vec![],
             ))
@@ -2493,6 +2936,7 @@ fn cmd_collate(cwd: &std::path::Path, a: CollateArgs) -> Result<Reply> {
 fn cmd_z(cwd: &std::path::Path, a: ZArgs, json_mode: bool) -> Result<Reply> {
     use aikit_cli::jump::{self, JumpAction};
     use aikit_core::frecency::Jump;
+    use std::io::IsTerminal as _;
 
     let mut service = Service::discover(cwd)?;
     let query = a.words.join(" ");
@@ -2531,11 +2975,16 @@ fn cmd_z(cwd: &std::path::Path, a: ZArgs, json_mode: bool) -> Result<Reply> {
                 "candidates": candidates,
                 "tied": ids.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
             });
-            if dry_run {
+            // Ambiguity is the interactive case, not an error — but only when
+            // the terminal can actually host the palette. A bare non-TTY text
+            // invocation prints the bounded candidate list and exits rather
+            // than dying in raw mode.
+            let interactive =
+                !dry_run && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+            if !interactive {
                 return Ok(reply(&service, data, vec![]));
             }
-            // Ambiguity is the interactive case, not an error: open the palette
-            // pre-filtered to what was meant.
+            // Open the palette pre-filtered to what was meant.
             ui::run(&mut service, Some(plan.query.clone()), false)?;
             Ok(Reply::Silent)
         }
@@ -3170,6 +3619,26 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
         KnowledgeSub::Code(_) => {
             unreachable!("KnowledgeSub::Code is dispatched before Service::discover")
         }
+        // The grouped members route to the exact handlers their root spellings
+        // reach: same type, same handler, no second implementation.
+        KnowledgeSub::Flow(c) => return cmd_flow(cwd, c),
+        KnowledgeSub::Wiki(c) => return cmd_wiki(cwd, c),
+        KnowledgeSub::WikiShape(c) => {
+            return cmd_wiki_shape(cwd, c);
+        }
+        KnowledgeSub::WikiConstruct(args) => {
+            return Ok(Reply::Data {
+                context: EnvelopeContext {
+                    context_id: None,
+                    session_id: None,
+                    project_root: Some(cwd.display().to_string()),
+                },
+                data: aikit_cli::wiki_construct::run(args)?,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            });
+        }
+        KnowledgeSub::Jev(c) => return cmd_jev(c),
     };
     Ok(reply(&service, data, warnings))
 }
@@ -3384,12 +3853,109 @@ fn parse_knowledge_address(raw: &str) -> Result<aikit_core::KnowledgeAddress> {
     .with("address", raw))
 }
 
+/// `aikit act` — the doorway over contextual Action discovery and invocation.
+///
+/// Discovery and describe are inert (no invocation, familiarity or trust
+/// events); invoke resolves the ref through the existing native runner before
+/// any effect. Output/exit semantics mirror `aikit run` exactly: the invoked
+/// capability owns stdout, and its status is ours.
+fn cmd_act(cwd: &std::path::Path, a: ActGroup, json_mode: bool) -> Result<Reply> {
+    use aikit_cli::cli::ActGroupCommand;
+    let mut service = Service::discover(cwd)?;
+    match a.command {
+        None => {
+            let data = aikit_cli::act::discover(
+                &mut service,
+                ActDiscoverArgs {
+                    subject: None,
+                    query: None,
+                    limit: 24,
+                },
+            )?;
+            Ok(reply(&service, data, diagnostic_warnings(&service)))
+        }
+        Some(ActGroupCommand::Discover(args)) => {
+            let data = aikit_cli::act::discover(&mut service, args)?;
+            Ok(reply(&service, data, diagnostic_warnings(&service)))
+        }
+        Some(ActGroupCommand::Describe(args)) => {
+            let data = aikit_cli::act::describe(&service, args)?;
+            Ok(reply(&service, data, diagnostic_warnings(&service)))
+        }
+        Some(ActGroupCommand::Invoke(args)) => match aikit_cli::act::invoke(&mut service, args)? {
+            aikit_cli::act::ActOutcome::Capability { run, digest } => {
+                for line in &run.report.output {
+                    println!("{line}");
+                }
+                if json_mode {
+                    eprintln!(
+                        "{}",
+                        json::line(&json::success(
+                            &EnvelopeContext::default(),
+                            jval!({
+                                "schema": "aikit.act-invocation/v1",
+                                "capability": run.capsule.to_string(),
+                                "status": run.report.status,
+                                "detached": run.report.detached,
+                                "result_digest": digest,
+                            }),
+                            vec![],
+                        ))
+                    );
+                }
+                Ok(Reply::Status(run.report.status))
+            }
+            aikit_cli::act::ActOutcome::Owner {
+                action,
+                owner,
+                subject,
+                output,
+                digest,
+            } => {
+                for line in output.lines() {
+                    println!("{line}");
+                }
+                if json_mode {
+                    eprintln!(
+                        "{}",
+                        json::line(&json::success(
+                            &EnvelopeContext::default(),
+                            jval!({
+                                "schema": "aikit.act-invocation/v1",
+                                "action": action.to_string(),
+                                "owner": owner,
+                                "subject": subject,
+                                "status": "ok",
+                                "detached": false,
+                                "result_digest": digest,
+                            }),
+                            vec![],
+                        ))
+                    );
+                }
+                Ok(Reply::Status(0))
+            }
+        },
+    }
+}
+
+/// `aikit system commands` — the complete generated command reference.
+///
+/// The tree is walked from the live parser, so it is exactly the surface this
+/// binary parses: everyday heads, operator depth, protocol aliases and every
+/// compatibility root. A bare JSON document, like the other `system` owner
+/// disclosures — never wrapped in an envelope.
+fn cmd_system_commands() -> Result<Reply> {
+    Ok(Reply::RawJson(aikit_cli::command_metadata::command_tree()))
+}
+
 fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
     let mut service = Service::discover(cwd)?;
     let resolved = {
         let application = ApplicationService::new(&mut service);
         application.resolve_search(&a.query)?
     };
+    let view = service.resolved();
     let rows: Vec<Value> = resolved
         .resources
         .resources
@@ -3399,27 +3965,117 @@ fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
             let capsule = CapsuleId::parse(row.resource.as_str()).ok();
             let package = capsule
                 .as_ref()
-                .and_then(|id| service.resolved().catalog_index.get(id));
+                .and_then(|id| view.catalog_index.get(id));
+            // What becomes possible, not only what exists: the resolver's own
+            // availability opinion, the carrying source, and the next
+            // inspect/describe/act route. Search stays inert — this row is a
+            // reading, and recording nothing is part of the reading.
+            let unavailable_reason = capsule.as_ref().and_then(|id| {
+                view.unavailable_reason(id).map(|reason| reason.describe())
+            });
+            let source = capsule
+                .as_ref()
+                .and_then(|id| view.active.get(id))
+                .and_then(|active| active.source.as_ref());
+            let describe_route = match &capsule {
+                Some(id) => format!("aikit act describe {id}"),
+                None => format!("aikit act describe {}", row.resource),
+            };
             jval!({
                 "id": row.resource.to_string(),
                 "name": row.label,
                 "kind": package.map(|entry| entry.kind.as_str()).unwrap_or(row.kind.as_str()),
                 "resource_kind": row.kind.as_str(),
                 "summary": row.summary,
-                "active": capsule.as_ref().is_some_and(|id| service.resolved().is_active(id)),
-                "runnable": capsule.as_ref().is_some_and(|id| service.resolved().can_run(id)),
+                "active": capsule.as_ref().is_some_and(|id| view.is_active(id)),
+                "runnable": capsule.as_ref().is_some_and(|id| view.can_run(id)),
+                "unavailable_reason": unavailable_reason,
+                "source": source,
+                "revision": package.and_then(|entry| entry.revision.as_ref().map(|revision| revision.to_string())),
+                "trust": package.map(|entry| entry.trust.as_str()),
+                "next": {
+                    "describe": describe_route,
+                    "explain": capsule.as_ref().map(|id| format!("aikit explain {id}")),
+                    "open": format!("aikit knowledge open {}", row.resource),
+                    "invoke": capsule.as_ref()
+                        .filter(|id| view.can_run(id))
+                        .map(|id| format!("aikit act invoke {id}")),
+                },
             })
         })
         .collect();
-    Ok(reply(
-        &service,
-        jval!({
-            "expression": resolved.expression,
-            "path": resolved.path,
-            "rows": rows,
-        }),
-        diagnostic_warnings(&service),
-    ))
+
+    // Authored alias families are typed composition resources, exposed with
+    // their type and source — never as separate capabilities, never as search
+    //-minted identity. An entry that validates as refused or invalid stays in
+    // the list with its reason: coverage honesty, not a silent omission.
+    let query_lower = a.query.trim().to_lowercase();
+    let (readings, problems) = aikit_cli::alias_family::read_all(service.home(), None);
+    let family_rows: Vec<Value> = readings
+        .iter()
+        .filter(|reading| {
+            query_lower.is_empty()
+                || reading.family.to_lowercase().contains(&query_lower)
+                || reading.entry.to_lowercase().contains(&query_lower)
+                || reading.harness.to_lowercase().contains(&query_lower)
+                || reading.model.to_lowercase().contains(&query_lower)
+        })
+        .take(a.limit)
+        .map(|reading| {
+            jval!({
+                "id": format!("alias-family:{}/{}", reading.family, reading.entry),
+                "name": reading.entry,
+                "kind": "alias-family",
+                "resource_kind": "alias-family",
+                "summary": format!(
+                    "authored command family `{}`: {} against {} ({})",
+                    reading.family, reading.entry, reading.harness, reading.model,
+                ),
+                "active": false,
+                "runnable": reading.verdict == "launchable",
+                "unavailable_reason": (reading.verdict != "launchable")
+                    .then(|| reading.reason.clone().unwrap_or_else(|| reading.verdict.clone())),
+                "source": "aikit.alias-family/v1",
+                "family": reading.family,
+                "entry": reading.entry,
+                "verdict": reading.verdict,
+                "next": {
+                    "describe": "aikit alias check".to_string(),
+                    "list": "aikit alias list",
+                    "invoke": (reading.verdict == "launchable")
+                        .then(|| format!("aikit alias install {}", reading.family)),
+                },
+            })
+        })
+        .collect();
+
+    // Contextual Actions join the same search answer: what becomes possible
+    // includes the Actions this scope holds, each with its subjects, owner and
+    // the describe/invoke routes of the one doorway. Search stays inert —
+    // these rows are readings, never observation events.
+    let action_rows = aikit_cli::act::search_rows(&service, &a.query, a.limit)?;
+
+    let mut data = jval!({
+        "expression": resolved.expression,
+        "path": resolved.path,
+        "rows": rows,
+        "actions": action_rows,
+        "alias_families": family_rows,
+        "alias_family_problems": problems,
+        "inert": true,
+    });
+    // A task-phrase query that resolved to nothing at all is an answered
+    // absence, never a bare expression dump: what was searched, and what is
+    // nearby in the same field.
+    if !a.query.trim().is_empty() && data["rows"].as_array().is_some_and(Vec::is_empty) {
+        let no_actions = data["actions"].as_array().is_some_and(Vec::is_empty);
+        let no_families = data["alias_families"].as_array().is_some_and(Vec::is_empty);
+        if no_actions && no_families {
+            data["empty_query"] = aikit_cli::act::empty_query_disclosure(&service, &a.query, 3)?;
+        }
+    }
+
+    Ok(reply(&service, data, diagnostic_warnings(&service)))
 }
 
 /// `aikit method` — Methods are skills whose description carries the
@@ -3429,10 +4085,25 @@ fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
 /// situated operational patterns visible as such, with their effective
 /// state in the current context.
 fn cmd_method(cwd: &std::path::Path, a: MethodArgs) -> Result<Reply> {
-    let service = Service::discover(cwd)?;
+    let mut service = Service::discover(cwd)?;
     if let MethodCommand::Prove { method, proof_json } = &a.command {
         let data = aikit_cli::routine_cli::method_prove(service.home(), method, proof_json)?;
         return Ok(reply(&service, data, vec![]));
+    }
+    if let MethodCommand::Run {
+        method,
+        input,
+        confirm,
+    } = &a.command
+    {
+        let receipt =
+            aikit_cli::routine_cli::method_run(&mut service, method, input.as_deref(), *confirm)?;
+        if let Some(lines) = receipt.get("output_lines") {
+            for line in lines.as_array().unwrap_or(&vec![]) {
+                println!("{line}");
+            }
+        }
+        return Ok(reply(&service, receipt, vec![]));
     }
     let MethodCommand::List { filter } = a.command else {
         unreachable!("method prove is handled above");
@@ -3450,6 +4121,11 @@ fn cmd_method(cwd: &std::path::Path, a: MethodArgs) -> Result<Reply> {
                     return None;
                 }
             }
+            // Discovery teaches the same condition the run route refuses on:
+            // whether `method run` can execute the Method here and, when it
+            // cannot, the exact missing condition and the route that supplies
+            // it — the same `run_barrier` answer, never a second opinion.
+            let barrier = aikit_core::method::run_barrier(view, &entry.id);
             Some(jval!({
                 "id": entry.id.to_string(),
                 "name": entry.name,
@@ -3457,6 +4133,12 @@ fn cmd_method(cwd: &std::path::Path, a: MethodArgs) -> Result<Reply> {
                 "kind": entry.kind.as_str(),
                 "active": view.is_active(&entry.id),
                 "declared": view.is_declared_enabled(&entry.id),
+                "runnable": barrier.is_none(),
+                "run_barrier": barrier.map(|barrier| jval!({
+                    "code": barrier.code,
+                    "condition": barrier.condition,
+                    "recovery": barrier.recovery,
+                })),
             }))
         })
         .collect();
@@ -3479,24 +4161,74 @@ fn cmd_method(cwd: &std::path::Path, a: MethodArgs) -> Result<Reply> {
 
 /// `aikit praxis` — Skills by form, and the Agent praxis disclosure.
 fn cmd_praxis(cwd: &std::path::Path, a: PraxisCmd) -> Result<Reply> {
-    let service = Service::discover(cwd)?;
-    let data = match &a.command {
+    // The grouped members route to the exact handlers their root spellings
+    // reach: same type, same handler, no second implementation.
+    match a.command {
         PraxisSub::List { form, filter } => {
-            aikit_cli::praxis_cli::list(service.resolved(), form.as_deref(), filter.as_deref())?
+            let service = Service::discover(cwd)?;
+            let data = aikit_cli::praxis_cli::list(
+                service.resolved(),
+                form.as_deref(),
+                filter.as_deref(),
+            )?;
+            Ok(reply(&service, data, diagnostic_warnings(&service)))
         }
         PraxisSub::Disclose {
             profile_json,
             activity_json,
             select,
-        } => aikit_cli::praxis_cli::disclose(
-            service.home(),
-            service.resolved(),
-            profile_json,
-            activity_json.as_deref(),
-            select,
-        )?,
-    };
-    Ok(reply(&service, data, diagnostic_warnings(&service)))
+            now_workcell,
+            now_machine,
+            now_register,
+            now_root,
+            now_branch,
+            now_primary,
+        } => {
+            let service = Service::discover(cwd)?;
+            let data = aikit_cli::praxis_cli::disclose(
+                service.home(),
+                service.resolved(),
+                &profile_json,
+                activity_json.as_deref(),
+                &select,
+                now_workcell.map(|workcell_ref| aikit_core::agent_praxis::NowLocationFacts {
+                    workcell_ref,
+                    machine_ref: now_machine,
+                    register: now_register,
+                    checkout_root: now_root,
+                    branch: now_branch,
+                    primary_on_main: if now_primary { Some(true) } else { None },
+                }),
+            )?;
+            Ok(reply(&service, data, diagnostic_warnings(&service)))
+        }
+        PraxisSub::InstantiateCheck { invocation_json } => {
+            let service = Service::discover(cwd)?;
+            let data = aikit_cli::praxis_cli::instantiate_check(&invocation_json)?;
+            Ok(reply(&service, data, diagnostic_warnings(&service)))
+        }
+        PraxisSub::Read { practice, revision } => {
+            let service = Service::discover(cwd)?;
+            let proven = aikit_cli::practice_capsule::prove(
+                service.home(),
+                service.snapshot(),
+                &practice,
+                revision.as_deref(),
+            )?;
+            Ok(reply(&service, proven.reading(), vec![]))
+        }
+        PraxisSub::Skill(c) => cmd_skill(cwd, c),
+        PraxisSub::Set(c) => cmd_set(cwd, c),
+        PraxisSub::Family(_) => cmd_family(cwd),
+        PraxisSub::Run(c) => cmd_run(cwd, c),
+        PraxisSub::Inbox(c) => cmd_inbox(cwd, c),
+        PraxisSub::Capture(c) => cmd_capture(cwd, c),
+        PraxisSub::Promote(c) => cmd_promote(cwd, c),
+        PraxisSub::Capabilities(c) => cmd_capabilities(cwd, c),
+        PraxisSub::Method(c) => cmd_method(cwd, c),
+        PraxisSub::Routine(c) => cmd_routine(c),
+        PraxisSub::Unused(_) => cmd_unused(cwd),
+    }
 }
 
 /// `aikit a2a card` — the published A2A Agent Card, projected from a World
@@ -4049,6 +4781,17 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
 
 fn cmd_history(cwd: &std::path::Path, a: HistoryArgs) -> Result<Reply> {
     use aikit_core::resource::ResourceRef;
+
+    // The grouped views (`history recent`, `history stats`, …) are the same
+    // handlers their root spellings always reached.
+    match a.command {
+        Some(HistoryGroupCommand::Recent(a)) => return cmd_recent(cwd, a.limit),
+        Some(HistoryGroupCommand::Stats(_)) => return cmd_stats(cwd),
+        Some(HistoryGroupCommand::Log(c)) => return cmd_log(cwd, c),
+        Some(HistoryGroupCommand::Failures(a)) => return cmd_failures(cwd, a.limit),
+        Some(HistoryGroupCommand::Bypasses(_)) => return cmd_bypasses(cwd),
+        None => (),
+    }
 
     let mut service = Service::discover(cwd)?;
     let resource = a.resource.as_deref().map(ResourceRef::parse).transpose()?;

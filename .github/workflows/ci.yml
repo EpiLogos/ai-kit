@@ -36,10 +36,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.2
       - name: Install tmux
         run: brew install tmux
+      - name: Ensure real ripgrep for Project-scope acceptance
+        run: |
+          if ! command -v rg >/dev/null 2>&1; then
+            brew install ripgrep
+          fi
+          rg --version
       - name: Validate installed Prime-QL acceptance runner
         run: python3 -m py_compile scripts/verify-epi-prime-ql.py
       - name: Verify repository
         shell: bash
+        env:
+          AIKIT_REQUIRE_RIPGREP_REAL: "1"
         run: |
           set +e
           bash scripts/verify 2>&1 | tee /tmp/aikit.log
@@ -71,11 +79,18 @@ jobs:
         uses: taiki-e/install-action@v2.87.8
         with:
           tool: cargo-nextest
+      - name: Ensure real ripgrep for Project-scope acceptance
+        run: |
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y ripgrep
+          fi
+          rg --version
       - name: Test ${{ matrix.package }}
         shell: bash
         run: |
           set +e
-          cargo nextest run --locked -p '${{ matrix.package }}' --all-targets 2>&1 | tee /tmp/aikit.log
+          AIKIT_REQUIRE_RIPGREP_REAL=1 cargo nextest run --locked -p '${{ matrix.package }}' --all-targets 2>&1 | tee /tmp/aikit.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             grep -E '(^error(\[|:)|^warning:|^failures:|^test result:|^thread .*panicked|^  left:|^ right:|^note:|^help:|^  -->|^   -->)' /tmp/aikit.log | tail -n 100 > /tmp/aikit-focus.log || true
@@ -117,6 +132,10 @@ jobs:
           rustup toolchain install 1.98.0 --profile minimal
           rustup default 1.98.0
       - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: |
+            . -> target
+            .gitnexus-native/Central -> target
       - uses: actions/setup-node@v6
         with:
           node-version: "24.11.0"
@@ -135,6 +154,23 @@ jobs:
             sleep $((attempt * 10))
           done
       - run: gitnexus --version
+      # The Project-scope step reads Central's World (central.world,
+      # effective-sources, file-map) through the real ctrl. Without it every
+      # Project fails for "ctrl not found" before GitNexus is ever asked, and
+      # the scope assertion reads that noise instead of the real outcome.
+      - uses: actions/checkout@v4
+        with:
+          repository: EpiLogos/Central
+          ref: 7a3f38c032e008b4c5c28c930f741b34d2d5b79d
+          path: .gitnexus-native/Central
+          persist-credentials: false
+      - name: Build the Central owner (ctrl) the Project scope reads
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --manifest-path .gitnexus-native/Central/Cargo.toml -p ctrl --bin ctrl
+          echo "$GITHUB_WORKSPACE/.gitnexus-native/Central/target/debug" >> "$GITHUB_PATH"
+          echo "CENTRAL_CTRL_BIN=$GITHUB_WORKSPACE/.gitnexus-native/Central/target/debug/ctrl" >> "$GITHUB_ENV"
       - name: Ensure real ripgrep for WorkRepos conformance
         run: |
           if ! command -v rg >/dev/null 2>&1; then
