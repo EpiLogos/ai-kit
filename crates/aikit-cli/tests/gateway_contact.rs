@@ -65,15 +65,43 @@ impl World {
                 "handle": handle,
             })
         };
+        let mut positions = vec![
+            position("factory-guardian", "@factory-guardian", "project:O-I"),
+            position("cradle-steward", "@cradle-steward", "project:O-I"),
+            position("scribe", "@scribe", "project:O-I"),
+            position("keeper", "@keeper", "control:root"),
+        ];
+        // Two Positions name the agency their occupants carry: the registry
+        // join resolves those identities to these seats.
+        for (slug, agents) in [
+            ("factory-guardian", vec!["agent/pen"]),
+            ("cradle-steward", vec!["agent/veil"]),
+            ("scribe", vec!["agent/quill"]),
+        ] {
+            if let Some(record) = positions.iter_mut().find(|p| p["slug"] == slug) {
+                record["eligible_agent_refs"] = json!(agents);
+            }
+        }
+        let agent_profile = |agent: &str, role: &str| {
+            json!({
+                "schema": "central.agent-profile/v1",
+                "ref": agent.replace('/', ":agent-"),
+                "agent_ref": agent,
+                "role": role,
+                "purpose": format!("{role} (fixture profile)"),
+                "revision": "r1",
+            })
+        };
         std::fs::write(
             &world,
             serde_json::to_vec_pretty(&json!({
                 "world_ref": "project:O-I",
-                "positions": [
-                    position("factory-guardian", "@factory-guardian", "project:O-I"),
-                    position("cradle-steward", "@cradle-steward", "project:O-I"),
-                    position("scribe", "@scribe", "project:O-I"),
-                    position("keeper", "@keeper", "control:root"),
+                "positions": positions,
+                "agent_profiles": [
+                    agent_profile("agent/anuttara", "M0 domain agent"),
+                    agent_profile("agent/quill", "the scribe's agency"),
+                    agent_profile("agent/pen", "the gate keeper's agency"),
+                    agent_profile("agent/veil", "the steward's agency"),
                 ],
                 "occupancy": {},
                 "custody": [],
@@ -661,6 +689,137 @@ fn identity_gaps_are_labelled_and_unknown_positions_are_refused_with_the_next_co
     let (document, _) = base.as_occupant(STEWARD, "steward-1").prompt(false);
     assert!(document.contains("From: <unknown sender> [unknown]"));
     assert!(document.contains("(claimed, not verified) [claimed]"));
+}
+
+#[test]
+fn a_registered_profile_without_a_position_is_addressable_and_its_communique_holds_for_the_agency()
+{
+    let world = World::new();
+    let base = body(&world, "a", "workcell:a", "agency-gateway/a");
+
+    // `@anuttara` names no Position handle; the registry names the agency.
+    let sent = base.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        "@anuttara",
+        "--body",
+        "are you there?",
+    ]);
+    let record = &sent["communique"];
+    assert_eq!(record["to_position_ref"], "agent/anuttara");
+    assert_eq!(record["state"], "held");
+    let basis = record["transitions"][0]["basis"].as_str().unwrap();
+    assert!(
+        basis.contains("registered agent profile")
+            && basis.contains("not currently embodied")
+            && basis.contains("held for the agency"),
+        "{basis}"
+    );
+    assert_eq!(sent["recipient"]["source"], "agent-profile.list");
+    assert_eq!(sent["recipient"]["agency_ref"], "agent/anuttara");
+    let delivery = &sent["delivery"];
+    assert!(delivery["fact"]
+        .as_str()
+        .unwrap()
+        .contains("no Position names it"));
+    assert!(delivery["action"]
+        .as_str()
+        .unwrap()
+        .contains("conversation --with agent/anuttara"));
+
+    // The registry's own ref spelling addresses the same identity.
+    let sent = base.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        "agent/anuttara",
+        "--body",
+        "still here",
+    ]);
+    assert_eq!(sent["communique"]["to_position_ref"], "agent/anuttara");
+    assert_eq!(sent["communique"]["state"], "held");
+
+    // The reading lists the agency with its embodiment state, honest about
+    // which registry the row came from, with its undelivered mail counted.
+    let population = base.ok(&["gateway", "who"]);
+    let agent = population["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["agent_ref"] == "agent/anuttara")
+        .expect("the reading lists every registered agency")
+        .clone();
+    assert_eq!(agent["registry"], "agent-profile.list");
+    assert_eq!(agent["handle"], "@anuttara");
+    assert_eq!(agent["label"], "M0 domain agent");
+    assert_eq!(agent["occupancy"]["state"], "not-currently-embodied");
+    assert_eq!(agent["communiques"]["undelivered"], 2);
+}
+
+#[test]
+fn a_profile_joined_to_its_position_routes_by_that_positions_occupancy() {
+    let world = World::new();
+    let base = body(&world, "a", "workcell:a", "agency-gateway/a");
+
+    // `@pen` names no Position handle; the registry joins it to the
+    // factory-guardian's Position, and its tenure routes the record: the
+    // occupancy, attribution and delivery laws are untouched by the join.
+    let guardian = base.as_occupant(GUARDIAN, "guardian-1");
+    let sent = guardian.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        "@pen",
+        "--body",
+        "for whoever holds the gate",
+    ]);
+    assert_eq!(sent["communique"]["to_position_ref"], GUARDIAN);
+    assert_eq!(sent["communique"]["state"], "pending");
+    assert!(sent["communique"]["transitions"][0]["basis"]
+        .as_str()
+        .unwrap()
+        .contains("occupied by"));
+    assert_eq!(
+        sent["recipient"]["source"],
+        "central.position.list+agent-profile.list"
+    );
+    assert!(sent["recipient"]["agency_ref"].is_null());
+
+    // `@quill` joins to a vacant Position: the ordinary held law governs.
+    let sent = base.ok(&["gateway", "send", "--to", "@quill", "--body", "hold this"]);
+    assert_eq!(sent["communique"]["to_position_ref"], SCRIBE);
+    assert_eq!(sent["communique"]["state"], "held");
+    assert!(sent["communique"]["transitions"][0]["basis"]
+        .as_str()
+        .unwrap()
+        .contains("vacant on this Workcell"));
+
+    // The reading shows each agency's embodiment through its Position:
+    // occupied here, joined-but-vacant, and never named anywhere.
+    let population = base.ok(&["gateway", "who"]);
+    let agent = |agent_ref: &str| {
+        population["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["agent_ref"] == agent_ref)
+            .unwrap()
+            .clone()
+    };
+    let pen = agent("agent/pen");
+    assert_eq!(pen["occupancy"]["state"], "embodied-here");
+    assert_eq!(pen["occupancy"]["position_ref"], GUARDIAN);
+    assert_eq!(
+        pen["positions"],
+        json!(["central:position:project:O-I:factory-guardian"])
+    );
+    let quill = agent("agent/quill");
+    assert_eq!(quill["occupancy"]["state"], "not-currently-embodied");
+    assert_eq!(
+        quill["positions"],
+        json!(["central:position:project:O-I:scribe"])
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1286,6 +1445,21 @@ fn the_population_reading_shows_occupancy_observed_through_a_remote_gateway() {
     let scribe = row(&population, SCRIBE);
     assert_eq!(scribe["occupancy"]["state"], "vacant");
     assert_eq!(scribe["occupancy"]["observed_via"], "local");
+    // The steward's agency is embodied elsewhere through its joined Position:
+    // the reading says so from the remote gateway's own answer.
+    let veil = population["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["agent_ref"] == "agent/veil")
+        .unwrap();
+    assert_eq!(veil["occupancy"]["state"], "embodied-elsewhere");
+    assert_eq!(veil["occupancy"]["via"][0]["position_ref"], STEWARD);
+    assert_eq!(veil["occupancy"]["via"][0]["workcell_ref"], "workcell:b");
+    assert_eq!(
+        veil["occupancy"]["via"][0]["generation_ref"],
+        generation("steward-b")
+    );
     assert_eq!(
         population["remotes"],
         json!([{
@@ -1305,4 +1479,405 @@ fn the_population_reading_shows_occupancy_observed_through_a_remote_gateway() {
     assert_eq!(steward["occupancy"]["observed_via"], "local");
     assert_eq!(population["remotes"][0]["status"], "unreachable");
     assert!(population["remotes"][0]["gateway_ref"].is_null());
+}
+
+// ---------------------------------------------------------------------------
+// Durable Position routes and exact-instance routes
+// ---------------------------------------------------------------------------
+
+fn by_ref(home: &Path, sent: &Value) -> Value {
+    journal_record(home, &sent["communique"]["communique_ref"])
+}
+
+#[test]
+fn a_durable_route_follows_succession_and_an_exact_route_refuses_the_successor() {
+    let world = World::new();
+    let base = body(&world, "a", "workcell:a", "agency-gateway/a");
+    let guardian = base.as_occupant(GUARDIAN, "guardian-1");
+
+    // The instance to target is read from the population reading.
+    let population = base.ok(&["gateway", "who"]);
+    let instance = row(&population, STEWARD)["occupancy"]["generation_ref"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(instance, generation("steward-1"));
+
+    let durable = guardian.ok(&["gateway", "send", "--to", STEWARD, "--body", "durable"]);
+    assert_eq!(durable["route"], "position");
+    assert!(durable["communique"]["to_instance"].is_null());
+    let exact = guardian.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        "@cradle-steward",
+        "--instance",
+        &instance,
+        "--body",
+        "exact",
+    ]);
+    assert_eq!(exact["route"], "exact-instance");
+    assert_eq!(exact["communique"]["state"], "pending");
+    assert_eq!(
+        exact["communique"]["to_instance"]["generation_ref"],
+        instance.as_str()
+    );
+    assert_eq!(
+        exact["communique"]["to_instance"]["agency_ref"],
+        "agency/fixture"
+    );
+    assert!(exact["communique"]["instance_hold"].is_null());
+
+    // Succession: steward-2 takes the Position before steward-1's next turn.
+    world.claim(STEWARD, "steward-2", "workcell:a");
+    let successor = base.as_occupant(STEWARD, "steward-2");
+    let peek = successor.ok(&["gateway", "inbox"]);
+    let deliverable: Vec<(&str, &str)> = peek["communiques"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["body"].as_str().unwrap(),
+                r["deliverable"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        deliverable,
+        vec![("durable", "pending"), ("exact", "awaiting-instance")]
+    );
+
+    // The successor's turn carries the durable route and not the exact one.
+    let (document, _) = successor.prompt(false);
+    assert!(document.contains("| durable"), "{document}");
+    assert!(!document.contains("| exact"), "{document}");
+    assert_eq!(
+        by_ref(&base.home, &durable)["delivered_to_generation_ref"],
+        generation("steward-2")
+    );
+    assert_eq!(by_ref(&base.home, &exact)["state"], "pending");
+
+    // The relay pass re-reads the instance and records the truth.
+    let pass = base.ok(&["gateway", "forward"]);
+    assert_eq!(pass["restood"][0]["instance_hold"], "instance-superseded");
+    assert_eq!(pass["held"][0]["instance_hold"], "instance-superseded");
+    let record = by_ref(&base.home, &exact);
+    assert_eq!(record["state"], "held");
+    assert_eq!(record["instance_hold"], "instance-superseded");
+    assert!(
+        record["transitions"].as_array().unwrap().last().unwrap()["basis"]
+            .as_str()
+            .unwrap()
+            .contains("never delivered to a successor")
+    );
+    // A second pass changes nothing.
+    assert!(base.ok(&["gateway", "forward"])["restood"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // The successor's ack withholds it; nothing is marked delivered.
+    let acked = successor.ok(&["gateway", "inbox", "--ack"]);
+    assert!(acked["communiques"].as_array().unwrap().is_empty());
+    assert_eq!(
+        acked["withheld"][0]["deliverable"],
+        "held-instance-superseded"
+    );
+    assert_eq!(by_ref(&base.home, &exact)["state"], "held");
+
+    // Addressing a superseded instance now is held at once, with its reason.
+    let late = guardian.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        STEWARD,
+        "--instance",
+        &instance,
+        "--body",
+        "too late",
+    ]);
+    assert_eq!(late["communique"]["state"], "held");
+    assert_eq!(late["communique"]["instance_hold"], "instance-superseded");
+    assert_eq!(late["delivery"]["instance_hold"], "instance-superseded");
+    assert!(late["delivery"]["consequence"]
+        .as_str()
+        .unwrap()
+        .contains("delivered to no successor"));
+    let thread = successor.ok(&["gateway", "conversation", "--with", GUARDIAN]);
+    let holds: Vec<Value> = thread["communiques"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["instance_hold"].clone())
+        .collect();
+    assert_eq!(
+        holds,
+        vec![
+            Value::Null,
+            json!("instance-superseded"),
+            json!("instance-superseded")
+        ]
+    );
+}
+
+#[test]
+fn a_required_workcell_mismatch_is_held_and_only_the_instance_on_its_workcell_receives() {
+    let world = World::new();
+    let base = body(&world, "a", "workcell:a", "agency-gateway/a");
+    let guardian = base.as_occupant(GUARDIAN, "guardian-1");
+    let instance = generation("steward-1");
+
+    let elsewhere = guardian.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        STEWARD,
+        "--instance",
+        &instance,
+        "--require-workcell",
+        "workcell:z",
+        "--body",
+        "only on z",
+    ]);
+    assert_eq!(elsewhere["communique"]["state"], "held");
+    assert_eq!(
+        elsewhere["communique"]["instance_hold"],
+        "workcell-mismatch"
+    );
+    assert_eq!(
+        elsewhere["communique"]["to_instance"]["required_workcell_ref"],
+        "workcell:z"
+    );
+    assert!(elsewhere["delivery"]["fact"]
+        .as_str()
+        .unwrap()
+        .contains("not the required Workcell workcell:z"));
+
+    let here = guardian.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        STEWARD,
+        "--instance",
+        &instance,
+        "--require-workcell",
+        "workcell:a",
+        "--body",
+        "only on a",
+    ]);
+    assert_eq!(here["communique"]["state"], "pending");
+
+    let steward = base.as_occupant(STEWARD, "steward-1");
+    let (document, _) = steward.prompt(false);
+    assert!(document.contains("| only on a"), "{document}");
+    assert!(document.contains("Addressed to this exact instance"));
+    assert!(!document.contains("| only on z"), "{document}");
+    assert_eq!(
+        by_ref(&base.home, &here)["delivered_to_generation_ref"],
+        instance.as_str()
+    );
+    let held = by_ref(&base.home, &elsewhere);
+    assert_eq!(held["state"], "held");
+    assert!(held["delivered_to_generation_ref"].is_null());
+    let acked = steward.ok(&["gateway", "inbox", "--ack"]);
+    assert!(acked["communiques"].as_array().unwrap().is_empty());
+    assert_eq!(
+        acked["withheld"][0]["deliverable"],
+        "held-workcell-mismatch"
+    );
+}
+
+#[test]
+fn an_exact_route_reaches_its_instance_on_a_remote_workcell_and_never_a_same_named_peer() {
+    let world = World::new();
+    let a = workcell_body(&world, "a", "workcell:a", "agency-gateway/a");
+    let b = workcell_body(&world, "b", "workcell:b", "agency-gateway/b");
+    let c = workcell_body(&world, "c", "workcell:c", "agency-gateway/c");
+    world.claim_in(
+        a.ledger.as_ref().unwrap(),
+        GUARDIAN,
+        "guardian-1",
+        "workcell:a",
+    );
+    world.claim_in(
+        b.ledger.as_ref().unwrap(),
+        STEWARD,
+        "steward-b",
+        "workcell:b",
+    );
+    // The same Position, held on C by another generation: a same-named peer.
+    world.claim_in(
+        c.ledger.as_ref().unwrap(),
+        STEWARD,
+        "steward-c",
+        "workcell:c",
+    );
+    let (bind_b, bind_c) = (free_port(), free_port());
+    let gateway_b = Gateway::serve(&b, Some((&bind_b, TOKEN)));
+    let gateway_c = Gateway::serve(&c, Some((&bind_c, TOKEN)));
+    declare(&a, "workcell:b", &bind_b);
+    declare(&a, "workcell:c", &bind_c);
+    let guardian = a.as_occupant(GUARDIAN, "guardian-1");
+
+    // A durable route cannot choose between the two occupants.
+    let refusal = guardian.refused(&["gateway", "send", "--to", STEWARD, "--body", "whoever"]);
+    assert_eq!(refusal["code"], "gateway.occupancy_ambiguous");
+
+    // The exact route names one of them and reaches only it.
+    let exact = guardian.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        STEWARD,
+        "--instance",
+        &generation("steward-b"),
+        "--body",
+        "for b only",
+    ]);
+    assert_eq!(exact["forward"]["state"], "forwarded");
+    assert_eq!(exact["forward"]["workcell_ref"], "workcell:b");
+    assert_eq!(
+        exact["communique"]["routing"]["generation_ref"],
+        generation("steward-b")
+    );
+    let pinned = guardian.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        STEWARD,
+        "--instance",
+        &generation("steward-b"),
+        "--require-workcell",
+        "workcell:b",
+        "--body",
+        "for b on b",
+    ]);
+    assert_eq!(pinned["forward"]["workcell_ref"], "workcell:b");
+
+    // An instance no Workcell holds is held; the peer on C is not a route.
+    let absent = guardian.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        STEWARD,
+        "--instance",
+        &generation("steward-x"),
+        "--body",
+        "for nobody here",
+    ]);
+    assert_eq!(absent["communique"]["state"], "held");
+    assert_eq!(absent["communique"]["instance_hold"], "instance-absent");
+    assert!(absent["forward"].is_null());
+    let fact = absent["delivery"]["fact"].as_str().unwrap();
+    assert!(
+        fact.contains(&generation("steward-c")) && fact.contains("receive nothing"),
+        "{fact}"
+    );
+    let pass = a.ok(&["gateway", "forward"]);
+    assert!(pass["forwarded"].as_array().unwrap().is_empty(), "{pass}");
+    assert_eq!(pass["held"][0]["instance_hold"], "instance-absent");
+
+    // C's gateway never received anything; its occupant's turn carries nothing.
+    assert!(state_file_communiques(&c.home).is_empty());
+    let (document, _) = c.as_occupant(STEWARD, "steward-c").prompt(false);
+    assert!(!document.contains("[gateway/communiques]"), "{document}");
+
+    let (document, _) = b.as_occupant(STEWARD, "steward-b").prompt(false);
+    assert!(document.contains("| for b only") && document.contains("| for b on b"));
+    assert!(!document.contains("for nobody here"));
+    for sent in [&exact, &pinned] {
+        assert_eq!(
+            by_ref(&b.home, sent)["delivered_to_generation_ref"],
+            generation("steward-b")
+        );
+    }
+    gateway_b.stop();
+    gateway_c.stop();
+}
+
+#[test]
+fn an_exact_route_to_a_workcell_that_is_down_is_held_then_relayed_there_once() {
+    let world = World::new();
+    let a = workcell_body(&world, "a", "workcell:a", "agency-gateway/a");
+    let b = workcell_body(&world, "b", "workcell:b", "agency-gateway/b");
+    world.claim_in(
+        a.ledger.as_ref().unwrap(),
+        GUARDIAN,
+        "guardian-1",
+        "workcell:a",
+    );
+    world.claim_in(
+        b.ledger.as_ref().unwrap(),
+        STEWARD,
+        "steward-b",
+        "workcell:b",
+    );
+    let bind_b = free_port();
+    declare(&a, "workcell:b", &bind_b);
+    let guardian = a.as_occupant(GUARDIAN, "guardian-1");
+
+    let sent = guardian.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        STEWARD,
+        "--instance",
+        &generation("steward-b"),
+        "--require-workcell",
+        "workcell:b",
+        "--body",
+        "wake up, b",
+    ]);
+    assert_eq!(sent["communique"]["state"], "held");
+    assert_eq!(sent["communique"]["instance_hold"], "instance-absent");
+    assert!(sent["delivery"]["fact"]
+        .as_str()
+        .unwrap()
+        .contains("could not ask workcell:b"));
+    assert_eq!(sent["remotes"][0]["status"], "unreachable");
+    let peek = a.ok(&["gateway", "inbox", "--position", STEWARD]);
+    assert_eq!(
+        peek["communiques"][0]["deliverable"],
+        "held-instance-absent"
+    );
+
+    let pass = a.ok(&["gateway", "forward"]);
+    assert!(pass["forwarded"].as_array().unwrap().is_empty());
+    assert_eq!(pass["held"][0]["instance_hold"], "instance-absent");
+
+    let gateway_b = Gateway::serve(&b, Some((&bind_b, TOKEN)));
+    let pass = a.ok(&["gateway", "forward"]);
+    assert_eq!(pass["forwarded"].as_array().unwrap().len(), 1, "{pass}");
+    assert_eq!(pass["restood"][0]["state"], "pending");
+    let record = by_ref(&a.home, &sent);
+    assert_eq!(record["state"], "pending");
+    assert!(record["instance_hold"].is_null());
+    assert_eq!(record["forward"]["state"], "forwarded");
+    let states: Vec<&str> = record["transitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, vec!["held", "pending", "pending"]);
+
+    // Nothing is relayed twice.
+    assert!(a.ok(&["gateway", "forward"])["forwarded"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let (document, _) = b.as_occupant(STEWARD, "steward-b").prompt(false);
+    assert!(document.contains("| wake up, b"));
+    let on_b = by_ref(&b.home, &sent);
+    assert_eq!(on_b["delivered_to_generation_ref"], generation("steward-b"));
+    assert_eq!(on_b["to_instance"]["required_workcell_ref"], "workcell:b");
+    assert_eq!(
+        state_file_communiques(&b.home)
+            .iter()
+            .filter(|r| r["communique_ref"] == sent["communique"]["communique_ref"])
+            .count(),
+        1
+    );
+    gateway_b.stop();
 }

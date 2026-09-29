@@ -1,0 +1,41 @@
+[
+  {
+    "logical_ref": "service:kev-decision/personal-workcell",
+    "endpoint": "http://127.0.0.1:8019",
+    "lifetime": "target-owned",
+    "acquisition": "ensure-running",
+    "status": {
+      "program": "curl",
+      "args": ["--silent", "--max-time", "5", "http://127.0.0.1:8019/v1/models"]
+    },
+    "readiness": {
+      "program": "curl",
+      "args": ["--silent", "--max-time", "5", "http://127.0.0.1:8019/v1/models"],
+      "timeout_ms": 60000,
+      "interval_ms": 500
+    },
+    "start": {
+      "program": "sh",
+      "args": ["/ABSOLUTE/PATH/TO/serve-kev.sh", "/ABSOLUTE/TARGET", "8019"]
+    },
+    "stop": {
+      "program": "sh",
+      "args": ["-c", "kill $(cat /ABSOLUTE/TARGET/kev-decision.pid) 2>/dev/null; rm -f /ABSOLUTE/TARGET/kev-decision.pid"]
+    },
+    "metadata": {
+      "target": "decision-model",
+      "recipe": "kev-0.8b",
+      "model_family": "kev",
+      "artifact": "jaredpalmer/kev-0.8b",
+      "base": "Qwen/Qwen3.5-0.8B-Base",
+      "base_revision": "dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68",
+      "backend": "mlx",
+      "precision": "bf16-as-stored",
+      "license": "Apache-2.0",
+      "configuration_owner": "workcell",
+      "semantic_state_owner": "aikit",
+      "binding": "loopback",
+      "manifest": "/ABSOLUTE/TARGET/decision-model-manifest.json"
+    }
+  }
+]

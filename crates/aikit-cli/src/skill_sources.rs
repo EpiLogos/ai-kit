@@ -21,6 +21,9 @@ use serde::{Deserialize, Serialize};
 const SPEC_FILE: &str = "source.toml";
 const STATE_FILE: &str = "state.toml";
 const SNAPSHOT_FILE: &str = "snapshot.toml";
+/// The verified archive a capsule source was registered from, kept inside the
+/// source so a sync never depends on the file the visitor was handed.
+const CAPSULE_ARCHIVE_FILE: &str = "capsule.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceSpec {
@@ -54,6 +57,56 @@ pub enum SourceKind {
         #[serde(default)]
         root: PathBuf,
     },
+    /// One practice capsule adopted from another World's exported archive
+    /// (`aikit.practice-capsule/v1`). The capsule keeps its original id and
+    /// revision: its files are carried verbatim, so the synced revision is the
+    /// exported one. The upstream record is the provenance slot.
+    Capsule {
+        capsule_id: String,
+        revision: String,
+        upstream: CapsuleUpstream,
+    },
+}
+
+/// Where an adopted capsule came from. `practice_id`, `revision` and
+/// `exported_from` are read from the verified archive; `world_ref` and
+/// `entry_ref` are the visitor's own statement of the publication it read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapsuleUpstream {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_ref: Option<String>,
+    pub practice_id: String,
+    pub revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exported_from: Option<crate::practice_capsule::ExportedFrom>,
+    /// sha256 of the archive bytes as registered.
+    pub archive_sha256: String,
+}
+
+impl CapsuleUpstream {
+    /// The upstream record as `source show` and `add-capsule` print it.
+    /// `exported_from` is the archive's own claim about where it was
+    /// exported: nothing here can check it against the exporting World, so
+    /// the reading carries `verified: false` beside it. The practice id and
+    /// revision, by contrast, are proven from the archive's bytes.
+    pub fn reading(&self) -> serde_json::Value {
+        let mut value = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
+        if let Some(claim) = value
+            .get_mut("exported_from")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            claim.insert("verified".into(), serde_json::Value::Bool(false));
+            claim.insert(
+                "basis".into(),
+                serde_json::Value::String(
+                    "the archive's own claim; not verified against the exporting World".into(),
+                ),
+            );
+        }
+        value
+    }
 }
 
 impl SourceKind {
@@ -62,6 +115,7 @@ impl SourceKind {
             Self::Central { .. } => "central",
             Self::Directory { .. } => "directory",
             Self::Git { .. } => "git",
+            Self::Capsule { .. } => "capsule",
         }
     }
 
@@ -248,6 +302,322 @@ pub fn add_git(
     )
 }
 
+/// The visitor's statement of where an archive came from. `practice_id` and
+/// `revision`, when stated, must match what the archive proves.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CapsuleProvenance {
+    #[serde(default)]
+    pub world_ref: Option<String>,
+    #[serde(default)]
+    pub entry_ref: Option<String>,
+    #[serde(default)]
+    pub practice_id: Option<String>,
+    #[serde(default)]
+    pub revision: Option<String>,
+}
+
+/// What `add_capsule` registered, and whether it was already there.
+#[derive(Debug, Clone)]
+pub struct AddedCapsule {
+    pub spec: SourceSpec,
+    pub already_registered: bool,
+}
+
+/// Register a machine-local source holding one practice capsule from a
+/// verified archive. Nothing becomes active: the capsule reaches the catalogue
+/// only through the ordinary sync → promote path. Re-adding the same archive
+/// with the same provenance is a no-op; a different revision takes its own
+/// source id and stands beside the first.
+pub fn add_capsule(
+    home: &AikitHome,
+    archive: &Path,
+    id: Option<&str>,
+    provenance: &CapsuleProvenance,
+) -> Result<AddedCapsule> {
+    use sha2::Digest;
+    let (bytes, verified) = crate::practice_capsule::read_archive(archive)?;
+    for (name, claimed, held) in [
+        (
+            "practice_id",
+            provenance.practice_id.as_deref(),
+            verified.id.to_string(),
+        ),
+        (
+            "revision",
+            provenance.revision.as_deref(),
+            verified.revision.clone(),
+        ),
+    ] {
+        if let Some(claimed) = claimed {
+            if claimed != held {
+                return Err(AikitError::new(
+                    "source.provenance_mismatch",
+                    format!(
+                        "the provenance names {name} `{claimed}` but the archive proves `{held}`"
+                    ),
+                ));
+            }
+        }
+    }
+    let world_ref = provenance.world_ref.as_deref();
+    let entry_ref = provenance.entry_ref.as_deref();
+    let id = match id {
+        Some(id) => id.to_string(),
+        None => default_capsule_source_id(verified.id.path(), &verified.revision),
+    };
+    validate_id(&id)?;
+    let upstream = CapsuleUpstream {
+        world_ref: world_ref.map(str::to_string),
+        entry_ref: entry_ref.map(str::to_string),
+        practice_id: verified.id.to_string(),
+        revision: verified.revision.clone(),
+        exported_from: verified.exported_from.clone(),
+        archive_sha256: format!("sha256:{:x}", sha2::Sha256::digest(&bytes)),
+    };
+    let spec = SourceSpec {
+        schema: 1,
+        id: id.clone(),
+        kind: SourceKind::Capsule {
+            capsule_id: verified.id.to_string(),
+            revision: verified.revision.clone(),
+            upstream,
+        },
+    };
+    let dir = source_dir(home, &id);
+    if dir.join(SPEC_FILE).exists() {
+        let existing = load_spec(home, &id)?;
+        let same = match (&existing.kind, &spec.kind) {
+            (
+                SourceKind::Capsule {
+                    capsule_id,
+                    revision,
+                    upstream,
+                },
+                SourceKind::Capsule {
+                    capsule_id: new_id,
+                    revision: new_revision,
+                    upstream: new_upstream,
+                },
+            ) => capsule_id == new_id && revision == new_revision && upstream == new_upstream,
+            _ => false,
+        };
+        if same {
+            return Ok(AddedCapsule {
+                spec: existing,
+                already_registered: true,
+            });
+        }
+        return Err(AikitError::new(
+            "source.exists",
+            format!(
+                "skill source `{id}` already exists and holds something else; \
+                 an adopted original is never overwritten — pass another --id"
+            ),
+        )
+        .with("source", id));
+    }
+    let spec = write_new_spec(home, spec)?;
+    write_bytes_atomic(&dir.join(CAPSULE_ARCHIVE_FILE), &bytes)?;
+    Ok(AddedCapsule {
+        spec,
+        already_registered: false,
+    })
+}
+
+/// `<path-slug>-<revision12>`: one source per adopted revision.
+fn default_capsule_source_id(path: &str, revision: &str) -> String {
+    let slug: String = path
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = slug.trim_matches('-').to_string();
+    let short: String = revision.chars().take(12).collect();
+    format!("capsule-{slug}-{short}")
+}
+
+fn build_capsule_snapshot(
+    home: &AikitHome,
+    spec: &SourceSpec,
+    staging: &Path,
+) -> Result<SnapshotRecord> {
+    let SourceKind::Capsule {
+        capsule_id,
+        revision,
+        ..
+    } = &spec.kind
+    else {
+        unreachable!("only capsule sources build capsule snapshots");
+    };
+    let archive = source_dir(home, &spec.id).join(CAPSULE_ARCHIVE_FILE);
+    let (_, verified) = crate::practice_capsule::read_archive(&archive)?;
+    if verified.id.to_string() != *capsule_id || verified.revision != *revision {
+        return Err(AikitError::new(
+            "source.capsule_changed",
+            format!(
+                "the archive held by source `{}` no longer proves `{capsule_id}` at {revision}",
+                spec.id
+            ),
+        ));
+    }
+    let capsule_dir = staging.join("registry/capsules").join(capsule_id);
+    fs::create_dir_all(&capsule_dir)
+        .map_err(|error| io("source.snapshot_failed", &capsule_dir, error))?;
+    crate::practice_capsule::write_files(&capsule_dir, &verified.files)?;
+    // Prove the materialised capsule with the registry's own reader.
+    let manifest = fs::read(capsule_dir.join(aikit_store::registry::MANIFEST_FILE))
+        .map_err(|error| io("source.snapshot_failed", &capsule_dir, error))?;
+    let materialised = aikit_store::registry::compute_revision(&capsule_dir, &manifest)?;
+    if materialised.as_str() != revision {
+        return Err(AikitError::new(
+            "source.capsule_revision_mismatch",
+            format!("`{capsule_id}` materialised at {materialised}, not the adopted {revision}"),
+        ));
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"aikit-capsule-source-snapshot-v1\n");
+    hash_field(&mut hasher, capsule_id);
+    hash_field(&mut hasher, revision);
+    let record = SnapshotRecord {
+        schema: 1,
+        source: spec.id.clone(),
+        digest: hasher.finalize().to_hex().to_string(),
+        git_commit: None,
+        owner_revision: None,
+        skills: vec![SnapshotSkill {
+            id: capsule_id.clone(),
+            name: verified.name,
+            source_path: ".".to_string(),
+            standing: None,
+            retirement_reason: None,
+        }],
+        rejected: Vec::new(),
+    };
+    write_toml_atomic(&staging.join(SNAPSHOT_FILE), &record)?;
+    Ok(record)
+}
+
+/// Refuse a promotion that would make two active sources speak for one
+/// practice id when an adopted capsule is on either side.
+///
+/// The rule: promoting source `id` is refused when any id in its candidate
+/// snapshot is already catalogued by another source's active snapshot and
+/// either the promoted source or that other source is a capsule source. Two
+/// non-capsule sources (directory, git, central) that provide one id are left
+/// as they were before capsules existed: their precedence is the catalogue's
+/// existing layering. A capsule, though, is a proven revision adopted from
+/// another World; a silent shadow in either direction would hide which
+/// revision is operative.
+fn refuse_active_identity_collision(
+    home: &AikitHome,
+    id: &str,
+    promoting_capsule: bool,
+    candidate: &SnapshotRecord,
+) -> Result<()> {
+    let root = home.root().join("sources");
+    let Ok(entries) = fs::read_dir(&root) else {
+        return Ok(());
+    };
+    let mut others: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|other| other != id)
+        .collect();
+    others.sort();
+    for other in others {
+        let Ok(state) = load_state(home, &other) else {
+            continue;
+        };
+        let Some(active) = state.active_snapshot else {
+            continue;
+        };
+        let other_capsule = matches!(
+            load_spec(home, &other).map(|spec| spec.kind),
+            Ok(SourceKind::Capsule { .. })
+        );
+        if !promoting_capsule && !other_capsule {
+            continue;
+        }
+        let Ok(record) = load_snapshot(home, &other, &active) else {
+            continue;
+        };
+        if let Some(shared) = candidate
+            .skills
+            .iter()
+            .find(|skill| record.skills.iter().any(|theirs| theirs.id == skill.id))
+        {
+            let capability = shared.id.clone();
+            return Err(AikitError::new(
+                "source.capsule_identity_active",
+                format!(
+                    "`{capability}` is already active through source `{other}`{}; roll back or \
+                     remove that source before promoting `{id}`, so one revision speaks for the id",
+                    if other_capsule {
+                        " (an adopted capsule)"
+                    } else {
+                        ""
+                    }
+                ),
+            )
+            .with("capability", capability)
+            .with("active_source", other));
+        }
+    }
+    Ok(())
+}
+
+/// The active snapshot digest of a managed source, when `id` names one.
+pub fn active_snapshot_of(home: &AikitHome, id: &str) -> Option<String> {
+    if validate_id(id).is_err() {
+        return None;
+    }
+    load_state(home, id).ok()?.active_snapshot
+}
+
+/// Every retained snapshot of a managed source that holds `capsule_id`, as
+/// `(digest, capsule directory)`: active first, then the candidate and the
+/// rollback history, newest first. Empty when `id` is not a managed source.
+pub fn retained_capsule_dirs(
+    home: &AikitHome,
+    id: &str,
+    capsule_id: &str,
+) -> Vec<(String, PathBuf)> {
+    if validate_id(id).is_err() {
+        return Vec::new();
+    }
+    let Ok(state) = load_state(home, id) else {
+        return Vec::new();
+    };
+    let mut digests: Vec<String> = Vec::new();
+    for digest in state
+        .active_snapshot
+        .into_iter()
+        .chain(state.candidate_snapshot)
+        .chain(state.history.into_iter().rev())
+    {
+        if !digests.contains(&digest) {
+            digests.push(digest);
+        }
+    }
+    digests
+        .into_iter()
+        .filter_map(|digest| {
+            let dir = snapshot_dir(home, id, &digest)
+                .join("registry/capsules")
+                .join(capsule_id);
+            dir.join(aikit_store::registry::MANIFEST_FILE)
+                .is_file()
+                .then_some((digest, dir))
+        })
+        .collect()
+}
+
 pub fn set_revision(home: &AikitHome, id: &str, revision: &str) -> Result<SourceSpec> {
     if !is_exact_commit(revision) {
         return Err(AikitError::new(
@@ -260,10 +630,10 @@ pub fn set_revision(home: &AikitHome, id: &str, revision: &str) -> Result<Source
         SourceKind::Git {
             revision: current, ..
         } => *current = revision.to_string(),
-        SourceKind::Directory { .. } | SourceKind::Central { .. } => {
+        SourceKind::Directory { .. } | SourceKind::Central { .. } | SourceKind::Capsule { .. } => {
             return Err(AikitError::new(
                 "source.not_git",
-                format!("skill source `{id}` is a directory source"),
+                format!("skill source `{id}` is a {} source", spec.kind.label()),
             ));
         }
     }
@@ -296,15 +666,19 @@ pub fn sync(home: &AikitHome, id: &str) -> Result<SnapshotRecord> {
     let staging = source_dir_path.join(format!(".staging-{}", ulid::Ulid::generate()));
     fs::create_dir_all(&staging).map_err(|error| io("source.snapshot_failed", &staging, error))?;
 
-    let prepared = prepare_source(&spec, &staging);
-    let (scan_root, git_commit) = match prepared {
-        Ok(value) => value,
-        Err(error) => {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(error);
-        }
+    let built = if matches!(spec.kind, SourceKind::Capsule { .. }) {
+        build_capsule_snapshot(home, &spec, &staging)
+    } else {
+        let prepared = prepare_source(&spec, &staging);
+        let (scan_root, git_commit) = match prepared {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(error);
+            }
+        };
+        build_snapshot(&spec, &scan_root, git_commit, &staging)
     };
-    let built = build_snapshot(&spec, &scan_root, git_commit, &staging);
     let record = match built {
         Ok(record) => record,
         Err(error) => {
@@ -338,6 +712,7 @@ fn prepare_source(spec: &SourceSpec, staging: &Path) -> Result<(PathBuf, Option<
     match &spec.kind {
         SourceKind::Directory { path, .. } => Ok((path.clone(), None)),
         SourceKind::Central { .. } => prepare_central_source(spec, staging),
+        SourceKind::Capsule { .. } => unreachable!("capsule sources build from their archive"),
         SourceKind::Git {
             repository,
             revision,
@@ -428,29 +803,23 @@ fn build_snapshot(
         } else {
             relative_text
         };
-        // Control-ground and Central sources refuse the whole sync at the
-        // first invalid skill — their standing is authored, not discovered.
-        // Git and plain Directory sources record the refusal and keep the
-        // valid remainder: a repository can carry an unrelated broken tree
-        // beside the skills that are wanted.
-        let strict = spec.kind.control_ground();
+        // Every source kind records an invalid skill as a rejection and keeps
+        // the valid remainder — sources hold skills, not promises of
+        // perfection: one broken tree beside sixty-four good ones must not
+        // silence the whole source. A source whose candidates ALL fail
+        // validation still refuses below, naming the rejections; a cleanly
+        // empty Control-ground source stays a real, successful state.
+        let control_ground_source = spec.kind.control_ground();
         let skill = match agent_skills::validate(&root) {
             Ok(skill) => skill,
             Err(error) => {
-                record_rejection(
-                    strict,
-                    &relative_text,
-                    scan_root,
-                    &mut rejected,
-                    &mut hasher,
-                    error,
-                )?;
+                record_rejection(&relative_text, scan_root, &mut rejected, &mut hasher, error)?;
                 continue;
             }
         };
         // A Control-ground source reads the sibling contract beside each skill;
         // every other source never opens skill.json at all.
-        let control = if strict {
+        let control = if control_ground_source {
             let directory_name = root
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -469,14 +838,7 @@ fn build_snapshot(
         };
         let id = format!("skill/{}/{capsule_tail}", spec.id);
         if let Err(error) = aikit_core::CapsuleId::parse(&id) {
-            record_rejection(
-                strict,
-                &relative_text,
-                scan_root,
-                &mut rejected,
-                &mut hasher,
-                error,
-            )?;
+            record_rejection(&relative_text, scan_root, &mut rejected, &mut hasher, error)?;
             continue;
         }
         if !ids.insert(id.clone()) {
@@ -553,7 +915,11 @@ fn build_snapshot(
         });
     }
     skills.sort_by(|left, right| left.id.cmp(&right.id));
-    if skills.is_empty() && !spec.kind.control_ground() {
+    // A clean empty ground is a real state for a Control-ground source (an
+    // authored collection can be emptied on purpose) — but candidates that
+    // all failed validation are a defect in any source kind: refuse, naming
+    // every rejection.
+    if skills.is_empty() && (!rejected.is_empty() || !spec.kind.control_ground()) {
         return Err(no_valid_skills(spec, &rejected));
     }
     let digest = hasher.finalize().to_hex().to_string();
@@ -603,21 +969,18 @@ fn no_valid_skills(spec: &SourceSpec, rejected: &[RejectedSkill]) -> AikitError 
     AikitError::new("source.no_skills", message)
 }
 
-/// Either refuse the whole sync (Control-ground and Central sources) or record
-/// the refusal as part of the snapshot — the rejected path, code and message
-/// participate in the digest so a rejection that appears or disappears is a new
-/// candidate, never a stale record under an old name.
+/// Record the refusal as part of the snapshot — the rejected path, code and
+/// message participate in the digest so a rejection that appears or
+/// disappears is a new candidate, never a stale record under an old name.
+/// Every source kind rejects per skill; the sync reply and `source show`
+/// carry the rejections, and a source with no valid skills left refuses.
 fn record_rejection(
-    strict: bool,
     path: &str,
     scan_root: &Path,
     rejected: &mut Vec<RejectedSkill>,
     hasher: &mut blake3::Hasher,
     error: AikitError,
 ) -> Result<()> {
-    if strict {
-        return Err(error);
-    }
     // Validator diagnostics can embed a checkout path. Git sync stages at a
     // fresh ULID every time: keep diagnostics and snapshot identity source-relative.
     let message = error
@@ -643,9 +1006,13 @@ pub fn promote(
 ) -> Result<(SnapshotRecord, usize)> {
     // Registering and promoting an existing local directory is the user's
     // acceptance of that source. Downloaded Git snapshots retain explicit trust.
+    // An adopted capsule follows the directory path: the visitor registered
+    // the verified archive and promotes it deliberately — publication alone
+    // never reached the catalogue.
+    let spec = load_spec(home, id)?;
     let local = matches!(
-        load_spec(home, id)?.kind,
-        SourceKind::Directory { .. } | SourceKind::Central { .. }
+        spec.kind,
+        SourceKind::Directory { .. } | SourceKind::Central { .. } | SourceKind::Capsule { .. }
     );
     let trust_all = trust_all || (local && trust_skills.is_empty());
     let mut state = load_state(home, id)?;
@@ -657,6 +1024,12 @@ pub fn promote(
     })?;
     let record = load_snapshot(home, id, &digest)?;
     validate_owner_snapshot(&load_spec(home, id)?, &record)?;
+    refuse_active_identity_collision(
+        home,
+        id,
+        matches!(spec.kind, SourceKind::Capsule { .. }),
+        &record,
+    )?;
     let registry = snapshot_dir(home, id, &digest).join("registry");
     let mut trusted = 0;
     let requested: BTreeSet<&str> = trust_skills.iter().map(String::as_str).collect();
@@ -684,7 +1057,9 @@ pub fn promote(
             store.record(
                 &TrustKey::new(source.clone(), capsule.id.clone(), revision.clone()),
                 TrustState::Trusted,
-                Some(if local {
+                Some(if matches!(spec.kind, SourceKind::Capsule { .. }) {
+                    "user-promoted adopted capsule"
+                } else if local {
                     "user-promoted local directory"
                 } else {
                     "explicit source promotion"
@@ -993,6 +1368,12 @@ fn write_toml_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     }
     let temporary = path.with_extension("toml.tmp");
     fs::write(&temporary, text).map_err(|error| io("source.write_failed", &temporary, error))?;
+    fs::rename(&temporary, path).map_err(|error| io("source.write_failed", path, error))
+}
+
+fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, bytes).map_err(|error| io("source.write_failed", &temporary, error))?;
     fs::rename(&temporary, path).map_err(|error| io("source.write_failed", path, error))
 }
 

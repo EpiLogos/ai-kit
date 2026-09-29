@@ -11,6 +11,7 @@ use crate::cli::{
     JevInvokeArgs, JevValidateArgs, NowAppendChangeArgs, NowFactorySensingArgs, NowInspectArgs,
     NowPrepareArgs, NowPublishArgs, NowRevokeArgs, NowStatusArgs,
 };
+use crate::decide::{invoke_selected, DecisionProviderMode, DecisionReceipt};
 use aikit_adapters::central_file_map::{self, CentralFileMapProvider};
 use aikit_adapters::jev::{
     CurlJevProvider, JevBoundary, JevCancellation, JevEndpoint, JevInvocation,
@@ -90,7 +91,7 @@ pub(crate) fn resolve_secret(
         .transpose()
 }
 
-fn minted_invocation_ref(request: &JevRequest) -> Result<ResourceRef> {
+pub(crate) fn minted_invocation_ref(request: &JevRequest) -> Result<ResourceRef> {
     let identity = format!("{}:{}:{}", request.digest()?, now_ms()?, std::process::id());
     ResourceRef::parse(format!(
         "invocation/jev/{}",
@@ -100,10 +101,12 @@ fn minted_invocation_ref(request: &JevRequest) -> Result<ResourceRef> {
 
 pub fn jev_validate(args: JevValidateArgs) -> Result<Value> {
     let request = JevRequest::parse(&read_bytes(&args.request_file, "Jev request", 1024 * 1024)?)?;
-    let response = JevResponse::parse_for(
-        &read_bytes(&args.response_file, "Jev response", 1024 * 1024)?,
-        &request,
-    )?;
+    let response = JevResponse::parse(&read_bytes(
+        &args.response_file,
+        "Jev response",
+        1024 * 1024,
+    )?)?;
+    response.validate_typesafe_for(&request)?;
     Ok(json!({
         "schema":"aikit.jev-validation/v1",
         "requestDigest": request.digest()?,
@@ -272,6 +275,18 @@ enum SelectionMode {
         #[serde(default)]
         controlled_endpoint: Option<SocketAddr>,
     },
+    /// Provider-neutral selection through an elected decision provider
+    /// (`aikit.decision-provider/v1`): a managed local model, an existing
+    /// self-hosted endpoint, or the hosted TypeSafe API. The relevance
+    /// threshold is required and explicit — decision thresholds are never
+    /// silently copied from one provider's calibration to another's.
+    Provider {
+        provider_file: PathBuf,
+        state: Value,
+        relevance_threshold: f64,
+        #[serde(default)]
+        allow_env_import: bool,
+    },
 }
 fn default_threshold() -> f64 {
     0.5
@@ -315,6 +330,13 @@ struct SelectionEvidence {
     mode: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     invocation: Option<JevInvocation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision_invocation: Option<DecisionReceipt>,
+    /// Identity digest of the elected decision provider behind a provider
+    /// selection; joins the prepared basis so provider/runtime/calibration
+    /// changes cannot present cached decisions as the same basis.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision_provider: Option<String>,
     #[serde(default)]
     selected_candidate_refs: Vec<ResourceRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1275,6 +1297,8 @@ fn select_candidates(
             SelectionEvidence {
                 mode: "all",
                 invocation: None,
+                decision_invocation: None,
+                decision_provider: None,
                 selected_candidate_refs: candidates.iter().map(|i| i.source_ref.clone()).collect(),
                 catalogue_sufficient_noul: None,
                 withheld_from_jev: vec![],
@@ -1379,6 +1403,107 @@ fn select_candidates(
                 SelectionEvidence {
                     mode: "jev",
                     invocation: Some(invocation),
+                    decision_invocation: None,
+                    decision_provider: None,
+                    selected_candidate_refs: selected_refs,
+                    catalogue_sufficient_noul,
+                    withheld_from_jev,
+                },
+            ))
+        }
+        SelectionMode::Provider {
+            provider_file,
+            state,
+            relevance_threshold,
+            allow_env_import,
+        } => {
+            if !relevance_threshold.is_finite() || !(0.0..=1.0).contains(relevance_threshold) {
+                return Err(fail(
+                    "now_context.selection_invalid",
+                    "The provider relevance threshold must be a finite value between zero and one",
+                ));
+            }
+            let config_bytes = read_bytes(provider_file, "Decision provider config", 256 * 1024)?;
+            let config = crate::decide::parse_provider_config(&config_bytes)?;
+            config.validate()?;
+            if config.mode == DecisionProviderMode::None {
+                return Err(fail(
+                    "decision.provider_disabled",
+                    "The elected decision provider is none; selection cannot use it",
+                ));
+            }
+            let model = match &config.mode {
+                DecisionProviderMode::Hosted => config
+                    .jev_limits
+                    .as_ref()
+                    .map(|l| l.tariff.model_version.clone())
+                    .ok_or_else(|| fail("decision.config_invalid", "hosted requires JevLimits"))?,
+                _ => config.limits()?.model.clone(),
+            };
+            let eligible: Vec<_> = candidates
+                .iter()
+                .filter(|i| {
+                    i.external_egress == ExternalEgress::Allowed
+                        && i.agent_visibility == AgentVisibility::Payload
+                })
+                .cloned()
+                .collect();
+            let withheld_from_jev = candidates
+                .iter()
+                .filter(|i| !eligible.iter().any(|e| e.source_ref == i.source_ref))
+                .map(|i| i.source_ref.clone())
+                .collect::<Vec<_>>();
+            let request = selection_request(state.clone(), &eligible, model)?;
+            if let Some(limits) = &config.limits {
+                limits.validate(&request)?;
+            }
+            if let Some(limits) = &config.jev_limits {
+                limits.validate(&request)?;
+            }
+            let invocation_ref = minted_invocation_ref(&request)?;
+            let receipt = invoke_selected(
+                &config,
+                &request,
+                invocation_ref,
+                None,
+                *allow_env_import,
+                revalidate,
+            )?;
+            let answer = receipt.answer().ok_or_else(|| {
+                fail(
+                    "now_context.decision_failed",
+                    receipt.failure_message().unwrap_or_else(|| {
+                        "The elected decision provider produced no successful determination".into()
+                    }),
+                )
+            })?;
+            if !receipt.outcome_completed() {
+                return Err(fail(
+                    "now_context.decision_failed",
+                    "The elected decision provider did not complete the determination",
+                ));
+            }
+            let mut selected = Vec::new();
+            let mut selected_refs = Vec::new();
+            for (index, item) in eligible.iter().enumerate() {
+                let id = format!("candidate/{index:03}");
+                if matches!(answer.answers.get(&id), Some(Answer::Noul{noul}) if *noul >= *relevance_threshold)
+                {
+                    selected.push(item.clone());
+                    selected_refs.push(item.source_ref.clone());
+                }
+            }
+            let catalogue_sufficient_noul = match answer.answers.get("catalogue-sufficient") {
+                Some(Answer::Noul { noul }) => Some(*noul),
+                _ => None,
+            };
+            Ok((
+                selected,
+                SelectionEvidence {
+                    mode: "provider",
+                    invocation: None,
+                    decision_invocation: Some(receipt),
+                    decision_provider: Some(DecisionReceipt::provider_identity_digest(&config)?),
                     selected_candidate_refs: selected_refs,
                     catalogue_sufficient_noul,
                     withheld_from_jev,
@@ -1639,6 +1764,7 @@ fn now_prepare_request(cwd: &Path, request: NowPrepareRequest) -> Result<Value> 
         dependency_revisions,
         disclosure_revision: request.disclosure_revision,
         factory_revision: factory_revision.clone(),
+        decision_provider: selection.decision_provider.clone(),
         change_cursor,
     };
     let jev_invocation_ref = selection

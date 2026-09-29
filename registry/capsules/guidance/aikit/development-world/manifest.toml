@@ -1,0 +1,23 @@
+schema = 1
+id = "guidance/aikit/development-world"
+kind = "guidance"
+name = "The shape of the development world"
+description = "Standing orientation in the ground's shape: Control and its machines, the Workcell, projects and their registers, how harnesses receive the world through rendered floors, and what a development seat is — including that a landed lane releases its seat."
+tags = ["aikit", "guidance", "world", "control", "machines", "workcell", "projects", "seats"]
+targets = ["claude-code", "codex"]
+
+[effects]
+filesystem = []
+network = false
+subprocess = false
+credentials = []
+
+[guidance]
+entry = "payload/guidance.md"
+inject = ["SessionStart"]
+order = 14
+token_budget = 700
+dedup_key = "world:development-shape"
+
+[provenance]
+source = "authored"

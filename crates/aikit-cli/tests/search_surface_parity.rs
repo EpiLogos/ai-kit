@@ -25,6 +25,21 @@ fn headless_and_interactive_search_share_typed_expressions_and_order() {
             "---\nname: {name}\ndescription: Operate {name}.\n---\n\nRead the source, inspect its state, and explain the result.\n"
         )).unwrap();
     }
+    // The verification/close-out practice task language must be able to find.
+    let verification = home
+        .registry("personal")
+        .join("capsules/skill/parity/verification-closeout");
+    fs::create_dir_all(verification.join("payload")).unwrap();
+    fs::write(
+        verification.join("manifest.toml"),
+        "schema = 1\nid = \"skill/parity/verification-closeout\"\nkind = \"skill\"\nname = \"verification-before-completion\"\ndescription = \"Verify the implementation before claiming completion and close out with evidence.\"\n[skill]\nroot = \"payload\"\n",
+    )
+    .unwrap();
+    fs::write(
+        verification.join("payload/SKILL.md"),
+        "---\nname: verification-before-completion\ndescription: Verify the implementation before claiming completion and close out with evidence.\n---\n\nRun the checks and read the evidence back.\n",
+    )
+    .unwrap();
     let mut service = Service::open(home, &project, |_| None).unwrap();
     for query in [
         "gateway",
@@ -32,6 +47,7 @@ fn headless_and_interactive_search_share_typed_expressions_and_order() {
         "@ skill/parity/gateway",
         "@# @5",
         "absent-resource",
+        "verify this implementation",
     ] {
         let canonical = ApplicationService::new(&mut service)
             .resolve_search(query)
@@ -93,6 +109,88 @@ fn headless_and_interactive_search_share_typed_expressions_and_order() {
     )
     .unwrap();
     assert_eq!(exact.rows[0].id.to_string(), "skill/parity/gateway");
+
+    // X2: task language finds the applicable registered practice, and the
+    // exact invocation is learned from ordinary describe — no archaeology.
+    let phrase = AikitApplication::search(
+        &service,
+        SearchRequest {
+            query: "verify this implementation".to_string(),
+            limit: 50,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        phrase.rows[0].id.to_string(),
+        "skill/parity/verification-closeout",
+        "the verification/close-out practice leads the task-phrase answer"
+    );
+    assert_eq!(phrase.rows[0].name, "verification-before-completion");
+
+    // A garbage query is an answered absence, never a bare expression dump:
+    // what was searched, nearby suggestions from the same field, next routes.
+    let inert_before = aikit_tui::backend::PaletteBackend::familiarity(&service).unwrap();
+    let disclosure = aikit_cli::act::empty_query_disclosure(&service, "zzqx wobble flurb", 3)
+        .expect("the empty-state disclosure reads the same field");
+    assert_eq!(disclosure["schema"], "aikit.search-empty/v1");
+    assert!(disclosure["query"] == "zzqx wobble flurb");
+    let searched = disclosure["searched"]
+        .as_array()
+        .expect("the disclosure names the corpora that were searched");
+    assert!(
+        searched
+            .iter()
+            .any(|corpus| corpus["corpus"] == "resource-field"),
+        "the resource field corpus is named"
+    );
+    let suggestions = disclosure["suggestions"].as_array().unwrap();
+    assert!(
+        !suggestions.is_empty() && suggestions.len() <= 3,
+        "1-3 nearby suggestions, bounded"
+    );
+    for suggestion in suggestions {
+        assert!(suggestion["ref"].as_str().is_some());
+        assert!(suggestion["kind"].as_str().is_some());
+        assert!(
+            suggestion["next"]["describe"]
+                .as_str()
+                .is_some_and(|route| route.starts_with("aikit act describe ")),
+            "every suggestion carries its next describe route"
+        );
+    }
+    let garbage = std::process::Command::new(assert_cmd::cargo::cargo_bin("aikit"))
+        .current_dir(&project)
+        .env("AIKIT_HOME", temp.path().join("store"))
+        .env("AIKIT_CONTEXT_ID", "ctx_SEARCHPARITY0000000000")
+        .args(["--json", "search", "zzqx wobble flurb"])
+        .output()
+        .unwrap();
+    assert!(
+        garbage.status.success(),
+        "{}",
+        String::from_utf8_lossy(&garbage.stderr)
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&garbage.stdout).unwrap();
+    let empty = &envelope["data"];
+    assert!(empty["rows"].as_array().unwrap().is_empty());
+    assert_eq!(empty["empty_query"]["schema"], "aikit.search-empty/v1");
+    assert!(
+        empty["empty_query"]["suggestions"]
+            .as_array()
+            .is_some_and(|s| !s.is_empty() && s.len() <= 3),
+        "the printed search answer carries the bounded helpful form"
+    );
+
+    // Search stays inert across the whole new surface: no familiarity or
+    // observation event is recorded by a reading (the standing invariant the
+    // gateway block above asserts for display).
+    let inert_after = aikit_tui::backend::PaletteBackend::familiarity(&service).unwrap();
+    assert_eq!(
+        format!("{inert_before:?}"),
+        format!("{inert_after:?}"),
+        "search and its empty state record nothing"
+    );
+
     let before = aikit_tui::backend::PaletteBackend::familiarity(&service).unwrap();
     AikitApplication::search(
         &service,

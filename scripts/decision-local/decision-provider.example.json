@@ -1,0 +1,27 @@
+{
+  "schema": "aikit.decision-provider/v1",
+  "mode": "managed-local",
+  "address": "127.0.0.1:8019",
+  "allow_remote": false,
+  "credential_ref": null,
+  "limits": {
+    "timeout_ms": 60000,
+    "max_attempts": 2,
+    "max_input_tokens_per_attempt": 16384,
+    "max_output_tokens_per_attempt": 4000,
+    "model": "kev-latest"
+  },
+  "decision_model": {
+    "family": "kev",
+    "artifact": "jaredpalmer/kev-0.8b",
+    "base": "Qwen/Qwen3.5-0.8B-Base",
+    "base_revision": "dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68",
+    "runtime": "kev.serve (uv)",
+    "backend": "mlx",
+    "precision": "bf16-as-stored",
+    "calibration": "checkpoint-fitted-temperature (fitted on upstream held-out data; reported by GET /v1/models)",
+    "license": "Apache-2.0",
+    "trained_state_tokens": 7552,
+    "notes": "input ceiling admits packed selections while staying near the trained envelope; keep shared states lean and put per-candidate detail in question entries (small models lose accuracy on long states)"
+  }
+}
