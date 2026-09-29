@@ -1544,6 +1544,15 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                     conversation: Some(aikit_adapters::GatewayConversationHooks {
                         turn_sources: Some(conversation),
                         policy: None,
+                        // `/ask` behind a connector conversation routes with
+                        // the exact `gateway send` laws — the same owners and
+                        // declared remotes this home serves.
+                        ask_router: Some(std::sync::Arc::new(
+                            aikit_cli::gateway_contact::ContactAskRouter {
+                                home: home.clone(),
+                                cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                            },
+                        )),
                     }),
                     coexistence: coexistence.gate,
                 },

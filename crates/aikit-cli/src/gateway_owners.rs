@@ -63,6 +63,10 @@ pub enum PositionLookup {
 pub trait ContactOwners {
     /// `central.position.list {project?}` — the listing document.
     fn position_list(&self, project: Option<&str>) -> Result<Value, OwnerUnavailable>;
+    /// `agent-profile.list {scope:"root"}` — the authoritative agent profile
+    /// registry: Central's durable AgentProfile source relations, each naming
+    /// the `agent/<slug>` identity an addressable agency carries.
+    fn agent_profiles(&self) -> Result<Value, OwnerUnavailable>;
     /// `central.position.read {position_ref}`.
     fn position_read(&self, position_ref: &str) -> Result<PositionLookup, OwnerUnavailable>;
     /// `central.world.here {cwd?}`.
@@ -280,6 +284,19 @@ impl ContactOwners for ProcessOwners {
             })
     }
 
+    fn agent_profiles(&self) -> Result<Value, OwnerUnavailable> {
+        self.ctrl_action(
+            "agent-profile.list",
+            &serde_json::json!({ "scope": "root" }),
+        )
+        .map_err(|failure| match failure {
+            CtrlFailure::Unavailable(unavailable) => unavailable,
+            CtrlFailure::Refused { command, envelope } => {
+                unavailable(&command, ctrl_refusal_reason(&envelope))
+            }
+        })
+    }
+
     fn position_read(&self, position_ref: &str) -> Result<PositionLookup, OwnerUnavailable> {
         match self.ctrl_action(
             "central.position.read",
@@ -467,6 +484,26 @@ impl ContactOwners for ProcessOwners {
 /// answered (`{record, source}` or the bare record).
 pub fn position_record(entry: &Value) -> &Value {
     entry.get("record").unwrap_or(entry)
+}
+
+/// The record inside an `agent-profile.list` entry, whichever shape the owner
+/// answered (`{profile, source_path}` or the bare profile).
+pub fn profile_record(entry: &Value) -> &Value {
+    entry.get("profile").unwrap_or(entry)
+}
+
+/// An agent profile's handle as the gateway spells it: the last segment of
+/// its `agent_ref` (`agent/anuttara` → `@anuttara`,
+/// `agent:expressed-<id>` → `@expressed-<id>`).
+pub fn profile_handle(agent_ref: &str) -> String {
+    let slug = agent_ref.rsplit(['/', ':']).next().unwrap_or(agent_ref);
+    format!("@{slug}")
+}
+
+/// Whether an agent profile answers to an `@handle`: its `agent_ref`'s last
+/// segment is the handle, the same derivation [`profile_handle`] spells.
+pub fn profile_answers_to(agent_ref: &str, handle: &str) -> bool {
+    agent_ref.rsplit(['/', ':']).next() == Some(handle)
 }
 
 /// The current tenure of an Actuation occupancy reading, when occupied.
