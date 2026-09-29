@@ -8,6 +8,32 @@ const vscode = require('vscode');
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Resolve once `predicate()` holds, re-checking whenever one of `events`
+// fires, bounded by `timeoutMs`. VS Code updates window state (terminal
+// focus, tab groups) asynchronously after the calling API returns, so a
+// fixed sleep races on slow CI hosts. Resolves `false` on timeout so the
+// caller's own assertion reports the failure.
+function waitUntil(predicate, events, timeoutMs = 5000) {
+  if (predicate()) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const subscriptions = [];
+    let timer;
+    let poll;
+    const finish = (value) => {
+      clearTimeout(timer);
+      clearInterval(poll);
+      subscriptions.forEach((subscription) => subscription.dispose());
+      resolve(value);
+    };
+    const check = () => { if (predicate()) finish(true); };
+    for (const event of events) subscriptions.push(event(check));
+    // Events are the primary signal; a coarse poll covers state that settles
+    // without a matching event.
+    poll = setInterval(check, 50);
+    timer = setTimeout(() => finish(predicate()), timeoutMs);
+  });
+}
+
 async function waitForControlAddress() {
   const controlFile = process.env.AIKIT_VSCODE_PROVIDER_CONTROL_FILE;
   assert.ok(controlFile, 'VS Code provider control file must be configured');
@@ -67,12 +93,18 @@ async function run() {
 
   const terminal = vscode.window.createTerminal({ name: 'AIKit SessionSpace terminal' });
   terminal.show(true);
-  await delay(150);
+  await waitUntil(
+    () => vscode.window.terminals.includes(terminal) && vscode.window.activeTerminal === terminal,
+    [vscode.window.onDidOpenTerminal, vscode.window.onDidChangeActiveTerminal]
+  );
   assert.ok(vscode.window.terminals.includes(terminal), 'integrated terminal must be a live VS Code Surface');
   assert.ok(vscode.window.activeTerminal, 'VS Code must expose terminal focus');
 
   await vscode.commands.executeCommand('vscode.diff', a, b, 'AIKit Project diff');
-  await delay(150);
+  await waitUntil(
+    () => vscode.window.tabGroups.all.length > 0 && Boolean(vscode.window.tabGroups.activeTabGroup.activeTab),
+    [vscode.window.tabGroups.onDidChangeTabGroups, vscode.window.tabGroups.onDidChangeTabs]
+  );
   assert.ok(vscode.window.tabGroups.all.length > 0, 'tab groups must expose editor/diff placement');
   assert.ok(vscode.window.tabGroups.activeTabGroup.activeTab, 'a focused tab must be observable');
 

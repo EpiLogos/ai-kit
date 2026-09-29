@@ -9,11 +9,16 @@
 //! stream identity unchanged, connector reconnected, and a subscriber that
 //! re-subscribes from its cursor misses nothing and receives nothing twice.
 
+#[path = "support/serve_guard.rs"]
+mod serve_guard;
+use serve_guard::ServeGuard;
+
 use std::{
     collections::VecDeque,
     fs,
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
+    path::Path,
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -24,16 +29,24 @@ use std::{
 };
 
 use aikit_adapters::{
-    execute_gateway_command, spawn_connector_workers, AgencyGateway, ConnectorCapabilities,
-    ConnectorConnectionState, ConnectorDescriptor, ConnectorFuture, ConnectorHealth,
-    ConnectorHello, ConnectorOperation, ConnectorPumpControls, ConnectorQueues,
-    ConversationAddress, DeliveryReceipt, DeliveryState, FixtureTurnSource, GatewayBinding,
-    GatewayCommand, GatewayConnector, GatewayConnectorEntry, GatewayConnectorFactory,
-    GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult, GatewayResponse,
-    GatewayTurnSourceResolver, InboundEvent, InboundEventKind, OutboundOperation, SenderIdentity,
+    execute_gateway_command, parse_slash, spawn_connector_workers, AgencyGateway, CommuniqueDraft,
+    CommuniqueForward, CommuniqueForwardOutcome, CommuniqueRouting, CommuniqueState,
+    ConnectorCapabilities, ConnectorConnectionState, ConnectorDescriptor, ConnectorFuture,
+    ConnectorHealth, ConnectorHello, ConnectorOperation, ConnectorPumpControls, ConnectorQueues,
+    ConversationAddress, DeliveryReceipt, DeliveryState, FixtureTurnSource, GatewayAskRequest,
+    GatewayAskRoute, GatewayAskRouter, GatewayBinding, GatewayCommand, GatewayConnector,
+    GatewayConnectorEntry, GatewayConnectorFactory, GatewayIngressDecision, GatewayIngressPolicy,
+    GatewayIngressResult, GatewayResponse, GatewayTurnSourceResolver, InboundEvent,
+    InboundEventKind, OutboundOperation, SenderAttribution, SenderIdentity, SlashParse,
     CONNECTOR_QUIET_POLL_CODE, GATEWAY_CONNECTOR_SDK_VERSION, GATEWAY_CONNECTOR_WIRE_VERSION,
 };
+use aikit_cli::gateway_contact::route_ask_with_owners;
+use aikit_cli::gateway_owners::{
+    ContactOwners, CustodyAssign, OccupancyVerdict, OwnerRefusal, OwnerUnavailable, PositionLookup,
+};
 use aikit_core::resource::ResourceRef;
+use aikit_core::AikitError;
+use aikit_store::AikitHome;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -329,6 +342,31 @@ impl Harness {
         policy: aikit_adapters::EnginePolicy,
         descriptor: ConnectorDescriptor,
     ) -> Self {
+        Self::assemble(policy, descriptor, None)
+    }
+
+    /// A harness with the scripted ask router wired behind `/ask`.
+    fn with_ask_router(
+        policy: aikit_adapters::EnginePolicy,
+        router: Arc<FixtureAskRouter>,
+    ) -> Self {
+        Self::with_dyn_router(policy, router as Arc<dyn GatewayAskRouter>)
+    }
+
+    /// A harness with any ask router wired behind `/ask` — the scripted
+    /// fixture, or the production resolution over fixture owners.
+    fn with_dyn_router(
+        policy: aikit_adapters::EnginePolicy,
+        router: Arc<dyn GatewayAskRouter>,
+    ) -> Self {
+        Self::assemble(policy, fixture_descriptor(), Some(router))
+    }
+
+    fn assemble(
+        policy: aikit_adapters::EnginePolicy,
+        descriptor: ConnectorDescriptor,
+        ask_router: Option<Arc<dyn GatewayAskRouter>>,
+    ) -> Self {
         let dir = TempDir::new().unwrap();
         let mut gateway = AgencyGateway::new(r("agency-gateway/test"));
         gateway.register_connector(descriptor.clone()).unwrap();
@@ -376,6 +414,9 @@ impl Harness {
             })),
             policy,
         );
+        if let Some(router) = ask_router.as_ref() {
+            engine.attach_ask_router(Arc::clone(router) as Arc<dyn GatewayAskRouter>);
+        }
         let shutdown = Arc::new(AtomicBool::new(false));
         let harness = Self {
             gateway,
@@ -485,7 +526,20 @@ impl Harness {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        panic!("timed out waiting for {what}");
+        let executed: Vec<_> = self
+            .recording
+            .executed
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|operation| format!("{:?}", operation.operation))
+            .collect();
+        let events: Vec<_> = self
+            .stream_events()
+            .iter()
+            .map(|event| format!("{}:{}", event["kind"], event["content"]))
+            .collect();
+        panic!("timed out waiting for {what}; executed {executed:?}; stream {events:?}");
     }
 }
 
@@ -1897,6 +1951,860 @@ fn skills_listing_discloses_the_surface_and_names_the_invocation_law() {
 }
 
 // ---------------------------------------------------------------------------
+// The connector-originated ask (/ask → attributable Communique)
+// ---------------------------------------------------------------------------
+
+/// The asking Position the fixture ledger names for the bound conversation.
+const ASKER_POSITION: &str = "central:position:project:O-I:connector-agency";
+const RECIPIENT_POSITION: &str = "central:position:project:O-I:cradle-steward";
+
+/// The scripted ask router: records every request the engine hands it,
+/// answers with the next scripted route (or the default pending route derived
+/// from the request itself, the way the production router composes origin
+/// provenance), and scripts relay outcomes. The journal append is the
+/// engine's own; this fixture only shapes the world around it.
+struct FixtureAskRouter {
+    requests: Mutex<Vec<GatewayAskRequest>>,
+    routes: Mutex<VecDeque<Result<GatewayAskRoute, AikitError>>>,
+    relays: Mutex<VecDeque<CommuniqueForwardOutcome>>,
+    relayed: Mutex<Vec<String>>,
+    counter: std::sync::atomic::AtomicUsize,
+}
+
+impl FixtureAskRouter {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            requests: Mutex::new(Vec::new()),
+            routes: Mutex::new(VecDeque::new()),
+            relays: Mutex::new(VecDeque::new()),
+            relayed: Mutex::new(Vec::new()),
+            counter: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn script_route(&self, route: GatewayAskRoute) {
+        self.routes.lock().unwrap().push_back(Ok(route));
+    }
+
+    fn script_refusal(&self, error: AikitError) {
+        self.routes.lock().unwrap().push_back(Err(error));
+    }
+
+    fn script_relay(&self, outcome: CommuniqueForwardOutcome) {
+        self.relays.lock().unwrap().push_back(outcome);
+    }
+
+    fn requests(&self) -> Vec<GatewayAskRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    fn relayed_refs(&self) -> Vec<String> {
+        self.relayed.lock().unwrap().clone()
+    }
+
+    /// The default route: verified attribution from the ledger-shaped answer
+    /// the request carries, origin provenance composed into the attribution
+    /// basis — the production law, scripted.
+    fn pending_route(&self, ask: &GatewayAskRequest) -> GatewayAskRoute {
+        let serial = self
+            .counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        GatewayAskRoute {
+            draft: CommuniqueDraft {
+                communique_ref: format!("aikit:communique:fixture-ask-{serial}"),
+                from_position_ref: Some(ASKER_POSITION.into()),
+                from_generation_ref: Some("actuation:generation:asker-1".into()),
+                attribution: SenderAttribution::Verified,
+                attribution_basis: format!(
+                    "actuation occupancy list: actuation:generation:asker-1 is the current \
+                     occupant of {ASKER_POSITION} and its tenure carries this conversation's \
+                     agent session {}; asked from connector conversation {} on {} (binding {}, \
+                     agent session {}, agency {})",
+                    ask.agent_session_ref,
+                    ask.conversation_id,
+                    ask.platform,
+                    ask.binding_ref,
+                    ask.agent_session_ref,
+                    ask.agency_ref
+                ),
+                to_position_ref: RECIPIENT_POSITION.into(),
+                to_workcell_ref: None,
+                to_instance: None,
+                instance_hold: None,
+                body: ask.message.clone(),
+                sent_at_unix_ms: 1_000,
+                state: CommuniqueState::Pending,
+                state_basis: format!(
+                    "{RECIPIENT_POSITION} is occupied by actuation:generation:recipient-1; \
+                     delivered at its next turn boundary"
+                ),
+                reply_to: None,
+                forward_to_workcell_ref: None,
+                routing: None,
+            },
+            recipient_position_ref: RECIPIENT_POSITION.into(),
+            delivery: Value::Null,
+        }
+    }
+
+    /// A held route: the recipient is vacant everywhere surveyed.
+    fn held_route(&self, ask: &GatewayAskRequest) -> GatewayAskRoute {
+        let mut route = self.pending_route(ask);
+        route.draft.state = CommuniqueState::Held;
+        route.draft.state_basis =
+            format!("{RECIPIENT_POSITION} is vacant on this Workcell and no declared Workcell reports an occupant; held for the next occupant");
+        route.delivery = json!({
+            "fact": format!("{RECIPIENT_POSITION} is vacant: Actuation on this Workcell records no current occupant, and no other Workcell is declared."),
+            "consequence": "The Communique is recorded held in this gateway's journal; nothing has been delivered yet.",
+            "action": "It is delivered to the next occupant that claims the Position at that occupant's first turn boundary.",
+        });
+        route
+    }
+
+    /// A relay route: the recipient's occupant stands on another Workcell.
+    fn relay_route(&self, ask: &GatewayAskRequest, serial_hint: &str) -> GatewayAskRoute {
+        let mut route = self.pending_route(ask);
+        route.draft.communique_ref = format!("aikit:communique:fixture-relay-{serial_hint}");
+        route.draft.to_workcell_ref = Some("workcell:omarchy".into());
+        route.draft.forward_to_workcell_ref = Some("workcell:omarchy".into());
+        route.draft.state_basis = format!(
+            "{RECIPIENT_POSITION} has no current occupant on this Workcell; gateway \
+             agency-gateway/omarchy of workcell:omarchy reports \
+             actuation:generation:recipient-2 current there; relayed to that Workcell's \
+             gateway, delivered at the occupant's next turn boundary there"
+        );
+        route.draft.routing = Some(CommuniqueRouting {
+            workcell_ref: "workcell:omarchy".into(),
+            gateway_ref: "agency-gateway/omarchy".into(),
+            generation_ref: Some("actuation:generation:recipient-2".into()),
+            basis: format!(
+                "{RECIPIENT_POSITION} has no current occupant on this Workcell; gateway \
+                 agency-gateway/omarchy of workcell:omarchy reports \
+                 actuation:generation:recipient-2 current there"
+            ),
+            observed_at_unix_ms: 1_000,
+        });
+        route
+    }
+}
+
+impl GatewayAskRouter for FixtureAskRouter {
+    fn route(&self, ask: &GatewayAskRequest) -> Result<GatewayAskRoute, AikitError> {
+        self.requests.lock().unwrap().push(ask.clone());
+        match self.routes.lock().unwrap().pop_front() {
+            Some(route) => route,
+            None => Ok(self.pending_route(ask)),
+        }
+    }
+
+    fn relay(
+        &self,
+        communique: &aikit_adapters::Communique,
+        _relayed_by: &str,
+    ) -> Result<CommuniqueForwardOutcome, AikitError> {
+        self.relayed
+            .lock()
+            .unwrap()
+            .push(communique.communique_ref.clone());
+        Ok(self
+            .relays
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(CommuniqueForwardOutcome::Forwarded {
+                workcell_ref: "workcell:omarchy".into(),
+                remote_gateway_ref: "agency-gateway/omarchy".into(),
+                at_unix_ms: 2_000,
+            }))
+    }
+}
+
+/// Central and Actuation answered in memory: the authoritative agent profile
+/// registry (one agency, no Position anywhere naming it) beside an empty
+/// occupancy ledger. The fake owners behind the production resolution stand
+/// exactly where the fixture script stands for the contact suite.
+struct ResidentOwners {
+    positions: Value,
+    profiles: Value,
+}
+
+impl ResidentOwners {
+    fn new() -> Self {
+        Self {
+            positions: json!({
+                "schema": "central.position-listing/v1",
+                "world_ref": "control:root",
+                "positions": [],
+                "inherited": [],
+                "invalid": [],
+            }),
+            profiles: json!({
+                "profiles": [{
+                    "profile": {
+                        "schema": "central.agent-profile/v1",
+                        "ref": "agent-profile:anuttara",
+                        "agent_ref": "agent/anuttara",
+                        "role": "M0 domain agent",
+                        "purpose": "Faculty #0 (proof).",
+                        "revision": "r1",
+                    },
+                    "source_path": "Control/agents/profiles/fixture.json",
+                }],
+                "scope": "root",
+                "source_payloads_disclosed": false,
+            }),
+        }
+    }
+}
+
+impl ContactOwners for ResidentOwners {
+    fn position_list(&self, _project: Option<&str>) -> Result<Value, OwnerUnavailable> {
+        Ok(self.positions.clone())
+    }
+
+    fn agent_profiles(&self) -> Result<Value, OwnerUnavailable> {
+        Ok(self.profiles.clone())
+    }
+
+    fn position_read(&self, position_ref: &str) -> Result<PositionLookup, OwnerUnavailable> {
+        Ok(PositionLookup::NotFound(OwnerRefusal {
+            command: "ctrl --json action run central.position.read".into(),
+            code: "central.position_not_found".into(),
+            fact: format!("No Position definition exists at {position_ref}."),
+            consequence: "Nothing was read.".into(),
+            action: "ctrl --json action run central.position.list '{}'".into(),
+        }))
+    }
+
+    fn world_here(&self, _cwd: &Path) -> Result<Value, OwnerUnavailable> {
+        Ok(json!({
+            "schema": "central.world-here/v1",
+            "local_world": {"ref": "control:root", "root": "/fixture"},
+            "project_world": {"state": "absent"},
+            "workcells": [],
+        }))
+    }
+
+    fn occupancy_list(&self) -> Result<Value, OwnerUnavailable> {
+        Ok(json!({
+            "schema": "actuation.position-occupancy-listing/v1",
+            "store": "proof",
+            "positions": [],
+            "invalid": [],
+        }))
+    }
+
+    fn occupancy_read(&self, position_ref: &str) -> Result<Value, OwnerUnavailable> {
+        Ok(json!({
+            "schema": "actuation.position-occupancy/v1",
+            "position_ref": position_ref,
+            "state": "vacant",
+            "generations": [],
+        }))
+    }
+
+    fn occupancy_verify(
+        &self,
+        position_ref: &str,
+        generation_ref: &str,
+    ) -> Result<OccupancyVerdict, OwnerUnavailable> {
+        Ok(OccupancyVerdict::Refused(OwnerRefusal {
+            command: "actuation occupancy verify".into(),
+            code: "occupancy.unknown_generation".into(),
+            fact: format!("{generation_ref} never held {position_ref}."),
+            consequence: "Nothing was verified.".into(),
+            action: "actuation occupancy read".into(),
+        }))
+    }
+
+    fn current_work(&self, _position_ref: &str, _cwd: &Path) -> Result<Value, OwnerUnavailable> {
+        Ok(json!({
+            "schema": "factory.current-work/v1",
+            "outcome": "none",
+            "candidates": [],
+        }))
+    }
+
+    fn custody_assign(
+        &self,
+        _request: &CustodyAssign,
+        _cwd: &Path,
+    ) -> Result<Result<Value, OwnerRefusal>, OwnerUnavailable> {
+        Err(OwnerUnavailable {
+            command: "factory development custody assign".into(),
+            reason: "no custody is assigned in this proof".into(),
+        })
+    }
+}
+
+/// The production ask resolution the service wires, over the resident owners:
+/// the same `route_ask_with_owners` laws, deterministic.
+struct ProductionResolution {
+    home: AikitHome,
+    owners: Arc<ResidentOwners>,
+}
+
+impl GatewayAskRouter for ProductionResolution {
+    fn route(&self, ask: &GatewayAskRequest) -> Result<GatewayAskRoute, AikitError> {
+        route_ask_with_owners(&self.home, self.owners.as_ref(), Path::new("/fixture"), ask)
+    }
+
+    fn relay(
+        &self,
+        _communique: &aikit_adapters::Communique,
+        _relayed_by: &str,
+    ) -> Result<CommuniqueForwardOutcome, AikitError> {
+        Ok(CommuniqueForwardOutcome::Failed {
+            workcell_ref: "workcell:proof".into(),
+            error: "no relay is exercised in this proof".into(),
+            at_unix_ms: 0,
+        })
+    }
+}
+
+fn ask_engine(harness: &Harness, position: &str, message: &str) -> GatewayResponse {
+    harness
+        .engine
+        .execute(
+            harness.binding_ref.clone(),
+            aikit_adapters::GatewayConversationOperation::AskPosition {
+                position: position.into(),
+                message: message.into(),
+            },
+        )
+        .unwrap()
+        .response
+}
+
+#[test]
+fn the_ask_edge_parses_the_whole_line_into_one_canonical_operation() {
+    match parse_slash("/ask @steward does the eastern gate read green?") {
+        SlashParse::Operation(aikit_adapters::GatewayConversationOperation::AskPosition {
+            position,
+            message,
+        }) => {
+            assert_eq!(position, "@steward");
+            assert_eq!(message, "does the eastern gate read green?");
+        }
+        other => panic!("the ask edge parses into AskPosition, got {other:?}"),
+    }
+    // The full Position ref is a recipient too, and the message keeps its
+    // interior whitespace.
+    match parse_slash("/ask central:position:project:O-I:steward   one  two ") {
+        SlashParse::Operation(aikit_adapters::GatewayConversationOperation::AskPosition {
+            position,
+            message,
+        }) => {
+            assert_eq!(position, "central:position:project:O-I:steward");
+            assert_eq!(message, "one  two");
+        }
+        other => panic!("the ask edge parses into AskPosition, got {other:?}"),
+    }
+    for (spelling, fragment) in [
+        ("/ask", "usage: /ask"),
+        ("/ask @steward", "needs a message"),
+        ("/ask @steward   ", "needs a message"),
+    ] {
+        match parse_slash(spelling) {
+            SlashParse::Unknown(line) => {
+                assert!(line.contains(fragment), "{spelling}: {line}")
+            }
+            other => panic!("{spelling} is refused as usage, got {other:?}"),
+        }
+    }
+    // The canonical operation is portable, spelled ask-position.
+    let encoded = serde_json::to_value(aikit_adapters::GatewayConversationOperation::AskPosition {
+        position: "@steward".into(),
+        message: "hello".into(),
+    })
+    .unwrap();
+    assert_eq!(encoded["op"], "ask-position");
+    assert_eq!(encoded["position"], "@steward");
+    assert_eq!(encoded["message"], "hello");
+}
+
+#[test]
+fn an_admitted_ask_appends_an_attributed_communique_with_origin_provenance_and_answers_the_chat() {
+    let router = FixtureAskRouter::new();
+    let harness = Harness::with_ask_router(aikit_adapters::EnginePolicy::default(), router.clone());
+
+    harness.admit(fixture_inbound(
+        &format!("/ask {RECIPIENT_POSITION} does the eastern gate read green?"),
+        "a1",
+    ));
+    harness.wait_until(
+        "the ask appends its Communique and answers the chat",
+        Duration::from_secs(30),
+        |harness| !harness.executed_sends().is_empty(),
+    );
+
+    // The canonical operation behind the slash edge received exactly what the
+    // conversation carries: the binding's semantic identity and provenance.
+    let requests = router.requests();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0].binding_ref.as_str(), BINDING_REF);
+    assert_eq!(requests[0].agent_session_ref, "agent-session/fixture");
+    assert_eq!(requests[0].agency_ref, "agency/fixture");
+    assert_eq!(requests[0].platform, "fixture");
+    assert_eq!(requests[0].conversation_id, "chat-1");
+    assert_eq!(requests[0].recipient, RECIPIENT_POSITION);
+    assert_eq!(requests[0].message, "does the eastern gate read green?");
+
+    // The journal holds one attributable Communique; the origin provenance —
+    // asking agent session, binding, connector conversation — rides its
+    // attribution basis, never the body.
+    let records: Vec<aikit_adapters::Communique> = harness
+        .gateway
+        .lock()
+        .unwrap()
+        .communiques()
+        .records()
+        .to_vec();
+    assert_eq!(records.len(), 1, "{:?}", harness.executed_sends());
+    let record = &records[0];
+    assert_eq!(record.to_position_ref, RECIPIENT_POSITION);
+    assert_eq!(
+        record.from_position_ref.as_deref(),
+        Some(ASKER_POSITION),
+        "the ask is attributed to the asking agency's Position"
+    );
+    assert_eq!(record.attribution, SenderAttribution::Verified);
+    assert_eq!(record.state, CommuniqueState::Pending);
+    assert_eq!(record.body, "does the eastern gate read green?");
+    assert!(
+        record.attribution_basis.contains("agent-session/fixture"),
+        "the basis names the asking agent session: {}",
+        record.attribution_basis
+    );
+    assert!(
+        record.attribution_basis.contains(BINDING_REF),
+        "the basis names the binding: {}",
+        record.attribution_basis
+    );
+    assert!(
+        record.attribution_basis.contains("chat-1"),
+        "the basis names the connector conversation: {}",
+        record.attribution_basis
+    );
+
+    // The chat's answer mirrors `gateway send`'s pending outcome honestly.
+    let sends = harness.executed_sends();
+    assert!(
+        sends.iter().any(|text| text.contains("ask:")
+            && text.contains("queued for")
+            && text.contains(RECIPIENT_POSITION)
+            && text.contains(&record.communique_ref)),
+        "the ask answers with the queued outcome and its ref: {sends:?}"
+    );
+    // An ask is control, not a turn: no agent context was opened.
+    assert_eq!(harness.source.parked_turns(), 0);
+
+    // The canonical operation answers a carrier with the same facts.
+    let GatewayResponse::Conversation { result, .. } =
+        ask_engine(&harness, "@steward", "and the western one?")
+    else {
+        panic!("ask answers with a conversation response");
+    };
+    assert_eq!(result["ask"], json!(true), "{result}");
+    assert_eq!(result["state"], json!("pending"), "{result}");
+    assert_eq!(
+        result["to_position_ref"],
+        json!(RECIPIENT_POSITION),
+        "{result}"
+    );
+    assert_eq!(result["attribution"], json!("verified"), "{result}");
+    let records = harness
+        .gateway
+        .lock()
+        .unwrap()
+        .communiques()
+        .records()
+        .to_vec();
+    assert_eq!(records.len(), 2);
+    assert_eq!(result["communique_ref"], json!(records[1].communique_ref));
+    assert_eq!(records[1].body, "and the western one?");
+}
+
+#[test]
+fn an_ask_to_an_unknown_position_is_refused_and_nothing_is_recorded() {
+    let router = FixtureAskRouter::new();
+    router.script_refusal(AikitError::new(
+        "gateway.unknown_position",
+        "No Position with handle @nobody is defined in this World. Nothing was sent; no \
+         Communique was recorded. List the Positions and their handles with `aikit gateway \
+         who --json`.",
+    ));
+    let harness = Harness::with_ask_router(aikit_adapters::EnginePolicy::default(), router);
+
+    harness.admit(fixture_inbound("/ask @nobody are you there?", "a2"));
+    harness.wait_until(
+        "the refusal surfaces with the named remedy",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| text.contains("No Position with handle @nobody"))
+        },
+    );
+
+    // Nothing was recorded and no turn was started.
+    assert_eq!(harness.gateway.lock().unwrap().communiques().len(), 0);
+    assert_eq!(harness.source.parked_turns(), 0);
+    // A canonical carrier ask is refused the same way, before any append.
+    let router = FixtureAskRouter::new();
+    router.script_refusal(AikitError::new(
+        "gateway.unknown_position",
+        "No Position with handle @nobody is defined in this World. Nothing was sent.",
+    ));
+    let harness = Harness::with_ask_router(aikit_adapters::EnginePolicy::default(), router);
+    let error = harness
+        .engine
+        .execute(
+            harness.binding_ref.clone(),
+            aikit_adapters::GatewayConversationOperation::AskPosition {
+                position: "@nobody".into(),
+                message: "are you there?".into(),
+            },
+        )
+        .err()
+        .expect("the refused ask is an error");
+    assert_eq!(error.code(), "gateway.unknown_position", "{error}");
+    assert_eq!(harness.gateway.lock().unwrap().communiques().len(), 0);
+}
+
+#[test]
+fn a_held_ask_answers_with_the_vacancy_notice() {
+    let router = FixtureAskRouter::new();
+    let harness = Harness::with_ask_router(aikit_adapters::EnginePolicy::default(), router.clone());
+    router.script_route(router.held_route(&canned_ask("anyone home?")));
+
+    let held = harness.admit(fixture_inbound(
+        &format!("/ask {RECIPIENT_POSITION} anyone home?"),
+        "a3",
+    ));
+    assert!(matches!(held, GatewayIngressResult::Appended { .. }));
+    harness.wait_until(
+        "the held ask answers the chat with the vacancy notice",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| text.contains("held") && text.contains("vacant"))
+        },
+    );
+    let records = harness
+        .gateway
+        .lock()
+        .unwrap()
+        .communiques()
+        .records()
+        .to_vec();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].state, CommuniqueState::Held);
+    let sends = harness.executed_sends();
+    assert!(
+        sends
+            .iter()
+            .any(|text| text.contains("no other Workcell is declared")),
+        "the answer carries the vacancy fact: {sends:?}"
+    );
+}
+
+#[test]
+fn an_ask_to_a_registered_profile_without_a_position_holds_for_the_agency() {
+    let dir = TempDir::new().unwrap();
+    let router = Arc::new(ProductionResolution {
+        home: AikitHome::at(dir.path()),
+        owners: Arc::new(ResidentOwners::new()),
+    });
+    let harness = Harness::with_dyn_router(aikit_adapters::EnginePolicy::default(), router);
+
+    harness.admit(fixture_inbound(
+        "/ask @anuttara are you embodied anywhere?",
+        "a7",
+    ));
+    harness.wait_until(
+        "the ask to the unembodied agency appends its held Communique and answers the chat",
+        Duration::from_secs(30),
+        |harness| !harness.executed_sends().is_empty(),
+    );
+
+    // The journal holds one Communique addressed to the agency at its own
+    // identity, held for it — the registry answered, and no Position gates
+    // the contact.
+    let records = harness
+        .gateway
+        .lock()
+        .unwrap()
+        .communiques()
+        .records()
+        .to_vec();
+    assert_eq!(records.len(), 1, "{:?}", harness.executed_sends());
+    let record = &records[0];
+    assert_eq!(record.to_position_ref, "agent/anuttara");
+    assert_eq!(record.state, CommuniqueState::Held);
+    let basis = &record.transitions[0].basis;
+    assert!(
+        basis.contains("registered agent profile")
+            && basis.contains("not currently embodied")
+            && basis.contains("held for the agency"),
+        "{basis}"
+    );
+    // Origin provenance still rides the attribution basis.
+    assert!(
+        record.attribution_basis.contains(BINDING_REF),
+        "{}",
+        record.attribution_basis
+    );
+    assert!(
+        record.attribution_basis.contains("chat-1"),
+        "{}",
+        record.attribution_basis
+    );
+    assert!(
+        record.attribution_basis.contains("agent-session/fixture"),
+        "{}",
+        record.attribution_basis
+    );
+
+    // The chat is answered with the held-for-agency notice.
+    let sends = harness.executed_sends();
+    assert!(
+        sends
+            .iter()
+            .any(|text| text.contains("held") && text.contains("not currently embodied")),
+        "the answer carries the held-for-agency fact: {sends:?}"
+    );
+    assert_eq!(harness.source.parked_turns(), 0);
+
+    // A handle the registry does not name either is refused as unknown by the
+    // production resolution, before anything is recorded.
+    let router = Arc::new(ProductionResolution {
+        home: AikitHome::at(dir.path()),
+        owners: Arc::new(ResidentOwners::new()),
+    });
+    let error = router
+        .route(&canned_ask_to("@notregistered", "anyone?"))
+        .expect_err("an unknown handle is refused");
+    assert_eq!(error.code(), "gateway.unknown_position", "{error}");
+}
+
+#[test]
+fn an_ask_relays_across_workcells_and_answers_both_outcomes_honestly() {
+    let router = FixtureAskRouter::new();
+    let harness = Harness::with_ask_router(aikit_adapters::EnginePolicy::default(), router.clone());
+
+    // First ask: the route names workcell:omarchy, and the relay attempt
+    // succeeds there.
+    router.script_route(router.relay_route(&canned_ask("where did the run stop?"), "one"));
+    harness.admit(fixture_inbound(
+        &format!("/ask {RECIPIENT_POSITION} where did the run stop?"),
+        "a4",
+    ));
+    harness.wait_until(
+        "the relayed ask answers and the remote ingest was attempted",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| text.contains("relayed to Workcell workcell:omarchy"))
+        },
+    );
+    let records = harness
+        .gateway
+        .lock()
+        .unwrap()
+        .communiques()
+        .records()
+        .to_vec();
+    assert_eq!(records.len(), 1);
+    assert!(matches!(
+        &records[0].forward,
+        Some(CommuniqueForward::Forwarded { remote_gateway_ref, .. })
+            if remote_gateway_ref == "agency-gateway/omarchy"
+    ));
+    assert_eq!(
+        router.relayed_refs(),
+        vec![records[0].communique_ref.clone()]
+    );
+    assert!(
+        harness
+            .executed_sends()
+            .iter()
+            .any(|text| text.contains("through gateway agency-gateway/omarchy")),
+        "the answer names the relaying gateway: {:?}",
+        harness.executed_sends()
+    );
+
+    // Second ask: the remote gateway cannot be reached; the record stays
+    // queued for the next relay pass and the chat is told.
+    router.script_route(router.relay_route(&canned_ask("and now?"), "two"));
+    router.script_relay(CommuniqueForwardOutcome::Failed {
+        workcell_ref: "workcell:omarchy".into(),
+        error: "connection refused".into(),
+        at_unix_ms: 3_000,
+    });
+    harness.admit(fixture_inbound(
+        &format!("/ask {RECIPIENT_POSITION} and now?"),
+        "a5",
+    ));
+    harness.wait_until(
+        "the queued relay is answered honestly",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| text.contains("queued for relay"))
+        },
+    );
+    let records = harness
+        .gateway
+        .lock()
+        .unwrap()
+        .communiques()
+        .records()
+        .to_vec();
+    assert_eq!(records.len(), 2);
+    assert!(matches!(
+        &records[1].forward,
+        Some(CommuniqueForward::Queued { attempts: 1, last_error, .. })
+            if last_error.as_deref() == Some("connection refused")
+    ));
+    assert_eq!(router.relayed_refs().len(), 2);
+}
+
+/// The request any admitted fixture ask produces: the binding's semantic
+/// identity and the connector conversation it arrives through. The scripted
+/// routes are composed from it up front, before `route` consumes them.
+fn canned_ask(message: &str) -> GatewayAskRequest {
+    GatewayAskRequest {
+        binding_ref: r(BINDING_REF),
+        connector_ref: CONNECTOR_REF.into(),
+        agent_session_ref: "agent-session/fixture".into(),
+        agency_ref: "agency/fixture".into(),
+        platform: "fixture".into(),
+        conversation_id: "chat-1".into(),
+        recipient: RECIPIENT_POSITION.into(),
+        message: message.into(),
+    }
+}
+
+fn canned_ask_to(recipient: &str, message: &str) -> GatewayAskRequest {
+    GatewayAskRequest {
+        recipient: recipient.into(),
+        ..canned_ask(message)
+    }
+}
+
+#[test]
+fn an_ask_without_a_wired_router_is_refused_and_nothing_is_recorded() {
+    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
+
+    harness.admit(fixture_inbound(
+        &format!("/ask {RECIPIENT_POSITION} anyone home?"),
+        "a6",
+    ));
+    harness.wait_until(
+        "the absent-router refusal names the remedy",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| text.contains("no routing behind this gateway"))
+        },
+    );
+    assert_eq!(harness.gateway.lock().unwrap().communiques().len(), 0);
+    assert_eq!(harness.source.parked_turns(), 0);
+}
+
+#[test]
+fn a_denied_or_unpaired_sender_cannot_ask() {
+    let dir = TempDir::new().unwrap();
+    let router = FixtureAskRouter::new();
+    let mut gateway = AgencyGateway::new(r("agency-gateway/test"));
+    gateway.register_connector(fixture_descriptor()).unwrap();
+    let binding = GatewayBinding {
+        binding_ref: r(BINDING_REF),
+        connector_ref: r(CONNECTOR_REF),
+        address: fixture_address(),
+        agent_session_ref: r("agent-session/fixture"),
+        agency_ref: r("agency/fixture"),
+        actuation_ref: r("actuation/fixture"),
+        actuation_stream_ref: r(STREAM_REF),
+        agent_ref: None,
+        harness_ref: None,
+        surface_ref: None,
+        forked_from: None,
+        context_revision: 1,
+        ingress: GatewayIngressPolicy {
+            default: GatewayIngressDecision::Pair,
+            sender_overrides: [("blocked-sender".into(), GatewayIngressDecision::Deny)]
+                .into_iter()
+                .collect(),
+        },
+        provenance: Vec::new(),
+    };
+    let gateway = Arc::new(Mutex::new(gateway));
+    let source = Arc::new(FixtureTurnSource::named("fixture-harness"));
+    let engine = aikit_adapters::GatewayConversationEngine::new(
+        Arc::clone(&gateway),
+        Arc::new(aikit_adapters::SubscriptionHub::default()),
+        Arc::new(ConnectorQueues::default()),
+        Arc::new(ConnectorPumpControls::default()),
+        Some(dir.path().join("gateway.json")),
+        Some(Arc::new(FixtureResolver::new(
+            r(CONNECTOR_REF),
+            Arc::clone(&source),
+        ))),
+        aikit_adapters::EnginePolicy::default(),
+    );
+    engine.attach_ask_router(Arc::clone(&router) as Arc<dyn GatewayAskRouter>);
+    gateway.lock().unwrap().bind(binding).unwrap();
+
+    // An unpaired sender's /ask asks for pairing; a denied sender's /ask is
+    // refused at admission. Neither reaches the ask plane: no request was
+    // routed, nothing was recorded, no answer was queued.
+    let pair = {
+        let mut kernel = gateway.lock().unwrap();
+        let result = kernel
+            .ingest(fixture_inbound("/ask @steward let me in", "p1"))
+            .unwrap();
+        if let GatewayIngressResult::Appended { event, .. } = &result {
+            engine.appended(&kernel, event);
+        }
+        result
+    };
+    assert!(matches!(pair, GatewayIngressResult::PairingRequired { .. }));
+    let denied = {
+        let mut kernel = gateway.lock().unwrap();
+        let result = kernel
+            .ingest(fixture_inbound_for(
+                "blocked-sender",
+                "/ask @steward let me in",
+                "p2",
+            ))
+            .unwrap();
+        if let GatewayIngressResult::Appended { event, .. } = &result {
+            engine.appended(&kernel, event);
+        }
+        result
+    };
+    assert!(matches!(denied, GatewayIngressResult::Denied { .. }));
+
+    thread::sleep(Duration::from_millis(100));
+    assert!(router.requests().is_empty(), "{:?}", router.requests());
+    assert_eq!(gateway.lock().unwrap().communiques().len(), 0);
+    assert_eq!(source.parked_turns(), 0);
+    assert_eq!(gateway.lock().unwrap().status().stream_count, 0);
+}
+
+// ---------------------------------------------------------------------------
 // Restart proof against the real binary
 // ---------------------------------------------------------------------------
 
@@ -1928,17 +2836,19 @@ fn write_connectors_file(home: &std::path::Path) {
     .unwrap();
 }
 
-fn spawn_serve(home: &std::path::Path) -> std::process::Child {
-    Command::new(bin())
-        .args(["gateway", "serve"])
-        .env("AIKIT_HOME", home)
-        .env("HOME", home)
-        .env_remove("AIKIT_GATEWAY_TOKEN")
-        .current_dir(home)
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("aikit gateway serve should spawn")
+fn spawn_serve(home: &std::path::Path) -> ServeGuard {
+    ServeGuard::new(
+        Command::new(bin())
+            .args(["gateway", "serve"])
+            .env("AIKIT_HOME", home)
+            .env("HOME", home)
+            .env_remove("AIKIT_GATEWAY_TOKEN")
+            .current_dir(home)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("aikit gateway serve should spawn"),
+    )
 }
 
 fn wait_for_socket(home: &std::path::Path) {

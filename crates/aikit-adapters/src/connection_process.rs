@@ -656,6 +656,11 @@ impl OwnedChild {
                 // leader's exit was observed an EPERM means the teardown work
                 // is already done and reaping is what is left.
                 Err(rustix::io::Errno::PERM) if leader_exit_observed.is_some() => {}
+                // The leader can exit between the observation above and the
+                // signal: the group then refuses with EPERM although nothing
+                // signalable remains. Observe again before calling it a
+                // failure (a child that exits on its own raced exactly here).
+                Err(rustix::io::Errno::PERM) if self.poll_exit()?.is_some() => {}
                 Err(error) => return Err(error.into()),
             }
         }

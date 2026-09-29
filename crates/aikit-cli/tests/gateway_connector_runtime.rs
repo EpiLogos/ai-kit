@@ -9,6 +9,10 @@
 //! corrupting state, and the configuration plane refuses token values and
 //! unusable token locations.
 
+#[path = "support/serve_guard.rs"]
+mod serve_guard;
+use serve_guard::ServeGuard;
+
 use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
@@ -121,17 +125,19 @@ fn specimen_program(extra: &[&str]) -> Value {
     serde_json::Value::Array(program.into_iter().map(Value::String).collect())
 }
 
-fn spawn_serve(home: &std::path::Path) -> std::process::Child {
-    Command::new(bin())
-        .args(["gateway", "serve"])
-        .env("AIKIT_HOME", home)
-        .env("HOME", home)
-        .env_remove("AIKIT_GATEWAY_TOKEN")
-        .current_dir(home)
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("aikit gateway serve should spawn")
+fn spawn_serve(home: &std::path::Path) -> ServeGuard {
+    ServeGuard::new(
+        Command::new(bin())
+            .args(["gateway", "serve"])
+            .env("AIKIT_HOME", home)
+            .env("HOME", home)
+            .env_remove("AIKIT_GATEWAY_TOKEN")
+            .current_dir(home)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("aikit gateway serve should spawn"),
+    )
 }
 
 fn bind_specimen(home: &std::path::Path) {

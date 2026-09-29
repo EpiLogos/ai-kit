@@ -7,7 +7,7 @@ $FIXTURE_WORLD. It speaks exactly the CLI shapes the pinned contract
 (O-I docs/contracts/WORLD-INHABITATION-V1.md) and the owners' in-flight
 implementations publish:
 
-  ctrl --json [--root R] action run central.position.list|central.position.read|central.world.here JSON
+  ctrl --json [--root R] action run central.position.list|central.position.read|central.world.here|agent-profile.list JSON
   actuation occupancy list|read|verify|claim|release ... --json
   factory development current-work|custody assign ... --json
 
@@ -115,6 +115,11 @@ def ctrl(args):
         emit({"ok": True, "action": action, "data": {
             "schema": "central.position-listing/v1", "world_ref": world_ref,
             "positions": positions, "inherited": inherited, "invalid": []}})
+    if action == "agent-profile.list":
+        profiles = [{"profile": p, "source_path": "Control/agents/profiles/fixture-%s.json" % p.get("agent_ref", "?").replace("/", "-").replace(":", "-")}
+                    for p in world.get("agent_profiles", [])]
+        emit({"ok": True, "action": action, "data": {
+            "profiles": profiles, "scope": "root", "source_payloads_disclosed": False}})
     if action == "central.position.read":
         for p in world.get("positions", []):
             if p["ref"] == payload["position_ref"]:
