@@ -4,6 +4,10 @@
 //! its journals, bindings, connectors, coexistence and agent providers intact
 //! — token locations moving and token values never.
 
+#[path = "support/serve_guard.rs"]
+mod serve_guard;
+use serve_guard::ServeGuard;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -727,23 +731,25 @@ fn at_routes_a_declared_remote_and_discloses_which_gateway_answered() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let mut serve = Command::new(bin())
-        .args([
-            "gateway",
-            "serve",
-            "--ws",
-            &format!("127.0.0.1:{port}"),
-            "--ws-token-location",
-            &format!("file:{}", target_token.display()),
-        ])
-        .env("AIKIT_HOME", target.path())
-        .env("HOME", target.path())
-        .env("AIKIT_GATEWAY_REF", "agency-gateway/omarchy")
-        .current_dir(target.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the remote gateway should spawn");
+    let mut serve = ServeGuard::new(
+        Command::new(bin())
+            .args([
+                "gateway",
+                "serve",
+                "--ws",
+                &format!("127.0.0.1:{port}"),
+                "--ws-token-location",
+                &format!("file:{}", target_token.display()),
+            ])
+            .env("AIKIT_HOME", target.path())
+            .env("HOME", target.path())
+            .env("AIKIT_GATEWAY_REF", "agency-gateway/omarchy")
+            .current_dir(target.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the remote gateway should spawn"),
+    );
 
     // The source declares that endpoint, holding its copy of the token.
     let source_copy = write_token(source.path(), "omarchy-gateway.token");

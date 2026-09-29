@@ -60,10 +60,14 @@ pub const CONNECTOR_QUIET_POLL_CODE: &str = "gateway_connector_wire.quiet_poll";
 
 /// Consecutive `next_event` errors tolerated before a reconnect cycle.
 const MAX_EVENT_FAILURES: usize = 3;
-/// Connect attempts before a connector is left Unavailable.
+/// Connect attempts before the fast linear backoff is spent.
 const MAX_CONNECT_ATTEMPTS: usize = 5;
 /// Linear reconnect backoff step: attempt N waits N × this.
 const BACKOFF_STEP: Duration = Duration::from_millis(200);
+/// After the fast attempts are spent, a failed connector keeps retrying on
+/// this steady cadence for the service's remaining life instead of parking
+/// forever: a startup DNS hiccup must not silence a connector all day.
+const CONNECT_RETRY_PARK: Duration = Duration::from_secs(30);
 
 /// The thread-safe outbound hand-off: anything holding the kernel mutex can
 /// push a prepared operation to the owning connector's worker.
@@ -291,20 +295,23 @@ fn run_connector_worker(
             }
         }
         if connect_failures >= MAX_CONNECT_ATTEMPTS {
+            // A startup blip (a name-resolution hiccup, a restarting peer)
+            // must not silence a connector for the service's whole life: the
+            // worker keeps trying on a steady long cadence and says so.
             record_health(
                 &context,
                 ConnectorHealth {
                     connector_ref: connector_ref.clone(),
                     state: ConnectorConnectionState::Unavailable,
                     detail: Some(format!(
-                        "gave up after {MAX_CONNECT_ATTEMPTS} connect attempts; last: \
-                         {last_connect_error}"
+                        "still retrying after {connect_failures} failed connect attempts; \
+                         last: {last_connect_error}"
                     )),
                     provenance: vec!["gateway connector pump".into()],
                 },
             );
-            park_until_shutdown(&context);
-            return;
+            sleep_with_shutdown(&context, CONNECT_RETRY_PARK);
+            continue;
         }
         sleep_with_shutdown(&context, BACKOFF_STEP * connect_failures.max(1) as u32);
     }
@@ -1056,18 +1063,23 @@ pub mod tests {
     }
 
     #[test]
-    fn a_connector_that_never_connects_leaves_the_service_up_with_named_health() {
+    fn a_connector_that_never_connects_keeps_retrying_with_named_health() {
         let harness = Harness::new();
         let inner = FixtureInner::new();
         inner.fail_next_connects(usize::MAX);
 
         let worker = harness.spawn_worker(Arc::clone(&inner));
-        harness.wait_until("the connector gives up with a named detail", |harness| {
-            harness
-                .health()
-                .and_then(|health| health.detail)
-                .is_some_and(|detail| detail.contains("gave up after 5 connect attempts"))
-        });
+        harness.wait_until(
+            "the connector reports it is still retrying with a named detail",
+            |harness| {
+                harness
+                    .health()
+                    .and_then(|health| health.detail)
+                    .is_some_and(|detail| {
+                        detail.contains("still retrying after 5 failed connect attempts")
+                    })
+            },
+        );
         assert_eq!(
             harness.health().unwrap().state,
             ConnectorConnectionState::Unavailable
