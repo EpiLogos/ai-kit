@@ -92,7 +92,9 @@ impl Server {
                     }
                 };
                 socket.set_nonblocking(false).unwrap();
-                socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
                 let (headers, body) = read_request(&mut socket);
                 assert!(headers.starts_with("POST /v1/systemone HTTP/1.1\r\n"));
                 record
@@ -196,7 +198,12 @@ fn an_explicitly_unauthenticated_local_endpoint_serves_typed_decisions_without_a
     assert_eq!(*endpoint.standing(), DecisionStanding::LocalProtocol);
     assert!(endpoint.base_url().starts_with("http://127.0.0.1:"));
     let receipt = invoke(&server.provider(), None);
-    assert_eq!(receipt.outcome, JevOutcome::Completed, "failure: {:?}", receipt.failure);
+    assert_eq!(
+        receipt.outcome,
+        JevOutcome::Completed,
+        "failure: {:?}",
+        receipt.failure
+    );
     assert!(receipt.failure.is_none());
     assert!(receipt.attempts[0].effect_uncertain == false);
     // No credential was sent: the server observed no Authorization header, and
@@ -253,10 +260,7 @@ fn incomplete_or_malformed_answers_never_become_decisions() {
         }]);
         let receipt = invoke(&server.provider(), None);
         assert_eq!(receipt.outcome, JevOutcome::Failed);
-        assert_eq!(
-            receipt.failure.as_ref().unwrap().code,
-            "jev.invalid_answer"
-        );
+        assert_eq!(receipt.failure.as_ref().unwrap().code, "jev.invalid_answer");
     }
 }
 
@@ -289,7 +293,10 @@ fn a_server_error_is_a_visible_failure_with_no_cloud_fallback() {
     }]);
     let receipt = invoke(&server.provider(), None);
     assert_eq!(receipt.outcome, JevOutcome::Failed);
-    assert_eq!(receipt.failure.as_ref().unwrap().code, "decision.endpoint_http");
+    assert_eq!(
+        receipt.failure.as_ref().unwrap().code,
+        "decision.endpoint_http"
+    );
     assert!(receipt.answer.is_none());
     assert_eq!(receipt.attempts.len(), 1);
 }
@@ -305,7 +312,10 @@ fn configured_bearer_credentials_travel_over_the_private_header_only() {
     let receipt = invoke(&server.provider(), Some(&secret));
     assert_eq!(receipt.outcome, JevOutcome::Completed);
     let auth = server.auth_seen.lock().unwrap().clone();
-    assert_eq!(auth, [Some("Authorization: Bearer local-optional-bearer".into())]);
+    assert_eq!(
+        auth,
+        [Some("Authorization: Bearer local-optional-bearer".into())]
+    );
 }
 
 #[test]
@@ -346,7 +356,9 @@ fn the_model_card_diagnostic_reports_what_the_endpoint_actually_serves() {
             }
         };
         socket.set_nonblocking(false).unwrap();
-        socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
         let _ = read_request(&mut socket);
         let body = serde_json::to_vec(&json!({
             "models": [{
