@@ -165,6 +165,9 @@ fn portable_signal(signal: &ConnectionSignal) -> (&'static str, Option<String>, 
         ConnectionSignalKind::AgentMessageChunk { text } => {
             ("model-delta", Some(text.clone()), None)
         }
+        ConnectionSignalKind::AgentMessageSegment { text } => {
+            ("model-message", Some(text.clone()), None)
+        }
         ConnectionSignalKind::AgentThoughtChunk { text, content } => (
             "harness-event",
             Some(text.clone()),

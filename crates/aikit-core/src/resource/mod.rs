@@ -26,7 +26,7 @@ mod search;
 mod versioned_world;
 mod worktree_projection;
 
-pub use action_search::search_contextual_actions;
+pub use action_search::{search_contextual_actions, significant_terms, word_overlap_score};
 pub use development_field::*;
 pub use factory::{FactoryInteropView, FactoryResourceImport};
 pub use index::{MemoryResourceIndex, ResolveRankingSignals, ResourceIndex};

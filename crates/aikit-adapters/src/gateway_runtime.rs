@@ -24,9 +24,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use aikit_adapters::{
-    ConnectorDescriptor, ConnectorHealth, ConversationAddress, DeliveryReceipt, GatewayConnector,
-    InboundEvent, InboundEventKind, MediaReference, OutboundOperation, OutboundOperationKind,
-    SenderIdentity, GATEWAY_CONNECTOR_SDK_VERSION, GATEWAY_CONNECTOR_WIRE_VERSION,
+    ConnectorDescriptor, ConnectorHealth, ConnectorOperation, ConversationAddress, DeliveryReceipt,
+    GatewayConnector, InboundEvent, InboundEventKind, MediaReference, OutboundOperation,
+    OutboundOperationKind, SenderIdentity, GATEWAY_CONNECTOR_SDK_VERSION,
+    GATEWAY_CONNECTOR_WIRE_VERSION,
 };
 use aikit_core::resource::ResourceRef;
 use aikit_core::{AikitError, Result};
@@ -34,13 +35,23 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::gateway_communique::{
-    Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForwardOutcome, CommuniqueJournal,
-    CommuniqueRouting,
+    Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForwardOutcome, CommuniqueInstanceHold,
+    CommuniqueJournal, CommuniqueRouting, CommuniqueState,
 };
 
 pub const AGENCY_GATEWAY_VERSION: &str = "aikit.agency-gateway/v1";
 pub const ACTUATION_STREAM_SCHEMA: &str = "actuation.stream/v1";
 pub const GATEWAY_OCCUPANCY_READING_SCHEMA: &str = "aikit.gateway-occupancy-reading/v1";
+
+/// Protocol feature: this gateway keeps a Communique's `to_instance` binding
+/// through send, ingest, relay and its state file. A gateway that does not
+/// advertise it (one built before exact-instance routes) silently drops the
+/// field and would turn an exact-instance Communique into a durable Position
+/// route, so a client never hands it one.
+pub const GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE: &str = "communique-exact-instance";
+
+/// Every protocol feature this gateway advertises in its `protocol` answer.
+pub const GATEWAY_PROTOCOL_FEATURES: [&str; 1] = [GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE];
 
 /// A serving gateway's answer to "who occupies this Position on your
 /// Workcell" (or, with no Position, the whole listing). The gateway keeps no
@@ -109,6 +120,10 @@ pub struct GatewayForkOrigin {
 
 fn default_context_revision() -> u64 {
     1
+}
+
+fn default_subscribe_limit() -> usize {
+    usize::MAX
 }
 
 /// Stable semantic route between one provider-native conversation and one
@@ -334,6 +349,83 @@ pub enum GatewayIngressResult {
 pub enum GatewayActuationControlOperation {
     Interrupt,
     Cancel,
+}
+
+/// Canonical conversation-control operations. These are gateway-native: a
+/// connector surface may spell them with slash strings at its own edge, a
+/// carrier client may send them directly, but the operation itself is this
+/// enum — never a parsed string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "kebab-case")]
+pub enum GatewayConversationOperation {
+    /// Conversation-scoped detail: binding, stream position, in-flight turn,
+    /// agent backing and connector health.
+    Status,
+    /// Interrupt the in-flight turn of the binding's agent session.
+    Stop,
+    /// Fresh turn context for the binding: a forked Stream and a new
+    /// AgentSession generation under the same connector conversation. The old
+    /// Stream is retained in the journal and named in the result.
+    New,
+    /// List the agent sessions behind this gateway's bindings.
+    Sessions,
+    /// A drained, state-preserving rematerialisation: stop admitting new
+    /// turn work, resolve the in-flight turn under the bounded policy, persist
+    /// the snapshot, answer, and exit so the service manager restarts it.
+    Restart,
+    /// Stop admitting new connector ingress for one connector; the pump keeps
+    /// serving outbound work and reports the pause in its health. `None`
+    /// targets the requesting conversation's own connector.
+    PauseConnector {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connector_ref: Option<ResourceRef>,
+    },
+    /// Resume connector ingress after a pause.
+    ResumeConnector {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connector_ref: Option<ResourceRef>,
+    },
+    /// The binding's harness native model selector. `None` lists what the
+    /// harness itself discloses (its controls, and a roster when it offers
+    /// one); `Some(id)` selects a provider-advertised model through the same
+    /// native seam. The gateway never invents a parallel notion of models.
+    Model {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
+    /// The binding's agent backing and the available provider ids (name +
+    /// label + protocol only). Read-only: switching a backing mid-session is a
+    /// session-replacement event this kernel does not own, so the answer
+    /// discloses the exact command instead of performing it.
+    Harness,
+    /// The aikit skill surface available to the backed harness, with the
+    /// invocation law disclosed: the harness carries skills in-turn; the
+    /// gateway does not execute skills.
+    Skills,
+}
+
+/// One agent reply (or honest turn failure) to be journaled on the same
+/// Stream the inbound message appended to, attributed to the binding's agent
+/// session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayAgentReply {
+    pub binding_ref: ResourceRef,
+    /// The journal sequence of the inbound event this answers.
+    pub in_reply_to_sequence: u64,
+    pub text: String,
+    /// Set when the turn failed or was interrupted: the text carried to the
+    /// surface says so, and the journaled event is a turn-failure record,
+    /// never a fabricated successful reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<GatewayAgentReplyFailure>,
+}
+
+/// Why a turn produced no real answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GatewayAgentReplyFailure {
+    Failed { reason: String },
+    Interrupted { detail: Option<String> },
 }
 
 /// Portable control intent. A harness/Actuation control adapter performs the
@@ -846,6 +938,198 @@ impl AgencyGateway {
         })
     }
 
+    /// The binding bound to one connector conversation, if any.
+    pub fn binding_by_route(
+        &self,
+        connector_ref: &ResourceRef,
+        address: &ConversationAddress,
+    ) -> Option<&GatewayBinding> {
+        let binding_ref = self.routes.get(&GatewayRouteKey::new(
+            connector_ref.clone(),
+            address.clone(),
+        ))?;
+        self.bindings.get(binding_ref)
+    }
+
+    /// One binding by ref.
+    pub fn binding(&self, binding_ref: &ResourceRef) -> Option<&GatewayBinding> {
+        self.bindings.get(binding_ref)
+    }
+
+    /// Whether the connector advertises an operation (e.g. Typing for a
+    /// best-effort indicator before a turn).
+    pub fn connector_supports(
+        &self,
+        connector_ref: &ResourceRef,
+        operation: ConnectorOperation,
+    ) -> bool {
+        self.connectors
+            .get(connector_ref)
+            .is_some_and(|descriptor| descriptor.capabilities.operations.contains(&operation))
+    }
+
+    /// One stream journal read view: last sequence and event count.
+    pub fn stream_position(&self, stream_ref: &ResourceRef) -> Option<(u64, usize)> {
+        self.streams
+            .get(stream_ref)
+            .map(|stream| (stream.next_sequence.saturating_sub(1), stream.events.len()))
+    }
+
+    /// Append an agent turn's reply (or its honest failure record) to the same
+    /// Stream journal the inbound human event appended to, attributed to the
+    /// binding's agent session. This is the kernel's only door for an agent
+    /// reply: an inbound human event is never fabricated to carry one.
+    pub fn record_agent_reply(&mut self, reply: GatewayAgentReply) -> Result<GatewayStreamEvent> {
+        let binding = self.bindings.get(&reply.binding_ref).ok_or_else(|| {
+            AikitError::new(
+                "agency_gateway.unknown_binding",
+                format!(
+                    "agent reply cites binding {} which does not exist",
+                    reply.binding_ref
+                ),
+            )
+        })?;
+        let binding = binding.clone();
+        let stream = self
+            .streams
+            .entry(binding.actuation_stream_ref.clone())
+            .or_insert_with(|| GatewayStreamJournal::for_binding(&binding));
+        stream.ensure_binding(&binding)?;
+        let sequence = stream.next_sequence;
+        let mut metadata = Map::new();
+        metadata.insert(
+            "agent_session_ref".into(),
+            json!(binding.agent_session_ref.to_string()),
+        );
+        metadata.insert("agency_ref".into(), json!(binding.agency_ref.to_string()));
+        metadata.insert(
+            "actuation_ref".into(),
+            json!(binding.actuation_ref.to_string()),
+        );
+        metadata.insert(
+            "in_reply_to_sequence".into(),
+            json!(reply.in_reply_to_sequence),
+        );
+        let (kind, custom_kind) = match &reply.failure {
+            None => ("agent-message", None),
+            Some(failure) => {
+                metadata.insert(
+                    "failure".into(),
+                    json!(match failure {
+                        GatewayAgentReplyFailure::Failed { reason } => json!({
+                            "kind": "failed",
+                            "reason": reason,
+                        }),
+                        GatewayAgentReplyFailure::Interrupted { detail } => json!({
+                            "kind": "interrupted",
+                            "detail": detail,
+                        }),
+                    }),
+                );
+                ("custom", Some("gateway-agent/turn-failure"))
+            }
+        };
+        let mut event = Map::new();
+        event.insert(
+            "event_ref".into(),
+            json!(format!(
+                "{}/gateway-event/{sequence}",
+                binding.actuation_stream_ref
+            )),
+        );
+        event.insert("sequence".into(), json!(sequence));
+        event.insert("kind".into(), json!(kind));
+        if let Some(custom_kind) = custom_kind {
+            event.insert("custom_kind".into(), json!(custom_kind));
+        }
+        event.insert(
+            "native_trace_ref".into(),
+            json!(format!(
+                "gateway-agent-reply/{}",
+                reply.in_reply_to_sequence
+            )),
+        );
+        event.insert("disclosure".into(), json!("portable"));
+        event.insert("metadata".into(), Value::Object(metadata));
+        if let Some(surface_ref) = &binding.surface_ref {
+            event.insert("surface_ref".into(), json!(surface_ref.to_string()));
+        }
+        event.insert("content".into(), json!(reply.text));
+        stream.append(Value::Object(event))
+    }
+
+    /// Append one honest turn-activity record to the binding's Stream journal
+    /// — the additive record of what an in-flight agent turn is doing right
+    /// now: a tool line, or a named streaming fallback. One custom event per
+    /// line, attributed to the binding's agent session like a reply. This is
+    /// the kernel's only door for in-turn notes; it never fabricates inbound
+    /// or reply events, and a note never stands in for the turn's answer.
+    pub fn record_agent_activity(
+        &mut self,
+        binding_ref: &ResourceRef,
+        in_reply_to_sequence: u64,
+        line: &str,
+    ) -> Result<GatewayStreamEvent> {
+        let binding = self.bindings.get(binding_ref).ok_or_else(|| {
+            AikitError::new(
+                "agency_gateway.unknown_binding",
+                format!(
+                    "agent activity cites binding {} which does not exist",
+                    binding_ref
+                ),
+            )
+        })?;
+        let binding = binding.clone();
+        let stream = self
+            .streams
+            .entry(binding.actuation_stream_ref.clone())
+            .or_insert_with(|| GatewayStreamJournal::for_binding(&binding));
+        stream.ensure_binding(&binding)?;
+        let sequence = stream.next_sequence;
+        let mut metadata = Map::new();
+        metadata.insert(
+            "agent_session_ref".into(),
+            json!(binding.agent_session_ref.to_string()),
+        );
+        metadata.insert("agency_ref".into(), json!(binding.agency_ref.to_string()));
+        metadata.insert(
+            "actuation_ref".into(),
+            json!(binding.actuation_ref.to_string()),
+        );
+        metadata.insert("in_reply_to_sequence".into(), json!(in_reply_to_sequence));
+        let mut event = Map::new();
+        event.insert(
+            "event_ref".into(),
+            json!(format!(
+                "{}/gateway-event/{sequence}",
+                binding.actuation_stream_ref
+            )),
+        );
+        event.insert("sequence".into(), json!(sequence));
+        event.insert("kind".into(), json!("custom"));
+        event.insert("custom_kind".into(), json!("gateway-agent/turn-activity"));
+        event.insert(
+            "native_trace_ref".into(),
+            json!(format!("gateway-agent-activity/{in_reply_to_sequence}")),
+        );
+        event.insert("disclosure".into(), json!("portable"));
+        event.insert("metadata".into(), Value::Object(metadata));
+        if let Some(surface_ref) = &binding.surface_ref {
+            event.insert("surface_ref".into(), json!(surface_ref.to_string()));
+        }
+        event.insert("content".into(), json!(line));
+        stream.append(Value::Object(event))
+    }
+
+    /// The recorded delivery receipt for one prepared operation, once its
+    /// receipt has arrived. The streaming reply path reads the anchor Send's
+    /// native message id here — the id its edits then target.
+    pub fn delivery_receipt(&self, operation_ref: &ResourceRef) -> Option<&DeliveryReceipt> {
+        self.delivery_receipts
+            .iter()
+            .find(|receipt| &receipt.operation_ref == operation_ref)
+    }
+
     pub fn discovery(&self) -> GatewayDiscovery {
         GatewayDiscovery {
             version: AGENCY_GATEWAY_VERSION.into(),
@@ -1189,6 +1473,19 @@ pub enum GatewayCommand {
         after_sequence: u64,
         limit: usize,
     },
+    /// Live subscription: answered immediately with the replay payload (the
+    /// same response a Replay gets); a running service then pushes each
+    /// subsequently appended event of that stream as its own `stream-event`
+    /// response frame on the same connection until disconnect. A client that
+    /// returns re-subscribes from its last seen sequence: the replay covers
+    /// the gap, so no appended event is missed and none is repeated.
+    Subscribe {
+        stream_ref: ResourceRef,
+        #[serde(default)]
+        after_sequence: u64,
+        #[serde(default = "default_subscribe_limit")]
+        limit: usize,
+    },
     PrepareOperation {
         binding_ref: ResourceRef,
         operation: OutboundOperationKind,
@@ -1203,17 +1500,25 @@ pub enum GatewayCommand {
         binding_ref: ResourceRef,
         operation: GatewayActuationControlOperation,
     },
+    /// A canonical conversation-control operation (status, stop, new, sessions,
+    /// restart, connector pause/resume). The kernel holds no turn sources: a
+    /// running gateway service routes this to its conversation engine; offline
+    /// execution is refused honestly.
+    Conversation {
+        binding_ref: ResourceRef,
+        operation: GatewayConversationOperation,
+    },
     Snapshot,
     Restore {
         snapshot: GatewaySnapshot,
     },
     /// Append a sender's Communique (non-blocking contact).
     SendCommunique {
-        draft: CommuniqueDraft,
+        draft: Box<CommuniqueDraft>,
     },
     /// Accept a Communique relayed by another Workcell's gateway.
     IngestCommunique {
-        communique: Communique,
+        communique: Box<Communique>,
         relayed_by: String,
     },
     /// Undelivered Communiques addressed to one Position.
@@ -1224,6 +1529,11 @@ pub enum GatewayCommand {
     AcknowledgeCommuniques {
         position_ref: String,
         generation_ref: String,
+        /// The Workcell the acknowledging generation stands on, when known;
+        /// an exact-instance Communique that requires a Workcell is refused
+        /// without it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workcell_ref: Option<String>,
         communique_refs: Vec<String>,
         delivered_at_unix_ms: u64,
         via: String,
@@ -1252,6 +1562,16 @@ pub enum GatewayCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         routing: Option<CommuniqueRouting>,
     },
+    /// Record a changed standing of an exact-instance Communique (pending, or
+    /// held with its reason), read by the caller from the owners.
+    RecordCommuniqueStanding {
+        communique_ref: String,
+        state: CommuniqueState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance_hold: Option<CommuniqueInstanceHold>,
+        at_unix_ms: u64,
+        basis: String,
+    },
     /// Who occupies this Position on the serving gateway's Workcell. Answered
     /// by the service from its own Workcell's Actuation; the kernel holds no
     /// occupancy and refuses it.
@@ -1279,6 +1599,7 @@ impl GatewayCommand {
                 | Self::Status
                 | Self::Ecology
                 | Self::Replay { .. }
+                | Self::Subscribe { .. }
                 | Self::Control { .. }
                 | Self::Snapshot
                 | Self::CommuniqueInbox { .. }
@@ -1300,6 +1621,17 @@ impl GatewayCommand {
             _ => None,
         }
     }
+
+    /// The conversation-control request this command carries, if any.
+    pub fn conversation_request(&self) -> Option<(&ResourceRef, &GatewayConversationOperation)> {
+        match self {
+            Self::Conversation {
+                binding_ref,
+                operation,
+            } => Some((binding_ref, operation)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1310,6 +1642,10 @@ pub enum GatewayResponse {
         connector_sdk_version: String,
         connector_wire_version: String,
         actuation_stream_schema: String,
+        /// Protocol features this gateway supports. Absent on gateways that
+        /// predate feature advertisement: they support none of them.
+        #[serde(default)]
+        features: Vec<String>,
     },
     Discovery {
         discovery: GatewayDiscovery,
@@ -1335,6 +1671,12 @@ pub enum GatewayResponse {
     Replay {
         replay: GatewayReplay,
     },
+    /// A live push: one event appended to a subscribed Stream. The service
+    /// emits this response without a request; clients never send it.
+    StreamEvent {
+        stream_ref: ResourceRef,
+        event: GatewayStreamEvent,
+    },
     OperationPrepared {
         operation: OutboundOperation,
     },
@@ -1346,6 +1688,14 @@ pub enum GatewayResponse {
     },
     ControlIntent {
         intent: GatewayActuationControlIntent,
+    },
+    /// A conversation-control operation's answer. The result document is the
+    /// engine's own reading (status detail, session list, receipts); the
+    /// heterogeneous shapes share one response kind.
+    Conversation {
+        binding_ref: ResourceRef,
+        operation: GatewayConversationOperation,
+        result: Value,
     },
     Snapshot {
         snapshot: GatewaySnapshot,
@@ -1384,6 +1734,10 @@ pub fn execute_gateway_command(
             connector_sdk_version: GATEWAY_CONNECTOR_SDK_VERSION.into(),
             connector_wire_version: GATEWAY_CONNECTOR_WIRE_VERSION.into(),
             actuation_stream_schema: ACTUATION_STREAM_SCHEMA.into(),
+            features: GATEWAY_PROTOCOL_FEATURES
+                .iter()
+                .map(|feature| (*feature).to_owned())
+                .collect(),
         }),
         GatewayCommand::Discover => Ok(GatewayResponse::Discovery {
             discovery: gateway.discovery(),
@@ -1418,6 +1772,16 @@ pub fn execute_gateway_command(
         } => Ok(GatewayResponse::Replay {
             replay: gateway.replay(&stream_ref, after_sequence, limit)?,
         }),
+        // A subscribe's kernel answer is the replay payload; the running
+        // service attaches the live push while answering (see
+        // gateway_service), so the replay and the registration are atomic.
+        GatewayCommand::Subscribe {
+            stream_ref,
+            after_sequence,
+            limit,
+        } => Ok(GatewayResponse::Replay {
+            replay: gateway.replay(&stream_ref, after_sequence, limit)?,
+        }),
         GatewayCommand::PrepareOperation {
             binding_ref,
             operation,
@@ -1440,6 +1804,16 @@ pub fn execute_gateway_command(
         } => Ok(GatewayResponse::ControlIntent {
             intent: gateway.control_intent(&binding_ref, operation)?,
         }),
+        GatewayCommand::Conversation {
+            binding_ref,
+            operation,
+        } => Err(AikitError::new(
+            "agency_gateway.engine_absent",
+            format!(
+                "conversation operation {operation:?} for binding {binding_ref} is executed by a \
+                 running gateway service's conversation engine; this kernel holds no turn sources"
+            ),
+        )),
         GatewayCommand::Snapshot => Ok(GatewayResponse::Snapshot {
             snapshot: gateway.snapshot(),
         }),
@@ -1451,7 +1825,7 @@ pub fn execute_gateway_command(
         }
         GatewayCommand::SendCommunique { draft } => {
             let gateway_ref = gateway.gateway_ref.to_string();
-            let (communique, replayed) = gateway.communiques.send(&gateway_ref, draft)?;
+            let (communique, replayed) = gateway.communiques.send(&gateway_ref, *draft)?;
             Ok(GatewayResponse::CommuniqueAccepted {
                 communique,
                 replayed,
@@ -1463,7 +1837,7 @@ pub fn execute_gateway_command(
             relayed_by,
         } => {
             let at = communique_now_unix_ms();
-            let (communique, replayed) = gateway.communiques.ingest(communique, &relayed_by, at)?;
+            let (communique, replayed) = gateway.communiques.ingest(*communique, &relayed_by, at)?;
             Ok(GatewayResponse::CommuniqueAccepted {
                 communique,
                 replayed,
@@ -1476,6 +1850,7 @@ pub fn execute_gateway_command(
         GatewayCommand::AcknowledgeCommuniques {
             position_ref,
             generation_ref,
+            workcell_ref,
             communique_refs,
             delivered_at_unix_ms,
             via,
@@ -1483,6 +1858,7 @@ pub fn execute_gateway_command(
             communiques: gateway.communiques.acknowledge(
                 &position_ref,
                 &generation_ref,
+                workcell_ref.as_deref(),
                 &communique_refs,
                 delivered_at_unix_ms,
                 &via,
@@ -1524,6 +1900,18 @@ pub fn execute_gateway_command(
         }),
         GatewayCommand::CommuniqueForwardQueue => Ok(GatewayResponse::CommuniqueList {
             communiques: gateway.communiques.forward_queue(),
+        }),
+        GatewayCommand::RecordCommuniqueStanding {
+            communique_ref,
+            state,
+            instance_hold,
+            at_unix_ms,
+            basis,
+        } => Ok(GatewayResponse::CommuniqueRecord {
+            communique: gateway
+                .communiques
+                .restand(&communique_ref, state, instance_hold, at_unix_ms, &basis)?
+                .0,
         }),
         GatewayCommand::RecordCommuniqueForward {
             communique_ref,

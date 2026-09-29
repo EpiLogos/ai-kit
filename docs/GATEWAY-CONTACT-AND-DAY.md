@@ -25,6 +25,7 @@ answer is reported as `unavailable` with the exact command that failed.
 aikit gateway who [--project-world project:O-I] --json
 aikit gateway send --to @cradle-steward --body "Cradle build is red on main." --json
 aikit gateway send --to central:position:project:O-I:factory-guardian --reply-to aikit:communique:… --body-file reply.md
+aikit gateway send --to @cradle-steward --instance actuation:generation:… [--require-workcell workcell:omarchy] --body "…" --json
 aikit gateway inbox [--position P] [--ack] --json
 aikit gateway conversation --with @factory-guardian --json
 aikit gateway delegate --communique aikit:communique:… --work work:cradle-fix [--run R] [--journey J] [--workflow-unit U] --reason "…"
@@ -33,6 +34,8 @@ aikit gateway remote add --workcell workcell:omarchy --ws 100.92.62.101:7800 --t
 aikit gateway serve --ws HOST:PORT --ws-token-location file:/ABS/PATH --unix
 aikit gateway install-service [--ws HOST:PORT --ws-token-location file:/ABS/PATH] [--workcell-ref W] [--gateway-ref G]
 aikit gateway remote list | remove --workcell W
+aikit gateway hoist --to workcell:omarchy [--apply [--ssh user@host] [--yes]] | --receive [--force]
+aikit gateway --at workcell:omarchy status | who | send | inbox | conversation | forward
 ```
 
 `who` returns `aikit.population-reading/v1`: every Position of the Project
@@ -116,6 +119,63 @@ carry `observed_via: "local"`. Two Workcells claiming one Position show
 `state: unavailable` with both `claims` and an absence. `data.remotes` lists
 every declared remote as `{workcell_ref, gateway_ref, status: reachable |
 unreachable, detail}`.
+
+### Durable Position routes and exact-instance routes
+
+`--to P` alone is a **durable Position route**: everything above applies, it
+follows succession, and it reaches whichever generation occupies P when it is
+delivered. `--instance G` makes it an **exact-instance route** bound to one
+occupancy generation — Actuation's `generation_ref`, the same ref `who --json`
+shows as `occupancy.generation_ref` (with `occupancy.workcell_ref`,
+`agency_ref` and `agent_session_ref` beside it). `--require-workcell W` further
+binds it to that generation standing on W. The record carries
+`to_instance: {generation_ref, required_workcell_ref?, agency_ref?,
+agent_session_ref?}` (the last two as Actuation's tenure named them at send
+time; delivery is decided on the generation).
+
+An exact route is placed by asking `actuation occupancy verify --position P
+--generation G` here first. Current here (and on W when required): `pending`,
+delivered at that instance's next turn. Current on another declared Workcell:
+relayed to that Workcell's gateway only. A generation this ledger never knew
+is looked for on the declared remotes (only W's gateway when W is required);
+a remote holding P under another generation is a same-named peer and is never
+a route. Otherwise the Communique is `held` with `instance_hold`:
+
+| `instance_hold` | meaning |
+|---|---|
+| `instance-absent` | no ledger asked records G current (vacant, only other generations, or the Workcell that might hold it could not be asked) |
+| `instance-superseded` | Actuation records G as ended: the address moved on; the successor never receives it |
+| `workcell-mismatch` | G is current, but not on the required Workcell |
+| `instance-unverified` | Actuation could not answer at send time |
+
+The relay pass re-reads every exact route and records a changed standing as a
+transition (`restood` in its output): a held route whose instance becomes
+reachable is relayed there; a pending one whose instance was superseded
+becomes `held: instance-superseded`. Not knowing never overwrites what was
+known. `inbox` annotates exact routes `pending` only for their own verified
+instance, else `awaiting-instance` or `held-<reason>`; `inbox --ack` and the
+turn boundary deliver only what the reader's generation and Workcell may
+receive and list the rest as `withheld`. The gateway kernel enforces the same
+law: acknowledging an exact route by another generation is refused
+(`agency_gateway.communique_wrong_instance`), and by its generation on another
+or an unknown Workcell when one is required
+(`agency_gateway.communique_workcell_mismatch`). A replayed send or relay of
+the same ref stays one record; the same ref with another target is refused as
+an identity rewrite. Out-of-order relays keep the receiving journal's arrival
+order and each sender's `sent_at_unix_ms`.
+
+An exact route is handed only to gateways that keep it. A gateway advertises
+`communique-exact-instance` in its `protocol` answer (`features`); `send
+--instance` refuses with `gateway.exact_instance_unsupported` when this
+Workcell's gateway, or a relay target that answers, does not advertise it (a
+gateway built before exact routes would silently drop `to_instance` and turn
+the Communique into a durable Position route). Every echoed record (send,
+remote ingest, the local relay record) must still carry the instance binding
+it was handed, or the command refuses with
+`gateway.communique_instance_binding_lost` and reports no route over it. In a
+relay pass each exact route stands or falls on its own: a standing that cannot
+be recorded, or a refused relay, is listed in `skipped` with its `code` and
+`reason`, and the pass continues.
 
 ### Delivery at the turn boundary
 
@@ -257,6 +317,71 @@ hook dispatcher, need the same identity. Set `AIKIT_WORKCELL_REF` in the
 shell profile on each machine, unless `central.world.here` already names the
 current Workcell there.
 
+### Hoisting the gateway to another Workcell
+
+One verb, two phases, honest everywhere:
+
+```sh
+aikit gateway hoist --to workcell:omarchy                 # plan: print everything
+aikit gateway hoist --to workcell:omarchy --apply --ssh frank@100.92.62.101
+aikit gateway hoist --receive                             # on the target
+aikit gateway hoist --receive --force                     # over existing posture
+```
+
+- **plan** packs the posture — connector entries (token by LOCATION, never
+  value), the semantic gateway state (bindings, stream journals, Communiques),
+  the coexistence document, and the resolved agent-provider entries the
+  connectors' `--agent-backing` names — and prints exactly what would move,
+  what the target must re-resolve (owner-only token files at their packed
+  paths; provider argv, re-resolved at serve time), and what identity each
+  thing keeps. Bindings, streams and Communiques keep their refs; the
+  gateway's own ref and Workcell become the target's (`agency-gateway/omarchy`
+  on `workcell:omarchy`): material moves, semantics hold, and the plan says
+  so.
+- **apply** reaches the Workcell the posture is already declared for
+  (`gateway remote add` first — an undeclared target is refused, never
+  invented). With `--ssh user@host` the bundle stages into the target home's
+  `state/gateway-hoist-pending.json` over that channel; without it the bundle
+  stages locally beside the exact carry-over commands. With `--yes` the apply
+  also runs the target's own `hoist --receive` and
+  `gateway install-service` over the channel. Every step prints; the first
+  refusal stops the apply with the exact remedy. `--include-tokens` (with
+  `--ssh --yes` only) copies each packed `file:` token file — and this
+  machine's declared copy of the target's gateway token, to the target's
+  `gateway.token` — each copy a printed step; without it, token files are the
+  operator's to stage.
+- **receive** unpacks a staged bundle into this home under the gateway state
+  lock (a running service is a refusal, not a race), validating the snapshot
+  through the kernel's own restore law before anything is written. A home
+  that already holds posture is refused without `--force`. The staged bundle
+  is consumed by the receive that unpacked it, and the output prints the
+  exact `install-service` command for the target.
+
+After the target answers (`aikit gateway --at <workcell> status`), retire the
+gateway on the old machine (`aikit gateway uninstall-service`) and swap every
+machine's `gateway remote add` to the new endpoint. The apply output prints
+each of those commands.
+
+### Addressing a remote gateway: `--at`
+
+Any gateway-carrier verb routes through the endpoint declared for a remote
+Workcell instead of this home's own:
+
+```sh
+aikit gateway --at workcell:omarchy status --json
+aikit gateway --at workcell:omarchy who --json
+AIKIT_GATEWAY_AT=workcell:omarchy aikit tui    # the conversation aperture too
+```
+
+The token comes from the declared location at call time and lives only in the
+one request. Nothing hides: the envelope carries a warning naming the
+routing, a population reading records `answered_by`, `status` and `ecology`
+name the `gateway_ref` that answered, and the TUI header shows the addressed
+Workcell beside the answering gateway's ref. `--at` on a verb that names no
+gateway carrier (connectors, coexistence, remote, install-service, hoist) is
+refused, not silently ignored; an undeclared Workcell is refused with the
+exact `remote add` command.
+
 ## The environmental DAY Routine
 
 The Method `skill/aikit/central-day-rollover` declares a **native body**
@@ -299,7 +424,9 @@ civil-time policy must say `automatic_day_rollover: true`, and
 ## Proof
 
 - `crates/aikit-adapters/src/gateway_communique.rs`: journal laws (atomic
-  acknowledgement, replay versus rewrite, relay, escalation, restore).
+  acknowledgement, replay versus rewrite, relay, escalation, restore; durable
+  versus exact-instance delivery, wrong-generation and wrong-Workcell ack
+  refused, hold re-standing, duplicate and out-of-order relay).
 - `crates/aikit-cli/tests/gateway_contact.rs`: the real binary and gateway.
   Covers same-Workcell send, inbox and ack; turn-boundary delivery; vacant →
   held → next claim; occupant replacement; unknown and forged attribution;
@@ -312,7 +439,11 @@ civil-time policy must say `automatic_day_rollover: true`, and
   had and nothing twice; two Workcells claiming one Position are refused as
   ambiguous; `who` shows occupancy observed through a remote gateway; a tenure
   A's own ledger places on B is relayed, retried after B was down, or refused
-  when B is undeclared.
+  when B is undeclared. Exact-instance routes: the durable route follows
+  succession while the exact route is withheld from the successor and re-stood
+  `instance-superseded`; a required-Workcell mismatch is held; the exact route
+  reaches its instance on B and never the same-named peer on C; a down B holds
+  it `instance-absent` until a relay pass relays it there once.
 - `crates/aikit-adapters/src/gateway_service.rs`: the occupancy query is
   answered by the service's owner hook on every ask (nothing cached), writes
   no gateway state, and the kernel alone refuses it.

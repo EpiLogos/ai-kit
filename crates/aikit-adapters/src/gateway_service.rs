@@ -12,24 +12,29 @@
 //! existing stdio carrier.
 
 use std::{
+    collections::{BTreeMap, VecDeque},
     fs,
     io::{self, BufRead, BufReader, Read, Write},
-    net::{TcpListener, TcpStream},
+    net::{Shutdown, TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Condvar, Mutex,
     },
-    thread,
+    thread::{self, JoinHandle},
     time::Duration,
 };
 
+use aikit_core::resource::ResourceRef;
 use aikit_core::{AikitError, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::gateway_connector_config::GatewayConnectorFactory;
+use crate::gateway_connector_pump::{spawn_connector_workers, ConnectorQueues};
 use crate::gateway_runtime::{
-    execute_gateway_command, AgencyGateway, GatewayCommand, GatewayOccupancyReading,
-    GatewayRequestEnvelope, GatewayResponse, GatewayResponseEnvelope,
+    execute_gateway_command, AgencyGateway, GatewayCommand, GatewayIngressResult,
+    GatewayOccupancyReading, GatewayRequestEnvelope, GatewayResponse, GatewayResponseEnvelope,
+    GatewayStreamEvent,
 };
 
 pub const GATEWAY_SERVICE_CARRIER_VERSION: &str = "aikit.gateway-service-carrier/v1";
@@ -337,11 +342,240 @@ pub trait GatewayOccupancyReader: Send + Sync + 'static {
     fn read(&self, gateway_ref: &str, position_ref: Option<&str>) -> GatewayOccupancyReading;
 }
 
-/// What runs beside the carriers: the periodic tick and the occupancy reader.
+/// What runs beside the carriers: the periodic tick, the occupancy reader and
+/// the connector factories whose pumps drive the configured connectors.
 #[derive(Default)]
 pub struct GatewayServiceHooks {
     pub ticks: Option<GatewayTickLoop>,
     pub occupancy: Option<Arc<dyn GatewayOccupancyReader>>,
+    pub connectors: Vec<Box<dyn GatewayConnectorFactory>>,
+    /// The conversation engine's turn-source resolver and policy. `None`
+    /// still builds an engine: canonical conversation control works, and a
+    /// connector that names no agent backing simply gets no turns.
+    pub conversation: Option<GatewayConversationHooks>,
+    /// The coexistence gate at serve startup: with the `exclusive` policy and
+    /// a foreign harness gateway detected, a connector whose platform + bot
+    /// identity the foreign gateway is recorded to own is refused with a
+    /// named error. `None` gates nothing.
+    pub coexistence: Option<Arc<dyn crate::gateway_coexistence::GatewayCoexistenceGate>>,
+}
+
+/// How the service builds its conversation engine.
+#[derive(Default)]
+pub struct GatewayConversationHooks {
+    /// Resolves a connector's agent-backed turn source from its configuration.
+    pub turn_sources:
+        Option<Arc<dyn crate::gateway_conversation_engine::GatewayTurnSourceResolver>>,
+    /// Bounded restart-drain and interruption policy. Defaults when absent.
+    pub policy: Option<crate::gateway_conversation_engine::EnginePolicy>,
+}
+
+// ---------------------------------------------------------------------------
+// Live event subscription
+// ---------------------------------------------------------------------------
+
+/// One subscribed connection's outbound queue. The carrier writes responses on
+/// its own thread; a small writer thread drains this queue onto the connection
+/// once the replay answer has been written (the gate), so a subscriber sees
+/// replay first and then every appended event, in order, with no gaps.
+pub struct SubscriptionSink {
+    gate: Mutex<bool>,
+    gate_signal: Condvar,
+    queue: Mutex<VecDeque<String>>,
+    queue_signal: Condvar,
+    closed: std::sync::atomic::AtomicBool,
+}
+
+impl SubscriptionSink {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            gate: Mutex::new(false),
+            gate_signal: Condvar::new(),
+            queue: Mutex::new(VecDeque::new()),
+            queue_signal: Condvar::new(),
+            closed: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// Called by the carrier once the subscribe's replay answer is on the wire.
+    pub fn open_gate(&self) {
+        if let Ok(mut gate) = self.gate.lock() {
+            *gate = true;
+            self.gate_signal.notify_all();
+        }
+    }
+
+    fn push(&self, frame: String) {
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Ok(mut queue) = self.queue.lock() {
+            queue.push_back(frame);
+            self.queue_signal.notify_one();
+        }
+    }
+
+    fn wait_open(&self) {
+        let mut gate = self.gate.lock().expect("subscription gate");
+        while !*gate && !self.closed.load(Ordering::SeqCst) {
+            gate = self.gate_signal.wait(gate).expect("subscription gate");
+        }
+    }
+
+    /// Blocks until frames are queued or the sink closed. `None` means closed.
+    fn wait_frames(&self) -> Option<Vec<String>> {
+        let mut queue = self.queue.lock().expect("subscription queue");
+        loop {
+            if self.closed.load(Ordering::SeqCst) {
+                return None;
+            }
+            if !queue.is_empty() {
+                return Some(queue.drain(..).collect());
+            }
+            queue = self.queue_signal.wait(queue).ok()?;
+        }
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.queue_signal.notify_all();
+        self.gate_signal.notify_all();
+    }
+}
+
+/// The in-process broadcast registry. Updated when events are appended — under
+/// the gateway state lock, so a subscriber registered before an append always
+/// receives it and registration can never miss the events replay already
+/// returned.
+pub struct SubscriptionHub {
+    inner: Mutex<HubInner>,
+}
+
+struct HubInner {
+    next_id: u64,
+    entries: BTreeMap<u64, HubEntry>,
+}
+
+struct HubEntry {
+    stream_ref: ResourceRef,
+    sink: Arc<SubscriptionSink>,
+}
+
+impl Default for SubscriptionHub {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(HubInner {
+                next_id: 1,
+                entries: BTreeMap::new(),
+            }),
+        }
+    }
+}
+
+impl SubscriptionHub {
+    /// Register a subscriber. Called while the gateway state lock is held.
+    fn register(&self, stream_ref: ResourceRef, sink: Arc<SubscriptionSink>) -> u64 {
+        let mut inner = self.inner.lock().expect("subscription hub");
+        let id = inner.next_id;
+        inner.next_id += 1;
+        inner.entries.insert(id, HubEntry { stream_ref, sink });
+        id
+    }
+
+    fn unregister(&self, id: u64) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.entries.remove(&id);
+        }
+    }
+
+    /// Publish an appended stream event to every subscriber of that stream.
+    pub fn publish(&self, stream_ref: &ResourceRef, event: &GatewayStreamEvent) {
+        let frame = {
+            let response = GatewayResponseEnvelope::from_result(
+                None,
+                Ok(GatewayResponse::StreamEvent {
+                    stream_ref: stream_ref.clone(),
+                    event: event.clone(),
+                }),
+            );
+            match serde_json::to_string(&response) {
+                Ok(encoded) => encoded,
+                Err(_) => return,
+            }
+        };
+        if let Ok(inner) = self.inner.lock() {
+            for entry in inner.entries.values() {
+                if &entry.stream_ref == stream_ref {
+                    entry.sink.push(frame.clone());
+                }
+            }
+        }
+    }
+}
+
+/// A connection's live subscription. Dropping it unregisters the subscriber
+/// and closes its sink (which ends the connection's writer thread).
+struct ConnectionSubscription {
+    hub: Arc<SubscriptionHub>,
+    id: u64,
+    sink: Arc<SubscriptionSink>,
+}
+
+impl Drop for ConnectionSubscription {
+    fn drop(&mut self) {
+        self.hub.unregister(self.id);
+        self.sink.close();
+    }
+}
+
+/// Per-connection subscription state held by the carrier loops.
+struct ConnectionSubscriptions {
+    hub: Arc<SubscriptionHub>,
+    active: Option<ConnectionSubscription>,
+}
+
+impl ConnectionSubscriptions {
+    fn new(hub: Arc<SubscriptionHub>) -> Self {
+        Self { hub, active: None }
+    }
+
+    /// Subscribe this connection to `stream_ref`. One live subscription per
+    /// connection: a re-Subscribe replaces the previous one. Called under the
+    /// gateway state lock so the replay answer and the registration are one
+    /// indivisible moment.
+    fn subscribe(&mut self, stream_ref: ResourceRef) -> Arc<SubscriptionSink> {
+        self.active = None;
+        let sink = SubscriptionSink::new();
+        let id = self.hub.register(stream_ref, Arc::clone(&sink));
+        self.active = Some(ConnectionSubscription {
+            hub: Arc::clone(&self.hub),
+            id,
+            sink: Arc::clone(&sink),
+        });
+        sink
+    }
+}
+
+/// Spawn the writer thread that drains a subscription sink onto one
+/// connection. It waits for the replay gate, then writes frames as they come,
+/// and ends when the sink closes or a write fails.
+fn spawn_subscription_writer(
+    sink: Arc<SubscriptionSink>,
+    mut write: impl FnMut(&str) -> Result<()> + Send + 'static,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        sink.wait_open();
+        loop {
+            let Some(frames) = sink.wait_frames() else {
+                return;
+            };
+            for frame in frames {
+                if write(&frame).is_err() {
+                    return;
+                }
+            }
+        }
+    })
 }
 
 /// Run every configured service carrier against one shared gateway state,
@@ -357,18 +591,111 @@ pub fn run_gateway_service_with_ticks(
         GatewayServiceHooks {
             ticks,
             occupancy: None,
+            connectors: Vec::new(),
+            conversation: None,
+            coexistence: None,
         },
     )
 }
 
+/// What the carriers and the connector pumps share beside the gateway state.
+pub struct GatewayServiceRuntime {
+    pub hub: Arc<SubscriptionHub>,
+    pub queues: Arc<ConnectorQueues>,
+    pub controls: Arc<crate::gateway_connector_pump::ConnectorPumpControls>,
+    /// The conversation engine, present on every running service.
+    pub engine: Option<Arc<crate::gateway_conversation_engine::GatewayConversationEngine>>,
+    pub connections: ConnectionRegistry,
+}
+
+/// One live carrier connection, closeable from the service's exit path.
+trait ConnectionCloser: Send + Sync {
+    /// End the connection: the peer's pending read returns at once (EOF for a
+    /// clean shutdown), instead of hanging on a handler thread that would
+    /// otherwise hold the socket open forever.
+    fn close(&self);
+}
+
+struct StreamCloser<S>(S);
+
+impl ConnectionCloser for StreamCloser<TcpStream> {
+    fn close(&self) {
+        let _ = self.0.shutdown(Shutdown::Both);
+    }
+}
+
+#[cfg(unix)]
+impl ConnectionCloser for StreamCloser<std::os::unix::net::UnixStream> {
+    fn close(&self) {
+        let _ = self.0.shutdown(Shutdown::Both);
+    }
+}
+
+/// The service's live connections. When the service stops it closes them, so
+/// a subscriber learns the gateway ended from its socket ending, never from
+/// silence — its next read returns and it re-subscribes from the last
+/// sequence it saw.
+#[derive(Default)]
+pub struct ConnectionRegistry {
+    inner: Mutex<BTreeMap<u64, Arc<dyn ConnectionCloser>>>,
+    next_id: AtomicU64,
+}
+
+impl ConnectionRegistry {
+    fn register(&self, closer: Arc<dyn ConnectionCloser>) -> ConnectionGuard<'_> {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.insert(id, closer);
+        }
+        ConnectionGuard { registry: self, id }
+    }
+
+    fn unregister(&self, id: u64) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.remove(&id);
+        }
+    }
+
+    /// Close every live connection. Guards still held drop afterwards and
+    /// keep the registry clean.
+    pub fn close_all(&self) {
+        let live = self
+            .inner
+            .lock()
+            .map(|inner| inner.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for closer in live {
+            closer.close();
+        }
+    }
+}
+
+/// Unregisters its connection when the handler ends, however it ends.
+struct ConnectionGuard<'a> {
+    registry: &'a ConnectionRegistry,
+    id: u64,
+}
+
+impl Drop for ConnectionGuard<'_> {
+    fn drop(&mut self) {
+        self.registry.unregister(self.id);
+    }
+}
+
 /// Run every configured service carrier against one shared gateway state,
-/// with the given hooks.
+/// with the given hooks: tick loop, occupancy reader and connector pumps.
 pub fn run_gateway_service_with_hooks(
     gateway: AgencyGateway,
     config: GatewayServiceConfig,
     hooks: GatewayServiceHooks,
 ) -> Result<()> {
-    let GatewayServiceHooks { ticks, occupancy } = hooks;
+    let GatewayServiceHooks {
+        ticks,
+        occupancy,
+        connectors,
+        conversation,
+        coexistence,
+    } = hooks;
     config.validate()?;
     // Held until this function returns: the service is the only writer of its
     // state file while it runs (see `GatewayStateLock`).
@@ -383,6 +710,79 @@ pub fn run_gateway_service_with_hooks(
     let gateway = restore_gateway_state(gateway, config.state_file.as_deref())?;
     let gateway = Arc::new(Mutex::new(gateway));
     let shutdown = Arc::new(AtomicBool::new(false));
+    let hub = Arc::new(SubscriptionHub::default());
+    let queues = Arc::new(ConnectorQueues::default());
+    let controls = Arc::new(crate::gateway_connector_pump::ConnectorPumpControls::default());
+    let GatewayConversationHooks {
+        turn_sources,
+        policy,
+    } = conversation.unwrap_or_default();
+    let engine = crate::gateway_conversation_engine::GatewayConversationEngine::new(
+        Arc::clone(&gateway),
+        Arc::clone(&hub),
+        Arc::clone(&queues),
+        Arc::clone(&controls),
+        config.state_file.clone(),
+        turn_sources,
+        policy.unwrap_or_default(),
+    );
+    let runtime = Arc::new(GatewayServiceRuntime {
+        hub,
+        queues,
+        controls: Arc::clone(&controls),
+        engine: Some(engine),
+        connections: ConnectionRegistry::default(),
+    });
+
+    // Coexistence gate at serve startup: with the exclusive policy and a
+    // foreign harness gateway detected, a connector whose platform + bot
+    // identity the foreign gateway is recorded to own is refused with a named
+    // error, printed here. Every other connector passes; nothing is silent.
+    let connectors = match coexistence {
+        Some(gate) => {
+            let mut admitted = Vec::new();
+            for factory in connectors {
+                let (connector_ref, platform, enabled) = {
+                    let entry = factory.entry();
+                    (
+                        entry.connector_ref.clone(),
+                        entry.platform.clone(),
+                        entry.enabled,
+                    )
+                };
+                if !enabled {
+                    admitted.push(factory);
+                    continue;
+                }
+                match gate.admit_connector(&connector_ref, &platform) {
+                    Ok(()) => admitted.push(factory),
+                    Err(error) => {
+                        eprintln!(
+                            "connector {connector_ref} was not started by the coexistence \
+                             policy: {error}"
+                        );
+                    }
+                }
+            }
+            admitted
+        }
+        None => connectors,
+    };
+
+    // Connector pumps run beside the carriers. A pump failure never takes a
+    // carrier down; workers stop when the shutdown flag is set, which every
+    // carrier exit path sets.
+    let connector_workers = spawn_connector_workers(
+        Arc::clone(&gateway),
+        Arc::clone(&shutdown),
+        config.state_file.clone(),
+        Arc::clone(&runtime.hub),
+        Arc::clone(&runtime.queues),
+        Arc::clone(&runtime.controls),
+        runtime.engine.clone(),
+        connectors,
+    );
+
     let mut workers = Vec::new();
 
     let tick_loop: Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)> =
@@ -437,6 +837,7 @@ pub fn run_gateway_service_with_hooks(
         let state_file = config.state_file.clone();
         let max_frame_bytes = config.max_frame_bytes;
         let occupancy = occupancy.clone();
+        let runtime = Arc::clone(&runtime);
         workers.push(thread::spawn(move || {
             let result = serve_websocket_listener(
                 listener,
@@ -446,6 +847,7 @@ pub fn run_gateway_service_with_hooks(
                 state_file,
                 max_frame_bytes,
                 occupancy,
+                runtime,
             );
             // A carrier that fails stops the whole service: a half-alive
             // gateway answering on one carrier only is silent degradation.
@@ -462,9 +864,16 @@ pub fn run_gateway_service_with_hooks(
         let shutdown = Arc::clone(&shutdown);
         let state_file = config.state_file.clone();
         let occupancy = occupancy.clone();
+        let runtime = Arc::clone(&runtime);
         workers.push(thread::spawn(move || {
-            let result =
-                serve_unix_socket(path, gateway, Arc::clone(&shutdown), state_file, occupancy);
+            let result = serve_unix_socket(
+                path,
+                gateway,
+                Arc::clone(&shutdown),
+                state_file,
+                occupancy,
+                runtime,
+            );
             if result.is_err() {
                 shutdown.store(true, Ordering::SeqCst);
             }
@@ -501,11 +910,20 @@ pub fn run_gateway_service_with_hooks(
             }
         }
     }
-    // Stop the tick loop and wait for it before persisting state.
+    // Stop the tick loop and the connector pumps, and wait for both, before
+    // the final state write.
     if let Some((tick_shutdown, handle)) = tick_loop {
         tick_shutdown.store(true, Ordering::SeqCst);
         let _ = handle.join();
     }
+    for worker in connector_workers {
+        let _ = worker.join();
+    }
+    // The service is ending: close every live carrier connection so a
+    // subscriber's next read ends now and it re-subscribes from the last
+    // sequence it saw, rather than waiting on a socket that outlives the
+    // service.
+    runtime.connections.close_all();
     if let Some(error) = first_error {
         return Err(error);
     }
@@ -520,6 +938,7 @@ pub fn run_gateway_service_with_hooks(
 
 type OccupancyHook = Option<Arc<dyn GatewayOccupancyReader>>;
 
+#[allow(clippy::too_many_arguments)] // the listener's facts are distinct; a bundle would only rename them
 fn serve_websocket_listener(
     listener: TcpListener,
     gateway: Arc<Mutex<AgencyGateway>>,
@@ -528,6 +947,7 @@ fn serve_websocket_listener(
     state_file: Option<PathBuf>,
     max_frame_bytes: usize,
     occupancy: OccupancyHook,
+    runtime: Arc<GatewayServiceRuntime>,
 ) -> Result<()> {
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
@@ -545,6 +965,7 @@ fn serve_websocket_listener(
                 let token = token.clone();
                 let state_file = state_file.clone();
                 let occupancy = occupancy.clone();
+                let runtime = Arc::clone(&runtime);
                 thread::spawn(move || {
                     let _ = handle_websocket_connection(
                         stream,
@@ -554,6 +975,7 @@ fn serve_websocket_listener(
                         state_file.as_deref(),
                         max_frame_bytes,
                         occupancy.as_deref(),
+                        runtime,
                     );
                 });
             }
@@ -571,6 +993,7 @@ fn serve_websocket_listener(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // the connection's facts are distinct; a bundle would only rename them
 fn handle_websocket_connection(
     stream: TcpStream,
     gateway: Arc<Mutex<AgencyGateway>>,
@@ -579,6 +1002,7 @@ fn handle_websocket_connection(
     state_file: Option<&Path>,
     max_frame_bytes: usize,
     occupancy: Option<&dyn GatewayOccupancyReader>,
+    runtime: Arc<GatewayServiceRuntime>,
 ) -> Result<()> {
     stream
         .set_read_timeout(Some(Duration::from_secs(60)))
@@ -586,19 +1010,38 @@ fn handle_websocket_connection(
     stream
         .set_write_timeout(Some(Duration::from_secs(30)))
         .map_err(io_error("configure WebSocket write timeout"))?;
+    // Registered so the service's exit closes this connection: a subscriber's
+    // next read ends instead of outliving the service.
+    let _connection = runtime.connections.register(match stream.try_clone() {
+        Ok(clone) => Arc::new(StreamCloser(clone)),
+        Err(_) => Arc::new(NullCloser),
+    });
     let writer = stream
         .try_clone()
         .map_err(io_error("clone WebSocket stream"))?;
+    // Responses and subscription pushes come from two threads; every write
+    // goes through this one lock so frames never interleave mid-write.
+    let writer = Arc::new(Mutex::new(writer));
     let mut reader = BufReader::new(stream);
-    let mut writer = writer;
-    websocket_handshake(&mut reader, &mut writer, token)?;
+    let mut subscriptions = ConnectionSubscriptions::new(Arc::clone(&runtime.hub));
+    let push_writer: Option<JoinHandle<()>> = None;
+    websocket_handshake(&mut reader, &mut *writer.lock().expect("writer"), token)?;
+    let mut push_writer = push_writer;
 
     loop {
         let frame = match read_websocket_frame(&mut reader, max_frame_bytes) {
             Ok(frame) => frame,
+            Err(error) if is_idle_timeout(&error) && subscriptions.active.is_some() => {
+                // A subscribed client may sit silent waiting for events;
+                // keep the connection alive with a protocol ping.
+                let mut writer = writer.lock().expect("writer");
+                write_websocket_frame(&mut *writer, 0x9, b"gateway")?;
+                continue;
+            }
             Err(error) if error.code() == "agency_gateway_service.websocket_eof" => return Ok(()),
             Err(error) => {
-                let _ = write_websocket_close(&mut writer, 1002, "protocol error");
+                let mut writer = writer.lock().expect("writer");
+                let _ = write_websocket_close(&mut *writer, 1002, "protocol error");
                 return Err(error);
             }
         };
@@ -610,27 +1053,71 @@ fn handle_websocket_connection(
                         format!("WebSocket text frame is not UTF-8: {error}"),
                     )
                 })?;
-                let (response, should_shutdown) =
-                    execute_serialized_request(&gateway, &text, state_file, occupancy)?;
-                write_websocket_text(&mut writer, response.as_bytes())?;
+                let (response, should_shutdown, subscribed) = execute_serialized_request(
+                    &gateway,
+                    &runtime,
+                    &text,
+                    state_file,
+                    occupancy,
+                    &mut subscriptions,
+                )?;
+                // The shutdown lands before the answer: a client that shuts
+                // the gateway down may hang up without waiting for it, and a
+                // failed answer to a gone peer must never strand the shutdown.
                 if should_shutdown {
                     shutdown.store(true, Ordering::SeqCst);
-                    write_websocket_close(&mut writer, 1000, "gateway shutdown")?;
+                }
+                {
+                    let write = write_websocket_text(
+                        &mut *writer.lock().expect("writer"),
+                        response.as_bytes(),
+                    );
+                    if let Err(error) = write {
+                        if !should_shutdown {
+                            return Err(error);
+                        }
+                    }
+                }
+                if let Some(sink) = subscribed {
+                    // The replay answer is on the wire; open the gate so the
+                    // writer can begin, and start it if this is the first.
+                    sink.open_gate();
+                    if push_writer.is_none() {
+                        let writer = Arc::clone(&writer);
+                        push_writer = Some(spawn_subscription_writer(sink, move |frame| {
+                            let mut writer = writer.lock().expect("writer");
+                            write_websocket_text(&mut *writer, frame.as_bytes())
+                        }));
+                    }
+                }
+                if should_shutdown {
+                    let mut writer = writer.lock().expect("writer");
+                    let _ = write_websocket_close(&mut *writer, 1000, "gateway shutdown");
                     return Ok(());
                 }
             }
             0x8 => {
-                write_websocket_close(&mut writer, 1000, "closing")?;
+                let mut writer = writer.lock().expect("writer");
+                write_websocket_close(&mut *writer, 1000, "closing")?;
                 return Ok(());
             }
-            0x9 => write_websocket_frame(&mut writer, 0xA, &frame.payload)?,
+            0x9 => {
+                let mut writer = writer.lock().expect("writer");
+                write_websocket_frame(&mut *writer, 0xA, &frame.payload)?
+            }
             0xA => {}
             _ => {
-                write_websocket_close(&mut writer, 1003, "unsupported frame")?;
+                let mut writer = writer.lock().expect("writer");
+                write_websocket_close(&mut *writer, 1003, "unsupported frame")?;
                 return Ok(());
             }
         }
     }
+}
+
+fn is_idle_timeout(error: &AikitError) -> bool {
+    error.code() == "agency_gateway_service.io"
+        && error.to_string().contains("read WebSocket frame header")
 }
 
 #[cfg(unix)]
@@ -640,6 +1127,7 @@ fn serve_unix_socket(
     shutdown: Arc<AtomicBool>,
     state_file: Option<PathBuf>,
     occupancy: OccupancyHook,
+    runtime: Arc<GatewayServiceRuntime>,
 ) -> Result<()> {
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
@@ -700,6 +1188,7 @@ fn serve_unix_socket(
                 let shutdown = Arc::clone(&shutdown);
                 let state_file = state_file.clone();
                 let occupancy = occupancy.clone();
+                let runtime = Arc::clone(&runtime);
                 thread::spawn(move || {
                     let _ = handle_line_connection(
                         stream,
@@ -707,6 +1196,7 @@ fn serve_unix_socket(
                         shutdown,
                         state_file.as_deref(),
                         occupancy.as_deref(),
+                        runtime,
                     );
                 });
             }
@@ -727,58 +1217,159 @@ fn serve_unix_socket(
     Ok(())
 }
 
+/// Streams the line carrier can duplicate, giving a subscription writer its
+/// own write half beside the reader, plus a service-exit closer.
+trait DuplexStream: Read + Write + Send + 'static {
+    fn duplicate(&self) -> io::Result<Self>
+    where
+        Self: Sized;
+
+    fn closer(&self) -> Arc<dyn ConnectionCloser>;
+}
+
+impl DuplexStream for TcpStream {
+    fn duplicate(&self) -> io::Result<Self> {
+        self.try_clone()
+    }
+
+    fn closer(&self) -> Arc<dyn ConnectionCloser> {
+        match self.try_clone() {
+            Ok(clone) => Arc::new(StreamCloser(clone)),
+            Err(_) => Arc::new(NullCloser),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl DuplexStream for std::os::unix::net::UnixStream {
+    fn duplicate(&self) -> io::Result<Self> {
+        use std::os::unix::net::UnixStream;
+        UnixStream::try_clone(self)
+    }
+
+    fn closer(&self) -> Arc<dyn ConnectionCloser> {
+        match self.try_clone() {
+            Ok(clone) => Arc::new(StreamCloser(clone)),
+            Err(_) => Arc::new(NullCloser),
+        }
+    }
+}
+
+/// A closer for the rare case the duplicate itself failed: the connection
+/// then ends with its handler thread, as before this registry existed.
+struct NullCloser;
+
+impl ConnectionCloser for NullCloser {
+    fn close(&self) {}
+}
+
 fn handle_line_connection<S>(
     stream: S,
     gateway: Arc<Mutex<AgencyGateway>>,
     shutdown: Arc<AtomicBool>,
     state_file: Option<&Path>,
     occupancy: Option<&dyn GatewayOccupancyReader>,
+    runtime: Arc<GatewayServiceRuntime>,
 ) -> Result<()>
 where
-    S: Read + Write + Send + 'static,
+    S: DuplexStream,
 {
-    // UnixStream/TcpStream cloning is intentionally avoided in this generic
-    // carrier helper. Split reading/writing through one BufReader and its inner
-    // stream so line framing remains deterministic.
+    // Responses and subscription pushes come from two threads; every write
+    // goes through this one lock so lines never interleave mid-write.
+    let writer = Arc::new(Mutex::new(
+        stream
+            .duplicate()
+            .map_err(io_error("duplicate gateway line stream"))?,
+    ));
+    // Registered so the service's exit closes this connection: a subscriber's
+    // next read ends instead of outliving the service.
+    let _connection = runtime.connections.register(stream.closer());
     let mut reader = BufReader::new(stream);
+    let mut subscriptions = ConnectionSubscriptions::new(Arc::clone(&runtime.hub));
+    let mut push_writer: Option<JoinHandle<()>> = None;
     loop {
         let mut line = String::new();
         let count = reader
             .read_line(&mut line)
             .map_err(io_error("read gateway line"))?;
         if count == 0 {
-            return Ok(());
+            break;
         }
         if line.trim().is_empty() {
             continue;
         }
-        let (response, should_shutdown) =
-            execute_serialized_request(&gateway, line.trim_end(), state_file, occupancy)?;
-        {
-            let stream = reader.get_mut();
-            stream
-                .write_all(response.as_bytes())
-                .map_err(io_error("write gateway line response"))?;
-            stream
-                .write_all(b"\n")
-                .map_err(io_error("write gateway line terminator"))?;
-            stream
-                .flush()
-                .map_err(io_error("flush gateway line response"))?;
-        }
+        let (response, should_shutdown, subscribed) = execute_serialized_request(
+            &gateway,
+            &runtime,
+            line.trim_end(),
+            state_file,
+            occupancy,
+            &mut subscriptions,
+        )?;
+        // The shutdown lands before the answer: a client that shuts the
+        // gateway down may hang up without waiting for the answer, and the
+        // answer failing to a gone peer must never strand the shutdown.
         if should_shutdown {
             shutdown.store(true, Ordering::SeqCst);
-            return Ok(());
+        }
+        {
+            let mut writer = writer.lock().expect("gateway line writer");
+            let write = writer
+                .write_all(response.as_bytes())
+                .and_then(|()| writer.write_all(b"\n"))
+                .and_then(|()| writer.flush());
+            if let Err(error) = write {
+                if !should_shutdown {
+                    return Err(io_error("write gateway line response")(error));
+                }
+            }
+        }
+        if let Some(sink) = subscribed {
+            // The replay answer is on the wire; open the gate and start the
+            // connection's subscription writer if this is the first.
+            sink.open_gate();
+            if push_writer.is_none() {
+                let writer = Arc::clone(&writer);
+                push_writer = Some(spawn_subscription_writer(sink, move |frame| {
+                    let mut writer = writer.lock().expect("gateway line writer");
+                    writer
+                        .write_all(frame.as_bytes())
+                        .map_err(io_error("write gateway push"))?;
+                    writer
+                        .write_all(b"\n")
+                        .map_err(io_error("write gateway push terminator"))?;
+                    writer.flush().map_err(io_error("flush gateway push"))?;
+                    Ok(())
+                }));
+            }
+        }
+        if should_shutdown {
+            break;
         }
     }
+    // Dropping the subscription unregisters it and closes the sink, which
+    // ends the writer thread.
+    drop(subscriptions);
+    if let Some(handle) = push_writer {
+        let _ = handle.join();
+    }
+    Ok(())
 }
 
+/// Execute one serialized carrier request against the shared gateway state.
+///
+/// Returns the response line, whether the service should shut down, and — for
+/// a successful `subscribe` — the connection's new subscription sink. The
+/// sink's gate opens once the carrier has written the replay answer, so a
+/// subscriber always sees replay first, then live pushes, never a gap.
 fn execute_serialized_request(
     gateway: &Arc<Mutex<AgencyGateway>>,
+    runtime: &GatewayServiceRuntime,
     input: &str,
     state_file: Option<&Path>,
     occupancy: Option<&dyn GatewayOccupancyReader>,
-) -> Result<(String, bool)> {
+    subscriptions: &mut ConnectionSubscriptions,
+) -> Result<(String, bool, Option<Arc<SubscriptionSink>>)> {
     let request = match serde_json::from_str::<GatewayRequestEnvelope>(input) {
         Ok(request) => request,
         Err(error) => {
@@ -790,7 +1381,7 @@ fn execute_serialized_request(
                     "message": error.to_string()
                 }
             });
-            return Ok((response.to_string(), false));
+            return Ok((response.to_string(), false, None));
         }
     };
     // An occupancy query is the Workcell owner's answer, not gateway state:
@@ -817,7 +1408,50 @@ fn execute_serialized_request(
                 format!("encode gateway response: {error}"),
             )
         })?;
-        return Ok((encoded, false));
+        return Ok((encoded, false, None));
+    }
+    // A canonical conversation-control command is the running engine's to
+    // execute: the kernel holds no turn sources. The engine locks the state
+    // itself, answers the requesting carrier, surfaces its line to the
+    // requesting conversation, and persists — and a restart drains, answers,
+    // and then stops the service so the service manager rematerialises it.
+    if let Some(engine) = &runtime.engine {
+        if let GatewayCommand::Conversation {
+            binding_ref,
+            operation,
+        } = request.command.clone()
+        {
+            // An operation the engine refuses (an unknown binding, say) is
+            // the same honest error envelope any other command gets — never a
+            // closed carrier.
+            let execution = match engine.execute(binding_ref, operation) {
+                Ok(execution) => execution,
+                Err(error) => {
+                    let encoded = serde_json::to_string(&GatewayResponseEnvelope::from_result(
+                        request.request_id,
+                        Err(error),
+                    ))
+                    .map_err(|error| {
+                        AikitError::new(
+                            "agency_gateway_service.response_encode",
+                            format!("encode gateway response: {error}"),
+                        )
+                    })?;
+                    return Ok((encoded, false, None));
+                }
+            };
+            let encoded = serde_json::to_string(&GatewayResponseEnvelope::from_result(
+                request.request_id,
+                Ok(execution.response),
+            ))
+            .map_err(|error| {
+                AikitError::new(
+                    "agency_gateway_service.response_encode",
+                    format!("encode gateway response: {error}"),
+                )
+            })?;
+            return Ok((encoded, execution.restart_requested, None));
+        }
     }
     let should_shutdown = request.command.is_shutdown();
     let mut gateway = gateway.lock().map_err(|_| {
@@ -826,10 +1460,46 @@ fn execute_serialized_request(
             "gateway state lock was poisoned",
         )
     })?;
-    let response = GatewayResponseEnvelope::from_result(
-        request.request_id,
-        execute_gateway_command(&mut gateway, request.command),
-    );
+    let result = execute_gateway_command(&mut gateway, request.command.clone());
+    let mut subscribed = None;
+    match &result {
+        // A subscribe is a replay plus a live attachment, made one indivisible
+        // moment by holding the gateway state lock across both: no event can
+        // slip between the replay snapshot and the registration.
+        Ok(GatewayResponse::Replay { .. })
+            if matches!(request.command, GatewayCommand::Subscribe { .. }) =>
+        {
+            let GatewayCommand::Subscribe { stream_ref, .. } = &request.command else {
+                unreachable!("matched above")
+            };
+            subscribed = Some(subscriptions.subscribe(stream_ref.clone()));
+        }
+        Ok(GatewayResponse::OperationPrepared { operation }) => {
+            // Hand the prepared operation to its connector's pump. The queue
+            // is the thread-safe seam: the pump executes and records the
+            // receipt through the kernel like any carrier command.
+            runtime
+                .queues
+                .queue_for(&operation.connector_ref)
+                .push(operation.clone());
+        }
+        Ok(GatewayResponse::Ingress {
+            result:
+                GatewayIngressResult::Appended {
+                    stream_ref, event, ..
+                },
+        }) => {
+            // Carrier-appended events reach live subscribers exactly like
+            // pump-appended ones, under the same lock — and the conversation
+            // engine sees the same append.
+            runtime.hub.publish(stream_ref, event);
+            if let Some(engine) = &runtime.engine {
+                engine.appended(&gateway, event);
+            }
+        }
+        _ => {}
+    }
+    let response = GatewayResponseEnvelope::from_result(request.request_id, result);
     if response.ok {
         persist_gateway_state(&gateway, state_file)?;
     }
@@ -839,7 +1509,7 @@ fn execute_serialized_request(
             format!("encode gateway response: {error}"),
         )
     })?;
-    Ok((encoded, should_shutdown))
+    Ok((encoded, should_shutdown, subscribed))
 }
 
 fn websocket_handshake<R: BufRead, W: Write>(
@@ -1200,6 +1870,7 @@ mod tests {
     use super::*;
     use std::{
         net::SocketAddr,
+        os::unix::net::UnixStream,
         sync::mpsc,
         time::{Duration, Instant},
     };
@@ -1209,6 +1880,16 @@ mod tests {
 
     fn gateway() -> AgencyGateway {
         AgencyGateway::new(ResourceRef::parse("agency-gateway/test").unwrap())
+    }
+
+    fn test_runtime() -> Arc<GatewayServiceRuntime> {
+        Arc::new(GatewayServiceRuntime {
+            hub: Arc::new(SubscriptionHub::default()),
+            queues: Arc::new(crate::gateway_connector_pump::ConnectorQueues::default()),
+            controls: Arc::new(crate::gateway_connector_pump::ConnectorPumpControls::default()),
+            engine: None,
+            connections: ConnectionRegistry::default(),
+        })
     }
 
     #[test]
@@ -1260,6 +1941,8 @@ mod tests {
             attribution_basis: "test".into(),
             to_position_ref: "central:position:control:root:keeper".into(),
             to_workcell_ref: None,
+            to_instance: None,
+            instance_hold: None,
             body: "offline".into(),
             sent_at_unix_ms: 1,
             state: crate::gateway_communique::CommuniqueState::Held,
@@ -1275,7 +1958,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("gateway.json");
         let send = |reference: &str| GatewayCommand::SendCommunique {
-            draft: communique_draft(reference),
+            draft: Box::new(communique_draft(reference)),
         };
 
         // A service holds the state: the offline writer waits, then refuses.
@@ -1448,6 +2131,7 @@ mod tests {
                 None,
                 64 * 1024,
                 None,
+                test_runtime(),
             );
             done_tx.send(result).unwrap();
         });
@@ -1505,7 +2189,7 @@ mod tests {
         }
         assert!(shutdown.load(Ordering::SeqCst));
         done_rx
-            .recv_timeout(Duration::from_secs(3))
+            .recv_timeout(Duration::from_secs(10))
             .unwrap()
             .unwrap();
     }
@@ -1532,11 +2216,7 @@ mod tests {
                 .unwrap()
         });
 
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while !socket.exists() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(socket.exists());
+        wait_connectable(&socket);
         assert_eq!(
             fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
             0o600
@@ -1562,11 +2242,28 @@ mod tests {
         )
         .unwrap();
         done_rx
-            .recv_timeout(Duration::from_secs(3))
+            .recv_timeout(Duration::from_secs(10))
             .unwrap()
             .unwrap();
         assert!(state.exists());
         assert!(!socket.exists());
+    }
+
+    /// Wait until the socket accepts a connection. The socket file appears at
+    /// bind(), but connect is refused until listen() — waiting for the file
+    /// alone races the listener.
+    fn wait_connectable(socket: &std::path::Path) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if UnixStream::connect(socket).is_ok() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the socket never accepted a connection"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// A fixture Workcell owner: answers from a map, counts how often it was
@@ -1603,6 +2300,199 @@ mod tests {
         serde_json::from_str(response.trim()).unwrap()
     }
 
+    /// Read one newline-terminated response from a gateway line connection,
+    /// retrying through read timeouts until the deadline.
+    fn read_gateway_line(
+        stream: &std::os::unix::net::UnixStream,
+        deadline: Instant,
+    ) -> serde_json::Value {
+        stream
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(count) if count > 0 => {
+                    return serde_json::from_str(line.trim()).unwrap();
+                }
+                _ if Instant::now() >= deadline => {
+                    panic!("timed out reading a gateway line");
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subscribe_answers_with_replay_then_pushes_live_events_without_gaps_or_duplicates() {
+        use crate::gateway_connector_pump::tests::{fixture_entry, FixtureFactory, FixtureInner};
+        use crate::gateway_connector_pump::CONNECTOR_QUIET_POLL_CODE;
+        let _ = CONNECTOR_QUIET_POLL_CODE;
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("gateway.sock");
+        let state = root.path().join("gateway.json");
+
+        // The deployed posture: a persisted kernel that already names the
+        // connector and its binding, so the pump's ingests append.
+        {
+            let mut gateway =
+                AgencyGateway::new(ResourceRef::parse("agency-gateway/test").unwrap());
+            crate::gateway_connector_pump::tests::seed_binding(&mut gateway);
+            persist_gateway_state(&gateway, Some(&state)).unwrap();
+        }
+
+        let inner = FixtureInner::new();
+        let config = GatewayServiceConfig {
+            websocket_bind: None,
+            websocket_bearer_token: None,
+            unix_socket: Some(socket.clone()),
+            state_file: Some(state.clone()),
+            max_frame_bytes: DEFAULT_GATEWAY_MAX_FRAME_BYTES,
+        };
+        let hooks = GatewayServiceHooks {
+            ticks: None,
+            occupancy: None,
+            connectors: vec![Box::new(FixtureFactory {
+                entry: fixture_entry(),
+                inner: Arc::clone(&inner),
+            })],
+            conversation: None,
+            coexistence: None,
+        };
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            done_tx
+                .send(run_gateway_service_with_hooks(
+                    AgencyGateway::new(ResourceRef::parse("agency-gateway/test").unwrap()),
+                    config,
+                    hooks,
+                ))
+                .unwrap()
+        });
+        wait_connectable(&socket);
+
+        let subscribe = |after_sequence: u64| -> std::os::unix::net::UnixStream {
+            let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+            let request = serde_json::json!({
+                "request_id": "sub",
+                "command": {
+                    "type": "subscribe",
+                    "stream_ref": "actuation-stream/fixture",
+                    "after_sequence": after_sequence
+                }
+            });
+            use std::io::Write as _;
+            writeln!(stream, "{request}").unwrap();
+            stream
+        };
+        let far_deadline = Instant::now() + Duration::from_secs(10);
+
+        // One event appends before anyone subscribes; the pump ingests it
+        // into the kernel and persists it.
+        inner.push_text("one");
+        let appended = Instant::now() + Duration::from_secs(10);
+        loop {
+            let persisted = std::fs::read_to_string(&state).unwrap_or_default();
+            if persisted.contains("\"sequence\": 1") || persisted.contains("\"sequence\":1") {
+                break;
+            }
+            assert!(Instant::now() < appended, "the first event never landed");
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        // First session: the subscribe answers with the replay payload (the
+        // one event already in the journal), then pushes live appends.
+        let client = subscribe(0);
+        let replay = read_gateway_line(&client, far_deadline);
+        assert_eq!(replay["response"]["type"], "replay", "{replay}");
+        assert_eq!(
+            replay["response"]["replay"]["events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        inner.push_text("two");
+        let push = read_gateway_line(&client, far_deadline);
+        assert_eq!(push["response"]["type"], "stream-event", "{push}");
+        assert_eq!(push["response"]["event"]["sequence"], 2);
+        assert_eq!(push["response"]["event"]["event"]["content"], "two");
+
+        // The client goes away; an event appends while it is disconnected.
+        drop(client);
+        inner.push_text("three");
+        // The pump must have appended it before the re-subscribe: a subscribe
+        // served earlier would see the gap arrive as a live push instead.
+        let appended = Instant::now() + Duration::from_secs(10);
+        loop {
+            let persisted = std::fs::read_to_string(&state).unwrap_or_default();
+            if persisted.contains("\"sequence\": 3") || persisted.contains("\"sequence\":3") {
+                break;
+            }
+            assert!(Instant::now() < appended, "the away-gap event never landed");
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        // Re-Subscribe from the last seen sequence: the replay covers the
+        // gap (three) with no duplicate of two, then live pushes resume.
+        let client = subscribe(2);
+        let replay = read_gateway_line(&client, far_deadline);
+        let covered: Vec<u64> = replay["response"]["replay"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["sequence"].as_u64().unwrap())
+            .collect();
+        assert_eq!(covered, vec![3], "replay must cover the away gap: {replay}");
+        inner.push_text("four");
+        let push = read_gateway_line(&client, far_deadline);
+        assert_eq!(push["response"]["event"]["sequence"], 4);
+        assert_eq!(push["response"]["event"]["event"]["content"], "four");
+
+        // The stream saw every event exactly once, in order. A push can beat
+        // the state write to the file, so poll for the final append.
+        let snapshot_deadline = Instant::now() + Duration::from_secs(10);
+        let snapshot = loop {
+            let snapshot: Vec<u64> = restore_gateway_state(
+                AgencyGateway::new(ResourceRef::parse("agency-gateway/test").unwrap()),
+                Some(&state),
+            )
+            .unwrap()
+            .snapshot()
+            .streams
+            .into_iter()
+            .flat_map(|stream| stream.events.into_iter().map(|event| event.sequence))
+            .collect();
+            if snapshot == vec![1, 2, 3, 4] {
+                break snapshot;
+            }
+            assert!(
+                Instant::now() < snapshot_deadline,
+                "the stream never completed: {snapshot:?}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(snapshot, vec![1, 2, 3, 4]);
+
+        // Shutdown on a separate connection; the service stops cleanly.
+        let mut stop = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        use std::io::Write as _;
+        writeln!(
+            stop,
+            "{}",
+            serde_json::json!({"command": {"type": "shutdown"}})
+        )
+        .unwrap();
+        drop(client);
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+    }
+
     #[test]
     fn an_occupancy_query_is_answered_fresh_by_the_owner_hook_and_never_by_the_kernel() {
         use std::os::unix::net::UnixStream;
@@ -1635,6 +2525,9 @@ mod tests {
             occupancy: Some(Arc::new(FixtureOccupancy {
                 asked: Arc::clone(&asked),
             })),
+            connectors: Vec::new(),
+            conversation: None,
+            coexistence: None,
         };
         let (done_tx, done_rx) = mpsc::channel();
         thread::spawn(move || {
@@ -1642,10 +2535,7 @@ mod tests {
                 .send(run_gateway_service_with_hooks(gateway(), config, hooks))
                 .unwrap()
         });
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while !socket.exists() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-        }
+        wait_connectable(&socket);
         let mut stream = UnixStream::connect(&socket).unwrap();
         let first = line_exchange(
             &mut stream,
@@ -1683,7 +2573,7 @@ mod tests {
             serde_json::json!({"request_id":"stop","command":{"type":"shutdown"}}),
         );
         done_rx
-            .recv_timeout(Duration::from_secs(3))
+            .recv_timeout(Duration::from_secs(10))
             .unwrap()
             .unwrap();
     }
