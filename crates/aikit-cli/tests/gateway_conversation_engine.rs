@@ -9,6 +9,10 @@
 //! stream identity unchanged, connector reconnected, and a subscriber that
 //! re-subscribes from its cursor misses nothing and receives nothing twice.
 
+#[path = "support/serve_guard.rs"]
+mod serve_guard;
+use serve_guard::ServeGuard;
+
 use std::{
     collections::VecDeque,
     fs,
@@ -1928,17 +1932,19 @@ fn write_connectors_file(home: &std::path::Path) {
     .unwrap();
 }
 
-fn spawn_serve(home: &std::path::Path) -> std::process::Child {
-    Command::new(bin())
-        .args(["gateway", "serve"])
-        .env("AIKIT_HOME", home)
-        .env("HOME", home)
-        .env_remove("AIKIT_GATEWAY_TOKEN")
-        .current_dir(home)
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("aikit gateway serve should spawn")
+fn spawn_serve(home: &std::path::Path) -> ServeGuard {
+    ServeGuard::new(
+        Command::new(bin())
+            .args(["gateway", "serve"])
+            .env("AIKIT_HOME", home)
+            .env("HOME", home)
+            .env_remove("AIKIT_GATEWAY_TOKEN")
+            .current_dir(home)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("aikit gateway serve should spawn"),
+    )
 }
 
 fn wait_for_socket(home: &std::path::Path) {
