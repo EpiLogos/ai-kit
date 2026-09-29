@@ -41,9 +41,14 @@ fn project(world: &Path, name: &str, source: &str, committed_repo: bool) {
             r#"{{"schema":"central.project/v1","project_id":"{name}","human_source":"ProjectCentral/user","wiki":{{"profile":"okf-wiki/v1","source":"ProjectCentral/agents/wiki/wiki.json","adopted_sources":[]}}}}"#
         ),
     );
+    // The canonical Wiki declaration must carry its own register space:
+    // `read_central_wiki` refuses a declared wiki whose file does not hold
+    // the space the world map names (contract since the reconciled tree).
     write(
         &root.join("ProjectCentral/agents/wiki/wiki.json"),
-        r#"{"profile":"okf-wiki/v1","objects":[]}"#,
+        &format!(
+            r#"{{"profile":"okf-wiki/v1","objects":[{{"child_space_refs":[],"node_refs":[],"object":"space","parent_space_refs":["central:wiki:root"],"profile":"okf-wiki/v1","provenance":[],"ref":"central:wiki:project:{name}","revision":1,"title":"{name}"}}]}}"#
+        ),
     );
     write(
         &root.join("package.json"),
@@ -171,10 +176,33 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     let temp = TempDir::new().unwrap();
     let world = temp.path().join("Central");
     fs::create_dir_all(world.join("Control")).unwrap();
+    // The root register's own Wiki declaration must hold the root space the
+    // world map names — the read model refuses a space-less wiki file.
+    fs::create_dir_all(world.join("Control/agents/wiki")).unwrap();
+    fs::write(
+        world.join("Control/agents/wiki/wiki.json"),
+        r#"{"profile":"okf-wiki/v1","objects":[{"child_space_refs":["central:wiki:project:cedar","central:wiki:project:larch","central:wiki:project:broken"],"node_refs":[],"object":"space","parent_space_refs":[],"profile":"okf-wiki/v1","provenance":[],"ref":"central:wiki:root","revision":1,"title":"Central"}]}"#,
+    )
+    .unwrap();
     let world = world.canonicalize().unwrap();
     // The real Central root also carries an AIKit marker. Its topmost profile
     // must not make a nested Git worktree outside Work/ a root-wide query.
     fs::create_dir_all(world.join(".aikit")).unwrap();
+    // The world contract: the root register declares its identity through the
+    // ground-relations manifest and its placement basis, so `central.world`
+    // answers for `control:root` instead of refusing the fixture.
+    fs::create_dir_all(world.join("Control/user")).unwrap();
+    fs::create_dir_all(world.join("Control/relations")).unwrap();
+    fs::write(
+        world.join("Control/user/placement.json"),
+        r#"{"schema":"central.work-placement-policy/v1","scope_ref":"control:root","writable":[{"path":"Work/cedar","class":"repository"},{"path":"Work/larch","class":"repository"},{"path":"Work/broken","class":"repository"}],"enforcement":"native-actions","required_coverage":["file-content"],"lease_seconds":300}"#,
+    )
+    .unwrap();
+    fs::write(
+        world.join("Control/relations/source-relations.json"),
+        r#"{"schema":"central.control.ground-relations/v1","project_id":"control:root","relations":[]}"#,
+    )
+    .unwrap();
     project(
         &world,
         "cedar",
