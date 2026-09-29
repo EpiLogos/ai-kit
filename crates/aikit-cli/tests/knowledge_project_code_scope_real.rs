@@ -200,9 +200,46 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     .unwrap();
     fs::write(
         world.join("Control/relations/source-relations.json"),
-        r#"{"schema":"central.control.ground-relations/v1","project_id":"control:root","relations":[]}"#,
+        r#"{"schema":"central.control.ground-relations/v1","project_id":"control:root","relations":[{"ref":"central:source:control:root:Control/user/placement.json","path":"Control/user/placement.json","roles":["work-placement-policy"],"provenance":"human-adopted","standing":"architecture-contract","treatment":"projectcentral-user","recognition":"explicit-scope-fixture","recorded_at_unix_seconds":1,"agent_retrieval_allowed":true}]}"#,
     )
     .unwrap();
+
+    // Register the control sources with the real ctrl: the world identity
+    // `control:root` exists only once registered sources carry it, and the
+    // effective-sources binding needs that identity to contextualise the
+    // fixture (the same bootstrap scripts/jev-redis/joined_proof.py performs).
+    let ctrl = std::env::var("CENTRAL_CTRL_BIN").unwrap_or_else(|_| "ctrl".into());
+    let register = |path: &str| {
+        let inspect = Command::new(&ctrl)
+            .args(["--json", "--root"])
+            .arg(&world)
+            .args(["action", "run", "central.file-map.inspect", "{}"])
+            .env("CENTRAL_ROOT", &world)
+            .output()
+            .expect("ctrl is available for fixture registration");
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&inspect.stdout).expect("ctrl inspect answered JSON");
+        let revision = envelope["data"]["result"]["revision"]
+            .as_str()
+            .expect("ctrl inspect disclosed a revision")
+            .to_owned();
+        let request = serde_json::json!({"path": path, "expected_revision": revision});
+        let registered = Command::new(&ctrl)
+            .args(["--json", "--root"])
+            .arg(&world)
+            .args(["action", "run", "central.file-map.register"])
+            .arg(request.to_string())
+            .env("CENTRAL_ROOT", &world)
+            .output()
+            .expect("ctrl is available for fixture registration");
+        assert!(
+            registered.status.success(),
+            "fixture registration of {path} failed: {}",
+            String::from_utf8_lossy(&registered.stderr)
+        );
+    };
+    register("Control/user/placement.json");
+    register("Control/relations/source-relations.json");
     project(
         &world,
         "cedar",
