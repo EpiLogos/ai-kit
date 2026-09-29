@@ -18,6 +18,24 @@
     "source_command": ["cargo", "test", "--workspace", "--all-targets", "--locked"],
     "installed_command": ["aikit", "doctor", "--json"]
   },
+  "capability_matrices": {
+    "schema": "oi.product-capability-sources/v1",
+    "primary_id": "aikit-product-profile",
+    "matrices": [
+      {
+        "id": "aikit-product-profile",
+        "role": "suite-profile",
+        "protocol": "ql-capability-matrix/1",
+        "suite_catalogue": true,
+        "carriers": {
+          "manifest": "ProjectCentral/user/telos/capability-matrix.json",
+          "records": "ProjectCentral/user/telos/capability-matrix.csv",
+          "rendering": "ProjectCentral/user/telos/capability-matrix.md",
+          "account": "ProjectCentral/user/telos/aikit.html"
+        }
+      }
+    ]
+  },
   "install": {"mode": "oi-managed-binary"},
   "update": {"mode": "suite-manifest"},
   "remove": {"mode": "oi-managed-only"},
