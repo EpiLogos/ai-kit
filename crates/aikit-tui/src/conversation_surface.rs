@@ -1111,6 +1111,7 @@ fn operation_name(operation: &GatewayConversationOperation) -> &'static str {
         GatewayConversationOperation::Model { .. } => "model",
         GatewayConversationOperation::Harness => "harness",
         GatewayConversationOperation::Skills => "skills",
+        GatewayConversationOperation::AskPosition { .. } => "ask",
     }
 }
 
