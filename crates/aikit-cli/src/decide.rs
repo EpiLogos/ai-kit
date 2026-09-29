@@ -412,7 +412,7 @@ pub fn decide_status(args: DecideStatusArgs) -> Result<Value> {
             match probe_models(
                 curl.clone().expect("curl path"),
                 &endpoint,
-                limits.timeout_ms.min(30_000).max(2_000),
+                limits.timeout_ms.clamp(2_000, 30_000),
                 resolve_optional_credential(&config, args.allow_env_import)?.as_ref(),
             ) {
                 Ok(card) => {
