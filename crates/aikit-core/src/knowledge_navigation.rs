@@ -595,7 +595,7 @@ impl<'a> KnowledgeApplication<'a> {
                             resource: resource.clone(),
                             kind,
                             label: hit.label,
-                            score: 1.0 / (1.0 + f64::from(hit.score)),
+                            score: wiki_rank(hit.score),
                             snippet: hit.summary,
                             provider: wiki.status().provider,
                             authority: SourceAuthority::Authored,
@@ -637,7 +637,7 @@ impl<'a> KnowledgeApplication<'a> {
                             resource,
                             kind: ResourceKind::KnowledgeSource,
                             label: hit.label,
-                            score: 1.0 / (1.0 + f64::from(hit.score)),
+                            score: wiki_rank(hit.score),
                             snippet: hit.summary,
                             provider: wiki.status().provider,
                             authority: SourceAuthority::Authored,
@@ -1726,6 +1726,24 @@ fn authority_rank(authority: SourceAuthority) -> u8 {
     }
 }
 
+/// The SemanticWiki's score is a match-distance penalty (0 = exact, growing
+/// by match tier per token), while every other provider in this merged
+/// ranking scores content quality near 1.0. Mapped through `1/(1 + penalty)`
+/// an exact title match scored 1.0 but an ordinary multi-token match scored
+/// 0.1–0.3, so curated Wiki knowledge — the ground's own authored answer —
+/// sank beneath default-scored file hits and behind the surfaced limit on
+/// any realistic query. Tier the penalty into the merged band instead:
+/// authored knowledge stays at or above the 0.5 provider default, ordered
+/// monotonically by match quality.
+fn wiki_rank(penalty: u32) -> f64 {
+    match penalty {
+        0 => 1.0,
+        1..=2 => 0.8,
+        3..=5 => 0.65,
+        _ => 0.5,
+    }
+}
+
 fn provider_absent(name: &str) -> AikitError {
     AikitError::new(
         "knowledge.provider_absent",
@@ -2185,6 +2203,87 @@ mod tests {
             "the top hit for a documentation query is authored ground, not a \
              higher-scored derived code symbol: {:#?}",
             result.hits
+        );
+    }
+
+    /// A realistic multi-token query matches a curated Wiki node at
+    /// contains tier (penalty grows per token), which the old
+    /// `1/(1 + penalty)` mapping scored around 0.2 — under a flood of
+    /// default-scored source hits. The tiered ranking keeps authored
+    /// knowledge competitive in the merged band where the authority sort
+    /// actually decides.
+    #[test]
+    fn a_multi_token_wiki_match_is_not_buried_by_default_scored_source_hits() {
+        let index = wiki();
+        let wiki_provider = SemanticWikiProvider::new(&index);
+        let flood = FloodProvider {
+            provider: ProviderRef::parse("provider/source-pool/flood").unwrap(),
+            count: 8,
+            score: 0.5,
+        };
+        let app = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_wiki(wiki_provider)
+            .with_source_pool(&flood, &[]);
+
+        let result = app.search("authentication concept", 10);
+        let wiki_hit = result
+            .hits
+            .iter()
+            .find(|hit| hit.resource.as_str() == "wiki:node:auth")
+            .expect("the authored Wiki node is found for a multi-token query");
+        assert!(
+            wiki_hit.score >= 0.5,
+            "a multi-token authored match must not rank below the provider \
+             default it competes with: {}",
+            wiki_hit.score
+        );
+        let source_positions: Vec<usize> = result
+            .hits
+            .iter()
+            .enumerate()
+            .filter(|(_, hit)| hit.resource.as_str().starts_with("source:flood:"))
+            .map(|(index, _)| index)
+            .collect();
+        let wiki_position = result
+            .hits
+            .iter()
+            .position(|hit| hit.resource.as_str() == "wiki:node:auth")
+            .unwrap();
+        assert!(
+            source_positions
+                .iter()
+                .all(|&position| wiki_position < position),
+            "the authored match at {wiki_position} must rank ahead of every \
+             default-scored source hit at {source_positions:?}: {:#?}",
+            result.hits
+        );
+    }
+
+    /// The tiered ranking stays monotone in match quality: a tighter match
+    /// must never score below a looser one.
+    #[test]
+    fn wiki_ranking_stays_monotone_in_match_quality() {
+        let index = wiki();
+        let wiki_provider = SemanticWikiProvider::new(&index);
+        let app = KnowledgeApplication::new(FamiliarityContext::default()).with_wiki(wiki_provider);
+
+        let tight = app
+            .search("authentication", 10)
+            .hits
+            .into_iter()
+            .find(|hit| hit.resource.as_str() == "wiki:node:auth")
+            .expect("single-token match found");
+        let loose = app
+            .search("authentication concept", 10)
+            .hits
+            .into_iter()
+            .find(|hit| hit.resource.as_str() == "wiki:node:auth")
+            .expect("multi-token match found");
+        assert!(
+            tight.score > loose.score,
+            "the tighter match ({}) must outscore the looser one ({})",
+            tight.score,
+            loose.score
         );
     }
 
