@@ -680,6 +680,7 @@ impl Command {
             Self::A2a(c) => a2a_route(c),
             Self::Routine(c) => routine_route(&c.command),
             Self::Jev(c) => jev_route(&c.command),
+            Self::Decide(c) => decide_route(&c.command),
             Self::NowContext(c) => now_context_route(c),
             Self::Factory(c) => factory_route(c),
             Self::Trust(c) => trust_route(&c.command),
@@ -1042,6 +1043,13 @@ fn jev_route(command: &JevSub) -> &'static str {
     match command {
         JevSub::Validate(_) => "cmd_jev_validate",
         JevSub::Invoke(_) => "cmd_jev_invoke",
+    }
+}
+
+fn decide_route(command: &DecideSub) -> &'static str {
+    match command {
+        DecideSub::Status(_) => "cmd_decide_status",
+        DecideSub::Invoke(_) => "cmd_decide_invoke",
     }
 }
 

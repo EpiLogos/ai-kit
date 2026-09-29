@@ -140,9 +140,7 @@ impl JevRequest {
         // `jev-…` selector) is enforced by the transport adapter that speaks
         // for that provider, so a local server does not need a Jev-shaped name.
         if !identifier(&self.model) {
-            return Err(invalid(
-                "An explicit, bounded model selector is required",
-            ));
+            return Err(invalid("An explicit, bounded model selector is required"));
         }
         if !matches!(
             self.state,
@@ -265,9 +263,7 @@ impl JevResponse {
     ) -> Result<()> {
         request.validate()?;
         if !identifier(&self.model) {
-            return Err(malformed(
-                "Provider did not return a usable model identity",
-            ));
+            return Err(malformed("Provider did not return a usable model identity"));
         }
         if !self.answers.keys().eq(request.questions.keys()) {
             return Err(malformed("Every requested question needs exactly one answer; missing or surplus answers refuse the determination"));

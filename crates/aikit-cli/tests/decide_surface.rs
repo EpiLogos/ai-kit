@@ -43,25 +43,32 @@ fn config_value(mode: &str) -> Value {
 }
 
 fn request() -> JevRequest {
-    JevRequest::parse(&serde_json::to_vec(&json!({
-        "model": MODEL,
-        "state": {"undertaking": "Route the support ticket."},
-        "questions": {"escalate": {"type": "noul", "instructions": "Urgent?"}}
-    }))
-    .unwrap())
+    JevRequest::parse(
+        &serde_json::to_vec(&json!({
+            "model": MODEL,
+            "state": {"undertaking": "Route the support ticket."},
+            "questions": {"escalate": {"type": "noul", "instructions": "Urgent?"}}
+        }))
+        .unwrap(),
+    )
     .unwrap()
 }
 
 #[test]
 fn the_configuration_law_keeps_each_placement_honest() {
-    let none = parse_provider_config(&serde_json::to_vec(&json!({
-        "schema": "aikit.decision-provider/v1",
-        "mode": "none",
-        "address": "127.0.0.1:8009"
-    }))
-    .unwrap())
+    let none = parse_provider_config(
+        &serde_json::to_vec(&json!({
+            "schema": "aikit.decision-provider/v1",
+            "mode": "none",
+            "address": "127.0.0.1:8009"
+        }))
+        .unwrap(),
+    )
     .unwrap();
-    assert_eq!(none.validate().unwrap_err().code(), "decision.config_invalid");
+    assert_eq!(
+        none.validate().unwrap_err().code(),
+        "decision.config_invalid"
+    );
 
     let hosted = parse_provider_config(&serde_json::to_vec(&json!({
         "schema": "aikit.decision-provider/v1",
@@ -77,18 +84,26 @@ fn the_configuration_law_keeps_each_placement_honest() {
     }))
     .unwrap())
     .unwrap();
-    assert_eq!(hosted.validate().unwrap_err().code(), "decision.config_invalid");
+    assert_eq!(
+        hosted.validate().unwrap_err().code(),
+        "decision.config_invalid"
+    );
 
     let well_formed: DecisionProviderConfig =
         parse_provider_config(&serde_json::to_vec(&config_value("managed-local")).unwrap())
             .unwrap();
     well_formed.validate().unwrap();
-    assert!(matches!(well_formed.mode, DecisionProviderMode::ManagedLocal));
+    assert!(matches!(
+        well_formed.mode,
+        DecisionProviderMode::ManagedLocal
+    ));
 
-    let bad_schema = parse_provider_config(&serde_json::to_vec(&json!({
-        "schema": "aikit.decision-provider/v2", "mode": "none"
-    }))
-    .unwrap())
+    let bad_schema = parse_provider_config(
+        &serde_json::to_vec(&json!({
+            "schema": "aikit.decision-provider/v2", "mode": "none"
+        }))
+        .unwrap(),
+    )
     .unwrap();
     assert_eq!(
         bad_schema.validate().unwrap_err().code(),
@@ -98,10 +113,12 @@ fn the_configuration_law_keeps_each_placement_honest() {
 
 #[test]
 fn a_mode_none_election_refuses_invocation_and_names_the_ordinary_path() {
-    let none = parse_provider_config(&serde_json::to_vec(&json!({
-        "schema": "aikit.decision-provider/v1", "mode": "none"
-    }))
-    .unwrap())
+    let none = parse_provider_config(
+        &serde_json::to_vec(&json!({
+            "schema": "aikit.decision-provider/v1", "mode": "none"
+        }))
+        .unwrap(),
+    )
     .unwrap();
     let error = none.endpoint().unwrap_err();
     assert_eq!(error.code(), "decision.provider_disabled");
@@ -264,9 +281,15 @@ fn status_and_invoke_against_a_controlled_local_endpoint_report_served_facts() {
     assert_eq!(status["selected_model"], MODEL);
     assert_eq!(status["install"]["state"], "loaded");
     assert_eq!(status["served"]["models"][0]["backend"], "mlx");
-    assert_eq!(status["decision_model"]["base_revision"], "dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68");
+    assert_eq!(
+        status["decision_model"]["base_revision"],
+        "dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68"
+    );
     assert_eq!(status["diagnostic"]["outcome"], "completed");
-    assert_eq!(status["limits"]["tariff"], "none — a local/self-hosted endpoint has no price source; none is invented");
+    assert_eq!(
+        status["limits"]["tariff"],
+        "none — a local/self-hosted endpoint has no price source; none is invented"
+    );
 
     let request_path = temp.path().join("request.json");
     std::fs::write(

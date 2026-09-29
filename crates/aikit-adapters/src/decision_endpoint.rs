@@ -17,9 +17,7 @@
 //! - the answer must echo the explicitly selected model identity — a mismatch
 //!   means the served artifact changed and the determination is refused.
 
-use aikit_core::jev::{
-    DecisionLimits, JevRequest, JevResponse, TokenUsage, MAX_RESPONSE_BYTES,
-};
+use aikit_core::jev::{DecisionLimits, JevRequest, JevResponse, TokenUsage, MAX_RESPONSE_BYTES};
 use aikit_core::{AikitError, ResourceRef, Result, SecretValue};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -30,7 +28,7 @@ use std::{
 };
 
 use crate::jev::{
-    bounded_process, boundary, error, failure, millis, parse_http, pause, quote, JevBoundary,
+    boundary, bounded_process, error, failure, millis, parse_http, pause, quote, JevBoundary,
     JevCancellation, JevFailure, JevOutcome,
 };
 
@@ -70,7 +68,12 @@ impl DecisionEndpoint {
         }
         let resolved = address
             .to_socket_addrs()
-            .map_err(|_| error("decision.endpoint_invalid", "Decision endpoint does not resolve to a socket address"))?
+            .map_err(|_| {
+                error(
+                    "decision.endpoint_invalid",
+                    "Decision endpoint does not resolve to a socket address",
+                )
+            })?
             .next()
             .ok_or_else(|| {
                 error(
@@ -213,7 +216,10 @@ impl EndpointDecisionProvider {
                 receipt.fail(e);
                 break;
             }
-            if let Err(e) = guard(JevBoundary::BeforeAttempt { ordinal, reserved_microusd: 0 }) {
+            if let Err(e) = guard(JevBoundary::BeforeAttempt {
+                ordinal,
+                reserved_microusd: 0,
+            }) {
                 receipt.fail(e);
                 break;
             }
@@ -429,7 +435,11 @@ pub fn probe_models(
         "--noproxy",
         "*",
         "--proto",
-        if endpoint.is_loopback() { "=http" } else { "=https" },
+        if endpoint.is_loopback() {
+            "=http"
+        } else {
+            "=https"
+        },
         "--max-redirs",
         "0",
         "--max-filesize",
@@ -450,6 +460,10 @@ pub fn probe_models(
             format!("Model-card probe received HTTP {}", http.status),
         ));
     }
-    aikit_core::jev::unique_json(&http.body, MAX_RESPONSE_BYTES)
-        .map_err(|_| error("decision.endpoint_invalid", "Model card is not bounded unique JSON"))
+    aikit_core::jev::unique_json(&http.body, MAX_RESPONSE_BYTES).map_err(|_| {
+        error(
+            "decision.endpoint_invalid",
+            "Model card is not bounded unique JSON",
+        )
+    })
 }

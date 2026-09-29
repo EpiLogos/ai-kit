@@ -133,7 +133,9 @@ impl DecisionProviderConfig {
                 }
             }
             DecisionProviderMode::ManagedLocal => {
-                if self.address.as_ref().is_some_and(|a| a.trim().is_empty()) || self.limits.is_none() {
+                if self.address.as_ref().is_some_and(|a| a.trim().is_empty())
+                    || self.limits.is_none()
+                {
                     return Err(fail(
                         "decision.config_invalid",
                         "managed-local requires the service address and bounded limits",
@@ -147,7 +149,9 @@ impl DecisionProviderConfig {
                 }
             }
             DecisionProviderMode::Endpoint => {
-                if self.address.as_ref().is_some_and(|a| a.trim().is_empty()) || self.limits.is_none() {
+                if self.address.as_ref().is_some_and(|a| a.trim().is_empty())
+                    || self.limits.is_none()
+                {
                     return Err(fail(
                         "decision.config_invalid",
                         "endpoint requires the address and bounded limits",
@@ -175,10 +179,9 @@ impl DecisionProviderConfig {
     pub fn endpoint(&self) -> Result<DecisionEndpoint> {
         match self.mode {
             DecisionProviderMode::ManagedLocal | DecisionProviderMode::Endpoint => {
-                let address = self
-                    .address
-                    .as_deref()
-                    .ok_or_else(|| fail("decision.config_invalid", "No endpoint address configured"))?;
+                let address = self.address.as_deref().ok_or_else(|| {
+                    fail("decision.config_invalid", "No endpoint address configured")
+                })?;
                 DecisionEndpoint::resolve(address, self.allow_remote)
             }
             DecisionProviderMode::None => Err(fail(
@@ -194,7 +197,10 @@ impl DecisionProviderConfig {
 
     pub fn limits(&self) -> Result<&DecisionLimits> {
         self.limits.as_ref().ok_or_else(|| {
-            fail("decision.config_invalid", "Endpoint placement requires bounded limits")
+            fail(
+                "decision.config_invalid",
+                "Endpoint placement requires bounded limits",
+            )
         })
     }
 }
@@ -331,8 +337,7 @@ pub fn invoke_selected(
             };
             let secret = resolver.resolve(&credential_ref)?;
             let initial_material_digest = blake3::hash(secret.expose().as_bytes());
-            let provider =
-                CurlJevProvider::new(curl, JevEndpoint::Official);
+            let provider = CurlJevProvider::new(curl, JevEndpoint::Official);
             let mut guard = |_: JevBoundary| -> Result<()> {
                 revalidate()?;
                 let current = resolver.resolve(&credential_ref)?;
@@ -407,11 +412,12 @@ pub fn decide_status(args: DecideStatusArgs) -> Result<Value> {
             match probe_models(
                 curl.clone().expect("curl path"),
                 &endpoint,
-                limits.timeout_ms.min(30_000).max(2_000),
+                limits.timeout_ms.clamp(2_000, 30_000),
                 resolve_optional_credential(&config, args.allow_env_import)?.as_ref(),
             ) {
                 Ok(card) => {
-                    status["install"] = json!({"state": "loaded", "basis": "endpoint answered its model card"});
+                    status["install"] =
+                        json!({"state": "loaded", "basis": "endpoint answered its model card"});
                     status["served"] = card;
                 }
                 Err(unavailable) => {
@@ -509,7 +515,11 @@ fn diagnostic_probe(
 pub fn decide_invoke(args: DecideInvokeArgs) -> Result<Value> {
     let config: DecisionProviderConfig =
         read_json(&args.provider_file, "Decision provider config", 256 * 1024)?;
-    let request = JevRequest::parse(&read_bytes(&args.request_file, "Decision request", 1024 * 1024)?)?;
+    let request = JevRequest::parse(&read_bytes(
+        &args.request_file,
+        "Decision request",
+        1024 * 1024,
+    )?)?;
     let invocation_ref = args
         .invocation_ref
         .as_deref()
@@ -531,8 +541,12 @@ pub fn decide_invoke(args: DecideInvokeArgs) -> Result<Value> {
 /// Parse a decision-provider configuration from bytes already read elsewhere
 /// (the NOW-preparation selection path).
 pub fn parse_provider_config(bytes: &[u8]) -> Result<DecisionProviderConfig> {
-    serde_json::from_slice(bytes)
-        .map_err(|e| fail("decision.invalid_config", format!("Decision provider config: {e}")))
+    serde_json::from_slice(bytes).map_err(|e| {
+        fail(
+            "decision.invalid_config",
+            format!("Decision provider config: {e}"),
+        )
+    })
 }
 
 /// A mode-none refusal carries the ordinary-path meaning, not a generic error.

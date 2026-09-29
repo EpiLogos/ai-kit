@@ -109,7 +109,11 @@ fn provider_identity_law_lives_at_the_typesafe_boundary_not_the_protocol() {
     ] {
         let mut value = response();
         value["model"] = json!(model);
-        assert_eq!(parse(&value).is_ok(), neutral_ok, "neutral parse of {model}");
+        assert_eq!(
+            parse(&value).is_ok(),
+            neutral_ok,
+            "neutral parse of {model}"
+        );
     }
     // The TypeSafe boundary keeps its own law: concrete evaluated `jev-x.y.z`
     // versions only, never an echoed alias or a foreign identity.
@@ -146,10 +150,16 @@ fn bf16_serving_precision_is_admitted_at_the_endpoint_standing_never_at_the_host
     let mut value = response();
     value["answers"]["action"]["probabilities"] = json!({"wait": 0.9001, "stop": 0.1});
     let parsed = parse_only(&value).expect("structurally parseable response");
-    assert!(parsed.validate_for(&request()).is_err(), "hosted-exact law refuses the drift");
-    assert!(parsed
-        .validate_for_with_tolerance(&request(), aikit_core::jev::ENDPOINT_TOLERANCE)
-        .is_ok(), "endpoint standing admits bf16 serving precision");
+    assert!(
+        parsed.validate_for(&request()).is_err(),
+        "hosted-exact law refuses the drift"
+    );
+    assert!(
+        parsed
+            .validate_for_with_tolerance(&request(), aikit_core::jev::ENDPOINT_TOLERANCE)
+            .is_ok(),
+        "endpoint standing admits bf16 serving precision"
+    );
     // Coverage and range laws do not widen with the bound.
     let mut uncovered = response();
     uncovered["answers"]["action"]["probabilities"] = json!({"wait": 0.9001});
