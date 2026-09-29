@@ -278,3 +278,93 @@ fn an_enabled_but_untrusted_capsule_is_not_projected_and_names_trust() {
         "a not-projected seam creates no config"
     );
 }
+
+/// O:I #65 native-owner repair, 2026-09-23: `CLAUDE_CONFIG_DIR` isolates
+/// claude's tools-layer write the same way it already isolates `aikit client
+/// status`'s disclosed `config_dir` — a caller who sets it never touches
+/// `$HOME/.claude.json`, even when `$HOME` itself resolves to a real-looking
+/// home directory. Before the fix this test's `decoy_home` is exactly what
+/// took the write: the seam `~/.claude.json` is spelled literally in
+/// `profiles.rs`, so the `$VAR`-led resolution `client.rs` already carried
+/// for `$CODEX_HOME/hooks.json`-style seams never fired for it.
+#[test]
+fn claude_config_dir_isolates_the_tools_layer_write_from_home() {
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(home.path().join("project/.aikit")).unwrap();
+    fs::write(
+        home.path().join("project/.aikit/profile.toml"),
+        "schema = 1\n",
+    )
+    .unwrap();
+
+    let aikit_home = home.path().join("aikit-home");
+    let capsule_dir = aikit_home.join("registries/test/capsules/tool-protocol/test/bimba");
+    fs::create_dir_all(&capsule_dir).unwrap();
+    fs::write(capsule_dir.join("manifest.toml"), BIMBA_MANIFEST).unwrap();
+    fs::create_dir_all(aikit_home.join("scopes/global")).unwrap();
+    fs::write(
+        aikit_home.join("scopes/global/profile.toml"),
+        "schema = 1\nenable = [\"tool-protocol/test/bimba\"]\n",
+    )
+    .unwrap();
+
+    assert!(
+        Command::cargo_bin("aikit")
+            .unwrap()
+            .env("AIKIT_HOME", &aikit_home)
+            .env("HOME", home.path().join("decoy-home"))
+            .arg("--json")
+            .current_dir(home.path().join("project"))
+            .env("PATH", "/usr/bin:/bin")
+            .args(["trust", "record", "tool-protocol/test/bimba"])
+            .args(["--note", "claude-config-dir isolation test review"])
+            .output()
+            .unwrap()
+            .status
+            .success(),
+        "recording the review must succeed"
+    );
+
+    let claude_scratch = home.path().join("claude-config-dir");
+    let output = Command::cargo_bin("aikit")
+        .unwrap()
+        .env("AIKIT_HOME", &aikit_home)
+        .env("HOME", home.path().join("decoy-home"))
+        .env("CLAUDE_CONFIG_DIR", &claude_scratch)
+        .arg("--json")
+        .current_dir(home.path().join("project"))
+        .env("PATH", "/usr/bin:/bin")
+        .arg("apply")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "apply must succeed: {stdout} {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope: Value = serde_json::from_str(&stdout).unwrap();
+    let projections = envelope["data"]["tools_projections"].as_array().unwrap();
+    let claude = projections
+        .iter()
+        .find(|projection| projection["client"] == "claude")
+        .unwrap();
+    assert_eq!(claude["state"], "written", "{claude:?}");
+    let expected_path = claude_scratch.with_extension("json");
+    assert_eq!(
+        claude["path"],
+        expected_path.display().to_string(),
+        "the write lands beside CLAUDE_CONFIG_DIR, not under $HOME: {claude:?}"
+    );
+
+    assert!(
+        !home.path().join("decoy-home/.claude.json").exists(),
+        "CLAUDE_CONFIG_DIR must keep the write off $HOME entirely"
+    );
+    let written: Value =
+        serde_json::from_str(&fs::read_to_string(&expected_path).unwrap()).unwrap();
+    assert!(
+        written["mcpServers"]["bimba"].is_object(),
+        "the record lands at the CLAUDE_CONFIG_DIR-relative path: {written}"
+    );
+}

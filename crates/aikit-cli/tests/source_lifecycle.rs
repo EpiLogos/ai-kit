@@ -41,6 +41,37 @@ fn skill(root: &Path, name: &str, marker: &str) {
     .unwrap();
 }
 
+/// A directory that looks like a skill but has no SKILL.md frontmatter: the
+/// real-world shape of a candidate a snapshot must be able to refuse by name.
+fn broken_skill(root: &Path, marker: &str) {
+    fs::create_dir_all(root).unwrap();
+    fs::write(
+        root.join("SKILL.md"),
+        format!("This file has no frontmatter at all.\n\n{marker}\n"),
+    )
+    .unwrap();
+}
+
+/// Run aikit expecting the command to fail; returns the full failure envelope.
+fn aikit_failure(home: &Path, cwd: &Path, args: &[&str]) -> Value {
+    let output = Command::cargo_bin("aikit")
+        .unwrap()
+        .env("AIKIT_HOME", home)
+        .env("HOME", home.join("user-home"))
+        .current_dir(cwd)
+        .arg("--json")
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "aikit {args:?} was expected to fail\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
 fn aikit(home: &Path, cwd: &Path, args: &[&str]) -> Value {
     let output = Command::cargo_bin("aikit")
         .unwrap()
@@ -94,6 +125,11 @@ fn rollback_remains_available_when_a_promoted_source_removed_an_enabled_skill() 
     fs::remove_dir_all(source.join("required")).unwrap();
     aikit(&home, &cwd, &["source", "sync", "recovery"]);
     aikit(&home, &cwd, &["source", "promote", "recovery", "--trust"]);
+    // The removed-but-enabled skill is a loud, named state, not a wedge:
+    // status still answers and names the capability as unavailable, because
+    // an enabled declaration whose source lost the capsule must stay
+    // recoverable (issue #394 K1) — `doctor` reports and repairs it, and
+    // native recovery below stays reachable.
     let broken = Command::cargo_bin("aikit")
         .unwrap()
         .env("AIKIT_HOME", &home)
@@ -101,8 +137,20 @@ fn rollback_remains_available_when_a_promoted_source_removed_an_enabled_skill() 
         .args(["--json", "status", "--all"])
         .output()
         .unwrap();
-    assert!(!broken.status.success());
-    assert!(String::from_utf8_lossy(&broken.stdout).contains("skill/recovery/required"));
+    assert!(
+        broken.status.success(),
+        "status must not wedge on the stale enablement: {}",
+        String::from_utf8_lossy(&broken.stdout)
+    );
+    let broken_view = String::from_utf8_lossy(&broken.stdout);
+    assert!(
+        broken_view.contains("skill/recovery/required"),
+        "the absent capability must be named: {broken_view}"
+    );
+    assert!(
+        broken_view.contains("not present in any registry"),
+        "the absence must carry its honest reason: {broken_view}"
+    );
     // Inspection and native recovery cannot depend on the broken view.
     aikit(&home, &cwd, &["source", "show", "recovery"]);
     let restored = aikit(&home, &cwd, &["source", "rollback", "recovery"]);
@@ -499,4 +547,294 @@ fn git_source_resolves_an_exact_commit_and_ignores_later_worktree_changes() {
         second_digest,
         "two exact commits with identical skill bytes need distinct provenance snapshots"
     );
+}
+
+#[test]
+fn sync_skips_an_invalid_skill_and_names_it_in_the_snapshot_rejections() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("aikit-home");
+    let source = temp.path().join("mixed-source");
+    let cwd = temp.path().join("project");
+    fs::create_dir_all(&cwd).unwrap();
+    skill(&source.join("healthy"), "healthy", "valid");
+    broken_skill(&source.join("broken"), "no frontmatter");
+
+    aikit(
+        &home,
+        &cwd,
+        &["source", "add-directory", "mixed", source.to_str().unwrap()],
+    );
+    let synced = aikit(&home, &cwd, &["source", "sync", "mixed"]);
+    assert_eq!(
+        data(&synced)["skills"],
+        1,
+        "the valid skill must still make the snapshot"
+    );
+    let rejected = data(&synced)["rejected"]
+        .as_array()
+        .expect("the sync reply names the rejections");
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0]["path"], "broken");
+    assert_eq!(rejected[0]["code"], "skill.invalid");
+    assert!(
+        rejected[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("frontmatter"),
+        "the rejection carries the validator's reason: {}",
+        rejected[0]["message"]
+    );
+
+    let shown = aikit(&home, &cwd, &["source", "show", "mixed"]);
+    assert_eq!(data(&shown)["candidate_skills"], 1);
+    let candidate_rejected = data(&shown)["candidate_rejected"]
+        .as_array()
+        .expect("source show names the candidate's rejections");
+    assert_eq!(candidate_rejected[0]["path"], "broken");
+
+    let promoted = aikit(&home, &cwd, &["source", "promote", "mixed", "--trust"]);
+    assert_eq!(data(&promoted)["skills"], 1);
+
+    // An unchanged tree resyncs to the same immutable snapshot: the recorded
+    // rejections are stable input to the snapshot identity, not drift.
+    let again = aikit(&home, &cwd, &["source", "sync", "mixed"]);
+    assert_eq!(
+        data(&again)["candidate_snapshot"],
+        data(&synced)["candidate_snapshot"]
+    );
+}
+
+#[test]
+fn git_source_sync_skips_an_invalid_skill_and_keeps_the_valid_ones() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("aikit-home");
+    let repository = temp.path().join("monorepo");
+    let cwd = temp.path().join("project");
+    fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(repository.join("skills/engineering")).unwrap();
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "AIKit test"]);
+    git(
+        &repository,
+        &["config", "user.email", "aikit@example.invalid"],
+    );
+    skill(
+        &repository.join("skills/engineering/wayfinder"),
+        "wayfinder",
+        "pinned-version",
+    );
+    // The real-world shape: a deep, otherwise-unrelated tree in the same
+    // repository carries a SKILL.md with no frontmatter.
+    broken_skill(
+        &repository.join("packages/daemon/specs/agents/apps/vault-specialist/skills/vault-user"),
+        "no frontmatter",
+    );
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "--quiet", "-m", "fixture"]);
+    let commit = git(&repository, &["rev-parse", "HEAD"]);
+
+    aikit(
+        &home,
+        &cwd,
+        &[
+            "source",
+            "add-git",
+            "monorepo",
+            repository.to_str().unwrap(),
+            "--revision",
+            &commit,
+        ],
+    );
+    let synced = aikit(&home, &cwd, &["source", "sync", "monorepo"]);
+    assert_eq!(
+        data(&synced)["skills"],
+        1,
+        "one invalid file must not take the valid skills down with it"
+    );
+    let rejected = data(&synced)["rejected"].as_array().unwrap();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(
+        rejected[0]["path"],
+        "packages/daemon/specs/agents/apps/vault-specialist/skills/vault-user"
+    );
+    assert_eq!(rejected[0]["code"], "skill.invalid");
+}
+
+#[test]
+fn a_source_with_no_valid_skills_refuses_naming_every_rejection() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("aikit-home");
+    let source = temp.path().join("all-broken");
+    let cwd = temp.path().join("project");
+    fs::create_dir_all(&cwd).unwrap();
+    broken_skill(&source.join("first-broken"), "one");
+    broken_skill(&source.join("second-broken"), "two");
+
+    aikit(
+        &home,
+        &cwd,
+        &[
+            "source",
+            "add-directory",
+            "all-broken",
+            source.to_str().unwrap(),
+        ],
+    );
+    let failed = aikit_failure(&home, &cwd, &["source", "sync", "all-broken"]);
+    assert_eq!(failed["error"]["code"], "source.no_skills");
+    let message = failed["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("first-broken") && message.contains("second-broken"),
+        "the refusal lists every rejection, not just the first: {message}"
+    );
+    assert!(
+        message.contains("--root"),
+        "the refusal suggests rescoping the source root: {message}"
+    );
+}
+
+#[test]
+fn control_ground_sources_reject_an_invalid_skill_and_keep_the_valid_ones() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("aikit-home");
+    let source = temp.path().join("strict-ground");
+    let cwd = temp.path().join("project");
+    fs::create_dir_all(&cwd).unwrap();
+    skill(&source.join("healthy"), "healthy", "valid");
+    broken_skill(&source.join("broken"), "no frontmatter");
+
+    aikit(
+        &home,
+        &cwd,
+        &[
+            "source",
+            "add-directory",
+            "strict",
+            source.to_str().unwrap(),
+            "--control-ground",
+        ],
+    );
+
+    // One broken skill must not silence the whole ground: the sync carries
+    // the valid remainder and names the rejection loudly in the reply's
+    // warnings (2026-09-28 owner correction — a frontmatter-less skill
+    // blocked every personal skill from projecting for days).
+    let synced = aikit(&home, &cwd, &["source", "sync", "strict"]);
+    assert_eq!(
+        data(&synced)["skills"],
+        1,
+        "the valid skill must still make the ground snapshot"
+    );
+    let rejected = data(&synced)["rejected"]
+        .as_array()
+        .expect("the sync reply names the rejections");
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0]["path"], "broken");
+    assert_eq!(rejected[0]["code"], "skill.invalid");
+    assert!(
+        synced.to_string().contains("NOT projected"),
+        "the reply warns that the rejected skill is not projected: {synced}"
+    );
+
+    let promoted = aikit(&home, &cwd, &["source", "promote", "strict", "--trust"]);
+    assert_eq!(data(&promoted)["skills"], 1);
+}
+
+#[test]
+fn control_ground_source_with_no_valid_skills_still_refuses() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("aikit-home");
+    let source = temp.path().join("empty-ground");
+    let cwd = temp.path().join("project");
+    fs::create_dir_all(&cwd).unwrap();
+    broken_skill(&source.join("broken-one"), "no frontmatter");
+    broken_skill(&source.join("broken-two"), "still no frontmatter");
+
+    aikit(
+        &home,
+        &cwd,
+        &[
+            "source",
+            "add-directory",
+            "empty-ground",
+            source.to_str().unwrap(),
+            "--control-ground",
+        ],
+    );
+
+    // Authored ground that validates nothing is a real defect: with zero
+    // valid skills the sync refuses, naming every rejection.
+    let failed = aikit_failure(&home, &cwd, &["source", "sync", "empty-ground"]);
+    assert_eq!(failed["error"]["code"], "source.no_skills");
+    let rendered = serde_json::to_string(&failed).unwrap();
+    assert!(
+        rendered.contains("broken-one") && rendered.contains("broken-two"),
+        "the refusal names every rejected skill: {rendered}"
+    );
+}
+
+#[test]
+fn rejected_git_diagnostics_are_source_relative_and_snapshot_identity_is_stable() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("aikit-home");
+    let repository = temp.path().join("monorepo");
+    let cwd = temp.path().join("project");
+    fs::create_dir_all(&cwd).unwrap();
+    skill(&repository.join("healthy"), "healthy", "valid");
+    for (name, contents) in [
+        (
+            "missing-name",
+            "---\ndescription: Present description\n---\nBody\n",
+        ),
+        (
+            "missing-description",
+            "---\nname: missing-description\n---\nBody\n",
+        ),
+    ] {
+        fs::create_dir_all(repository.join(name)).unwrap();
+        fs::write(repository.join(name).join("SKILL.md"), contents).unwrap();
+    }
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "AIKit test"]);
+    git(
+        &repository,
+        &["config", "user.email", "aikit@example.invalid"],
+    );
+    git(&repository, &["add", "."]);
+    git(
+        &repository,
+        &["commit", "--quiet", "-m", "actual mixed skill source"],
+    );
+    let commit = git(&repository, &["rev-parse", "HEAD"]);
+    aikit(
+        &home,
+        &cwd,
+        &[
+            "source",
+            "add-git",
+            "mixed",
+            repository.to_str().unwrap(),
+            "--revision",
+            &commit,
+        ],
+    );
+    let first = aikit(&home, &cwd, &["source", "sync", "mixed"]);
+    let second = aikit(&home, &cwd, &["source", "sync", "mixed"]);
+    assert_eq!(
+        data(&first)["candidate_snapshot"],
+        data(&second)["candidate_snapshot"]
+    );
+    assert_eq!(data(&first)["rejected"], data(&second)["rejected"]);
+    let rejected = data(&first)["rejected"].as_array().unwrap();
+    assert_eq!(rejected.len(), 2);
+    for item in rejected {
+        let message = item["message"].as_str().unwrap();
+        assert!(
+            !message.contains(".staging-"),
+            "temporary checkout leaked: {message}"
+        );
+        assert!(!message.contains(home.to_str().unwrap()));
+        assert!(message.contains(item["path"].as_str().unwrap()));
+    }
+    assert_eq!(data(&first)["skills"], 1);
 }

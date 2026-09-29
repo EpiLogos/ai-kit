@@ -5,6 +5,7 @@
 //! absent without changing [`CodeReference`] identity.
 
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use aikit_core::knowledge_code::{
@@ -17,8 +18,10 @@ use aikit_core::{AikitError, Result};
 use serde_json::{Map, Value};
 
 use crate::runner::CommandRunner;
+#[path = "gitnexus_snapshot.rs"]
+mod snapshot;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct GitNexusCliSurface {
     available: bool,
     version: Option<String>,
@@ -43,6 +46,8 @@ pub struct GitNexusCodeIndexProvider<R> {
     provider: ProviderRef,
     root: Option<PathBuf>,
     indexed: bool,
+    index_observation: Option<String>,
+    isolate_reads: bool,
     cli: GitNexusCliSurface,
 }
 
@@ -75,8 +80,127 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
                 .expect("static GitNexus provider ref must be valid"),
             root: None,
             indexed: false,
+            index_observation: None,
+            isolate_reads: false,
             cli,
         }
+    }
+
+    /// As [`Self::with_binary`], but the executable's CLI surface is observed
+    /// once per installed binary rather than once per construction: a
+    /// knowledge call builds one provider per Work project, and re-probing
+    /// (`--version`, `--help`, `impact --help`, `analyze --help` — four Node
+    /// cold starts each) cost ~10 s on every call. The observation is keyed by
+    /// the resolved executable's path, size and modification time, held for
+    /// the process and persisted under `$AIKIT_HOME/cache` so separate
+    /// invocations reuse it; a reinstalled or upgraded binary is re-probed.
+    pub fn with_binary_memoised(
+        runner: R,
+        binary: impl Into<String>,
+        repo_name: impl Into<String>,
+        source: SourceRef,
+        revision: Option<SourceRevision>,
+    ) -> Self {
+        let binary = binary.into();
+        let cli = discover_cli_memoised(&runner, &binary);
+        Self {
+            runner,
+            binary,
+            repo_name: repo_name.into(),
+            source,
+            revision,
+            provider: ProviderRef::parse("provider/code-index/gitnexus")
+                .expect("static GitNexus provider ref must be valid"),
+            root: None,
+            indexed: false,
+            index_observation: None,
+            isolate_reads: false,
+            cli,
+        }
+    }
+
+    /// Reuse one executable capability observation across a project census.
+    /// This neither opens nor rebuilds any index.
+    pub fn for_project(&self, runner: R, repo_name: impl Into<String>, source: SourceRef) -> Self {
+        Self {
+            runner,
+            binary: self.binary.clone(),
+            repo_name: repo_name.into(),
+            source,
+            revision: None,
+            provider: self.provider.clone(),
+            root: None,
+            indexed: false,
+            index_observation: None,
+            isolate_reads: false,
+            cli: self.cli.clone(),
+        }
+    }
+
+    /// Admit an already materialised owner index without invoking GitNexus.
+    /// `list` and even query discovery in current GitNexus may prune its registry
+    /// or migrate old databases; neither belongs on a Knowledge read path.
+    pub fn open_existing(&mut self, root: &Path) -> Result<CodeIndexStatus> {
+        self.root = Some(root.to_path_buf());
+        self.isolate_reads = true;
+        self.indexed = false;
+        self.index_observation = Some("existing index absent; explicit indexing required".into());
+        let directory = root.join(".gitnexus");
+        let primary = directory.join("gitnexus.json");
+        let file = match std::fs::File::open(&primary) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::File::open(directory.join("meta.json")).map_err(|error| {
+                    AikitError::new("knowledge.gitnexus_existing_index", error.to_string())
+                })?
+            }
+            Err(error) => {
+                return Err(AikitError::new(
+                    "knowledge.gitnexus_existing_index",
+                    error.to_string(),
+                ))
+            }
+        };
+        let mut bytes = Vec::new();
+        file.take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| {
+                AikitError::new("knowledge.gitnexus_existing_index", error.to_string())
+            })?;
+        if bytes.len() > 1024 * 1024 {
+            return Err(AikitError::new(
+                "knowledge.gitnexus_existing_index",
+                "index metadata exceeds 1 MiB",
+            ));
+        }
+        let meta: Value = serde_json::from_slice(&bytes).map_err(|error| {
+            AikitError::new(
+                "knowledge.gitnexus_existing_index",
+                format!("invalid index metadata: {error}"),
+            )
+        })?;
+        let commit = meta
+            .get("lastCommit")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                AikitError::new(
+                    "knowledge.gitnexus_existing_index",
+                    "index metadata has no commit",
+                )
+            })?;
+        if !directory.join("lbug").is_file() {
+            return Err(AikitError::new(
+                "knowledge.gitnexus_existing_index",
+                "current index database absent; explicit indexing or legacy migration required",
+            ));
+        }
+        self.revision = Some(SourceRevision::parse(format!("git:{commit}"))?);
+        self.indexed = true;
+        // Resolve native queries by actual root, never a colliding project alias.
+        self.repo_name = root.to_string_lossy().into_owned();
+        self.index_observation = Some(format!("existing index at {commit}; freshness against current source and branch is unverified; no rebuild performed"));
+        Ok(self.status())
     }
 
     fn argv(&self, args: &[String]) -> Vec<String> {
@@ -85,9 +209,39 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
         argv
     }
 
+    fn run_read(&self, args: &[String], code: &'static str) -> Result<String> {
+        let snapshot = if self.isolate_reads {
+            Some(snapshot::Snapshot::read_only(
+                self.root.as_deref().ok_or_else(|| {
+                    AikitError::new(
+                        "knowledge.gitnexus_not_indexed",
+                        "existing index root absent",
+                    )
+                })?,
+            )?)
+        } else {
+            None
+        };
+        let mut argv = self.argv(args);
+        if let Some(snapshot) = snapshot.as_ref() {
+            argv.splice(
+                0..0,
+                [
+                    "env".into(),
+                    format!("GITNEXUS_HOME={}", snapshot.home.display()),
+                ],
+            );
+        }
+        Ok(self
+            .runner
+            .run_with_timeout(&argv, std::time::Duration::from_secs(15))?
+            .require(&argv, code)?
+            .stdout)
+    }
+
     fn run_json(&self, args: &[String], code: &'static str) -> Result<Value> {
         let argv = self.argv(args);
-        let stdout = self.runner.run(&argv)?.require(&argv, code)?.stdout;
+        let stdout = self.run_read(args, code)?;
         serde_json::from_str(stdout.trim()).map_err(|error| {
             AikitError::new(
                 "knowledge.gitnexus_invalid_json",
@@ -98,14 +252,14 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
     }
 
     fn run_text(&self, args: &[String], code: &'static str) -> Result<String> {
-        let argv = self.argv(args);
-        Ok(self
-            .runner
-            .run(&argv)?
-            .require(&argv, code)?
-            .stdout
-            .trim()
-            .to_string())
+        Ok(self.run_read(args, code)?.trim().to_string())
+    }
+
+    /// Why the CLI surface is unavailable, when it is. Absence means the
+    /// binary answered discovery, so the caller names the version-drift gap
+    /// instead.
+    pub fn unavailable_reason(&self) -> Option<String> {
+        self.cli.reason.clone()
     }
 
     fn require_capability(&self, supported: bool, operation: &str) -> Result<()> {
@@ -133,7 +287,7 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
         } else {
             Err(AikitError::new(
                 "knowledge.gitnexus_not_indexed",
-                "GitNexus code provider has not indexed the Project source in this AIKit provider instance",
+                "No existing GitNexus index was admitted; explicit indexing is required",
             ))
         }
     }
@@ -254,7 +408,17 @@ impl<R: CommandRunner> CodeIndexProvider for GitNexusCodeIndexProvider<R> {
             detail: self
                 .root
                 .as_ref()
-                .map(|root| format!("repo={} root={}", self.repo_name, root.display()))
+                .map(|root| {
+                    format!(
+                        "repo={} root={}{}",
+                        self.repo_name,
+                        root.display(),
+                        self.index_observation
+                            .as_ref()
+                            .map(|note| format!("; {note}"))
+                            .unwrap_or_default()
+                    )
+                })
                 .unwrap_or_else(|| format!("repo={} root=unmaterialised", self.repo_name)),
         }
     }
@@ -268,6 +432,11 @@ impl<R: CommandRunner> CodeIndexProvider for GitNexusCodeIndexProvider<R> {
             "--name".into(),
             self.repo_name.clone(),
         ];
+        // A ground without git — personal collections, dated work — is still
+        // indexable; git is not the ticket into the code index.
+        if !root.join(".git").exists() {
+            args.push("--skip-git".into());
+        }
         if force {
             args.push("--force".into());
         }
@@ -432,13 +601,18 @@ fn discover_cli<R: CommandRunner>(runner: &R, binary: &str) -> GitNexusCliSurfac
     };
     let help = probe_help(runner, binary, &["--help"]);
     let impact_help = probe_help(runner, binary, &["impact", "--help"]);
+    // The index capability is the exact surface `index()` drives: a release
+    // without `analyze --index-only` cannot index, however its top-level help
+    // reads. Older installs (1.4.x) answer this probe empty and are reported
+    // unavailable with the version drift named, never invoked to fail.
+    let analyze_help = probe_help(runner, binary, &["analyze", "--help"]);
     GitNexusCliSurface {
         available: true,
         version: parse_version(&format!(
             "{} {}",
             version_output.stdout, version_output.stderr
         )),
-        index: help.contains("analyze"),
+        index: help.contains("analyze") && analyze_help.contains("--index-only"),
         search: help.contains("query"),
         context: help.contains("context"),
         impact: help.contains("impact"),
@@ -466,6 +640,91 @@ fn unavailable_surface(reason: String) -> GitNexusCliSurface {
         pdg_impact: false,
         reason: Some(reason),
     }
+}
+
+/// The identity an observed CLI surface is valid for: the resolved
+/// executable plus its size and modification time. `None` when the binary
+/// cannot be resolved to a file (then nothing is memoised).
+fn binary_identity(binary: &str) -> Option<String> {
+    let path = Path::new(binary);
+    let resolved = if path.components().count() > 1 {
+        Some(path.to_path_buf())
+    } else {
+        std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join(binary))
+                .find(|candidate| candidate.is_file())
+        })
+    }?;
+    let canonical = std::fs::canonicalize(&resolved).ok()?;
+    let meta = std::fs::metadata(&canonical).ok()?;
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(format!(
+        "{}|{}|{}",
+        canonical.display(),
+        meta.len(),
+        modified
+    ))
+}
+
+fn surface_cache_path() -> Option<PathBuf> {
+    let home = std::env::var_os("AIKIT_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".aikit")))?;
+    Some(home.join("cache").join("gitnexus-cli-surface.json"))
+}
+
+fn discover_cli_memoised<R: CommandRunner>(runner: &R, binary: &str) -> GitNexusCliSurface {
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, OnceLock};
+    static SURFACES: OnceLock<Mutex<BTreeMap<String, GitNexusCliSurface>>> = OnceLock::new();
+    let Some(identity) = binary_identity(binary) else {
+        return discover_cli(runner, binary);
+    };
+    let memo = SURFACES.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Some(surface) = memo.lock().ok().and_then(|m| m.get(&identity).cloned()) {
+        return surface;
+    }
+    let cache_path = surface_cache_path();
+    let mut persisted: BTreeMap<String, GitNexusCliSurface> = cache_path
+        .as_ref()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let surface = match persisted.get(&identity) {
+        Some(surface) => surface.clone(),
+        None => {
+            let surface = discover_cli(runner, binary);
+            // Only a successful observation is remembered: an unavailable
+            // surface (a transient spawn failure) is re-probed next time.
+            if surface.available {
+                persisted
+                    .retain(|key, _| !key.starts_with(identity.split('|').next().unwrap_or("")));
+                persisted.insert(identity.clone(), surface.clone());
+                if let Some(path) = &cache_path {
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    if let Ok(bytes) = serde_json::to_vec_pretty(&persisted) {
+                        let temp = path.with_extension(format!("json.{}", std::process::id()));
+                        if std::fs::write(&temp, bytes).is_ok() {
+                            let _ = std::fs::rename(&temp, path);
+                        }
+                    }
+                }
+            }
+            surface
+        }
+    };
+    if let Ok(mut m) = memo.lock() {
+        m.insert(identity, surface.clone());
+    }
+    surface
 }
 
 fn probe_help<R: CommandRunner>(runner: &R, binary: &str, args: &[&str]) -> String {
@@ -545,6 +804,7 @@ mod tests {
                     "gitnexus --help",
                     "analyze query context impact trace detect-changes check cypher\n",
                 )
+                .on("analyze --help", "--index-only --force --name <name>\n")
                 .on("gitnexus impact --help", "--mode <callgraph|pdg>\n")
                 .on("analyze /tmp/project", "Indexed\n")
                 .on("query auth", query)
@@ -647,5 +907,105 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| { line.contains("check --cycles --json --repo demo") }));
+    }
+
+    /// The live-ground defect this bound repairs: `gitnexus analyze
+    /// --index-only` on one large Work repository ran past five minutes with
+    /// no bound at all, and the code-lens provider awaited it unconditionally
+    /// (`self.runner.run(&argv)?`, no `run_with_timeout`). A real subprocess
+    /// that would run far longer than its budget must be killed and reported
+    /// — not silently awaited — so `index()` (and by the same runner,
+    /// `search()`, `context()` and the rest) can never again turn one query
+    /// into a multi-minute stall. This drives an actual slow child process
+    /// through `SystemRunner`'s own timeout enforcement, the same seam the
+    /// production `knowledge.rs` caller now binds every GitNexus subprocess
+    /// call through.
+    #[test]
+    fn index_is_bounded_by_the_runner_budget_and_reports_a_timeout_instead_of_hanging() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("slow-gitnexus.sh");
+        let mut file = std::fs::File::create(&script_path).unwrap();
+        write!(
+            file,
+            r#"#!/bin/sh
+case "$1" in
+  --version) echo "1.6.9"; exit 0 ;;
+  --help) echo "analyze query context impact trace detect-changes check cypher"; exit 0 ;;
+  analyze)
+    if [ "$2" = "--help" ]; then
+      echo "--index-only --force --name <name>"
+      exit 0
+    fi
+    sleep 30
+    echo "Indexed"
+    exit 0
+    ;;
+  impact)
+    if [ "$2" = "--help" ]; then
+      echo "--mode <callgraph|pdg>"
+      exit 0
+    fi
+    exit 1
+    ;;
+esac
+exit 1
+"#
+        )
+        .unwrap();
+        drop(file);
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        // Generous enough that the trivial `--version`/`--help` capability
+        // probes finish comfortably even on a loaded machine (this fixture
+        // answers them instantly; the budget is not what bounds them in
+        // practice) — but still far below the 30s the `analyze` branch below
+        // would otherwise sleep, so the assertion on `elapsed` below stays a
+        // genuine proof of bounding rather than a race against machine load.
+        let budget = Duration::from_secs(10);
+        let runner = crate::runner::SystemRunner::new().with_timeout(budget);
+        let mut provider = GitNexusCodeIndexProvider::with_binary(
+            runner,
+            script_path.display().to_string(),
+            "demo",
+            SourceRef::parse("source:git/demo").unwrap(),
+            None,
+        );
+        assert!(
+            provider.capabilities().index,
+            "the fixture answers the same capability probe a real GitNexus release does: {:?} ({:?})",
+            provider.status(),
+            provider.unavailable_reason()
+        );
+
+        let start = Instant::now();
+        let error = provider
+            .index(dir.path(), false)
+            .expect_err("a call that would run 30s against a 10s budget is killed, not awaited");
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            error.code(),
+            "mux.command_timeout",
+            "the refusal names the runner's own bound, not a generic index failure: {error}"
+        );
+        assert!(
+            error.message().contains("did not finish within"),
+            "the refusal names what happened: {}",
+            error.message()
+        );
+        assert!(
+            elapsed < Duration::from_secs(25),
+            "the call returned inside its budget instead of waiting out the 30s script: {elapsed:?}"
+        );
+        assert!(
+            !provider.status().indexed,
+            "a killed index attempt never claims to have indexed"
+        );
     }
 }

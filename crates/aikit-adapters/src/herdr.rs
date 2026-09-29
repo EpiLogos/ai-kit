@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use aikit_core::resource::ResourceRef;
-use aikit_core::session::SessionPlan;
+use aikit_core::session::{Direction, SessionPlan, Split};
 use aikit_core::{AikitError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -91,6 +91,43 @@ pub struct HerdrSnapshot {
     pub workspace_ids: Vec<String>,
     pub pane_ids: Vec<String>,
     pub agents: Vec<HerdrAgentObservation>,
+    /// Each tab layout's workspace and its own focused pane, as Herdr reports
+    /// them (`layouts[]`). Lets a surface bound to a workspace's focused pane
+    /// be focused exactly through `workspace focus`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layouts: Vec<HerdrLayoutFocus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HerdrLayoutFocus {
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused_pane_id: Option<String>,
+    pub pane_ids: Vec<String>,
+    /// Each pane of the layout with its reported rect, when Herdr publishes
+    /// one. The multi-surface reconcile reads the parent pane's rect before
+    /// splitting so a pane is never minted invisibly small.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub panes: Vec<HerdrLayoutPane>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HerdrLayoutPane {
+    pub pane_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rect: Option<HerdrPaneRect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HerdrPaneRect {
+    #[serde(default)]
+    pub x: i64,
+    #[serde(default)]
+    pub y: i64,
+    #[serde(default)]
+    pub width: i64,
+    #[serde(default)]
+    pub height: i64,
 }
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
@@ -204,6 +241,38 @@ pub fn parse_herdr_snapshot(raw: &str) -> Result<HerdrSnapshot> {
         workspace_ids: object_ids(snapshot, "workspaces", "workspace_id"),
         pane_ids: object_ids(snapshot, "panes", "pane_id"),
         agents,
+        layouts: snapshot
+            .get("layouts")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|layout| {
+                Some(HerdrLayoutFocus {
+                    workspace_id: string_field(layout, "workspace_id")?,
+                    focused_pane_id: string_field(layout, "focused_pane_id"),
+                    pane_ids: object_ids(layout, "panes", "pane_id"),
+                    panes: layout
+                        .get("panes")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|pane| {
+                            Some(HerdrLayoutPane {
+                                pane_id: string_field(pane, "pane_id")?,
+                                rect: pane.get("rect").and_then(|rect| {
+                                    Some(HerdrPaneRect {
+                                        x: rect.get("x").and_then(Value::as_i64)?,
+                                        y: rect.get("y").and_then(Value::as_i64)?,
+                                        width: rect.get("width").and_then(Value::as_i64)?,
+                                        height: rect.get("height").and_then(Value::as_i64)?,
+                                    })
+                                }),
+                            })
+                        })
+                        .collect(),
+                })
+            })
+            .collect(),
     })
 }
 
@@ -255,11 +324,12 @@ pub fn herdr_recorded_surface_keys(plan: &SessionPlan) -> Vec<(String, String)> 
 /// The provider-native bindings an explicit open created, when the fresh
 /// observation proves a Herdr place the plan does not yet record.
 ///
-/// This is the travel permit for created evidence: the observation's Session
-/// binding names the workspace this open proved, and only when that id is not
-/// what the plan already records did this open mint a new place. Attaching to
-/// the recorded place returns `None` — a repeated open must not re-issue
-/// evidence the caller already persists.
+/// This is the travel permit for created evidence: per binding, not
+/// all-or-nothing. A reconciling open on an already-recorded place mints
+/// only the panes the plan declares but does not yet record — those travel,
+/// and the workspace evidence travels with them; every surface the plan
+/// already records at the same native id stays home, so a repeated open
+/// never re-issues evidence the caller already persists.
 pub fn created_place_bindings(
     plan: &SessionPlan,
     observation: &WorkingEnvironmentObservation,
@@ -267,13 +337,75 @@ pub fn created_place_bindings(
     if observation.provider.as_str() != herdr_provider_ref_uri() {
         return None;
     }
-    let session = observation.bindings.iter().find(|binding| {
+    let has_session = observation.bindings.iter().any(|binding| {
         binding.kind == NativeBindingKind::Session && binding.canonical_ref.is_none()
-    })?;
-    if herdr_recorded_workspace(plan).as_deref() == Some(session.native_id.as_str()) {
+    });
+    if !has_session {
         return None;
     }
-    Some(observation.bindings.clone())
+    let recorded = herdr_recorded_surface_keys(plan);
+    let mut fresh: Vec<ProviderNativeBinding> = Vec::new();
+    let mut any_new_surface = false;
+    for binding in &observation.bindings {
+        let keep = match (&binding.kind, &binding.canonical_ref) {
+            (NativeBindingKind::Surface, Some(canonical)) => {
+                match canonical.as_str().strip_prefix("surface/terminal/") {
+                    Some(logical) => {
+                        let already_recorded = recorded
+                            .iter()
+                            .any(|(known, pane)| known == logical && pane == &binding.native_id);
+                        if !already_recorded {
+                            any_new_surface = true;
+                        }
+                        !already_recorded
+                    }
+                    None => {
+                        any_new_surface = true;
+                        true
+                    }
+                }
+            }
+            _ => true,
+        };
+        if keep {
+            fresh.push(binding.clone());
+        }
+    }
+    if !any_new_surface {
+        return None;
+    }
+    Some(fresh)
+}
+
+/// The smallest pane a split may mint, in layout cells: herdr mints
+/// degenerate 0-width panes silently, so the reconcile refuses to create one.
+const MIN_SPLIT_COLS: i64 = 8;
+const MIN_SPLIT_ROWS: i64 = 3;
+
+fn geometry_allows(
+    snapshot: &HerdrSnapshot,
+    source_pane: &str,
+    direction: HerdrSplitDirection,
+) -> bool {
+    let rect = snapshot
+        .layouts
+        .iter()
+        .flat_map(|layout| layout.panes.iter())
+        .find(|pane| pane.pane_id == source_pane)
+        .and_then(|pane| pane.rect);
+    let Some(rect) = rect else {
+        // No geometry published: herdr accepted every observed split where a
+        // rect existed, and refusing without evidence would make the rich
+        // provider less usable than the floor. Allow it; the fresh snapshot
+        // after the split discloses the outcome either way.
+        return true;
+    };
+    // The split halves the source pane; the new pane must keep a minimal
+    // visible area.
+    match direction {
+        HerdrSplitDirection::Right => rect.width - rect.width / 2 >= MIN_SPLIT_COLS,
+        HerdrSplitDirection::Down => rect.height - rect.height / 2 >= MIN_SPLIT_ROWS,
+    }
 }
 
 pub struct HerdrWorkingEnvironment<R> {
@@ -286,6 +418,19 @@ pub struct HerdrWorkingEnvironment<R> {
     surface_bindings: BTreeMap<ResourceRef, String>,
     project_bindings: BTreeMap<ResourceRef, String>,
     agent_session_bindings: BTreeMap<ResourceRef, String>,
+    /// The whole plan surface list with its logical keys — not only the
+    /// recorded subset — so a reconciling open can materialise the panes the
+    /// plan declares but no open has created yet.
+    plan_surfaces: Vec<(ResourceRef, String)>,
+    /// Logical pane key → the plan's declared split (source + direction).
+    plan_splits: BTreeMap<String, Split>,
+    /// Logical pane key → the plan's declared command, honoured after the
+    /// pane materialises: herdr has no command slot at create or split time,
+    /// so `herdr pane run` is the post-hoc route.
+    plan_commands: BTreeMap<String, Vec<String>>,
+    /// Why a declared pane was not materialised by the last open: recorded
+    /// into the observation's provenance, never silently dropped.
+    reconcile_warnings: Vec<String>,
 }
 
 impl<R> HerdrWorkingEnvironment<R> {
@@ -300,6 +445,10 @@ impl<R> HerdrWorkingEnvironment<R> {
             surface_bindings: BTreeMap::new(),
             project_bindings: BTreeMap::new(),
             agent_session_bindings: BTreeMap::new(),
+            plan_surfaces: Vec::new(),
+            plan_splits: BTreeMap::new(),
+            plan_commands: BTreeMap::new(),
+            reconcile_warnings: Vec::new(),
         }
     }
 
@@ -341,6 +490,22 @@ impl<R> HerdrWorkingEnvironment<R> {
         environment.open_subject = subject.cloned();
         if let Some(workspace_id) = herdr_recorded_workspace(plan) {
             environment.workspace_id = Some(workspace_id);
+        }
+        environment.plan_surfaces = surfaces.to_vec();
+        for view in &plan.views {
+            for step in &view.steps {
+                let logical = format!("{}/{}", view.id, step.pane);
+                if let Some(split) = &step.split {
+                    environment
+                        .plan_splits
+                        .insert(logical.clone(), split.clone());
+                }
+                if !step.command.is_empty() {
+                    environment
+                        .plan_commands
+                        .insert(logical, step.command.clone());
+                }
+            }
         }
         let recorded = herdr_recorded_surface_keys(plan);
         for (surface, logical) in surfaces {
@@ -394,11 +559,52 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
         parse_herdr_snapshot(&self.run(&["api", "snapshot"])?)
     }
 
+    /// Read only the pane bound by this provider's persisted plan and fresh
+    /// snapshot. No workspace creation, focus or input occurs here.
+    pub fn capture_surface(&self, subject: &ResourceRef, lines: u16) -> Result<(String, String)> {
+        if !(1..=2000).contains(&lines) {
+            return Err(AikitError::new(
+                "herdr.capture_limit",
+                "Capture lines must be between 1 and 2000",
+            ));
+        }
+        let observation = self.observation(self.snapshot()?);
+        let native = observation
+            .canonical_native_id(subject)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "herdr.surface_not_live",
+                    "The persisted working Surface has no currently observed Herdr pane",
+                )
+            })?
+            .to_string();
+        let text = self.run(&[
+            "pane",
+            "read",
+            &native,
+            "--source",
+            "visible",
+            "--format",
+            "ansi",
+            "--lines",
+            &lines.to_string(),
+            "--raw",
+        ])?;
+        let after = self.observation(self.snapshot()?);
+        if after.canonical_native_id(subject) != Some(native.as_str()) {
+            return Err(AikitError::new(
+                "herdr.surface_changed",
+                "The working pane changed during capture; retry its current binding",
+            ));
+        }
+        Ok((native, text))
+    }
+
     pub fn create_workspace(&mut self) -> Result<HerdrWorkspaceCreation> {
         let cwd = self.create_cwd.clone().ok_or_else(|| {
             AikitError::new(
                 "herdr.workspace_absent",
-                "configured Herdr workspace is absent and no create cwd was supplied",
+                "configured Herdr workspace is absent and no create cwd was supplied: set the working-surface plan's `root` (the directory Herdr creates the workspace in) and re-bind it",
             )
         })?;
         let mut argv = vec![
@@ -623,6 +829,110 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
         self.observe()
     }
 
+    /// Reconcile the plan's declared panes that no open has materialised yet
+    /// into the live workspace — the create-or-attach contract the mux floor
+    /// gives operators, which the rich provider now honours too.
+    ///
+    /// Each unbound plan pane splits off the pane its own step declares as
+    /// its source (falling back to the plan's root pane), with `--no-focus`
+    /// always: herdr has no absolute pane focus, and focus is a global
+    /// desktop fact the plan must never be keyed to. A pane that cannot be
+    /// honoured honestly — an unhonourable direction, an unbound source, a
+    /// split that would mint an invisibly small pane — is skipped with a
+    /// provenance line naming it, never silently.
+    /// Run one materialised pane's declared command in it. `herdr pane run`
+    /// is the only route — workspace create and pane split take no command —
+    /// and it is best-effort by contract: a command that does not start is a
+    /// named provenance line, never a failed open.
+    fn run_declared_command(&mut self, logical: &str, pane_id: &str) {
+        let Some(command) = self.plan_commands.get(logical).cloned() else {
+            return;
+        };
+        let mut argv = vec![
+            "herdr".to_string(),
+            "pane".to_string(),
+            "run".to_string(),
+            pane_id.to_string(),
+        ];
+        argv.extend(command);
+        match self.runner.run(&argv) {
+            Ok(output) if output.status == 0 => {}
+            Ok(output) => self.reconcile_warnings.push(format!(
+                "plan pane {logical}: its command did not start in {pane_id} (exit {}): {}",
+                output.status,
+                output.stderr.trim()
+            )),
+            Err(error) => self.reconcile_warnings.push(format!(
+                "plan pane {logical}: its command did not start in {pane_id}: {}",
+                error.message()
+            )),
+        }
+    }
+
+    fn reconcile_plan_surfaces(&mut self) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        for (surface, logical) in self.plan_surfaces.clone() {
+            if self.surface_bindings.contains_key(&surface) {
+                continue;
+            }
+            let split = match self.plan_splits.get(&logical).cloned() {
+                Some(split) => split,
+                None => {
+                    self.reconcile_warnings.push(format!(
+                        "plan pane {logical} has no declared split source; only opens that address it directly can materialise it"
+                    ));
+                    continue;
+                }
+            };
+            let direction = match split.direction {
+                Direction::Right => HerdrSplitDirection::Right,
+                Direction::Down => HerdrSplitDirection::Down,
+                other => {
+                    self.reconcile_warnings.push(format!(
+                        "plan pane {logical} declares direction {} which herdr cannot honour; skipped without transposing",
+                        other.as_str()
+                    ));
+                    continue;
+                }
+            };
+            let Some((source_surface, _)) = self
+                .plan_surfaces
+                .iter()
+                .find(|(_, key)| *key == split.from)
+                .cloned()
+            else {
+                self.reconcile_warnings.push(format!(
+                    "plan pane {logical} splits from {} which names no pane of this plan; skipped",
+                    split.from
+                ));
+                continue;
+            };
+            let Some(source_pane) = self.surface_bindings.get(&source_surface).cloned() else {
+                self.reconcile_warnings.push(format!(
+                    "plan pane {logical} splits from {} whose pane is not bound yet; skipped",
+                    split.from
+                ));
+                continue;
+            };
+            if !snapshot.pane_ids.contains(&source_pane) {
+                self.reconcile_warnings.push(format!(
+                    "plan pane {logical} splits from bound pane {source_pane} that the fresh snapshot does not show live; skipped"
+                ));
+                continue;
+            }
+            if !geometry_allows(&snapshot, &source_pane, direction) {
+                self.reconcile_warnings.push(format!(
+                    "plan pane {logical} skipped: splitting {source_pane} {} would mint an invisibly small pane",
+                    direction.as_cli()
+                ));
+                continue;
+            }
+            let pane_id = self.split_surface(&source_surface, surface, direction)?;
+            self.run_declared_command(&logical, &pane_id);
+        }
+        Ok(())
+    }
+
     fn observation(&self, snapshot: HerdrSnapshot) -> WorkingEnvironmentObservation {
         let workspace_present = self
             .workspace_id
@@ -688,6 +998,9 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
             format!("herdrdev/herdr@{HERDR_UPSTREAM_REVISION}"),
             HERDR_PROVIDER_VERSION.into(),
         ];
+        for warning in &self.reconcile_warnings {
+            provenance.push(format!("reconcile: {warning}"));
+        }
         if !churned.is_empty() {
             provenance.push(format!(
                 "recorded Herdr pane(s) {} no longer live; herdr never reuses pane ids",
@@ -740,6 +1053,7 @@ impl<R: CommandRunner> WorkingEnvironmentProvider for HerdrWorkingEnvironment<R>
     }
 
     fn open(&mut self) -> Result<WorkingEnvironmentObservation> {
+        self.reconcile_warnings.clear();
         let snapshot = self.snapshot()?;
         let recorded_live = self
             .workspace_id
@@ -755,10 +1069,23 @@ impl<R: CommandRunner> WorkingEnvironmentProvider for HerdrWorkingEnvironment<R>
             self.surface_bindings.clear();
             let created = self.create_workspace()?;
             if let Some(subject) = self.open_subject.clone() {
+                let subject_logical = self
+                    .plan_surfaces
+                    .iter()
+                    .find(|(surface, _)| *surface == subject)
+                    .map(|(_, key)| key.clone());
                 self.surface_bindings
-                    .insert(subject, created.root_pane_id.clone());
+                    .insert(subject.clone(), created.root_pane_id.clone());
+                if let Some(logical) = subject_logical {
+                    self.run_declared_command(&logical, &created.root_pane_id);
+                }
             }
         }
+        // Both halves of create-or-attach reconcile: a plan that declares
+        // panes no open has materialised gets them now, split off the pane
+        // their own step names. The mux floor has always worked this way;
+        // the rich provider matches it instead of under-reconciling it.
+        self.reconcile_plan_surfaces()?;
         // Whatever was decided, the returned observation is fresh provider
         // proof: the workspace this open now stands on, and every bound pane
         // seen live in the same snapshot.
@@ -776,9 +1103,21 @@ impl<R: CommandRunner> WorkingEnvironmentProvider for HerdrWorkingEnvironment<R>
         // Installed Herdr has no absolute pane focus: `herdr pane focus` is
         // neighbour-relative navigation (`--direction left|right|up|down`), so
         // the only available command would silently move the operator to a
-        // neighbour of the bound pane. Withhold the surface-level operation
-        // rather than focus something else; `focus_workspace` remains the
-        // supported coarse route.
+        // neighbour of the bound pane. When the bound pane is its workspace's
+        // own focused pane, `workspace focus` lands exactly on it; otherwise
+        // withhold the surface-level operation rather than focus something else.
+        // Observing is not acting: an unreadable snapshot proves nothing and
+        // falls through to the withheld refusal.
+        let exact_workspace = self.snapshot().ok().and_then(|snapshot| {
+            snapshot
+                .layouts
+                .into_iter()
+                .find(|layout| layout.focused_pane_id.as_deref() == Some(pane.as_str()))
+        });
+        if let Some(layout) = exact_workspace {
+            self.run(&["workspace", "focus", &layout.workspace_id])?;
+            return Ok(());
+        }
         Err(AikitError::new(
             "herdr.surface_focus_unsupported",
             format!(
@@ -830,6 +1169,52 @@ mod tests {
         assert_eq!(snapshot.focused_pane_id.as_deref(), Some("w1:p2"));
         assert_eq!(snapshot.agents[0].status, HerdrAgentStatus::Blocked);
         assert_eq!(snapshot.agents[0].pane_id, "w1:p2");
+    }
+
+    #[test]
+    fn a_surface_that_is_its_workspaces_focused_pane_is_focused_through_the_workspace() {
+        let snapshot = |focused: &str| {
+            format!(
+                r#"{{"id":"s","result":{{"type":"session_snapshot","snapshot":{{
+                  "version":"0.9.1","protocol":8,"focused_workspace_id":"w2","focused_pane_id":"w2:p1",
+                  "workspaces":[{{"workspace_id":"w2"}},{{"workspace_id":"w9"}}],"tabs":[],
+                  "panes":[{{"pane_id":"w2:p1"}},{{"pane_id":"w9:p1"}},{{"pane_id":"w9:p2"}}],
+                  "layouts":[
+                    {{"workspace_id":"w2","tab_id":"w2:t1","focused_pane_id":"w2:p1","panes":[{{"pane_id":"w2:p1"}}]}},
+                    {{"workspace_id":"w9","tab_id":"w9:t1","focused_pane_id":"{focused}","panes":[{{"pane_id":"w9:p1"}},{{"pane_id":"w9:p2"}}]}}
+                  ],"agents":[]}}}}}}"#
+            )
+        };
+        let surface = r("surface/terminal/guardian/shell");
+
+        // Bound pane is w9's focused pane: focusing w9 lands exactly on it.
+        let runner = Arc::new(
+            ScriptedRunner::new()
+                .on("api snapshot", &snapshot("w9:p1"))
+                .on("workspace focus w9", "{}"),
+        );
+        let mut provider = HerdrWorkingEnvironment::new(runner.clone(), r("provider/herdr"));
+        provider
+            .surface_bindings
+            .insert(surface.clone(), "w9:p1".into());
+        provider.focus_surface(&surface).unwrap();
+        assert!(runner
+            .call_lines()
+            .iter()
+            .any(|line| line.contains("workspace focus w9")));
+
+        // Bound pane is not its workspace's focused pane: refused, nothing moved.
+        let runner = Arc::new(ScriptedRunner::new().on("api snapshot", &snapshot("w9:p2")));
+        let mut provider = HerdrWorkingEnvironment::new(runner.clone(), r("provider/herdr"));
+        provider
+            .surface_bindings
+            .insert(surface.clone(), "w9:p1".into());
+        let error = provider.focus_surface(&surface).unwrap_err();
+        assert_eq!(error.code(), "herdr.surface_focus_unsupported");
+        assert!(!runner
+            .call_lines()
+            .iter()
+            .any(|line| line.contains("focus")));
     }
 
     #[test]

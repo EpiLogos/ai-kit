@@ -7,10 +7,16 @@
 //! other world mutation — `doctor --fix` is a front-end over the one engine, not a
 //! second safety story.
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use aikit_adapters::runner::CommandRunner;
 use aikit_adapters::NativeSecureStoreProvider;
 use aikit_core::credential::{CredentialRef, SecretProvider};
+use aikit_core::id::CapsuleId;
 use aikit_core::procedure::{Inverse, Plan, Procedure, ProcedureKind, WorldEdit};
 use aikit_core::{AikitError, Result};
+use aikit_store::edit::ProfileDocument;
 use aikit_store::CredentialBindingStore;
 
 use crate::app::Service;
@@ -41,6 +47,12 @@ impl Severity {
 pub enum Fix {
     /// Create a missing directory AIKit owns.
     CreateDir { path: std::path::PathBuf },
+    /// Drop every declaration for a capsule from one scope's profile file —
+    /// the repair for an enablement whose source was removed under it.
+    ClearEnableEntry {
+        path: std::path::PathBuf,
+        capsule: CapsuleId,
+    },
 }
 
 /// One thing `doctor` noticed.
@@ -99,16 +111,30 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
     }
 
     // Declared-but-unavailable: the user asked for something and did not get it.
+    // When the declaration lives in a scope's profile file, the stale enablement
+    // is repairable: a forced `source remove` legitimately leaves these behind,
+    // and the honest exit is a named finding with a named fix, not a wedged
+    // context.
     for (id, reason) in &view.unavailable {
         if view.is_declared_enabled(id) {
-            findings.push(
-                Finding::new(
-                    "resolution.unavailable",
-                    Severity::Warning,
-                    format!("{id} is enabled here but cannot activate"),
-                )
-                .with_detail(reason.describe()),
-            );
+            let mut finding = Finding::new(
+                "resolution.unavailable",
+                Severity::Warning,
+                format!("{id} is enabled here but cannot activate"),
+            )
+            .with_detail(reason.describe());
+            if let Some(path) = view
+                .declared
+                .get(id)
+                .map(|state| std::path::PathBuf::from(&state.origin.label))
+                .filter(|path| path.is_file())
+            {
+                finding = finding.fixable(Fix::ClearEnableEntry {
+                    path,
+                    capsule: id.clone(),
+                });
+            }
+            findings.push(finding);
         }
     }
 
@@ -183,6 +209,42 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
         )),
     );
 
+    // Git↔GitHub credential wiring. `gh` logged in while git carries no
+    // github.com credential helper is the silent push failure: a session
+    // meets it mid-landing, headless, where the username prompt cannot be
+    // answered. Read-only two-leg probe; `gh auth setup-git` is the fix.
+    let gh_authenticated = aikit_adapters::runner::SystemRunner::probe()
+        .with_timeout(std::time::Duration::from_secs(10))
+        .run(&["gh".into(), "auth".into(), "status".into()])
+        .map(|output| output.ok())
+        .unwrap_or(false);
+    let github_helper_wired = aikit_adapters::runner::SystemRunner::probe()
+        .with_timeout(std::time::Duration::from_secs(10))
+        .run(&[
+            "git".into(),
+            "config".into(),
+            "--get-all".into(),
+            "credential.https://github.com.helper".into(),
+        ])
+        .map(|output| output.ok() && !output.stdout.trim().is_empty())
+        .unwrap_or(false);
+    if gh_authenticated && !github_helper_wired {
+        findings.push(
+            Finding::new(
+                "git.github-credential-wiring",
+                Severity::Warning,
+                "gh holds a GitHub login but git has no github.com credential helper",
+            )
+            .with_detail(
+                "non-interactive pushes to https://github.com fail with \
+                 \"could not read Username\"; wire them with `gh auth setup-git` \
+                 (idempotent). If pushes already work through another helper, \
+                 ignore this finding."
+                    .to_string(),
+            ),
+        );
+    }
+
     for binding in CredentialBindingStore::new(home).list()? {
         findings.push(
             Finding::new(
@@ -222,7 +284,9 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
     // says what AIKit's wiring actually landed in it. A leg that cannot be
     // read is named as the missing leg — never flattened into "not installed".
     let detection = aikit_adapters::actuation_harness_detection::intake_actuation_detection(
-        &aikit_adapters::runner::SystemRunner::new(),
+        // A doctor check is a probe: bounded, so a hanging or missing
+        // `actuation` is a finding within the budget, never a stalled doctor.
+        &aikit_adapters::runner::SystemRunner::probe(),
         "actuation",
     );
     for (slug, marker) in [
@@ -248,7 +312,7 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
         };
         let capability_leg =
             match aikit_adapters::actuation_harness_capability::intake_actuation_capability(
-                &aikit_adapters::runner::SystemRunner::new(),
+                &aikit_adapters::runner::SystemRunner::probe(),
                 "actuation",
                 slug,
             ) {
@@ -312,10 +376,28 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
     // The Agency Gateway at its well-known endpoint. Three honest states:
     // answering, present-but-degraded, or simply not running. Absence is not
     // an error — the gateway is optional — but bootstrap truth means the
-    // default endpoint is always accounted for, never silently absent.
+    // default endpoint is always accounted for, never silently absent — and
+    // when Enabled schedule Routines exist, a down gateway is exactly the
+    // reason scheduled automations will not fire.
     #[cfg(unix)]
     {
         let socket = home.gateway_socket();
+        let enabled_schedule_routines = aikit_store::RoutineStore::new(home.clone())
+            .list()
+            .map(|records| {
+                records
+                    .iter()
+                    .filter(|record| {
+                        record.routine.state == aikit_core::resource::routine::RoutineState::Enabled
+                            && matches!(
+                                record.routine.trigger,
+                                aikit_core::resource::routine::RoutineTrigger::Schedule { .. }
+                            )
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        let automations_at_stake = enabled_schedule_routines > 0;
         if socket.exists() {
             let target = aikit_adapters::GatewayCarrierTarget::UnixSocket(socket.clone());
             match aikit_adapters::gateway_command(
@@ -333,7 +415,16 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
                                 "gateway.service",
                                 Severity::Note,
                                 format!(
-                                    "agency gateway answers at the default endpoint ({gateway_version})"
+                                    "gateway installed and running: the agency gateway answers \
+                                     at the default endpoint ({gateway_version}){}",
+                                    if automations_at_stake {
+                                        format!(
+                                            "; {enabled_schedule_routines} enabled schedule \
+                                             routine(s) will fire"
+                                        )
+                                    } else {
+                                        String::new()
+                                    }
                                 ),
                             )
                             .with_detail(socket.display().to_string()),
@@ -347,7 +438,17 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
                             Severity::Warning,
                             "the default agency gateway socket is present but not answering",
                         )
-                        .with_detail(format!("{error}; restart it with `aikit gateway serve`")),
+                        .with_detail(format!("{error}; restart it with `aikit gateway serve`"))
+                        .with_detail(if automations_at_stake {
+                            format!(
+                                "scheduled automations will not fire: \
+                                 {enabled_schedule_routines} enabled schedule routine(s) have \
+                                 no dispatcher"
+                            )
+                        } else {
+                            "no enabled schedule routines exist, so nothing scheduled depends on it"
+                                .to_string()
+                        }),
                     );
                 }
             }
@@ -355,10 +456,26 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
             findings.push(
                 Finding::new(
                     "gateway.service",
-                    Severity::Note,
-                    "no agency gateway is running at the default endpoint",
+                    if automations_at_stake {
+                        Severity::Warning
+                    } else {
+                        Severity::Note
+                    },
+                    if automations_at_stake {
+                        format!(
+                            "scheduled automations will not fire: no agency gateway is running, \
+                             and {enabled_schedule_routines} enabled schedule routine(s) depend \
+                             on its dispatcher"
+                        )
+                    } else {
+                        "no agency gateway is running at the default endpoint".to_string()
+                    },
                 )
-                .with_detail("optional; start one with `aikit gateway serve`".to_string()),
+                .with_detail(
+                    "install the persistent service with `aikit gateway install-service`, or \
+                     start one ad hoc with `aikit gateway serve`"
+                        .to_string(),
+                ),
             );
         }
     }
@@ -373,12 +490,17 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
 /// correct case, because most findings are decisions rather than chores.
 pub fn plan_fixes(service: &Service, findings: &[Finding]) -> Result<Option<Procedure>> {
     let mut plan = Plan::new();
-    let mut any = false;
+    let mut planned = false;
+
+    // Several stale enablements can live in one declaration file. Clearing them
+    // is one edit per file, computed once from the bytes on disk, so the second
+    // edit cannot resurrect what the first removed.
+    let mut stale: BTreeMap<PathBuf, Vec<CapsuleId>> = BTreeMap::new();
 
     for finding in findings {
         match &finding.fix {
             Some(Fix::CreateDir { path }) => {
-                any = true;
+                planned = true;
                 plan = plan
                     .with_note(format!("create {}", path.display()))
                     // A directory AIKit owns, created with a marker file so the
@@ -389,11 +511,50 @@ pub fn plan_fixes(service: &Service, findings: &[Finding]) -> Result<Option<Proc
                         inverse: Inverse::Remove,
                     });
             }
+            Some(Fix::ClearEnableEntry { path, capsule }) => {
+                stale.entry(path.clone()).or_default().push(capsule.clone());
+            }
             None => {}
         }
     }
 
-    if !any {
+    for (path, capsules) in &stale {
+        let text = std::fs::read_to_string(path).map_err(|error| {
+            AikitError::new(
+                "doctor.unreadable_profile",
+                format!("could not read {}: {error}", path.display()),
+            )
+            .with("path", path.display().to_string())
+        })?;
+        let mut document = ProfileDocument::parse(&text)?;
+        for capsule in capsules {
+            document.clear(capsule);
+        }
+        let contents = document.to_string();
+        if contents == text {
+            continue;
+        }
+        planned = true;
+        plan = plan
+            .with_note(format!(
+                "remove the stale enablement of {} from {}",
+                capsules
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                path.display()
+            ))
+            .with_edit(WorldEdit::WriteFile {
+                path: path.clone(),
+                contents: contents.into_bytes(),
+                inverse: Inverse::Restore {
+                    blob: aikit_core::procedure::BlobId::deferred(),
+                },
+            });
+    }
+
+    if !planned {
         return Ok(None);
     }
     aikit_store::procedure::plan_procedure(

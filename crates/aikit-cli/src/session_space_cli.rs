@@ -11,10 +11,14 @@
 //! the process via `exec()` and never return.
 
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use crate::app::Service;
 use crate::SessionSpaceServiceOps;
+use aikit_adapters::place_technology::PlaceTechnologyRegistry;
+use aikit_core::platform::PlaceTechnology;
 use aikit_core::project::ProjectRef;
+use aikit_core::resource::ResourceRef;
 use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::session_space_application::{
     ContextResolutionEvidence, SessionSpaceMutation, SessionSpacePreview,
@@ -37,6 +41,39 @@ struct Cli {
 
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Debug, clap::Args)]
+struct EpiPrimeConfigureArgs {
+    #[arg(long, default_value = "epi-prime-ql")]
+    provider_id: String,
+    #[arg(long)]
+    launcher: PathBuf,
+    #[arg(long)]
+    prime_bin: PathBuf,
+    #[arg(long)]
+    ql_bin: PathBuf,
+    #[arg(long)]
+    ql_revision: String,
+    #[arg(long)]
+    body_revision: String,
+    #[arg(long)]
+    skill_path: PathBuf,
+    #[arg(long)]
+    research_bin: PathBuf,
+    #[arg(long)]
+    faculty_config: PathBuf,
+    #[arg(long)]
+    ql_root: Option<PathBuf>,
+    /// Optional native Central owner for pithy NOW handover/continuation.
+    #[arg(long)]
+    central_ctrl_bin: Option<PathBuf>,
+    /// Central root paired with --central-ctrl-bin.
+    #[arg(long)]
+    central_root: Option<PathBuf>,
+    /// Optional Project key used as the Prime Skill's default NOW scope.
+    #[arg(long)]
+    central_project: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -83,6 +120,16 @@ enum Command {
         #[arg(long)]
         agent_session: String,
     },
+    /// Restore an exact prior ready task after failed unhosted preparation.
+    /// Hosted pending work requires recovery of the same Workcell demand.
+    EncounterTaskAbort {
+        #[arg(long)]
+        agent_session: String,
+        #[arg(long)]
+        expected_revision: String,
+        #[arg(long)]
+        restore_revision: String,
+    },
     /// Internal native protocol launch; emits no wrapper bytes to stdout.
     EncounterTaskExec {
         #[arg(long)]
@@ -103,6 +150,32 @@ enum Command {
     EncounterConfigure {
         #[arg(long)]
         provider_json: String,
+    },
+    /// Withdraw one configured encounter provider by its exact id. Owner-only,
+    /// never IPC input. Refuses an unknown id rather than pretending.
+    EncounterDeconfigure {
+        #[arg(long)]
+        provider_id: String,
+    },
+    /// Configure the installable Epi-Logos Prime-QL body over Prime RPC.
+    /// Paths are resolved now; mode selection later starts nothing until the
+    /// ordinary Encounter open/first-Send boundary.
+    EncounterEpiPrimeConfigure {
+        #[command(flatten)]
+        args: Box<EpiPrimeConfigureArgs>,
+    },
+    /// Derive (dry-run) the encounter provider a harness profile's connection
+    /// facts produce. Prints the provider JSON and exits; no state changes.
+    EncounterDerive {
+        /// The embedded harness profile slug (e.g. gemini, pi, hermes, kimi).
+        #[arg(long = "from-profile")]
+        from_profile: String,
+        /// Provider id; defaults to the profile slug.
+        #[arg(long)]
+        id: Option<String>,
+        /// Provider label; defaults to "<slug> (profile-derived)".
+        #[arg(long)]
+        label: Option<String>,
     },
     /// Provision or withdraw a native Agency binding under an exact revision.
     /// This is an owner-only operation, not gateway/IPC input.
@@ -128,6 +201,10 @@ enum Command {
         /// project scope when exactly one exists, else a derived project agent.
         #[arg(long)]
         agent_ref: Option<String>,
+        /// Request bounded task execution as well as ordinary chat. The native
+        /// authority owner must still actualise it against the standing grant.
+        #[arg(long)]
+        for_task: bool,
     },
     /// Correlate operator-reviewed native evidence for a stuck delivery; never replay it.
     EncounterDeliveryReconcile {
@@ -190,6 +267,14 @@ enum Command {
         operation: Option<String>,
         #[arg(long = "intent-json", value_name = "JSON|@FILE")]
         intent_json: Option<String>,
+        /// With a bind-working-surface intent: select the provider the
+        /// binding is created against — a place-technology name (`herdr`) or
+        /// a provider ref (`provider/herdr/current`, or an instance ref like
+        /// `provider/herdr/w6`). Validated against the place-technology
+        /// registry (registered, detected installed, drivable) before it is
+        /// persisted. Without it the staged binding's own provider stands.
+        #[arg(long, value_name = "PROVIDER_REF|TECHNOLOGY")]
+        provider: Option<String>,
     },
     /// Apply exactly a previously reviewed preview. Prefix with @ to read a file.
     Apply {
@@ -218,6 +303,15 @@ enum Command {
 enum WorkingSurfaceCommand {
     /// Read the persisted binding and its current provider observation.
     Observe { space: String, binding: String },
+    /// Capture the exact persisted terminal Surface without focus or input.
+    Capture {
+        space: String,
+        binding: String,
+        #[arg(long, default_value_t = 500)]
+        lines: u16,
+    },
+    /// Read the provider's verified attachment command without starting a client.
+    Attachment { space: String, binding: String },
     /// Explicitly create-or-attach the persisted provider plan for this Surface.
     Open { space: String, binding: String },
     /// Focus only the currently live persisted Surface; this never recreates it.
@@ -305,6 +399,18 @@ fn run(cli: Cli) -> Result<()> {
                 &aikit_core::ResourceRef::parse(agent_session)?,
             )?)
         }
+        Command::EncounterTaskAbort {
+            agent_session,
+            expected_revision,
+            restore_revision,
+        } => emit(
+            &crate::encounter_service::EncounterService::abort_task_preparation(
+                service.home(),
+                &aikit_core::ResourceRef::parse(agent_session)?,
+                &aikit_core::SourceRevision::parse(expected_revision)?,
+                &aikit_core::SourceRevision::parse(restore_revision)?,
+            )?,
+        ),
         Command::EncounterTaskExec {
             agent_session,
             expected_revision,
@@ -326,6 +432,183 @@ fn run(cli: Cli) -> Result<()> {
                 parse_json_arg(&provider_json)?,
             )?;
             emit(&serde_json::json!({"configured":true}))
+        }
+        Command::EncounterDeconfigure { provider_id } => {
+            crate::encounter_service::EncounterService::deconfigure(service.home(), &provider_id)?;
+            emit(&serde_json::json!({"withdrawn":provider_id}))
+        }
+        Command::EncounterEpiPrimeConfigure { args } => {
+            let EpiPrimeConfigureArgs {
+                provider_id,
+                launcher,
+                prime_bin,
+                ql_bin,
+                ql_revision,
+                body_revision,
+                skill_path,
+                research_bin,
+                faculty_config,
+                ql_root,
+                central_ctrl_bin,
+                central_root,
+                central_project,
+            } = *args;
+            fn exact_revision(value: &str, label: &str) -> Result<()> {
+                if value.len() == 40
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    Ok(())
+                } else {
+                    Err(AikitError::new(
+                        "encounter.prime_configuration",
+                        format!("{label} must be a lowercase 40-hex revision"),
+                    ))
+                }
+            }
+            fn file(path: PathBuf, label: &str) -> Result<PathBuf> {
+                let path = path.canonicalize().map_err(|error| {
+                    AikitError::new(
+                        "encounter.prime_configuration",
+                        format!("{label} is unavailable: {error}"),
+                    )
+                })?;
+                if !path.is_file() {
+                    return Err(AikitError::new(
+                        "encounter.prime_configuration",
+                        format!("{label} must be a file"),
+                    ));
+                }
+                Ok(path)
+            }
+            fn directory(path: PathBuf, label: &str) -> Result<PathBuf> {
+                let path = path.canonicalize().map_err(|error| {
+                    AikitError::new(
+                        "encounter.prime_configuration",
+                        format!("{label} is unavailable: {error}"),
+                    )
+                })?;
+                if !path.is_dir() {
+                    return Err(AikitError::new(
+                        "encounter.prime_configuration",
+                        format!("{label} must be a directory"),
+                    ));
+                }
+                Ok(path)
+            }
+            exact_revision(&ql_revision, "QL revision")?;
+            exact_revision(&body_revision, "Actuation body revision")?;
+            let launcher = file(launcher, "Prime-QL launcher")?;
+            let prime_bin = file(prime_bin, "Prime Agent binary")?;
+            let ql_bin = file(ql_bin, "QL binary")?;
+            let skill_path = directory(skill_path, "Prime QL relational skill")?;
+            let research_bin = file(research_bin, "Actuation research binary")?;
+            let faculty_config = file(faculty_config, "Actuation faculty configuration")?;
+            let ql_root = ql_root
+                .map(|path| directory(path, "QL source root"))
+                .transpose()?;
+            if central_ctrl_bin.is_some() != central_root.is_some()
+                || central_ctrl_bin.is_some() != central_project.is_some()
+            {
+                return Err(AikitError::new(
+                    "encounter.prime_configuration",
+                    "Central ctrl binary, root and project must be supplied together",
+                ));
+            }
+            let central_ctrl_bin = central_ctrl_bin
+                .map(|path| file(path, "Central ctrl binary"))
+                .transpose()?;
+            let central_root = central_root
+                .map(|path| directory(path, "Central root"))
+                .transpose()?;
+            let aikit_bin = file(
+                std::env::current_exe().map_err(|error| {
+                    AikitError::new(
+                        "encounter.prime_configuration",
+                        format!("AIKit current executable is unavailable: {error}"),
+                    )
+                })?,
+                "AIKit current executable",
+            )?;
+            let mut argv = vec![
+                launcher.display().to_string(),
+                "--prime-bin".into(),
+                prime_bin.display().to_string(),
+                "--ql-bin".into(),
+                ql_bin.display().to_string(),
+                "--ql-revision".into(),
+                ql_revision.clone(),
+                "--skill-path".into(),
+                skill_path.display().to_string(),
+                "--research-bin".into(),
+                research_bin.display().to_string(),
+                "--faculty-config".into(),
+                faculty_config.display().to_string(),
+                "--aikit-bin".into(),
+                aikit_bin.display().to_string(),
+            ];
+            if let Some(root) = ql_root {
+                argv.extend(["--ql-root".into(), root.display().to_string()]);
+            }
+            if let (Some(ctrl), Some(root)) = (central_ctrl_bin, central_root) {
+                argv.extend([
+                    "--central-ctrl-bin".into(),
+                    ctrl.display().to_string(),
+                    "--central-root".into(),
+                    root.display().to_string(),
+                ]);
+            }
+            if let Some(project) = central_project {
+                argv.extend(["--central-project".into(), project]);
+            }
+            crate::encounter_service::EncounterService::configure(
+                service.home(),
+                crate::encounter_service::EncounterProvider {
+                    protocol: crate::encounter_service::EncounterProtocol::PrimeRpc,
+                    id: provider_id.clone(),
+                    label: "Epi-Logos Prime-QL".into(),
+                    argv,
+                    from_profile: None,
+                    argv_fallback: Vec::new(),
+                    env: Default::default(),
+                    cwd: None,
+                    body_ref: Some("agent-body/epi-prime-ql".into()),
+                    body_revision: Some(body_revision.clone()),
+                    required_context: None,
+                    model_policy: None,
+                    now_context: None,
+                },
+            )?;
+            emit(&serde_json::json!({
+                "configured":true,
+                "provider":provider_id,
+                "body_ref":"agent-body/epi-prime-ql",
+                "body_revision":body_revision,
+                "ql_revision":ql_revision,
+                "model_selection":"Prime native configured model unless an explicit AIKit model policy overrides it",
+                "standing":"configured-not-started"
+            }))
+        }
+        Command::EncounterDerive {
+            from_profile,
+            id,
+            label,
+        } => {
+            let profile = aikit_adapters::profiles::for_slug(&from_profile).ok_or_else(|| {
+                AikitError::new(
+                    "encounter.from_profile_unknown",
+                    format!(
+                        "no embedded harness profile names slug {from_profile}; \
+                             encounter-derive is a dry run, nothing was configured"
+                    ),
+                )
+            })?;
+            emit(&crate::encounter_profile_provider::derive_provider(
+                profile,
+                id.unwrap_or_else(|| from_profile.clone()),
+                label.unwrap_or_else(|| format!("{from_profile} (profile-derived)")),
+            )?)
         }
         Command::EncounterAgencyConfigure {
             agent_session,
@@ -350,12 +633,18 @@ fn run(cli: Cli) -> Result<()> {
             agent_session,
             project_cwd,
             agent_ref,
+            for_task,
         } => {
             let agent_ref = agent_ref
                 .as_deref()
                 .map(aikit_core::ResourceRef::parse)
                 .transpose()?;
-            emit(&crate::encounter_service::mint_from_cli(
+            let mint = if for_task {
+                crate::encounter_service::mint_task_from_cli
+            } else {
+                crate::encounter_service::mint_from_cli
+            };
+            emit(&mint(
                 service.home(),
                 &project_cwd,
                 &aikit_core::ResourceRef::parse(agent_session)?,
@@ -394,6 +683,25 @@ fn run(cli: Cli) -> Result<()> {
         Command::Show { space } => emit(&service.session_space_show(&space_ref(&space)?)?),
         Command::Open { space } => emit(&service.session_space_open(&space_ref(&space)?)?),
         Command::WorkingSurface { command } => match command {
+            WorkingSurfaceCommand::Capture {
+                space,
+                binding,
+                lines,
+            } => {
+                let state = service.session_space_show(&space_ref(&space)?)?;
+                emit(&crate::session_space_working_surface::capture(
+                    &state,
+                    &aikit_core::ResourceRef::parse(binding)?,
+                    lines,
+                )?)
+            }
+            WorkingSurfaceCommand::Attachment { space, binding } => {
+                let state = service.session_space_show(&space_ref(&space)?)?;
+                emit(&crate::session_space_working_surface::terminal_attachment(
+                    &state,
+                    &aikit_core::ResourceRef::parse(binding)?,
+                )?)
+            }
             WorkingSurfaceCommand::Observe { space, binding } => {
                 let state = service.session_space_show(&space_ref(&space)?)?;
                 emit(&crate::session_space_working_surface::observe(
@@ -469,6 +777,7 @@ fn run(cli: Cli) -> Result<()> {
             print_schema,
             operation,
             intent_json,
+            provider,
         } => {
             if print_schema {
                 return match operation.as_deref() {
@@ -495,6 +804,19 @@ fn run(cli: Cli) -> Result<()> {
                 ));
             };
             let intent: SessionSpaceMutation = parse_json_arg(intent_json)?;
+            // Provider selection happens at the binding-authoring boundary:
+            // validated against the place-technology registry here, persisted
+            // on the binding, so every working-surface verb that follows the
+            // binding needs no change of its own. Absent, the intent is
+            // exactly what was staged.
+            let intent = match provider.as_deref() {
+                Some(raw) => select_binding_provider(
+                    &aikit_adapters::place_technology::PlaceTechnologyRegistry::builtin(),
+                    intent,
+                    raw,
+                )?,
+                None => intent,
+            };
             let space = space.as_deref().map(space_ref).transpose()?;
             emit(&service.session_space_stage(space.as_ref(), intent)?)
         }
@@ -556,6 +878,134 @@ fn space_ref(raw: &str) -> Result<SessionSpaceRef> {
     SessionSpaceRef::parse(raw)
 }
 
+/// One `--provider` selection after validation: the technology it names, and
+/// the ref persisted on the binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderSelection {
+    technology: PlaceTechnology,
+    provider: ResourceRef,
+}
+
+/// Parse a `--provider <provider-ref|technology>` value and validate it
+/// against `registry`: the technology must be registered, its real detection
+/// must report it installed on this host, and this build must be able to
+/// drive it as a working environment (through a mux adapter or a
+/// provider-native one). A technology name (`herdr`) persists as the
+/// technology-canonical ref; a provider ref persists exactly as named, so an
+/// instance ref (`provider/herdr/w6`) stays the instance the operator named.
+fn resolve_provider_selection(
+    registry: &PlaceTechnologyRegistry,
+    raw: &str,
+    plan: &aikit_core::session::SessionPlan,
+) -> Result<ProviderSelection> {
+    let (technology, provider) = if let Ok(technology) = PlaceTechnology::from_str(raw) {
+        (
+            technology,
+            ResourceRef::parse(format!("provider/{raw}/current"))?,
+        )
+    } else {
+        let Some((technology, _instance)) = raw
+            .strip_prefix("provider/")
+            .and_then(|rest| rest.split_once('/'))
+        else {
+            return Err(AikitError::new(
+                "session_space.provider_selection_malformed",
+                format!(
+                    "`{raw}` is neither a place-technology name nor a provider ref \
+                     (`provider/<technology>/<instance>`), so no binding provider can be \
+                     selected from it"
+                ),
+            ));
+        };
+        (
+            PlaceTechnology::from_str(technology)?,
+            ResourceRef::parse(raw)?,
+        )
+    };
+    let Some(entry) = registry.resolve(&technology) else {
+        return Err(AikitError::new(
+            "session_space.provider_unregistered",
+            format!(
+                "no place technology `{technology}` is registered in this build, so \
+                 --provider {raw} cannot select a working-environment provider"
+            ),
+        ));
+    };
+    let reading = entry.detect()?;
+    if !reading.installed {
+        return Err(AikitError::new(
+            "session_space.provider_not_installed",
+            format!(
+                "{provider} cannot be selected: {}",
+                reading
+                    .detail
+                    .unwrap_or_else(|| format!("`{technology}` is not installed on this host"))
+            ),
+        ));
+    }
+    let drivable = entry.mux_adapter().is_some()
+        || entry
+            .working_environment(plan, &provider, &[], None)
+            .is_some();
+    if !drivable {
+        return Err(AikitError::new(
+            "session_space.provider_undrivable",
+            format!(
+                "`{technology}` is registered and installed, but this build cannot drive it \
+                 as a working environment, so a working-surface binding cannot be created \
+                 against it"
+            ),
+        ));
+    }
+    Ok(ProviderSelection {
+        technology,
+        provider,
+    })
+}
+
+/// Apply a `--provider` value to a staged SessionSpace intent.
+///
+/// The only intent it applies to is `bind-working-surface`: the selection is
+/// validated against the registry and persisted on the binding, so every
+/// working-surface verb that follows the binding needs no change of its own.
+/// A staged plan that already declares a different place technology is a
+/// contradiction and is refused. Without the flag the intent passes through
+/// exactly as staged — zero change when absent.
+fn select_binding_provider(
+    registry: &PlaceTechnologyRegistry,
+    intent: SessionSpaceMutation,
+    raw: &str,
+) -> Result<SessionSpaceMutation> {
+    let SessionSpaceMutation::BindWorkingSurface { binding } = intent else {
+        return Err(AikitError::new(
+            "session_space.provider_flag_misplaced",
+            "--provider selects the provider a working-surface binding is created against; \
+             this staged intent has no working-surface binding to select one for",
+        ));
+    };
+    let mut binding = *binding;
+    let selection = resolve_provider_selection(registry, raw, &binding.plan)?;
+    if let Some(declared) = &binding.plan.mux {
+        if *declared != selection.technology {
+            return Err(AikitError::new(
+                "session_space.provider_plan_conflict",
+                format!(
+                    "the staged plan declares place technology `{declared}`, but --provider \
+                     {raw} selects `{}`; one binding cannot name both",
+                    selection.technology
+                ),
+            ));
+        }
+    }
+    binding.provider = selection.provider;
+    binding.provenance.push(format!(
+        "provider selected at stage time with --provider {raw}"
+    ));
+    Ok(SessionSpaceMutation::BindWorkingSurface {
+        binding: Box::new(binding),
+    })
+}
+
 fn parse_json_arg<T: DeserializeOwned>(raw: &str) -> Result<T> {
     let text = if let Some(path) = raw.strip_prefix('@') {
         std::fs::read_to_string(path).map_err(|error| {
@@ -584,4 +1034,285 @@ fn emit<T: Serialize>(value: &T) -> Result<()> {
     })?;
     println!("{text}");
     Ok(())
+}
+
+#[cfg(test)]
+mod epi_prime_cli_tests {
+    use super::*;
+
+    #[test]
+    fn epi_prime_configuration_parses_as_boxed_owner_arguments() {
+        let cli = Cli::try_parse_from([
+            "aikit-session-space",
+            "encounter-epi-prime-configure",
+            "--provider-id",
+            "epi-prime-ql",
+            "--launcher",
+            "/opt/actuation-epi-prime",
+            "--prime-bin",
+            "/opt/prime-agent",
+            "--ql-bin",
+            "/opt/ql",
+            "--ql-revision",
+            "89ca4088ea47fe626c23c2b11efe2d38bdfcd1f7",
+            "--body-revision",
+            "161b869740c54dc325ad1d6aef765dbf32920073",
+            "--skill-path",
+            "/opt/ql-relational",
+            "--research-bin",
+            "/opt/actuation-research",
+            "--faculty-config",
+            "/opt/faculty.json",
+            "--central-ctrl-bin",
+            "/opt/ctrl",
+            "--central-root",
+            "/opt/Central",
+            "--central-project",
+            "O-I",
+        ])
+        .expect("Prime-QL configure grammar parses");
+
+        let Command::EncounterEpiPrimeConfigure { args } = cli.command else {
+            panic!("expected Prime-QL configure command");
+        };
+        assert_eq!(args.provider_id, "epi-prime-ql");
+        assert_eq!(args.ql_revision, "89ca4088ea47fe626c23c2b11efe2d38bdfcd1f7");
+        assert_eq!(
+            args.body_revision,
+            "161b869740c54dc325ad1d6aef765dbf32920073"
+        );
+        assert_eq!(args.central_project.as_deref(), Some("O-I"));
+    }
+}
+
+#[cfg(test)]
+mod provider_selection_tests {
+    use super::*;
+    use aikit_adapters::place_technology::{
+        MuxAdapterHandle, PlaceTechnologyAdapter, PlaceTechnologyReading,
+    };
+    use aikit_adapters::working_environment::{
+        WorkingEnvironmentCapabilities, WorkingEnvironmentObservation, WorkingEnvironmentProvider,
+    };
+    use aikit_core::session::SessionSpec;
+    use aikit_core::session_space_application::SessionSpaceWorkingSurfaceBinding;
+
+    /// A herdr stand-in: detected by construction, never spawned. The
+    /// `installed`/`drivable` switches let each refusal state be produced on
+    /// demand, which no live herdr could promise.
+    struct FakeHerdrTechnology {
+        installed: bool,
+        drivable: bool,
+    }
+
+    impl PlaceTechnologyAdapter for FakeHerdrTechnology {
+        fn technology(&self) -> PlaceTechnology {
+            PlaceTechnology::herdr()
+        }
+
+        fn detect(&self) -> Result<PlaceTechnologyReading> {
+            Ok(PlaceTechnologyReading {
+                technology: PlaceTechnology::herdr(),
+                installed: self.installed,
+                version: self.installed.then(|| "herdr fake 1".to_string()),
+                server_running: self.installed,
+                inside: false,
+                detail: (!self.installed).then(|| "herdr fake is not installed".to_string()),
+            })
+        }
+
+        fn mux_adapter(&self) -> Option<MuxAdapterHandle> {
+            None
+        }
+
+        fn working_environment(
+            &self,
+            _plan: &aikit_core::session::SessionPlan,
+            provider: &ResourceRef,
+            _surfaces: &[(ResourceRef, String)],
+            _subject: Option<&ResourceRef>,
+        ) -> Option<Box<dyn WorkingEnvironmentProvider>> {
+            if !self.drivable {
+                return None;
+            }
+            Some(Box::new(UnDrivenEnvironment(provider.clone())))
+        }
+    }
+
+    /// The environment handed back by selection validation is never driven:
+    /// selection asks only whether the build *can* drive the technology.
+    struct UnDrivenEnvironment(ResourceRef);
+
+    impl WorkingEnvironmentProvider for UnDrivenEnvironment {
+        fn provider_ref(&self) -> &ResourceRef {
+            &self.0
+        }
+
+        fn capabilities(&self) -> WorkingEnvironmentCapabilities {
+            WorkingEnvironmentCapabilities::default()
+        }
+
+        fn observe(&mut self) -> Result<WorkingEnvironmentObservation> {
+            unreachable!("selection validates drivability; it never drives the provider")
+        }
+
+        fn open(&mut self) -> Result<WorkingEnvironmentObservation> {
+            unreachable!("selection validates drivability; it never drives the provider")
+        }
+
+        fn focus_surface(&mut self, _surface: &ResourceRef) -> Result<()> {
+            unreachable!("selection validates drivability; it never drives the provider")
+        }
+
+        fn detach_surface(&mut self, _surface: &ResourceRef) -> Result<()> {
+            unreachable!("selection validates drivability; it never drives the provider")
+        }
+    }
+
+    fn fake_registry(installed: bool, drivable: bool) -> PlaceTechnologyRegistry {
+        PlaceTechnologyRegistry::from_entries(vec![Box::new(FakeHerdrTechnology {
+            installed,
+            drivable,
+        })])
+    }
+
+    fn plan(backend: &str) -> aikit_core::session::SessionPlan {
+        SessionSpec::from_toml_str(&format!(
+            "schema = 1\nid = \"p\"\nname = \"p\"\nbackend = \"{backend}\"\n\n[[views]]\nid = \"main\"\n[[views.panes]]\nid = \"shell\"\ncommand = [\"sh\"]\n"
+        ))
+        .expect("spec parses")
+        .compile()
+        .expect("spec compiles")
+    }
+
+    fn binding_intent(backend: &str) -> SessionSpaceMutation {
+        SessionSpaceMutation::BindWorkingSurface {
+            binding: Box::new(SessionSpaceWorkingSurfaceBinding {
+                binding: ResourceRef::parse("working-surface/w1").expect("ref parses"),
+                surface: ResourceRef::parse("surface/terminal/main/shell").expect("ref parses"),
+                agent_session: ResourceRef::parse("agent-session/a1").expect("ref parses"),
+                provider: ResourceRef::parse("provider/tmux/current").expect("ref parses"),
+                plan: plan(backend),
+                plan_key: "main/shell".into(),
+                provenance: Vec::new(),
+            }),
+        }
+    }
+
+    #[test]
+    fn stage_parses_the_provider_flag_and_defaults_to_absent() {
+        let cli = Cli::try_parse_from([
+            "aikit-session-space",
+            "stage",
+            "--space",
+            "session-space/s1",
+            "--intent-json",
+            "{}",
+            "--provider",
+            "herdr",
+        ])
+        .expect("stage grammar parses with --provider");
+        let Command::Stage {
+            space, provider, ..
+        } = cli.command
+        else {
+            panic!("expected a stage command");
+        };
+        assert_eq!(provider.as_deref(), Some("herdr"));
+        assert_eq!(space.as_deref(), Some("session-space/s1"));
+
+        let cli = Cli::try_parse_from(["aikit-session-space", "stage", "--intent-json", "{}"])
+            .expect("stage grammar parses without --provider");
+        let Command::Stage { provider, .. } = cli.command else {
+            panic!("expected a stage command");
+        };
+        assert!(provider.is_none(), "absent flag must stay absent");
+    }
+
+    #[test]
+    fn selection_accepts_technology_and_provider_ref_forms() {
+        let selection =
+            resolve_provider_selection(&fake_registry(true, true), "herdr", &plan("herdr"))
+                .expect("a technology name selects");
+        assert_eq!(selection.technology, PlaceTechnology::herdr());
+        assert_eq!(selection.provider.as_str(), "provider/herdr/current");
+
+        let selection = resolve_provider_selection(
+            &fake_registry(true, true),
+            "provider/herdr/w6",
+            &plan("herdr"),
+        )
+        .expect("an instance provider ref selects");
+        assert_eq!(selection.technology, PlaceTechnology::herdr());
+        assert_eq!(selection.provider.as_str(), "provider/herdr/w6");
+    }
+
+    #[test]
+    fn selection_refuses_unregistered_absent_undrivable_and_malformed() {
+        let error = resolve_provider_selection(
+            &PlaceTechnologyRegistry::from_entries(vec![]),
+            "herdr",
+            &plan("herdr"),
+        )
+        .expect_err("an unregistered technology cannot select");
+        assert_eq!(error.code(), "session_space.provider_unregistered");
+
+        let error =
+            resolve_provider_selection(&fake_registry(false, true), "herdr", &plan("herdr"))
+                .expect_err("an absent technology cannot select");
+        assert_eq!(error.code(), "session_space.provider_not_installed");
+        assert!(error.message().contains("not installed"));
+
+        let error =
+            resolve_provider_selection(&fake_registry(true, false), "herdr", &plan("herdr"))
+                .expect_err("an undrivable technology cannot select");
+        assert_eq!(error.code(), "session_space.provider_undrivable");
+
+        let error = resolve_provider_selection(
+            &fake_registry(true, true),
+            "provider/herdr",
+            &plan("herdr"),
+        )
+        .expect_err("a provider ref without its instance segment cannot select");
+        assert_eq!(error.code(), "session_space.provider_selection_malformed");
+
+        let error =
+            resolve_provider_selection(&fake_registry(true, true), "Bad_Name", &plan("herdr"))
+                .expect_err("a value in neither form cannot select");
+        assert_eq!(error.code(), "session_space.provider_selection_malformed");
+    }
+
+    #[test]
+    fn selection_is_persisted_on_the_binding_with_provenance() {
+        let intent =
+            select_binding_provider(&fake_registry(true, true), binding_intent("herdr"), "herdr")
+                .expect("selection applies to a bind-working-surface intent");
+        let SessionSpaceMutation::BindWorkingSurface { binding } = intent else {
+            panic!("expected a bind-working-surface intent");
+        };
+        assert_eq!(binding.provider.as_str(), "provider/herdr/current");
+        assert!(binding
+            .provenance
+            .iter()
+            .any(|line| line.contains("--provider herdr")));
+    }
+
+    #[test]
+    fn selection_refuses_a_contradicting_plan_and_a_misplaced_flag() {
+        let error =
+            select_binding_provider(&fake_registry(true, true), binding_intent("tmux"), "herdr")
+                .expect_err("a plan declaring another technology contradicts the selection");
+        assert_eq!(error.code(), "session_space.provider_plan_conflict");
+
+        let error = select_binding_provider(
+            &fake_registry(true, true),
+            SessionSpaceMutation::Create {
+                id: SessionSpaceRef::parse("session-space/s1").expect("space parses"),
+                label: None,
+            },
+            "herdr",
+        )
+        .expect_err("a create intent has no provider to select");
+        assert_eq!(error.code(), "session_space.provider_flag_misplaced");
+    }
 }

@@ -165,6 +165,9 @@ fn portable_signal(signal: &ConnectionSignal) -> (&'static str, Option<String>, 
         ConnectionSignalKind::AgentMessageChunk { text } => {
             ("model-delta", Some(text.clone()), None)
         }
+        ConnectionSignalKind::AgentMessageSegment { text } => {
+            ("model-message", Some(text.clone()), None)
+        }
         ConnectionSignalKind::AgentThoughtChunk { text, content } => (
             "harness-event",
             Some(text.clone()),
@@ -213,6 +216,13 @@ fn portable_signal(signal: &ConnectionSignal) -> (&'static str, Option<String>, 
             None,
             Some(
                 json!({ "event": "native-model-configured", "model_observation": model_observation }),
+            ),
+        ),
+        ConnectionSignalKind::ModeConfigured { mode_observation } => (
+            "harness-event",
+            None,
+            Some(
+                json!({ "event": "native-mode-configured", "mode_observation": mode_observation }),
             ),
         ),
         ConnectionSignalKind::HistoryReplay { update } => (

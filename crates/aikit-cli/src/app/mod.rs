@@ -27,7 +27,10 @@ use aikit_core::profile::{PoolPatch, SkillUsageOverlayPatch};
 use aikit_core::projection::{
     ActivationEffect, ProjectionItem, ProjectionPlan, ResolvedContext, TargetAdapter,
 };
-use aikit_core::resolve::{resolve_diagnostic, ResolveRequest as CoreResolveRequest, ResolvedView};
+use aikit_core::resolve::{
+    resolve_diagnostic, DeclaredState, ResolveRequest as CoreResolveRequest, ResolvedView,
+    UnavailableReason,
+};
 use aikit_core::scope::{LayerOrigin, ScopeKind, ScopeLayer};
 use aikit_core::search::SearchDoc;
 use aikit_core::trust::TrustOracle;
@@ -47,18 +50,23 @@ use aikit_adapters::clients::aider::AiderAdapter;
 use aikit_adapters::clients::antigravity::AntigravityAdapter;
 use aikit_adapters::clients::broker::BrokerAdapter;
 use aikit_adapters::clients::claude::ClaudeAdapter;
+use aikit_adapters::clients::cline::ClineAdapter;
 use aikit_adapters::clients::codex::CodexAdapter;
+use aikit_adapters::clients::copilot::CopilotAdapter;
 use aikit_adapters::clients::cursor::CursorAdapter;
+use aikit_adapters::clients::droid::DroidAdapter;
 use aikit_adapters::clients::dsh::DshAdapter;
 use aikit_adapters::clients::gemini::GeminiAdapter;
 use aikit_adapters::clients::goose::GooseAdapter;
-use aikit_adapters::clients::grokbot::GrokbotAdapter;
+use aikit_adapters::clients::grok::GrokAdapter;
 use aikit_adapters::clients::hermes::HermesAdapter;
 use aikit_adapters::clients::kimi::KimiAdapter;
+use aikit_adapters::clients::kiro_cli::KiroCliAdapter;
 use aikit_adapters::clients::ollama::OllamaAdapter;
 use aikit_adapters::clients::openclaw::OpenclawAdapter;
 use aikit_adapters::clients::opencode::OpencodeAdapter;
 use aikit_adapters::clients::pi::PiAdapter;
+use aikit_adapters::clients::qoder::QoderAdapter;
 use aikit_adapters::clients::qwen::QwenAdapter;
 use aikit_adapters::clients::zcode::ZcodeAdapter;
 use aikit_adapters::factory_developmental::{
@@ -81,6 +89,7 @@ use crate::temporal::process_central_root;
 mod development_field;
 mod flow_cognition;
 mod knowledge;
+mod knowledge_cache;
 mod model_resident;
 mod root_context;
 
@@ -198,6 +207,11 @@ pub struct SessionReconcileOutcome {
     /// work, not drift to be corrected.
     pub preserved: Vec<String>,
     pub warnings: Vec<String>,
+    /// Present only when the plan's declared place technology is
+    /// provider-native — driven through its provider's own interface instead
+    /// of the mux contract. The mux path never sets it, so mux consumers read
+    /// byte-identical replies.
+    pub provider_native: Option<crate::session_provider_reconcile::ProviderNativeReconcile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,6 +266,9 @@ pub struct Service {
     descriptor: ContextDescriptor,
     project: Option<DiscoveredProject>,
     central_meta_root: Option<PathBuf>,
+    /// An explicitly configured Central World remains the Knowledge owner for
+    /// a real Project worktree even when that checkout lives outside Work/.
+    knowledge_central_root: Option<PathBuf>,
     layers: Vec<ScopeLayer>,
     trust: TrustSnapshot,
     policy: ManagedPolicy,
@@ -262,6 +279,11 @@ pub struct Service {
     factory_state: Option<PathBuf>,
     factory_project_ref: Option<String>,
     factory_request_file: Option<PathBuf>,
+    /// Optional override for the GitNexus code-index binary. `None` uses the
+    /// PATH lookup (`gitnexus`); `AIKIT_GITNEXUS_BIN` pins it to a known binary
+    /// so code intelligence does not depend on the host's PATH — the seam the
+    /// knowledge tests inject through.
+    gitnexus_binary: Option<String>,
     /// Owner observations returned by a Factory Commission in this running
     /// application. This is an ephemeral read cache, not an AIKit Factory
     /// store; restarting re-observes through the configured owner binding.
@@ -284,6 +306,7 @@ pub struct Service {
     /// binary; like the health reading, it does not shift under ordinary
     /// navigation, so it is observed once per session and reused.
     workcell_reading: std::cell::RefCell<Option<aikit_core::workcell_world::WorkcellDisclosure>>,
+    workcell_run_reading: std::cell::RefCell<Option<Vec<aikit_core::resource::ResourceRecord>>>,
     /// Cached Model roster. Composing it runs the same detection+join the
     /// compose path does; it is fetched on demand (roster overlay open), so one
     /// composition per session is reused rather than recomputed on each open.
@@ -296,6 +319,24 @@ pub struct Service {
 }
 
 impl Service {
+    fn workcell_run_resources(&self) -> Vec<aikit_core::resource::ResourceRecord> {
+        if let Some(reading) = self.workcell_run_reading.borrow().as_ref() {
+            return reading.clone();
+        }
+        let executable = std::env::var("AIKIT_WORKCELL_BIN").unwrap_or_else(|_| "workcell".into());
+        let records =
+            match aikit_adapters::workcell_run_intake::read(&SystemRunner::probe(), &executable) {
+                Ok(observed) => observed,
+                Err(error) => {
+                    self.context_composition_notes
+                        .borrow_mut()
+                        .push(format!("Workcell run resources unavailable: {error}"));
+                    Vec::new()
+                }
+            };
+        *self.workcell_run_reading.borrow_mut() = Some(records.clone());
+        records
+    }
     /// Discover everything from the current working directory and process
     /// environment, and resolve the view.
     pub fn discover(cwd: &Path) -> Result<Self> {
@@ -389,6 +430,10 @@ impl Service {
         let project =
             discover::discover_project_with_home_excluding(&home, cwd, &additional_stores)?;
         let (project, central_meta_root) = root_context::discover(cwd, &env, project)?;
+        let knowledge_central_root = env("CENTRAL_ROOT")
+            .filter(|value| !value.is_empty())
+            .and_then(|value| PathBuf::from(value).canonicalize().ok())
+            .filter(|root| root.join("Control").is_dir() && root.join("Work").is_dir());
         let project_root = project.as_ref().map(|p| p.root.clone());
 
         let descriptor = match &project_root {
@@ -412,6 +457,7 @@ impl Service {
         let factory_state = env("AIKIT_FACTORY_STATE").map(PathBuf::from);
         let factory_project_ref = env("AIKIT_FACTORY_PROJECT_REF");
         let factory_request_file = env("AIKIT_FACTORY_REQUEST_FILE").map(PathBuf::from);
+        let gitnexus_binary = env("AIKIT_GITNEXUS_BIN").filter(|value| !value.is_empty());
 
         Ok(Self {
             home,
@@ -421,6 +467,7 @@ impl Service {
             descriptor,
             project,
             central_meta_root,
+            knowledge_central_root,
             layers,
             trust,
             policy,
@@ -431,10 +478,12 @@ impl Service {
             factory_state,
             factory_project_ref,
             factory_request_file,
+            gitnexus_binary,
             factory_started_resources: None,
             working_environments: std::cell::RefCell::new(None),
             doctor_report: std::cell::RefCell::new(None),
             workcell_reading: std::cell::RefCell::new(None),
+            workcell_run_reading: std::cell::RefCell::new(None),
             model_roster_reading: std::cell::RefCell::new(None),
             context_composition_notes: std::cell::RefCell::new(Vec::new()),
         })
@@ -473,9 +522,28 @@ impl Service {
         destructive: bool,
     ) -> Result<SessionReconcileOutcome> {
         use aikit_adapters::mux::ReconcileMode;
+        use aikit_adapters::place_technology::PlaceTechnologyRegistry;
         let plan = self.diff_or_reconcile_plan(requested)?;
         let name = plan.name.clone();
-        let (stack, _) = self.session_stack(&plan)?;
+        // The split before the stack: a plan whose declared place technology
+        // is provider-native is reconciled through the provider's own
+        // interface, in the provider's own vocabulary. Any other plan — no
+        // declared technology, a built-in mux, an unregistered name — takes
+        // the mux path below, byte-for-byte as before.
+        if let Some(native) = crate::session_provider_reconcile::reconcile_provider_native(
+            &PlaceTechnologyRegistry::builtin(),
+            &plan,
+            destructive,
+        )? {
+            return Ok(SessionReconcileOutcome {
+                session: name,
+                mux: native.technology.clone(),
+                actions: native.actions(),
+                preserved: Vec::new(),
+                warnings: native.warnings(),
+                provider_native: Some(native),
+            });
+        }
         // Non-destructive unless asked: the default may only ever ADD, so a
         // reconcile can never close the pane somebody is working in.
         let mode = if destructive {
@@ -483,6 +551,7 @@ impl Service {
         } else {
             ReconcileMode::CreateOrAttach
         };
+        let (stack, _) = self.session_stack(&plan)?;
         let binding = stack.ensure_session(&plan, mode)?;
         Ok(SessionReconcileOutcome {
             session: name,
@@ -490,6 +559,7 @@ impl Service {
             actions: binding.actions,
             preserved: binding.preserved,
             warnings: binding.warnings,
+            provider_native: None,
         })
     }
 
@@ -936,7 +1006,7 @@ impl Service {
         // hosted provider can have short of calling its API with a key.
         let capabilities =
             aikit_adapters::actuation_harness_detection::intake_actuation_capabilities(
-                &SystemRunner::new(),
+                &SystemRunner::probe(),
                 "actuation",
             );
         let (reachable, reach_notes) =
@@ -1040,22 +1110,56 @@ impl Service {
     /// can show what lost and why. There is deliberately no standalone roster
     /// listing command — this, `model-catalogue show` and the TUI overlay are
     /// the resolution surfaces.
+    pub fn read_model_roster(
+        &self,
+        composed: &serde_json::Value,
+        use_type: &str,
+        policy: aikit_core::resource::ModelRankingPolicy,
+    ) -> Result<serde_json::Value> {
+        use aikit_core::resource::{rank_model_roster, ModelRouteSet};
+        let routes: Vec<ModelRouteSet> =
+            serde_json::from_value(composed.get("model_routes").cloned().unwrap_or_default())
+                .map_err(|error| {
+                    AikitError::new("model_roster.route_sets_unreadable", error.to_string())
+                })?;
+        let roster = rank_model_roster(
+            self.model_roster_demand(use_type)?,
+            policy,
+            self.roster_candidates(&routes)?,
+        );
+        let (catalogue, _) = aikit_store::model_catalogue::resolved_catalogue(&self.home);
+        let route_facts: Vec<_> = routes.iter().flat_map(|set| set.routes.iter()).map(|route| {
+            let harness = if route.kind == aikit_core::resource::ModelRouteKind::HarnessNative {
+                route.endpoint.as_deref().and_then(|endpoint| endpoint.rsplit_once(" via ")).and_then(|(_, through)| through.strip_prefix("harness/")).filter(|slug| aikit_adapters::profiles::for_slug(slug).is_some())
+            } else { None };
+            serde_json::json!({"model":route.model,"provider":route.provider,"variant":route.provider_native_id,
+                "name":catalogue.get(&route.model).map(|entry|entry.name.as_str()),"harness":harness,
+                "availability":route.availability})
+        }).collect();
+        Ok(
+            serde_json::json!({"schema":"aikit.model-roster-reading/v1","roster":roster,"route_facts":route_facts,
+            "standing":"Read-only ranked native route evidence; no selection, session launch or inference"}),
+        )
+    }
+
     pub fn resolve_model(
         &self,
         composed: &serde_json::Value,
         use_type: &str,
         policy: aikit_core::resource::ModelRankingPolicy,
     ) -> Result<serde_json::Value> {
-        use aikit_core::resource::{rank_model_roster, select_model, ModelRouteSet};
+        use aikit_core::resource::{select_model, ModelRouteSet};
 
         let route_sets: Vec<ModelRouteSet> =
             serde_json::from_value(composed.get("model_routes").cloned().unwrap_or_default())
                 .map_err(|error| {
                     AikitError::new("model_roster.route_sets_unreadable", error.to_string())
                 })?;
-        let candidates = self.roster_candidates(&route_sets)?;
-        let demand = self.model_roster_demand(use_type)?;
-        let roster = rank_model_roster(demand, policy, candidates);
+        let reading = self.read_model_roster(composed, use_type, policy)?;
+        let roster: aikit_core::resource::ModelRoster =
+            serde_json::from_value(reading["roster"].clone()).map_err(|error| {
+                AikitError::new("model_roster.reading_unreadable", error.to_string())
+            })?;
 
         let winning_model = roster
             .entries
@@ -1125,7 +1229,7 @@ impl Service {
         let (provider_ref, outcome) = match provider {
             "openrouter" => (
                 OPENROUTER_PROVIDER,
-                fetch_openrouter_catalog(&SystemRunner::new(), &observed_at),
+                fetch_openrouter_catalog(&SystemRunner::probe(), &observed_at),
             ),
             "z-ai" => (
                 ZAI_PROVIDER,
@@ -1244,7 +1348,7 @@ impl Service {
             )
         })?;
         Ok(fetch_zai_coding_catalog(
-            &SystemRunner::new(),
+            &SystemRunner::probe(),
             secret.expose(),
             observed_at,
         ))
@@ -1325,26 +1429,41 @@ impl Service {
             // receipt and the Central-authored profile. Absent or ambiguous
             // projections resolve to defaults — never guessed; a fetch failure
             // is fail-soft (no projection), never a resolution failure.
-            let composed = match self.descriptor.project_root.as_deref() {
-                Some(root) => self
-                    .central_meta_root
+            let central_root = self.descriptor.project_root.as_deref().and_then(|root| {
+                self.central_meta_root
                     .clone()
                     .or_else(|| process_central_root(Some(root)))
-                    .and_then(|central| {
-                        let runner = SystemRunner::new();
-                        compose_live_actor_inputs(&runner, &central, root)
-                            .ok()
-                            .flatten()
-                    }),
+            });
+            let composed = match self.descriptor.project_root.as_deref() {
+                Some(root) => central_root.as_deref().and_then(|central| {
+                    let runner = SystemRunner::probe();
+                    compose_live_actor_inputs(&runner, central, root)
+                        .ok()
+                        .flatten()
+                }),
                 None => None,
             };
 
+            let mut source_resources = composed
+                .as_ref()
+                .map(|c| c.source_resources.clone())
+                .unwrap_or_default();
+            // Governance ContextSources ride alongside the actor-composed
+            // sources — root Control/agents/governance plus this Project's
+            // own ProjectCentral/agents/governance — through the same shared
+            // reading `context_resource_records` uses, so the managed
+            // bootstrap this projection materialises (the Claude/Codex
+            // `aikit-context` skill an `apply` writes) names governance
+            // identically to every other resolution path instead of never
+            // naming it at all.
+            if let Some(root) = self.descriptor.project_root.as_deref() {
+                source_resources
+                    .extend(self.governance_context_records(root, central_root.as_deref()));
+            }
+
             let resources = aikit_tui::project_world_service::resource_index_with_records(
                 self,
-                composed
-                    .as_ref()
-                    .map(|c| c.source_resources.clone())
-                    .unwrap_or_default(),
+                source_resources,
             )?;
             let mut resolution =
                 aikit_tui::project_world_service::context_resolution_from_resources(
@@ -1360,7 +1479,7 @@ impl Service {
             // candidates as ephemeral resources; a failed run is disclosed
             // unavailability riding on the resolution, never absence.
             let detection = aikit_adapters::actuation_harness_detection::intake_actuation_detection(
-                &SystemRunner::new(),
+                &SystemRunner::probe(),
                 "actuation",
             );
             resolution.harness_detection =
@@ -1482,7 +1601,7 @@ impl Service {
             .as_ref()
             .map(|central| {
                 aikit_adapters::actor_composition::compose_selected_actor_inputs(
-                    &SystemRunner::new(),
+                    &SystemRunner::probe(),
                     central,
                     project_root,
                     admission.map(|a| &a.agent_ref),
@@ -1558,13 +1677,18 @@ impl Service {
             }
         }
 
-        let resources = aikit_tui::project_world_service::resource_index_with_records(
-            self,
-            composed
-                .as_ref()
-                .map(|c| c.source_resources.clone())
-                .unwrap_or_default(),
-        )?;
+        let mut source_resources = composed
+            .as_ref()
+            .map(|c| c.source_resources.clone())
+            .unwrap_or_default();
+        // Same shared governance reading `context_resource_records` and
+        // `projection_context_for` use: `aikit compose` previews exactly
+        // what an `apply` would materialise, so it must name the same
+        // governance sources rather than silently omitting them.
+        source_resources
+            .extend(self.governance_context_records(project_root, central_root.as_deref()));
+        let resources =
+            aikit_tui::project_world_service::resource_index_with_records(self, source_resources)?;
         let actors = composed
             .as_ref()
             .map(|c| c.requested_actors.clone())
@@ -1590,7 +1714,7 @@ impl Service {
         // index); a failed run is disclosed unavailability, never an empty
         // set read as absence.
         let detection = aikit_adapters::actuation_harness_detection::intake_actuation_detection(
-            &SystemRunner::new(),
+            &SystemRunner::probe(),
             "actuation",
         );
         let mut detection_notes: Vec<String> = Vec::new();
@@ -1656,7 +1780,7 @@ impl Service {
         // candidate carries a `self` annotation so surfaces can show it
         // without treating it as chosen.
         let self_outcome = aikit_adapters::actuation_harness_detection::intake_actuation_self(
-            &SystemRunner::new(),
+            &SystemRunner::probe(),
             "actuation",
         );
         match &self_outcome {
@@ -1981,6 +2105,39 @@ impl Service {
         &self,
         event: &aikit_core::hooks::HookEvent,
     ) -> Result<aikit_core::hooks::HookDecision> {
+        self.dispatch_hook_inhabited(event)
+            .map(|(decision, _refocus)| decision)
+    }
+
+    /// [`Service::dispatch_hook`] plus World inhabitation: at SessionStart a
+    /// resolvable Position occupancy replaces the historical temporal floor
+    /// with the lean entry, and a due Refocus rides the decision. The Refocus
+    /// is returned uncommitted — the caller records it delivered only after
+    /// the harness output carrying it was written.
+    pub fn dispatch_hook_inhabited(
+        &self,
+        event: &aikit_core::hooks::HookEvent,
+    ) -> Result<(
+        aikit_core::hooks::HookDecision,
+        Option<crate::refocus::RefocusCommit>,
+    )> {
+        let inhabitation = crate::refocus::hook_prepare_process(&self.home, event);
+        let mut decision = self.dispatch_hook_chain(event, inhabitation.lean_entry.as_deref())?;
+        decision.warnings.extend(inhabitation.warnings);
+        let refocus = inhabitation.refocus;
+        if let Some(commit) = &refocus {
+            if decision.allowed {
+                decision.injected.push(commit.text.clone());
+            }
+        }
+        Ok((decision, refocus))
+    }
+
+    fn dispatch_hook_chain(
+        &self,
+        event: &aikit_core::hooks::HookEvent,
+        lean_entry: Option<&str>,
+    ) -> Result<aikit_core::hooks::HookDecision> {
         use aikit_core::hooks::{build_chains, HookChain};
         let chains = build_chains(&self.view, &self.catalog)?;
         let chain = match chains.get(event.kind.as_str()) {
@@ -1992,12 +2149,13 @@ impl Service {
             )?,
         };
         let roots = self.catalog.capsule_roots();
-        let mut decision = crate::hook::dispatch(
+        let mut decision = crate::hook::dispatch_with_entry(
             &self.index,
             &self.descriptor.context_id,
             &chain,
             event,
             &roots,
+            lean_entry,
         )?;
 
         // W1 reaction engine. The floor (Central's temporal reground) already
@@ -2495,17 +2653,38 @@ impl Service {
                 }
                 // Harness-admission sweep round 3: six catalog-r4 harnesses
                 // admitted through Actuation detection records; ids align to
-                // catalog slugs (gemini-antigravity, grok-bot, kimi, ollama,
+                // catalog slugs (gemini-antigravity, grok, kimi, ollama,
                 // openclaw, pi). Binding one opts the context into that
                 // harness's honest effect; unbound harnesses stay inert.
                 TargetId::ANTIGRAVITY => plan_effect(
                     &AntigravityAdapter::new(ctx_dir.join("projections/antigravity")),
                     &rc,
                 ),
-                TargetId::GROK_BOT => plan_effect(
-                    &GrokbotAdapter::new(ctx_dir.join("projections/grokbot")),
+                // Owner decision 2026-09-22: grok-bot was a misidentification
+                // (bot/group management, not a coding harness); the adapter now
+                // profiles Grok Build, slug `grok`. The aikit-core TargetId
+                // constant keeps its legacy spelling, so both the legacy id and
+                // the new slug route here; behavior is otherwise unchanged.
+                TargetId::GROK_BOT | "grok" => {
+                    plan_effect(&GrokAdapter::new(ctx_dir.join("projections/grok")), &rc)
+                }
+                // Harness-connection roster expansion 2026-09-23 (connection
+                // truth cards 2026-09-22): docs-level census adapters. These
+                // slugs have no aikit-core TargetId constant yet, so the arms
+                // match their catalog-slug spellings directly (the grok
+                // precedent); each routes to that harness's honest brokered
+                // plan. Unbound harnesses stay inert.
+                "copilot" => plan_effect(
+                    &CopilotAdapter::new(ctx_dir.join("projections/copilot")),
                     &rc,
                 ),
+                "cline" => plan_effect(&ClineAdapter::new(ctx_dir.join("projections/cline")), &rc),
+                "kiro-cli" => plan_effect(
+                    &KiroCliAdapter::new(ctx_dir.join("projections/kiro-cli")),
+                    &rc,
+                ),
+                "qoder" => plan_effect(&QoderAdapter::new(ctx_dir.join("projections/qoder")), &rc),
+                "droid" => plan_effect(&DroidAdapter::new(ctx_dir.join("projections/droid")), &rc),
                 TargetId::HERMES => {
                     plan_effect(&HermesAdapter::new(ctx_dir.join("projections/hermes")), &rc)
                 }
@@ -3029,6 +3208,61 @@ fn create_directory_link(target: &Path, link: &Path) -> Result<()> {
     })
 }
 
+impl Service {
+    /// Governance ContextSources applicable to `project`: Central's own root
+    /// `Control/agents/governance/**` under `central_root` (when this
+    /// context has one), plus `project`'s own
+    /// `ProjectCentral/agents/governance/**` when it exists. Shared by every
+    /// resolution path that builds a resource index for this Project —
+    /// `context_resource_records` (the generic `PaletteBackend` path),
+    /// `projection_context_for` (client projection / `apply`) and
+    /// `compose_selected_plan` (`aikit compose`) all call this rather than
+    /// each re-deriving the same governance read, so a governance source
+    /// named to one is named to all of them alike. Fail-soft: a governance
+    /// read failure decorates the reading with a composition note, it never
+    /// fails a context that is otherwise sound. Bodies are never read here —
+    /// named refs with a filesystem revision only.
+    fn governance_context_records(
+        &self,
+        project: &Path,
+        central_root: Option<&Path>,
+    ) -> Vec<aikit_core::resource::ResourceRecord> {
+        let mut records = Vec::new();
+        if let Some(central) = central_root {
+            match aikit_adapters::projectcentral::root_governance_context_source_records(central) {
+                Ok(governance) => records.extend(governance),
+                Err(error) => self.context_composition_notes.borrow_mut().push(format!(
+                    "root governance context sources skipped ({}): {}",
+                    error.code(),
+                    error.message()
+                )),
+            }
+        }
+        if std::fs::symlink_metadata(project.join("ProjectCentral/project.json")).is_ok() {
+            match aikit_adapters::ProjectCentralFilesystemBinding::inspect(project, central_root)
+                .and_then(|binding| binding.semantic.context_sources())
+            {
+                Ok(entries) => records.extend(entries.into_iter().filter_map(|entry| {
+                    (entry
+                        .resource
+                        .descriptor
+                        .annotations
+                        .get("central.standing")
+                        .map(String::as_str)
+                        == Some("human-governance"))
+                    .then_some(entry.resource)
+                })),
+                Err(error) => self.context_composition_notes.borrow_mut().push(format!(
+                    "project governance context sources skipped ({}): {}",
+                    error.code(),
+                    error.message()
+                )),
+            }
+        }
+        records
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PaletteBackend — the same state, shaped for the palette
 // ---------------------------------------------------------------------------
@@ -3079,15 +3313,16 @@ impl PaletteBackend for Service {
     }
 
     fn context_resource_records(&self) -> Result<Vec<aikit_core::resource::ResourceRecord>> {
+        let run_resources = self.workcell_run_resources();
         let Some(project) = self.descriptor.project_root.as_deref() else {
-            return Ok(Vec::new());
+            return Ok(run_resources);
         };
-        let mut records = if let Some(central) = self
+        let central_root = self
             .central_meta_root
             .clone()
-            .or_else(|| process_central_root(Some(project)))
-        {
-            match compose_live_actor_inputs(&SystemRunner::new(), &central, project) {
+            .or_else(|| process_central_root(Some(project)));
+        let mut records = if let Some(central) = central_root.as_deref() {
+            match compose_live_actor_inputs(&SystemRunner::probe(), central, project) {
                 Ok(composed) => composed
                     .map(|inputs| inputs.source_resources)
                     .unwrap_or_default(),
@@ -3106,6 +3341,15 @@ impl PaletteBackend for Service {
         } else {
             Vec::new()
         };
+        // Governance ContextSources: root Control/agents/governance plus this
+        // Project's own ProjectCentral/agents/governance, shared with every
+        // other resolution path through `governance_context_records` so a
+        // governance source named here is named identically everywhere else.
+        records.extend(self.governance_context_records(project, central_root.as_deref()));
+        // Native material runs and their actual operative refs enter the same
+        // @/operator field as other Resources. An unreadable owner is disclosed,
+        // never substituted with an empty successful reading or invented refs.
+        records.extend(run_resources);
         if let Some(started) = &self.factory_started_resources {
             records.extend(started.clone());
             return Ok(records);
@@ -3118,8 +3362,9 @@ impl PaletteBackend for Service {
                     state.clone(),
                     project_ref.clone(),
                 )?;
-                records
-                    .extend(read_factory_developmental(&SystemRunner::new(), &binding)?.resources);
+                records.extend(
+                    read_factory_developmental(&SystemRunner::probe(), &binding)?.resources,
+                );
             }
             // A configured start-work request may legitimately point at a new
             // state path. Until the owner accepts the Commission, this is a
@@ -3397,7 +3642,7 @@ impl PaletteBackend for Service {
             return Ok(Some(cached.clone()));
         }
 
-        let disclosure = match intake_workcell_instances(&SystemRunner::new(), "workcell", None) {
+        let disclosure = match intake_workcell_instances(&SystemRunner::probe(), "workcell", None) {
             InstancesOutcome::Records(records) => WorkcellDisclosure::observed(
                 records
                     .into_iter()
@@ -3826,6 +4071,17 @@ fn override_layer(toggles: &[Toggle]) -> ScopeLayer {
 
 /// Resolve, preferring a produced view but turning a fatal problem into the very
 /// error the JSON envelope and exit codes are built to carry.
+///
+/// One fatal is deliberately recovered here: `resolution.unknown_capability`
+/// means a scope declared a capability enabled that no registry carries any
+/// more — the state a forced `source remove` leaves behind in every scope that
+/// enabled its capsules (`skill_sources::remove` promises exactly this:
+/// "enabled declarations resolve unavailable"). The context is re-resolved
+/// without those declarations, the capabilities are marked unavailable and
+/// named in a warning instead of wedging everything, so read verbs keep
+/// answering and `doctor` reports and repairs the stale enablement. A
+/// capability that was never there is still refused where it is typed: the
+/// `enable` and `use` verbs check the catalogue before writing a declaration.
 fn resolve_or_explain(
     catalog: &Snapshot,
     trust: &TrustSnapshot,
@@ -3839,10 +4095,127 @@ fn resolve_or_explain(
         policy: policy.clone(),
     };
     let diagnosis = resolve_diagnostic(catalog, trust, &request);
-    if let Some(fatal) = diagnosis.problems.iter().find(|p| p.fatal) {
-        return Err(fatal.error.clone());
+    let view = match diagnosis.view {
+        Some(view) => view,
+        None => {
+            let orphaned = orphaned_capabilities(&diagnosis.problems);
+            if orphaned.is_empty() {
+                return Err(diagnosis
+                    .problems
+                    .iter()
+                    .find(|p| p.fatal)
+                    .map(|p| p.error.clone())
+                    .unwrap_or_else(|| {
+                        AikitError::new("resolution.failed", "resolution produced no view")
+                    }));
+            }
+            let ids: Vec<CapsuleId> = orphaned.iter().map(|orphan| orphan.id.clone()).collect();
+            let mut recovered = view_at_recovery(&ids, catalog, trust, descriptor, layers, policy)?;
+            let named = ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            for orphan in &orphaned {
+                recovered
+                    .unavailable
+                    .insert(orphan.id.clone(), UnavailableReason::NotInCatalog);
+                // The failed resolution would have declared the capsule enabled
+                // from its own scope; carry those facts into the recovered view
+                // so `declared` stays the honest record of what the scopes ask
+                // for, and doctor can point the repair at the declaring file.
+                recovered.declared.insert(
+                    orphan.id.clone(),
+                    DeclaredState {
+                        enabled: true,
+                        scope: orphan.scope.unwrap_or(ScopeKind::Project),
+                        origin: LayerOrigin::new(
+                            orphan
+                                .origin
+                                .clone()
+                                .unwrap_or_else(|| "an unknown scope".to_string()),
+                        ),
+                        via_profile: None,
+                    },
+                );
+            }
+            recovered.warnings.push(format!(
+                "{named} is enabled here but not present in any registry — its source was \
+                 removed; `aikit doctor` reports and repairs the stale enablement"
+            ));
+            recovered
+        }
+    };
+    Ok(view)
+}
+
+/// A declared-enabled capability no registry carries, with the scope facts the
+/// resolver recorded about the declaration.
+struct OrphanedCapability {
+    id: CapsuleId,
+    scope: Option<ScopeKind>,
+    origin: Option<String>,
+}
+
+/// The capabilities a fatal `resolution.unknown_capability` names — but only
+/// when every fatal problem in the diagnosis is of that recoverable kind.
+fn orphaned_capabilities(problems: &[aikit_core::resolve::Problem]) -> Vec<OrphanedCapability> {
+    let mut orphaned = Vec::new();
+    for problem in problems {
+        if !problem.fatal {
+            continue;
+        }
+        if problem.code() != "resolution.unknown_capability" {
+            return Vec::new();
+        }
+        let details = problem.error.details();
+        let Some(id) = details
+            .get("capability")
+            .and_then(|raw| CapsuleId::parse(raw).ok())
+        else {
+            return Vec::new();
+        };
+        let scope = details
+            .get("scope")
+            .and_then(|raw| ScopeKind::ALL.iter().copied().find(|k| k.as_str() == raw));
+        let origin = details.get("origin").cloned();
+        orphaned.push(OrphanedCapability { id, scope, origin });
     }
-    diagnosis
+    orphaned
+}
+
+/// Re-resolve with the orphaned capsules' declarations stripped from every
+/// layer, so the rest of the context still resolves. Stripping cannot
+/// introduce new conflicts; a layer left empty by it is simply absent.
+fn view_at_recovery(
+    orphaned: &[CapsuleId],
+    catalog: &Snapshot,
+    trust: &TrustSnapshot,
+    descriptor: &ContextDescriptor,
+    layers: &[ScopeLayer],
+    policy: &ManagedPolicy,
+) -> Result<ResolvedView> {
+    let stripped: Vec<ScopeLayer> = layers
+        .iter()
+        .map(|layer| {
+            let mut patch = layer.patch.clone();
+            patch.enable.retain(|id| !orphaned.contains(id));
+            patch.disable.retain(|id| !orphaned.contains(id));
+            let mut recovered = ScopeLayer::new(layer.kind, layer.origin.clone(), patch);
+            recovered.depth = layer.depth;
+            recovered
+        })
+        .collect();
+    let request = CoreResolveRequest {
+        context: descriptor.clone(),
+        layers: stripped,
+        policy: policy.clone(),
+    };
+    let recovery = resolve_diagnostic(catalog, trust, &request);
+    if let Some(problem) = recovery.problems.iter().find(|p| p.fatal) {
+        return Err(problem.error.clone());
+    }
+    recovery
         .view
         .ok_or_else(|| AikitError::new("resolution.failed", "resolution produced no view"))
 }

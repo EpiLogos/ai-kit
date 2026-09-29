@@ -32,8 +32,12 @@ for line in sys.stdin:
     m=json.loads(line)
     with open(log,'a',encoding='utf-8') as f: f.write(json.dumps(m)+'\n')
     method=m.get('method',m.get('type'))
-    if method=='initialize': reply(m,{'protocolVersion':1,'agentCapabilities':{'loadSession':True}})
+    if method=='initialize': reply(m,{'protocolVersion':1,'agentCapabilities':{'loadSession':True,'sessionCapabilities':{'resume':True}}})
     elif method=='session/new': reply(m,{'sessionId':'fixture-native-stable'})
+    elif method=='session/resume':
+        # Resume keeps the requested identity and performs no history replay:
+        # the encounter reconnect rides session/resume, not session/load.
+        reply(m,{'sessionId':m['params']['sessionId']})
     elif method=='session/load':
         emit({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':m['params']['sessionId'],'update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'FIXTURE_REPLAY_BEFORE_LOAD'}}}})
         reply(m,None)

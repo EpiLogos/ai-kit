@@ -1,0 +1,724 @@
+{
+  "column_axis": [
+    {
+      "face": "conjugate",
+      "position": 0
+    },
+    {
+      "face": "conjugate",
+      "position": 1
+    },
+    {
+      "face": "conjugate",
+      "position": 2
+    },
+    {
+      "face": "conjugate",
+      "position": 3
+    },
+    {
+      "face": "conjugate",
+      "position": 4
+    },
+    {
+      "face": "conjugate",
+      "position": 5
+    }
+  ],
+  "constraints": {
+    "asserts_relations": false,
+    "creates_members": false,
+    "fixed_local_slots": true,
+    "frame": "normalized-local",
+    "partial_occupancy": true,
+    "unique_addresses": true,
+    "whole_transform": "presentation-only"
+  },
+  "embedding": "normalized-direct-conjugate-address-grid/v1",
+  "geometry_version": "1.1.0",
+  "owner": "ql-core",
+  "row_axis": [
+    {
+      "face": "direct",
+      "position": 0
+    },
+    {
+      "face": "direct",
+      "position": 1
+    },
+    {
+      "face": "direct",
+      "position": 2
+    },
+    {
+      "face": "direct",
+      "position": 3
+    },
+    {
+      "face": "direct",
+      "position": 4
+    },
+    {
+      "face": "direct",
+      "position": 5
+    }
+  ],
+  "schema": "ql.shape-presentation/v1",
+  "shape_ref": "ql:shape:1.0.0:6x6:direct-conjugate",
+  "sites": [
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 0
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 0
+        }
+      },
+      "xyz": [
+        -1.0,
+        -1.0,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 1
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 0
+        }
+      },
+      "xyz": [
+        -0.6,
+        -1.0,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 2
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 0
+        }
+      },
+      "xyz": [
+        -0.19999999999999996,
+        -1.0,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 3
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 0
+        }
+      },
+      "xyz": [
+        0.20000000000000018,
+        -1.0,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 4
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 0
+        }
+      },
+      "xyz": [
+        0.6000000000000001,
+        -1.0,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 5
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 0
+        }
+      },
+      "xyz": [
+        1.0,
+        -1.0,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 0
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 1
+        }
+      },
+      "xyz": [
+        -1.0,
+        -0.6,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 1
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 1
+        }
+      },
+      "xyz": [
+        -0.6,
+        -0.6,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 2
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 1
+        }
+      },
+      "xyz": [
+        -0.19999999999999996,
+        -0.6,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 3
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 1
+        }
+      },
+      "xyz": [
+        0.20000000000000018,
+        -0.6,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 4
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 1
+        }
+      },
+      "xyz": [
+        0.6000000000000001,
+        -0.6,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 5
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 1
+        }
+      },
+      "xyz": [
+        1.0,
+        -0.6,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 0
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 2
+        }
+      },
+      "xyz": [
+        -1.0,
+        -0.19999999999999996,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 1
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 2
+        }
+      },
+      "xyz": [
+        -0.6,
+        -0.19999999999999996,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 2
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 2
+        }
+      },
+      "xyz": [
+        -0.19999999999999996,
+        -0.19999999999999996,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 3
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 2
+        }
+      },
+      "xyz": [
+        0.20000000000000018,
+        -0.19999999999999996,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 4
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 2
+        }
+      },
+      "xyz": [
+        0.6000000000000001,
+        -0.19999999999999996,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 5
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 2
+        }
+      },
+      "xyz": [
+        1.0,
+        -0.19999999999999996,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 0
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 3
+        }
+      },
+      "xyz": [
+        -1.0,
+        0.20000000000000018,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 1
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 3
+        }
+      },
+      "xyz": [
+        -0.6,
+        0.20000000000000018,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 2
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 3
+        }
+      },
+      "xyz": [
+        -0.19999999999999996,
+        0.20000000000000018,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 3
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 3
+        }
+      },
+      "xyz": [
+        0.20000000000000018,
+        0.20000000000000018,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 4
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 3
+        }
+      },
+      "xyz": [
+        0.6000000000000001,
+        0.20000000000000018,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 5
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 3
+        }
+      },
+      "xyz": [
+        1.0,
+        0.20000000000000018,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 0
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 4
+        }
+      },
+      "xyz": [
+        -1.0,
+        0.6000000000000001,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 1
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 4
+        }
+      },
+      "xyz": [
+        -0.6,
+        0.6000000000000001,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 2
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 4
+        }
+      },
+      "xyz": [
+        -0.19999999999999996,
+        0.6000000000000001,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 3
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 4
+        }
+      },
+      "xyz": [
+        0.20000000000000018,
+        0.6000000000000001,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 4
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 4
+        }
+      },
+      "xyz": [
+        0.6000000000000001,
+        0.6000000000000001,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 5
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 4
+        }
+      },
+      "xyz": [
+        1.0,
+        0.6000000000000001,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 0
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 5
+        }
+      },
+      "xyz": [
+        -1.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 1
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 5
+        }
+      },
+      "xyz": [
+        -0.6,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 2
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 5
+        }
+      },
+      "xyz": [
+        -0.19999999999999996,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 3
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 5
+        }
+      },
+      "xyz": [
+        0.20000000000000018,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 4
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 5
+        }
+      },
+      "xyz": [
+        0.6000000000000001,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "address": {
+        "column": {
+          "face": "conjugate",
+          "position": 5
+        },
+        "kind": "cell",
+        "row": {
+          "face": "direct",
+          "position": 5
+        }
+      },
+      "xyz": [
+        1.0,
+        1.0,
+        0.0
+      ]
+    }
+  ],
+  "source_refs": [
+    "docs/geometry/GEOMETRY-CONSTELLATION-WAYFINDER.md",
+    "docs/geometry/CANONICAL-CONSTELLATION-RESOLUTION.md",
+    "crates/ql-core/src/shape.rs"
+  ],
+  "standing": "numerical presentation convention; not a semantic metric"
+}

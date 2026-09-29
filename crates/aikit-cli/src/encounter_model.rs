@@ -27,6 +27,7 @@ use crate::encounter_service::{
     EncounterService,
 };
 use aikit_core::credential::{CredentialRef, SecretRequirementRef};
+use aikit_core::harness_profile::HarnessProfile;
 use aikit_core::harness_profile::ModelDispatchPosture;
 use aikit_core::resource::{canonical_model_ref, CredentialCondition, ProviderRef};
 use aikit_core::{ResourceRef, Result};
@@ -69,9 +70,24 @@ pub(crate) struct PreparedModel {
     pub agency_ref: ResourceRef,
     pub world_binding_ref: ResourceRef,
     pub credential_reading: Option<Value>,
+    /// Explicit API key, verified Codex own-login, or a route needing no key.
+    /// This is a source/readiness fact, never a claim of USD cost or inference.
+    #[serde(default)]
+    pub credential_mode: String,
+    /// Exact native login executable and, for a direct provider, the declared
+    /// launch variant selected when the login was checked. Both enter the
+    /// fingerprint so a changed fallback cannot borrow old login evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codex_login_basis: Option<CodexLoginBasis>,
     /// The declared dispatch this policy is delivered through. Part of the
     /// serialized basis, so a dispatch change is a basis change.
     pub dispatch: ModelDispatchDelivery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CodexLoginBasis {
+    program: String,
+    direct_launch_variant: Option<usize>,
 }
 
 /// The ACP stable schema's session configuration option for the model: the
@@ -114,6 +130,81 @@ pub(crate) struct ModelDispatch {
     pub delivery: ModelDispatchDelivery,
 }
 
+/// A profile-derived ACP provider is bound to its embedded connection argv,
+/// not to the basename of its wrapper (`npx` for Codex ACP). An arbitrary
+/// from_profile string alongside foreign argv cannot claim Codex's login or
+/// model-selection contract.
+pub(crate) fn declared_provider_profile(
+    provider: &EncounterProvider,
+) -> Result<Option<&'static HarnessProfile>> {
+    if let Some(slug) = provider.from_profile.as_deref() {
+        let profile = aikit_adapters::profiles::for_slug(slug)
+            .ok_or_else(|| error(format!("unknown harness profile {slug}")))?;
+        let derived = crate::encounter_profile_provider::derive_provider(
+            profile,
+            provider.id.clone(),
+            provider.label.clone(),
+        )?;
+        if provider.argv != derived.argv
+            || provider.argv_fallback != derived.argv_fallback
+            || provider.protocol != derived.protocol
+        {
+            return Err(error(format!(
+                "profile-derived provider {} differs from the embedded {} connection facts",
+                provider.id, slug
+            )));
+        }
+        return Ok(Some(profile));
+    }
+    Ok(provider
+        .argv
+        .first()
+        .and_then(|program| aikit_adapters::profiles::for_argv_program(program)))
+}
+
+fn codex_login_basis(
+    provider: &EncounterProvider,
+    profile: &HarnessProfile,
+) -> Result<Option<CodexLoginBasis>> {
+    if profile.slug != "codex" {
+        return Ok(None);
+    }
+    if provider.from_profile.is_some() {
+        // The ACP wrapper is npx; the validated embedded profile identifies
+        // the native Codex executable. codex-acp otherwise starts a bundled
+        // Codex; resolve the installed binary and later bind CODEX_PATH to
+        // this exact path in its final child environment.
+        let program = profile
+            .presence
+            .as_ref()
+            .and_then(|presence| presence.executables.first())
+            .ok_or_else(|| error("Codex profile declares no native presence executable"))?;
+        let installed = crate::probe::which(program)
+            .ok_or_else(|| error(format!("Codex profile executable {program} is not on PATH")))?;
+        // Keep the resolved command pathname (including its `codex` symlink
+        // name). Canonicalizing a global npm install may produce `codex.js`,
+        // which is still the executable but no longer joins the declared
+        // Codex profile by program name. Probe and CODEX_PATH use this same
+        // absolute pathname.
+        let absolute = if installed.is_absolute() {
+            installed
+        } else {
+            std::env::current_dir().map_err(error)?.join(installed)
+        };
+        return Ok(Some(CodexLoginBasis {
+            program: absolute.display().to_string(),
+            direct_launch_variant: None,
+        }));
+    }
+    // A direct provider may launch its first resolving declared fallback.
+    // Probe that executable, not a stale or absent primary argv[0].
+    let (selected, variant) = resolved_launch_variant(provider)?;
+    Ok(selected.first().map(|program| CodexLoginBasis {
+        program: program.clone(),
+        direct_launch_variant: Some(variant),
+    }))
+}
+
 /// The declared dispatch for one provider, decided from the harness profile's
 /// models layer joined by the launch program — never from the connection
 /// protocol alone. The old protocol gate refused every ACP provider because
@@ -124,7 +215,7 @@ pub(crate) struct ModelDispatch {
 /// existing surface unchanged.
 pub(crate) fn dispatch_for(provider: &EncounterProvider) -> Result<ModelDispatch> {
     match provider.protocol {
-        EncounterProtocol::PiRpc => Ok(ModelDispatch {
+        EncounterProtocol::PiRpc | EncounterProtocol::PrimeRpc => Ok(ModelDispatch {
             native_provider_ref: None,
             delivery: ModelDispatchDelivery::Argv {
                 provider_flag: "--provider".into(),
@@ -137,7 +228,7 @@ pub(crate) fn dispatch_for(provider: &EncounterProvider) -> Result<ModelDispatch
                     "A model-selected provider needs a launch program; no dispatch surface is declared for an empty command",
                 ));
             };
-            let Some(profile) = aikit_adapters::profiles::for_argv_program(program) else {
+            let Some(profile) = declared_provider_profile(provider)? else {
                 return Err(error(format!(
                     "The launch program {program} joins no harness profile, so no model \
                      dispatch surface is declared for it; a bound policy is never delivered \
@@ -308,13 +399,28 @@ pub(crate) fn prepare(
             "Native model/provider does not name a declared route for the canonical Model",
         ));
     }
-    if routes
+    let requires_credential = routes
         .iter()
-        .any(|r| r.credential != CredentialCondition::NotRequired)
-        && policy.credential.is_none()
-    {
+        .any(|r| r.credential != CredentialCondition::NotRequired);
+    let mut verified_codex_login_basis = None;
+    if requires_credential && policy.credential.is_none() {
+        if let Some(profile) = declared_provider_profile(provider)? {
+            if let Some(basis) = codex_login_basis(provider, profile)? {
+                if crate::harness_auth::codex_chatgpt_login_ready(
+                    &crate::probe::probe_runner(),
+                    home,
+                    &basis.program,
+                    policy.provider_ref.as_str(),
+                )? {
+                    verified_codex_login_basis = Some(basis);
+                }
+            }
+        }
+    }
+    let codex_own_login = verified_codex_login_basis.is_some();
+    if requires_credential && policy.credential.is_none() && !codex_own_login {
         return Err(error(
-            "The declared model route requires an explicitly resolved credential",
+            "The declared model route requires an explicitly resolved credential or a verified native Codex own-login for this exact provider",
         ));
     }
     let credential_reading = policy
@@ -327,6 +433,13 @@ pub(crate) fn prepare(
         "blake3:{}",
         blake3::hash(catalogue_entry.to_string().as_bytes()).to_hex()
     );
+    let credential_mode = if codex_own_login {
+        "codex-chatgpt-own-login"
+    } else if policy.credential.is_some() {
+        "explicit-api-binding"
+    } else {
+        "not-required"
+    };
     Ok(Some(PreparedModel {
         policy_source: source.clone(),
         policy,
@@ -336,6 +449,8 @@ pub(crate) fn prepare(
         agency_ref: admitted.agency_ref,
         world_binding_ref: admitted.world_binding_ref,
         credential_reading,
+        credential_mode: credential_mode.into(),
+        codex_login_basis: verified_codex_login_basis,
         dispatch: dispatch.delivery,
     }))
 }
@@ -355,23 +470,107 @@ impl PreparedModel {
     }
 }
 
-/// The launch argv for a policy-selected provider. Where the declared
-/// dispatch rides argv (pi's native flags select its model) the declared
-/// flags are appended, and the harness's real get_state and assistant result
-/// must also confirm the same provider/id; these arguments alone are not
-/// proof. Where the selection rides the native session's model configuration
-/// instead, the provider starts unchanged and the resident delivers the
-/// selection after the session exists.
-fn selected_argv(provider: &EncounterProvider, model: &PreparedModel) -> Result<Vec<String>> {
+/// The exec resolution of one declared launch program: `Some(reason)` names
+/// why the program cannot be resolved to an executable; `None` means it
+/// resolves. An explicit path (absolute, or containing a separator) resolves
+/// when it exists; a bare name resolves when an executable file of that name
+/// sits on the given `PATH`. This is a resolution check only, made once
+/// before any exec — a program that resolves but fails later is the protocol
+/// or the model speaking, never a wrong argv.
+fn unresolvable_program_reason_in(
+    program: &str,
+    search: Option<&std::ffi::OsStr>,
+) -> Option<String> {
+    if program.is_empty() {
+        return Some("the program is empty".to_string());
+    }
+    let path = std::path::Path::new(program);
+    if path.is_absolute() || program.contains('/') {
+        return (!path.exists()).then(|| "the path does not exist".to_string());
+    }
+    let Some(search) = search else {
+        return Some("PATH is not set".to_string());
+    };
+    let hit = std::env::split_paths(search).any(|dir| {
+        let candidate = dir.join(path);
+        candidate.is_file() && is_executable_file(&candidate)
+    });
+    (!hit).then(|| "no executable file with this name is on PATH".to_string())
+}
+
+fn unresolvable_program_reason(program: &str) -> Option<String> {
+    unresolvable_program_reason_in(program, std::env::var_os("PATH").as_deref())
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &std::path::Path) -> bool {
+    path.is_file()
+}
+
+/// The declared launch variant the final exec rides: the primary argv when
+/// its program resolves, otherwise the first declared `argv_fallback`
+/// variant whose program resolves, in declared order. Declared variants are
+/// resolved exactly once, before any exec — never retried, never discovered.
+/// When no declared variant resolves, the launch refuses naming every
+/// declared variant and what was checked.
+fn resolved_launch_variant(provider: &EncounterProvider) -> Result<(Vec<String>, usize)> {
+    let mut checked: Vec<String> = Vec::new();
+    for (index, variant) in std::iter::once(&provider.argv)
+        .chain(provider.argv_fallback.iter())
+        .enumerate()
+    {
+        let declared = if index == 0 {
+            "primary".to_string()
+        } else {
+            format!("fallback {index}")
+        };
+        let Some(program) = variant.first() else {
+            checked.push(format!("{declared}: empty launch argv"));
+            continue;
+        };
+        match unresolvable_program_reason(program) {
+            Some(reason) => checked.push(format!("{declared} `{program}` ({reason})")),
+            None => return Ok((variant.clone(), index)),
+        }
+    }
+    Err(error(format!(
+        "No declared launch variant of provider {} resolves for exec; every declared variant \
+         was checked and unresolvable: {}",
+        provider.id,
+        checked.join("; ")
+    )))
+}
+
+/// The launch a bound policy resolves to: the declared provider variant
+/// selected by exec resolution, carrying the declared dispatch flags where
+/// the dispatch rides argv (pi's native flags select its model, and the
+/// harness's real get_state and assistant result must also confirm the same
+/// provider/id; these arguments alone are not proof). Where the selection
+/// rides the native session's model configuration instead, the selected
+/// variant starts unchanged and the resident delivers the selection after
+/// the session exists.
+fn selected_launch(
+    provider: &EncounterProvider,
+    model: &PreparedModel,
+) -> Result<(Vec<String>, usize)> {
+    let (base, launch_variant) = resolved_launch_variant(provider)?;
     let ModelDispatchDelivery::Argv {
         provider_flag,
         model_flag,
     } = &model.dispatch
     else {
-        return Ok(provider.argv.clone());
+        return Ok((base, launch_variant));
     };
-    if provider.argv.is_empty()
-        || provider.argv.iter().any(|a| {
+    if base.is_empty()
+        || base.iter().any(|a| {
             a == "--"
                 || a == provider_flag
                 || a == model_flag
@@ -381,14 +580,14 @@ fn selected_argv(provider: &EncounterProvider, model: &PreparedModel) -> Result<
     {
         return Err(error("Model-selected provider needs one unambiguous native provider/model binding; conflicting flags are not rewritten"));
     }
-    let mut argv = provider.argv.clone();
+    let mut argv = base;
     argv.extend([
         provider_flag.clone(),
         model.policy.native_provider.clone(),
         model_flag.clone(),
         model.policy.provider_native_id.clone(),
     ]);
-    Ok(argv)
+    Ok((argv, launch_variant))
 }
 
 /// Scoped final-child environment. Owned by the adapters' spawn seam (where
@@ -413,17 +612,18 @@ use aikit_adapters::connection_process::ModelEnvironment;
 /// * a revoked or expired binding refuses either way: a withdrawn key is
 ///   never bypassed through the harness's own login.
 ///
-/// `None` means nothing was declared or bound: the child then inherits the
-/// caller's environment unchanged rather than being scrubbed for nothing.
+/// `None` means nothing was declared or bound: the child inherits the
+/// caller's environment. A selected Codex own-login policy takes the separate
+/// `resolved_execution` path, which scrubs ambient keys and pins CODEX_PATH.
 pub(crate) fn profile_environment(
     home: &AikitHome,
     session: &ResourceRef,
     provider: &EncounterProvider,
 ) -> Result<Option<ModelEnvironment>> {
-    let Some(program) = provider.argv.first() else {
+    if provider.argv.is_empty() {
         return Ok(None);
-    };
-    let Some(profile) = aikit_adapters::profiles::for_argv_program(program) else {
+    }
+    let Some(profile) = declared_provider_profile(provider)? else {
         return Ok(None);
     };
     let Some(declared) = profile
@@ -489,17 +689,34 @@ pub(crate) fn profile_environment(
     Ok((!environment.is_empty()).then_some(environment))
 }
 
-pub(crate) fn execution(
+/// The final-exec resolution of a bound-policy launch: the scoped argv and
+/// environment, and which declared provider variant the argv rides. A
+/// non-primary selection happens only because the primary launch program
+/// could not be resolved for exec; the caller records it on its receipt
+/// surface.
+struct ResolvedExecution {
+    argv: Vec<String>,
+    environment: Option<ModelEnvironment>,
+    /// 0 is the provider's primary argv; n > 0 is the nth declared
+    /// `argv_fallback` variant.
+    launch_variant: usize,
+}
+
+fn resolved_execution(
     home: &AikitHome,
     session: &ResourceRef,
     provider: &EncounterProvider,
-) -> Result<(Vec<String>, Option<ModelEnvironment>)> {
+) -> Result<ResolvedExecution> {
     let Some(model) = prepare(home, session, provider)? else {
         // No selected-model policy: the profile-declared key delivery is the
         // whole launch environment (None when nothing is declared and bound),
         // which is the route that carries keys to non-pi harnesses.
         let environment = profile_environment(home, session, provider)?;
-        return Ok((provider.argv.clone(), environment));
+        return Ok(ResolvedExecution {
+            argv: provider.argv.clone(),
+            environment,
+            launch_variant: 0,
+        });
     };
     let delivery = model
         .policy
@@ -526,10 +743,69 @@ pub(crate) fn execution(
     // A profile-declared delivery rides the same scrubbed environment. The
     // pi profile declares no env-var deliveries, so the pi selected-model
     // path is unchanged by this join.
-    if let Some(profile) = profile_environment(home, session, provider)? {
+    if model.credential_mode == "codex-chatgpt-own-login" {
+        // A key bound after prepare must not silently switch this selected
+        // subscription-mode body onto paid API delivery. The final child is
+        // scrubbed and receives no provider key in this mode.
+        ensure_codex_api_key_still_unbound(home)?;
+        if provider.from_profile.is_some() {
+            let basis = model.codex_login_basis.as_ref().ok_or_else(|| {
+                error("Codex own-login preparation lacks its executable basis; re-resolve")
+            })?;
+            environment.set_codex_path(&basis.program)?;
+        }
+    } else if let Some(profile) = profile_environment(home, session, provider)? {
         environment.extend(profile)?;
     }
-    Ok((selected_argv(provider, &model)?, Some(environment)))
+    let (argv, launch_variant) = selected_launch(provider, &model)?;
+    ensure_codex_login_launch_matches(&model, &argv, launch_variant)?;
+    Ok(ResolvedExecution {
+        argv,
+        environment: Some(environment),
+        launch_variant,
+    })
+}
+
+fn ensure_codex_login_launch_matches(
+    model: &PreparedModel,
+    argv: &[String],
+    launch_variant: usize,
+) -> Result<()> {
+    if model.credential_mode != "codex-chatgpt-own-login" {
+        return Ok(());
+    }
+    let basis = model.codex_login_basis.as_ref().ok_or_else(|| {
+        error("Codex own-login preparation lacks its exact executable basis; re-resolve")
+    })?;
+    if let Some(expected_variant) = basis.direct_launch_variant {
+        if launch_variant != expected_variant || argv.first() != Some(&basis.program) {
+            return Err(error(
+                "Codex launch variant changed after own-login verification; re-resolve the selected model",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_codex_api_key_still_unbound(home: &AikitHome) -> Result<()> {
+    if CredentialBindingStore::new(home)
+        .load(&CredentialRef::new("credential:openai")?)?
+        .is_some()
+    {
+        return Err(error(
+            "credential:openai changed after Codex own-login preparation; explicitly re-resolve the selected model",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn execution(
+    home: &AikitHome,
+    session: &ResourceRef,
+    provider: &EncounterProvider,
+) -> Result<(Vec<String>, Option<ModelEnvironment>)> {
+    resolved_execution(home, session, provider)
+        .map(|resolved| (resolved.argv, resolved.environment))
 }
 
 pub(crate) fn direct_launcher(
@@ -576,7 +852,24 @@ impl EncounterService {
         if model.fingerprint()? != expected {
             return Err(error("Model launch basis changed since native admission"));
         }
-        let (argv, environment) = execution(home, session, &provider)?;
+        let resolved = resolved_execution(home, session, &provider)?;
+        if resolved.launch_variant != 0 {
+            // The open path's declared-variant loop cannot reach this re-exec
+            // child, so the selection is journaled here — the same receipt
+            // surface the open path records its launch attempts on. Receipt
+            // trouble refuses the launch rather than execing unrecorded.
+            service.store.append(
+                session,
+                &json!({
+                    "kind":"native-model-launch-variant-selected",
+                    "provider":provider_id,
+                    "attempt":resolved.launch_variant,
+                    "argv":resolved.argv,
+                    "reason":"primary-launch-program-unresolvable"
+                }),
+            )?;
+        }
+        let (argv, environment) = (resolved.argv, resolved.environment);
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| error("Missing native model executable"))?;
@@ -615,6 +908,7 @@ pub(crate) fn validate_target(
     home: &AikitHome,
     session: &ResourceRef,
     configured: &EncounterProvider,
+    model_provider: &EncounterProvider,
     request: &EncounterModelOpen,
 ) -> Result<()> {
     let binding = read_binding(home, session)?
@@ -623,14 +917,18 @@ pub(crate) fn validate_target(
     if admitted != request.expected_agency {
         return Err(error("Selected Agency/source/WorldBinding changed between composition and resident admission"));
     }
-    let model = prepare(home, session, configured)?
-        .ok_or_else(|| error("The configured body has no explicit model policy"))?;
+    let model = prepare(home, session, model_provider)?
+        .ok_or_else(|| error("The selected body has no explicit model policy"))?;
     if model.policy.model_ref != request.model_ref
         || request
             .provider_ref
             .as_ref()
             .is_some_and(|p| p != &model.policy.provider_ref)
-        || request.body.as_ref().is_some_and(|b| b != &configured.id)
+        // A task's existing explicit body names its Workcell launcher; the
+        // validated inner provider is also an exact name for that same task.
+        || request.body.as_ref().is_some_and(|b| {
+            b != &configured.id && b != &model_provider.id
+        })
     {
         return Err(error(
             "Resolved body/model does not match the explicit catalogue target",
@@ -643,15 +941,20 @@ impl EncounterService {
         self.require_attached(&request.agent_session)?;
         let mut candidates = Vec::new();
         for configured in self.providers()? {
-            if configured.model_policy.is_none()
-                || request.body.as_ref().is_some_and(|b| b != &configured.id)
-            {
+            let Ok((model_provider, _task_bound)) =
+                self.selected_model_provider(&request.agent_session, &configured, &request.cwd)
+            else {
                 continue;
-            }
-            if validate_target(&self.home, &request.agent_session, &configured, &request).is_ok()
-                && self
-                    .check_task_launch(&request.agent_session, &configured, &request.cwd)
-                    .is_ok()
+            };
+            if model_provider.model_policy.is_some()
+                && validate_target(
+                    &self.home,
+                    &request.agent_session,
+                    &configured,
+                    &model_provider,
+                    &request,
+                )
+                .is_ok()
             {
                 candidates.push(configured);
             }
@@ -692,8 +995,15 @@ mod tests {
             id: "probe".into(),
             label: "probe".into(),
             argv: vec![program.to_string()],
+            body_ref: None,
+            body_revision: None,
+            from_profile: None,
+            argv_fallback: Vec::new(),
+            env: Default::default(),
+            cwd: None,
             required_context: None,
             model_policy: None,
+            now_context: None,
         }
     }
 
@@ -773,6 +1083,25 @@ mod tests {
         assert!(environment.is_none(), "pi keeps its policy-delivery path");
     }
 
+    #[test]
+    fn codex_own_login_refuses_a_key_bound_after_preparation() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = aikit_store::AikitHome::at(temp.path().join("aikit"));
+        ensure_codex_api_key_still_unbound(&home).unwrap();
+        let credential_ref = CredentialRef::new("credential:openai").unwrap();
+        let provider = EnvironmentImportProvider::from_value(
+            credential_ref.clone(),
+            "AIKIT_CODEX_KEY_SWITCH_PROBE",
+            Some("diagnostic-material".into()),
+        )
+        .unwrap();
+        let state = provider.binding_state(&credential_ref).unwrap().unwrap();
+        CredentialBindingStore::new(&home).save(&state).unwrap();
+        let error = ensure_codex_api_key_still_unbound(&home).unwrap_err();
+        assert!(error.message().contains("changed after Codex own-login"));
+        assert!(error.message().contains("explicitly re-resolve"));
+    }
+
     // --- dispatch determination ---
 
     fn acp_provider(argv: &[&str]) -> EncounterProvider {
@@ -781,8 +1110,15 @@ mod tests {
             id: "probe".into(),
             label: "probe".into(),
             argv: argv.iter().map(|s| s.to_string()).collect(),
+            body_ref: None,
+            body_revision: None,
+            from_profile: None,
+            argv_fallback: Vec::new(),
+            env: Default::default(),
+            cwd: None,
             required_context: None,
             model_policy: None,
+            now_context: None,
         }
     }
 
@@ -950,6 +1286,116 @@ mod tests {
     }
 
     #[test]
+    fn profile_derived_codex_acp_uses_its_exact_connection_facts() {
+        let profile = aikit_adapters::profiles::for_slug("codex").unwrap();
+        let provider = crate::encounter_profile_provider::derive_provider(
+            profile,
+            "codex-profile".to_string(),
+            "Codex profile".to_string(),
+        )
+        .unwrap();
+        assert_eq!(provider.argv.first().map(String::as_str), Some("npx"));
+        let dispatch = dispatch_for(&provider).unwrap();
+        assert_eq!(
+            dispatch.native_provider_ref.as_deref(),
+            Some("provider:openai")
+        );
+        assert!(
+            matches!(dispatch.delivery, ModelDispatchDelivery::ConfigKey { ref name } if name == "model")
+        );
+        let mut forged = provider;
+        forged.argv = vec!["npx".into(), "-y".into(), "foreign-acp".into()];
+        let error = dispatch_for(&forged).unwrap_err();
+        assert!(error.message().contains("differs from the embedded codex"));
+    }
+
+    #[test]
+    fn direct_codex_login_binds_the_exact_resolved_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let fallback = fake_executable(temp.path(), "codex");
+        let mut provider = acp_provider(&["/nonexistent/aikit-codex-primary/codex"]);
+        provider.argv_fallback = vec![vec![fallback.display().to_string()]];
+        let profile = declared_provider_profile(&provider).unwrap().unwrap();
+        let basis = codex_login_basis(&provider, profile).unwrap().unwrap();
+        assert_eq!(basis.program, fallback.display().to_string());
+        assert_eq!(basis.direct_launch_variant, Some(1));
+
+        let mut model = prepared_with_dispatch(ModelDispatchDelivery::ConfigKey {
+            name: "model".into(),
+        });
+        model.credential_mode = "codex-chatgpt-own-login".into();
+        model.codex_login_basis = Some(basis);
+        let (argv, variant) = selected_launch(&provider, &model).unwrap();
+        ensure_codex_login_launch_matches(&model, &argv, variant).unwrap();
+
+        let replacement = fake_executable(temp.path(), "replacement-codex");
+        provider.argv_fallback = vec![vec![replacement.display().to_string()]];
+        let (changed_argv, changed_variant) = selected_launch(&provider, &model).unwrap();
+        let error =
+            ensure_codex_login_launch_matches(&model, &changed_argv, changed_variant).unwrap_err();
+        assert!(error.message().contains("launch variant changed"));
+    }
+
+    #[test]
+    #[ignore = "requires installed Codex with a real ChatGPT login"]
+    fn installed_codex_absolute_fallback_is_the_verified_launch_executable() {
+        let codex = crate::probe::which("codex").expect("installed Codex executable");
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path().join("aikit"));
+        let mut provider = acp_provider(&["/nonexistent/aikit-codex-primary/codex"]);
+        provider.argv_fallback = vec![vec![codex.display().to_string()]];
+        let profile = declared_provider_profile(&provider).unwrap().unwrap();
+        let basis = codex_login_basis(&provider, profile).unwrap().unwrap();
+        assert_eq!(basis.program, codex.display().to_string());
+        assert_eq!(basis.direct_launch_variant, Some(1));
+        assert!(crate::harness_auth::codex_chatgpt_login_ready(
+            &crate::probe::probe_runner(),
+            &home,
+            &basis.program,
+            "provider:openai",
+        )
+        .unwrap());
+        let mut model = prepared_with_dispatch(ModelDispatchDelivery::ConfigKey {
+            name: "model".into(),
+        });
+        model.credential_mode = "codex-chatgpt-own-login".into();
+        model.codex_login_basis = Some(basis);
+        let (argv, variant) = selected_launch(&provider, &model).unwrap();
+        ensure_codex_login_launch_matches(&model, &argv, variant).unwrap();
+        assert_eq!(argv.first().map(String::as_str), codex.to_str());
+    }
+
+    #[test]
+    #[ignore = "requires installed Codex with a real ChatGPT login"]
+    fn installed_codex_acp_profile_binds_its_verified_native_executable() {
+        let profile = aikit_adapters::profiles::for_slug("codex").unwrap();
+        let provider = crate::encounter_profile_provider::derive_provider(
+            profile,
+            "installed-codex-acp".to_string(),
+            "Installed Codex ACP".to_string(),
+        )
+        .unwrap();
+        let verified_profile = declared_provider_profile(&provider).unwrap().unwrap();
+        let basis = codex_login_basis(&provider, verified_profile)
+            .unwrap()
+            .unwrap();
+        assert_eq!(basis.direct_launch_variant, None);
+        assert!(std::path::Path::new(&basis.program).is_absolute());
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path().join("aikit"));
+        assert!(crate::harness_auth::codex_chatgpt_login_ready(
+            &crate::probe::probe_runner(),
+            &home,
+            &basis.program,
+            "provider:openai",
+        )
+        .unwrap());
+        let mut environment = ModelEnvironment::new();
+        environment.set_codex_path(&basis.program).unwrap();
+        assert!(!environment.is_empty());
+    }
+
+    #[test]
     fn every_declared_executable_resolves_to_its_expected_dispatch() {
         // The whole declared table in one place: the dispatch determination
         // is decided by the embedded profiles, so the expectation is legible
@@ -968,6 +1414,7 @@ mod tests {
             ("cursor-agent", ExpectedDispatch::Refusal),
             ("opencode", ExpectedDispatch::Refusal),
             ("grok-bot", ExpectedDispatch::Refusal),
+            ("grok", ExpectedDispatch::Refusal),
             ("aider", ExpectedDispatch::Refusal),
         ];
         for (program, expected) in expected {
@@ -1016,6 +1463,19 @@ mod tests {
 
     // --- dispatch translation ---
 
+    /// A fake executable at a controlled path: the file exists and carries
+    /// the executable bit on unix, so launch-program resolution resolves it.
+    fn fake_executable(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
     fn prepared_with_dispatch(dispatch: ModelDispatchDelivery) -> PreparedModel {
         PreparedModel {
             policy_source: EncounterRequiredSource {
@@ -1031,45 +1491,50 @@ mod tests {
             agency_ref: ResourceRef::parse("agency/probe").unwrap(),
             world_binding_ref: ResourceRef::parse("world-binding/probe").unwrap(),
             credential_reading: None,
+            credential_mode: "not-required".into(),
+            codex_login_basis: None,
             dispatch,
         }
     }
 
     #[test]
     fn an_argv_dispatch_appends_exactly_the_declared_flags() {
-        let provider = pi_rpc_provider(&["/Users/admin/.local/bin/pi", "--mode", "rpc"]);
+        let temp = tempfile::tempdir().unwrap();
+        let program = fake_executable(temp.path(), "probe-pi");
+        let provider = pi_rpc_provider(&[program.to_str().unwrap(), "--mode", "rpc"]);
         let model = prepared_with_dispatch(ModelDispatchDelivery::Argv {
             provider_flag: "--provider".into(),
             model_flag: "--model".into(),
         });
-        let argv = selected_argv(&provider, &model).unwrap();
+        let (argv, variant) = selected_launch(&provider, &model).unwrap();
+        assert_eq!(variant, 0);
         assert_eq!(
             argv,
             vec![
-                "/Users/admin/.local/bin/pi",
-                "--mode",
-                "rpc",
-                "--provider",
-                "probe-native",
-                "--model",
-                "probe-model-1",
+                program.display().to_string(),
+                "--mode".to_string(),
+                "rpc".to_string(),
+                "--provider".to_string(),
+                "probe-native".to_string(),
+                "--model".to_string(),
+                "probe-model-1".to_string(),
             ]
         );
     }
 
     #[test]
     fn a_conflicting_native_flag_refuses_without_rewriting() {
+        let temp = tempfile::tempdir().unwrap();
+        let program = fake_executable(temp.path(), "probe-pi-conflict");
         let model = prepared_with_dispatch(ModelDispatchDelivery::Argv {
             provider_flag: "--provider".into(),
             model_flag: "--model".into(),
         });
-        for existing in [
-            vec!["pi", "--model", "other"],
-            vec!["pi", "--provider=zai"],
-            vec!["pi", "--"],
-        ] {
-            let provider = pi_rpc_provider(&existing);
-            let error = selected_argv(&provider, &model).unwrap_err();
+        for existing in [vec!["--model", "other"], vec!["--provider=zai"], vec!["--"]] {
+            let mut argv = vec![program.to_str().unwrap().to_string()];
+            argv.extend(existing.iter().map(|s| s.to_string()));
+            let provider = pi_rpc_provider(&argv.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+            let error = selected_launch(&provider, &model).unwrap_err();
             assert!(
                 error
                     .message()
@@ -1085,12 +1550,131 @@ mod tests {
         // The selection rides the session's model configuration after the
         // session exists, so the launch argv is the provider's own, never
         // rewritten with pi's flags.
-        let provider = acp_provider(&["/opt/homebrew/bin/gemini", "--experimental-acp"]);
+        let temp = tempfile::tempdir().unwrap();
+        let program = fake_executable(temp.path(), "probe-gemini");
+        let provider = acp_provider(&[program.to_str().unwrap(), "--experimental-acp"]);
         let model = prepared_with_dispatch(ModelDispatchDelivery::ConfigKey {
             name: "model".into(),
         });
-        let argv = selected_argv(&provider, &model).unwrap();
+        let argv = selected_launch(&provider, &model).unwrap().0;
         assert_eq!(argv, provider.argv);
+    }
+
+    // --- declared launch-variant resolution at the final exec ---
+
+    #[test]
+    fn an_unresolvable_primary_rides_the_first_resolvable_declared_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let second = fake_executable(temp.path(), "probe-resolved-fallback");
+        let mut provider = acp_provider(&["/nonexistent/aikit-probe/primary-program"]);
+        provider.argv_fallback = vec![
+            vec!["/nonexistent/aikit-probe/first-fallback".to_string()],
+            vec![second.display().to_string()],
+        ];
+        // Declared order decides: the first variant whose program resolves
+        // is selected, skipping only the unresolvable ones before it.
+        let (argv, variant) = resolved_launch_variant(&provider).unwrap();
+        assert_eq!(variant, 2);
+        assert_eq!(argv, vec![second.display().to_string()]);
+    }
+
+    #[test]
+    fn a_resolvable_primary_is_never_swapped_for_a_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let primary = fake_executable(temp.path(), "probe-resolved-primary");
+        let mut provider = acp_provider(&[primary.to_str().unwrap()]);
+        provider.argv_fallback = vec![vec!["/nonexistent/aikit-probe/fallback".to_string()]];
+        let (argv, variant) = resolved_launch_variant(&provider).unwrap();
+        assert_eq!(variant, 0);
+        assert_eq!(argv, provider.argv, "a resolving primary is never swapped");
+    }
+
+    #[test]
+    fn a_selected_fallback_carries_the_declared_dispatch_flags() {
+        // The dispatch delivery joins whichever declared variant the exec
+        // resolution selected — a fallback is a full argv for the same
+        // harness in the same protocol mode, so the flags ride it too.
+        let temp = tempfile::tempdir().unwrap();
+        let fallback = fake_executable(temp.path(), "probe-fallback-flags");
+        let mut provider = pi_rpc_provider(&["/nonexistent/aikit-probe/primary"]);
+        provider.argv_fallback = vec![vec![fallback.to_str().unwrap().to_string()]];
+        let model = prepared_with_dispatch(ModelDispatchDelivery::Argv {
+            provider_flag: "--provider".into(),
+            model_flag: "--model".into(),
+        });
+        let (argv, variant) = selected_launch(&provider, &model).unwrap();
+        assert_eq!(variant, 1);
+        assert_eq!(
+            argv,
+            vec![
+                fallback.display().to_string(),
+                "--provider".to_string(),
+                "probe-native".to_string(),
+                "--model".to_string(),
+                "probe-model-1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_resolvable_declared_variant_refuses_naming_every_checked_variant() {
+        let mut provider = acp_provider(&["/nonexistent/aikit-probe/primary"]);
+        provider.argv_fallback = vec![vec!["aikit-probe-no-such-executable".to_string()]];
+        let error = resolved_launch_variant(&provider).unwrap_err();
+        let message = error.message();
+        assert!(message.contains("every declared variant"), "{message}");
+        assert!(message.contains(provider.id.as_str()), "{message}");
+        assert!(
+            message
+                .contains("primary `/nonexistent/aikit-probe/primary` (the path does not exist)"),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "fallback 1 `aikit-probe-no-such-executable` (no executable file with this \
+                 name is on PATH)"
+            ),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_bare_name_resolves_only_through_an_executable_hit_on_the_search_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = fake_executable(temp.path(), "probe-on-path");
+        let search = Some(temp.path().as_os_str());
+        assert_eq!(
+            unresolvable_program_reason_in("probe-on-path", search),
+            None,
+            "an executable hit on PATH resolves"
+        );
+        let plain = temp.path().join("probe-not-executable");
+        fs::write(&plain, b"not executable").unwrap();
+        assert_eq!(
+            unresolvable_program_reason_in("probe-not-executable", search),
+            Some("no executable file with this name is on PATH".to_string()),
+            "a PATH hit without the executable bit is not a resolution"
+        );
+        assert_eq!(
+            unresolvable_program_reason_in("probe-absent", search),
+            Some("no executable file with this name is on PATH".to_string())
+        );
+        assert_eq!(
+            unresolvable_program_reason_in(
+                "probe-on-path",
+                Some(std::path::Path::new("/nonexistent-aikit-probe-path").as_os_str())
+            ),
+            Some("no executable file with this name is on PATH".to_string())
+        );
+        assert_eq!(
+            unresolvable_program_reason_in(executable.to_str().unwrap(), None),
+            None,
+            "an explicit path resolves without any PATH"
+        );
+        assert_eq!(
+            unresolvable_program_reason_in("/nonexistent/aikit-probe/primary", None),
+            Some("the path does not exist".to_string())
+        );
     }
 
     #[test]

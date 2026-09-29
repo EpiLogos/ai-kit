@@ -31,7 +31,14 @@ pub mod factory_developmental;
 pub mod factory_run_thought_authored_wiki;
 pub mod flow_authored_wiki;
 pub mod gateway_client;
+pub mod gateway_coexistence;
+pub mod gateway_communique;
 pub mod gateway_connector;
+pub mod gateway_connector_config;
+pub mod gateway_connector_pump;
+pub mod gateway_connector_specimen;
+pub mod gateway_connector_wire;
+pub mod gateway_conversation_engine;
 #[allow(unused_imports)]
 pub mod gateway_runtime;
 pub mod gateway_service;
@@ -42,6 +49,7 @@ pub mod home_agent_profile;
 pub mod hook_sources;
 pub mod hyprland;
 pub mod interactive_connection;
+pub mod jev;
 pub mod layers;
 pub mod local_source_discovery;
 pub mod markdown_document;
@@ -52,6 +60,7 @@ pub mod now_field;
 pub mod okf;
 pub mod openai_realtime;
 pub mod place_technology;
+pub mod prime_rpc_connection;
 pub mod profiles;
 pub mod projectcentral;
 pub mod projectcentral_authored_wiki;
@@ -64,12 +73,18 @@ pub mod session_space_connection;
 pub mod session_space_observation;
 pub mod session_space_reconstruction;
 pub mod shells;
+mod slack_bot_api;
+pub mod slack_gateway;
+pub mod slack_gateway_curl;
 mod telegram_bot_api;
 pub mod telegram_gateway;
+pub mod telegram_gateway_curl;
 pub mod tool_sources;
 pub mod wiki_document;
 pub mod wiki_graph;
+pub mod work_repos;
 pub mod workcell_instance_intake;
+pub mod workcell_run_intake;
 pub mod working_environment;
 pub mod working_environment_control;
 
@@ -82,14 +97,15 @@ pub use agent_connection::{
     AcpV1ConnectionAdapter, AgentConnectionAdapter, CancelRequest, ClassicProcessConnectionAdapter,
     ConnectionCapabilities, ConnectionCommand, ConnectionDegradation, ConnectionDescriptor,
     ConnectionProtocol, ConnectionProtocolFamily, ConnectionSignal, ConnectionSignalKind,
-    ConnectionState, NativePermissionChoice, NativePermissionRequest, NativeSessionBinding,
-    PromptRequest, SessionOpenMode, SessionOpenRequest, ACP_STABLE_PROTOCOL_VERSION,
-    AGENT_CONNECTION_ADAPTER_VERSION,
+    ConnectionState, NativeModeObservation, NativeModeOption, NativePermissionChoice,
+    NativePermissionRequest, NativeSessionBinding, PromptRequest, SessionOpenMode,
+    SessionOpenRequest, ACP_STABLE_PROTOCOL_VERSION, AGENT_CONNECTION_ADAPTER_VERSION,
 };
 pub use agent_session_host::{
     AgentSessionHost, AgentSessionHostLimits, HostEvent, InterruptOrigin, InterruptReceipt,
-    SessionIdentity, SessionLane, SessionLaneState, TurnHandle, TurnInterruption, TurnRecord,
-    TurnStop, WaitOutcome, AGENT_SESSION_HOST_VERSION, DEFAULT_MAX_SIGNALS_PER_TURN,
+    ModeConfigurationReceipt, SessionIdentity, SessionLane, SessionLaneState, TurnHandle,
+    TurnInterruption, TurnRecord, TurnStop, WaitOutcome, AGENT_SESSION_HOST_VERSION,
+    DEFAULT_MAX_SIGNALS_PER_TURN,
 };
 pub use authored_wiki_living::{authored_wiki_knowledge_impact, AUTHORED_WIKI_LIVING_VERSION};
 pub use authored_wiki_read::{
@@ -133,7 +149,20 @@ pub use factory_run_thought_authored_wiki::{
 };
 pub use flow_authored_wiki::{standing_flow_authored_wiki_source, FLOW_AUTHORED_WIKI_VERSION};
 pub use gateway_client::{
-    gateway_command, gateway_request, GatewayCarrierTarget, GATEWAY_CLIENT_VERSION,
+    gateway_command, gateway_command_within, gateway_request, GatewayCarrierTarget,
+    GATEWAY_CLIENT_VERSION,
+};
+pub use gateway_coexistence::{
+    coexistence_report, decide, detect, exclusive_gate, load_coexistence, probe_live,
+    store_coexistence, CoexistenceDecision, CoexistenceDocument, CoexistencePolicy,
+    CoexistenceProbe, ExclusiveCoexistenceGate, ForeignBotIdentity, ForeignGateway,
+    GatewayCoexistenceGate, GATEWAY_COEXISTENCE_FILE_NAME, GATEWAY_COEXISTENCE_SCHEMA,
+};
+pub use gateway_communique::{
+    Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForward, CommuniqueForwardOutcome,
+    CommuniqueInstance, CommuniqueInstanceHold, CommuniqueJournal, CommuniqueRouting,
+    CommuniqueState, CommuniqueTransition, SenderAttribution, COMMUNIQUE_REF_PREFIX,
+    COMMUNIQUE_SCHEMA, MAX_COMMUNIQUE_BODY_BYTES,
 };
 pub use gateway_connector::{
     verify_connector_descriptor, ConnectorCapabilities, ConnectorConformance,
@@ -143,19 +172,45 @@ pub use gateway_connector::{
     OutboundOperation, OutboundOperationKind, SenderIdentity, SenderKind,
     GATEWAY_CONNECTOR_SCHEMA_PATH, GATEWAY_CONNECTOR_SDK_VERSION, GATEWAY_CONNECTOR_WIRE_VERSION,
 };
+pub use gateway_connector_config::{
+    build_connector_factory, load_gateway_connectors, store_gateway_connectors,
+    ConnectorTokenLocation, GatewayConnectorEntry, GatewayConnectorFactory, GatewayConnectorsFile,
+    GATEWAY_CONNECTORS_FILE_NAME, GATEWAY_CONNECTORS_SCHEMA,
+};
+pub use gateway_connector_pump::{
+    spawn_connector_workers, ConnectorOutbound, ConnectorPumpControls, ConnectorQueues,
+    CONNECTOR_QUIET_POLL_CODE,
+};
+pub use gateway_connector_specimen::{
+    run_specimen_connector, SpecimenOptions, SPECIMEN_CONNECTOR_VERSION,
+};
+pub use gateway_connector_wire::StdioWireConnector;
+pub use gateway_conversation_engine::{
+    parse_slash, AgentHostTurnSource, ConversationHarnessProtocol, ConversationTurn,
+    ConversationTurnOutcome, ConversationTurnRequest, ConversationTurnSource, EnginePolicy,
+    FixtureScript, FixtureTurnSource, GatewayConversationEngine, GatewayTurnSourceResolver,
+    SlashParse, StreamTiming, TurnProgress, TurnStreamItem,
+};
 pub use gateway_runtime::{
     connector_descriptor, execute_gateway_command, text_send, AgencyGateway,
-    GatewayActuationControlIntent, GatewayActuationControlOperation, GatewayBinding,
-    GatewayCommand, GatewayDiscovery, GatewayEcology, GatewayEcologyAgency, GatewayEcologySession,
+    GatewayActuationControlIntent, GatewayActuationControlOperation, GatewayAgentReply,
+    GatewayAgentReplyFailure, GatewayBinding, GatewayCommand, GatewayConversationOperation,
+    GatewayDiscovery, GatewayEcology, GatewayEcologyAgency, GatewayEcologySession,
     GatewayEcologyStream, GatewayEcologySurface, GatewayErrorEnvelope, GatewayForkOrigin,
     GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult, GatewayInvocationMode,
-    GatewayReplay, GatewayRequestEnvelope, GatewayResponse, GatewayResponseEnvelope,
-    GatewaySnapshot, GatewayStatus, GatewayStreamEvent, GatewayStreamJournal,
-    ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA, AGENCY_GATEWAY_VERSION,
-    GATEWAY_ECOLOGY_AUTHORITY_LAW, GATEWAY_INVOCATION_MODES,
+    GatewayOccupancyReading, GatewayOwnerUnavailable, GatewayReplay, GatewayRequestEnvelope,
+    GatewayResponse, GatewayResponseEnvelope, GatewaySnapshot, GatewayStatus, GatewayStreamEvent,
+    GatewayStreamJournal, ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA,
+    AGENCY_GATEWAY_VERSION, GATEWAY_ECOLOGY_AUTHORITY_LAW,
+    GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE, GATEWAY_INVOCATION_MODES,
+    GATEWAY_OCCUPANCY_READING_SCHEMA, GATEWAY_PROTOCOL_FEATURES,
 };
 pub use gateway_service::{
-    persist_gateway_state, restore_gateway_state, run_gateway_service, GatewayServiceConfig,
+    acquire_gateway_state_lock, execute_against_state_file, persist_gateway_state,
+    restore_gateway_state, run_gateway_service, run_gateway_service_with_hooks,
+    run_gateway_service_with_ticks, GatewayConversationHooks, GatewayOccupancyReader,
+    GatewayServiceConfig, GatewayServiceHooks, GatewayServiceRuntime, GatewayStateLock,
+    GatewayTick, GatewayTickLoop, SubscriptionHub, SubscriptionSink,
     DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION,
 };
 pub use harness_disclosure::{
@@ -201,6 +256,10 @@ pub use session_space_observation::{
     SESSION_SPACE_OBSERVATION_FILE_VERSION,
 };
 pub use session_space_reconstruction::session_space_native_observations;
+pub use slack_gateway::{
+    SlackBotApiTransport, SlackBotIdentity, SlackConnector, SlackConnectorConfig,
+    SLACK_GATEWAY_CONNECTOR_VERSION, SLACK_WEB_API_BASE,
+};
 pub use telegram_gateway::{
     TelegramBotApiTransport, TelegramBotIdentity, TelegramConnector, TelegramConnectorConfig,
     TELEGRAM_BOT_API_BASE, TELEGRAM_GATEWAY_CONNECTOR_VERSION,
@@ -208,6 +267,9 @@ pub use telegram_gateway::{
 pub use tool_sources::{
     plan_tools_projection, ToolServerRecord, ToolSourceEntry, ToolSourceError,
     ToolsProjectionOutcome, ToolsProjectionPlan, TOOLS_PROJECTION_OWNERSHIP,
+};
+pub use work_repos::{
+    discover_work_projects, WorkProjectEntry, WorkRepoProject, WorkReposSourcePoolProvider,
 };
 pub use working_environment::{
     MuxSessionSpaceActivationDriver, MuxWorkingEnvironment, NativeBindingKind,
@@ -236,3 +298,8 @@ pub mod agency_admission;
 pub mod central_file_map;
 pub mod central_placement;
 pub mod placement_enforcement;
+
+pub use prime_rpc_connection::{
+    PrimeRpcConnectionAdapter, PRIME_AGENT_RELEASE, PRIME_AGENT_RELEASE_REVISION,
+    PRIME_RPC_ADAPTER_VERSION,
+};

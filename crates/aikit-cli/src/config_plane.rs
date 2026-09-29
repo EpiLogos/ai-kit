@@ -214,10 +214,7 @@ fn settings() -> Vec<Setting> {
             section_ref: "models",
             key: "models.candidates",
             title: "Model candidates",
-            description: "The model candidates a launch composes from. AIKit authors no \
-                      default-model setting: the model is resolved per session launch \
-                      (`aikit compose --model`), so this subject is disclosure-only — there \
-                      is nothing native for the plane to write.",
+            description: "The model candidates a launch composes from. This catalogue is disclosure-only; harness-native launch preferences are configured separately through models.default, and governed selection remains per launch (`aikit compose --model`).",
             value_schema: json!({ "type": "reference", "subject_kind": "model.stable-id" }),
             allowed_scopes: &["world"],
             writable: false,
@@ -256,6 +253,57 @@ fn settings() -> Vec<Setting> {
             effect_ref: Some("aikit credential setup --json"),
             operations: (true, false, false, false),
             native_ref: "aikit:credentials",
+        },
+        Setting {
+            setting_ref: crate::model_defaults::SETTING_REF,
+            section_ref: "models",
+            key: "models.default",
+            title: "Default model per harness",
+            description: "A harness-native model preference for new chats, keyed by the configured encounter provider ID. An explicit governed model policy takes precedence; existing and resumed chats keep their model.",
+            value_schema: json!({"type":"table","columns":[{"name":"harness","type":"scalar"},{"name":"model","type":"scalar"}]}),
+            allowed_scopes: &["machine"],
+            writable: true,
+            profileable: false,
+            sensitive: false,
+            default: Some(json!({})),
+            default_semantics: "constant",
+            effect_kind: "session-restart-required",
+            effect_summary: "New chats request this model through the harness's native selector or launch arguments and require its confirmation. Existing chats and governed model policies are unchanged.",
+            effect_ref: Some("aikit system --json"),
+            operations: (true, true, true, true),
+            native_ref: "aikit:config:model-defaults",
+        },
+        Setting {
+            setting_ref: crate::permission_defaults::SETTING_REF,
+            section_ref: "permissions",
+            key: "permissions.default-mode",
+            title: "Default permission mode per harness",
+            description: "Which of a harness's own session permission modes a new encounter \
+                      session starts in, as an object mapping a harness (its encounter \
+                      provider id, or its executable's file name such as `hermes-acp`) to \
+                      one mode id that harness advertises (for example `default`, \
+                      `accept_edits`, `plan`). AIKit never defines or interprets a mode.",
+            value_schema: json!({
+                "type": "table",
+                "columns": [
+                    { "name": "harness", "type": "scalar" },
+                    { "name": "mode", "type": "scalar" }
+                ]
+            }),
+            allowed_scopes: &["machine"],
+            writable: true,
+            profileable: true,
+            sensitive: false,
+            default: Some(json!({})),
+            default_semantics: "constant",
+            effect_kind: "session-restart-required",
+            effect_summary: "Applies when a new session opens: AIKit asks the harness to switch \
+                         to the named mode, only if that harness advertises it, and records \
+                         the harness's confirmation. Sessions already open keep their current \
+                         mode. The harness still decides what each mode allows.",
+            effect_ref: Some("aikit system --json"),
+            operations: (true, true, true, true),
+            native_ref: "aikit:config:permission-default-modes",
         },
     ]
 }
@@ -522,6 +570,7 @@ fn sections() -> Vec<Value> {
             "resolution" => "Project / Profile / scope",
             "skills" => "Skills / SkillSets / Methods / UsageOverlays",
             "models" => "Models / providers / credential refs",
+            "permissions" => "Permissions / session permission modes",
             other => unreachable!("unmapped section {other}"),
         };
         let entry = sections.iter_mut().find(|s| s["id"] == setting.section_ref);
@@ -654,12 +703,11 @@ pub fn contribution_document(cwd: &Path) -> Value {
                     "reading_digest_covers": DIGEST_COVERS,
                 },
                 "about": "Resolution and composition: which native profiles, capability \
-                          toggles, default skill-sets and credential references the composed \
-                          World may address, plus each declared harness's own \
-                          trust/permissions surface. Models are resolved per launch, \
+                          toggles, default skill-sets, per-harness default models and permission modes \
+                          and credential references the composed World may address, plus each declared harness's own \
+                          trust/permissions surface. Governed model policies remain per launch, \
                           credentials are bound owner-natively, and harness trust is \
-                          harness-owned, so all three are disclosed without a write path \
-                          through this plane.",
+                          harness-owned. Only the ordinary launch-model preference is writable here.",
                 "sections": all_sections(),
                 "operations": {
                     "transport": "cli/v1",
@@ -671,9 +719,9 @@ pub fn contribution_document(cwd: &Path) -> Value {
                 "availability": { "state": "available", "reason": null },
                 "degradations": [],
                 "obligations": [
-                    "SessionSpace authoring and model selection stay native (`aikit session`, \
-                     `aikit compose --model`); they are relational or per-launch choices, not \
-                     addressable settings.",
+                    "SessionSpace authoring and governed model selection stay native (`aikit session`, \
+                     `aikit compose --model`); models.default selects only an ordinary harness-native \
+                     preference for a new chat, subordinate to every explicit model policy.",
                     "Credential material is bound only through `aikit credential setup` (or \
                      declared with `--ref`); the plane discloses presence and reference, and \
                      the per-provider inventory rides `aikit system --json` \
@@ -737,6 +785,18 @@ fn validate_value(service: &Service, setting: &Setting, value: &Value) -> Vec<Va
     let mut violations: Vec<Value> = Vec::new();
     let violation =
         |code: &str, message: String| json!({ "code": code, "message": message, "path": null });
+    if setting.setting_ref == crate::model_defaults::SETTING_REF {
+        return crate::model_defaults::violations(value)
+            .into_iter()
+            .map(|message| violation("invalid_model_defaults", message))
+            .collect();
+    }
+    if setting.setting_ref == crate::permission_defaults::SETTING_REF {
+        return crate::permission_defaults::violations(value)
+            .into_iter()
+            .map(|message| violation("invalid_permission_modes", message))
+            .collect();
+    }
     match setting.value_kind() {
         "secret" => {
             // Representation law: the only acceptable value shape is a
@@ -1019,6 +1079,33 @@ fn plan_digest(plan: &Value) -> Result<String, Failure> {
 }
 
 fn change_summary(setting: &Setting, value: &Value, scope: &ScopeAddress) -> String {
+    if setting.setting_ref == crate::model_defaults::SETTING_REF {
+        return format!(
+            "Set default models for {} harnesses at {}; existing chats keep their model",
+            value.as_object().map_or(0, |v| v.len()),
+            scope.compact()
+        );
+    }
+    if setting.setting_ref == crate::permission_defaults::SETTING_REF {
+        let mut parts: Vec<String> = value
+            .as_object()
+            .map(|map| {
+                map.iter()
+                    .map(|(harness, mode)| format!("{harness} → {}", mode.as_str().unwrap_or("")))
+                    .collect()
+            })
+            .unwrap_or_default();
+        parts.sort();
+        return if parts.is_empty() {
+            format!("no default permission mode at {}", scope.compact())
+        } else {
+            format!(
+                "default permission modes at {}: {}",
+                scope.compact(),
+                parts.join(", ")
+            )
+        };
+    }
     match setting.value_kind() {
         "reference" => format!(
             "declare profile `{}` at {}",
@@ -1156,6 +1243,29 @@ fn execute(
     address: &ScopeAddress,
     value: &Value,
 ) -> Result<(), Failure> {
+    if setting.setting_ref == crate::model_defaults::SETTING_REF {
+        return crate::model_defaults::from_value(value)
+            .and_then(|models| crate::model_defaults::write(service.home(), &models))
+            .map_err(|error| {
+                fail(
+                    "internal",
+                    format!(
+                        "The native model-default mutation failed: {}",
+                        error.message()
+                    ),
+                )
+            });
+    }
+    if setting.setting_ref == crate::permission_defaults::SETTING_REF {
+        return crate::permission_defaults::from_value(value)
+            .and_then(|modes| crate::permission_defaults::write(service.home(), &modes))
+            .map_err(|error| {
+                fail(
+                    "internal",
+                    format!("the native mutation failed: {}", error.message()),
+                )
+            });
+    }
     let scope_kind = address
         .aikit_kind()
         .expect("writable settings always map to an AIKit scope");
@@ -1223,6 +1333,10 @@ fn execute_reset(
         "ai-kit:resolution:skill-sets.default" => {
             crate::projects::set_defaults(service.home(), &[]).map(|_| ())
         }
+        crate::permission_defaults::SETTING_REF => {
+            crate::permission_defaults::clear(service.home())
+        }
+        crate::model_defaults::SETTING_REF => crate::model_defaults::clear(service.home()),
         other => unreachable!("no reset executor for {other}"),
     };
     result.map_err(|error| {

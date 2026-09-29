@@ -29,15 +29,25 @@ const OVERLAY_NAMES: &[&str] = &[
     "claude",
     "codex",
     "zcode",
+    "opencode",
     "gemini-cli",
     "pi",
     "gemini-antigravity",
-    "grok-bot",
+    "grok",
     "kimi",
     "openclaw",
     "ollama",
     "hermes",
     "hermes-acp",
+    // Harness-connection roster expansion 2026-09-23 (connection truth cards
+    // 2026-09-22): five docs-level census overlays, each joining its own
+    // catalog slug — the rows exist once Actuation's descriptors declare the
+    // slugs, never before.
+    "copilot",
+    "cline",
+    "kiro-cli",
+    "qoder",
+    "droid",
 ];
 
 /// A stand-in `actuation` binary: serves fixture descriptors for the slugs a
@@ -436,6 +446,97 @@ fn with_actuation_absent_every_row_discloses_instead_of_vanishing() {
     assert_eq!(pi_rows[0]["state"], "unavailable");
 }
 
+/// Issue #394 K2: the embedded adapter registry carries opencode, so the
+/// client surface must answer for it by name — a roster row with its honest
+/// state, and an install refusal that names the harness as known-but-undispatchable,
+/// never `client.unknown` against a roster that omits it.
+#[test]
+fn client_status_opencode_answers_in_an_isolated_scope_and_install_is_a_named_refusal() {
+    let home = scenario_with_partial_intake();
+
+    // This scenario's detection record names no opencode entry and its
+    // descriptor is refused — the row still answers, with the absence named.
+    let rows = rows_with_fixtures_env(&home, &["client", "status", "opencode"]);
+    assert_eq!(
+        rows.len(),
+        1,
+        "opencode must be a first-class row: {rows:?}"
+    );
+    assert_eq!(rows[0]["client"], "opencode");
+    assert_eq!(rows[0]["state"], "absent");
+    assert_eq!(rows[0]["detection"], "absent-from-record");
+    assert_eq!(rows[0]["dispatch"], "adapter-only");
+    assert_eq!(rows[0]["admission"]["source_revision"], "v1.18.29");
+
+    let mut command = Command::cargo_bin("aikit").unwrap();
+    command
+        .env("AIKIT_HOME", home.path().join("aikit-home"))
+        .env("HOME", home.path().join("user-home"))
+        .env(
+            "PATH",
+            format!(
+                "{}:/usr/bin:/bin",
+                home.path().join("actuation-bin").display()
+            ),
+        )
+        .env("FIXTURES", home.path().join("actuation-fixtures"))
+        .arg("--json")
+        .args(["client", "install", "opencode"])
+        .current_dir(home.path().join("project"));
+    let output = command.output().unwrap();
+    assert!(!output.status.success(), "no dispatch seam, so no install");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("client.not_dispatchable"), "{stdout}");
+    assert!(
+        !stdout.contains("client.unknown"),
+        "a carried harness must never be unknown: {stdout}"
+    );
+}
+
+/// Issue #394 K4: the admission descriptor declares the edition its evidence
+/// was gathered on; when the installed product reports a different edition,
+/// the read model surfaces both and names the divergence — the designed
+/// honesty law (facts surfaced, never normalised away) with no invented gate.
+#[test]
+fn the_admission_read_model_surfaces_a_stale_edition_instead_of_passing_silently() {
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(home.path().join("project/.aikit")).unwrap();
+    fs::write(
+        home.path().join("project/.aikit/profile.toml"),
+        "schema = 1\n",
+    )
+    .unwrap();
+    let fixtures = stage_actuation(home.path());
+    write_detection_fixture(
+        &fixtures,
+        r#"{"slug": "opencode", "harness_ref": "harness/opencode", "state": "detected",
+            "version": "1.18.30",
+            "probes": [{"kind": "config-dir", "result": "pass", "spec": "~/.config/opencode"}]}"#,
+    );
+
+    let rows = rows_with_fixtures_env(&home, &["client", "status", "opencode"]);
+    assert_eq!(
+        rows.len(),
+        1,
+        "the filter must select exactly opencode: {rows:?}"
+    );
+    let row = &rows[0];
+    // The declared edition facts ride the row, with what the installed
+    // product reports beside them.
+    assert_eq!(row["admission"]["source_revision"], "v1.18.29");
+    assert_eq!(row["admission"]["native_version"], Value::Null);
+    assert_eq!(row["detected_version"], "1.18.30");
+    let notes = row["notes"].as_array().unwrap();
+    assert!(
+        notes.iter().any(|note| {
+            note.as_str().is_some_and(|text| {
+                text.contains("pinned to edition v1.18.29") && text.contains("reports 1.18.30")
+            })
+        }),
+        "the stale-edition mismatch must be disclosed: {notes:?}"
+    );
+}
+
 #[test]
 fn install_refuses_for_harnesses_without_a_dispatch_seam() {
     let home = scenario_with_partial_intake();
@@ -503,4 +604,186 @@ fn install_refuses_for_harnesses_without_a_dispatch_seam() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("client.unknown"), "{stdout}");
     assert!(stdout.contains("actuation harness detect"), "{stdout}");
+}
+
+// --- Probe discipline -------------------------------------------------------
+//
+// Every row names what its spawns and credential facts did, in one shared
+// vocabulary: `ok | credential-gated | unreachable | unsupported | timed-out |
+// refused`. The existing row keys stay exactly where they were.
+
+const PROBE_VOCABULARY: &[&str] = &[
+    "ok",
+    "credential-gated",
+    "unreachable",
+    "unsupported",
+    "timed-out",
+    "refused",
+];
+
+#[test]
+fn every_status_row_carries_the_probe_vocabulary_with_its_old_keys_intact() {
+    let home = scenario_with_partial_intake();
+    let rows = rows_with_fixtures_env(&home, &["client", "status"]);
+    assert!(!rows.is_empty());
+    for row in &rows {
+        // The pre-existing keys are unchanged and still render.
+        for key in ["client", "state", "capability", "detection"] {
+            assert!(
+                row[key].is_string(),
+                "existing key {key} must stay on every row: {row}"
+            );
+        }
+        // The outcome fields join them, closed over the shared vocabulary
+        // (`self` for the broker, which spawns nothing and gates nothing).
+        let probe = row["probe"]
+            .as_str()
+            .unwrap_or_else(|| panic!("probe outcome missing: {row}"));
+        assert!(
+            probe == "self" || PROBE_VOCABULARY.contains(&probe),
+            "probe must use the shared vocabulary: {row}"
+        );
+        let credential = row["credential"]
+            .as_str()
+            .unwrap_or_else(|| panic!("credential outcome missing: {row}"));
+        assert!(
+            credential == "self" || PROBE_VOCABULARY.contains(&credential),
+            "credential must use the shared vocabulary: {row}"
+        );
+    }
+    // The broker is AIKit's own client: its outcomes are `self`, not findings.
+    let broker = by_name(&rows, "broker");
+    assert_eq!(broker["probe"], "self");
+    assert_eq!(broker["credential"], "self");
+}
+
+#[test]
+fn an_absent_credential_is_credential_gated_without_spawning_the_harness() {
+    let home = scenario_with_partial_intake();
+    // A sentinel `claude` that leaves a marker if anything ever runs it: the
+    // credential pre-check is presence facts only, so a status read must not
+    // need the harness binary at all — that is the whole point of gating
+    // before a model call instead of after.
+    let marker = home.path().join("claude-was-spawned.marker");
+    let sentinel = home.path().join("sentinel-bin");
+    fs::create_dir_all(&sentinel).unwrap();
+    let script = sentinel.join("claude");
+    fs::write(
+        &script,
+        format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut command = Command::cargo_bin("aikit").unwrap();
+    command
+        .env("AIKIT_HOME", home.path().join("aikit-home"))
+        .env("HOME", home.path().join("user-home"))
+        .env("FIXTURES", home.path().join("actuation-fixtures"))
+        .env(
+            "PATH",
+            format!(
+                "{}:{}:/usr/bin:/bin",
+                sentinel.display(),
+                home.path().join("actuation-bin").display()
+            ),
+        )
+        // Presence facts, decided in isolation: no ambient key may leak in.
+        .env_remove("ANTHROPIC_API_KEY")
+        .arg("--json")
+        .args(["client", "status", "claude"])
+        .current_dir(home.path().join("project"));
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "status must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    let rows = value["data"]["clients"].as_array().unwrap();
+    let claude = by_name(rows, "claude");
+    assert_eq!(
+        claude["credential"], "credential-gated",
+        "an unbound credential with no ambient key gates the row: {claude}"
+    );
+    let reason = claude["credential_reason"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the gate names what is missing: {claude}"));
+    assert!(
+        reason.contains("ANTHROPIC_API_KEY"),
+        "the gate names the missing env var: {reason}"
+    );
+    assert!(
+        reason.contains("credential:anthropic"),
+        "the gate names the credential to bind: {reason}"
+    );
+    assert!(
+        !marker.exists(),
+        "the credential pre-check must never spawn the harness binary"
+    );
+}
+
+#[test]
+fn a_hanging_actuation_is_timed_out_within_the_budget_instead_of_stalling() {
+    // The class that commissioned the discipline: gemini 0.84 with an expired
+    // OAuth session hung 30–90s with empty output. A harness binary that
+    // never answers is killed at the shared budget and the surface names
+    // `timed-out` — the command returns, with the finding as data.
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir_all(home.path().join("project/.aikit")).unwrap();
+    fs::write(
+        home.path().join("project/.aikit/profile.toml"),
+        "schema = 1\n",
+    )
+    .unwrap();
+    let bin = home.path().join("actuation-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("actuation");
+    fs::write(&script, "#!/bin/sh\nexec sleep 60\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let start = std::time::Instant::now();
+    let mut command = Command::cargo_bin("aikit").unwrap();
+    command
+        .env("AIKIT_HOME", home.path().join("aikit-home"))
+        .env("HOME", home.path().join("user-home"))
+        .env("AIKIT_PROBE_BUDGET_SECS", "1")
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .arg("--json")
+        .args(["client", "status", "claude"])
+        .current_dir(home.path().join("project"));
+    let output = command.output().unwrap();
+    let elapsed = start.elapsed();
+
+    assert!(
+        output.status.success(),
+        "a timed-out probe is a finding, not a failure: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "status must return within the bound instead of hanging, took {elapsed:?}"
+    );
+    let value: Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    let rows = value["data"]["clients"].as_array().unwrap();
+    let claude = by_name(rows, "claude");
+    assert_eq!(
+        claude["probe"], "timed-out",
+        "a hanging binary is named timed-out: {claude}"
+    );
+    let reason = claude["probe_reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains('1'),
+        "the timeout names the bound it violated: {reason}"
+    );
 }

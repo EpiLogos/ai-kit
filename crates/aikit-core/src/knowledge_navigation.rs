@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -60,6 +60,11 @@ pub struct KnowledgeSearchHit {
     pub authority: SourceAuthority,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ranking: Option<KnowledgeRankingEvidence>,
+    /// Other faculties that found the same file: a code-index hit over a
+    /// source the pool also holds folds into that source instead of
+    /// duplicating the row, and names itself here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corroborated_by: Vec<ProviderRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -101,6 +106,11 @@ pub struct KnowledgeProviderStatus {
     pub project_map: bool,
     #[serde(default)]
     pub absences: Vec<String>,
+    /// Informational per-project and per-pool disclosure lines (anchor state,
+    /// index freshness, pool posture). Notes are state, not failures: a
+    /// missing anchor that degrades searches belongs in `absences` instead.
+    #[serde(default)]
+    pub notes: Vec<String>,
     /// Per-project rollups of pending authored relations. Status is the only
     /// surface that carries every project; search/resolve/frame replies keep
     /// their own scope's rollup line only.
@@ -231,8 +241,57 @@ pub struct KnowledgeApplication<'a> {
     context: FamiliarityContext,
     wiki: Option<Box<dyn WikiProvider + 'a>>,
     sources: Vec<SourcePoolBinding<'a>>,
-    code: Option<&'a dyn CodeIndexProvider>,
+    /// One code-index provider per declared project; each answers only its
+    /// own references, so search and relations fan out across all of them.
+    code: Vec<&'a dyn CodeIndexProvider>,
     project_map: Option<&'a ProjectMap>,
+    /// Scoped-reply attribution: the reply's own Project display plus the
+    /// ref → owning-Project maps for compiled authored edges, folder
+    /// subjects and capability-matrix objects (and their cited carrier
+    /// paths). When present, an authored Wiki citation attributed to
+    /// another Project surfaces neither as a hit nor as an unreadable
+    /// absence — sibling carrier paths must not re-enter a scoped reply
+    /// through the diagnostic door after the hits are filtered.
+    project_attribution: Option<ScopedAttribution<'a>>,
+}
+
+/// The attribution maps a scoped application consults, borrowed from the
+/// runtime that assembled it.
+#[derive(Clone, Copy)]
+struct ScopedAttribution<'a> {
+    scoped_project: &'a str,
+    authored_edge_projects: &'a BTreeMap<String, String>,
+    folder_subject_projects: &'a BTreeMap<String, String>,
+    matrix_object_projects: &'a BTreeMap<String, String>,
+}
+
+impl<'a> ScopedAttribution<'a> {
+    /// True when `resource` is attributed to a Project other than the
+    /// reply's own scope.
+    fn owned_by_other_project(&self, resource: &str) -> bool {
+        [
+            self.authored_edge_projects,
+            self.folder_subject_projects,
+            self.matrix_object_projects,
+        ]
+        .iter()
+        .any(|attribution| {
+            attribution
+                .get(resource)
+                .is_some_and(|project| project != self.scoped_project)
+        })
+    }
+
+    /// Whether an authored Wiki citation stays out of this scoped reply.
+    /// Two doors are closed: a citation attributed to another Project, and
+    /// a citation that is a plain filesystem path — compiled carriers carry
+    /// no Project ownership in their text, so an unattributed path can only
+    /// be root-composition material, and a Project reply discloses owned
+    /// refs, not the machine's layout. The root scope (no attribution
+    /// wired) keeps every shape.
+    fn suppresses(&self, source: &str) -> bool {
+        self.owned_by_other_project(source) || source.starts_with('/')
+    }
 }
 
 impl<'a> KnowledgeApplication<'a> {
@@ -241,8 +300,9 @@ impl<'a> KnowledgeApplication<'a> {
             context,
             wiki: None,
             sources: Vec::new(),
-            code: None,
+            code: Vec::new(),
             project_map: None,
+            project_attribution: None,
         }
     }
 
@@ -264,7 +324,7 @@ impl<'a> KnowledgeApplication<'a> {
 
     #[must_use]
     pub fn with_code(mut self, provider: &'a dyn CodeIndexProvider) -> Self {
-        self.code = Some(provider);
+        self.code.push(provider);
         self
     }
 
@@ -274,6 +334,31 @@ impl<'a> KnowledgeApplication<'a> {
         self
     }
 
+    #[must_use]
+    pub fn with_project_attribution(
+        mut self,
+        scoped_project: &'a str,
+        authored_edge_projects: &'a BTreeMap<String, String>,
+        folder_subject_projects: &'a BTreeMap<String, String>,
+        matrix_object_projects: &'a BTreeMap<String, String>,
+    ) -> Self {
+        self.project_attribution = Some(ScopedAttribution {
+            scoped_project,
+            authored_edge_projects,
+            folder_subject_projects,
+            matrix_object_projects,
+        });
+        self
+    }
+
+    /// True when the application carries scoped attribution and the source
+    /// must stay out of the reply entirely (see `ScopedAttribution::suppresses`).
+    fn source_suppressed_in_scope(&self, source: &str) -> bool {
+        self.project_attribution
+            .as_ref()
+            .is_some_and(|attribution| attribution.suppresses(source))
+    }
+
     pub fn status(&self) -> KnowledgeProviderStatus {
         let wiki = self.wiki.as_ref().map(|provider| provider.status());
         let sources = self
@@ -281,7 +366,7 @@ impl<'a> KnowledgeApplication<'a> {
             .iter()
             .map(|binding| binding.provider.status())
             .collect::<Vec<_>>();
-        let code = self.code.map(|provider| provider.status());
+        let code = self.code.first().map(|provider| provider.status());
         let mut absences = Vec::new();
         if wiki.is_none() {
             absences.push("SemanticWiki provider absent".into());
@@ -302,6 +387,7 @@ impl<'a> KnowledgeApplication<'a> {
             code,
             project_map: self.project_map.is_some(),
             absences,
+            notes: Vec::new(),
             authored_pending: Vec::new(),
         }
     }
@@ -368,14 +454,71 @@ impl<'a> KnowledgeApplication<'a> {
             !matches!(hit.address, KnowledgeAddress::ProjectMap(_))
                 || !native_resources.contains(&hit.resource.to_string())
         });
+        // Authority tier before score (addendum A-6): a code-index hit is
+        // GitNexus's own *derived* reading of the repository, never the
+        // authored or observed ground a documentation query is actually
+        // asking about. GitNexus's own score defaults to 0.5 whenever its
+        // JSON carries no `score`/`relevance`/`similarity` field (see
+        // `GitNexusCodeIndexProvider::search_hits`), which used to let a flat
+        // wall of default-scored code symbols interleave with — and bury —
+        // an authored Wiki node or an observed SourcePool document scored
+        // below that default. Grouping by tier first keeps every authored or
+        // observed hit ahead of every derived one; score only breaks ties
+        // inside a tier, so a code-specific query still ranks its own best
+        // symbols against each other exactly as before.
+        // One row per file across faculties: a code-reference hit whose
+        // basename matches an observed source hit corroborates it rather
+        // than duplicating it. The source hit keeps its score; the folding
+        // is disclosed on the hit itself.
+        let mut folded: Vec<KnowledgeSearchHit> = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let mut merged = false;
+            if hit.kind == ResourceKind::CodeReference {
+                if let Some(filename) = hit.label.rsplit('/').next() {
+                    for existing in folded.iter_mut() {
+                        let tail = existing.label.rsplit('/').next().unwrap_or_default();
+                        if existing.kind == ResourceKind::KnowledgeSource
+                            && !filename.is_empty()
+                            && tail == filename
+                        {
+                            existing.corroborated_by.push(hit.provider.clone());
+                            merged = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !merged {
+                folded.push(hit);
+            }
+        }
+        hits = folded;
         hits.sort_by(|left, right| {
-            right
-                .score
-                .total_cmp(&left.score)
+            authority_rank(left.authority)
+                .cmp(&authority_rank(right.authority))
+                .then_with(|| right.score.total_cmp(&left.score))
                 .then_with(|| left.resource.cmp(&right.resource))
         });
         let mut seen = HashSet::new();
         hits.retain(|hit| seen.insert(hit.resource.to_string()));
+        // No single pool may fill the surfaced limit. A provider whose corpus
+        // is vast (a code index over every Work repo, a live pool over the
+        // whole ground) would otherwise rank every other pool out of the
+        // surface on its own scale, and Work coverage would displace the
+        // Control prose it must not displace (addendum A-5). Each provider
+        // keeps its best half; the global ranking decides the rest.
+        let per_provider_cap = (limit / 2).max(1);
+        let mut provider_counts: HashMap<String, usize> = HashMap::new();
+        hits.retain(|hit| {
+            let count = provider_counts
+                .entry(hit.provider.as_str().to_owned())
+                .or_default();
+            let keep = *count < per_provider_cap;
+            if keep {
+                *count += 1;
+            }
+            keep
+        });
         hits.truncate(limit);
         // A relation evaluates each side against the same provider field, so a
         // shared absence is one absence, reported once.
@@ -437,7 +580,7 @@ impl<'a> KnowledgeApplication<'a> {
 
         let mut unreadable: Vec<SourceRef> = Vec::new();
         if let Some(wiki) = &self.wiki {
-            hits.extend(wiki.search(query, limit).into_iter().map(|hit| {
+            hits.extend(wiki.search(query, limit).into_iter().filter_map(|hit| {
                 match &hit.address {
                     // A curated Wiki object keeps the Wiki address and the
                     // KnowledgeNode/Space/Frame kind it always had.
@@ -447,17 +590,18 @@ impl<'a> KnowledgeApplication<'a> {
                             "frame" => ResourceKind::KnowledgeFrame,
                             _ => ResourceKind::KnowledgeNode,
                         };
-                        KnowledgeSearchHit {
+                        Some(KnowledgeSearchHit {
                             address: KnowledgeAddress::Wiki(resource.clone()),
                             resource: resource.clone(),
                             kind,
                             label: hit.label,
-                            score: 1.0 / (1.0 + f64::from(hit.score)),
+                            score: wiki_rank(hit.score),
                             snippet: hit.summary,
                             provider: wiki.status().provider,
                             authority: SourceAuthority::Authored,
                             ranking: None,
-                        }
+                            corroborated_by: Vec::new(),
+                        })
                     }
                     // A source cited by a curated node is findable, but it is
                     // not itself curated Wiki identity: it reaches the
@@ -468,6 +612,15 @@ impl<'a> KnowledgeApplication<'a> {
                     // `Authored` authority; only its provenance house
                     // differs from a curated Wiki object.
                     WikiSearchAddress::AuthoredSource { source } => {
+                        // Scoped attribution precedes findability: a source
+                        // attributed to another Project — or an unattributed
+                        // raw filesystem path — produces neither a hit nor
+                        // the unreadable-source absence below, so sibling
+                        // carriers cannot re-enter a scoped reply through
+                        // the diagnostic door.
+                        if self.source_suppressed_in_scope(source.as_str()) {
+                            return None;
+                        }
                         // Findability must not outrun openability in silence.
                         // If this horizon cannot materialise the source, the
                         // result says so here — at the point the address is
@@ -479,17 +632,18 @@ impl<'a> KnowledgeApplication<'a> {
                         let resource = ResourceRef::parse(source.as_str()).expect(
                             "SourceRef validation is compatible with ResourceRef validation",
                         );
-                        KnowledgeSearchHit {
+                        Some(KnowledgeSearchHit {
                             address: KnowledgeAddress::Source(source.clone()),
                             resource,
                             kind: ResourceKind::KnowledgeSource,
                             label: hit.label,
-                            score: 1.0 / (1.0 + f64::from(hit.score)),
+                            score: wiki_rank(hit.score),
                             snippet: hit.summary,
                             provider: wiki.status().provider,
                             authority: SourceAuthority::Authored,
                             ranking: None,
-                        }
+                            corroborated_by: Vec::new(),
+                        })
                     }
                 }
             }));
@@ -552,6 +706,7 @@ impl<'a> KnowledgeApplication<'a> {
                         snippet: hit.snippet,
                         provider: hit.provider,
                         authority: SourceAuthority::Observed,
+                        corroborated_by: Vec::new(),
                         ranking: None,
                     }
                 })),
@@ -563,7 +718,7 @@ impl<'a> KnowledgeApplication<'a> {
             }
         }
 
-        if let Some(code) = self.code {
+        for code in &self.code {
             let status = code.status();
             if status.available && status.indexed && status.capabilities.search {
                 match code.search(query, limit) {
@@ -577,6 +732,7 @@ impl<'a> KnowledgeApplication<'a> {
                             snippet: hit.snippet,
                             provider: hit.provider,
                             authority: SourceAuthority::Derived,
+                            corroborated_by: Vec::new(),
                             ranking: None,
                         }))
                     }
@@ -589,7 +745,8 @@ impl<'a> KnowledgeApplication<'a> {
                 absences
                     .push("ProjectMap code search unavailable: index absent or degraded".into());
             }
-        } else {
+        }
+        if self.code.is_empty() {
             absences.push("ProjectMap code search unavailable: provider absent".into());
         }
 
@@ -609,6 +766,7 @@ impl<'a> KnowledgeApplication<'a> {
                     address: KnowledgeAddress::ProjectMap(endpoint.resource.clone()),
                     resource: endpoint.resource.clone(),
                     kind: endpoint.kind,
+                    corroborated_by: Vec::new(),
                     label,
                     score: if endpoint.resource.as_str() == query {
                         1.25
@@ -639,57 +797,97 @@ impl<'a> KnowledgeApplication<'a> {
                 .ok_or_else(|| provider_absent("SemanticWiki"))?
                 .read(resource),
             KnowledgeAddress::Source(source) => {
-                let (binding, material) = self.source_material(source).ok_or_else(|| {
-                    // Search can hand back a source a curated node cites. If
-                    // this horizon cannot materialise it, say which citation
-                    // it came from rather than reporting it simply missing.
-                    let citing = self.wiki_citations(source);
-                    if citing.is_empty() {
-                        AikitError::new(
-                            "knowledge.source_missing",
-                            format!("Source {source} is not materialised in the project horizon"),
-                        )
-                    } else {
-                        Self::unmaterialised_cited_source(source, &citing)
+                if let Some((binding, material)) = self.source_material(source) {
+                    let live = binding.provider.read(source)?;
+                    let material = live.as_ref().unwrap_or(material);
+                    return Ok(KnowledgeReading {
+                        resource: ResourceRef::parse(source.as_str())?,
+                        provider: Some(binding.provider.status().provider),
+                        lens: Some("source-pool".into()),
+                        revision: Some(material.binding.revision.to_string()),
+                        freshness: None,
+                        authority: SourceAuthority::Observed,
+                        content: Some(material.body.clone()),
+                        evidence: vec![source.clone()],
+                        why_selected: "selected from the eligible project SourcePool".into(),
+                    });
+                }
+                // Search can surface a source no attached source set declared:
+                // a live pool over a large owner ground cannot enumerate every
+                // file it might ever match. The SourcePoolProvider::read
+                // contract is the live owner read, so the owning pool is asked
+                // directly; a pool that declines the ref simply passes.
+                for binding in &self.sources {
+                    if let Some(material) = binding.provider.read(source).ok().flatten() {
+                        return Ok(KnowledgeReading {
+                            resource: ResourceRef::parse(source.as_str())?,
+                            provider: Some(binding.provider.status().provider),
+                            lens: Some("source-pool".into()),
+                            revision: Some(material.binding.revision.to_string()),
+                            freshness: None,
+                            authority: SourceAuthority::Observed,
+                            content: Some(material.body.clone()),
+                            evidence: vec![source.clone()],
+                            why_selected: "read live from the owning SourcePool".into(),
+                        });
                     }
-                })?;
-                let live = binding.provider.read(source)?;
-                let material = live.as_ref().unwrap_or(material);
-                Ok(KnowledgeReading {
-                    resource: ResourceRef::parse(source.as_str())?,
-                    provider: Some(binding.provider.status().provider),
-                    lens: Some("source-pool".into()),
-                    revision: Some(material.binding.revision.to_string()),
-                    freshness: None,
-                    authority: SourceAuthority::Observed,
-                    content: Some(material.body.clone()),
-                    evidence: vec![source.clone()],
-                    why_selected: "selected from the eligible project SourcePool".into(),
-                })
+                }
+                // This horizon cannot materialise it, say which citation
+                // it came from rather than reporting it simply missing.
+                let citing = self.wiki_citations(source);
+                if citing.is_empty() {
+                    return Err(AikitError::new(
+                        "knowledge.source_missing",
+                        format!("Source {source} is not materialised in the project horizon"),
+                    ));
+                }
+                Err(Self::unmaterialised_cited_source(source, &citing))
             }
             KnowledgeAddress::Code(reference) => {
-                let code = self
-                    .code
-                    .ok_or_else(|| provider_absent("ProjectMap CodeIndex"))?;
-                let context = code.context(reference)?;
-                Ok(KnowledgeReading {
-                    resource: reference.resource_ref(),
-                    provider: Some(context.provider),
-                    lens: Some("code-index".into()),
-                    revision: reference.revision.as_ref().map(ToString::to_string),
-                    freshness: None,
-                    authority: SourceAuthority::Derived,
-                    content: Some(serde_json::to_string_pretty(&context.detail).map_err(
-                        |error| {
-                            AikitError::new(
-                                "knowledge.code_context_serialization",
-                                format!("could not render code context: {error}"),
-                            )
-                        },
-                    )?),
-                    evidence: vec![reference.source.clone()],
-                    why_selected: "selected from derived ProjectMap code intelligence".into(),
-                })
+                if self.code.is_empty() {
+                    return Err(provider_absent("ProjectMap CodeIndex"));
+                }
+                // One provider per project: the owner of this reference
+                // answers; the others decline, and the last refusal is the
+                // honest error.
+                let mut last_error = None;
+                for code in &self.code {
+                    match code.context(reference) {
+                        Ok(context) => {
+                            return Ok(KnowledgeReading {
+                                resource: reference.resource_ref(),
+                                provider: Some(context.provider),
+                                lens: Some("code-index".into()),
+                                revision: reference.revision.as_ref().map(ToString::to_string),
+                                freshness: None,
+                                authority: SourceAuthority::Derived,
+                                content: Some(
+                                    serde_json::to_string_pretty(&context.detail).map_err(
+                                        |error| {
+                                            AikitError::new(
+                                                "knowledge.code_context_serialization",
+                                                format!("could not render code context: {error}"),
+                                            )
+                                        },
+                                    )?,
+                                ),
+                                evidence: vec![reference.source.clone()],
+                                why_selected: "selected from derived ProjectMap code intelligence"
+                                    .into(),
+                            });
+                        }
+                        Err(error) => last_error = Some(error),
+                    }
+                }
+                let error = last_error.expect("a non-empty provider list produced no answer");
+                Err(AikitError::new(
+                    "knowledge.code_context_unavailable",
+                    format!(
+                        "no code index in this horizon answers {}: {}",
+                        reference.resource_ref(),
+                        error.message()
+                    ),
+                ))
             }
             KnowledgeAddress::ProjectMap(resource) => {
                 let endpoint = self.project_map_endpoint(resource)?;
@@ -816,10 +1014,19 @@ impl<'a> KnowledgeApplication<'a> {
                 })
             }
             KnowledgeAddress::Code(reference) => {
-                let code = self
-                    .code
-                    .ok_or_else(|| provider_absent("ProjectMap CodeIndex"))?;
-                let context = code.context(reference)?;
+                // The provider whose project indexed this reference answers;
+                // the others decline, and the last refusal is the honest
+                // error.
+                let mut context = None;
+                for code in &self.code {
+                    if let Ok(answer) = code.context(reference) {
+                        context = Some(answer);
+                        break;
+                    }
+                }
+                let Some(context) = context else {
+                    return Err(provider_absent("ProjectMap CodeIndex"));
+                };
                 Ok(KnowledgeExplanation {
                     address: address.clone(),
                     provider: Some(context.provider),
@@ -1243,10 +1450,33 @@ impl<'a> KnowledgeApplication<'a> {
         max_nodes: usize,
         max_edges: usize,
     ) -> Result<KnowledgeRelationView> {
-        let code = self
-            .code
-            .ok_or_else(|| provider_absent("ProjectMap CodeIndex"))?;
-        let context = code.context(reference)?;
+        if self.code.is_empty() {
+            return Err(provider_absent("ProjectMap CodeIndex"));
+        }
+        // The provider that indexed this reference's project owns the
+        // relation walk; the others decline and that is data, not failure.
+        let mut last_error = None;
+        let mut context = None;
+        for code in &self.code {
+            match code.context(reference) {
+                Ok(answer) => {
+                    context = Some(answer);
+                    break;
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        let Some(context) = context else {
+            let error = last_error.expect("a non-empty provider list produced no answer");
+            return Err(AikitError::new(
+                "knowledge.code_relations_unavailable",
+                format!(
+                    "no code index in this horizon answers {}: {}",
+                    reference.resource_ref(),
+                    error.message()
+                ),
+            ));
+        };
         let focus = reference.resource_ref();
         let query = RelationQuery {
             focus: focus.clone(),
@@ -1455,8 +1685,11 @@ impl<'a> KnowledgeApplication<'a> {
                 ))
             }
             KnowledgeAddress::Code(reference) => {
+                // The first provider's identity labels the address; the
+                // reference itself belongs to whichever project indexed it.
                 let code = self
                     .code
+                    .first()
                     .ok_or_else(|| provider_absent("ProjectMap CodeIndex"))?;
                 Ok((
                     Some(code.status().provider),
@@ -1476,6 +1709,38 @@ impl<'a> KnowledgeApplication<'a> {
                 ))
             }
         }
+    }
+}
+
+/// Ranking tier for [`resolve`]'s global sort: lower sorts first. Authored
+/// ground and observed artefacts share the top tier — a query does not
+/// prefer a curated Wiki node over the source it cites, only over derived
+/// intelligence about either. `Learned`/`Generated` sit behind `Derived`:
+/// both name material with even less claim to being the thing a query asked
+/// about than a structural code reading.
+fn authority_rank(authority: SourceAuthority) -> u8 {
+    match authority {
+        SourceAuthority::Authored | SourceAuthority::Observed => 0,
+        SourceAuthority::Derived => 1,
+        SourceAuthority::Learned | SourceAuthority::Generated => 2,
+    }
+}
+
+/// The SemanticWiki's score is a match-distance penalty (0 = exact, growing
+/// by match tier per token), while every other provider in this merged
+/// ranking scores content quality near 1.0. Mapped through `1/(1 + penalty)`
+/// an exact title match scored 1.0 but an ordinary multi-token match scored
+/// 0.1–0.3, so curated Wiki knowledge — the ground's own authored answer —
+/// sank beneath default-scored file hits and behind the surfaced limit on
+/// any realistic query. Tier the penalty into the merged band instead:
+/// authored knowledge stays at or above the 0.5 provider default, ordered
+/// monotonically by match quality.
+fn wiki_rank(penalty: u32) -> f64 {
+    match penalty {
+        0 => 1.0,
+        1..=2 => 0.8,
+        3..=5 => 0.65,
+        _ => 0.5,
     }
 }
 
@@ -1529,7 +1794,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::knowledge_source_pool::{
-        NativeSourcePoolProvider, SourceBinding, SourcePoolProvider, SourceVisibility,
+        NativeSourcePoolProvider, SourceBinding, SourceHit, SourcePoolProvider,
+        SourceProviderCapabilities, SourceSearchMode, SourceVisibility,
     };
     use crate::knowledge_wiki::{parse_wiki_objects, WikiObject};
     use crate::knowledge_wiki_index::SemanticWikiIndex;
@@ -1558,6 +1824,56 @@ mod tests {
 
     fn spec() -> SourceRef {
         SourceRef::parse("source:spec").unwrap()
+    }
+
+    /// A scripted pool that answers every query with many high-scored hits
+    /// under one provider ref — the shape of a vast indexed pool whose
+    /// native scores sit above the shared default.
+    struct FloodProvider {
+        provider: ProviderRef,
+        count: usize,
+        score: f64,
+    }
+
+    impl SourcePoolProvider for FloodProvider {
+        fn capabilities(&self) -> SourceProviderCapabilities {
+            SourceProviderCapabilities {
+                provider: self.provider.clone(),
+                version: None,
+                fulltext: true,
+                fuzzy_interactive: false,
+                semantic: false,
+                hybrid: false,
+                tags: true,
+                structured_output: false,
+                reasons: BTreeMap::new(),
+            }
+        }
+
+        fn rebuild(&mut self, _material: &[SourceMaterial]) -> Result<()> {
+            Ok(())
+        }
+
+        fn search(
+            &self,
+            _query: &str,
+            _mode: SourceSearchMode,
+            _tags: &[String],
+            _limit: usize,
+        ) -> Result<Vec<SourceHit>> {
+            Ok((0..self.count)
+                .map(|index| SourceHit {
+                    source: SourceRef::parse(format!("source:flood:{index}")).unwrap(),
+                    provider: self.provider.clone(),
+                    score: Some(self.score),
+                    title: format!("flood {index}"),
+                    snippet: String::new(),
+                    tags: Vec::new(),
+                    provider_binding: None,
+                    retrieval_mode: SourceSearchMode::Fulltext,
+                })
+                .collect())
+        }
     }
 
     fn material() -> SourceMaterial {
@@ -1647,6 +1963,328 @@ mod tests {
             .hits
             .iter()
             .any(|hit| hit.resource.as_str() == "source:spec"));
+    }
+
+    /// No single pool may fill the surfaced limit. The live gate proved the
+    /// failure shape: a pool whose native scores sit above the shared 0.5
+    /// default (a code index over every Work repo) ranked every other pool
+    /// out of the surface entirely, displacing the Control material the
+    /// faculty must keep first-class (addendum A-5).
+    #[test]
+    fn no_single_pool_fills_the_surfaced_limit() {
+        let flood = FloodProvider {
+            provider: ProviderRef::parse("provider/source-pool/flood").unwrap(),
+            count: 40,
+            score: 0.9,
+        };
+        let material = vec![material()];
+        let mut native = NativeSourcePoolProvider::new();
+        native.rebuild(&material).unwrap();
+        let app = KnowledgeApplication::new(FamiliarityContext {
+            project: None,
+            actor: None,
+            agency: None,
+            focus: None,
+        })
+        .with_source_pool(&flood, &[])
+        .with_source_pool(&native, &material);
+
+        let matched = app.search("Authentication", 10);
+        let flood_hits = matched
+            .hits
+            .iter()
+            .filter(|hit| hit.provider.as_str() == "provider/source-pool/flood")
+            .count();
+        assert!(
+            flood_hits <= 5,
+            "one provider is capped at half the limit, its best hits first: \
+             {flood_hits} of {} surfaced",
+            matched.hits.len()
+        );
+        assert!(
+            matched
+                .hits
+                .iter()
+                .any(|hit| hit.resource.as_str() == "source:spec"),
+            "the shared-floor native hit surfaces beside the flood: {:#?}",
+            matched
+                .hits
+                .iter()
+                .map(|hit| (hit.resource.as_str(), hit.provider.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A fake code lens that answers every search with high-scored symbol
+    /// hits, tagged `Derived` exactly as `GitNexusCodeIndexProvider` tags its
+    /// own hits — the shape a real GitNexus index takes for a query that
+    /// also happens to match code symbol/file names.
+    struct FakeCodeIndex {
+        count: usize,
+        score: f64,
+    }
+
+    impl CodeIndexProvider for FakeCodeIndex {
+        fn capabilities(&self) -> crate::knowledge_code::CodeIndexCapabilities {
+            crate::knowledge_code::CodeIndexCapabilities {
+                provider: self.provider(),
+                version: Some("9.9.9".into()),
+                index: true,
+                search: true,
+                context: false,
+                impact: false,
+                trace: false,
+                detect_changes: false,
+                structural_check: false,
+                cypher: false,
+                pdg_impact: false,
+                structured_output: true,
+            }
+        }
+
+        fn status(&self) -> crate::knowledge_code::CodeIndexStatus {
+            crate::knowledge_code::CodeIndexStatus {
+                provider: self.provider(),
+                available: true,
+                version: Some("9.9.9".into()),
+                tested_version: Some("9.9.9".into()),
+                version_drift: false,
+                indexed: true,
+                capabilities: self.capabilities(),
+                detail: "fake".into(),
+            }
+        }
+
+        fn index(
+            &mut self,
+            _root: &std::path::Path,
+            _force: bool,
+        ) -> Result<crate::knowledge_code::CodeIndexStatus> {
+            Ok(self.status())
+        }
+
+        fn search(
+            &self,
+            _query: &str,
+            limit: usize,
+        ) -> Result<Vec<crate::knowledge_code::CodeSearchHit>> {
+            Ok((0..self.count.min(limit))
+                .map(|index| {
+                    let reference = CodeReference {
+                        source: SourceRef::parse("source:git/demo").unwrap(),
+                        revision: None,
+                        path: format!("src/auth_{index}.rs"),
+                        symbol: Some(format!("authenticate_{index}")),
+                        kind: Some("Function".into()),
+                        line: None,
+                    };
+                    crate::knowledge_code::CodeSearchHit {
+                        resource: reference.resource_ref(),
+                        reference,
+                        title: format!("authenticate_{index}"),
+                        score: Some(self.score),
+                        snippet: String::new(),
+                        provider: self.provider(),
+                        provider_binding: None,
+                    }
+                })
+                .collect())
+        }
+
+        fn context(&self, reference: &CodeReference) -> Result<crate::knowledge_code::CodeContext> {
+            Ok(crate::knowledge_code::CodeContext {
+                reference: reference.clone(),
+                provider: self.provider(),
+                detail: Value::Null,
+            })
+        }
+
+        fn impact(
+            &self,
+            reference: &CodeReference,
+            _direction: &str,
+        ) -> Result<crate::knowledge_code::CodeImpact> {
+            Ok(crate::knowledge_code::CodeImpact {
+                reference: reference.clone(),
+                provider: self.provider(),
+                detail: Value::Null,
+            })
+        }
+
+        fn trace(
+            &self,
+            from: &CodeReference,
+            to: &CodeReference,
+        ) -> Result<crate::knowledge_code::CodeTrace> {
+            Ok(crate::knowledge_code::CodeTrace {
+                from: from.clone(),
+                to: to.clone(),
+                provider: self.provider(),
+                detail: Value::Null,
+            })
+        }
+
+        fn detect_changes(
+            &self,
+            scope: &str,
+            base_ref: Option<&str>,
+        ) -> Result<crate::knowledge_code::CodeChanges> {
+            Ok(crate::knowledge_code::CodeChanges {
+                provider: self.provider(),
+                scope: scope.into(),
+                base_ref: base_ref.map(str::to_string),
+                detail: Value::Null,
+            })
+        }
+
+        fn structural_check(&self) -> Result<crate::knowledge_code::CodeStructuralCheck> {
+            Ok(crate::knowledge_code::CodeStructuralCheck {
+                provider: self.provider(),
+                detail: Value::Null,
+            })
+        }
+    }
+
+    impl FakeCodeIndex {
+        fn provider(&self) -> ProviderRef {
+            ProviderRef::parse("provider/code-index/fake").unwrap()
+        }
+    }
+
+    /// A documentation query must not be answered only by derived code
+    /// symbols that happen to share its words. Before this case, `resolve`
+    /// sorted purely by score, and GitNexus's own default score (0.5 when its
+    /// JSON carries no `score`/`relevance`/`similarity`) sat above a curated
+    /// Wiki hit's real but modest match score — so a wall of default-scored
+    /// code hits could bury the one authored answer the query wanted. This
+    /// reproduces that shape with a fake code lens scored well above the
+    /// Wiki hit and asserts the authored hit still leads.
+    #[test]
+    fn a_documentation_hit_is_not_displaced_by_higher_scored_derived_code_hits() {
+        let index = wiki();
+        let wiki_provider = SemanticWikiProvider::new(&index);
+        let code = FakeCodeIndex {
+            count: 8,
+            score: 0.97,
+        };
+        let app = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_wiki(wiki_provider)
+            .with_code(&code);
+
+        let result = app.search("Authentication", 10);
+        let wiki_position = result
+            .hits
+            .iter()
+            .position(|hit| hit.resource.as_str() == "wiki:node:auth")
+            .expect("the authored Wiki node is still found");
+        let code_positions: Vec<usize> = result
+            .hits
+            .iter()
+            .enumerate()
+            .filter(|(_, hit)| hit.authority == SourceAuthority::Derived)
+            .map(|(index, _)| index)
+            .collect();
+        assert!(
+            !code_positions.is_empty(),
+            "the fake code lens contributed derived hits: {:#?}",
+            result.hits
+        );
+        assert!(
+            code_positions
+                .iter()
+                .all(|&position| wiki_position < position),
+            "the authored hit at {wiki_position} must rank ahead of every derived hit \
+             at {code_positions:?}: {:#?}",
+            result.hits
+        );
+        assert_eq!(
+            result.hits[0].authority,
+            SourceAuthority::Authored,
+            "the top hit for a documentation query is authored ground, not a \
+             higher-scored derived code symbol: {:#?}",
+            result.hits
+        );
+    }
+
+    /// A realistic multi-token query matches a curated Wiki node at
+    /// contains tier (penalty grows per token), which the old
+    /// `1/(1 + penalty)` mapping scored around 0.2 — under a flood of
+    /// default-scored source hits. The tiered ranking keeps authored
+    /// knowledge competitive in the merged band where the authority sort
+    /// actually decides.
+    #[test]
+    fn a_multi_token_wiki_match_is_not_buried_by_default_scored_source_hits() {
+        let index = wiki();
+        let wiki_provider = SemanticWikiProvider::new(&index);
+        let flood = FloodProvider {
+            provider: ProviderRef::parse("provider/source-pool/flood").unwrap(),
+            count: 8,
+            score: 0.5,
+        };
+        let app = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_wiki(wiki_provider)
+            .with_source_pool(&flood, &[]);
+
+        let result = app.search("authentication concept", 10);
+        let wiki_hit = result
+            .hits
+            .iter()
+            .find(|hit| hit.resource.as_str() == "wiki:node:auth")
+            .expect("the authored Wiki node is found for a multi-token query");
+        assert!(
+            wiki_hit.score >= 0.5,
+            "a multi-token authored match must not rank below the provider \
+             default it competes with: {}",
+            wiki_hit.score
+        );
+        let source_positions: Vec<usize> = result
+            .hits
+            .iter()
+            .enumerate()
+            .filter(|(_, hit)| hit.resource.as_str().starts_with("source:flood:"))
+            .map(|(index, _)| index)
+            .collect();
+        let wiki_position = result
+            .hits
+            .iter()
+            .position(|hit| hit.resource.as_str() == "wiki:node:auth")
+            .unwrap();
+        assert!(
+            source_positions
+                .iter()
+                .all(|&position| wiki_position < position),
+            "the authored match at {wiki_position} must rank ahead of every \
+             default-scored source hit at {source_positions:?}: {:#?}",
+            result.hits
+        );
+    }
+
+    /// The tiered ranking stays monotone in match quality: a tighter match
+    /// must never score below a looser one.
+    #[test]
+    fn wiki_ranking_stays_monotone_in_match_quality() {
+        let index = wiki();
+        let wiki_provider = SemanticWikiProvider::new(&index);
+        let app = KnowledgeApplication::new(FamiliarityContext::default()).with_wiki(wiki_provider);
+
+        let tight = app
+            .search("authentication", 10)
+            .hits
+            .into_iter()
+            .find(|hit| hit.resource.as_str() == "wiki:node:auth")
+            .expect("single-token match found");
+        let loose = app
+            .search("authentication concept", 10)
+            .hits
+            .into_iter()
+            .find(|hit| hit.resource.as_str() == "wiki:node:auth")
+            .expect("multi-token match found");
+        assert!(
+            tight.score > loose.score,
+            "the tighter match ({}) must outscore the looser one ({})",
+            tight.score,
+            loose.score
+        );
     }
 
     /// Law 3, one query path: the raw-string front is a front, not a second

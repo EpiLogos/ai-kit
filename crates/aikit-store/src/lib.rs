@@ -63,13 +63,18 @@ pub mod home;
 pub mod inbox;
 pub mod index;
 pub mod knowledge_application;
+pub mod knowledge_cache;
 pub mod knowledge_wiki;
 pub mod locks;
 pub mod model_catalogue;
+pub mod now_context;
 pub mod procedure;
 pub mod procedure_history;
 pub mod registry;
+pub mod registry_skillsets;
+pub mod routine_credentials;
 pub mod routine_invocation;
+pub mod routine_store;
 pub mod scan;
 pub mod session_lifecycle;
 pub mod session_space_application;
@@ -114,13 +119,20 @@ pub use knowledge_application::{
 };
 pub use knowledge_wiki::SqliteWikiProvider;
 pub use locks::{ContextLock, LockOptions};
+pub use now_context::{
+    CursorChange, NowContextBasis, NowContextChange, NowContextItem, NowDeliveryReceipt,
+    NowNeighbour, PreparedNowContext, RedisNowConfig, RedisNowStatus, RedisNowStore,
+    NOW_DELIVERY_SCHEMA, NOW_PREPARED_SCHEMA, NOW_REDIS_CONFIG_SCHEMA,
+};
 pub use procedure::{plan_procedure, EditDiff, ProcedureDiff, ProcedureOutcome, ProcedureRunner};
 pub use procedure_history::procedure_history_evidence;
 pub use registry::{load_project_local, load_registry, RegistryLoad, RegistryProblem, Snapshot};
+pub use routine_credentials::{RoutineCredentialStore, ROUTINE_CREDENTIALS_VERSION};
 pub use routine_invocation::{
     RoutineInvocationAdmission, RoutineInvocationAdmissionStatus, RoutineInvocationStore,
     ROUTINE_INVOCATION_ADMISSION_VERSION, ROUTINE_INVOCATION_LEDGER_VERSION,
 };
+pub use routine_store::{ForeignAdoption, RoutineStore, StoredRoutine, ROUTINE_STORE_VERSION};
 pub use scan::{Finding, Scanner};
 pub use session_lifecycle::{SessionLifecycleStore, SESSION_LIFECYCLE_STORE_VERSION};
 pub use session_space_application::{

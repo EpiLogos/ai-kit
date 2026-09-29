@@ -26,12 +26,12 @@ use aikit_adapters::actuation_model_routes::{
 };
 use aikit_adapters::connection_process::ModelEnvironment;
 use aikit_adapters::profiles;
-use aikit_adapters::runner::{CommandRunner, SystemRunner};
+use aikit_adapters::runner::CommandRunner;
 use aikit_core::harness_profile::{ModelDispatchPosture, ModelsLayer};
 use aikit_core::model_harness_binding::HarnessProviderGate;
 use aikit_core::resource::{
-    canonical_model_ref, CredentialCondition, ModelRoute, ModelRouteSet, ProviderRef, ResourceRef,
-    RouteAvailability, RouteUsability,
+    canonical_model_ref, CredentialCondition, ModelRoute, ModelRouteKind, ModelRouteSet,
+    ProviderRef, ResourceRef, RouteAvailability, RouteUsability,
 };
 use aikit_core::{AikitError, Result};
 use aikit_store::model_catalogue::{load_provider_catalogs, resolved_catalogue};
@@ -70,6 +70,8 @@ pub struct RouteLaunchPlan {
     /// Credential disclosure for humans: variable names and binding refs,
     /// never material.
     pub credential_disclosure: String,
+    /// API binding, verified Codex login, or a route needing no credential.
+    pub credential_mode: &'static str,
     /// Delivered credential variable names (the values live only in the
     /// spawned `Command`).
     pub delivered_env_vars: Vec<String>,
@@ -90,9 +92,52 @@ pub(crate) enum RouteSelection<'a> {
     NoneViable(Vec<String>),
 }
 
+/// The token a harness's own CLI accepts. Catalogue identity stays
+/// `provider:z-ai`; Pi's model list and `--provider` flag say `zai`.
+fn harness_argv_provider(harness: &str, provider: &ProviderRef) -> String {
+    let stripped = provider
+        .as_str()
+        .strip_prefix("provider:")
+        .unwrap_or(provider.as_str());
+    if harness == "pi" && stripped == "z-ai" {
+        return "zai".to_string();
+    }
+    stripped.to_string()
+}
+
+fn same_offer_prefers_harness<'a>(usable: Vec<&'a ModelRoute>) -> Vec<&'a ModelRoute> {
+    let mut grouped: Vec<((String, String), Vec<&'a ModelRoute>)> = Vec::new();
+    for route in usable {
+        let key = (route.provider.to_string(), route.provider_native_id.clone());
+        if let Some((_, group)) = grouped.iter_mut().find(|(existing, _)| *existing == key) {
+            group.push(route);
+        } else {
+            grouped.push((key, vec![route]));
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(_, group)| {
+            group
+                .iter()
+                .copied()
+                .find(|route| route.kind == ModelRouteKind::HarnessNative)
+                .unwrap_or(group[0])
+        })
+        .collect()
+}
+
 pub(crate) fn select_route<'a>(
     set: &'a ModelRouteSet,
     pin: Option<&ProviderRef>,
+) -> RouteSelection<'a> {
+    select_route_with_login(set, pin, None)
+}
+
+fn select_route_with_login<'a>(
+    set: &'a ModelRouteSet,
+    pin: Option<&ProviderRef>,
+    own_login_provider: Option<&str>,
 ) -> RouteSelection<'a> {
     let narrowed = match pin {
         Some(provider) => set.viable_pinned(provider),
@@ -117,8 +162,17 @@ pub(crate) fn select_route<'a>(
     }
     let usable: Vec<&ModelRoute> = narrowed
         .into_iter()
-        .filter(|route| route.is_usable())
+        .filter(|route| {
+            route.is_usable()
+                || (own_login_provider == Some(route.provider.as_str())
+                    && matches!(&route.credential, CredentialCondition::Required { .. }))
+        })
         .collect();
+    // One provider offering one native id is one route, however many times
+    // the catalogue and the harness both observed it. A harness launch takes
+    // the harness-native observation of that offer. Distinct native ids, or
+    // distinct providers, stay ambiguous and still require an explicit pin.
+    let usable = same_offer_prefers_harness(usable);
     match usable.len() {
         0 => RouteSelection::NoneUsable(
             set.routes
@@ -152,8 +206,9 @@ pub(crate) fn select_route<'a>(
 fn route_for_launch<'a>(
     set: &'a ModelRouteSet,
     pin: Option<&ProviderRef>,
+    own_login_provider: Option<&str>,
 ) -> Result<&'a ModelRoute> {
-    match select_route(set, pin) {
+    match select_route_with_login(set, pin, own_login_provider) {
         RouteSelection::Selected(route) => Ok(route),
         RouteSelection::Ambiguous(providers) => Err(error(format!(
             "several usable routes reach {} ({}); pin one with --provider — selection is \
@@ -165,14 +220,76 @@ fn route_for_launch<'a>(
                 .collect::<Vec<_>>()
                 .join(", ")
         ))),
-        RouteSelection::NoneUsable(reasons) | RouteSelection::NoneViable(reasons) => {
+        RouteSelection::NoneUsable(reasons) => {
+            // When the blocker is an unbound credential, the refusal carries
+            // the shared vocabulary outcome: `credential-gated`, naming the
+            // missing credential and the bind remediation — never an opaque
+            // failure and never a live call that hangs on authentication.
+            let gated = set.routes.iter().any(|route| {
+                pin.is_none_or(|p| route.provider == *p)
+                    && matches!(route.usability(), RouteUsability::NeedsCredential { .. })
+            });
+            if gated {
+                return Err(AikitError::new(
+                    "route_launch.credential_gated",
+                    format!(
+                        "credential-gated: no observed+usable route reaches {} today:\n  - {}",
+                        set.model,
+                        reasons.join("\n  - ")
+                    ),
+                )
+                .with("outcome", "credential-gated"));
+            }
             Err(error(format!(
                 "no observed+usable route reaches {} today:\n  - {}",
                 set.model,
                 reasons.join("\n  - ")
             )))
         }
+        // No viable route at all (nothing observed).
+        RouteSelection::NoneViable(reasons) => Err(error(format!(
+            "no observed+usable route reaches {} today:\n  - {}",
+            set.model,
+            reasons.join("\n  - ")
+        ))),
     }
+}
+
+/// The selected Codex model and provider must remain the ones disclosed by
+/// the plan. Codex 0.155.1 accepts model/config/provider overrides both before
+/// and after a subcommand, so inspect every passthrough token before appending
+/// it. Ordinary prompt and execution flags remain available.
+fn guard_codex_passthrough(passthrough: &[String]) -> Result<()> {
+    for argument in passthrough {
+        let overrides = argument == "--"
+            || argument == "--model"
+            || argument.starts_with("--model=")
+            || argument == "-m"
+            || argument.starts_with("-m")
+            || argument == "--config"
+            || argument.starts_with("--config=")
+            || argument == "-c"
+            || argument.starts_with("-c")
+            || argument == "--profile"
+            || argument.starts_with("--profile=")
+            || argument == "-p"
+            || argument.starts_with("-p")
+            || argument == "--oss"
+            || argument == "--local-provider"
+            || argument.starts_with("--local-provider=")
+            || argument == "--remote"
+            || argument.starts_with("--remote=")
+            || argument == "--remote-auth-token-env"
+            || argument.starts_with("--remote-auth-token-env=")
+            || argument == "--provider"
+            || argument.starts_with("--provider=");
+        if overrides {
+            return Err(error(format!(
+                "Codex passthrough {argument:?} can change or obscure the selected model/provider/auth route; use AIKit's --model and --provider instead"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The profile's provider gate as a launch-time verdict, carrying the
@@ -229,9 +346,14 @@ impl LaunchDispatch<'_> {
 
     /// The argv fragment that carries the model choice into the harness, per
     /// its declared selector surface. A selector the launch path cannot honour
-    /// (a config key: there is no one-shot spawn-time config surface) refuses
-    /// rather than delivering a key and silently ignoring the model choice.
-    fn model_args(&self, native_provider: &str, native_id: &str) -> Result<Vec<String>> {
+    /// (a config key with no observed one-shot flag) refuses rather than
+    /// delivering a key and silently ignoring the model choice.
+    fn model_args(
+        &self,
+        harness: &str,
+        native_provider: &str,
+        native_id: &str,
+    ) -> Result<Vec<String>> {
         match self {
             LaunchDispatch::ProviderPlural { selectors } => Ok(vec![
                 selectors.provider.clone(),
@@ -245,6 +367,12 @@ impl LaunchDispatch<'_> {
                 ..
             } => match *selector_kind {
                 "argv-flag" => Ok(vec![(*selector_name).to_string(), native_id.to_string()]),
+                // Codex 0.155.1 exposes `--model` on its actual one-shot CLI.
+                // Its ACP encounter still selects through the declared
+                // session `model` config key; this is only the CLI launcher.
+                "config-key" if harness == "codex" && *selector_name == "model" => {
+                    Ok(vec!["--model".into(), native_id.into()])
+                }
                 other => Err(error(format!(
                     "the harness profile binds its provider through a {other:?} selector \
                      ({selector_name:?}), and AIKit's launch path has no one-shot {other:?} \
@@ -331,7 +459,10 @@ pub fn plan_route_launch(
     passthrough: &[String],
 ) -> Result<RouteLaunchPlan> {
     plan_route_launch_with_runner(
-        &SystemRunner::new(),
+        // The route join is a probe-shaped spawn of `actuation`: bounded, so a
+        // hanging or missing binary refuses inside the shared budget instead
+        // of silently stalling the launch.
+        &crate::probe::probe_runner(),
         home,
         harness,
         model_ref,
@@ -371,6 +502,16 @@ pub(crate) fn plan_route_launch_with_runner(
         ))
     })?;
     let dispatch = launch_gate(slug, models)?;
+    let program = profile
+        .presence
+        .as_ref()
+        .and_then(|presence| presence.executables.first())
+        .cloned()
+        .ok_or_else(|| {
+            error(format!(
+                "the {slug} profile declares no presence executable; there is nothing to launch"
+            ))
+        })?;
     let pin = provider_pin
         .map(ProviderRef::parse)
         .transpose()
@@ -402,7 +543,12 @@ pub(crate) fn plan_route_launch_with_runner(
 
     let model = canonical_model_ref(model_ref)?;
     let (set, mut notes) = joined_routes(runner, home, &model)?;
-    let route = route_for_launch(&set, pin.as_ref())?;
+    let codex_login = if slug == "codex" {
+        crate::harness_auth::codex_chatgpt_login_ready(runner, home, &program, "provider:openai")?
+    } else {
+        false
+    };
+    let route = route_for_launch(&set, pin.as_ref(), codex_login.then_some("provider:openai"))?;
 
     // A natively bound harness can only serve its own provider's models; the
     // selected route must sit inside that binding.
@@ -416,24 +562,12 @@ pub(crate) fn plan_route_launch_with_runner(
         }
     }
 
-    let native_provider = route
-        .provider
-        .as_str()
-        .strip_prefix("provider:")
-        .unwrap_or(route.provider.as_str())
-        .to_string();
-    let mut model_args = dispatch.model_args(&native_provider, &route.provider_native_id)?;
+    let native_provider = harness_argv_provider(slug, &route.provider);
+    let mut model_args = dispatch.model_args(slug, &native_provider, &route.provider_native_id)?;
 
-    let program = profile
-        .presence
-        .as_ref()
-        .and_then(|presence| presence.executables.first())
-        .cloned()
-        .ok_or_else(|| {
-            error(format!(
-                "the {slug} profile declares no presence executable; there is nothing to launch"
-            ))
-        })?;
+    let using_codex_login = codex_login
+        && route.provider.as_str() == "provider:openai"
+        && matches!(&route.credential, CredentialCondition::Required { .. });
 
     // Credential presence was already confirmed through the join (binding
     // store, never materialised): the selected route is usable, which means
@@ -443,24 +577,39 @@ pub(crate) fn plan_route_launch_with_runner(
         CredentialCondition::Satisfied { binding_ref, .. } => {
             format!("bound ({binding_ref})")
         }
+        CredentialCondition::Required { .. } if using_codex_login => {
+            "verified Codex ChatGPT own-login; no API key bound or delivered; model entitlement awaits native run".into()
+        }
         CredentialCondition::Required { .. } => {
             return Err(error(
-                "the selected route reports an unbound credential; refusing to launch a body \
-                 that cannot authenticate",
-            ))
+                "credential-gated: the selected route reports an unbound credential; \
+                 refusing to launch a body that cannot authenticate",
+            )
+            .with("outcome", "credential-gated"))
         }
     };
 
     // Key delivery materialises only where the profile declares an env-var
     // path for this provider, through the same seam every other launch uses.
-    // pi (and kin) declare no env-var path: the harness's own store stands,
-    // and the child inherits the caller's environment unchanged.
-    let (environment, delivered_env_vars, delivery_notes) =
-        delivery_environment(home, slug, models, &route.provider, &native_provider)?;
+    // pi (and kin) declare no env-var path: the harness's own store stands.
+    // Codex's verified ChatGPT path needs an empty scrubbed environment, so
+    // ambient API keys cannot silently replace that login.
+    let (environment, delivered_env_vars, delivery_notes) = if using_codex_login {
+        (
+            Some(ModelEnvironment::new()),
+            Vec::new(),
+            vec!["Codex own-login path uses the native auth store under a scrubbed child environment".into()],
+        )
+    } else {
+        delivery_environment(home, slug, models, &route.provider, &native_provider)?
+    };
     let mut disclosure_notes = Vec::new();
     disclosure_notes.extend(delivery_notes);
 
     notes.extend(disclosure_notes);
+    if slug == "codex" {
+        guard_codex_passthrough(passthrough)?;
+    }
     model_args.extend(passthrough.iter().cloned());
     let mut argv = vec![program.clone()];
     argv.extend(model_args);
@@ -473,6 +622,13 @@ pub(crate) fn plan_route_launch_with_runner(
         provider_native_id: route.provider_native_id.clone(),
         route_kind: route.kind.as_str(),
         credential_disclosure,
+        credential_mode: if using_codex_login {
+            "codex-chatgpt-own-login"
+        } else if matches!(&route.credential, CredentialCondition::NotRequired) {
+            "not-required"
+        } else {
+            "explicit-api-binding"
+        },
         delivered_env_vars,
         argv,
         environment,
@@ -495,11 +651,28 @@ fn delivered_nothing_declared(models: &ModelsLayer, provider_ref: &str) -> bool 
 /// Run the composed launch in the foreground: the harness owns the terminal
 /// exactly as if the operator had typed it, with the delivered keys present
 /// only in its scrubbed environment. Returns the child's exit code.
+///
+/// This is the one spawn this surface performs, and it is the model path: the
+/// pre-checks refuse before it. A program that is not on PATH is
+/// `unreachable`; the plan stage has already refused `credential-gated` when
+/// the route's credential was unbound, so an unauthenticated launch never
+/// starts and cannot hang on a login it cannot complete.
 pub fn run_plan(plan: &RouteLaunchPlan) -> Result<i32> {
     let (program, args) = plan
         .argv
         .split_first()
         .ok_or_else(|| error("empty launch argv"))?;
+    if crate::probe::which(program).is_none() {
+        return Err(AikitError::new(
+            "route_launch.harness_unreachable",
+            format!(
+                "`{program}` is not on PATH (unreachable); install the harness or adjust PATH \
+                 and retry the launch"
+            ),
+        )
+        .with("outcome", "unreachable")
+        .with("program", program.clone()));
+    }
     let mut command = Command::new(program);
     command.args(args);
     if let Some(environment) = plan.environment.as_ref() {
@@ -608,6 +781,7 @@ pub fn plan_disclosure(plan: &RouteLaunchPlan) -> serde_json::Value {
         "provider_native_id": plan.provider_native_id,
         "route_kind": plan.route_kind,
         "credential": plan.credential_disclosure,
+        "credential_mode": plan.credential_mode,
         "delivered_env_vars": plan.delivered_env_vars,
         "environment_scrubbed": plan.environment.is_some(),
         "argv": plan.argv,
@@ -935,6 +1109,77 @@ mod tests {
             message.contains("aikit credential setup credential:deepseek"),
             "the refusal names the bind remediation: {message}"
         );
+        // The shared vocabulary: the refusal is the credential-gated outcome,
+        // named on the error, and it fires before any model-path work — no
+        // key delivery, no launch, nothing that could hang on a login.
+        assert_eq!(
+            error.details().get("outcome").map(String::as_str),
+            Some("credential-gated"),
+            "the refusal carries the vocabulary outcome: {message}"
+        );
+    }
+
+    #[test]
+    fn codex_passthrough_cannot_override_the_disclosed_model_or_provider() {
+        for argument in [
+            "--model",
+            "--model=other",
+            "-m",
+            "-mother",
+            "-c",
+            "--config=model=other",
+            "--profile",
+            "-p",
+            "--oss",
+            "--local-provider=ollama",
+            "--remote",
+            "--provider=foreign",
+            "--",
+        ] {
+            let error = guard_codex_passthrough(&[argument.into()]).unwrap_err();
+            assert!(
+                error
+                    .message()
+                    .contains("selected model/provider/auth route"),
+                "{argument}: {error}"
+            );
+        }
+        guard_codex_passthrough(&[
+            "-C".into(),
+            "/tmp/project".into(),
+            "--no-alt-screen".into(),
+            "inspect this work".into(),
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn a_launch_program_off_path_is_unreachable_before_any_spawn() {
+        // Probe discipline at the spawn gate: a plan can compose (planning
+        // spawns nothing), but `run_plan` refuses with the named outcome when
+        // the launch program cannot be found — never an opaque exec error
+        // after the fact.
+        let plan = RouteLaunchPlan {
+            harness: "fixture".to_string(),
+            program: "aikit-run-plan-missing-binary-xyz".to_string(),
+            model: aikit_core::resource::canonical_model_ref("model:fixture").unwrap(),
+            provider: ProviderRef::parse("provider:fixture").unwrap(),
+            provider_native_id: "fixture-native".to_string(),
+            route_kind: "provider-native",
+            credential_disclosure: "not required by this route".to_string(),
+            credential_mode: "not-required",
+            delivered_env_vars: vec![],
+            argv: vec!["aikit-run-plan-missing-binary-xyz".to_string()],
+            environment: None,
+            notes: vec![],
+        };
+        let error = run_plan(&plan).unwrap_err();
+        assert_eq!(error.code(), "route_launch.harness_unreachable");
+        assert_eq!(
+            error.details().get("outcome").map(String::as_str),
+            Some("unreachable"),
+            "the refusal carries the vocabulary outcome"
+        );
     }
 
     #[test]
@@ -956,6 +1201,48 @@ mod tests {
             error.message().contains("needs a credential"),
             "a revoked binding must not satisfy the route: {error}"
         );
+    }
+
+    #[test]
+    fn pi_receives_the_zai_flag_for_the_catalogue_provider() {
+        assert_eq!(
+            harness_argv_provider("pi", &ProviderRef::parse("provider:z-ai").unwrap()),
+            "zai"
+        );
+        assert_eq!(
+            harness_argv_provider("pi", &ProviderRef::parse("provider:deepseek").unwrap()),
+            "deepseek"
+        );
+    }
+
+    #[test]
+    fn the_same_provider_offer_observed_twice_selects_the_harness_route() {
+        let model = canonical_model_ref("model:glm-5.3-flash").unwrap();
+        let provider = ProviderRef::parse("provider:z-ai").unwrap();
+        let mut set = ModelRouteSet::new(model.clone());
+        for kind in [
+            ModelRouteKind::ProviderNative,
+            ModelRouteKind::HarnessNative,
+        ] {
+            set.routes.push(ModelRoute {
+                model: model.clone(),
+                provider: provider.clone(),
+                kind,
+                provider_native_id: "glm-5.3-flash".into(),
+                endpoint: None,
+                availability: RouteAvailability::Observed {
+                    detection_ref: kind.as_str().into(),
+                },
+                credential: CredentialCondition::NotRequired,
+                provenance: vec![],
+            });
+        }
+        let selected = select_route(&set, Some(&provider));
+        let RouteSelection::Selected(route) = selected else {
+            panic!("one native id must not stay ambiguous");
+        };
+        assert_eq!(route.kind, ModelRouteKind::HarnessNative);
+        assert_eq!(route.provider_native_id, "glm-5.3-flash");
     }
 
     #[test]
@@ -1136,7 +1423,7 @@ mod tests {
         let mut argv = vec!["probe-harness".to_string()];
         argv.extend(
             dispatch
-                .model_args("probevendor", &route.provider_native_id)
+                .model_args("pi", "probevendor", &route.provider_native_id)
                 .unwrap(),
         );
         argv.push("--flag-from-caller".to_string());

@@ -215,6 +215,35 @@ aikit session reconcile session.toml
 
 `diff` remains inspection-only. Reconciliation is bounded by durable ownership markers so unowned panes and Surfaces are not silently treated as AIKit state.
 
+## Worktree projection
+
+A whole suite of repository checkouts — the worktrees a dev environment or a
+machine holds — should be able to *project* the canonical branch, `origin/main`,
+in one command, with drift surfaced and safely repaired. AIKit owns the
+repository/worktree side of a project, so this is its command:
+
+```sh
+# Observe only (default): report each checkout's drift from origin/main.
+aikit worktree project \
+  --repo o-i=/path/O-I --repo central=/path/Central --repo ai-kit=/path/ai-kit
+
+# Reconcile: fast-forward the clean, behind checkouts to the target.
+aikit worktree project --apply --repo ql-mef=/path/Quaternal-Logic
+```
+
+The one law it never breaks: a projection **never discards uncommitted or
+unmerged work** to force the target. Only a *clean* checkout that is strictly
+behind the target (its HEAD an ancestor of `origin/main`) is fast-forwarded, and
+only with `--apply`. A dirty, ahead, or diverged checkout is *surfaced* — named
+as a delta a human must resolve — never reset, cleaned, or rebased. Detached
+HEADs (the usual shape of a dev worktree) are fast-forwarded in place and stay
+detached. `--no-fetch` compares against the last-fetched target; `--target`
+overrides `origin/main`.
+
+The checkout roots are supplied by the caller (explicit `--repo`, or a resolver
+such as O-I's dev-world machine file); AIKit never guesses them. See
+[Worktree projection](docs/WORKTREE-PROJECTION.md).
+
 ## Verification
 
 ```sh

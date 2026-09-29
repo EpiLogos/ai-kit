@@ -278,14 +278,23 @@ impl PlaceTechnologyRegistry {
     /// composes its own registry from the same trait — no core release
     /// required, which is the point of open names.
     pub fn builtin() -> Self {
-        Self {
-            entries: vec![
-                Box::new(TmuxTechnology),
-                Box::new(CmuxTechnology),
-                Box::new(HerdrTechnology),
-                Box::new(PlainTechnology),
-            ],
-        }
+        Self::from_entries(vec![
+            Box::new(TmuxTechnology),
+            Box::new(CmuxTechnology),
+            Box::new(HerdrTechnology),
+            Box::new(PlainTechnology),
+        ])
+    }
+
+    /// Compose a registry from exactly these entries, in this order.
+    ///
+    /// The explicit composition seam for a build (or a test scope) that must
+    /// not carry the built-ins: the same trait, the same [`Self::resolve`]
+    /// answers, none of the built-in detection. A consumer whose validation
+    /// and dispatch take a `&PlaceTechnologyRegistry` parameter is thereby
+    /// testable without any live technology on the host.
+    pub fn from_entries(entries: Vec<Box<dyn PlaceTechnologyAdapter>>) -> Self {
+        Self { entries }
     }
 
     /// Compose a registry with an additional entry appended (after the
@@ -347,5 +356,69 @@ impl std::fmt::Debug for PlaceTechnologyRegistry {
         f.debug_struct("PlaceTechnologyRegistry")
             .field("entries", &names)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aikit_core::session::SessionSpec;
+
+    fn plan(backend: &str) -> SessionPlan {
+        SessionSpec::from_toml_str(&format!(
+            "schema = 1\nid = \"p\"\nname = \"p\"\nbackend = \"{backend}\"\n\n[[views]]\nid = \"main\"\n[[views.panes]]\nid = \"shell\"\ncommand = [\"sh\"]\n"
+        ))
+        .expect("spec parses")
+        .compile()
+        .expect("spec compiles")
+    }
+
+    /// Herdr must be reachable as a provider-native entry — registered,
+    /// without a mux adapter, with a plan-scoped working environment — through
+    /// construction alone. Selecting or routing herdr never needs a probe, so
+    /// a consumer can validate a binding against it without spawning herdr.
+    #[test]
+    fn herdr_is_a_registered_provider_native_entry_without_probing() {
+        let registry = PlaceTechnologyRegistry::builtin();
+        let entry = registry
+            .resolve(&PlaceTechnology::herdr())
+            .expect("herdr is registered in the builtin registry");
+        assert!(
+            entry.mux_adapter().is_none(),
+            "herdr is deliberately not a mux adapter"
+        );
+        let provider = ResourceRef::parse("provider/herdr/current").expect("provider ref parses");
+        assert!(
+            entry
+                .working_environment(&plan("herdr"), &provider, &[], None)
+                .is_some(),
+            "herdr hands back a plan-scoped working environment"
+        );
+    }
+
+    /// The composition seam must be able to drop every built-in, so a test
+    /// scope (or a custom build) answers from its own entries alone.
+    #[test]
+    fn from_entries_composes_a_registry_without_the_builtins() {
+        struct UnknownTechnology;
+        impl PlaceTechnologyAdapter for UnknownTechnology {
+            fn technology(&self) -> PlaceTechnology {
+                PlaceTechnology::new("stubplace")
+            }
+            fn detect(&self) -> Result<PlaceTechnologyReading> {
+                Ok(PlaceTechnologyReading::absent(
+                    PlaceTechnology::new("stubplace"),
+                    "stub",
+                ))
+            }
+            fn mux_adapter(&self) -> Option<MuxAdapterHandle> {
+                None
+            }
+        }
+        let registry = PlaceTechnologyRegistry::from_entries(vec![Box::new(UnknownTechnology)]);
+        assert!(registry.resolve(&PlaceTechnology::herdr()).is_none());
+        assert!(registry
+            .resolve(&PlaceTechnology::new("stubplace"))
+            .is_some());
     }
 }

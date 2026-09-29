@@ -97,6 +97,10 @@ const READ_ONLY: &[&[&str]] = &[
     &["z", "greet"],
     &["prune"],
     &["method", "list"],
+    // The inhabitation reads: with no Position and no owners they still answer,
+    // every facet naming why (absent / unavailable / not-attempted).
+    &["whoami"],
+    &["refocus"],
 ];
 
 #[test]

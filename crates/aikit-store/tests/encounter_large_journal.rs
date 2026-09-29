@@ -61,8 +61,16 @@ fn concurrent_large_events_are_complete_and_survive_reopen() {
     for sequence in 0..24 {
         let page = reopened.events(&session, cursor, 1).unwrap();
         assert_eq!(page.events.len(), 1);
+        // The owner stamps its observation time; the event itself is intact.
+        let mut stored = page.events[0].event.clone();
+        let stamp = stored
+            .as_object_mut()
+            .unwrap()
+            .remove("observed_at_ms")
+            .expect("owner observation time");
+        assert!(stamp.as_u64().is_some());
         assert_eq!(
-            page.events[0].event,
+            stored,
             json!({"kind":"context-evidence","sequence":sequence,"body":body})
         );
         cursor = page.next_cursor;

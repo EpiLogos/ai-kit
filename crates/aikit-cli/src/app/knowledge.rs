@@ -3,18 +3,26 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aikit_adapters::bkmr::BkmrSourcePoolProvider;
+use super::knowledge_cache::{address_cache_key, BasisScope};
+use aikit_adapters::bkmr::{
+    bkmr_config_dir, discover_bkmr_stores, BkmrSourcePoolProvider, BkmrStoreSearchProvider,
+};
 use aikit_adapters::central_file_map::CentralFileMapProvider;
 use aikit_adapters::gitnexus::GitNexusCodeIndexProvider;
 use aikit_adapters::now_field::{NowFieldScope, NowFieldSourcePoolProvider};
 use aikit_adapters::runner::SystemRunner;
+use aikit_adapters::work_repos::{
+    discover_work_projects, WorkRepoProject, WorkReposSourcePoolProvider,
+};
 use aikit_core::knowledge::{KnowledgeContextPack, KnowledgeRelationView, KnowledgeRoute};
 use aikit_core::knowledge_code::CodeIndexProvider;
 use aikit_core::knowledge_navigation::ProjectAuthoredPending;
 use aikit_core::knowledge_source_pool::{
     material_for_actor, NativeSourcePoolProvider, SourceMaterial, SourcePool, SourcePoolProvider,
 };
-use aikit_core::knowledge_wiki::{parse_wiki_objects, OkfWikiBundle, WikiObject};
+use aikit_core::knowledge_wiki::{
+    parse_wiki_objects, OkfWikiBundle, WikiObject, PROJECT_WIKI_SPACE_REF_PREFIX,
+};
 use aikit_core::knowledge_wiki_index::SemanticWikiIndex;
 use aikit_core::project_map::{ProjectLens, ProjectMap, ProjectMapBinding, ProjectMapEndpoint};
 use aikit_core::repair_absence_lines;
@@ -38,22 +46,285 @@ use super::Service;
 const MAX_DISCOVERY_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_DISCOVERY_FILES: usize = 4096;
 
+/// Default wall-clock budget for one GitNexus subprocess call (capability
+/// probe, index, or search) issued by a project's code-lens provider.
+/// Indexing a real repository is legitimate work, not a health probe, so
+/// this sits well above `aikit_core::probe::probe_budget()` (10s, meant for
+/// `--version`/`--help`-shaped checks) — but it is still a hard ceiling: a
+/// live gate against the real Central ground found `gitnexus analyze
+/// --index-only` on one large Work repo running past five minutes
+/// unbounded, which is exactly the class of stall a query must never carry
+/// silently.
+const DEFAULT_GITNEXUS_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Environment override for [`DEFAULT_GITNEXUS_BUDGET`], in whole seconds.
+const GITNEXUS_BUDGET_VAR: &str = "AIKIT_GITNEXUS_BUDGET_SECS";
+
+/// At most this many discovered Work projects index in parallel. GitNexus's
+/// own process is heavy (observed over 1 GB resident indexing one large
+/// repo), so parallelism is bounded rather than one thread per project.
+const MAX_GITNEXUS_PARALLELISM: usize = 4;
+
+/// The effective GitNexus subprocess budget: `AIKIT_GITNEXUS_BUDGET_SECS`
+/// when it parses to at least one second, otherwise
+/// [`DEFAULT_GITNEXUS_BUDGET`]. An unparseable or zero override falls back
+/// to the default rather than disabling the bound — the bound has no off
+/// switch, matching the probe-budget discipline it sits beside.
+fn gitnexus_budget() -> std::time::Duration {
+    parse_gitnexus_budget(std::env::var(GITNEXUS_BUDGET_VAR).ok().as_deref())
+}
+
+/// Pure parse behind [`gitnexus_budget`], split out so the fallback rules are
+/// testable without mutating process-wide environment state.
+fn parse_gitnexus_budget(raw: Option<&str>) -> std::time::Duration {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs >= 1)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(DEFAULT_GITNEXUS_BUDGET)
+}
+
+#[cfg(test)]
+mod gitnexus_budget_tests {
+    use super::{parse_gitnexus_budget, DEFAULT_GITNEXUS_BUDGET};
+
+    #[test]
+    fn absent_or_junk_or_zero_falls_back_to_the_default_rather_than_disabling_the_bound() {
+        assert_eq!(parse_gitnexus_budget(None), DEFAULT_GITNEXUS_BUDGET);
+        assert_eq!(parse_gitnexus_budget(Some("")), DEFAULT_GITNEXUS_BUDGET);
+        assert_eq!(
+            parse_gitnexus_budget(Some("not-a-number")),
+            DEFAULT_GITNEXUS_BUDGET
+        );
+        assert_eq!(parse_gitnexus_budget(Some("0")), DEFAULT_GITNEXUS_BUDGET);
+        assert_eq!(parse_gitnexus_budget(Some("-5")), DEFAULT_GITNEXUS_BUDGET);
+    }
+
+    #[test]
+    fn a_valid_override_wins() {
+        assert_eq!(
+            parse_gitnexus_budget(Some("90")),
+            std::time::Duration::from_secs(90)
+        );
+        // Surrounding whitespace (a shell export quirk) does not defeat it.
+        assert_eq!(
+            parse_gitnexus_budget(Some(" 12 ")),
+            std::time::Duration::from_secs(12)
+        );
+    }
+}
+
+#[cfg(test)]
+mod project_scope_tests {
+    use super::ref_belongs_to_project_scope;
+    use std::collections::BTreeMap;
+
+    fn belongs(resource: &str, display: &str) -> bool {
+        let work = BTreeMap::new();
+        let central = BTreeMap::new();
+        ref_belongs_to_project_scope(resource, display, &work, &central)
+    }
+
+    #[test]
+    fn a_clearing_drops_whole_from_a_project_scope() {
+        // The packet A incident shape: a clearing's evidence tree holding a
+        // sibling-Project state copy must not re-enter through the graph.
+        assert!(!belongs(
+            "central:source:control:root:Control/agents/now/clearings/a5cbbe83/T/evidence/disposable-held-decision/Central/Work/Factory/.factory/development-state.json",
+            "Work/O-I",
+        ));
+        assert!(!belongs(
+            "central:source:control:root:Control/agents/now/clearings/a5cbbe83/T/acceptance.json",
+            "Work/O-I",
+        ));
+    }
+
+    #[test]
+    fn a_sibling_wiki_space_names_the_sibling_and_the_root_space_passes() {
+        assert!(!belongs("central:wiki:project:Factory", "Work/O-I"));
+        assert!(belongs("central:wiki:project:O-I", "Work/O-I"));
+        // The root composition space is not a Project space: it passes.
+        assert!(belongs("central:wiki:root", "Work/O-I"));
+    }
+
+    #[test]
+    fn a_raw_path_under_another_work_tree_names_the_sibling_by_layout() {
+        assert!(!belongs(
+            "/Users/admin/Central/Work/Factory/ProjectCentral/user/capability-matrix.csv",
+            "Work/O-I",
+        ));
+        // Own-tree raw paths stay inside their Project's scope.
+        assert!(belongs(
+            "/Users/admin/Central/Work/O-I/docs/overview.md",
+            "Work/O-I",
+        ));
+        // Paths outside any Work tree pass: the root lineage is broader.
+        assert!(belongs("/Users/admin/notes/overview.md", "Work/O-I"));
+        // A segment named `Workfile` is not a Work segment.
+        assert!(belongs("/Users/admin/Workfile/x.md", "Work/O-I"));
+    }
+
+    #[test]
+    fn canonical_work_refs_keep_their_owner_rule() {
+        assert!(belongs(
+            "central:source:control:root:Work/O-I/docs/overview.md",
+            "Work/O-I",
+        ));
+        assert!(!belongs(
+            "central:source:control:root:Work/Factory/ProjectCentral/user/capability-matrix.csv",
+            "Work/O-I",
+        ));
+    }
+}
+
+/// True when an attribution map names `resource` as owned by a Project
+/// other than `display` — the check that keeps another Project's compiled
+/// objects (authored edges, folder basis, capability matrices) out of a
+/// scoped reply or graph. Unattributed refs pass: the root lineage is a
+/// distinct, legitimately broader aperture.
+fn attributed_to_other_project(
+    attribution: &BTreeMap<String, String>,
+    resource: &str,
+    display: &str,
+) -> bool {
+    attribution
+        .get(resource)
+        .is_some_and(|project| project != display)
+}
+
+/// Whether `resource` may enter a reply scoped to `display` (`Work/<name>`).
+/// Canonical Source refs retain Project ownership regardless of whether the
+/// caller reaches them through SourcePool or ProjectMap; clearings drop
+/// whole; sibling wiki spaces and sibling raw work-tree paths name the
+/// sibling by layout. The root lineage keeps every shape: this predicate is
+/// consulted only when a reply HAS a Project scope.
+fn ref_belongs_to_project_scope(
+    resource: &str,
+    display: &str,
+    work_repo_scopes: &BTreeMap<String, String>,
+    central_project_source_scopes: &BTreeMap<String, String>,
+) -> bool {
+    if resource.starts_with("source:project:") {
+        return work_repo_scopes
+            .iter()
+            .any(|(prefix, project)| resource.starts_with(prefix.as_str()) && project == display);
+    }
+    if resource.starts_with("central:source:project:") {
+        return central_project_source_scopes
+            .iter()
+            .any(|(prefix, project)| resource.starts_with(prefix.as_str()) && project == display);
+    }
+    if let Some(rest) = resource.strip_prefix("central:source:control:root:Work/") {
+        return rest
+            .split_once('/')
+            .is_some_and(|(project, _)| format!("Work/{project}") == display);
+    }
+    // Project NOW-field law (packet A): a clearing drops whole from a
+    // Project-scoped reply — it is a working horizon, never a common record.
+    // The graph and every other consumer of this predicate obey the scope
+    // the search repair established, so a clearing's evidence tree —
+    // including sibling-Project copies it holds — cannot re-enter a
+    // ProjectWorld through the graph door.
+    if resource.starts_with("central:source:control:root:Control/agents/now/clearings/") {
+        return false;
+    }
+    // Another Project's wiki space names the sibling outright; the root
+    // composition space (`central:wiki:root`) passes.
+    if let Some(project_id) = resource
+        .strip_prefix(PROJECT_WIKI_SPACE_REF_PREFIX)
+        .filter(|id| !id.is_empty() && !id.contains('/'))
+    {
+        return display
+            .strip_prefix("Work/")
+            .is_some_and(|own| project_id.eq_ignore_ascii_case(own));
+    }
+    // An unattributed raw filesystem path under another Project's work tree
+    // names the sibling by machine layout; a ProjectWorld reply discloses
+    // owned refs. Paths outside any `Work/<Project>/` segment pass.
+    if resource.starts_with('/') {
+        let own = display.strip_prefix("Work/");
+        let mut segments = resource.split('/');
+        while let Some(segment) = segments.next() {
+            if segment == "Work" {
+                if let Some(project) = segments.next() {
+                    if own.is_none_or(|name| !project.eq_ignore_ascii_case(name)) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+/// One project's GitNexus code-index degradation: the binary was present and
+/// index-capable, but building that project's index failed. Held per project
+/// so a scoped reply carries only its own scope's line and `knowledge status`
+/// names every project — the same discipline `authored_pending` and the
+/// per-project anchor lines already follow.
+struct ProjectCodeDegradation {
+    /// Work-relative project display, e.g. `Work/demo`.
+    project: String,
+    /// The full disclosure line, already naming the project and the reason.
+    message: String,
+}
+
+struct ProjectOwnedAbsence {
+    project: String,
+    message: String,
+}
+
 pub(super) struct KnowledgeRuntime {
     wiki: Option<SqliteWikiProvider>,
     material: Vec<SourceMaterial>,
     native_source: NativeSourcePoolProvider,
     bkmr: Option<BkmrSourcePoolProvider<SystemRunner>>,
+    /// The default read-only pool over the configured bkmr stores (owner
+    /// correction 2026-09-23: bkmr is part of agent context sourcing by
+    /// default). Registered only when it is operable, so an inactive pool
+    /// costs one status note, not a per-query absence.
+    bkmr_stores: Option<BkmrStoreSearchProvider<SystemRunner>>,
     central: Option<CentralFileMapProvider<SystemRunner>>,
     now_field: Option<NowFieldSourcePoolProvider<SystemRunner>>,
     now_field_roster: Vec<SourceMaterial>,
+    /// The live Work-repos pool, one repo per discovered project. Registered
+    /// only when projects were discovered, so a non-Central context keeps its
+    /// old shape.
+    work_repos: Option<WorkReposSourcePoolProvider<SystemRunner>>,
+    /// `source:project:<project_id>:` prefix → `Work/<name>` display, for
+    /// scoped queries to keep another project's repo hits out of their
+    /// results.
+    work_repo_scopes: BTreeMap<String, String>,
+    /// `central:source:project:<project_id>:` prefix → `Work/<name>` for
+    /// canonical owner refs returned by Central's project file map.
+    central_project_source_scopes: BTreeMap<String, String>,
     central_expected: bool,
-    code: Option<GitNexusCodeIndexProvider<SystemRunner>>,
+    /// `source:project-code:<project_id>` → `Work/<name>` for real CodeIndex
+    /// hits whose public resource refs are opaque code digests.
+    code_source_scopes: BTreeMap<String, String>,
+    /// Parallel to `code`: the discovered Project owning each native index.
+    /// Select providers before a scoped query so search failures cannot name
+    /// another Project in the reply's diagnostic lines.
+    code_project_scopes: Vec<String>,
+    /// One code-index provider per discovered project; unavailable ones are
+    /// kept so the absence is per project, never a global "provider absent".
+    code: Vec<GitNexusCodeIndexProvider<SystemRunner>>,
+    /// Per-project code-index degradations, kept out of the global per-query
+    /// `absences` so another project's code state never leaks into a scoped
+    /// reply; a reply carries only its own scope's, and status carries all.
+    code_degradations: Vec<ProjectCodeDegradation>,
     project_map: ProjectMap,
     absences: Vec<String>,
+    /// Informational per-project and per-pool disclosure lines (anchor
+    /// state, index freshness, pool posture). Notes are state, not failures;
+    /// only `knowledge status` carries them.
+    status_notes: Vec<String>,
     /// Per-project rollups of pending authored relations. Search/resolve/frame
     /// replies carry at most their own scope's rollup; status carries every
     /// project plus per-target detail.
     authored_pending: Vec<ProjectAuthoredPending>,
+    /// Materialisation failures are attributed by their native producer;
+    /// scoped replies show their own Project, while status shows the World.
+    project_absences: Vec<ProjectOwnedAbsence>,
     /// Authored edge ref → Work-relative project display, for scoped queries
     /// to keep another project's authored edges out of their results.
     authored_edge_projects: BTreeMap<String, String>,
@@ -61,12 +332,29 @@ pub(super) struct KnowledgeRuntime {
     /// → Work-relative project display, for scoped queries to keep another
     /// project's folder basis out of their results.
     folder_subject_projects: BTreeMap<String, String>,
+    /// Compiled capability-matrix object ref — or its cited carrier path —
+    /// → Work-relative project display, for scoped queries and graphs to
+    /// keep another project's matrix material out of their results. The
+    /// root composition stays unattributed: the root lineage is a distinct,
+    /// legitimately broader aperture.
+    matrix_object_projects: BTreeMap<String, String>,
     /// This invocation's own project in Work-relative display (`Work/demo`),
     /// when the invocation root sits in a Central Work project.
     current_project: Option<String>,
 }
 
 impl KnowledgeRuntime {
+    /// Canonical Source refs retain Project ownership regardless of whether
+    /// the caller reaches them through SourcePool or ProjectMap.
+    fn source_belongs_to_scope(&self, resource: &str, display: &str) -> bool {
+        ref_belongs_to_project_scope(
+            resource,
+            display,
+            &self.work_repo_scopes,
+            &self.central_project_source_scopes,
+        )
+    }
+
     /// Flow cognition (W1.4/W1.5) reads identity and material through these
     /// same owners; it creates no second wiki or source-pool access path.
     pub(super) fn wiki_index(&self) -> Option<&SemanticWikiIndex> {
@@ -82,6 +370,10 @@ impl KnowledgeRuntime {
         let Some(key) = explicit_scope else {
             return self.current_project.clone();
         };
+        let key = key.trim();
+        if key.is_empty() || key.contains("..") {
+            return None;
+        }
         if let Some(pending) = self
             .authored_pending
             .iter()
@@ -93,10 +385,6 @@ impl KnowledgeRuntime {
             if display_matches_key(current, key) {
                 return Some(current.clone());
             }
-        }
-        let key = key.trim();
-        if key.contains("..") {
-            return None;
         }
         if let Some(rest) = key.strip_prefix("Work/") {
             return (!rest.is_empty() && !rest.contains('/')).then(|| key.to_owned());
@@ -120,25 +408,63 @@ impl KnowledgeRuntime {
         self.central.as_ref().map(|p| p as &dyn SourcePoolProvider)
     }
     fn application(&self, context: FamiliarityContext) -> KnowledgeApplication<'_> {
+        self.application_with_project_scope(
+            context,
+            None,
+            self.now_field.as_ref(),
+            self.work_repos.as_ref(),
+        )
+    }
+
+    fn application_with_project_scope<'a>(
+        &'a self,
+        context: FamiliarityContext,
+        scoped_project: Option<&'a str>,
+        now_field: Option<&'a NowFieldSourcePoolProvider<SystemRunner>>,
+        work_repos: Option<&'a WorkReposSourcePoolProvider<SystemRunner>>,
+    ) -> KnowledgeApplication<'a> {
         let mut application =
             KnowledgeApplication::new(context).with_project_map(&self.project_map);
+        if let Some(scope) = scoped_project {
+            // Scoped replies consult the runtime's attribution at the
+            // source: sibling-owned authored citations produce neither hits
+            // nor unreadable-source absences (knowledge_navigation).
+            application = application.with_project_attribution(
+                scope,
+                &self.authored_edge_projects,
+                &self.folder_subject_projects,
+                &self.matrix_object_projects,
+            );
+        }
         if let Some(provider) = &self.wiki {
             application = application.with_wiki(provider);
         }
         if let Some(provider) = &self.central {
             application = application.with_source_pool(provider, provider.descriptors());
         }
-        if let Some(provider) = &self.now_field {
+        if let Some(provider) = now_field {
             // The NOW field is live owner ground searched in place; its
             // roster carries identity only, and reads go back to the file.
             application = application.with_source_pool(provider, &self.now_field_roster);
+        }
+        if let Some(provider) = work_repos {
+            // Live Work-repos search slots in after NOW-field and before the
+            // native shard baseline (addendum A-1): existing pools keep
+            // priority on material they already carry, and the live pool's
+            // refs (`source:project:…`) collide with nothing.
+            application = application.with_source_pool(provider, &[]);
         }
         application = application.with_source_pool(&self.native_source, &self.material);
         if let Some(provider) = &self.bkmr {
             application = application.with_source_pool(provider, &self.material);
         }
-        if let Some(provider) = &self.code {
-            application = application.with_code(provider);
+        if let Some(provider) = &self.bkmr_stores {
+            application = application.with_source_pool(provider, &[]);
+        }
+        for (provider, project) in self.code.iter().zip(&self.code_project_scopes) {
+            if scoped_project.is_none_or(|scope| scope == project) {
+                application = application.with_code(provider);
+            }
         }
         application
     }
@@ -170,6 +496,7 @@ impl Service {
         &self,
         operation: impl FnOnce(&KnowledgeRuntime, KnowledgeApplication<'_>) -> Result<T>,
     ) -> Result<T> {
+        self.ensure_knowledge_project_scope()?;
         let owner_backed = self
             .knowledge_runtime
             .borrow()
@@ -209,48 +536,168 @@ impl Service {
         // The scope that governs this reply's disclosure: an explicit `:`
         // scope in the expression, else the invocation's own project.
         let explicit_scope = expression_scope_project(expression).map(str::to_owned);
-        let mut result = self.with_knowledge(|runtime, application| {
-            let scoped_display = runtime.scoped_project_display(explicit_scope.as_deref());
-            let mut result = application.resolve(expression, candidate_limit);
-            result.absences.extend(runtime.absences.clone());
-            // Pending authored relations are scoped: a query sees its own
-            // scope's rollup; other projects' pendings stay with
-            // `knowledge status`.
-            if let Some(pending) = scoped_display.as_deref().and_then(|display| {
-                runtime
-                    .authored_pending
-                    .iter()
-                    .find(|pending| pending.project == display)
-            }) {
-                result.absences.push(pending.rollup_line());
-            }
-            // A scoped query keeps another project's compiled authored edges
-            // — and its compiled folder subjects — out of its results;
-            // unattributable material passes through.
-            if explicit_scope.is_some() {
-                if let Some(display) = &scoped_display {
-                    let attributed_to_other_project =
-                        |attribution: &BTreeMap<String, String>, resource: &str| {
-                            attribution
-                                .get(resource)
-                                .is_some_and(|project| project != display)
-                        };
-                    result.hits.retain(|hit| match &hit.address {
-                        aikit_core::KnowledgeAddress::Wiki(resource) => {
-                            !attributed_to_other_project(
-                                &runtime.authored_edge_projects,
-                                resource.as_str(),
-                            ) && !attributed_to_other_project(
-                                &runtime.folder_subject_projects,
-                                resource.as_str(),
-                            )
-                        }
-                        _ => true,
-                    });
-                }
-            }
-            Ok(result)
+        // The retrieval itself is pure compute over the ground: answered from
+        // the result cache when the basis has not moved. Learned
+        // accessibility and search-hit memory below stay live on every call.
+        let expression_key = serde_json::to_string(expression).map_err(|error| {
+            aikit_core::AikitError::new("knowledge.cache_key", error.to_string())
         })?;
+        let mut result = self.with_knowledge_cached(
+            BasisScope::Full,
+            &format!("resolve\x1f{candidate_limit}\x1f{expression_key}"),
+            || {
+                self.with_knowledge(|runtime, _application| {
+                    let scoped_display = runtime.scoped_project_display(explicit_scope.as_deref());
+                    if explicit_scope.is_some() && scoped_display.is_none() {
+                        return Err(aikit_core::AikitError::new(
+                            "knowledge.scope_invalid",
+                            "Explicit Project scope is invalid or cannot be resolved",
+                        ));
+                    }
+                    let discovered_project = scoped_display.as_deref().and_then(|display| {
+                        runtime
+                            .work_repos
+                            .as_ref()?
+                            .projects()
+                            .iter()
+                            .find(|project| format!("Work/{}", project.name) == display)
+                    });
+                    // The root NOW provider includes every Work project, but a
+                    // Project-scoped reply may only query its own NOW files plus
+                    // common Control records. Selecting globs before ripgrep also
+                    // prevents sibling read failures from surfacing as absences.
+                    let mut scoped_provider_absences = Vec::new();
+                    let scoped_now_field =
+                        match (scoped_display.as_deref(), runtime.now_field.as_ref()) {
+                            (Some(_), Some(provider)) => {
+                                let scope = provider
+                                    .scope()
+                                    .for_project(discovered_project.map(|p| p.name.as_str()));
+                                match NowFieldSourcePoolProvider::connect(
+                                    aikit_adapters::now_field::default_runner(&scope.central_root),
+                                    aikit_adapters::ripgrep::executable(),
+                                    scope,
+                                ) {
+                                    Ok(provider) => Some(provider),
+                                    Err(error) => {
+                                        scoped_provider_absences.push(format!(
+                                            "NOW-field scoped search unavailable: {error}"
+                                        ));
+                                        None
+                                    }
+                                }
+                            }
+                            _ => None,
+                        };
+                    let now_field = if scoped_display.is_some() {
+                        scoped_now_field.as_ref()
+                    } else {
+                        runtime.now_field.as_ref()
+                    };
+                    // A Work-repos search can fail before producing any hits. Search
+                    // only the resolved Project at the provider boundary so another
+                    // repo's ripgrep failure cannot appear in this reply's absences.
+                    // The root World deliberately retains the broad native provider.
+                    let scoped_work_repos = discovered_project.map(|project| {
+                        WorkReposSourcePoolProvider::connect(
+                            SystemRunner::new().with_env_removed("RIPGREP_CONFIG_PATH"),
+                            aikit_adapters::ripgrep::executable(),
+                            vec![project.clone()],
+                        )
+                    });
+                    let work_repos = if scoped_display.is_some() {
+                        scoped_work_repos.as_ref()
+                    } else {
+                        runtime.work_repos.as_ref()
+                    };
+                    let mut result = runtime
+                        .application_with_project_scope(
+                            self.knowledge_context(),
+                            scoped_display.as_deref(),
+                            now_field,
+                            work_repos,
+                        )
+                        .resolve(expression, candidate_limit);
+                    result.absences.extend(scoped_provider_absences);
+                    result.absences.extend(runtime.absences.clone());
+                    result.absences.extend(
+                        runtime
+                            .project_absences
+                            .iter()
+                            .filter(|absence| {
+                                scoped_display
+                                    .as_deref()
+                                    .is_none_or(|project| project == absence.project)
+                            })
+                            .map(|absence| absence.message.clone()),
+                    );
+                    // Pending authored relations are scoped: a query sees its own
+                    // scope's rollup; other projects' pendings stay with
+                    // `knowledge status`.
+                    if let Some(pending) = scoped_display.as_deref().and_then(|display| {
+                        runtime
+                            .authored_pending
+                            .iter()
+                            .find(|pending| pending.project == display)
+                    }) {
+                        result.absences.push(pending.rollup_line());
+                    }
+                    // Code-index degradations are scoped the same way: a reply carries
+                    // only its own scope's line, never another project's — the leak
+                    // this fix closes. Every project's degradation stays in
+                    // `knowledge status`.
+                    if let Some(display) = scoped_display.as_deref() {
+                        for degradation in &runtime.code_degradations {
+                            if degradation.project == display {
+                                result.absences.push(degradation.message.clone());
+                            }
+                        }
+                    }
+                    // A scoped query keeps another project's compiled authored edges
+                    // — and its compiled folder subjects — out of its results;
+                    // unattributable material passes through. Work-repo hits carry
+                    // their project in the ref itself (`source:project:<id>:…`), so
+                    // the same discipline applies to them.
+                    if let Some(display) = &scoped_display {
+                        let attributed_to_other_project =
+                            |attribution: &BTreeMap<String, String>, resource: &str| {
+                                attribution
+                                    .get(resource)
+                                    .is_some_and(|project| project != display)
+                            };
+                        result.hits.retain(|hit| {
+                            let resource = hit.resource.as_str();
+                            // A Source ref may surface through SourcePool or a
+                            // ProjectMap endpoint. The address wrapper does not
+                            // change which Project owns it.
+                            if !runtime.source_belongs_to_scope(resource, display) {
+                                return false;
+                            }
+                            if attributed_to_other_project(
+                                &runtime.authored_edge_projects,
+                                resource,
+                            ) || attributed_to_other_project(
+                                &runtime.folder_subject_projects,
+                                resource,
+                            ) || attributed_to_other_project(
+                                &runtime.matrix_object_projects,
+                                resource,
+                            ) {
+                                return false;
+                            }
+                            match &hit.address {
+                                aikit_core::KnowledgeAddress::Code(reference) => runtime
+                                    .code_source_scopes
+                                    .get(reference.source.as_str())
+                                    .is_some_and(|project| project == display),
+                                _ => true,
+                            }
+                        });
+                    }
+                    Ok(result)
+                })
+            },
+        )?;
         self.apply_learned_accessibility(&resolve_subjects(expression), &mut result)?;
         result.hits.truncate(limit);
         if let Err(error) = self.knowledge_store().remember_search_hits(&result.hits) {
@@ -383,13 +830,19 @@ impl Service {
             .project_root
             .as_deref()
             .unwrap_or(&self.invocation_cwd);
-        let central_root = root.ancestors().find(|candidate| {
-            candidate.join("Control").is_dir() && candidate.join("Work").is_dir()
-        })?;
+        let central_root = self.knowledge_central_root(root)?;
         Some(format!(
             "Work/{}",
             self.invocation_project_member(central_root, root)?
         ))
+    }
+
+    pub(super) fn knowledge_central_root<'a>(&'a self, root: &'a Path) -> Option<&'a Path> {
+        self.knowledge_central_root.as_deref().or_else(|| {
+            root.ancestors().find(|candidate| {
+                candidate.join("Control").is_dir() && candidate.join("Work").is_dir()
+            })
+        })
     }
 
     /// The Work member this invocation's project context belongs to, read from
@@ -406,16 +859,100 @@ impl Service {
     /// canonical while the cwd keeps its invoked spelling (or the reverse);
     /// an unreadable path names nothing rather than guessing.
     fn invocation_project_member(&self, central_root: &Path, root: &Path) -> Option<String> {
-        work_member(central_root, root).or_else(|| {
-            let cwd = std::fs::canonicalize(&self.invocation_cwd).ok()?;
-            let central = std::fs::canonicalize(central_root).ok()?;
-            work_member(&central, &cwd)
-        })
+        work_member(central_root, root)
+            .or_else(|| {
+                let cwd = std::fs::canonicalize(&self.invocation_cwd).ok()?;
+                let central = std::fs::canonicalize(central_root).ok()?;
+                work_member(&central, &cwd)
+            })
+            .or_else(|| {
+                self.external_project_member(central_root, &self.invocation_cwd)
+                    .ok()
+                    .flatten()
+            })
+    }
+
+    /// A real checkout outside `Work/` can still be the same Project. Resolve
+    /// its ProjectCentral identity against discovered World manifests rather
+    /// than treating its location as authority to search the whole World.
+    fn external_project_member(&self, central_root: &Path, root: &Path) -> Result<Option<String>> {
+        let root = root.canonicalize().map_err(|error| {
+            aikit_core::AikitError::new("knowledge.project_scope_unresolved", error.to_string())
+        })?;
+        let central_root = central_root.canonicalize().map_err(|error| {
+            aikit_core::AikitError::new("knowledge.project_scope_unresolved", error.to_string())
+        })?;
+        if root == central_root
+            || root.starts_with(central_root.join("Control"))
+            || root.starts_with(central_root.join("Work"))
+        {
+            return Ok(None);
+        }
+        let project_root = root
+            .ancestors()
+            .take_while(|path| *path != central_root)
+            .find(|path| {
+                path.join("ProjectCentral/project.json").is_file() || path.join(".git").exists()
+            });
+        let Some(project_root) = project_root else {
+            if self.knowledge_central_root.is_some()
+                || root.starts_with(central_root.join("worktrees"))
+            {
+                return Err(aikit_core::AikitError::new(
+                    "knowledge.project_scope_unresolved",
+                    format!(
+                        "{} has no ProjectCentral identity in the configured Central World",
+                        root.display()
+                    ),
+                ));
+            }
+            return Ok(None);
+        };
+        let binding = aikit_adapters::ProjectCentralFilesystemBinding::inspect(project_root, None)
+            .map_err(|error| {
+                aikit_core::AikitError::new(
+                    "knowledge.project_scope_unresolved",
+                    format!(
+                        "cannot resolve ProjectCentral identity at {}: {error}",
+                        project_root.display()
+                    ),
+                )
+            })?;
+        let project_id = &binding.semantic.project_id;
+        let matches: Vec<_> = discover_work_projects(&central_root)
+            .into_iter()
+            .filter_map(|entry| match entry {
+                aikit_adapters::work_repos::WorkProjectEntry::Project(project)
+                    if project.project_id == *project_id =>
+                {
+                    Some(project.name)
+                }
+                _ => None,
+            })
+            .collect();
+        match matches.as_slice() {
+            [name] => Ok(Some(name.clone())),
+            _ => Err(aikit_core::AikitError::new(
+                "knowledge.project_scope_unresolved",
+                format!(
+                    "ProjectCentral identity {project_id} at {} matches {} discovered Work Projects; Knowledge refuses a broad query",
+                    project_root.display(),
+                    matches.len()
+                ),
+            )),
+        }
+    }
+
+    fn ensure_knowledge_project_scope(&self) -> Result<()> {
+        if let Some(central_root) = self.knowledge_central_root(&self.invocation_cwd) {
+            self.external_project_member(central_root, &self.invocation_cwd)?;
+        }
+        Ok(())
     }
 
     /// The bare Work name used as the lowered scope key (`demo` for
     /// `Work/demo`) — the readable spelling of the project world.
-    fn knowledge_scope_project(&self) -> Option<String> {
+    pub(super) fn knowledge_scope_project(&self) -> Option<String> {
         self.current_project_display().and_then(|display| {
             display
                 .rsplit('/')
@@ -463,37 +1000,43 @@ impl Service {
         &self,
         address: &KnowledgeAddress,
     ) -> Result<aikit_core::KnowledgeReading> {
-        self.with_knowledge(|_, application| application.read(address))
+        let key = address_cache_key("read", address, "");
+        self.with_knowledge_cached(BasisScope::Ground, &key, || {
+            self.with_knowledge(|_, application| application.read(address))
+        })
     }
 
     /// Additive native document facet; plain KnowledgeReading users keep their API.
     pub fn knowledge_read_document(&self, address: &KnowledgeAddress) -> Result<serde_json::Value> {
-        self.with_knowledge(|runtime, application| {
-            let reading = application.read(address)?;
-            let material = runtime.document_material();
-            let objects: Vec<_> = runtime
-                .wiki_index()
-                .map(|index| {
-                    index
-                        .discover()
-                        .into_iter()
-                        .filter_map(|reference| index.resolve(&reference))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let relations = application
-                .relations(address, 1, 256, 512)
-                .and_then(|view| {
-                    aikit_adapters::wiki_document::complete_source_relations(
-                        &reading, view, &material, &objects,
-                    )
-                })
-                .ok();
-            aikit_adapters::wiki_document::reading_document(
-                &reading,
-                relations.as_ref(),
-                &runtime.document_material(),
-            )
+        let key = address_cache_key("read-document", address, "");
+        self.with_knowledge_cached(BasisScope::Ground, &key, || {
+            self.with_knowledge(|runtime, application| {
+                let reading = application.read(address)?;
+                let material = runtime.document_material();
+                let objects: Vec<_> = runtime
+                    .wiki_index()
+                    .map(|index| {
+                        index
+                            .discover()
+                            .into_iter()
+                            .filter_map(|reference| index.resolve(&reference))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let relations = application
+                    .relations(address, 1, 256, 512)
+                    .and_then(|view| {
+                        aikit_adapters::wiki_document::complete_source_relations(
+                            &reading, view, &material, &objects,
+                        )
+                    })
+                    .ok();
+                aikit_adapters::wiki_document::reading_document(
+                    &reading,
+                    relations.as_ref(),
+                    &runtime.document_material(),
+                )
+            })
         })
     }
 
@@ -513,64 +1056,99 @@ impl Service {
         }
         let found =
             self.knowledge_search(query, max_nodes.saturating_add(max_edges).saturating_add(1))?;
-        self.with_knowledge(|runtime, _| {
-            let objects: Vec<_> = runtime
-                .wiki_index()
-                .map(|index| {
-                    index
-                        .discover()
-                        .into_iter()
-                        .filter_map(|reference| index.resolve(&reference))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let material = runtime.document_material();
-            let mut hits = found.hits.clone();
-            if query.trim().is_empty() {
-                for item in &material {
-                    let provider = runtime
-                        .central
-                        .as_ref()
-                        .filter(|p| {
-                            p.descriptors()
-                                .iter()
-                                .any(|m| m.binding.source == item.binding.source)
-                        })
-                        .map(|p| p.status().provider)
-                        .or_else(|| {
-                            runtime
-                                .now_field
-                                .as_ref()
-                                .filter(|_| {
-                                    runtime
-                                        .now_field_roster
-                                        .iter()
-                                        .any(|m| m.binding.source == item.binding.source)
-                                })
-                                .map(|p| p.status().provider)
-                        })
-                        .unwrap_or_else(|| runtime.native_source.status().provider);
-                    hits.push(aikit_core::knowledge_navigation::KnowledgeSearchHit {
-                        address: KnowledgeAddress::Source(item.binding.source.clone()),
-                        resource: ResourceRef::parse(item.binding.source.as_str())?,
-                        kind: ResourceKind::KnowledgeSource,
-                        label: item.binding.title.clone(),
-                        score: 0.0,
-                        snippet: String::new(),
-                        provider,
-                        authority: SourceAuthority::Observed,
-                        ranking: None,
+        let expression =
+            parse_or_search_expression_in_scope(query, self.knowledge_scope_project().as_deref())?;
+        let graph_key = format!("graph\x1f{max_nodes}\x1f{max_edges}\x1f{query}");
+        self.with_knowledge_cached(BasisScope::Full, &graph_key, || {
+            self.with_knowledge(|runtime, _| {
+                let mut objects: Vec<_> = runtime
+                    .wiki_index()
+                    .map(|index| {
+                        index
+                            .discover()
+                            .into_iter()
+                            .filter_map(|reference| index.resolve(&reference))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut material = runtime.document_material();
+                if let Some(display) =
+                    runtime.scoped_project_display(expression_scope_project(&expression))
+                {
+                    material.retain(|item| {
+                        runtime.source_belongs_to_scope(item.binding.source.as_str(), &display)
+                    });
+                    objects.retain(|object| {
+                        let reference = object.ref_id().as_str();
+                        // The same scope predicate the material obeys: another
+                        // Project's wiki space (or any ref naming a sibling)
+                        // stays out of a ProjectWorld's graph reply.
+                        runtime.source_belongs_to_scope(reference, &display)
+                            && !attributed_to_other_project(
+                                &runtime.authored_edge_projects,
+                                reference,
+                                &display,
+                            )
+                            && !attributed_to_other_project(
+                                &runtime.folder_subject_projects,
+                                reference,
+                                &display,
+                            )
+                            && !attributed_to_other_project(
+                                &runtime.matrix_object_projects,
+                                reference,
+                                &display,
+                            )
                     });
                 }
-            }
-            Ok(aikit_adapters::wiki_graph::project_graph(
-                &hits,
-                &objects,
-                &material,
-                max_nodes,
-                max_edges,
-                &found.absences,
-            ))
+                let mut hits = found.hits.clone();
+                if query.trim().is_empty() {
+                    for item in &material {
+                        let provider = runtime
+                            .central
+                            .as_ref()
+                            .filter(|p| {
+                                p.descriptors()
+                                    .iter()
+                                    .any(|m| m.binding.source == item.binding.source)
+                            })
+                            .map(|p| p.status().provider)
+                            .or_else(|| {
+                                runtime
+                                    .now_field
+                                    .as_ref()
+                                    .filter(|_| {
+                                        runtime
+                                            .now_field_roster
+                                            .iter()
+                                            .any(|m| m.binding.source == item.binding.source)
+                                    })
+                                    .map(|p| p.status().provider)
+                            })
+                            .unwrap_or_else(|| runtime.native_source.status().provider);
+                        hits.push(aikit_core::knowledge_navigation::KnowledgeSearchHit {
+                            address: KnowledgeAddress::Source(item.binding.source.clone()),
+                            resource: ResourceRef::parse(item.binding.source.as_str())?,
+                            kind: ResourceKind::KnowledgeSource,
+                            label: item.binding.title.clone(),
+                            score: 0.0,
+                            snippet: String::new(),
+                            provider,
+                            authority: SourceAuthority::Observed,
+                            ranking: None,
+                            corroborated_by: Vec::new(),
+                        });
+                    }
+                }
+                Ok(aikit_adapters::wiki_graph::project_graph(
+                    &hits,
+                    &objects,
+                    &material,
+                    max_nodes,
+                    max_edges,
+                    &found.absences,
+                ))
+            })
         })
     }
 
@@ -581,28 +1159,35 @@ impl Service {
         max_nodes: usize,
         max_edges: usize,
     ) -> Result<KnowledgeRelationView> {
-        self.with_knowledge(|runtime, application| {
-            let view = application.relations(address, depth, max_nodes, max_edges)?;
-            if !matches!(address, KnowledgeAddress::Source(_)) || depth == 0 {
-                return Ok(view);
-            }
-            let reading = application.read(address)?;
-            let objects: Vec<_> = runtime
-                .wiki_index()
-                .map(|index| {
-                    index
-                        .discover()
-                        .into_iter()
-                        .filter_map(|reference| index.resolve(&reference))
-                        .collect()
-                })
-                .unwrap_or_default();
-            aikit_adapters::wiki_document::complete_source_relations(
-                &reading,
-                view,
-                &runtime.document_material(),
-                &objects,
-            )
+        let key = address_cache_key(
+            "relations",
+            address,
+            &format!("\x1f{depth}\x1f{max_nodes}\x1f{max_edges}"),
+        );
+        self.with_knowledge_cached(BasisScope::Ground, &key, || {
+            self.with_knowledge(|runtime, application| {
+                let view = application.relations(address, depth, max_nodes, max_edges)?;
+                if !matches!(address, KnowledgeAddress::Source(_)) || depth == 0 {
+                    return Ok(view);
+                }
+                let reading = application.read(address)?;
+                let objects: Vec<_> = runtime
+                    .wiki_index()
+                    .map(|index| {
+                        index
+                            .discover()
+                            .into_iter()
+                            .filter_map(|reference| index.resolve(&reference))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                aikit_adapters::wiki_document::complete_source_relations(
+                    &reading,
+                    view,
+                    &runtime.document_material(),
+                    &objects,
+                )
+            })
         })
     }
 
@@ -631,8 +1216,20 @@ impl Service {
         let mut frame = self.with_knowledge(|runtime, application| {
             let mut frame = application.context_pack(query, addresses);
             frame.absences.extend(runtime.absences.clone());
-            // A frame carries its own project's pending rollup, never other
-            // projects'.
+            frame.absences.extend(
+                runtime
+                    .project_absences
+                    .iter()
+                    .filter(|absence| {
+                        runtime
+                            .current_project
+                            .as_deref()
+                            .is_none_or(|project| project == absence.project)
+                    })
+                    .map(|absence| absence.message.clone()),
+            );
+            // A frame carries its own project's pending rollup and code-index
+            // degradation, never other projects'.
             if let Some(current) = &runtime.current_project {
                 if let Some(pending) = runtime
                     .authored_pending
@@ -640,6 +1237,11 @@ impl Service {
                     .find(|pending| &pending.project == current)
                 {
                     frame.absences.push(pending.rollup_line());
+                }
+                for degradation in &runtime.code_degradations {
+                    if &degradation.project == current {
+                        frame.absences.push(degradation.message.clone());
+                    }
                 }
             }
             Ok(frame)
@@ -685,17 +1287,35 @@ impl Service {
     }
 
     pub fn knowledge_status(&self) -> Result<KnowledgeProviderStatus> {
-        self.with_knowledge(|runtime, application| {
+        let mut status = self.with_knowledge(|runtime, application| {
             let mut status = application.status();
             status.absences.extend(runtime.absences.clone());
+            status.absences.extend(
+                runtime
+                    .project_absences
+                    .iter()
+                    .map(|absence| absence.message.clone()),
+            );
+            // Notes are the loud per-project surface: anchor state, map
+            // freshness, pool posture — state, not per-query failures.
+            status.notes.extend(runtime.status_notes.clone());
             // Status is the only surface that carries every project's pending
             // rollup and the full per-target detail.
             for pending in &runtime.authored_pending {
                 status.absences.push(pending.rollup_line());
             }
+            // Likewise every project's code-index degradation: a scoped reply
+            // carries only its own, but the diagnostic surface names all.
+            for degradation in &runtime.code_degradations {
+                status.absences.push(degradation.message.clone());
+            }
             status.authored_pending = runtime.authored_pending.clone();
             Ok(status)
-        })
+        })?;
+        // The result cache's own disclosure: what it is, what this invocation
+        // did with it, or why it stood down.
+        status.notes.push(self.knowledge_result_cache_note());
+        Ok(status)
     }
 
     pub fn knowledge_forget(&mut self, scope: ForgetScope) -> Result<()> {
@@ -709,13 +1329,15 @@ impl Service {
             .as_deref()
             .unwrap_or(&self.invocation_cwd);
         let mut absences = Vec::new();
+        let mut status_notes = Vec::new();
+        let mut work_projects: Vec<WorkRepoProject> = Vec::new();
         let mut wiki_registers = Vec::new();
         let mut authored_pending = Vec::new();
+        let mut project_absences = Vec::new();
         let mut authored_edge_projects = BTreeMap::new();
         let mut folder_subject_projects = BTreeMap::new();
-        let central_root = root.ancestors().find(|candidate| {
-            candidate.join("Control").is_dir() && candidate.join("Work").is_dir()
-        });
+        let mut matrix_object_projects = BTreeMap::new();
+        let central_root = self.knowledge_central_root(root);
         let mut discovered = discover_material(
             root,
             self.home.root(),
@@ -750,6 +1372,13 @@ impl Service {
             // (project spaces + the Central root composition), origin Compiled.
             let matrices = aikit_adapters::capability_matrix::compile_world_matrices(central_root);
             absences.extend(matrices.absences);
+            matrix_object_projects = matrices.object_projects;
+            project_absences.extend(matrices.project_absences.into_iter().map(|absence| {
+                ProjectOwnedAbsence {
+                    project: absence.project,
+                    message: absence.message,
+                }
+            }));
             aikit_adapters::central_entities::adopt_into(&mut discovered.wiki, matrices.objects);
             // CASE 19 / W10 V9.4: authored Markdown under each project's
             // ProjectCentral/user/** compiles its explicit [[wikilinks]]
@@ -760,7 +1389,12 @@ impl Service {
                 aikit_adapters::projectcentral_authored_wiki::compile_world_authored_wiki(
                     central_root,
                 );
-            absences.extend(authored_wiki.absences);
+            project_absences.extend(authored_wiki.absences.into_iter().map(|absence| {
+                ProjectOwnedAbsence {
+                    project: absence.project,
+                    message: absence.message,
+                }
+            }));
             authored_pending = authored_wiki.pending;
             authored_edge_projects = authored_wiki.edge_projects;
             aikit_adapters::central_entities::adopt_into(
@@ -924,12 +1558,86 @@ impl Service {
                     self.invocation_project_member(central_root, root)
                         .as_deref(),
                 );
-            absences.extend(folder_subjects.absences);
+            // Anchor gaps are status notes (Design D), never per-query
+            // absences: the per-project state belongs in `knowledge status`,
+            // which carries every project's line below.
+            for absence in folder_subjects.absences {
+                if is_anchor_gap(&absence) {
+                    status_notes.push(absence);
+                } else {
+                    absences.push(absence);
+                }
+            }
             folder_subject_projects = folder_subjects.subject_projects;
             aikit_adapters::central_entities::adopt_into(
                 &mut discovered.wiki,
                 folder_subjects.objects,
             );
+
+            // Projects from declarations, not env (Design B, A-4): the
+            // manifests every Work folder already carries. A folder whose
+            // manifest cannot be honoured is one named absence, never a
+            // silent skip.
+            for entry in discover_work_projects(central_root) {
+                match entry {
+                    aikit_adapters::work_repos::WorkProjectEntry::Project(project) => {
+                        work_projects.push(project);
+                    }
+                    aikit_adapters::work_repos::WorkProjectEntry::Absence { name, reason } => {
+                        project_absences.push(ProjectOwnedAbsence {
+                            project: format!("Work/{name}"),
+                            message: format!("Work/{name} {reason}"),
+                        });
+                    }
+                }
+            }
+            // Per-project anchor state, loud in status (Design D): a missing
+            // anchor degrades folder subjects, so it is named once per
+            // project with the one command that fixes it.
+            for project in &work_projects {
+                let anchor_ref =
+                    aikit_adapters::projectcentral_folder_subjects::project_root_anchor_ref(
+                        &project.name,
+                    );
+                let anchored = aikit_adapters::ProjectCentralFilesystemBinding::inspect(
+                    &project.root,
+                    Some(central_root),
+                )
+                .ok()
+                .and_then(|binding| binding.load_project_wiki().ok())
+                .map(|objects| {
+                    objects
+                        .iter()
+                        .any(|object| object.ref_id().as_str() == anchor_ref)
+                });
+                match anchored {
+                    Some(true) => status_notes.push(format!(
+                        "Work/{}: project-root anchor present",
+                        project.name
+                    )),
+                    Some(false) => status_notes.push(format!(
+                        "Work/{name}: project-root anchor absent — folder subjects are not compiled; run `aikit wiki root-anchor --project Work/{name}`",
+                        name = project.name
+                    )),
+                    None => status_notes.push(format!(
+                        "Work/{}: project wiki unreadable; anchor state unknown",
+                        project.name
+                    )),
+                }
+            }
+            if work_projects.is_empty() {
+                status_notes.push(
+                    "Work projects: none — no Work/*/ProjectCentral/project.json manifests were found"
+                        .into(),
+                );
+            } else {
+                let names: Vec<&str> = work_projects.iter().map(|p| p.name.as_str()).collect();
+                status_notes.push(format!(
+                    "Projects: {} discovered from Work/*/ProjectCentral manifests: {}",
+                    work_projects.len(),
+                    names.join(", ")
+                ));
+            }
         }
 
         let central = if let Some(central_root) = central_root {
@@ -942,7 +1650,10 @@ impl Service {
                 central_root,
                 project.as_deref(),
             ) {
-                Ok(provider) => Some(provider),
+                Ok(provider) => {
+                    note_central_map_freshness(central_root, &mut status_notes);
+                    Some(provider)
+                }
                 Err(error) => {
                     absences.push(format!("Central file map unavailable: {error}"));
                     None
@@ -971,6 +1682,70 @@ impl Service {
         } else {
             None
         };
+        // The live Work-repos pool (Design A): one repo per discovered
+        // project, searched at query time. It exists only where projects
+        // were discovered; the NOW-field/native providers keep their priority.
+        let work_repos = if work_projects.is_empty() {
+            None
+        } else {
+            Some(WorkReposSourcePoolProvider::connect(
+                SystemRunner::new().with_env_removed("RIPGREP_CONFIG_PATH"),
+                aikit_adapters::ripgrep::executable(),
+                work_projects.clone(),
+            ))
+        };
+        let work_repo_scopes: BTreeMap<String, String> = work_projects
+            .iter()
+            .map(|project| {
+                (
+                    format!("source:project:{}:", project.project_id),
+                    format!("Work/{}", project.name),
+                )
+            })
+            .collect();
+        let central_project_source_scopes: BTreeMap<String, String> = work_projects
+            .iter()
+            .map(|project| {
+                (
+                    format!("central:source:project:{}:", project.project_id),
+                    format!("Work/{}", project.name),
+                )
+            })
+            .collect();
+        let code_source_scopes: BTreeMap<String, String> = work_projects
+            .iter()
+            .map(|project| {
+                (
+                    format!("source:project-code:{}", project.project_id),
+                    format!("Work/{}", project.name),
+                )
+            })
+            .collect();
+
+        // The default read-only bkmr store pool (owner-corrected A-2): bkmr
+        // is part of agent context sourcing by default, so the configured
+        // stores — personal included — are searched read-only without any
+        // opt-in capsule. Writes stay fenced in the provider; an inactive
+        // pool costs one status note, never a per-query absence.
+        let bkmr_stores = {
+            let config_dir = bkmr_config_dir();
+            let stores = discover_bkmr_stores(&config_dir);
+            let provider = BkmrStoreSearchProvider::connect(SystemRunner::new(), "bkmr", stores);
+            let status = provider.status();
+            if status.available {
+                status_notes.push(format!("bkmr store pool: {}", status.detail));
+                Some(provider)
+            } else {
+                let reason = if provider.stores().is_empty() {
+                    format!("no configured bkmr stores under {}", config_dir.display())
+                } else {
+                    status.detail
+                };
+                status_notes.push(format!("bkmr store pool inactive: {reason}"));
+                None
+            }
+        };
+
         // Filesystem source shards are a standalone discovery mechanism. In a
         // Central World their copied bodies must not bypass the live source owner
         // (including a source withheld since an earlier cached corpus was written).
@@ -1068,26 +1843,144 @@ impl Service {
         if let Some(provider) = &central {
             material.extend(provider.descriptors().iter().cloned());
         }
-        let mut code = None;
-        if let Some(project_id) = self.descriptor.project_id.as_ref() {
-            let source = SourceRef::parse(format!("source:project-code:{project_id}"))?;
-            let mut provider = GitNexusCodeIndexProvider::new(
-                SystemRunner::new().with_cwd(root),
-                project_id.to_string(),
-                source,
-                None,
-            );
-            let status = provider.status();
-            if status.available && status.capabilities.index {
-                if let Err(error) = provider.index(root, false) {
-                    absences.push(format!("GitNexus CodeIndex degraded: {error}"));
+        // GitNexus per discovered project (Design C): the structural layer is
+        // capability-gated per project. Each provider joins the runtime even
+        // when it cannot index, so the absence is per project — never a
+        // global "provider absent"; unavailable projects share one grouped
+        // line per distinct reason.
+        //
+        // Bounded and parallel (owner repair, W-knowledge-search-2026-09-24):
+        // a live gate against the real Central ground found `knowledge
+        // search`/`knowledge status` taking minutes — one large Work repo's
+        // `gitnexus analyze --index-only` alone ran past five minutes
+        // unbounded, and this loop ran one such call per discovered project,
+        // strictly sequentially, on every single invocation (no index state
+        // survives between CLI processes). Every GitNexus subprocess this
+        // provider spawns — capability probe, index, search — now runs under
+        // `gitnexus_budget()`, so one huge or hung repository is killed and
+        // disclosed rather than stalling the query. Reads no longer index at
+        // all; per-project admission still runs in bounded parallel.
+        let code_budget = gitnexus_budget();
+        let parallelism = std::thread::available_parallelism()
+            .map(|n| n.get().clamp(1, MAX_GITNEXUS_PARALLELISM))
+            .unwrap_or(2);
+        let mut code = Vec::with_capacity(work_projects.len());
+        let mut code_project_scopes = Vec::with_capacity(work_projects.len());
+        let mut code_degradations: Vec<ProjectCodeDegradation> = Vec::new();
+        // The binary is a seam: `AIKIT_GITNEXUS_BIN` (resolved through the
+        // process environment at `Service::open`) overrides the PATH lookup,
+        // so a test — and an operator — pins code intelligence to a known
+        // binary instead of depending on whatever the host happens to have.
+        let gitnexus_binary = self.gitnexus_binary.clone();
+        let mut gitnexus_unavailable: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut project_sources = Vec::with_capacity(work_projects.len());
+        for project in &work_projects {
+            let source = SourceRef::parse(format!("source:project-code:{}", project.project_id))?;
+            project_sources.push((project.clone(), source));
+        }
+        for batch in project_sources.chunks(parallelism) {
+            let outcomes: Vec<(
+                WorkRepoProject,
+                GitNexusCodeIndexProvider<SystemRunner>,
+                Option<aikit_core::AikitError>,
+            )> = std::thread::scope(|scope| {
+                let handles: Vec<_> = batch
+                    .iter()
+                    .map(|(project, source)| {
+                        let project = project.clone();
+                        let source = source.clone();
+                        let binary = gitnexus_binary.clone();
+                        scope.spawn(move || {
+                            let runner = SystemRunner::new()
+                                .with_cwd(&project.root)
+                                .with_timeout(code_budget);
+                            let mut provider = match binary.as_deref() {
+                                Some(binary) => GitNexusCodeIndexProvider::with_binary_memoised(
+                                    runner,
+                                    binary,
+                                    project.project_id.clone(),
+                                    source,
+                                    None,
+                                ),
+                                None => GitNexusCodeIndexProvider::with_binary_memoised(
+                                    runner,
+                                    "gitnexus",
+                                    project.project_id.clone(),
+                                    source,
+                                    None,
+                                ),
+                            };
+                            let status = provider.status();
+                            // A Knowledge read admits the owner index that
+                            // already exists and queries a private copy of
+                            // it; it never builds, rebuilds or registers one
+                            // (`aikit knowledge code index` does). A Project
+                            // without an admissible index — no index yet, or
+                            // not a Git repository — is disclosed as its own
+                            // degradation instead of being indexed here.
+                            let admission = provider.open_existing(&project.root).err();
+                            let index_error = if status.available { admission } else { None };
+                            (project, provider, index_error)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle
+                            .join()
+                            .expect("GitNexus index worker thread did not panic")
+                    })
+                    .collect()
+            });
+            for (project, provider, index_error) in outcomes {
+                if let Some(error) = index_error {
+                    // An index that cannot be admitted — absent, incomplete,
+                    // or without a recorded commit — is disclosed as this
+                    // project's degradation, never silently dropped.
+                    // Per-project code state, scoped like `authored_pending`:
+                    // never the global per-query absence that leaked another
+                    // project's code degradation into a scoped reply.
+                    code_degradations.push(ProjectCodeDegradation {
+                        project: format!("Work/{}", project.name),
+                        message: format!(
+                            "GitNexus CodeIndex degraded for Work/{}: {error}",
+                            project.name
+                        ),
+                    });
                 }
-            } else {
-                absences.push("GitNexus CodeIndex unavailable for this Project".into());
+                let status = provider.status();
+                if !status.available {
+                    let reason = provider
+                        .unavailable_reason()
+                        .unwrap_or_else(|| "GitNexus executable is unavailable".into());
+                    gitnexus_unavailable
+                        .entry(reason)
+                        .or_default()
+                        .push(format!("Work/{}", project.name));
+                } else if !status.capabilities.index {
+                    gitnexus_unavailable
+                        .entry(format!(
+                            "installed version {} does not expose the `analyze --index-only` surface this integration uses (tested {})",
+                            status.version.as_deref().unwrap_or("unknown"),
+                            aikit_core::knowledge_code::GITNEXUS_TESTED_VERSION
+                        ))
+                        .or_default()
+                        .push(format!("Work/{}", project.name));
+                }
+                code.push(provider);
+                code_project_scopes.push(format!("Work/{}", project.name));
             }
-            code = Some(provider);
-        } else {
-            absences.push("ProjectMap CodeIndex unavailable: no canonical Project identity".into());
+        }
+        for (reason, projects) in gitnexus_unavailable {
+            // A status note, not a per-query absence: capability state is the
+            // same for every query, and a scoped reply must keep another
+            // project's disclosures out (the discipline authored_pending and
+            // the anchor lines already follow). Status names every project.
+            status_notes.push(format!(
+                "GitNexus unavailable for {}: {reason}",
+                projects.join(", ")
+            ));
         }
 
         let project_map =
@@ -1108,16 +2001,26 @@ impl Service {
             material,
             native_source,
             bkmr,
+            bkmr_stores,
             central,
             now_field,
             now_field_roster,
+            work_repos,
+            work_repo_scopes,
+            central_project_source_scopes,
             central_expected: central_root.is_some(),
+            code_source_scopes,
+            code_project_scopes,
             code,
+            code_degradations,
             project_map,
             absences,
+            status_notes,
             authored_pending,
+            project_absences,
             authored_edge_projects,
             folder_subject_projects,
+            matrix_object_projects,
             current_project,
         })
     }
@@ -1258,16 +2161,68 @@ fn discover_material(
     discover_wiki: bool,
 ) -> Result<DiscoveredMaterial> {
     let mut discovered = DiscoveredMaterial::default();
+    let mut seen_wiki_refs: BTreeSet<String> = BTreeSet::new();
+    let mut conflicted_sources = BTreeSet::new();
+
+    // Canonical authored ground is read directly, outside the walk (Design
+    // E): the root wiki and every project wiki sit at known paths, and
+    // authored ground never depends on walk order or on the candidate bound.
+    // The walk below adds nothing these reads already hold.
+    if discover_wiki {
+        let mut canonical: Vec<PathBuf> = Vec::new();
+        let root_wiki = root.join("Control/agents/wiki/wiki.json");
+        if root_wiki.is_file() {
+            canonical.push(root_wiki);
+        }
+        let work = root.join("Work");
+        if work.is_dir() {
+            if let Ok(entries) = fs::read_dir(&work) {
+                for entry in entries.flatten() {
+                    let wiki = entry.path().join("ProjectCentral/agents/wiki/wiki.json");
+                    if wiki.is_file() {
+                        canonical.push(wiki);
+                    }
+                }
+            }
+        }
+        canonical.sort();
+        canonical.dedup();
+        for path in canonical {
+            let text = match fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(error) => {
+                    absences.push(format!(
+                        "Canonical wiki register {} could not be read: {error}",
+                        path.display()
+                    ));
+                    continue;
+                }
+            };
+            match parse_wiki_objects(&text) {
+                Ok(objects) => {
+                    for object in objects {
+                        if seen_wiki_refs.insert(object.ref_id().as_str().to_owned()) {
+                            discovered.wiki.push(object);
+                        }
+                    }
+                }
+                Err(error) => absences.push(format!(
+                    "Canonical wiki register {} is invalid: {error}",
+                    path.display()
+                )),
+            }
+        }
+    }
+
     let mut stack = vec![root.to_path_buf()];
     let mut files = 0usize;
-    let mut conflicted_sources = BTreeSet::new();
 
     while let Some(dir) = stack.pop() {
         if dir == home || is_ignored_dir(&dir) {
             continue;
         }
         let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
+            Ok(entries) => entries.flatten().collect::<Vec<_>>(),
             Err(error) => {
                 absences.push(format!(
                     "Knowledge discovery could not read {}: {error}",
@@ -1276,7 +2231,7 @@ fn discover_material(
                 continue;
             }
         };
-        for entry in entries.flatten() {
+        for (index, entry) in entries.iter().enumerate() {
             let path = entry.path();
             if path.is_dir() {
                 if !is_ignored_dir(&path) && path != home {
@@ -1285,8 +2240,18 @@ fn discover_material(
                 continue;
             }
             if files >= MAX_DISCOVERY_FILES {
+                // A bound that fires stays acceptable; one that hides what it
+                // skipped is the defect (Design E): the absence names the
+                // stopping directory and the approximate unexamined count.
+                let skipped_here = entries[index..]
+                    .iter()
+                    .filter(|e| !e.path().is_dir())
+                    .count();
                 absences.push(format!(
-                    "Knowledge discovery stopped after {MAX_DISCOVERY_FILES} candidate files"
+                    "Knowledge discovery stopped after {MAX_DISCOVERY_FILES} candidate files in {}; \
+                     ~{skipped_here} further files unexamined in that subtree; {} queued directories were never visited",
+                    dir.display(),
+                    stack.len()
                 ));
                 stack.clear();
                 break;
@@ -1320,9 +2285,19 @@ fn discover_material(
 
             if source_items.is_err() && discover_wiki && text.contains("okf-wiki/v1") {
                 match parse_wiki_objects(&text) {
-                    Ok(objects) => discovered.wiki.extend(objects),
+                    Ok(objects) => {
+                        for object in objects {
+                            if seen_wiki_refs.insert(object.ref_id().as_str().to_owned()) {
+                                discovered.wiki.push(object);
+                            }
+                        }
+                    }
                     Err(collection_error) => match OkfWikiBundle::parse_json(&text) {
-                        Ok(bundle) => discovered.wiki.push(bundle.wiki),
+                        Ok(bundle) => {
+                            if seen_wiki_refs.insert(bundle.wiki.ref_id().as_str().to_owned()) {
+                                discovered.wiki.push(bundle.wiki);
+                            }
+                        }
                         Err(_) => absences.push(format!(
                             "self-identified SemanticWiki material at {} is invalid: {collection_error}",
                             path.display()
@@ -1353,6 +2328,40 @@ fn discover_material(
         }
     }
     Ok(discovered)
+}
+
+/// The compiler's own anchor-gap disclosure, partitioned into status notes by
+/// Design D so a missing anchor is loud in status, not per query.
+fn is_anchor_gap(absence: &str) -> bool {
+    absence.contains("project-root anchor") && absence.contains("no folder subjects compiled")
+}
+
+/// Status note naming how fresh Central's persistent file-map index is (the
+/// bkmr-backed map only knows what its last refresh saw).
+fn note_central_map_freshness(central_root: &Path, notes: &mut Vec<String>) {
+    let index = central_root.join(".central/bkmr/index.db");
+    let bindings = central_root.join(".central/bkmr/bindings.json");
+    let Some(path) = [index, bindings]
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+    else {
+        notes.push(
+            "central-bkmr file map: no index found under .central/bkmr; refresh it through Central"
+                .into(),
+        );
+        return;
+    };
+    let stamp = fs::metadata(&path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .and_then(|duration| jiff::Timestamp::from_second(duration.as_secs() as i64).ok())
+        .map(|timestamp| timestamp.to_string())
+        .unwrap_or_else(|| "unknown time".into());
+    notes.push(format!(
+        "central-bkmr file map index last refreshed {stamp} ({})",
+        path.display()
+    ));
 }
 
 fn is_ignored_dir(path: &Path) -> bool {

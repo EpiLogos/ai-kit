@@ -194,3 +194,275 @@ fn restart_restores_semantic_state_from_the_default_location() {
     shutdown(home.path());
     serve.wait().unwrap();
 }
+
+// -- The Routine dispatcher surface ----------------------------------------
+
+/// `aikit gateway tick` is one deterministic dispatcher pass (addendum A-4):
+/// on a home with no Routines it succeeds having considered nothing, and it
+/// needs no running gateway.
+#[test]
+fn gateway_tick_is_one_deterministic_pass_even_with_no_routines() {
+    let home = TempDir::new().unwrap();
+    let (ok, envelope, _) = run(home.path(), &["gateway", "tick"]);
+    assert!(ok, "{envelope}");
+    assert_eq!(envelope["data"]["considered"].as_array().unwrap().len(), 0);
+    assert_eq!(envelope["data"]["dispatched"].as_array().unwrap().len(), 0);
+    assert_eq!(envelope["data"]["clock_moved_back"], Value::Bool(false));
+}
+
+/// While any Enabled schedule Routine exists, a down gateway is exactly the
+/// reason scheduled automations will not fire — doctor says so as a warning,
+/// not a note.
+#[test]
+fn doctor_warns_that_scheduled_automations_will_not_fire_without_a_gateway() {
+    use aikit_core::method::Method;
+    use aikit_core::resource::routine::{
+        ProvenMethodBasis, Routine, RoutineAuthority, RoutineSchedulerBinding,
+        RoutineSchedulerState, RoutineTrigger, METHOD_PROOF_VERSION,
+    };
+    use aikit_core::resource::{ProviderRef, ResourceRef, SourceRef, SourceRevision};
+    use aikit_core::schedule::{ScheduleRecord, ScheduleShape};
+    use aikit_store::{AikitHome, RoutineStore, StoredRoutine};
+
+    let temp = TempDir::new().unwrap();
+    let home = AikitHome::at(temp.path());
+    let r = |raw: &str| ResourceRef::parse(raw).unwrap();
+    let rev = |raw: &str| SourceRevision::parse(raw).unwrap();
+    let method = Method {
+        id: r("method:fixture"),
+        source: SourceRef::parse("source:fixture").unwrap(),
+        revision: Some(rev("method-rev-1")),
+        name: "Fixture Method".into(),
+        description: String::new(),
+        focus: vec![],
+        project_domain: vec![],
+        skills: vec![],
+        actions: vec![r("action/capability/run")],
+        capabilities: vec![],
+        context_sources: vec![],
+        verification: vec![r("verification:fixture")],
+        expected_resolve: None,
+        expected_return_forms: vec![],
+    };
+    let proof = ProvenMethodBasis {
+        version: METHOD_PROOF_VERSION.into(),
+        method: method.id.clone(),
+        method_revision: rev("method-rev-1"),
+        proof_ref: r("proof:fixture"),
+        context_resolution_ref: r("context-resolution:fixture"),
+        activity_refs: vec![r("activity:fixture:1")],
+        return_refs: vec![r("return:fixture:1")],
+        evidence_refs: vec![r("evidence:fixture:1")],
+        verification_refs: vec![r("verification:fixture:1")],
+    };
+    let routine = Routine::new(
+        r("routine/doctor-demo"),
+        SourceRef::parse("source:aikit:routines/routine/doctor-demo").unwrap(),
+        None,
+        "Doctor demo",
+        "",
+        &method,
+        proof,
+        RoutineTrigger::Schedule {
+            schedule_ref: "schedule/doctor-demo".into(),
+        },
+        RoutineAuthority {
+            authority_ref: r("authority:fixture"),
+            revision: Some(rev("authority-rev-1")),
+            action_refs: vec![r("action/capability/run")],
+            granted: true,
+            unattended: true,
+        },
+        None,
+        vec![],
+    )
+    .unwrap();
+    let mut record = StoredRoutine::new(
+        routine,
+        Some(
+            ScheduleRecord::new(
+                r("schedule/doctor-demo"),
+                ScheduleShape::Daily {
+                    time: "06:00".into(),
+                },
+                None,
+            )
+            .unwrap(),
+        ),
+        None,
+    )
+    .unwrap();
+    record
+        .routine
+        .set_scheduler_binding(RoutineSchedulerBinding {
+            provider: ProviderRef::parse("provider:aikit-gateway").unwrap(),
+            provider_job_id: None,
+            observed_state: RoutineSchedulerState::Planned,
+        })
+        .unwrap();
+    record.routine.enable(&method).unwrap();
+    RoutineStore::new(home).put(record).unwrap();
+
+    // AIKIT_HOME carries the routine; the gateway socket lives under it too
+    // and does not exist, so nothing can fire.
+    let (ok, doctor, _) = run(temp.path(), &["doctor"]);
+    assert!(ok, "{doctor}");
+    let finding = doctor["data"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["check"] == "gateway.service")
+        .expect("doctor must account for the gateway");
+    assert_eq!(finding["severity"], Value::from("warning"), "{finding}");
+    assert!(
+        finding["summary"]
+            .as_str()
+            .unwrap()
+            .contains("scheduled automations will not fire"),
+        "{finding}"
+    );
+}
+
+fn free_bind() -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    // An ephemeral port freed here can be claimed by a concurrently starting
+    // test's own server before this test's serve binds it, so hand each caller
+    // a distinct reservation instead of a port that is only momentarily free.
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let base = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port() as u32;
+    for attempt in 0..64u32 {
+        let spread = NEXT.fetch_add(7, Ordering::SeqCst) % 4096 + attempt;
+        let candidate = 1024 + (base.wrapping_add(spread * 97) % (65535 - 1024));
+        if let Ok(listener) = std::net::TcpListener::bind(format!("127.0.0.1:{candidate}")) {
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            return format!("127.0.0.1:{port}");
+        }
+    }
+    panic!("no reservable loopback port for the gateway test");
+}
+
+fn token_file(dir: &std::path::Path, mode: u32) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(format!("gateway-{mode:o}.token"));
+    std::fs::write(&path, "loopback-serve-token-0123456789\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    path
+}
+
+#[test]
+fn serve_refuses_a_token_file_others_can_read_before_binding_anything() {
+    let home = TempDir::new().unwrap();
+    let token = token_file(home.path(), 0o644);
+    let bind = free_bind();
+    let (ok, envelope, _) = run(
+        home.path(),
+        &[
+            "gateway",
+            "serve",
+            "--ws",
+            &bind,
+            "--ws-token-location",
+            &format!("file:{}", token.display()),
+            "--unix",
+        ],
+    );
+    assert!(!ok, "a world-readable token must be refused: {envelope}");
+    assert_eq!(envelope["error"]["code"], "gateway.serve_token_unusable");
+    let message = envelope["error"]["message"].as_str().unwrap();
+    assert!(message.contains("owner only"), "{message}");
+    assert!(message.contains("chmod 600"), "{message}");
+    assert!(!home.path().join("state/gateway.sock").exists());
+    assert!(std::net::TcpStream::connect(&bind).is_err());
+}
+
+#[test]
+fn serve_with_a_token_location_answers_on_the_websocket_and_the_home_socket_together() {
+    let home = TempDir::new().unwrap();
+    let token = token_file(home.path(), 0o600);
+    let bind = free_bind();
+    let child = Command::new(bin())
+        .args([
+            "gateway",
+            "serve",
+            "--ws",
+            &bind,
+            "--ws-token-location",
+            &format!("file:{}", token.display()),
+            "--unix",
+        ])
+        .env("AIKIT_HOME", home.path())
+        .env("HOME", home.path())
+        .env_remove("AIKIT_GATEWAY_TOKEN")
+        .current_dir(home.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_socket(home.path());
+
+    // The home socket: local verbs keep working while the WebSocket is served.
+    let (ok, local, _) = run(home.path(), &["gateway", "status"]);
+    assert!(ok, "the bare --unix binds the home socket: {local}");
+
+    // The WebSocket: the token read from the file is the one it demands.
+    let (ok, remote, _) = run(
+        home.path(),
+        &[
+            "gateway",
+            "status",
+            "--ws",
+            &bind,
+            "--ws-token",
+            "loopback-serve-token-0123456789",
+        ],
+    );
+    assert!(ok, "the WebSocket answers with the file's token: {remote}");
+    let (ok, refused, _) = run(
+        home.path(),
+        &[
+            "gateway",
+            "status",
+            "--ws",
+            &bind,
+            "--ws-token",
+            "wrong-token",
+        ],
+    );
+    assert!(!ok, "any other token is refused: {refused}");
+
+    let stopped = shutdown(home.path());
+    assert_eq!(stopped["ok"], Value::Bool(true));
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("serving the WebSocket carrier only"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_token_location_and_a_raw_token_cannot_both_be_given() {
+    let home = TempDir::new().unwrap();
+    let output = Command::new(bin())
+        .args([
+            "gateway",
+            "serve",
+            "--ws",
+            "127.0.0.1:1",
+            "--ws-token",
+            "raw",
+            "--ws-token-location",
+            "file:/tmp/x",
+        ])
+        .env("AIKIT_HOME", home.path())
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+}

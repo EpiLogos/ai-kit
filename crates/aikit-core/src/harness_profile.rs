@@ -27,7 +27,10 @@
 //! shape law — [`crate::credential::valid_credential_variable`] — and is
 //! refused here otherwise; the launch path that consumes the declaration
 //! materialises through the same credential seam the selected-model path
-//! uses, never passing an empty or ambient value.
+//! uses, never passing an empty or ambient value. An own-login fact may
+//! additionally carry the harness's declared one-shot login command, so the
+//! login is runnable and renderable next to the env-var option; where no
+//! such command is verified, the fact stays note-only and that is honest.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -279,6 +282,29 @@ pub struct ModelArgvSelectors {
 pub struct ModelOwnLogin {
     pub provider_ref: String,
     pub note: String,
+    /// The harness's declared one-shot login command, when its own command
+    /// surface verifies one: the exact argv that runs the login interactively
+    /// in the user's own terminal. Absent means the login has no declared
+    /// one-shot form (an in-TUI flow, a browser gate, a first-launch wizard) —
+    /// a note-only fact, which is honest, not incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<ModelLoginCommand>,
+}
+
+/// The declared one-shot login command of an own-login fact. The argv follows
+/// the same shape law as the sessions layer's connect declaration: the first
+/// element names the binary, the rest are the harness's own flags carried
+/// verbatim. The command runs in the user's own terminal with the caller's
+/// environment — it is a login, not a connection launch, so it never routes
+/// through the scrubbed launch environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ModelLoginCommand {
+    pub argv: Vec<String>,
+    /// Optional prose beside the command (for example, naming a second,
+    /// portal-scoped login the same harness offers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// Declared key-delivery facts of the models layer: which env var each served
@@ -335,6 +361,38 @@ pub enum SessionProtocol {
     Process,
 }
 
+/// The connection endpoint facts of the declared session protocol: the exact
+/// argv that puts the harness into its protocol mode (never its interactive
+/// UI), plus the launch environment and working directory the connection
+/// requires. This is the profile's answer to "how does a client actually
+/// reach this harness" — without it a protocol declaration is a claim with
+/// no door. Carried as declaration data: the connection builder validates
+/// and materialises it; nothing at runtime invents a launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct SessionConnect {
+    /// The primary launch template. The first element names the binary (an
+    /// absolute path or a PATH name); the rest are the flags that enter the
+    /// protocol mode, carried verbatim from the harness's own command
+    /// surface.
+    pub argv: Vec<String>,
+    /// Older-release argv variants that put the same harness into the same
+    /// protocol mode, tried in declared order when the primary argv is not
+    /// the installed build's surface (gemini renamed `--experimental-acp` to
+    /// `--acp` in the 0.30 line). Declared, never discovered at runtime.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argv_fallback: Vec<Vec<String>>,
+    /// Extra launch environment the connection requires. Values are plain
+    /// literals — secret material never rides a profile; credentials go
+    /// through the models layer's declared key delivery.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// The working directory the connection launches in, where the
+    /// harness's protocol mode demands one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
 /// The harness's session faculties as plain flags, mirroring the shape of
 /// aikit-adapters' `ConnectionCapabilities`. These are profile declarations
 /// used for read models and refusal boundaries, not a negotiated capability
@@ -368,6 +426,13 @@ pub struct SessionsLayer {
     pub open_modes: Vec<String>,
     #[serde(default)]
     pub capabilities: SessionCapabilityFlags,
+    /// How a client reaches this harness in the declared protocol. Required
+    /// for `acp` and `rpc` — a protocol declaration without a door is
+    /// refused at validation. Optional for `process`, whose face is the
+    /// harness's own command surface; where a declared headless face exists
+    /// it may be recorded here too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect: Option<SessionConnect>,
 }
 
 /// Install/config seams of the harness itself. Carried by the layers above;
@@ -656,8 +721,107 @@ impl HarnessProfile {
                 })?;
             }
         }
+        if let Some(sessions) = &self.sessions {
+            validate_sessions_connect(sessions)?;
+        }
         Ok(())
     }
+}
+
+/// Posture truth for the connection declaration: a harness that declares a
+/// client-reaching protocol (`acp`, `rpc`) must declare the door — the exact
+/// argv that opens a protocol session. A `process` protocol may carry one
+/// too (a declared headless face); its absence is honest there, because the
+/// harness's own command surface is the face.
+fn validate_sessions_connect(sessions: &SessionsLayer) -> Result<(), HarnessProfileError> {
+    let connect = match (&sessions.protocol, sessions.connect.as_ref()) {
+        (SessionProtocol::Process, None) => return Ok(()),
+        (_, None) => {
+            return Err(HarnessProfileError::new(
+                "harness_profile.sessions_connect_required",
+                format!(
+                    "the sessions layer declares the {} protocol but no connection facts; \
+                     add [sessions.connect] with the exact argv that puts this harness into \
+                     its protocol mode (and argv-fallback variants for older releases)",
+                    session_protocol_word(sessions.protocol)
+                ),
+            )
+            .with("field", "sessions.connect"));
+        }
+        (_, Some(connect)) => connect,
+    };
+    for (index, variant) in std::iter::once(&connect.argv)
+        .chain(connect.argv_fallback.iter())
+        .enumerate()
+    {
+        let field = if index == 0 {
+            "sessions.connect.argv".to_string()
+        } else {
+            format!("sessions.connect.argv-fallback[{}]", index - 1)
+        };
+        if variant.is_empty() || variant[0].trim().is_empty() {
+            return Err(HarnessProfileError::new(
+                "harness_profile.invalid_connect_argv",
+                format!(
+                    "the connection declaration at {field} declares no binary; its first \
+                     element must name the harness binary (an absolute path or a PATH name)"
+                ),
+            )
+            .with("field", field));
+        }
+        if let Some(position) = variant.iter().position(|part| part.trim().is_empty()) {
+            return Err(HarnessProfileError::new(
+                "harness_profile.invalid_connect_argv",
+                format!(
+                    "the connection declaration at {field} has an empty argument at offset \
+                     {position}; carry the harness's flags verbatim, never as blank padding"
+                ),
+            )
+            .with("field", field));
+        }
+    }
+    Ok(())
+}
+
+fn session_protocol_word(protocol: SessionProtocol) -> &'static str {
+    match protocol {
+        SessionProtocol::Acp => "acp",
+        SessionProtocol::Rpc => "rpc",
+        SessionProtocol::Process => "process",
+    }
+}
+
+/// The connect argv shape law applied to a declared login command: non-empty,
+/// the first element names the binary, no blank elements. A login command
+/// that names no binary would run nothing, and blank padding would hand the
+/// terminal a word that was never declared.
+fn validate_login_argv(
+    provider_ref: &str,
+    login: &ModelLoginCommand,
+) -> Result<(), HarnessProfileError> {
+    if login.argv.is_empty() || login.argv[0].trim().is_empty() {
+        return Err(HarnessProfileError::new(
+            "harness_profile.invalid_login_argv",
+            format!(
+                "the own-login declaration for {provider_ref} declares no binary; its first \
+                 element must name the harness binary (an absolute path or a PATH name)"
+            ),
+        )
+        .with("provider-ref", provider_ref.to_string())
+        .with("field", "login.argv"));
+    }
+    if let Some(position) = login.argv.iter().position(|part| part.trim().is_empty()) {
+        return Err(HarnessProfileError::new(
+            "harness_profile.invalid_login_argv",
+            format!(
+                "the own-login declaration for {provider_ref} has an empty argument at offset \
+                 {position}; carry the harness's flags verbatim, never as blank padding"
+            ),
+        )
+        .with("provider-ref", provider_ref.to_string())
+        .with("field", "login.argv"));
+    }
+    Ok(())
 }
 
 /// Posture truth for the argv-selector declaration: only a provider-plural
@@ -765,6 +929,9 @@ fn validate_key_delivery(delivery: &ModelKeyDeliveryLayer) -> Result<(), Harness
             )
             .with("provider-ref", fact.provider_ref.clone())
             .with("field", "note"));
+        }
+        if let Some(login) = &fact.login {
+            validate_login_argv(&fact.provider_ref, login)?;
         }
     }
     if delivery.env_var.is_empty()
@@ -1071,6 +1238,7 @@ mcp-servers = false
                 own_login: vec![ModelOwnLogin {
                     provider_ref: "provider:anthropic".to_string(),
                     note: "claude login stores its own credential".to_string(),
+                    login: None,
                 }],
                 note: None,
             }),
@@ -1188,6 +1356,120 @@ mcp-servers = false
             .note = "   ".to_string();
         let error = profile.validate().unwrap_err();
         assert_eq!(error.code, "harness_profile.empty_own_login_note");
+    }
+
+    #[test]
+    fn a_declared_login_command_validates_and_round_trips_kebab_case() {
+        let mut profile = claude_shaped_profile();
+        profile
+            .models
+            .as_mut()
+            .unwrap()
+            .key_delivery
+            .as_mut()
+            .unwrap()
+            .own_login[0]
+            .login = Some(ModelLoginCommand {
+            argv: vec!["claude".to_string(), "login".to_string()],
+            note: Some("the in-TUI login".to_string()),
+        });
+        profile
+            .validate()
+            .expect("a well-shaped login command satisfies posture truth");
+        let text = toml::to_string_pretty(&profile).expect("serialises");
+        assert!(
+            text.contains("own-login.login"),
+            "the login command renders under its kebab name: {text}"
+        );
+        let reparsed: HarnessProfile = toml::from_str(&text).expect("reparses");
+        assert_eq!(reparsed, profile);
+        let login = reparsed
+            .models
+            .as_ref()
+            .unwrap()
+            .key_delivery
+            .as_ref()
+            .unwrap()
+            .own_login[0]
+            .login
+            .as_ref()
+            .unwrap();
+        assert_eq!(login.argv, vec!["claude".to_string(), "login".to_string()]);
+    }
+
+    #[test]
+    fn an_absent_login_stays_legal_everywhere() {
+        // Note-only harnesses are honest: claude's login is the in-TUI /login
+        // flow, and no one-shot command is invented for it.
+        let profile = claude_shaped_profile();
+        assert!(
+            profile
+                .models
+                .as_ref()
+                .unwrap()
+                .key_delivery
+                .as_ref()
+                .unwrap()
+                .own_login[0]
+                .login
+                .is_none(),
+            "the fixture starts note-only"
+        );
+        profile
+            .validate()
+            .expect("an absent login is legal, not incomplete");
+    }
+
+    #[test]
+    fn a_login_command_that_names_no_binary_is_refused() {
+        for empty in [Vec::new(), vec!["   ".to_string()]] {
+            let mut profile = claude_shaped_profile();
+            profile
+                .models
+                .as_mut()
+                .unwrap()
+                .key_delivery
+                .as_mut()
+                .unwrap()
+                .own_login[0]
+                .login = Some(ModelLoginCommand {
+                argv: empty,
+                note: None,
+            });
+            let error = profile.validate().unwrap_err();
+            assert_eq!(error.code, "harness_profile.invalid_login_argv");
+            assert!(
+                error.to_string().contains("provider:anthropic"),
+                "the refusal names the own-login fact: {error}"
+            );
+            assert!(
+                error.to_string().contains("must name the harness binary"),
+                "the refusal names the fix: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_login_command_with_a_blank_argument_is_refused() {
+        let mut profile = claude_shaped_profile();
+        profile
+            .models
+            .as_mut()
+            .unwrap()
+            .key_delivery
+            .as_mut()
+            .unwrap()
+            .own_login[0]
+            .login = Some(ModelLoginCommand {
+            argv: vec!["claude".to_string(), " ".to_string(), "login".to_string()],
+            note: None,
+        });
+        let error = profile.validate().unwrap_err();
+        assert_eq!(error.code, "harness_profile.invalid_login_argv");
+        assert!(
+            error.to_string().contains("offset 1"),
+            "the refusal names the offending offset: {error}"
+        );
     }
 
     #[test]
@@ -1348,5 +1630,83 @@ mcp-servers = false
         profile.settings = Some(layer);
         let error = profile.validate().unwrap_err();
         assert_eq!(error.code, "harness_profile.trust_setting_scopes");
+    }
+
+    fn gemini_acp_profile_without_connect() -> HarnessProfile {
+        toml::from_str(
+            r#"
+schema = "aikit.harness-profile/v1"
+slug = "gemini"
+edition = "cli"
+
+[sessions]
+posture = "observed"
+protocol = "acp"
+capabilities = { ordered-streaming = true, cancellation = true }
+"#,
+        )
+        .expect("acp profile parses")
+    }
+
+    #[test]
+    fn an_acp_protocol_without_connection_facts_is_refused() {
+        let profile = gemini_acp_profile_without_connect();
+        let error = profile.validate().unwrap_err();
+        assert_eq!(error.code, "harness_profile.sessions_connect_required");
+        assert!(
+            error.to_string().contains("[sessions.connect]"),
+            "the refusal must name the fix: {error}"
+        );
+    }
+
+    #[test]
+    fn an_acp_protocol_with_connection_facts_validates_and_keeps_declared_fallbacks() {
+        let mut profile = gemini_acp_profile_without_connect();
+        profile.sessions.as_mut().unwrap().connect = Some(SessionConnect {
+            argv: vec!["gemini".into(), "--acp".into()],
+            argv_fallback: vec![vec!["gemini".into(), "--experimental-acp".into()]],
+            env: BTreeMap::new(),
+            cwd: None,
+        });
+        profile.validate().expect("declared door validates");
+        let sessions = profile.sessions.as_ref().unwrap();
+        assert_eq!(
+            sessions.connect.as_ref().unwrap().argv_fallback.len(),
+            1,
+            "declared fallback variants survive the round trip"
+        );
+    }
+
+    #[test]
+    fn an_rpc_protocol_without_connection_facts_is_refused() {
+        let mut profile = openclaw_profile();
+        let sessions = profile.sessions.as_mut().unwrap();
+        sessions.protocol = SessionProtocol::Rpc;
+        let error = profile.validate().unwrap_err();
+        assert_eq!(error.code, "harness_profile.sessions_connect_required");
+    }
+
+    #[test]
+    fn a_process_protocol_without_connection_facts_stays_honest() {
+        let profile = openclaw_profile();
+        profile.validate().expect("process needs no declared door");
+    }
+
+    #[test]
+    fn a_connection_argv_without_a_binary_is_refused() {
+        let mut profile = gemini_acp_profile_without_connect();
+        let sessions = profile.sessions.as_mut().unwrap();
+        sessions.connect = Some(SessionConnect {
+            argv: vec!["--acp".into()],
+            argv_fallback: vec![vec![String::new()]],
+            env: BTreeMap::new(),
+            cwd: None,
+        });
+        let error = profile.validate().unwrap_err();
+        assert_eq!(error.code, "harness_profile.invalid_connect_argv");
+        assert!(
+            error.to_string().contains("argv-fallback[0]"),
+            "the refusal must name the offending variant: {error}"
+        );
     }
 }

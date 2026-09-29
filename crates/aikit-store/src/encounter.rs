@@ -71,7 +71,7 @@ impl EncounterStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failure)?;
-        let event = delivery::attribute(&transaction, session, event)?;
+        let event = stamp_observed_at(delivery::attribute(&transaction, session, event)?);
         let body = serde_json::to_string(&event).map_err(failure)?;
         transaction
             .execute(
@@ -303,7 +303,7 @@ impl EncounterStore {
         let payload = context::compose(&draft.text, prepared.as_ref())?;
         dispatch(&payload)?;
         let accepted = (|| -> Result<()> {
-            transaction.execute("INSERT INTO encounter_events(session,event) VALUES(?1,?2)",params![session.as_str(),serde_json::to_string(&serde_json::json!({"kind":"user-message","text":draft.text,"draft_revision":basis,"prepared_context":prepared,"payload_digest":format!("blake3:{}",blake3::hash(payload.as_bytes()).to_hex())})).map_err(failure)?]).map_err(failure)?;
+            transaction.execute("INSERT INTO encounter_events(session,event) VALUES(?1,?2)",params![session.as_str(),serde_json::to_string(&stamp_observed_at(serde_json::json!({"kind":"user-message","text":draft.text,"draft_revision":basis,"prepared_context":prepared,"payload_digest":format!("blake3:{}",blake3::hash(payload.as_bytes()).to_hex())}))).map_err(failure)?]).map_err(failure)?;
             project_block(
                 &transaction,
                 session,
@@ -479,6 +479,23 @@ fn projected_assistant_block_index(events: &[EncounterEvent], target: u64) -> Op
     target_index
 }
 
+/// The owner's observation time for one journal event, in unix milliseconds.
+/// The journal had no clock; a reader that needs one (an activity tape) gets
+/// the moment AIKit recorded the event, never a provider claim. An event that
+/// already carries its own `observed_at_ms` keeps it.
+pub(crate) fn stamp_observed_at(mut event: Value) -> Value {
+    if let Some(object) = event.as_object_mut() {
+        if !object.contains_key("observed_at_ms") {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or(0);
+            object.insert("observed_at_ms".into(), Value::from(now));
+        }
+    }
+    event
+}
+
 fn validate(session: &ResourceRef) -> Result<()> {
     if !session.as_str().starts_with("agent-session/") {
         return Err(AikitError::new(
@@ -582,6 +599,41 @@ fn project_block(connection: &Connection, session: &ResourceRef, event: &Value) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn every_journal_event_carries_the_owner_observation_time() {
+        let root = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(root.path());
+        let session = ResourceRef::parse("agent-session/owner-time").unwrap();
+        let store = EncounterStore::open(&home).unwrap();
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        store
+            .append(&session, &serde_json::json!({"kind":"note","text":"plain"}))
+            .unwrap();
+        // An event that already carries its own time keeps it.
+        store
+            .append(
+                &session,
+                &serde_json::json!({"kind":"note","observed_at_ms":7}),
+            )
+            .unwrap();
+        store.set_draft(&session, 0, "hello").unwrap();
+        store.submit_context(&session, 1, None, |_| Ok(())).unwrap();
+        let page = store.events(&session, 0, 10).unwrap();
+        assert_eq!(page.events.len(), 3);
+        let first = page.events[0].event["observed_at_ms"].as_u64().unwrap();
+        assert!(first >= before);
+        // The stamp sits alongside the event's own fields, which are unchanged.
+        assert_eq!(page.events[0].event["text"], "plain");
+        assert_eq!(page.events[1].event["observed_at_ms"], 7);
+        assert_eq!(page.events[2].event["kind"], "user-message");
+        assert!(page.events[2].event["observed_at_ms"].as_u64().unwrap() >= first);
+        // Block projection is untouched by the stamp.
+        let view = store.view(&session, None).unwrap();
+        assert_eq!(view["blocks"][0]["text"], "hello");
+    }
     #[test]
     fn real_sqlite_resource_failure_preserves_draft_and_refuses_dispatch() {
         let root = tempfile::tempdir().unwrap();

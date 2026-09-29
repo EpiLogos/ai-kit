@@ -94,17 +94,37 @@ impl Output {
 /// each of those owns a runner.
 pub trait CommandRunner {
     fn run(&self, argv: &[String]) -> Result<Output>;
+
+    /// Run with a wall-clock budget. A command that has not finished inside the
+    /// budget is killed and answered as a runner error (`mux.command_timeout`):
+    /// there is no status data to hand back.
+    ///
+    /// The default delegates to [`CommandRunner::run`] unchanged — an
+    /// in-memory runner has nothing to kill — so only runners that spawn real
+    /// processes need to, and can, enforce the budget.
+    fn run_with_timeout(&self, argv: &[String], timeout: std::time::Duration) -> Result<Output> {
+        let _ = timeout;
+        self.run(argv)
+    }
 }
 
 impl<T: CommandRunner + ?Sized> CommandRunner for Box<T> {
     fn run(&self, argv: &[String]) -> Result<Output> {
         (**self).run(argv)
     }
+
+    fn run_with_timeout(&self, argv: &[String], timeout: std::time::Duration) -> Result<Output> {
+        (**self).run_with_timeout(argv, timeout)
+    }
 }
 
 impl<T: CommandRunner + ?Sized> CommandRunner for &T {
     fn run(&self, argv: &[String]) -> Result<Output> {
         (**self).run(argv)
+    }
+
+    fn run_with_timeout(&self, argv: &[String], timeout: std::time::Duration) -> Result<Output> {
+        (**self).run_with_timeout(argv, timeout)
     }
 }
 
@@ -114,6 +134,10 @@ impl<T: CommandRunner + ?Sized> CommandRunner for &T {
 impl<T: CommandRunner + ?Sized> CommandRunner for std::sync::Arc<T> {
     fn run(&self, argv: &[String]) -> Result<Output> {
         (**self).run(argv)
+    }
+
+    fn run_with_timeout(&self, argv: &[String], timeout: std::time::Duration) -> Result<Output> {
+        (**self).run_with_timeout(argv, timeout)
     }
 }
 
@@ -136,6 +160,23 @@ pub struct SystemRunner {
 impl SystemRunner {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A runner bounded by the shared probe budget
+    /// ([`aikit_core::probe::probe_budget`], default 10s, `AIKIT_PROBE_BUDGET_SECS`
+    /// overrides). Read, status and probe surfaces construct this instead of an
+    /// unbounded runner, so a hanging child — the gemini-with-expired-oauth
+    /// class — is killed inside the budget and reported as `timed-out` rather
+    /// than silently stalling the surface. An explicit [`with_timeout`] still
+    /// wins: the probe budget is the default, never a ceiling on configuration.
+    #[must_use]
+    pub fn probe() -> Self {
+        Self::new().with_timeout(aikit_core::probe::probe_budget())
+    }
+
+    /// The configured timeout, when this runner is bounded.
+    pub fn timeout(&self) -> Option<std::time::Duration> {
+        self.timeout
     }
 
     #[must_use]
@@ -171,6 +212,7 @@ impl SystemRunner {
         &self,
         command: &mut std::process::Command,
         argv: &[String],
+        budget: Option<std::time::Duration>,
     ) -> Result<Output> {
         use std::io::Read;
         use std::process::Stdio;
@@ -180,6 +222,23 @@ impl SystemRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null());
+        // The child becomes the leader of its own process group (Unix only —
+        // `process_group` is a no-op stand-in and never called on Windows):
+        // a timed-out kill below can then signal the whole group, not just
+        // this one PID. Without this, a child that itself forks a worker
+        // (a shell's `cmd &`, a Node CLI spawning subprocess workers) leaves
+        // that worker alive after the direct child is killed; the worker
+        // keeps the inherited stdout/stderr pipe open, and `read_to_end` on
+        // this end blocks until *every* holder of the write side closes it —
+        // so the reader-thread join below would still wait out the full
+        // unbounded runtime the budget exists to cut off. A live gate found
+        // exactly this shape (a shell script's `sleep` outliving its already
+        // SIGKILLed parent) turning a "3s budget" into a 30s wait.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         let mut child = command.spawn().map_err(|e| {
             AikitError::new(
                 "mux.command_spawn_failed",
@@ -204,8 +263,7 @@ impl SystemRunner {
             }
             buffer
         });
-        let deadline = self
-            .timeout
+        let deadline = budget
             .map(|budget| Instant::now() + budget)
             .unwrap_or_else(Instant::now);
         let status = loop {
@@ -213,7 +271,7 @@ impl SystemRunner {
                 Ok(Some(status)) => break Some(status),
                 Ok(None) => {
                     if Instant::now() >= deadline {
-                        let _ = child.kill();
+                        kill_tree(&mut child);
                         let _ = child.wait();
                         break None;
                     }
@@ -237,7 +295,7 @@ impl SystemRunner {
                 format!(
                     "`{}` did not finish within {:?} and was killed",
                     argv.join(" "),
-                    self.timeout.unwrap_or_default()
+                    budget.unwrap_or_default()
                 ),
             )
             .with("command", argv.join(" ")));
@@ -250,6 +308,28 @@ impl SystemRunner {
             stderr: String::from_utf8_lossy(&stderr).into_owned(),
         })
     }
+}
+
+/// Kill a timed-out child and, on Unix, every process in its group — not
+/// only the single PID `Child::kill` reaches. Paired with `process_group(0)`
+/// on spawn above; a grandchild the direct child forked (and left running)
+/// dies with it instead of surviving to hold the stdout/stderr pipe open.
+fn kill_tree(child: &mut std::process::Child) {
+    // `rustix` (with its `process` feature) is a dependency only on the two
+    // platforms this cfg names — matching its Cargo.toml target selector,
+    // not the wider `cfg(unix)` `process_group(0)` above uses, so this stays
+    // buildable on every Unix `process_group` already covers.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
+            // Best-effort: the group may already be empty (the child exited
+            // between the deadline check and here) or signalling it may
+            // fail for reasons this runner cannot repair. `child.kill()`
+            // below still covers the direct child either way.
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+    }
+    let _ = child.kill();
 }
 
 impl CommandRunner for SystemRunner {
@@ -274,7 +354,7 @@ impl CommandRunner for SystemRunner {
         }
 
         if self.timeout.is_some() {
-            return self.spawn_bounded(&mut command, argv);
+            return self.spawn_bounded(&mut command, argv, self.timeout);
         }
 
         let output = command.output().map_err(|e| {
@@ -293,6 +373,30 @@ impl CommandRunner for SystemRunner {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
+    }
+
+    fn run_with_timeout(&self, argv: &[String], timeout: std::time::Duration) -> Result<Output> {
+        let Some((program, args)) = argv.split_first() else {
+            return Err(AikitError::new(
+                "mux.empty_command",
+                "an empty command was submitted to the runner",
+            ));
+        };
+
+        let mut command = std::process::Command::new(program);
+        command.args(args);
+        if let Some(cwd) = &self.cwd {
+            command.current_dir(cwd);
+        }
+        for (key, value) in &self.env {
+            command.env(key, value);
+        }
+        for key in &self.env_removed {
+            command.env_remove(key);
+        }
+        // The caller's budget wins over the construction-time one: the request
+        // knows how expensive this particular command is expected to be.
+        self.spawn_bounded(&mut command, argv, Some(timeout))
     }
 }
 
@@ -472,6 +576,23 @@ mod tests {
             .run(&["sleep".into(), "30".into()])
             .expect_err("a 30s sleep cannot finish inside a 120ms budget");
         assert_eq!(error.code(), "mux.command_timeout");
+    }
+
+    #[test]
+    fn the_probe_constructor_rides_the_shared_budget_without_dropping_the_explicit_one() {
+        let probe = SystemRunner::probe();
+        assert_eq!(
+            probe.timeout(),
+            Some(aikit_core::probe::DEFAULT_PROBE_BUDGET),
+            "probe() is bounded by the shared budget, never unbounded"
+        );
+        let explicit = SystemRunner::probe().with_timeout(std::time::Duration::from_millis(120));
+        assert_eq!(
+            explicit.timeout(),
+            Some(std::time::Duration::from_millis(120)),
+            "an explicit budget wins over the probe default"
+        );
+        assert_eq!(SystemRunner::new().timeout(), None);
     }
 
     #[test]

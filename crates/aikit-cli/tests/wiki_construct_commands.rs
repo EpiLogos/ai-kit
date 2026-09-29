@@ -104,6 +104,160 @@ fn prepare_without_native_save_cannot_reopen_or_change_the_file() {
 }
 
 #[test]
+fn native_node_and_unconstructed_whole_facts_reopen_preserve_scope_and_refuse_stale_writes() {
+    let (temp, path) = fixture();
+    let mut document = initial();
+    document["objects"][1]["native_extra"] = json!({"keep":"node property"});
+    document["objects"][1]["provenance"] =
+        json!([{"source_ref":"central:source:alpha.md","source_revision":"r1"}]);
+    document["objects"].as_array_mut().unwrap().extend([
+        json!({"object":"frame","profile":"okf-wiki/v1","ref":"wiki:plain-whole","revision":1,"member_refs":["wiki:alpha","wiki:beta"],"native_extra":{"keep":"whole property"}}),
+        json!({"object":"frame","profile":"okf-wiki/v1","ref":"wiki:other-whole","revision":1,"member_refs":["wiki:alpha"]}),
+    ]);
+    fs::write(&path, document.to_string()).unwrap();
+    let original = fs::read_to_string(&path).unwrap();
+    let facts_request = |kind: &str,
+                         reference: &str,
+                         revision: u64,
+                         operation: &str,
+                         changes: Value| json!({"schema":"aikit.wiki-facts-action/v1","target":{"kind":kind,"ref":reference},"expected_revision":revision,"actor_ref":"human:author","operation_ref":operation,"changes":changes});
+    let temporal = json!([{"kind":"occurrence","instant":"2024-01-02T03:04:05Z","precision":"minute","source_ref":"central:source:alpha.md"}]);
+    let places = json!([{"place_ref":"place:declared","precision":"approximate","uncertainty":"The witness described the wider area, not an exact point.","source_ref":"central:source:alpha.md"}]);
+    let node = facts_request(
+        "node",
+        "wiki:alpha",
+        1,
+        "action:node-facts",
+        json!([{"change":"temporal_set","temporal":temporal},{"change":"place_set","places":places}]),
+    );
+    let apply = |request: &Value, basis: &str| {
+        command(
+            temp.path(),
+            &[
+                "wiki-construct",
+                "facts-apply",
+                "--file",
+                path.to_str().unwrap(),
+            ],
+            Some(&json!({"request":request,"basis_content":basis})),
+        )
+    };
+    let (code, saved) = apply(&node, &original);
+    assert_eq!(code, 0, "{saved}");
+    assert_eq!(saved["data"]["revision"], 2);
+    let first = fs::read_to_string(&path).unwrap();
+    let (code, reopened) = command(
+        temp.path(),
+        &[
+            "wiki-construct",
+            "facts-inspect",
+            "wiki:alpha",
+            "--file",
+            path.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert_eq!(code, 0, "{reopened}");
+    let row = &reopened["data"]["reading"]["object"];
+    assert_eq!(row["object"], "node");
+    assert_eq!(row["revision"], 2);
+    assert_eq!(row["aikit.techne-facet/v1"]["temporal"], temporal);
+    assert_eq!(row["aikit.techne-facet/v1"]["spatial"], places);
+    assert_eq!(row["native_extra"], document["objects"][1]["native_extra"]);
+    assert_eq!(row["provenance"], document["objects"][1]["provenance"]);
+    let whole = facts_request(
+        "whole",
+        "wiki:plain-whole",
+        1,
+        "action:whole-facts",
+        json!([{"change":"temporal_set","temporal":[{"kind":"valid","interval":{"from":"1900-01-01T00:00:00Z","to":"1950-01-01T00:00:00Z"},"source_ref":"central:source:alpha.md"}]}]),
+    );
+    let (code, saved) = apply(&whole, &first);
+    assert_eq!(code, 0, "{saved}");
+    assert_eq!(saved["data"]["reading"]["object"]["revision"], 2);
+    assert!(
+        saved["data"]["reading"]["object"]
+            .get("aikit.constellation/v1")
+            .is_none(),
+        "no dummy construction is invented"
+    );
+    let after = fs::read_to_string(&path).unwrap();
+    let actual: Value = serde_json::from_str(&after).unwrap();
+    for index in [0, 2, 4] {
+        let reference = &document["objects"][index]["ref"];
+        let found = actual["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| &r["ref"] == reference)
+            .unwrap();
+        // Native rendering may materialise empty default arrays. Parse through
+        // the owner model to compare semantic objects without string snapshots.
+        assert_eq!(
+            aikit_core::WikiObject::parse(found).unwrap(),
+            aikit_core::WikiObject::parse(&document["objects"][index]).unwrap()
+        );
+    }
+    let (code, replay) = apply(&node, &original);
+    assert_eq!(code, 0, "{replay}");
+    assert_eq!(replay["data"]["state"], "unchanged");
+    assert_eq!(fs::read_to_string(&path).unwrap(), after);
+    for mut bad in [node.clone(), whole.clone()] {
+        bad["operation_ref"] = json!("action:stale");
+        let (code, response) = apply(&bad, &after);
+        assert_ne!(code, 0, "{response}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), after);
+    }
+    let mut conflict = node.clone();
+    conflict["changes"][0]["temporal"] = json!([]);
+    assert_ne!(
+        apply(&conflict, &after).0,
+        0,
+        "same operation cannot name changed intent"
+    );
+    let mut wrong_kind = facts_request(
+        "whole",
+        "wiki:alpha",
+        2,
+        "action:wrong-kind",
+        json!([{"change":"temporal_set","temporal":[]}]),
+    );
+    assert_ne!(apply(&wrong_kind, &after).0, 0);
+    wrong_kind["target"]["kind"] = json!("node");
+    wrong_kind["changes"][0]["temporal"] =
+        json!([{"kind":"occurrence","instant":"2024-01-01T00:00:00Z"}]);
+    assert_ne!(
+        apply(&wrong_kind, &after).0,
+        0,
+        "source-free claim must refuse"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), after);
+    let clear = facts_request(
+        "node",
+        "wiki:alpha",
+        2,
+        "action:clear-time",
+        json!([{"change":"temporal_set","temporal":[]}]),
+    );
+    assert_ne!(
+        apply(&clear, &original).0,
+        0,
+        "stale register bytes must refuse even with current object revision"
+    );
+    let (code, cleared) = apply(&clear, &after);
+    assert_eq!(code, 0, "{cleared}");
+    assert!(
+        cleared["data"]["reading"]["object"]["aikit.techne-facet/v1"]
+            .get("temporal")
+            .is_none()
+    );
+    assert_eq!(
+        cleared["data"]["reading"]["object"]["aikit.techne-facet/v1"]["spatial"],
+        places
+    );
+}
+
+#[test]
 fn saved_whole_reopens_in_another_process_and_return_is_idempotent() {
     let (temp, path) = fixture();
     let (code, saved) = save(temp.path(), &path, &create());
@@ -206,6 +360,116 @@ fn a_readonly_or_malformed_action_never_changes_native_bytes() {
         "two competing native inputs must be refused: {refused}"
     );
     assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn native_facts_and_construction_node_targets_refuse_readonly_source_objects() {
+    for (flag, value) in [
+        ("read_only", json!(true)),
+        ("shared_projection_ref", json!("projection:shared")),
+    ] {
+        let (temp, path) = fixture();
+        assert_eq!(save(temp.path(), &path, &create()).0, 0);
+        let mut document: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for row in document["objects"].as_array_mut().unwrap() {
+            if row["ref"] == "wiki:alpha" || row["ref"] == "wiki:construction" {
+                row[flag] = value.clone();
+            }
+        }
+        fs::write(&path, document.to_string()).unwrap();
+        let before = fs::read(&path).unwrap();
+        for (kind, reference) in [("node", "wiki:alpha"), ("whole", "wiki:construction")] {
+            let (code, response) = command(
+                temp.path(),
+                &[
+                    "wiki-construct",
+                    "facts-apply",
+                    "--file",
+                    path.to_str().unwrap(),
+                ],
+                Some(&json!({"request":{
+                    "schema":"aikit.wiki-facts-action/v1","target":{"kind":kind,"ref":reference},"expected_revision":1,
+                    "actor_ref":"human:author","operation_ref":"action:readonly-facts","changes":[{"change":"temporal_set","temporal":[]}]
+                }})),
+            );
+            assert_ne!(code, 0, "{response}");
+            assert!(
+                response.to_string().contains("read-only shared material"),
+                "{response}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+        // Make only the containing frame writable. Its ordinary edit authority
+        // must not grant authority over a separately protected source node.
+        for row in document["objects"].as_array_mut().unwrap() {
+            if row["ref"] == "wiki:construction" {
+                row.as_object_mut().unwrap().remove(flag);
+            }
+        }
+        fs::write(&path, document.to_string()).unwrap();
+        let before = fs::read(&path).unwrap();
+        let (code, response) = save(
+            temp.path(),
+            &path,
+            &request(
+                1,
+                "action:readonly-node",
+                json!([
+                    {"change":"place_set","target":{"kind":"node","node_ref":"wiki:alpha","expected_revision":1},"places":[]}
+                ]),
+            ),
+        );
+        assert_ne!(code, 0, "{response}");
+        assert!(
+            response.to_string().contains("read-only shared material"),
+            "{response}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn native_facts_refuse_register_growth_beyond_the_existing_read_budget() {
+    let (temp, path) = fixture();
+    let mut document = initial();
+    document["retained_native_material"] = json!("x".repeat(9 * 1024 * 1024));
+    fs::write(&path, document.to_string()).unwrap();
+    let before = fs::read(&path).unwrap();
+    let (code, response) = command(
+        temp.path(),
+        &[
+            "wiki-construct",
+            "facts-apply",
+            "--file",
+            path.to_str().unwrap(),
+        ],
+        Some(&json!({"request":{
+            "schema":"aikit.wiki-facts-action/v1","target":{"kind":"node","ref":"wiki:alpha"},"expected_revision":1,
+            "actor_ref":"human:author","operation_ref":"action:too-large","changes":[{"change":"place_set","places":[{
+                "place_ref":"place:declared","precision":"unlocated","source_ref":"central:source:alpha.md","uncertainty":"y".repeat(8*1024*1024)
+            }]}]
+        }})),
+    );
+    assert_ne!(code, 0, "{response}");
+    assert_eq!(response["error"]["code"], "knowledge.constellation_budget");
+    assert!(
+        response.to_string().contains("resulting Wiki register"),
+        "must reach the output budget check, not reject its bounded input: {response}"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    let (code, reopened) = command(
+        temp.path(),
+        &[
+            "wiki-construct",
+            "facts-inspect",
+            "wiki:alpha",
+            "--file",
+            path.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert_eq!(code, 0, "{reopened}");
+    assert_eq!(reopened["data"]["reading"]["object"]["revision"], 1);
 }
 
 #[cfg(unix)]

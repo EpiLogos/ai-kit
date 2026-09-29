@@ -875,7 +875,9 @@ fn focusing_a_surface_is_withheld_because_herdr_pane_focus_is_neighbour_relative
     // Installed Herdr has no absolute pane focus: `herdr pane focus` navigates
     // to a *neighbour* (`--direction left|right|up|down`), so the only command
     // that looks like pane focus would silently move the operator somewhere
-    // they did not ask to go. The provider withholds instead.
+    // they did not ask to go. Unless the provider can observe that the pane is
+    // its workspace's own focused pane (then `workspace focus` is exact), it
+    // withholds instead. Here no snapshot can be read, so nothing is proven.
     let runner = Arc::new(ScriptedRunner::new());
     let mut provider = HerdrWorkingEnvironment::new(runner.clone(), r("provider/herdr"))
         .bind_surface(r("surface/reference/root"), "w1:p1");
@@ -890,8 +892,11 @@ fn focusing_a_surface_is_withheld_because_herdr_pane_focus_is_neighbour_relative
         "the refusal names the real provider limitation and the pane: {message}"
     );
     assert!(
-        runner.calls().is_empty(),
-        "a withheld operation must not reach the provider: {:?}",
+        !runner
+            .call_lines()
+            .iter()
+            .any(|line| line.contains("focus")),
+        "a withheld operation never issues a focus to the provider: {:?}",
         runner.calls()
     );
 
@@ -1283,4 +1288,464 @@ id = "shell"
             "no recorded evidence means create-or-fail, never attach-by-name"
         );
     }
+}
+
+// ─── multi-surface reconcile (27 September 2026 discovery packet) ───────────
+
+use std::collections::BTreeMap;
+
+use aikit_adapters::herdr::{created_place_bindings, herdr_provider_ref_uri};
+use aikit_core::profile::{ConfigTable, PoolPatch};
+use aikit_core::session::{
+    Attach, Direction, Lifecycle, PaneStep, Restart, SessionPlan, Split, ViewPlan,
+};
+
+fn r2(raw: &str) -> ResourceRef {
+    r(raw)
+}
+
+/// A two-pane herdr plan: `herdr-entry/root` first, `herdr-entry/second`
+/// split off it in the given direction. `recorded` seeds the persisted
+/// provider evidence a prior open left in the plan.
+fn two_pane_plan(direction: Direction, recorded: Option<(&str, &str)>) -> SessionPlan {
+    let step = |pane: &str, split: Option<Split>| PaneStep {
+        view: "herdr-entry".into(),
+        pane: pane.into(),
+        name: None,
+        split,
+        command: vec!["sh".into()],
+        cwd: None,
+        restart: Restart::Never,
+        focus: pane == "root",
+        capabilities: PoolPatch::default(),
+    };
+    let mut backend_extensions: BTreeMap<String, ConfigTable> = BTreeMap::new();
+    if let Some((workspace, pane)) = recorded {
+        let mut herdr = ConfigTable::new();
+        herdr.insert("workspace-id".into(), toml::Value::from(workspace));
+        let mut surfaces = ConfigTable::new();
+        surfaces.insert("herdr-entry/root".into(), toml::Value::from(pane));
+        herdr.insert("surfaces".into(), toml::Value::Table(surfaces));
+        backend_extensions.insert("herdr".into(), herdr);
+    }
+    SessionPlan {
+        id: "reference-plan".into(),
+        name: "reference (Herdr)".into(),
+        root: None,
+        mux: None,
+        attach: Attach::Always,
+        lifecycle: Lifecycle::Persist,
+        capabilities: PoolPatch::default(),
+        views: vec![ViewPlan {
+            id: "herdr-entry".into(),
+            name: None,
+            steps: vec![
+                step("root", None),
+                step(
+                    "second",
+                    Some(Split {
+                        from: "herdr-entry/root".into(),
+                        direction,
+                        ratio: None,
+                    }),
+                ),
+            ],
+            focus: None,
+        }],
+        backend_extensions,
+        task: None,
+        warnings: Vec::new(),
+    }
+}
+
+fn plan_surfaces(plan: &SessionPlan) -> Vec<(ResourceRef, String)> {
+    let mut surfaces = Vec::new();
+    for view in &plan.views {
+        for step in &view.steps {
+            surfaces.push((
+                r2(&format!("surface/terminal/{}/{}", view.id, step.pane)),
+                format!("{}/{}", view.id, step.pane),
+            ));
+        }
+    }
+    surfaces
+}
+
+#[test]
+fn open_reconciles_an_unrecorded_plan_pane_on_the_attach_half() {
+    // The recorded place (w7, root pane w7:p1) is live; the plan's second
+    // pane has never been materialised. Open must split it — with
+    // --no-focus, never stealing the operator's desktop focus — and the
+    // created evidence must travel per binding.
+    let plan = two_pane_plan(Direction::Right, Some(("w7", "w7:p1")));
+    let surfaces = plan_surfaces(&plan);
+    let runner = Arc::new(
+        ScriptedRunner::new()
+            .sequence(
+                "api snapshot",
+                &[
+                    &fixture("session-snapshot-reconcile-before.json"),
+                    &fixture("session-snapshot-reconcile-before.json"),
+                    &fixture("session-snapshot-reconcile-after.json"),
+                ],
+            )
+            .on("pane split", &fixture("pane-split-w7.json")),
+    );
+    let mut provider = HerdrWorkingEnvironment::for_plan(
+        runner.clone(),
+        &plan,
+        r2(herdr_provider_ref_uri()),
+        &surfaces,
+        Some(&surfaces[1].0),
+    );
+
+    let observation = provider.open().unwrap();
+    assert_eq!(
+        observation.canonical_native_id(&surfaces[1].0),
+        Some("w7:p2"),
+        "the declared pane is materialised and bound"
+    );
+    assert!(
+        runner
+            .call_lines()
+            .iter()
+            .any(|call| call == "herdr pane split w7:p1 --direction right --no-focus"),
+        "{:?}",
+        runner.call_lines()
+    );
+    assert!(
+        !runner
+            .call_lines()
+            .iter()
+            .any(|call| call.starts_with("herdr pane focus")
+                || call.starts_with("herdr workspace focus")
+                || call.contains(" --focus")),
+        "a reconcile never moves the operator's focus: {:?}",
+        runner.call_lines()
+    );
+    let created = created_place_bindings(&plan, &observation).expect("fresh evidence travels");
+    assert!(
+        created
+            .iter()
+            .any(|binding| binding.kind == NativeBindingKind::Session),
+        "the workspace evidence travels with the created panes"
+    );
+    assert!(
+        created
+            .iter()
+            .any(|binding| binding.kind == NativeBindingKind::Surface
+                && binding.canonical_ref.as_ref() == Some(&surfaces[1].0)
+                && binding.native_id == "w7:p2"),
+        "the newly split pane binding travels"
+    );
+    assert!(
+        !created
+            .iter()
+            .any(|binding| binding.kind == NativeBindingKind::Surface
+                && binding.canonical_ref.as_ref() == Some(&surfaces[0].0)),
+        "the already-recorded root binding stays home"
+    );
+}
+
+#[test]
+fn open_reconciles_an_unrecorded_plan_pane_on_the_create_half() {
+    // Nothing recorded, nothing live: the creating open binds its subject to
+    // the minted root pane AND materialises the plan's declared second pane.
+    let plan = two_pane_plan(Direction::Down, None);
+    let surfaces = plan_surfaces(&plan);
+    let runner = Arc::new(
+        ScriptedRunner::new()
+            .on("workspace create", &fixture("workspace-created.json"))
+            .sequence(
+                "api snapshot",
+                &[
+                    &fixture("session-snapshot-reconcile-before.json"),
+                    &fixture("session-snapshot-reconcile-after.json"),
+                ],
+            )
+            .on("pane split", &fixture("pane-split-w7.json")),
+    );
+    let mut provider = HerdrWorkingEnvironment::for_plan(
+        runner.clone(),
+        &plan,
+        r2(herdr_provider_ref_uri()),
+        &surfaces,
+        Some(&surfaces[0].0),
+    )
+    .with_create("/repo", None);
+
+    let observation = provider.open().unwrap();
+    assert_eq!(
+        observation.canonical_native_id(&surfaces[0].0),
+        Some("w7:p1")
+    );
+    assert_eq!(
+        observation.canonical_native_id(&surfaces[1].0),
+        Some("w7:p2")
+    );
+    assert!(
+        runner
+            .call_lines()
+            .iter()
+            .any(|call| call == "herdr pane split w7:p1 --direction down --no-focus"),
+        "{:?}",
+        runner.call_lines()
+    );
+}
+
+#[test]
+fn the_reconcile_refuses_to_mint_an_invisibly_small_pane() {
+    // herdr mints degenerate panes silently; the parent's reported rect is
+    // the guard. A 6-col pane cannot yield an 8-col half.
+    let plan = two_pane_plan(Direction::Right, Some(("w7", "w7:p1")));
+    let surfaces = plan_surfaces(&plan);
+    let mut narrow = serde_json::to_value(
+        serde_json::from_str::<serde_json::Value>(&fixture(
+            "session-snapshot-reconcile-before.json",
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    for layout in narrow["result"]["snapshot"]["layouts"]
+        .as_array_mut()
+        .unwrap()
+    {
+        if layout["workspace_id"] == "w7" {
+            layout["panes"][0]["rect"]["width"] = serde_json::json!(6);
+        }
+    }
+    let narrow = serde_json::to_string(&narrow).unwrap();
+    let runner = Arc::new(ScriptedRunner::new().sequence(
+        "api snapshot",
+        &[
+            narrow.as_str(),
+            narrow.as_str(),
+            fixture("session-snapshot-reconcile-before.json").as_str(),
+        ],
+    ));
+    let mut provider = HerdrWorkingEnvironment::for_plan(
+        runner.clone(),
+        &plan,
+        r2(herdr_provider_ref_uri()),
+        &surfaces,
+        Some(&surfaces[1].0),
+    );
+
+    let observation = provider.open().unwrap();
+    assert!(
+        !runner
+            .call_lines()
+            .iter()
+            .any(|call| call.contains("pane split")),
+        "no split is called: {:?}",
+        runner.call_lines()
+    );
+    assert_eq!(observation.health, WorkingEnvironmentHealth::Healthy);
+    assert!(
+        observation.provenance.iter().any(
+            |line| line.contains("invisibly small pane") && line.contains("herdr-entry/second")
+        ),
+        "{:?}",
+        observation.provenance
+    );
+}
+
+#[test]
+fn the_reconcile_never_transposes_a_direction_herdr_lacks() {
+    // herdr splits right/down only. A plan declaring Left is skipped with a
+    // named warning, not silently mapped onto a different axis.
+    let plan = two_pane_plan(Direction::Left, Some(("w7", "w7:p1")));
+    let surfaces = plan_surfaces(&plan);
+    let before = fixture("session-snapshot-reconcile-before.json");
+    let runner = Arc::new(ScriptedRunner::new().sequence(
+        "api snapshot",
+        &[before.as_str(), before.as_str(), before.as_str()],
+    ));
+    let mut provider = HerdrWorkingEnvironment::for_plan(
+        runner.clone(),
+        &plan,
+        r2(herdr_provider_ref_uri()),
+        &surfaces,
+        Some(&surfaces[1].0),
+    );
+
+    let observation = provider.open().unwrap();
+    assert!(
+        !runner
+            .call_lines()
+            .iter()
+            .any(|call| call.contains("pane split")),
+        "{:?}",
+        runner.call_lines()
+    );
+    assert!(
+        observation
+            .provenance
+            .iter()
+            .any(|line| line.contains("cannot honour") && line.contains("herdr-entry/second")),
+        "{:?}",
+        observation.provenance
+    );
+}
+
+#[test]
+fn a_materialised_pane_gets_its_declared_command_through_pane_run() {
+    // herdr has no command slot at create or split time; the plan's command
+    // travels through `herdr pane run` after the pane exists, and its pane
+    // id is the freshly split one — never a guessed name.
+    let mut plan = two_pane_plan(Direction::Right, Some(("w7", "w7:p1")));
+    plan.views[0].steps[1].command = vec!["tail".into(), "-f".into(), "build.log".into()];
+    let surfaces = plan_surfaces(&plan);
+    let runner = Arc::new(
+        ScriptedRunner::new()
+            .sequence(
+                "api snapshot",
+                &[
+                    fixture("session-snapshot-reconcile-before.json").as_str(),
+                    fixture("session-snapshot-reconcile-before.json").as_str(),
+                    fixture("session-snapshot-reconcile-after.json").as_str(),
+                ],
+            )
+            .on("pane split", &fixture("pane-split-w7.json"))
+            .on("pane run", ""),
+    );
+    let mut provider = HerdrWorkingEnvironment::for_plan(
+        runner.clone(),
+        &plan,
+        r2(herdr_provider_ref_uri()),
+        &surfaces,
+        Some(&surfaces[1].0),
+    );
+
+    let observation = provider.open().unwrap();
+    assert_eq!(
+        observation.canonical_native_id(&surfaces[1].0),
+        Some("w7:p2")
+    );
+    assert!(
+        runner
+            .call_lines()
+            .iter()
+            .any(|call| call == "herdr pane run w7:p2 tail -f build.log"),
+        "the declared command runs in the freshly split pane: {:?}",
+        runner.call_lines()
+    );
+    assert!(
+        !observation
+            .provenance
+            .iter()
+            .any(|line| line.starts_with("reconcile: ")),
+        "no warnings on the happy path: {:?}",
+        observation.provenance
+    );
+}
+
+#[test]
+fn a_failing_pane_command_is_a_named_warning_not_a_failed_open() {
+    let mut plan = two_pane_plan(Direction::Right, Some(("w7", "w7:p1")));
+    plan.views[0].steps[1].command = vec!["make".into(), "dev".into()];
+    let surfaces = plan_surfaces(&plan);
+    let runner = Arc::new(
+        ScriptedRunner::new()
+            .sequence(
+                "api snapshot",
+                &[
+                    fixture("session-snapshot-reconcile-before.json").as_str(),
+                    fixture("session-snapshot-reconcile-before.json").as_str(),
+                    fixture("session-snapshot-reconcile-after.json").as_str(),
+                ],
+            )
+            .on("pane split", &fixture("pane-split-w7.json"))
+            .failing("pane run", 1, "herdr: pane is gone"),
+    );
+    let mut provider = HerdrWorkingEnvironment::for_plan(
+        runner,
+        &plan,
+        r2(herdr_provider_ref_uri()),
+        &surfaces,
+        Some(&surfaces[1].0),
+    );
+
+    let observation = provider.open().unwrap();
+    assert_eq!(
+        observation.canonical_native_id(&surfaces[1].0),
+        Some("w7:p2"),
+        "the pane exists and is bound regardless of its command"
+    );
+    assert_eq!(observation.health, WorkingEnvironmentHealth::Healthy);
+    assert!(
+        observation
+            .provenance
+            .iter()
+            .any(|line| line.contains("herdr-entry/second")
+                && line.contains("did not start in w7:p2")),
+        "{:?}",
+        observation.provenance
+    );
+}
+
+#[test]
+fn the_reconcile_accepts_the_logical_key_as_the_split_source_too() {
+    // A plan may also name the source by its logical key; both shapes
+    // resolve, and the pane materialises either way.
+    let mut plan = two_pane_plan(Direction::Right, Some(("w7", "w7:p1")));
+    for view in &mut plan.views {
+        for step in &mut view.steps {
+            if let Some(split) = &mut step.split {
+                split.from = "herdr-entry/root".into();
+            }
+        }
+    }
+    let surfaces = plan_surfaces(&plan);
+    let runner = Arc::new(
+        ScriptedRunner::new()
+            .sequence(
+                "api snapshot",
+                &[
+                    fixture("session-snapshot-reconcile-before.json").as_str(),
+                    fixture("session-snapshot-reconcile-before.json").as_str(),
+                    fixture("session-snapshot-reconcile-after.json").as_str(),
+                ],
+            )
+            .on("pane split", &fixture("pane-split-w7.json")),
+    );
+    let mut provider = HerdrWorkingEnvironment::for_plan(
+        runner,
+        &plan,
+        r2(herdr_provider_ref_uri()),
+        &surfaces,
+        Some(&surfaces[1].0),
+    );
+    let observation = provider.open().unwrap();
+    assert_eq!(
+        observation.canonical_native_id(&surfaces[1].0),
+        Some("w7:p2")
+    );
+}
+
+#[test]
+fn a_fully_recorded_place_still_reissues_no_evidence() {
+    // The all-recorded attach: every surface the plan declares is recorded
+    // and live, so created evidence stays None — a repeated open stages no
+    // no-op write.
+    let mut plan = two_pane_plan(Direction::Right, None);
+    let mut herdr = ConfigTable::new();
+    herdr.insert("workspace-id".into(), toml::Value::from("w7"));
+    let mut surfaces_map = ConfigTable::new();
+    surfaces_map.insert("herdr-entry/root".into(), toml::Value::from("w7:p1"));
+    surfaces_map.insert("herdr-entry/second".into(), toml::Value::from("w7:p2"));
+    herdr.insert("surfaces".into(), toml::Value::Table(surfaces_map));
+    plan.backend_extensions.insert("herdr".into(), herdr);
+
+    let after = fixture("session-snapshot-reconcile-after.json");
+    let runner = Arc::new(ScriptedRunner::new().on("api snapshot", &after));
+    let mut provider = HerdrWorkingEnvironment::for_plan(
+        runner,
+        &plan,
+        r2(herdr_provider_ref_uri()),
+        &plan_surfaces(&plan),
+        Some(&plan_surfaces(&plan)[0].0),
+    );
+    let observation = provider.observe().unwrap();
+    assert!(created_place_bindings(&plan, &observation).is_none());
 }

@@ -9,3 +9,5 @@ skill/aikit/skill-authoring
 skill/aikit/provider-authoring
 skill/aikit/harness-adapter-authoring
 skill/aikit/component-surface-authoring
+skill/aikit/skillset-package-authoring
+skill/aikit/skillset-package-export

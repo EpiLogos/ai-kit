@@ -26,7 +26,8 @@ use serde::{Deserialize, Serialize};
 
 use aikit_core::harness_admission::HarnessEditionKind;
 use aikit_core::harness_profile::{
-    ActivationEffectName, HarnessProfile, HooksLayer, LayerPosture, ToolsLayer,
+    ActivationEffectName, HarnessProfile, HooksLayer, LayerPosture, ModelKeyDeliveryLayer,
+    SessionCapabilityFlags, SessionConnect, SessionProtocol, SessionsLayer, ToolsLayer,
 };
 
 use crate::tool_sources::{ToolSourceEntry, TOOLS_PROJECTION_OWNERSHIP};
@@ -67,6 +68,81 @@ pub struct DriftEntry {
     pub note: String,
 }
 
+/// The declared connect facts of a sessions layer: the binary the primary
+/// argv names, how many fallback argv variants are declared, and whether a
+/// working directory or launch environment is declared. Values are not
+/// disclosed — only the shape of the door. `not-declared` renders as "no
+/// connection facts declared": on a `process` profile that is the ordinary
+/// state (the face is the harness's own command surface), while on an
+/// `acp`/`rpc` profile it discloses a protocol claim with no door.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ConnectFactsDisclosure {
+    Declared {
+        binary: String,
+        fallback_variants: usize,
+        cwd: Option<String>,
+        env: bool,
+    },
+    NotDeclared,
+}
+
+/// The sessions layer's connection truth, joined from the profile: the
+/// declared protocol, the open modes, the capability flags, and the declared
+/// connect facts. This is disclosure of what the profile declares — the
+/// connection builder, not this read model, validates and materialises a
+/// launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionConnectionDisclosure {
+    pub protocol: SessionProtocol,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_modes: Vec<String>,
+    pub capabilities: SessionCapabilityFlags,
+    pub connect: ConnectFactsDisclosure,
+}
+
+/// One declared env-var key delivery, disclosed by name: the provider whose
+/// key the variable delivers. Names only — a declaration is a delivery
+/// selector, never material, and whether a key is presently bound stays with
+/// the credential store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvVarDeliveryDisclosure {
+    pub provider_ref: String,
+    pub env_var: String,
+}
+
+/// One own-login entry's disclosure: whether the profile declares a runnable
+/// one-shot login, rendered as its shape — the binary and the declared
+/// argument count, never the full argv — or the entry is note-only. The
+/// census note rides either way: it is the instruction a settings face
+/// renders beside the option.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum OwnLoginDisclosure {
+    Runnable {
+        provider_ref: String,
+        binary: String,
+        arg_count: usize,
+        note: String,
+    },
+    NoteOnly {
+        provider_ref: String,
+        note: String,
+    },
+}
+
+/// The models layer's declared auth options: the env-var delivery names and
+/// the own-login entries, exactly what a settings face renders beside an
+/// API-key input. Follows the file's redaction posture: variable names and
+/// argv shapes only; values, bindings and material stay out of disclosure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelAuthDisclosure {
+    pub env_var: Vec<EnvVarDeliveryDisclosure>,
+    pub own_login: Vec<OwnLoginDisclosure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 /// One layer of the disclosure: the posture, what the harness natively
 /// carries there, what AIKit has composed, and — managed tools layers only —
 /// the drift between the two.
@@ -82,6 +158,14 @@ pub struct LayerDisclosure {
     pub activation: Option<ActivationEffectName>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub drift: Vec<DriftEntry>,
+    /// The sessions layer's connection truth. Present only on the sessions
+    /// layer — the other layers carry no connection concept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<SessionConnectionDisclosure>,
+    /// The models layer's declared auth options. Present only on the models
+    /// layer, and only where the profile declares key-delivery facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<ModelAuthDisclosure>,
 }
 
 /// The whole-harness read model: one entry per layer the profile declares,
@@ -138,6 +222,8 @@ pub fn disclose(
             composed: Vec::new(),
             activation: None,
             drift: Vec::new(),
+            connection: None,
+            auth: None,
         });
     }
     if let Some(guidance) = &profile.guidance {
@@ -155,6 +241,8 @@ pub fn disclose(
             composed: Vec::new(),
             activation: None,
             drift: Vec::new(),
+            connection: None,
+            auth: None,
         });
     }
     if let Some(hooks) = &profile.hooks {
@@ -165,6 +253,8 @@ pub fn disclose(
             composed: Vec::new(),
             activation: hooks.activation,
             drift: Vec::new(),
+            connection: None,
+            auth: None,
         });
     }
     if let Some(tools) = &profile.tools {
@@ -178,6 +268,8 @@ pub fn disclose(
             composed: Vec::new(),
             activation: None,
             drift: Vec::new(),
+            connection: None,
+            auth: models.key_delivery.as_ref().map(model_auth_disclosure),
         });
     }
     if let Some(sessions) = &profile.sessions {
@@ -188,6 +280,8 @@ pub fn disclose(
             composed: Vec::new(),
             activation: None,
             drift: Vec::new(),
+            connection: Some(sessions_connection_disclosure(sessions)),
+            auth: None,
         });
     }
     if let Some(settings) = &profile.settings {
@@ -205,6 +299,8 @@ pub fn disclose(
             composed: Vec::new(),
             activation: None,
             drift: Vec::new(),
+            connection: None,
+            auth: None,
         });
     }
     HarnessDisclosure {
@@ -315,6 +411,74 @@ fn tools_disclosure(
         },
         activation: tools.activation,
         drift,
+        connection: None,
+        auth: None,
+    }
+}
+
+/// The models layer's auth disclosure: the declared env-var delivery names
+/// verbatim, and each own-login entry reduced to whether a runnable one-shot
+/// login is declared — shape only (binary plus declared argument count,
+/// never the full argv, following the connect-facts redaction posture) — with
+/// the census note as the instruction either way. An absent key-delivery
+/// section discloses nothing: a layer fact the profile does not declare is
+/// never rendered as an empty entry.
+fn model_auth_disclosure(key_delivery: &ModelKeyDeliveryLayer) -> ModelAuthDisclosure {
+    ModelAuthDisclosure {
+        env_var: key_delivery
+            .env_var
+            .iter()
+            .map(|entry| EnvVarDeliveryDisclosure {
+                provider_ref: entry.provider_ref.clone(),
+                env_var: entry.env_var.clone(),
+            })
+            .collect(),
+        own_login: key_delivery
+            .own_login
+            .iter()
+            .map(|fact| match &fact.login {
+                Some(login) => OwnLoginDisclosure::Runnable {
+                    provider_ref: fact.provider_ref.clone(),
+                    binary: login.argv.first().cloned().unwrap_or_default(),
+                    arg_count: login.argv.len().saturating_sub(1),
+                    note: fact.note.clone(),
+                },
+                None => OwnLoginDisclosure::NoteOnly {
+                    provider_ref: fact.provider_ref.clone(),
+                    note: fact.note.clone(),
+                },
+            })
+            .collect(),
+        note: key_delivery.note.clone(),
+    }
+}
+
+/// The sessions layer's connection disclosure: the declared protocol, open
+/// modes and capability flags verbatim, and the connect facts reduced to
+/// their shape — the binary the primary argv names, the fallback variant
+/// count, and cwd/env presence. An absent `connect` discloses as
+/// `not-declared` ("no connection facts declared"): ordinary for a `process`
+/// profile, a doorless protocol claim for `acp`/`rpc`.
+fn sessions_connection_disclosure(sessions: &SessionsLayer) -> SessionConnectionDisclosure {
+    let connect = match &sessions.connect {
+        Some(SessionConnect {
+            argv,
+            argv_fallback,
+            env,
+            cwd,
+        }) => ConnectFactsDisclosure::Declared {
+            binary: argv.first().cloned().unwrap_or_default(),
+            fallback_variants: argv_fallback.len(),
+            cwd: cwd.clone(),
+            env: !env.is_empty(),
+        },
+        None => ConnectFactsDisclosure::NotDeclared,
+    };
+    SessionConnectionDisclosure {
+        protocol: sessions.protocol,
+        open_modes: sessions.open_modes.clone(),
+        capabilities: sessions.capabilities,
+        connect,
     }
 }
 
@@ -339,6 +503,7 @@ mod tests {
                 env: BTreeMap::new(),
                 cwd: None,
                 url: None,
+                headers: BTreeMap::new(),
             },
         }
     }
@@ -355,6 +520,7 @@ mod tests {
                 env: BTreeMap::new(),
                 cwd: None,
                 url: None,
+                headers: BTreeMap::new(),
             },
         }
     }
@@ -686,6 +852,269 @@ mod tests {
             hooks.activation,
             Some(ActivationEffectName::NextSessionOnly),
             "pi reads extensions at session start; a running TUI can /reload"
+        );
+    }
+
+    fn acp_sessions_profile() -> HarnessProfile {
+        let mut profile = for_slug("pi")
+            .expect("pi carries an embedded profile")
+            .clone();
+        profile.sessions = Some(SessionsLayer {
+            posture: LayerPosture::Observed,
+            protocol: SessionProtocol::Acp,
+            open_modes: vec!["create".into(), "resume".into()],
+            capabilities: SessionCapabilityFlags {
+                ordered_streaming: true,
+                cancellation: true,
+                permission_requests: true,
+                reconnect: false,
+                additional_directories: false,
+                mcp_servers: true,
+            },
+            connect: Some(SessionConnect {
+                argv: vec!["gemini".into(), "--acp".into()],
+                argv_fallback: vec![vec!["gemini".into(), "--experimental-acp".into()]],
+                env: BTreeMap::new(),
+                cwd: Some("/workspace".into()),
+            }),
+        });
+        profile
+    }
+
+    #[test]
+    fn the_sessions_layer_discloses_protocol_open_modes_capabilities_and_declared_connect_facts() {
+        let profile = acp_sessions_profile();
+
+        let disclosure = disclose(&profile, &NativeObservation::default(), &[]);
+
+        let sessions = disclosure
+            .layers
+            .iter()
+            .find(|layer| layer.layer == "sessions")
+            .expect("the profile declares a sessions layer");
+        let connection = sessions
+            .connection
+            .as_ref()
+            .expect("the sessions layer discloses its connection truth");
+        assert_eq!(connection.protocol, SessionProtocol::Acp);
+        assert_eq!(
+            connection.open_modes,
+            vec!["create".to_string(), "resume".to_string()],
+            "the declared open modes render verbatim, resume included"
+        );
+        assert!(
+            connection.capabilities.mcp_servers && connection.capabilities.ordered_streaming,
+            "the declared capability flags render verbatim"
+        );
+        assert_eq!(
+            connection.connect,
+            ConnectFactsDisclosure::Declared {
+                binary: "gemini".to_string(),
+                fallback_variants: 1,
+                cwd: Some("/workspace".to_string()),
+                env: false,
+            },
+            "connect facts render their shape: the primary binary, the fallback count and \
+             cwd/env presence — never argv bodies or values"
+        );
+        assert!(
+            tools_layer(&disclosure).connection.is_none(),
+            "no layer other than sessions carries a connection concept"
+        );
+    }
+
+    #[test]
+    fn the_sessions_connection_truth_serializes_with_the_disclosure() {
+        let profile = acp_sessions_profile();
+
+        let disclosure = disclose(&profile, &NativeObservation::default(), &[]);
+        let json = serde_json::to_value(&disclosure).expect("the disclosure serializes");
+        let parsed: HarnessDisclosure =
+            serde_json::from_value(json.clone()).expect("the serialized disclosure reparses");
+        assert_eq!(parsed, disclosure, "the connection truth round-trips");
+
+        let sessions = json["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|layer| layer["layer"] == "sessions")
+            .expect("the sessions layer serializes");
+        let connection = &sessions["connection"];
+        assert_eq!(connection["protocol"], "acp");
+        assert_eq!(connection["connect"]["kind"], "declared");
+        assert_eq!(connection["connect"]["binary"], "gemini");
+        assert_eq!(connection["connect"]["fallback_variants"], 1);
+        assert_eq!(connection["connect"]["cwd"], "/workspace");
+        assert_eq!(connection["connect"]["env"], false);
+    }
+
+    #[test]
+    fn an_acp_or_rpc_sessions_layer_without_connect_discloses_no_connection_facts_declared() {
+        let mut profile = acp_sessions_profile();
+        profile.sessions.as_mut().unwrap().connect = None;
+
+        let disclosure = disclose(&profile, &NativeObservation::default(), &[]);
+
+        let sessions = disclosure
+            .layers
+            .iter()
+            .find(|layer| layer.layer == "sessions")
+            .expect("the profile declares a sessions layer");
+        let connection = sessions.connection.as_ref().unwrap();
+        assert_eq!(connection.protocol, SessionProtocol::Acp);
+        assert_eq!(
+            connection.connect,
+            ConnectFactsDisclosure::NotDeclared,
+            "a protocol claim with no door renders as no connection facts declared — the \
+             renderer flags the gap from the acp protocol beside it"
+        );
+    }
+
+    fn models_layer(disclosure: &HarnessDisclosure) -> &LayerDisclosure {
+        disclosure
+            .layers
+            .iter()
+            .find(|layer| layer.layer == "models")
+            .expect("the profile declares a models layer")
+    }
+
+    #[test]
+    fn the_codex_models_layer_discloses_env_var_names_and_the_runnable_login_shape() {
+        let profile = for_slug("codex").expect("codex carries an embedded profile");
+
+        let disclosure = disclose(profile, &NativeObservation::default(), &[]);
+
+        let auth = models_layer(&disclosure)
+            .auth
+            .as_ref()
+            .expect("codex declares key-delivery facts");
+        assert_eq!(
+            auth.env_var,
+            vec![EnvVarDeliveryDisclosure {
+                provider_ref: "provider:openai".to_string(),
+                env_var: "OPENAI_API_KEY".to_string(),
+            }],
+            "env-var delivery discloses provider and variable names only"
+        );
+        assert_eq!(
+            auth.own_login,
+            vec![OwnLoginDisclosure::Runnable {
+                provider_ref: "provider:openai".to_string(),
+                binary: "codex".to_string(),
+                arg_count: 1,
+                note: profile
+                    .models
+                    .as_ref()
+                    .unwrap()
+                    .key_delivery
+                    .as_ref()
+                    .unwrap()
+                    .own_login[0]
+                    .note
+                    .clone(),
+            }],
+            "a runnable login discloses its shape — binary plus argument count, never the \
+             full argv — with the census note as the instruction"
+        );
+    }
+
+    #[test]
+    fn a_note_only_own_login_discloses_note_only_without_inventing_a_command() {
+        let profile = for_slug("claude-code").expect("claude-code carries an embedded profile");
+
+        let disclosure = disclose(profile, &NativeObservation::default(), &[]);
+
+        let auth = models_layer(&disclosure)
+            .auth
+            .as_ref()
+            .expect("claude-code declares key-delivery facts");
+        assert_eq!(auth.env_var.len(), 1);
+        assert_eq!(
+            auth.own_login,
+            vec![OwnLoginDisclosure::NoteOnly {
+                provider_ref: "provider:anthropic".to_string(),
+                note: profile
+                    .models
+                    .as_ref()
+                    .unwrap()
+                    .key_delivery
+                    .as_ref()
+                    .unwrap()
+                    .own_login[0]
+                    .note
+                    .clone(),
+            }],
+            "claude's in-TUI login renders note-only: no one-shot command is invented"
+        );
+    }
+
+    #[test]
+    fn a_note_only_key_delivery_discloses_its_fact_with_neither_env_var_nor_own_login() {
+        let profile = for_slug("zcode").expect("zcode carries an embedded profile");
+
+        let disclosure = disclose(profile, &NativeObservation::default(), &[]);
+
+        let auth = models_layer(&disclosure)
+            .auth
+            .as_ref()
+            .expect("zcode declares its no-env-path fact");
+        assert!(auth.env_var.is_empty() && auth.own_login.is_empty());
+        assert!(
+            auth.note
+                .as_deref()
+                .is_some_and(|note| note.contains("own managed login")),
+            "the honest no-env-path fact rides the disclosure: {:?}",
+            auth.note
+        );
+    }
+
+    #[test]
+    fn a_models_layer_without_key_delivery_discloses_no_auth_and_no_other_layer_gains_the_concept()
+    {
+        let profile =
+            for_slug("gemini-antigravity").expect("gemini-antigravity carries an embedded profile");
+
+        let disclosure = disclose(profile, &NativeObservation::default(), &[]);
+
+        assert!(
+            models_layer(&disclosure).auth.is_none(),
+            "a models layer that declares no key-delivery facts discloses no auth"
+        );
+        for layer in &disclosure.layers {
+            if layer.layer != "models" {
+                assert!(
+                    layer.auth.is_none(),
+                    "no layer other than models carries an auth concept: {}",
+                    layer.layer
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_models_auth_disclosure_serializes_with_the_disclosure() {
+        let profile = for_slug("codex").expect("codex carries an embedded profile");
+
+        let disclosure = disclose(profile, &NativeObservation::default(), &[]);
+        let json = serde_json::to_value(&disclosure).expect("the disclosure serializes");
+        let parsed: HarnessDisclosure =
+            serde_json::from_value(json.clone()).expect("the serialized disclosure reparses");
+        assert_eq!(parsed, disclosure, "the auth truth round-trips");
+
+        let models = json["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|layer| layer["layer"] == "models")
+            .expect("the models layer serializes");
+        let auth = &models["auth"];
+        assert_eq!(auth["env_var"][0]["env_var"], "OPENAI_API_KEY");
+        assert_eq!(auth["own_login"][0]["kind"], "runnable");
+        assert_eq!(auth["own_login"][0]["binary"], "codex");
+        assert_eq!(auth["own_login"][0]["arg_count"], 1);
+        assert!(
+            auth["own_login"][0].get("argv").is_none(),
+            "the full argv stays out of the disclosure; shape only"
         );
     }
 }

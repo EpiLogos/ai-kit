@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/skillset-package-authoring"
+kind = "skill"
+name = "AIKit SkillSet package authoring"
+description = "Use when turning a selected SkillSet into an idiomatic OpenAI/Codex, Claude or pi package — authoring its neutral [package] metadata and target overlays while the SkillSet stays the source; do not select merely to author or edit a Skill."
+maturity = "draft"
+tags = ["aikit", "skillset", "package", "export", "authoring"]
+
+[skill]
+root = "payload"

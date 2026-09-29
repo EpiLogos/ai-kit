@@ -1,0 +1,20 @@
+schema = 1
+id = "skill/aikit/factory-telemetry-collect"
+kind = "skill"
+name = "Factory project telemetry collection"
+description = "METHOD: Collect bounded Factory project signals through Factory's native telemetry owner, then publish its current field to project-scoped Redis with revision checks."
+maturity = "draft"
+tags = ["aikit", "routine", "method", "factory", "sensing", "native-method"]
+
+[skill]
+root = "payload"
+
+[metadata.native-method]
+schema = "aikit.native-method/v1"
+body = "factory-collect"
+actions = ["factory:action/telemetry.collect", "factory:action/telemetry.field"]
+
+[metadata.native-method.factory]
+state = "/Users/admin/Central/Work/Factory/.factory/development-state.json"
+policy = "/Users/admin/Central/Work/Factory/ProjectCentral/user/factory-policy.json"
+project_world_ref = "project:Factory"

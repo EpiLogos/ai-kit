@@ -118,8 +118,17 @@ and route-explain surfaces.
   `--dry-run` discloses the composed argv and delivered variable names
   without spawning or materialising. Honest boundaries are enforced, not
   advertised: `None{reason}` dispatches, selector-less provider-plural
-  harnesses, and config-key native bindings refuse with the named remediation
-  (coverage honesty beats coverage theater).
+  harnesses, and config-key native bindings without an observed one-shot
+  selector refuse with the named remediation. Codex is a narrow observed
+  exception: its one-shot CLI accepts `--model`, so an exact `provider:openai`
+  route can use the selected model after `codex login status` confirms a
+  ChatGPT login on the selected executable. An absent API-key binding is
+  disclosed as Codex own-login, the final child is scrubbed of ambient API
+  keys, and revoked or expired bindings still refuse. This is authentication
+  readiness, not a claim that the model is entitled or that inference costs
+  nothing; a real launch determines that. The ACP Encounter keeps its
+  profile-declared session `model` config-key delivery and pins the adapter's
+  `CODEX_PATH` to the same installed executable whose login was checked.
 - **Stage 3.** Config-plane integration for family and profile defaults at
   machine scope, sequenced after the in-flight configuration work lands so it
   extends the shared registry rather than colliding with it.

@@ -24,8 +24,9 @@ mod refs;
 pub mod routine;
 mod search;
 mod versioned_world;
+mod worktree_projection;
 
-pub use action_search::search_contextual_actions;
+pub use action_search::{search_contextual_actions, significant_terms, word_overlap_score};
 pub use development_field::*;
 pub use factory::{FactoryInteropView, FactoryResourceImport};
 pub use index::{MemoryResourceIndex, ResolveRankingSignals, ResourceIndex};
@@ -83,4 +84,8 @@ pub use versioned_world::{
     VersionDiff, VersionDiffRequest, VersionHistoryEntry, VersionHistoryRequest, VersionRevision,
     VersionedProjectWorld, VersionedWorldCapability, VersionedWorldProvider,
     VersionedWorldProviderDescriptor, VersionedWorldProviderStatus, VERSIONED_WORLD_VERSION,
+};
+pub use worktree_projection::{
+    decide, surface_reason, Divergence, ProjectionAction, ProjectionDecision, ProjectionTarget,
+    RepoProjection, SuiteProjection, WORKTREE_PROJECTION_VERSION,
 };

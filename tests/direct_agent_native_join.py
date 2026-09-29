@@ -77,10 +77,13 @@ def peer(base: Path) -> None:
         if method == "initialize":
             assert not os.getenv("CENTRAL_NATIVE_TOKEN"), "human credential reached provider"
             effect({"kind":"initialize","human_token_absent":True})
-            emit({"jsonrpc":"2.0","id":request["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":True}}})
-        elif method in ("session/new","session/load"):
+            # Resume advertised: the encounter reconnect rides the capability-gated
+            # session/resume (no history replay), not session/load — the same
+            # union-truth advertisement the support fixture carries.
+            emit({"jsonrpc":"2.0","id":request["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":True,"sessionCapabilities":{"resume":True}}}})
+        elif method in ("session/new","session/load","session/resume"):
             effect({"kind":method,"requested":request.get("params",{}).get("sessionId")})
-            returned = "different-native-session" if method == "session/load" and (base / "wrong-load").exists() else native
+            returned = "different-native-session" if method in ("session/load","session/resume") and (base / "wrong-load").exists() else native
             emit({"jsonrpc":"2.0","id":request["id"],"result":{"sessionId":returned}})
         elif method == "session/prompt":
             cancel.clear(); permission.clear(); decision.clear()
@@ -229,11 +232,11 @@ def exercise(ctrl: Path, aikit: Path, evidence: Path | None = None) -> dict:
             resumed=request("reconnect",**opening)
             assert resumed["native_session_id"]==native
             assert sum(e["kind"]=="prompt" for e in effects())==before
-            assert any(e["kind"]=="session/load" and e["requested"]==native for e in effects())
+            assert any(e["kind"]=="session/resume" and e["requested"]==native for e in effects())
             (base/"source.txt").write_text(secrets.token_hex(24))
             send(session,"CONTROLLED-SOURCE after explicit repair")
             settle(session)
-            checks.append("Failed-body cleanup and same-identity session/load recover after disconnect without replaying the uncertain turn")
+            checks.append("Failed-body cleanup and same-identity session/resume recover after disconnect without replaying the uncertain turn")
             request("shutdown",expected_pid=pid)
             processes[-1].wait(timeout=10)
             pid=start(); reopened=request("reconnect",**opening)
@@ -251,7 +254,9 @@ def exercise(ctrl: Path, aikit: Path, evidence: Path | None = None) -> dict:
             assert isinstance(generation,str) and generation,rejection
             reservation=[row["event"] for row in held if row.get("event",{}).get("kind")=="native-open-reserved" and row["event"].get("connection_generation")==generation]
             assert len(reservation)==1 and reservation[0]["continuation_requested"] is True,reservation
-            assert rejection=={"kind":"native-open-refused","continuation_requested":True,"error_code":"agent_session_host.open_failed","cleanup_confirmed":True,"binding_recorded":False,"turn_replayed":False,"connection_generation":generation,"owner_pid":pid,"phase":"session-open","process_started":True,"inference_observed":False,"reason":"ACP load/resume contradicted the requested native identity"},rejection
+            # Every journal event carries the owner's observation time (observed_at_ms, ms since epoch).
+            assert isinstance(rejection.get("observed_at_ms"),int) and rejection["observed_at_ms"]>0,rejection
+            assert {key:value for key,value in rejection.items() if key!="observed_at_ms"}=={"kind":"native-open-refused","continuation_requested":True,"error_code":"agent_session_host.open_failed","cleanup_confirmed":True,"binding_recorded":False,"turn_replayed":False,"connection_generation":generation,"owner_pid":pid,"phase":"session-open","process_started":True,"inference_observed":False,"reason":"ACP load/resume contradicted the requested native identity"},rejection
             bindings=[row["event"] for row in held if row.get("event",{}).get("kind")=="binding"]
             assert bindings and all(row["native_session_id"]==native for row in bindings),bindings
             checks.append("A provider returning a different load identity is refused and never counted as continuation")

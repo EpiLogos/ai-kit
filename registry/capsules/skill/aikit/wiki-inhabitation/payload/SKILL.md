@@ -59,3 +59,10 @@ For a selected capability, collect its seed/expanded account units, matrix recor
 Central owns the durable filesystem arrangement, source identity and lifecycle metadata for document retirement. AIKit owns assessment, consolidation proposals, reconciliation and the actual retirement/archive/restore operations using that contract. Preserve source-to-successor mappings and unresolved content; retirement changes lifecycle, not standing. Current native Wiki commands do not implement a general retirement transaction: scope or prepare the proposal until the operation exists, and report that boundary explicitly. Ordinary task-authorised source editing remains available.
 
 The maintained population and real-file acceptance procedure is in AIKit's `docs/v2/21-PROJECT-REFLECTION-AND-LOCAL-ARTICULATION.md`, sections 15–18. Read it for suite population or retirement work. This source Skill does not imply that an installed generation or live harness has reloaded it.
+
+
+## NOW preparation and knowledge Return
+
+When Wiki understanding participates in a live undertaking, consume it through the same Knowledge/Wiki operations above and let AIKit's NOW preparation retain only the participant-specific reading that is useful for the current act. The prepared copy is not a new Wiki revision.
+
+Jev may help classify whether an actual result remains task-local, warrants an Agent Wiki update, changes a practice, or exposes pressure on an account/matrix relation. That determination does not itself write or author anything. Perform the authorised Wiki/source operation through its existing native owner, preserve the exact source basis and companion coherence, then publish the resulting source/Return change so affected participant contexts invalidate or receive a delta. A later participant should be able to use the revised field without inheriting the earlier session's private material.

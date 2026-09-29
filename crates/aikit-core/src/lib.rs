@@ -19,7 +19,9 @@
 #![forbid(unsafe_code)]
 
 pub mod a2a;
+pub mod a2a_card;
 pub mod actor_bootstrap;
+pub mod agent_praxis;
 pub mod application_context;
 pub mod arg;
 pub mod capsule;
@@ -53,6 +55,8 @@ pub mod harness_admission;
 pub mod harness_profile;
 pub mod hooks;
 pub mod id;
+pub mod inhabitation;
+pub mod jev;
 pub mod knowledge;
 pub mod knowledge_code;
 pub mod knowledge_construction;
@@ -69,6 +73,7 @@ pub mod knowledge_operations;
 pub mod knowledge_resolution;
 pub mod knowledge_source_pool;
 pub mod knowledge_wiki;
+pub mod knowledge_wiki_facts;
 pub mod knowledge_wiki_index;
 pub mod knowledge_wiki_provider;
 pub mod knowledge_wiki_shape;
@@ -85,6 +90,7 @@ pub mod platform;
 pub mod policy;
 pub mod praxis;
 pub mod pressure;
+pub mod probe;
 pub mod procedure;
 pub mod profile;
 pub mod project;
@@ -107,6 +113,7 @@ pub mod session_space;
 pub mod session_space_application;
 pub mod session_space_contribution;
 pub mod skillset;
+pub mod skillset_package;
 pub mod star;
 pub mod surface_material;
 pub mod surfacing;
@@ -419,10 +426,11 @@ pub use projectcentral::{
     ProjectCentralBinding, ProjectCentralGroundStatus, ProjectCentralOrientation,
     ProjectCentralProvenance, ProjectCentralSourceDescriptor, ProjectCentralSourceKind,
     ProjectCentralStanding, ProjectCentralTreatment, ProjectCentralTruthStanding,
-    CENTRAL_GROUND_RELATIONS_SCHEMA, CENTRAL_PROJECT_SCHEMA, CENTRAL_ROOT_WIKI_SOURCE,
-    CENTRAL_WIKI_PROFILE, NO_AGENT_RETRIEVAL_MARKER, PROJECTCENTRAL_BINDING_VERSION,
-    PROJECTCENTRAL_FILESYSTEM_PROVIDER, PROJECTCENTRAL_GOVERNANCE_ROOT,
-    PROJECTCENTRAL_GROUND_RELATIONS_SOURCE, PROJECTCENTRAL_HUMAN_ROOT, PROJECTCENTRAL_WIKI_SOURCE,
+    CENTRAL_GROUND_RELATIONS_SCHEMA, CENTRAL_PROJECT_SCHEMA, CENTRAL_ROOT_GOVERNANCE_ROOT,
+    CENTRAL_ROOT_SOURCE_REF_PREFIX, CENTRAL_ROOT_WIKI_SOURCE, CENTRAL_WIKI_PROFILE,
+    NO_AGENT_RETRIEVAL_MARKER, PROJECTCENTRAL_BINDING_VERSION, PROJECTCENTRAL_FILESYSTEM_PROVIDER,
+    PROJECTCENTRAL_GOVERNANCE_ROOT, PROJECTCENTRAL_GROUND_RELATIONS_SOURCE,
+    PROJECTCENTRAL_HUMAN_ROOT, PROJECTCENTRAL_WIKI_SOURCE,
 };
 pub use projection::{
     target_label, ActivationEffect, MaterializationMode, ProjectionItem, ProjectionPlan,
@@ -484,3 +492,9 @@ pub use workcell_world::{
 };
 
 pub mod recurrence;
+pub mod schedule;
+
+pub use schedule::{
+    routine_event_ref, routine_source_revision, ScheduleRecord, ScheduleShape,
+    TIME_SCHEDULE_VERSION,
+};

@@ -1,5 +1,10 @@
 schema = 1
 
+# Registry SkillSets are portable repertoire: they travel with this
+# repository and are addressed by semantic ref. `child_refs` carries another
+# set by reference — shared, never copied into `members` — so a revision to
+# the child reaches every parent that carries it.
+
 [[skillset]]
 semantic_ref = "aikit:operator"
 directory = "aikit-operator"
@@ -9,8 +14,14 @@ description = "Day-one AIKit operation over existing Wayfinder/foundation machin
 semantic_ref = "aikit:project-author"
 directory = "aikit-project-author"
 description = "AIKit project/Profile/Skill authoring competence."
+child_refs = ["aikit:account-authoring"]
 
 [[skillset]]
 semantic_ref = "aikit:extension-developer"
 directory = "aikit-extension-developer"
-description = "AIKit provider, Component and Surface extension competence."
+description = "AIKit provider, Component and Surface extension competence, including portable SkillSet package export."
+
+[[skillset]]
+semantic_ref = "aikit:account-authoring"
+directory = "aikit-account-authoring"
+description = "Provenance-aware product understanding and structured/HTML account authoring. Carried by reference by aikit:project-author and central:documentation."

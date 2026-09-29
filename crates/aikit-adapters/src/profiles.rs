@@ -3,7 +3,12 @@
 //! documents carry only what the per-harness censuses evidenced — the
 //! 2026-09-16 census for the first ten documents, the 2026-09-18
 //! harness-adapter sort-out for the additions, the 2026-09-18 pi hooks
-//! census, and the 2026-09-19 key-delivery census (each grounded in that
+//! census, the 2026-09-19 key-delivery census, and the 2026-09-22
+//! harness-connection truth cards
+//! (docs/plans/2026-09-22-harness-connection-truth-cards.md, evidence tags
+//! VL/VD/VR/VS/PO) for the MCP-observation, session-flag, and ACP-connection
+//! repairs (each
+//! grounded in that
 //! harness's admission census in this package and, where installed, the live
 //! Omarchy machine) — an absent layer says nothing, a `none` model dispatch
 //! carries its reason, and machine-specific paths are home-relative so the
@@ -25,6 +30,18 @@
 //! reports it. Coverage honesty beats coverage theater: zcode, opencode,
 //! openclaw, cursor-cli and ollama record why no env-var key path is declared
 //! for them, and no variable was invented to fill the table.
+//!
+//! ## Login commands (2026-09-23 pass; cards evidence)
+//!
+//! An own-login fact may carry the harness's declared one-shot login command
+//! (`login.argv`), grounded in the 2026-09-22 connection truth cards
+//! (docs/plans/2026-09-22-harness-connection-truth-cards.md, tags VL/VD):
+//! verified-live for codex, opencode and hermes, docs-verified for cline,
+//! qoder and cursor-cli. Harnesses whose login has no one-shot form — the
+//! in-TUI flows (claude, kimi, qwen), the browser consent gate the 2026-09-22
+//! live walk proved for gemini, the first-launch wizards (grok,
+//! antigravity) — stay note-only, and that absence is the honest record, not
+//! a gap.
 //!
 //! ## Pi hooks (2026-09-18 census; carrier commissioned same day)
 //!
@@ -83,6 +100,9 @@ project = { file = "~/.claude/settings.json", format = "claude-hook-map", owners
 
 [tools]
 posture = "managed"
+# Verified 2026-09-22 against the connection truth cards [VL+VD]: ~/.claude.json
+# key `mcpServers` is the user-scope MCP seam (project scope is `.mcp.json`,
+# precedence local>project>user) — this observation stands as written.
 observe = [{ path = "~/.claude.json", collection = "mcpServers" }]
 project = { file = "~/.claude.json", key = "mcpServers", format = "mcp-servers-record", merge = "preserve-foreign-sweep-owned" }
 activation = "next-session-only"
@@ -93,11 +113,25 @@ dispatch = { native-provider-binding = { provider-ref = "provider:anthropic", se
 
 [models.key-delivery]
 env-var = [{ provider-ref = "provider:anthropic", env-var = "ANTHROPIC_API_KEY" }]
+# Login commands pass 2026-09-23: claude's login is the in-TUI /login flow
+# (the cards verify no one-shot login command), so this fact stays note-only.
 own-login = [{ provider-ref = "provider:anthropic", note = "claude login keeps OAuth material in its own credential store (~/.claude/.credentials.json); the API key delivers only when credential:anthropic is bound" }]
 
 [sessions]
 posture = "observed"
-protocol = "process"
+# Connection truth 2026-09-22 (cards [VL+VR]): claude-code has NO native ACP
+# (verified-live 2.1.263); the maintained adapter is
+# @agentclientprotocol/claude-agent-acp (verified 0.81.0 on npm 2026-09-22;
+# the old @zed-industries package is gone). The adapter tracks the Claude Code
+# release line, so the package is deliberately NOT version-pinned in the
+# declaration — the verified version lives in this comment.
+protocol = "acp"
+connect = { argv = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"] }
+# ordered-streaming/cancellation: the ACP baseline every agent MUST support
+# per spec. permission-requests: the claude-code permission flow through the
+# adapter is its core feature. reconnect/mcp-servers/additional-directories
+# stay false: unverified.
+capabilities = { ordered-streaming = true, cancellation = true, permission-requests = true }
 
 [settings]
 posture = "observed"
@@ -145,6 +179,9 @@ project = { file = ".codex/hooks.json", format = "claude-hook-map", ownership-id
 
 [tools]
 posture = "observed"
+# Verified 2026-09-22 against the connection truth cards [VL+VD]:
+# ~/.codex/config.toml `[mcp_servers.<name>]` (command/args/env/cwd/...,
+# remote via url + bearer_token_env_var) matches this observation as written.
 observe = [{ path = "~/.codex/config.toml", collection = "mcp_servers" }]
 
 [models]
@@ -153,12 +190,30 @@ dispatch = { native-provider-binding = { provider-ref = "provider:openai", selec
 
 [models.key-delivery]
 env-var = [{ provider-ref = "provider:openai", env-var = "OPENAI_API_KEY" }]
-own-login = [{ provider-ref = "provider:openai", note = "codex login writes its own auth store (~/.codex/auth.json); the API key delivers only when credential:openai is bound" }]
+# Login command verified 2026-09-22 against the connection truth cards [VL]:
+# `codex login` runs the ChatGPT OAuth browser flow and writes ~/.codex/auth.json.
+own-login = [{ provider-ref = "provider:openai", note = "codex login runs the ChatGPT OAuth browser flow and writes its own auth store (~/.codex/auth.json); the API key delivers only when credential:openai is bound", login = { argv = ["codex", "login"] } }]
 
 [sessions]
 posture = "observed"
-protocol = "process"
-open-modes = ["resume"]
+# Connection truth 2026-09-22 (cards [VL+VR]): codex has NO native ACP
+# subcommand (verified-live codex-cli 0.155.1; `codex app-server` is its own
+# protocol, not ACP); the maintained adapter is
+# @agentclientprotocol/codex-acp (verified 1.13.0; zed-industries/codex-acp is
+# archived at 0.16.0). The adapter tracks the codex release line, so the
+# package is deliberately NOT version-pinned in the declaration — the
+# verified version lives in this comment.
+protocol = "acp"
+connect = { argv = ["npx", "-y", "@agentclientprotocol/codex-acp"] }
+# The cards verify `codex exec resume <id|--last>` for the process face only;
+# adapter-side resume is unverified, so the acp face claims create alone.
+open-modes = ["create"]
+# ordered-streaming/cancellation: the ACP baseline every agent MUST support
+# per spec. permission-requests stays false: unverified (the cards evidence
+# the adapter's existence and version, not its approval-flow surface — codex's
+# per-tool approval keys live in the process-face config).
+# reconnect/mcp-servers/additional-directories: unverified.
+capabilities = { ordered-streaming = true, cancellation = true }
 
 [settings]
 posture = "observed"
@@ -292,6 +347,7 @@ note = "pi keeps provider keys in its own auth store (~/.pi/agent/auth.json); a 
 posture = "observed"
 protocol = "rpc"
 open-modes = ["attach"]
+connect = { argv = ["pi", "--mode", "rpc"] }
 capabilities = { ordered-streaming = true, cancellation = true }
 "#,
     ),
@@ -325,15 +381,27 @@ dispatch = "provider-plural"
 
 [models.key-delivery]
 env-var = [{ provider-ref = "provider:gemini", env-var = "GEMINI_API_KEY" }]
+# Login commands pass 2026-09-23: Sign-in-with-Google is the TUI's own OAuth
+# flow and the 2026-09-22 live walk proved its headless 401 consent gate — no
+# one-shot login command exists to declare, so this fact stays note-only.
 own-login = [{ provider-ref = "provider:gemini", note = "Login with Google (OAuth) is Gemini CLI's default auth; the API key delivers only when credential:gemini is bound" }]
 
 [sessions]
 posture = "observed"
 protocol = "acp"
-capabilities = { ordered-streaming = true, cancellation = true, permission-requests = true }
+connect = { argv = ["gemini", "--acp"], argv-fallback = [["gemini", "--experimental-acp"]] }
+# Resume verified 2026-09-22 against the connection truth cards [VD]:
+# `-r latest|<idx>` / `--resume`, `--list-sessions` (store ~/.gemini/tmp/<hash>/chats/).
+capabilities = { ordered-streaming = true, cancellation = true, permission-requests = true, reconnect = true }
 "#,
     ),
     (
+        // Census 2026-09-22 (connection truth cards): kimi is MoonshotAI
+        // kimi-cli v1.6, installed as the uv tool `kimi-cli`; `kimi acp`
+        // verified-live 2026-09-22 [VL]. IDENTITY HAZARD: on this machine a
+        // `~/.zshrc` shell function shadows the name, wrapping `claude` in
+        // interactive shells — launchers must resolve the real binary path
+        // and never trust the PATH name.
         "kimi",
         r#"
 schema = "aikit.harness-profile/v1"
@@ -365,6 +433,7 @@ env-var = [{ provider-ref = "provider:moonshot", env-var = "MOONSHOT_API_KEY" }]
 posture = "observed"
 protocol = "acp"
 open-modes = ["resume"]
+connect = { argv = ["kimi", "acp"] }
 capabilities = { ordered-streaming = true, cancellation = true }
 "#,
     ),
@@ -400,6 +469,10 @@ note = "openclaw keeps model auth in its own config auth profiles (~/.openclaw/o
 [sessions]
 posture = "observed"
 protocol = "process"
+# Reconnect verified 2026-09-22 against the connection truth cards [VD]:
+# gateway sessions are keyed `agent:<id>:<key>` and reopen with
+# `openclaw agent --session-id`.
+capabilities = { reconnect = true }
 "#,
     ),
     (
@@ -431,11 +504,20 @@ dispatch = { none = { reason = "Cursor's model surface is subscription-mediated;
 
 [models.key-delivery]
 note = "cursor-agent authenticates through Cursor's own subscription login; no env-var key path is declared."
+# Login command verified 2026-09-22 against the connection truth cards [VD
+# docs.cursor.com]: the docs spell the command `agent login`, while the
+# installed CLI binary is `cursor-agent` (this profile's presence executable).
+# The argv carries the documented spelling verbatim — resolve the binary name
+# on the first install-probe before any runnable use.
+own-login = [{ provider-ref = "provider:cursor", note = "Cursor's own subscription login stores the auth cursor-agent reads; the docs spell the command `agent login` while the installed CLI binary is `cursor-agent` — resolve the spelling on install-probe", login = { argv = ["agent", "login"] } }]
 
 [sessions]
 posture = "observed"
 protocol = "process"
+# Resume verified 2026-09-22 against the connection truth cards [VD]:
+# `--resume <chat-id>`, `--continue`, and `agent ls/resume`.
 open-modes = ["resume"]
+capabilities = { reconnect = true }
 "#,
     ),
     (
@@ -465,7 +547,10 @@ env-var = [{ provider-ref = "provider:dashscope", env-var = "DASHSCOPE_API_KEY" 
 [sessions]
 posture = "observed"
 protocol = "process"
+# Resume verified 2026-09-22 against the connection truth cards [VD]:
+# `--continue` / `--resume`.
 open-modes = ["resume"]
+capabilities = { reconnect = true }
 "#,
     ),
     (
@@ -524,15 +609,33 @@ observe = { paths = ["~/.hermes/skills"] }
 posture = "observed"
 observe = ["~/.hermes/SOUL.md"]
 
+[tools]
+posture = "observed"
+# MCP seam verified-live 2026-09-22 against the connection truth cards [VL]:
+# ~/.hermes/config.yaml (YAML) top-level `mcp_servers:` mapping
+# {command, args, env}, plus `mcp_discovery_timeout`; `hermes mcp add/list`.
+observe = [{ path = "~/.hermes/config.yaml", collection = "mcp_servers" }]
+
 [models]
 posture = "observed"
 dispatch = "provider-plural"
 roster-note = "Provider and model chosen per invocation (--provider/-m) or the config.yaml model defaults (observed 2026-09-18: provider zai, model glm-5.3-flash); hermes carries its own provider catalog."
 
+[models.key-delivery]
+# Auth verified 2026-09-22 against the connection truth cards [VL]: pooled
+# credentials in ~/.hermes/auth.json via `hermes auth add`/`hermes auth
+# priority`; Nous Portal accounts log in with `hermes portal login`. The
+# provider-ref names the provider the pool is observed serving on this
+# machine; `hermes auth add` is the pool's door, not one vendor's.
+own-login = [{ provider-ref = "provider:zai", note = "pooled credential store (~/.hermes/auth.json): `hermes auth add` stores a credential and `hermes auth priority` orders the pool (observed 2026-09-18 default provider zai); Nous Portal accounts log in with `hermes portal login`", login = { argv = ["hermes", "auth", "add"] } }]
+
 [sessions]
 posture = "observed"
 protocol = "process"
+# Resume verified-live 2026-09-22 against the connection truth cards [VL]:
+# `-r <id|title|latest>`, `-c` (store ~/.hermes/sessions).
 open-modes = ["resume"]
+capabilities = { reconnect = true }
 "#,
     ),
     (
@@ -559,30 +662,47 @@ shared-tree = "The ACP bridge rides the hermes config tree (~/.hermes); it owns 
 [sessions]
 posture = "observed"
 protocol = "acp"
+connect = { argv = ["hermes", "acp"] }
 "#,
     ),
     (
-        "grok-bot",
-        // Evidence: catalog r10 descriptor (cli+service daemon, aliases
-        // gbot, executable names grok-bot/gbot, config-dir ~/.grokbot) and
-        // the clients/grokbot.rs admission census (brokered). Absent on the
-        // 2026-09-18 machine; nothing is claimed beyond the record.
+        "grok",
+        // Census 2026-09-22 (connection truth cards, ROSTER CORRECTION):
+        // owner decision 2026-09-22 — the grok-bot CLI is bot/group
+        // management through a gateway, not a coding harness; this adapter
+        // now profiles xAI's actual coding CLI, Grok Build. The Actuation
+        // catalog still carries a grok-bot descriptor describing the wrong
+        // product — a catalog correction is owed to Actuation (returned via
+        // NOW, not fixable in this repo). Everything here is docs-level
+        // [VD docs.x.ai/build/overview]: Grok Build is NOT installed on this
+        // machine, and the profile claims only what the docs pass verified.
         r#"
 schema = "aikit.harness-profile/v1"
-slug = "grok-bot"
-edition = "custom"
+slug = "grok"
+edition = "cli"
 
 [presence]
-executables = ["grok-bot", "gbot"]
-config-dir = "~/.grokbot"
+# Binary `grok` (Grok Build); no other executable is documented [VD].
+executables = ["grok"]
+config-dir = "~/.grok"
 
-[models]
+[tools]
 posture = "observed"
-dispatch = { none = { reason = "The catalog capability-gap document records the grok-bot surface as unobserved, including the daemon's provider binding; no model dispatch is declared." } }
+# MCP: docs say MCP "works out of the box" [VD docs.x.ai/build/overview], but
+# the MCP config path is undocumented and none was verified, so no observe
+# declaration names a seam. Config is ~/.grok/config.toml with custom
+# `[model.*]` provider tables carrying `env_key` [VD].
 
 [sessions]
+# Headless face `grok -p "..." --output-format streaming-json` is docs-verified
+# [VD]; the output-format value is literally `streaming-json`. ACP is
+# docs-declared supported with UNVERIFIED connect argv, so no acp connect is
+# declared — the protocol stays the verified process face. Resume flags are
+# undocumented upstream, so only `create` is declared; capabilities stay at the
+# all-false default because nothing negotiated is verified.
 posture = "observed"
 protocol = "process"
+open-modes = ["create"]
 "#,
     ),
     (
@@ -590,7 +710,10 @@ protocol = "process"
         // Evidence: catalog r10 descriptor (edition ide, config-dir
         // ~/.gemini/antigravity, detected inside the gemini config tree) and
         // the clients/antigravity.rs admission census (brokered, Ide).
-        // Absent on the 2026-09-18 machine.
+        // Absent on the 2026-09-18 machine. 2026-09-22 connection truth
+        // cards: the headless CLI (`agy -p ...`) makes this a real
+        // process-family candidate, and the global MCP config path is
+        // corrected below.
         r#"
 schema = "aikit.harness-profile/v1"
 slug = "gemini-antigravity"
@@ -599,9 +722,29 @@ edition = "ide"
 [presence]
 config-dir = "~/.gemini/antigravity"
 
+[tools]
+posture = "observed"
+# MCP path corrected 2026-09-22 against the connection truth cards [VD]: the
+# global config is ~/.gemini/config/mcp_config.json (key `mcpServers`; entries
+# are exactly-one-of `command` | `serverUrl` — the docs reject legacy
+# `url`/`httpUrl`). The previously observed ~/.gemini/antigravity/mcp_config.json
+# is stale. Workspace scope is .agents/mcp_config.json.
+observe = [{ path = "~/.gemini/config/mcp_config.json", collection = "mcpServers" }]
+
 [models]
 posture = "observed"
 dispatch = { none = { reason = "The catalog capability-gap document records the antigravity surface as unobserved beyond detection; no model dispatch is declared." } }
+
+[sessions]
+# Headless CLI verified 2026-09-22 against the connection truth cards [VD]:
+# `agy -p --output-format json|stream-json` with `--continue/--conversation <id>`
+# (exit codes 0/1/2, documented NDJSON events). Headless never prompts — a
+# cached interactive login is required, and it exits with auth-required
+# otherwise. Capabilities stay all-false: nothing beyond the open modes is
+# verified. ACP: none found.
+posture = "observed"
+protocol = "process"
+open-modes = ["create", "continue"]
 "#,
     ),
     (
@@ -684,6 +827,19 @@ shared-tree = "Claude-compatible Agent Skills (SKILL.md) via the built-in skills
 posture = "observed"
 observe = [".goosehints"]
 
+[tools]
+posture = "observed"
+# MCP client config corrected 2026-09-22 against the connection truth cards
+# [VS]: config.yaml root key `extensions` — variants stdio {cmd, args, envs,
+# env_keys, timeout, cwd, bundled} and streamable_http {uri, headers,
+# client_id, client_secret_key, scopes}; the SSE variant is removed upstream,
+# and malformed entries are skipped with a warning. macOS and XDG paths both
+# observed.
+observe = [
+  { path = "~/Library/Application Support/Block/goose/config.yaml", collection = "extensions" },
+  { path = "~/.config/goose/config.yaml", collection = "extensions" },
+]
+
 [models]
 posture = "observed"
 dispatch = "provider-plural"
@@ -692,7 +848,10 @@ roster-note = "15+ providers (Anthropic, OpenAI, Google, Ollama, OpenRouter, ...
 [sessions]
 posture = "observed"
 protocol = "process"
+# Named-session resume verified 2026-09-22 against the connection truth cards
+# [VD]: `goose run -n <name> -r` (store ~/.local/share/goose/sessions/sessions.db).
 open-modes = ["resume"]
+capabilities = { reconnect = true }
 "#,
     ),
     (
@@ -724,6 +883,11 @@ observe = ["~/.config/opencode/AGENTS.md"]
 
 [tools]
 posture = "observed"
+# Observation confirmed 2026-09-22 against the connection truth cards [VL+VD]:
+# opencode.json key `mcp` — local entries are {type:"local", command:[ARRAY],
+# environment, enabled}, remote {type:"remote", url, headers, enabled};
+# `command` is an array, unlike most harnesses. Project scope is a project
+# opencode.json.
 observe = [{ path = "~/.config/opencode/opencode.json", collection = "mcp" }]
 
 [models]
@@ -731,12 +895,217 @@ posture = "observed"
 dispatch = { none = { reason = "The catalog declares no capability document for opencode and the census records no provider binding surface; no model dispatch is declared." } }
 
 [models.key-delivery]
+# Login command verified 2026-09-22 against the connection truth cards [VL]:
+# `opencode auth login` is the one door to the per-provider store. One entry
+# stands for that store as a whole — it is not a single model vendor, and the
+# note says so — because the schema's own-login facts are per-provider and no
+# store entry was verified for one vendor alone.
 note = "opencode authenticates through its own per-provider auth store (opencode auth login) and per-provider config; no fixed env-var key path is declared for its native launch."
+own-login = [{ provider-ref = "provider:opencode", note = "opencode's own per-provider auth store (~/.local/share/opencode/auth.json); `opencode auth login` is the store's one interactive door across the providers it serves — this entry names the store, not a single model vendor", login = { argv = ["opencode", "auth", "login"] } }]
 
 [sessions]
 posture = "observed"
 protocol = "process"
-open-modes = ["resume", "attach"]
+# Corrected 2026-09-22 against the connection truth cards [VL+VD]: resume is
+# verified (`-c` / `-s <id>` / `--fork`, sessions in the
+# ~/.local/share/opencode/ SQLite db); "attach" is removed — `--attach
+# <serve-url>` reuses a warm `opencode serve` process, but no attach
+# session-open is implemented anywhere, so claiming it was posture drift.
+open-modes = ["resume"]
+capabilities = { reconnect = true }
+"#,
+    ),
+    (
+        "copilot",
+        // Census 2026-09-23 (connection truth cards 2026-09-22, expansion
+        // shortlist #1): GitHub Copilot CLI, binary `copilot`, first-party
+        // ACP face `copilot --acp` [VD docs.github.com/en/copilot/reference/
+        // acp-server]; public preview 2026-01-28 (github.blog changelog).
+        // NOT installed on this machine — docs-level only.
+        r#"
+schema = "aikit.harness-profile/v1"
+slug = "copilot"
+edition = "cli"
+
+[presence]
+# Binary `copilot`; no config-dir is declared because no file-based config is
+# documented at preview.
+executables = ["copilot"]
+
+[models]
+# The BYOK/auth split and model-selection surface are undocumented at preview;
+# no dispatch is declared rather than inventing a roster.
+posture = "observed"
+dispatch = { none = { reason = "Public preview (2026-01-28): the BYOK/auth split and model-selection surface are undocumented in the 2026-09-22 connection truth pass; no model dispatch is declared." } }
+
+[sessions]
+# First-party ACP face [VD docs.github.com/en/copilot/reference/acp-server].
+# ordered-streaming/cancellation: the ACP baseline every agent MUST support
+# per spec [VD]; permission-requests/reconnect/mcp-servers/
+# additional-directories stay false: unverified. MCP rides the session/new
+# mcpServers wire field (per-session delivery); no file-based MCP config is
+# documented, so no tools layer is declared.
+posture = "observed"
+protocol = "acp"
+connect = { argv = ["copilot", "--acp"] }
+open-modes = ["create"]
+capabilities = { ordered-streaming = true, cancellation = true }
+"#,
+    ),
+    (
+        "cline",
+        // Census 2026-09-23 (connection truth cards 2026-09-22, expansion
+        // shortlist #3): Cline CLI, binary `cline`, first-party ACP face
+        // `cline --acp` (documented optional `--auto-approve true` is the
+        // harness's own permission bypass, never AIKit's default door) [VD
+        // docs.cline.bot]. No batch headless JSON mode documented. NOT
+        // installed on this machine — docs-level only.
+        r#"
+schema = "aikit.harness-profile/v1"
+slug = "cline"
+edition = "cli"
+
+[presence]
+executables = ["cline"]
+
+[models]
+# Provider/model selection via CLINE_PROVIDER / CLINE_MODEL; API key via
+# CLINE_API_KEY or `cline auth` [VD docs.cline.bot].
+posture = "observed"
+dispatch = "provider-plural"
+roster-note = "Provider and model are selected through the CLINE_PROVIDER and CLINE_MODEL environment variables; the API key arrives via CLINE_API_KEY or `cline auth` [VD docs.cline.bot]."
+
+[models.key-delivery]
+# Auth verified 2026-09-22 against the connection truth cards [VD
+# docs.cline.bot]: the key arrives via CLINE_API_KEY or `cline auth`. Only the
+# own-login entry is declared here (the env-var census is a separate lane).
+own-login = [{ provider-ref = "provider:cline", note = "Cline's own auth stores the credential the CLI reads in place of CLINE_API_KEY (`cline auth`)", login = { argv = ["cline", "auth"] } }]
+
+[sessions]
+# First-party ACP face [VD docs.cline.bot]; `--auto-approve true` is
+# documented but deliberately NOT part of the declared door. Capabilities
+# stay at the ACP baseline; permission-requests/reconnect/mcp-servers/
+# additional-directories are unverified.
+posture = "observed"
+protocol = "acp"
+connect = { argv = ["cline", "--acp"] }
+open-modes = ["create"]
+capabilities = { ordered-streaming = true, cancellation = true }
+"#,
+    ),
+    (
+        "kiro-cli",
+        // Census 2026-09-23 (connection truth cards 2026-09-22, expansion
+        // shortlist #4): Kiro CLI, binary `kiro-cli`, first-party ACP face
+        // `kiro-cli acp [--agent <name>]`, JSON-RPC 2.0 over stdio [VD
+        // kiro.dev/docs/cli/acp]. Kiro CLI is the renamed Amazon Q CLI: the
+        // q/kiro binary-identity split is the census hazard, so launch facts
+        // are pinned to `kiro-cli` and no `q` fallback argv is declared — an
+        // old-generation install joins nothing here until its own census is
+        // taken. Headless docs exist but were nav-verified only. NOT
+        // installed on this machine — docs-level only.
+        r#"
+schema = "aikit.harness-profile/v1"
+slug = "kiro-cli"
+edition = "cli"
+
+[presence]
+# Current-generation binary only; the older-generation `q` binary (Amazon Q
+# CLI) joins nothing here until its own census is taken.
+executables = ["kiro-cli"]
+
+[sessions]
+# First-party ACP face [VD kiro.dev/docs/cli/acp]; `--agent <name>` is a
+# documented optional flag, not part of the default door. Capabilities stay
+# at the ACP baseline; everything else is unverified.
+posture = "observed"
+protocol = "acp"
+connect = { argv = ["kiro-cli", "acp"] }
+open-modes = ["create"]
+capabilities = { ordered-streaming = true, cancellation = true }
+"#,
+    ),
+    (
+        "qoder",
+        // Census 2026-09-23 (connection truth cards 2026-09-22, expansion
+        // shortlist #9): Qoder CLI, binary `qoder`, first-party ACP face
+        // `qoder --acp` [VD docs.qoder.com/cli/acp]; auth `qoder login` or
+        // QODER_PERSONAL_ACCESS_TOKEN. Headless undocumented. NOT installed
+        // on this machine — docs-level only.
+        r#"
+schema = "aikit.harness-profile/v1"
+slug = "qoder"
+edition = "cli"
+
+[presence]
+executables = ["qoder"]
+
+[models]
+# The 2026-09-22 connection truth cards record no model-selection surface for
+# qoder (headless undocumented), so no model dispatch is declared.
+posture = "observed"
+dispatch = { none = { reason = "The connection truth cards (2026-09-22) record no model-selection surface for qoder; headless is undocumented and no dispatch was observed." } }
+
+[models.key-delivery]
+# Auth per the connection truth cards 2026-09-22 [VD]: `qoder login` or
+# QODER_PERSONAL_ACCESS_TOKEN. Only the own-login entry is declared here (the
+# env-var census is a separate lane).
+own-login = [{ provider-ref = "provider:qoder", note = "Qoder's own login stores the credential the CLI reads in place of QODER_PERSONAL_ACCESS_TOKEN", login = { argv = ["qoder", "login"] } }]
+
+[sessions]
+# First-party ACP face [VD docs.qoder.com/cli/acp]. Capabilities stay at the
+# ACP baseline only; permission-requests/reconnect/mcp-servers/
+# additional-directories are unverified, and no headless face is documented.
+posture = "observed"
+protocol = "acp"
+connect = { argv = ["qoder", "--acp"] }
+open-modes = ["create"]
+capabilities = { ordered-streaming = true, cancellation = true }
+"#,
+    ),
+    (
+        "droid",
+        // Census 2026-09-23 (connection truth cards 2026-09-22, expansion
+        // shortlist #2): Factory Droid, binary `droid`. FIRST-PARTY
+        // connection is the headless runner `droid exec --output-format
+        // text|json|stream-jsonrpc` (+ `--input-format stream-jsonrpc`) [VD
+        // docs.factory.com] — NOT a spawn-and-speak ACP face (the ACP
+        // registry entry `droid exec --output-format acp-daemon` implies a
+        // daemon whose lifetime outlives exec — unverified). MCP client
+        // config documented at ~/.factory/mcp.json (global) and
+        // .factory/mcp.json (project), key mcpServers, `droid mcp add`. NOT
+        // installed on this machine — docs-level only.
+        r#"
+schema = "aikit.harness-profile/v1"
+slug = "droid"
+edition = "cli"
+
+[presence]
+executables = ["droid"]
+config-dir = "~/.factory"
+
+[tools]
+posture = "observed"
+# MCP client config documented [VD docs.factory.com]: ~/.factory/mcp.json
+# (global) and .factory/mcp.json (project), key `mcpServers`;
+# `droid mcp add`. Observation is disclosure, not projection: no capability
+# descriptor declares a managed seam, so nothing is written.
+observe = [
+  { path = "~/.factory/mcp.json", collection = "mcpServers" },
+  { path = ".factory/mcp.json", collection = "mcpServers" },
+]
+
+[sessions]
+# Process protocol: the first-party face is the headless runner `droid exec
+# --output-format text|json|stream-jsonrpc` (+ `--input-format
+# stream-jsonrpc`) [VD docs.factory.com]. NO connect is declared — the
+# stream-jsonrpc framing is unpinned against an installed binary, so there is
+# no declared door yet; that family is the named future connection lane. No
+# ACP door: the registry's acp-daemon argv is unverified. Resume flags are
+# absent from the fact base, so only `create` is declared.
+posture = "observed"
+protocol = "process"
+open-modes = ["create"]
 "#,
     ),
 ];
@@ -801,11 +1170,26 @@ pub fn slug_for_target(target: &TargetId) -> Option<&'static str> {
         TargetId::AIDER => Some("aider"),
         TargetId::DEEPSEEK_HARNESS => Some("deepseek-harness"),
         TargetId::GOOSE => Some("goose"),
-        TargetId::GROK_BOT => Some("grok-bot"),
+        // Owner decision 2026-09-22: the grok-bot row was a misidentification
+        // (bot/group management, not a coding harness); the adapter now
+        // profiles Grok Build, slug `grok`. The aikit-core TargetId constant
+        // keeps its legacy spelling (that crate is not this profile's to
+        // rename), so both the legacy id and the new slug join to `grok`.
+        TargetId::GROK_BOT | "grok" => Some("grok"),
         TargetId::ANTIGRAVITY => Some("gemini-antigravity"),
         TargetId::OPENCODE => Some("opencode"),
         TargetId::HERMES => Some("hermes"),
         TargetId::HERMES_ACP => Some("hermes-acp"),
+        // Harness-connection roster expansion 2026-09-23 (connection truth
+        // cards 2026-09-22): docs-level census adapters. These slugs have no
+        // aikit-core TargetId constant yet (that crate is not this table's to
+        // grow), so they join by their own catalog slug spelling — the join
+        // key, exactly like the grok row above.
+        "copilot" => Some("copilot"),
+        "cline" => Some("cline"),
+        "kiro-cli" => Some("kiro-cli"),
+        "qoder" => Some("qoder"),
+        "droid" => Some("droid"),
         _ => None,
     }
 }
@@ -835,7 +1219,7 @@ mod tests {
             "openclaw",
             "hermes",
             "hermes-acp",
-            "grok-bot",
+            "grok",
             "gemini-antigravity",
             "aider",
             "deepseek-harness",
@@ -1116,7 +1500,7 @@ mod tests {
             (TargetId::aider(), "aider"),
             (TargetId::deepseek_harness(), "deepseek-harness"),
             (TargetId::goose(), "goose"),
-            (TargetId::grok_bot(), "grok-bot"),
+            (TargetId::grok_bot(), "grok"),
             (TargetId::antigravity(), "gemini-antigravity"),
             (TargetId::opencode(), "opencode"),
         ] {
@@ -1206,6 +1590,66 @@ mod tests {
                 delivery.own_login.is_empty(),
                 "{slug}: no own-login store is evidenced, so none may be declared"
             );
+        }
+    }
+
+    #[test]
+    fn login_argv_is_declared_exactly_where_the_cards_verify_a_dedicated_login_command() {
+        // The 2026-09-23 login-commands pass over the 2026-09-22 connection
+        // truth cards: verified-live for codex/opencode/hermes, docs-verified
+        // for cline/qoder/cursor-cli. Every other harness stays note-only —
+        // an in-TUI flow, a browser consent gate or a first-launch wizard has
+        // no one-shot login command to declare, and none is invented.
+        let expected: &[(&str, &[&str])] = &[
+            ("codex", &["codex", "login"]),
+            ("opencode", &["opencode", "auth", "login"]),
+            ("hermes", &["hermes", "auth", "add"]),
+            ("cline", &["cline", "auth"]),
+            ("qoder", &["qoder", "login"]),
+            ("cursor-cli", &["agent", "login"]),
+        ];
+        for (slug, argv) in expected {
+            let profile = for_slug(slug).unwrap_or_else(|| panic!("{slug} must resolve"));
+            let delivery = profile
+                .models
+                .as_ref()
+                .unwrap_or_else(|| panic!("{slug} must declare models"))
+                .key_delivery
+                .as_ref()
+                .unwrap_or_else(|| panic!("{slug} must declare key delivery"));
+            let runnable: Vec<_> = delivery
+                .own_login
+                .iter()
+                .filter(|fact| fact.login.is_some())
+                .collect();
+            assert_eq!(
+                runnable.len(),
+                1,
+                "{slug}: exactly one runnable login is declared"
+            );
+            assert_eq!(
+                runnable[0].login.as_ref().unwrap().argv,
+                *argv,
+                "{slug}: the declared login argv matches the cards"
+            );
+        }
+        for (slug, profile) in all() {
+            if expected.iter().any(|(s, _)| *s == slug) {
+                continue;
+            }
+            let Some(delivery) = profile
+                .models
+                .as_ref()
+                .and_then(|models| models.key_delivery.as_ref())
+            else {
+                continue;
+            };
+            for fact in &delivery.own_login {
+                assert!(
+                    fact.login.is_none(),
+                    "{slug}: no runnable login is verified, so none may be declared"
+                );
+            }
         }
     }
 

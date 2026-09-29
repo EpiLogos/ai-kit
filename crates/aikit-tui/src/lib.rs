@@ -13,6 +13,7 @@ pub mod application_surface;
 pub mod backend;
 pub mod compose_preview;
 pub mod compose_spine;
+pub mod conversation_surface;
 pub mod credential_surface;
 pub mod event;
 pub mod explain_history_service;
@@ -38,6 +39,7 @@ pub mod tree;
 pub mod v2_render;
 pub mod working_field;
 pub mod workspace_navigation;
+pub mod world_entry;
 
 use aikit_core::id::{CapsuleId, GenerationId};
 
@@ -45,8 +47,9 @@ pub use application::{
     keyboard_select, mouse_select, reduce_tui, selected_contextual_action, unresolved_staged,
     ActionOutcome, ActivationIntent, ApplyReceipt, CompositionPreview, HistoryEntry,
     NavigationPoint, Overlay, PresentationMode, RelationReadModel, RelationView, ResourceListItem,
-    ResourceListReadModel, SelectionInvalidation, StagedChanges, TuiApplicationService,
-    TuiReduction, TuiRuntime, TuiState, UiAction, UiEffect, UiStatus, WorkspaceSection,
+    ResourceListReadModel, SelectionInvalidation, SkillSetFieldRow, StagedChanges,
+    TuiApplicationService, TuiReduction, TuiRuntime, TuiState, UiAction, UiEffect, UiStatus,
+    WorkspaceSection,
 };
 pub use application_service::ApplicationService;
 pub use application_surface::{

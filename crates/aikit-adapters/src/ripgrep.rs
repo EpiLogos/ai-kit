@@ -31,6 +31,11 @@ pub const DEFAULT_MAX_FILE_BYTES: u64 = 1024 * 1024;
 pub const MAX_COLUMNS: u32 = 240;
 /// Bounded parallelism; the NOW field is small and this is not a fleet scan.
 pub const SEARCH_THREADS: u32 = 2;
+/// The ripgrep release the knowledge-path searchers were verified against. A
+/// different installed release is disclosed as version drift in `status()`,
+/// matching the bkmr/GitNexus convention, never refused: literal content
+/// search is a stable surface.
+pub const RIPGREP_TESTED_VERSION: &str = "15.2.0";
 
 pub fn executable() -> PathBuf {
     std::env::var_os("AIKIT_RIPGREP_BIN")
@@ -46,6 +51,10 @@ pub struct SearchRequest {
     /// Literal by default. Regex is a deliberate caller decision because a
     /// caller-supplied pattern is also caller-supplied syntax.
     pub regex: bool,
+    /// Case-fold the match. Off by default: the NOW field answers for exact
+    /// ground. A code-search caller opts in, because code spells the same
+    /// word in many cases (`mcp`, `Mcp`, `MCP`).
+    pub ignore_case: bool,
     pub roots: Vec<PathBuf>,
     /// Include globs, matched against each root-relative path.
     pub include_globs: Vec<String>,
@@ -66,6 +75,7 @@ impl SearchRequest {
         Self {
             pattern: pattern.into(),
             regex: false,
+            ignore_case: false,
             roots,
             include_globs: Vec::new(),
             exclude_globs: Vec::new(),
@@ -93,6 +103,9 @@ impl SearchRequest {
         ];
         if !self.regex {
             argv.push("--fixed-strings".into());
+        }
+        if self.ignore_case {
+            argv.push("--ignore-case".into());
         }
         if self.hidden {
             argv.push("--hidden".into());
@@ -195,7 +208,14 @@ impl<R: CommandRunner> RipgrepSearcher<R> {
             ));
         }
         let argv = request.argv(&self.executable);
-        let output = self.runner.run(&argv)?;
+        // The declared wall-clock budget is enforced here, at the one place
+        // every knowledge-path search travels through: a pathological tree
+        // costs one timeout, not an unbounded wait. The runner seam does the
+        // killing; a timed-out search is a runner error, not a failed search.
+        let output = match request.timeout {
+            Some(budget) => self.runner.run_with_timeout(&argv, budget)?,
+            None => self.runner.run(&argv)?,
+        };
         // 0 = matches, 1 = clean no-match. Both parse their stream; only a
         // ripgrep failure (2) becomes an error.
         let outcome = parse_events(&output.stdout, request.limit)?;
@@ -273,7 +293,7 @@ pub fn available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::ScriptedRunner;
+    use crate::runner::{ScriptedRunner, SystemRunner};
 
     fn rg_json_line(path: &str, line_number: u64, text: &str) -> String {
         format!(
@@ -285,6 +305,7 @@ mod tests {
         SearchRequest {
             pattern: "harness gate".into(),
             regex: false,
+            ignore_case: false,
             roots: vec![PathBuf::from("/ground")],
             include_globs: vec!["Control/agents/now/**".into()],
             exclude_globs: vec![".git/**".into()],
@@ -293,6 +314,18 @@ mod tests {
             limit: 10,
             timeout: Some(Duration::from_secs(30)),
         }
+    }
+
+    #[test]
+    fn case_folding_is_a_deliberate_caller_opt_in() {
+        assert!(!request()
+            .argv(Path::new("rg"))
+            .contains(&"--ignore-case".to_string()));
+        let mut folded = request();
+        folded.ignore_case = true;
+        assert!(folded
+            .argv(Path::new("rg"))
+            .contains(&"--ignore-case".to_string()));
     }
 
     #[test]
@@ -383,5 +416,24 @@ mod tests {
         assert_eq!(format_filesize(DEFAULT_MAX_FILE_BYTES), "1M");
         assert_eq!(format_filesize(512), "512");
         assert_eq!(format_filesize(64 * 1024), "64K");
+    }
+
+    #[test]
+    fn a_search_over_a_runaway_binary_is_killed_by_the_declared_budget() {
+        // The real runner seam, not a scripted stand-in: the module contract
+        // promises that a pathological search costs one timeout, so the
+        // knowledge layer proves the process is actually killed.
+        let dir = tempfile::tempdir().unwrap();
+        let slow = dir.path().join("slow-rg");
+        std::fs::write(&slow, "#!/bin/sh\nsleep 30\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut request = request();
+        request.roots = vec![dir.path().to_path_buf()];
+        request.timeout = Some(Duration::from_millis(300));
+        let error = RipgrepSearcher::new(SystemRunner::new(), &slow)
+            .search(&request)
+            .expect_err("a 30s runaway cannot finish inside a 300ms budget");
+        assert_eq!(error.code(), "mux.command_timeout");
     }
 }

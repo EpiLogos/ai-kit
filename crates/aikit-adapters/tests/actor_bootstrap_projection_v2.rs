@@ -56,6 +56,7 @@ fn actor_bootstrap() -> ActorBootstrap {
         capabilities: empty_summary(),
         actions: empty_summary(),
         context_sources: empty_summary(),
+        governance_sources: Vec::new(),
         projection_targets: vec![TargetId::claude_code(), TargetId::codex()],
         runtime_body: None,
         warnings: Vec::new(),

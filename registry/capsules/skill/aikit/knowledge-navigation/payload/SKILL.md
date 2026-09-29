@@ -316,3 +316,19 @@ unavailable, say so and proceed on the authored sources — do not invent a
 stand-in reading.
 
 A stale revision requires rereading and reconciling, not overwriting. Replacing the body with an empty body clears that source's operative guidance while retaining its feedback history. A missing/denied/budget-withheld source is unavailable, not permission to reuse a stale reading. Native source history and accumulated feedback can support a later, separately reviewed governance diff. See `docs/WIKI-OPERATIONAL-PROJECTION.md` for the current implementation boundary and harness proof.
+
+
+## Prepared relevance for an undertaking
+
+Knowledge Navigation participates directly in prepared NOW context. The preparation path uses the existing Knowledge application and Central source routes; it does not maintain a second semantic index.
+
+For a bounded undertaking:
+
+- exact Central/BKMR source refs and revisions establish known material first;
+- `knowledge search` / `frame` may add source-linked Wiki understanding for the stated queries;
+- participant disclosure and ContextSource egress policy are checked before any passage can be sent to an external Jev/provider;
+- general Jev Noul/Choice/Score questions may select several complementary contributions and may return that the current catalogue is insufficient; a classifier result is relevance evidence, not source standing;
+- the selected material, routes, revisions, Factory dependencies and returned selection evidence can be retained as the participant's prepared NOW view;
+- unchanged warm preparation is read from Redis without another Jev call; source/dependency/Return changes require their exact owner revision to be reconsidered before a newer view replaces the previous one.
+
+Full declared-scope assessment must account for every selected member. Small scoped work should remain small. Never shrink a declared matrix/whole merely because retrieval or Jev found an attractive subset.

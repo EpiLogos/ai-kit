@@ -23,6 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use aikit_core::capsule::Kind;
+use aikit_core::credential::CredentialRef;
 use aikit_core::harness_admission::{
     unsupported_harness_gap, HarnessAdmissionAdapter, HarnessAdmissionDescriptor,
     HarnessEditionKind,
@@ -39,14 +40,20 @@ use aikit_adapters::actuation_harness_detection::{
 };
 use aikit_adapters::clients::{
     antigravity::AntigravityAdapter, broker::BrokerAdapter, claude::ClaudeAdapter,
-    codex::CodexAdapter, gemini::GeminiAdapter, grokbot::GrokbotAdapter, hermes::HermesAdapter,
-    kimi::KimiAdapter, ollama::OllamaAdapter, openclaw::OpenclawAdapter, pi::PiAdapter,
-    zcode::ZcodeAdapter, ClientAdapter,
+    cline::ClineAdapter, codex::CodexAdapter, copilot::CopilotAdapter, droid::DroidAdapter,
+    gemini::GeminiAdapter, grok::GrokAdapter, hermes::HermesAdapter, kimi::KimiAdapter,
+    kiro_cli::KiroCliAdapter, ollama::OllamaAdapter, openclaw::OpenclawAdapter,
+    opencode::OpencodeAdapter, pi::PiAdapter, qoder::QoderAdapter, zcode::ZcodeAdapter,
+    ClientAdapter,
 };
-use aikit_adapters::runner::SystemRunner;
-use aikit_adapters::tool_sources::{plan_tools_projection, ToolsProjectionOutcome};
+use aikit_adapters::tool_sources::{
+    plan_tools_projection, ToolSourceEntry, ToolsProjectionOutcome,
+};
+use aikit_core::probe::ProbeOutcome;
+use aikit_store::{AikitHome, CredentialBindingStore};
 
 use crate::app::Service;
+use crate::probe::ProbeTracker;
 
 /// The Actuation binary every intake asks. Resolved at spawn time; a missing
 /// or refusing binary is an intake outcome, never a build-time fact.
@@ -80,7 +87,88 @@ fn client_home(seam_path: &str, tree: &Path) -> Result<PathBuf> {
 
 /// Expand one seam path: `~/` against the given home, absolute as-is,
 /// relative against the working tree.
-fn expand_seam(seam_path: &str, home: &Path, tree: &Path) -> PathBuf {
+pub(crate) fn expand_seam(seam_path: &str, home: &Path, tree: &Path) -> PathBuf {
+    expand_seam_with(seam_path, home, tree, |name| std::env::var_os(name))
+}
+
+/// The documented default homes of the harness config variables a catalog
+/// seam may lead with (`$CODEX_HOME/hooks.json`). Each harness reads the
+/// variable when set and this `~/` default otherwise, so the seam must too —
+/// joining the literal `$CODEX_HOME` onto the project would write a folder of
+/// that name instead of the harness's real config.
+const SEAM_HOME_DEFAULTS: &[(&str, &str)] = &[
+    ("CODEX_HOME", "~/.codex"),
+    ("CLAUDE_CONFIG_DIR", "~/.claude"),
+    ("DSH_HOME", "~/.dsh"),
+];
+
+/// `expand_seam` with the environment passed in (tests never mutate the
+/// process environment). A leading `$NAME` or `${NAME}` resolves to the
+/// variable's non-empty value, else to its documented default; an unknown,
+/// unset variable is left as written.
+fn expand_seam_with(
+    seam_path: &str,
+    home: &Path,
+    tree: &Path,
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> PathBuf {
+    if let Some((name, rest)) = leading_seam_variable(seam_path) {
+        let base = env(name)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                SEAM_HOME_DEFAULTS
+                    .iter()
+                    .find(|(known, _)| *known == name)
+                    .map(|(_, default)| home.join(default.trim_start_matches("~/")))
+            });
+        if let Some(base) = base {
+            let joined = if rest.is_empty() {
+                base
+            } else {
+                base.join(rest)
+            };
+            return if joined.is_absolute() {
+                joined
+            } else {
+                tree.join(joined)
+            };
+        }
+    }
+    // A `~/`-anchored seam that literally names a harness's own documented
+    // default root (`~/.claude`, `~/.codex`, `~/.dsh` — the very defaults
+    // `SEAM_HOME_DEFAULTS` states) follows that harness's override variable
+    // exactly as a `$VAR`-led seam does, whether the seam sits inside the
+    // root (`~/.claude/settings.json`) or beside it as the harness's own
+    // dotfile (`~/.claude.json`, the tools-layer seam `profiles.rs`
+    // declares). Without this, `CLAUDE_CONFIG_DIR` moved `aikit client
+    // status`'s disclosed `config_dir` but silently left every write from
+    // `aikit apply`'s tools and hook seams pointed at the real, unoverridden
+    // home — a caller who isolated a harness's home through its own
+    // documented variable got a truthful read model and an untruthful write.
+    // An unset override changes nothing: the seam falls through exactly as
+    // it always did, against the plain `home`.
+    if let Some((name, tail)) = leading_seam_home_default(seam_path) {
+        if let Some(base) = env(name).filter(|value| !value.is_empty()) {
+            let base = PathBuf::from(base);
+            let joined = if let Some(sub) = tail.strip_prefix('/') {
+                base.join(sub)
+            } else if tail.is_empty() {
+                base
+            } else {
+                // `.json` and the like: a suffix on the harness's own root,
+                // not a new path segment under it.
+                let mut with_suffix = base.into_os_string();
+                with_suffix.push(tail);
+                PathBuf::from(with_suffix)
+            };
+            return if joined.is_absolute() {
+                joined
+            } else {
+                tree.join(joined)
+            };
+        }
+    }
     let expanded = if let Some(rest) = seam_path.strip_prefix("~/") {
         home.join(rest)
     } else {
@@ -91,6 +179,39 @@ fn expand_seam(seam_path: &str, home: &Path, tree: &Path) -> PathBuf {
     } else {
         tree.join(expanded)
     }
+}
+
+/// A `~/`-anchored seam whose remainder starts with one of
+/// [`SEAM_HOME_DEFAULTS`]'s literal default names (`.claude`, `.codex`,
+/// `.dsh`) → (the variable, whatever follows the name — `/settings.json`,
+/// `.json`, or empty). `None` for a seam under no documented harness
+/// variable (zcode, openclaw today) or with no `~/` anchor at all.
+fn leading_seam_home_default(seam_path: &str) -> Option<(&'static str, &str)> {
+    let rest = seam_path.strip_prefix("~/")?;
+    SEAM_HOME_DEFAULTS.iter().find_map(|(name, default)| {
+        let literal = default
+            .strip_prefix("~/")
+            .expect("SEAM_HOME_DEFAULTS entries are ~/-anchored");
+        rest.strip_prefix(literal).map(|tail| (*name, tail))
+    })
+}
+
+/// `$NAME/rest` or `${NAME}/rest` → (NAME, rest); `rest` may be empty.
+fn leading_seam_variable(seam_path: &str) -> Option<(&str, &str)> {
+    let body = seam_path.strip_prefix('$')?;
+    let (name, rest) = if let Some(braced) = body.strip_prefix('{') {
+        let end = braced.find('}')?;
+        (&braced[..end], &braced[end + 1..])
+    } else {
+        let end = body
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(body.len());
+        (&body[..end], &body[end..])
+    };
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, rest.strip_prefix('/').unwrap_or(rest)))
 }
 
 /// Config-home overrides the harnesses themselves document and honour. When
@@ -297,6 +418,21 @@ static OVERLAYS: &[ClientOverlay] = &[
         admission: |_dirs| ZcodeAdapter::new().admission(),
     },
     ClientOverlay {
+        name: TargetId::OPENCODE,
+        aliases: &[],
+        catalog_slug: TargetId::OPENCODE,
+        semantic: SemanticBasis::None,
+        // Brokered by design: the embedded profile and the adapter's own plan()
+        // own no representation on opencode's native surfaces — AIKit's skill
+        // reach is the project `.agents/skills` universal tree, which opencode
+        // 1.18.30 ingests directly (2026-09-22 probe). The admission census is
+        // the row's detail; there is no dispatch seam to install.
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(OpencodeAdapter::new(projection_dir(dirs, "opencode"))),
+        },
+        admission: |dirs| OpencodeAdapter::new(projection_dir(dirs, "opencode")).admission(),
+    },
+    ClientOverlay {
         name: TargetId::GEMINI_CLI,
         aliases: &["gemini"],
         // The catalog slug is `gemini` (Round 4, TargetId::GEMINI): the
@@ -331,14 +467,20 @@ static OVERLAYS: &[ClientOverlay] = &[
         admission: |dirs| AntigravityAdapter::new(projection_dir(dirs, "antigravity")).admission(),
     },
     ClientOverlay {
-        name: TargetId::GROK_BOT,
-        aliases: &["grokbot"],
-        catalog_slug: TargetId::GROK_BOT,
+        // Owner decision 2026-09-22: the grok-bot row was a misidentification
+        // (the grok-bot CLI manages bots/groups, not a coding harness); the
+        // adapter now profiles xAI's Grok Build (`grok`). The catalog slug is
+        // the join key, so it is `grok` — until Actuation lands its owed
+        // catalog correction, its grok-bot detection rows describe the wrong
+        // product and join no overlay.
+        name: "grok",
+        aliases: &[],
+        catalog_slug: "grok",
         semantic: SemanticBasis::None,
         reach: Reach::AdapterOnly {
-            build: |dirs| Box::new(GrokbotAdapter::new(projection_dir(dirs, "grokbot"))),
+            build: |dirs| Box::new(GrokAdapter::new(projection_dir(dirs, "grok"))),
         },
-        admission: |dirs| GrokbotAdapter::new(projection_dir(dirs, "grokbot")).admission(),
+        admission: |dirs| GrokAdapter::new(projection_dir(dirs, "grok")).admission(),
     },
     ClientOverlay {
         name: TargetId::KIMI,
@@ -389,6 +531,63 @@ static OVERLAYS: &[ClientOverlay] = &[
             build: |dirs| Box::new(HermesAdapter::acp(projection_dir(dirs, "hermes-acp"))),
         },
         admission: |dirs| HermesAdapter::acp(projection_dir(dirs, "hermes-acp")).admission(),
+    },
+    // Harness-connection roster expansion 2026-09-23 (connection truth cards
+    // 2026-09-22, expansion shortlist): five docs-level census adapters. None
+    // of these harnesses is installed on the authoring machine, so each row's
+    // admission is a docs-cited census and the reach is AdapterOnly — no
+    // launch or install seam is claimed. The catalog slugs are the harnesses'
+    // own spellings; the roster rows appear when Actuation's descriptors land,
+    // never before.
+    ClientOverlay {
+        name: "copilot",
+        aliases: &[],
+        catalog_slug: "copilot",
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(CopilotAdapter::new(projection_dir(dirs, "copilot"))),
+        },
+        admission: |dirs| CopilotAdapter::new(projection_dir(dirs, "copilot")).admission(),
+    },
+    ClientOverlay {
+        name: "cline",
+        aliases: &[],
+        catalog_slug: "cline",
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(ClineAdapter::new(projection_dir(dirs, "cline"))),
+        },
+        admission: |dirs| ClineAdapter::new(projection_dir(dirs, "cline")).admission(),
+    },
+    ClientOverlay {
+        name: "kiro-cli",
+        aliases: &[],
+        catalog_slug: "kiro-cli",
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(KiroCliAdapter::new(projection_dir(dirs, "kiro-cli"))),
+        },
+        admission: |dirs| KiroCliAdapter::new(projection_dir(dirs, "kiro-cli")).admission(),
+    },
+    ClientOverlay {
+        name: "qoder",
+        aliases: &[],
+        catalog_slug: "qoder",
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(QoderAdapter::new(projection_dir(dirs, "qoder"))),
+        },
+        admission: |dirs| QoderAdapter::new(projection_dir(dirs, "qoder")).admission(),
+    },
+    ClientOverlay {
+        name: "droid",
+        aliases: &[],
+        catalog_slug: "droid",
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(DroidAdapter::new(projection_dir(dirs, "droid"))),
+        },
+        admission: |dirs| DroidAdapter::new(projection_dir(dirs, "droid")).admission(),
     },
 ];
 
@@ -566,6 +765,26 @@ fn detection_config_dir(recorded: &DetectionEntry) -> Option<String> {
         .and_then(|probe| probe.spec.clone())
 }
 
+/// The edition the detection record observed for a slug, when it reports one.
+fn detection_version(detection: &DetectionOutcome, slug: &str) -> Option<String> {
+    match detection {
+        DetectionOutcome::Record(record) => record
+            .harnesses
+            .iter()
+            .find(|entry| entry.slug == slug)
+            .and_then(|entry| entry.version.clone()),
+        DetectionOutcome::Unavailable { .. } => None,
+    }
+}
+
+/// Edition spellings compared without their decoration: a leading `v` and
+/// surrounding whitespace carry no edition meaning (`v1.18.29` and `1.18.29`
+/// are the same edition).
+fn normalise_edition(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    trimmed.strip_prefix('v').unwrap_or(trimmed)
+}
+
 /// The derived surface state of an overlaid harness, from the two intake legs.
 /// Capability resolved means the install leg is satisfiable; a harness that is
 /// present while its descriptor is refused is a compatibility gap, not an
@@ -631,7 +850,9 @@ fn adapter_for(
         None => (broker_reach(), None),
         Some(overlay) => {
             let capability = match intake_actuation_capability(
-                &SystemRunner::new(),
+                // Install and launch reach through this intake: bounded, so a
+                // hanging `actuation` refuses instead of stalling the command.
+                &crate::probe::probe_runner(),
                 ACTUATION_BIN,
                 overlay.catalog_slug,
             ) {
@@ -883,6 +1104,14 @@ pub struct ToolsLayerOutcome {
     pub removed: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kept_foreign: Option<usize>,
+    /// The names behind the added/replaced counts: the records the merge
+    /// wrote into the seam, when a plan was made.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub written_entries: Option<Vec<String>>,
+    /// The names behind the removed count: the stale AIKit-owned records the
+    /// merge swept, when a plan was made.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swept_entries: Option<Vec<String>>,
     /// When the harness sees the change, as the profile declares it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activation: Option<aikit_core::harness_profile::ActivationEffectName>,
@@ -921,7 +1150,7 @@ fn managed_tools_clients() -> Vec<(&'static str, &'static str)> {
 /// capsule resolved. An enabled-but-unreviewed capsule is named as such, with
 /// the capsule and the way forward, because "reviewed" is exactly the fact the
 /// projection turns on; anything else is the plain no-composition truth.
-fn uncomposed_tools_reason(service: &Service) -> String {
+pub(crate) fn uncomposed_tools_reason(service: &Service) -> String {
     let view = service.resolved();
     let untrusted: Vec<String> = view
         .catalog_index
@@ -982,6 +1211,8 @@ pub fn project_tools_layers(service: &Service) -> Vec<ToolsLayerOutcome> {
                     replaced: None,
                     removed: None,
                     kept_foreign: None,
+                    written_entries: None,
+                    swept_entries: None,
                     activation: None,
                     reason: Some(reason.clone()),
                 })
@@ -991,23 +1222,115 @@ pub fn project_tools_layers(service: &Service) -> Vec<ToolsLayerOutcome> {
     // With nothing composed there is nothing a fresh document would carry, so
     // a missing config stays missing — creating empty record files for
     // harnesses that may not even be installed projects nothing.
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
     let tree = service
         .descriptor()
         .project_root
         .clone()
+        .unwrap_or_else(|| PathBuf::from("."));
+    let machine_home = std::env::var_os("HOME")
+        .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     let uncomposed = (entries.is_empty()).then(|| uncomposed_tools_reason(service));
 
     clients
         .into_iter()
         .map(|(client, slug)| {
-            let refused = |reason: String| ToolsLayerOutcome {
+            apply_managed_tools_projection(
+                service.home(),
+                &tree,
+                &machine_home,
                 client,
                 slug,
-                state: "refused",
+                &entries,
+                uncomposed.as_deref(),
+            )
+        })
+        .collect()
+}
+
+/// The overlay row joined by catalog slug, when one exists — the encounter's
+/// native-projection fallback names its write the way `apply` does, and a
+/// harness without an overlay row keeps its slug as the name.
+pub(crate) fn client_for_slug(slug: &str) -> Option<&'static str> {
+    OVERLAYS
+        .iter()
+        .find(|overlay| overlay.catalog_slug == slug)
+        .map(|overlay| overlay.name)
+}
+
+/// Apply one harness's managed tools-layer projection end to end: plan the
+/// merge from the profile's `tools.project` declaration through the one layer
+/// merge grammar, stage the merged write as a [`WorldEdit`] with its
+/// [`Inverse`], and run it as a [`Procedure`] — the same receipt pipeline
+/// every other AIKit write goes through. This is the ONE application entry:
+/// `aikit apply`'s tools tail ([`project_tools_layers`]) and the encounter
+/// native-MCP fallback ([`crate::encounter_native_projection`]) both call it;
+/// there is no second merge, staging or run implementation.
+///
+/// `machine_home` roots the profile's `~/`-anchored seam paths (the machine
+/// home in production, an isolated root in tests); `tree` roots a relative
+/// seam against the project, resolved exactly as the apply path resolves it.
+/// `uncomposed` carries the apply path's plain no-composition reason: a
+/// missing seam then stays missing (creating empty record files for harnesses
+/// that may not even be installed projects nothing), while an existing one is
+/// still processed, because the sweep of stale AIKit-owned records is real
+/// retraction work even with nothing composed. The encounter fallback passes
+/// `None` — its resolution fires only when capsules ARE composed.
+pub(crate) fn apply_managed_tools_projection(
+    home: &AikitHome,
+    tree: &Path,
+    machine_home: &Path,
+    client: &'static str,
+    slug: &'static str,
+    entries: &[ToolSourceEntry],
+    uncomposed: Option<&str>,
+) -> ToolsLayerOutcome {
+    let refused = |reason: String| ToolsLayerOutcome {
+        client,
+        slug,
+        state: "refused",
+        path: None,
+        procedure: None,
+        undo: None,
+        added: None,
+        replaced: None,
+        removed: None,
+        kept_foreign: None,
+        written_entries: None,
+        swept_entries: None,
+        activation: None,
+        reason: Some(reason),
+    };
+    // The profile facts the projection is gated by. The apply path derives the
+    // slug from the profile itself, so these are invariants there; a caller
+    // handing a profile that lost its declaration gets a refusal naming the
+    // gap, never a panic.
+    let Some(profile) = aikit_adapters::profiles::for_slug(slug) else {
+        return refused(format!(
+            "no embedded harness profile is named {slug}; there is no declared seam to \
+             project tool records into"
+        ));
+    };
+    let Some(tools) = profile.tools.as_ref() else {
+        return refused(format!(
+            "the {slug} profile declares no tools layer; there is no seam AIKit may project \
+             MCP server records into"
+        ));
+    };
+    let Some(project) = tools.project.as_ref() else {
+        return refused(format!(
+            "the {slug} profile's tools layer declares no project seam; a managed layer \
+             must name the seam it projects into"
+        ));
+    };
+
+    let expanded = expand_seam(&project.file, machine_home, tree);
+    if let Some(reason) = uncomposed {
+        if !expanded.exists() {
+            return ToolsLayerOutcome {
+                client,
+                slug,
+                state: "not-projected",
                 path: None,
                 procedure: None,
                 undo: None,
@@ -1015,151 +1338,141 @@ pub fn project_tools_layers(service: &Service) -> Vec<ToolsLayerOutcome> {
                 replaced: None,
                 removed: None,
                 kept_foreign: None,
+                written_entries: None,
+                swept_entries: None,
+                activation: None,
+                reason: Some(reason.to_string()),
+            };
+        }
+        // A config already exists: the sweep of stale AIKit-owned
+        // records is real retraction work even with nothing composed.
+    }
+
+    let outcome =
+        plan_tools_projection(
+            entries.iter().cloned(),
+            profile,
+            |raw| match std::fs::read_to_string(expand_seam(raw, machine_home, tree)) {
+                Ok(contents) => Ok(Some(contents)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error),
+            },
+        );
+    let plan = match outcome {
+        Err(error) => return refused(error.to_string()),
+        Ok(ToolsProjectionOutcome::NotProjected { reason }) => {
+            return ToolsLayerOutcome {
+                client,
+                slug,
+                state: "not-projected",
+                path: None,
+                procedure: None,
+                undo: None,
+                added: None,
+                replaced: None,
+                removed: None,
+                kept_foreign: None,
+                written_entries: None,
+                swept_entries: None,
                 activation: None,
                 reason: Some(reason),
             };
-            // The profile facts the client was selected by; the join key came
-            // from the profile, so both are present.
-            let profile = aikit_adapters::profiles::for_slug(slug)
-                .expect("the overlay's catalog slug carries an embedded profile");
-            let tools = profile
-                .tools
-                .as_ref()
-                .expect("a managed tools client was derived from a tools layer");
-            let project = tools
-                .project
-                .as_ref()
-                .expect("a managed tools client was derived from a project declaration");
+        }
+        Ok(ToolsProjectionOutcome::Projected(plan)) => plan,
+    };
+    let ProjectionItem::Write { contents, .. } = &plan.item else {
+        return refused(format!(
+            "the {client} tools layer planned an item that is not the merged config \
+             write: {:?}",
+            plan.item
+        ));
+    };
+    let written_entries = || {
+        Some(
+            plan.report
+                .added
+                .iter()
+                .chain(plan.report.replaced.iter())
+                .cloned()
+                .collect::<Vec<String>>(),
+        )
+    };
+    let swept_entries = || Some(plan.report.removed.clone());
 
-            if let Some(reason) = &uncomposed {
-                if !expand_seam(&project.file, &home, &tree).exists() {
-                    return ToolsLayerOutcome {
-                        client,
-                        slug,
-                        state: "not-projected",
-                        path: None,
-                        procedure: None,
-                        undo: None,
-                        added: None,
-                        replaced: None,
-                        removed: None,
-                        kept_foreign: None,
-                        activation: None,
-                        reason: Some(reason.clone()),
-                    };
-                }
-                // A config already exists: the sweep of stale AIKit-owned
-                // records is real retraction work even with nothing composed.
-            }
+    // The merge output is already exactly in place: nothing was
+    // written, so no procedure runs and no receipt is claimed.
+    if std::fs::read_to_string(&expanded).is_ok_and(|existing| existing == *contents) {
+        return ToolsLayerOutcome {
+            client,
+            slug,
+            state: "satisfied",
+            path: Some(expanded.display().to_string()),
+            procedure: None,
+            undo: None,
+            added: Some(plan.report.added.len()),
+            replaced: Some(plan.report.replaced.len()),
+            removed: Some(plan.report.removed.len()),
+            kept_foreign: Some(plan.report.kept_foreign.len()),
+            written_entries: written_entries(),
+            swept_entries: swept_entries(),
+            activation: plan.activation,
+            reason: None,
+        };
+    }
 
-            let expanded = expand_seam(&project.file, &home, &tree);
-            let outcome = plan_tools_projection(entries.iter().cloned(), profile, |raw| {
-                match std::fs::read_to_string(expand_seam(raw, &home, &tree)) {
-                    Ok(contents) => Ok(Some(contents)),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                    Err(error) => Err(error),
-                }
-            });
-            let plan = match outcome {
-                Err(error) => return refused(error.to_string()),
-                Ok(ToolsProjectionOutcome::NotProjected { reason }) => {
-                    return ToolsLayerOutcome {
-                        client,
-                        slug,
-                        state: "not-projected",
-                        path: None,
-                        procedure: None,
-                        undo: None,
-                        added: None,
-                        replaced: None,
-                        removed: None,
-                        kept_foreign: None,
-                        activation: None,
-                        reason: Some(reason),
-                    };
-                }
-                Ok(ToolsProjectionOutcome::Projected(plan)) => plan,
-            };
-            let ProjectionItem::Write { contents, .. } = &plan.item else {
-                return refused(format!(
-                    "the {client} tools layer planned an item that is not the merged config \
-                     write: {:?}",
-                    plan.item
-                ));
-            };
-
-            // The merge output is already exactly in place: nothing was
-            // written, so no procedure runs and no receipt is claimed.
-            if std::fs::read_to_string(&expanded).is_ok_and(|existing| existing == *contents) {
-                return ToolsLayerOutcome {
-                    client,
-                    slug,
-                    state: "satisfied",
-                    path: Some(expanded.display().to_string()),
-                    procedure: None,
-                    undo: None,
-                    added: Some(plan.report.added.len()),
-                    replaced: Some(plan.report.replaced.len()),
-                    removed: Some(plan.report.removed.len()),
-                    kept_foreign: Some(plan.report.kept_foreign.len()),
-                    activation: plan.activation,
-                    reason: None,
-                };
-            }
-
-            // Stage the write through the one Procedure engine: the inverse
-            // restores the previous bytes, or removes the file when there
-            // were none — undo is exact either way.
-            let inverse = if expanded.exists() {
-                Inverse::Restore {
-                    blob: aikit_core::procedure::BlobId::deferred(),
-                }
+    // Stage the write through the one Procedure engine: the inverse
+    // restores the previous bytes, or removes the file when there
+    // were none — undo is exact either way.
+    let inverse = if expanded.exists() {
+        Inverse::Restore {
+            blob: aikit_core::procedure::BlobId::deferred(),
+        }
+    } else {
+        Inverse::Remove
+    };
+    let procedure_plan = Plan::new()
+        .with_note(format!(
+            "project {client}'s managed tools layer into {}",
+            expanded.display()
+        ))
+        .with_edit(WorldEdit::WriteFile {
+            path: expanded.clone(),
+            contents: contents.clone().into_bytes(),
+            inverse,
+        });
+    let procedure = match aikit_store::procedure::plan_procedure(
+        home,
+        ProcedureKind::ToolsProjection {
+            client: TargetId::new(client),
+        },
+        procedure_plan,
+    ) {
+        Ok(procedure) => procedure,
+        Err(error) => return refused(error.message().to_string()),
+    };
+    match aikit_store::procedure::ProcedureRunner::new(home).run(&procedure) {
+        Ok(applied) => ToolsLayerOutcome {
+            client,
+            slug,
+            state: if applied.already_satisfied {
+                "satisfied"
             } else {
-                Inverse::Remove
-            };
-            let procedure_plan = Plan::new()
-                .with_note(format!(
-                    "project {client}'s managed tools layer into {}",
-                    expanded.display()
-                ))
-                .with_edit(WorldEdit::WriteFile {
-                    path: expanded.clone(),
-                    contents: contents.clone().into_bytes(),
-                    inverse,
-                });
-            let procedure = match aikit_store::procedure::plan_procedure(
-                service.home(),
-                ProcedureKind::ToolsProjection {
-                    client: TargetId::new(client),
-                },
-                procedure_plan,
-            ) {
-                Ok(procedure) => procedure,
-                Err(error) => return refused(error.message().to_string()),
-            };
-            match aikit_store::procedure::ProcedureRunner::new(service.home()).run(&procedure) {
-                Ok(applied) => ToolsLayerOutcome {
-                    client,
-                    slug,
-                    state: if applied.already_satisfied {
-                        "satisfied"
-                    } else {
-                        "written"
-                    },
-                    path: Some(expanded.display().to_string()),
-                    procedure: Some(procedure.id.to_string()),
-                    undo: Some(format!("aikit procedure undo {}", procedure.id)),
-                    added: Some(plan.report.added.len()),
-                    replaced: Some(plan.report.replaced.len()),
-                    removed: Some(plan.report.removed.len()),
-                    kept_foreign: Some(plan.report.kept_foreign.len()),
-                    activation: plan.activation,
-                    reason: None,
-                },
-                Err(error) => refused(error.message().to_string()),
-            }
-        })
-        .collect()
+                "written"
+            },
+            path: Some(expanded.display().to_string()),
+            procedure: Some(procedure.id.to_string()),
+            undo: Some(format!("aikit procedure undo {}", procedure.id)),
+            added: Some(plan.report.added.len()),
+            replaced: Some(plan.report.replaced.len()),
+            removed: Some(plan.report.removed.len()),
+            kept_foreign: Some(plan.report.kept_foreign.len()),
+            written_entries: written_entries(),
+            swept_entries: swept_entries(),
+            activation: plan.activation,
+            reason: None,
+        },
+        Err(error) => refused(error.message().to_string()),
+    }
 }
 
 /// The argv that starts a client against this context's projection.
@@ -1192,7 +1505,17 @@ pub fn launch_command(service: &Service, client: &str) -> Result<Vec<String>> {
 pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::Value>> {
     let rc = service.projection_context()?;
     let dirs = client_dirs(service);
-    let detection = intake_actuation_detection(&SystemRunner::new(), ACTUATION_BIN);
+    // The detection intake is a probe-shaped spawn: bounded by the shared
+    // budget, and its outcome rides every row whose leg could not be read, so
+    // a hanging or missing `actuation` is named (`timed-out` / `unreachable`)
+    // instead of silently stalling the whole surface.
+    let detection_probe = ProbeTracker::shared();
+    let detection = intake_actuation_detection(&detection_probe, ACTUATION_BIN);
+    let surface_probe = detection_probe
+        .first()
+        .unwrap_or(ProbeOutcome::Unsupported {
+            reason: "no detection spawn was performed".to_string(),
+        });
     let members = roster_members(&detection);
     let mut rows = Vec::new();
     for member in &members {
@@ -1201,7 +1524,14 @@ pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::V
                 continue;
             }
         }
-        rows.push(client_row(member, &rc, &dirs, &detection)?);
+        rows.push(client_row(
+            member,
+            &rc,
+            &dirs,
+            &detection,
+            &surface_probe,
+            service.home(),
+        )?);
     }
     Ok(rows)
 }
@@ -1212,14 +1542,18 @@ fn client_row(
     rc: &ResolvedContext,
     dirs: &ClientDirs,
     detection: &DetectionOutcome,
+    surface_probe: &ProbeOutcome,
+    home: &aikit_store::AikitHome,
 ) -> Result<serde_json::Value> {
     match member {
         RosterMember::Broker => broker_row(rc, dirs),
         RosterMember::Descriptor { entry, overlay } => match overlay {
-            Some(overlay) => overlaid_row(overlay, rc, dirs, detection),
-            None => generic_row(entry, rc, dirs, detection),
+            Some(overlay) => overlaid_row(overlay, rc, dirs, detection, surface_probe, home),
+            None => generic_row(entry, rc, dirs, detection, surface_probe, home),
         },
-        RosterMember::Unrecorded { overlay } => overlaid_row(overlay, rc, dirs, detection),
+        RosterMember::Unrecorded { overlay } => {
+            overlaid_row(overlay, rc, dirs, detection, surface_probe, home)
+        }
     }
 }
 
@@ -1241,6 +1575,10 @@ fn broker_row(rc: &ResolvedContext, dirs: &ClientDirs) -> Result<serde_json::Val
         "actor_bootstrap": rc.actor_bootstrap.is_some(),
         "capability": "self",
         "capability_reason": null,
+        "probe": "self",
+        "probe_reason": null,
+        "credential": "self",
+        "credential_reason": null,
         "detection": "self",
         "detection_reason": null,
         "gap": null,
@@ -1256,13 +1594,29 @@ fn overlaid_row(
     rc: &ResolvedContext,
     dirs: &ClientDirs,
     detection: &DetectionOutcome,
+    surface_probe: &ProbeOutcome,
+    home: &aikit_store::AikitHome,
 ) -> Result<serde_json::Value> {
     let leg = detection_leg(detection, overlay.catalog_slug);
+    // The capability intake is this row's own probe-shaped spawn: bounded, and
+    // classified into the shared vocabulary so a hanging or missing
+    // `actuation` names itself on the row instead of stalling the surface.
+    let capability_probe = ProbeTracker::shared();
     let capability = Some(intake_actuation_capability(
-        &SystemRunner::new(),
+        &capability_probe,
         ACTUATION_BIN,
         overlay.catalog_slug,
     ));
+    let probe = match &leg {
+        DetectionLeg::RunUnavailable { .. } => {
+            // The row's unreadable detection leg rode the shared detection
+            // spawn; that spawn's outcome is this row's probe outcome.
+            surface_probe.clone()
+        }
+        _ => capability_probe
+            .first()
+            .unwrap_or_else(|| unsupported_probe("the capability intake spawned nothing")),
+    };
     let kind = derive_surface_kind(capability.as_ref(), &leg);
 
     // The adapter for planning, and the config home the row reports. The
@@ -1307,6 +1661,30 @@ fn overlaid_row(
         .map(|p| p.notes.clone())
         .unwrap_or_default();
 
+    // The admission read model's edition honesty. The contract declares the
+    // adapter's version/source revision as facts about the edition its
+    // evidence was gathered on — not a gate. When the installed product
+    // reports a different edition, the divergence is surfaced as a named note
+    // (and as row fields), so a consumer can weigh the census's claims
+    // against their pinning; the mismatch is never normalised away and never
+    // silently treated as proof about the installed edition.
+    let admission = (overlay.admission)(dirs);
+    let detected_version = detection_version(detection, overlay.catalog_slug);
+    let pinned_edition = admission
+        .native_version
+        .as_deref()
+        .or(admission.source_revision.as_deref());
+    if let (Some(pinned), Some(detected)) = (pinned_edition, detected_version.as_deref()) {
+        if normalise_edition(pinned) != normalise_edition(detected) {
+            notes.push(format!(
+                "{}'s admission knowledge is pinned to edition {} while the installed \
+                 product reports {}; the census's compatibility claims are evidence for \
+                 {}, not for the installed edition",
+                overlay.name, pinned, detected, pinned
+            ));
+        }
+    }
+
     let (state, gap) = match kind {
         SurfaceKind::Installable => ("installable", None),
         SurfaceKind::Absent => ("absent", None),
@@ -1325,6 +1703,9 @@ fn overlaid_row(
         Reach::Client { .. } => "client",
         Reach::AdapterOnly { .. } => "adapter-only",
     };
+    // The credential pre-check: presence facts only (binding records, ambient
+    // env-var presence, the harness's own login store), never secret values.
+    let credential = credential_outcome(Some(home), dirs, Some(overlay));
 
     Ok(serde_json::json!({
         "client": overlay.name,
@@ -1339,8 +1720,17 @@ fn overlaid_row(
         "actor_bootstrap": rc.actor_bootstrap.is_some(),
         "capability": capability_name,
         "capability_reason": capability_reason,
+        "probe": probe.as_str(),
+        "probe_reason": probe_reason(&probe),
+        "credential": credential.as_str(),
+        "credential_reason": probe_reason(&credential),
         "detection": detection_name,
         "detection_reason": detection_reason,
+        "admission": {
+            "native_version": admission.native_version,
+            "source_revision": admission.source_revision,
+        },
+        "detected_version": detected_version,
         "gap": gap,
         "notes": notes,
         "error": planned.as_ref().err().map(|e| e.message().to_string()),
@@ -1356,9 +1746,18 @@ fn generic_row(
     rc: &ResolvedContext,
     dirs: &ClientDirs,
     detection: &DetectionOutcome,
+    surface_probe: &ProbeOutcome,
+    home: &aikit_store::AikitHome,
 ) -> Result<serde_json::Value> {
     let leg = detection_leg(detection, &entry.slug);
-    let capability = intake_actuation_capability(&SystemRunner::new(), ACTUATION_BIN, &entry.slug);
+    let capability_probe = ProbeTracker::shared();
+    let capability = intake_actuation_capability(&capability_probe, ACTUATION_BIN, &entry.slug);
+    let probe = match &leg {
+        DetectionLeg::RunUnavailable { .. } => surface_probe.clone(),
+        _ => capability_probe
+            .first()
+            .unwrap_or_else(|| unsupported_probe("the capability intake spawned nothing")),
+    };
     let kind = derive_generic_kind(&leg);
 
     let (state, gap) = match kind {
@@ -1377,6 +1776,9 @@ fn generic_row(
     let config_dir = leg
         .detected_config_dir()
         .map(|spec| expand_seam(&spec, &dirs.home, &dirs.tree));
+    // No overlay means no AIKit profile: there are no credential facts to
+    // pre-check, and the row says so instead of inventing a gate.
+    let credential = credential_outcome(Some(home), dirs, None);
 
     Ok(serde_json::json!({
         "client": entry.slug,
@@ -1391,6 +1793,10 @@ fn generic_row(
         "actor_bootstrap": rc.actor_bootstrap.is_some(),
         "capability": capability_name,
         "capability_reason": capability_reason,
+        "probe": probe.as_str(),
+        "probe_reason": probe_reason(&probe),
+        "credential": credential.as_str(),
+        "credential_reason": probe_reason(&credential),
         "detection": detection_name,
         "detection_reason": detection_reason,
         "gap": gap,
@@ -1468,6 +1874,149 @@ fn generic_gap_disclosure(entry: &DetectionEntry) -> Option<serde_json::Value> {
     serde_json::to_value(&gap).ok()
 }
 
+/// The credential pre-check for one row: cheap presence facts only — binding
+/// records in the credential store, ambient env-var presence, and the
+/// harness's own login store on disk. Secret values are never read or
+/// rendered; the point is to answer "would a model call have anything to
+/// authenticate with" *before* one is attempted, so the surface reports
+/// `credential-gated` naming what is missing instead of letting the live call
+/// hang or fail opaquely (the expired-OAuth class). A row AIKit has no
+/// credential facts for is `unsupported`, never silently "ok".
+fn credential_outcome(
+    home: Option<&aikit_store::AikitHome>,
+    dirs: &ClientDirs,
+    overlay: Option<&'static ClientOverlay>,
+) -> ProbeOutcome {
+    let Some(overlay) = overlay else {
+        return ProbeOutcome::Unsupported {
+            reason: "no AIKit adapter carries this catalog slug; its credential \
+                     path cannot be pre-checked"
+                .to_string(),
+        };
+    };
+    let Some(profile) = aikit_adapters::profiles::for_slug(overlay.catalog_slug) else {
+        return ProbeOutcome::Unsupported {
+            reason: format!(
+                "no harness profile carries {}; AIKit has no credential facts to pre-check",
+                overlay.catalog_slug
+            ),
+        };
+    };
+    let Some(delivery) = profile
+        .models
+        .as_ref()
+        .and_then(|models| models.key_delivery.as_ref())
+        .filter(|delivery| !delivery.env_var.is_empty() || !delivery.own_login.is_empty())
+    else {
+        return ProbeOutcome::Unsupported {
+            reason: format!(
+                "the {} profile declares no key-delivery facts; the harness's own \
+                 credential store stands unverified",
+                overlay.name
+            ),
+        };
+    };
+
+    let store = home.map(CredentialBindingStore::new);
+    // Whether `credential:<provider>` has a binding record. `None` means the
+    // store could not be read — an unreadable store is not evidence of
+    // absence, so the whole leg discloses instead of gating.
+    let bound = |provider_ref: &str| -> Option<bool> {
+        let slug = provider_ref
+            .strip_prefix("provider:")
+            .unwrap_or(provider_ref);
+        let credential_ref = CredentialRef::new(format!("credential:{slug}")).ok()?;
+        match store.as_ref().map(|store| store.load(&credential_ref)) {
+            None => Some(false),
+            Some(Ok(binding)) => Some(binding.is_some()),
+            Some(Err(_)) => None,
+        }
+    };
+    let store_unreadable = || ProbeOutcome::Unsupported {
+        reason: "the credential binding store could not be read; credential \
+                 presence cannot be checked"
+            .to_string(),
+    };
+
+    let mut missing: Vec<String> = Vec::new();
+    for entry in &delivery.env_var {
+        match bound(&entry.provider_ref) {
+            Some(true) => continue,
+            Some(false) => {}
+            None => return store_unreadable(),
+        }
+        // Presence only: the variable's value is never read into anything.
+        let ambient = std::env::var_os(&entry.env_var).is_some_and(|value| !value.is_empty());
+        if ambient {
+            continue;
+        }
+        let slug = entry
+            .provider_ref
+            .strip_prefix("provider:")
+            .unwrap_or(&entry.provider_ref);
+        missing.push(format!(
+            "credential:{slug} is unbound and {} is absent from the environment; \
+             bind it with `aikit credential setup credential:{slug}`",
+            entry.env_var
+        ));
+    }
+    for entry in &delivery.own_login {
+        match bound(&entry.provider_ref) {
+            Some(true) => continue,
+            Some(false) => {}
+            None => return store_unreadable(),
+        }
+        let own_store = profile
+            .presence
+            .as_ref()
+            .and_then(|presence| presence.config_dir.as_deref())
+            .map(|spec| expand_seam(spec, &dirs.home, &dirs.tree).exists())
+            .unwrap_or(false);
+        if own_store {
+            continue;
+        }
+        let slug = entry
+            .provider_ref
+            .strip_prefix("provider:")
+            .unwrap_or(&entry.provider_ref);
+        let store_path = profile
+            .presence
+            .as_ref()
+            .and_then(|presence| presence.config_dir.as_deref())
+            .unwrap_or("its config directory");
+        missing.push(format!(
+            "credential:{slug} is unbound and the harness's own login store at \
+             {store_path} is absent — {}",
+            entry.note
+        ));
+    }
+
+    if missing.is_empty() {
+        ProbeOutcome::Ok
+    } else {
+        ProbeOutcome::CredentialGated {
+            missing: missing.join("; "),
+        }
+    }
+}
+
+/// The human line riding a probe or credential outcome on a row. `Ok` carries
+/// no reason; a timeout names the bound it violated.
+fn probe_reason(outcome: &ProbeOutcome) -> Option<String> {
+    match outcome {
+        ProbeOutcome::TimedOut { bound_secs } => Some(format!(
+            "no answer within {bound_secs}s; the probe was killed at its bound"
+        )),
+        other => other.detail().map(str::to_string),
+    }
+}
+
+fn unsupported_probe(reason: &str) -> ProbeOutcome {
+    ProbeOutcome::Unsupported {
+        reason: reason.to_string(),
+    }
+}
+
 impl DetectionLeg {
     fn detected_config_dir(&self) -> Option<String> {
         match self {
@@ -1495,7 +2044,7 @@ fn plan_carrier_install(
     // capability intake asks for.
     let overlay = client_overlay(client).ok_or_else(|| unknown_client_error(client))?;
     let capability = match intake_actuation_capability(
-        &SystemRunner::new(),
+        &crate::probe::probe_runner(),
         ACTUATION_BIN,
         overlay.catalog_slug,
     ) {
@@ -1720,6 +2269,113 @@ fn declared_home_relative(path: &Path, home: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_seam_led_by_a_harness_home_variable_follows_the_variable_or_its_default() {
+        let home = Path::new("/Users/walker");
+        let tree = Path::new("/work/project");
+        let set = |name: &str| {
+            (name == "CODEX_HOME").then(|| std::ffi::OsString::from("/opt/codex-home"))
+        };
+        let unset = |_: &str| None;
+        assert_eq!(
+            expand_seam_with("$CODEX_HOME/hooks.json", home, tree, set),
+            PathBuf::from("/opt/codex-home/hooks.json")
+        );
+        assert_eq!(
+            expand_seam_with("${CODEX_HOME}/hooks.json", home, tree, set),
+            PathBuf::from("/opt/codex-home/hooks.json")
+        );
+        assert_eq!(
+            expand_seam_with("$CODEX_HOME/hooks.json", home, tree, unset),
+            PathBuf::from("/Users/walker/.codex/hooks.json")
+        );
+        assert_eq!(
+            expand_seam_with("$CLAUDE_CONFIG_DIR/settings.json", home, tree, unset),
+            PathBuf::from("/Users/walker/.claude/settings.json")
+        );
+        // An empty value is unset, never the project folder.
+        let empty = |_: &str| Some(std::ffi::OsString::new());
+        assert_eq!(
+            expand_seam_with("$CODEX_HOME/hooks.json", home, tree, empty),
+            PathBuf::from("/Users/walker/.codex/hooks.json")
+        );
+        // Unchanged: `~/`, relative and absolute seams; unknown unset variables stay as written.
+        assert_eq!(
+            expand_seam_with("~/.codex/config.toml", home, tree, unset),
+            PathBuf::from("/Users/walker/.codex/config.toml")
+        );
+        assert_eq!(
+            expand_seam_with(".codex/hooks.json", home, tree, unset),
+            PathBuf::from("/work/project/.codex/hooks.json")
+        );
+        assert_eq!(
+            expand_seam_with("/etc/x.json", home, tree, unset),
+            PathBuf::from("/etc/x.json")
+        );
+        assert_eq!(
+            expand_seam_with("$NOT_A_HOME/x.json", home, tree, unset),
+            PathBuf::from("/work/project/$NOT_A_HOME/x.json")
+        );
+    }
+
+    /// Reproduces the tools-layer real-home leak (O:I #65 native-owner repair,
+    /// 2026-09-23): the tools-layer profile seams are spelled literally —
+    /// `~/.claude.json`, not `$CLAUDE_CONFIG_DIR/.claude.json` — so the
+    /// `$VAR`-led resolution `expand_seam_with` already carries (the #402
+    /// fix) never fires for them. `aikit client status` already discloses
+    /// `config_dir` through `CLAUDE_CONFIG_DIR`
+    /// (`a_client_honours_its_own_config_home_override_over_every_default` in
+    /// `tests/client_surface.rs`), so a caller who isolates a harness's home
+    /// through its own documented variable gets a truthful `client status`
+    /// and a write that silently ignores it — the disclosure and the actual
+    /// write target disagree. A literal seam naming a harness's *own*
+    /// documented default root (`~/.claude`, `~/.codex`, `~/.dsh` — the
+    /// defaults `SEAM_HOME_DEFAULTS` already states) must follow that
+    /// harness's override variable exactly as a `$VAR`-led seam does.
+    #[test]
+    fn a_literal_seam_under_a_harnesss_own_default_root_follows_its_home_variable_too() {
+        let home = Path::new("/Users/walker");
+        let tree = Path::new("/work/project");
+        let claude_override = |name: &str| {
+            (name == "CLAUDE_CONFIG_DIR").then(|| std::ffi::OsString::from("/scratch/claude"))
+        };
+        let unset = |_: &str| None;
+
+        // This is the actual tools-layer seam declared in profiles.rs: a
+        // dotfile *beside* the harness's own default directory, not inside
+        // it — `~/.claude.json`, not `~/.claude/....`. Before this fix,
+        // `expand_seam_with` only recognised `$CLAUDE_CONFIG_DIR`-*led*
+        // seams, so this one fell straight through to the raw `home` and the
+        // override was silently dropped.
+        assert_eq!(
+            expand_seam_with("~/.claude.json", home, tree, claude_override),
+            PathBuf::from("/scratch/claude.json"),
+            "CLAUDE_CONFIG_DIR must relocate the harness's own dotfile the same way it \
+             relocates everything under its directory"
+        );
+
+        // The hooks-layer seam, inside the directory: same variable, same law.
+        assert_eq!(
+            expand_seam_with("~/.claude/settings.json", home, tree, claude_override),
+            PathBuf::from("/scratch/claude/settings.json")
+        );
+
+        // Unset: unchanged from today — the documented default still applies.
+        assert_eq!(
+            expand_seam_with("~/.claude.json", home, tree, unset),
+            PathBuf::from("/Users/walker/.claude.json")
+        );
+
+        // A seam under a harness with no documented override variable (zcode,
+        // openclaw) is untouched by this: no default row names it, so it
+        // keeps resolving against the plain `home`.
+        assert_eq!(
+            expand_seam_with("~/.openclaw/mcp.json", home, tree, claude_override),
+            PathBuf::from("/Users/walker/.openclaw/mcp.json")
+        );
+    }
+
     use super::*;
     use aikit_adapters::actuation_harness_detection::ActuationDetectionRecord;
 
@@ -2126,7 +2782,6 @@ mod tests {
             ("claude-code", "claude"),
             ("antigravity", TargetId::ANTIGRAVITY),
             ("gemini", TargetId::GEMINI_CLI),
-            ("grokbot", TargetId::GROK_BOT),
         ] {
             let via_alias = client_overlay(alias).expect("alias must resolve");
             let via_name = client_overlay(name).expect("name must resolve");

@@ -22,6 +22,7 @@ pub enum ConnectionProtocolFamily {
     Acp,
     ClassicProcess,
     PiRpc,
+    PrimeRpc,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +58,26 @@ impl ConnectionCapabilities {
     }
 }
 
+/// The negotiated ACP `agentCapabilities.sessionCapabilities` lifecycle facts:
+/// the post-pin session operations the target advertised at initialize.
+/// Absent means false — a target that did not advertise an operation does not
+/// have it, and nothing is inferred from a protocol version alone. The
+/// `resume` fact also appears as [`SessionOpenMode::Resume`] in
+/// [`ConnectionCapabilities::session_open`]; this carries the raw negotiated
+/// flags for read models that disclose them as such.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AcpSessionCapabilities {
+    /// The target advertised `sessionCapabilities.resume`: `session/resume`
+    /// (stabilized 2026-04-23) opens an existing native session with no
+    /// history replay.
+    #[serde(default)]
+    pub resume: bool,
+    /// The target advertised `sessionCapabilities.close`.
+    #[serde(default)]
+    pub close: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionDescriptor {
     pub adapter_ref: ResourceRef,
@@ -71,6 +92,9 @@ pub struct ConnectionDescriptor {
 /// provider report, not AIKit catalog availability or proof of inference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeModelObservation {
+    /// Native provider identity when the harness discloses it (RPC launch selection).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_provider: Option<String>,
     pub current_model_id: String,
     pub available_models: Vec<NativeAdvertisedModel>,
     /// Provider-advertised execution-budget selector, if exposed by ACP.
@@ -85,6 +109,17 @@ pub struct NativeAdvertisedModel {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Exact owner-observed join coordinates. Absent for protocols which do
+    /// not disclose a provider; a display/model ID is never parsed to guess it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roster_identity: Option<NativeModelRosterIdentity>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeModelRosterIdentity {
+    pub provider_ref: String,
+    pub provider_native_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_slug: Option<String>,
 }
 /// A bounded provider-advertised select control. Disclosure grants no write route.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +137,23 @@ pub struct NativeConfigOption {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
+/// A native route is identified by its provider model id, never by its label.
+/// Preserve the first native display name and wire order while merging repeated
+/// advertisements of the same selectable route.
+fn unique_advertised_models(models: Vec<NativeAdvertisedModel>) -> Vec<NativeAdvertisedModel> {
+    let mut seen = BTreeSet::new();
+    models
+        .into_iter()
+        // ACP model options carry opaque IDs, not an admitted native
+        // provider/profile join. Ignore extensions claiming that authority.
+        .map(|mut model| {
+            model.roster_identity = None;
+            model
+        })
+        .filter(|model| seen.insert(model.model_id.clone()))
+        .collect()
+}
+
 impl NativeModelObservation {
     pub(crate) fn from_acp(value: &Value) -> Result<Self> {
         let current = value
@@ -136,8 +188,9 @@ impl NativeModelObservation {
             ));
         }
         Ok(Self {
+            native_provider: None,
             current_model_id: current.into(),
-            available_models: models,
+            available_models: unique_advertised_models(models),
             reasoning_effort: None,
             standing:
                 "provider-reported-configuration-not-independent-selection-or-inference-proof"
@@ -202,6 +255,7 @@ impl NativeModelObservation {
                         )
                     })?;
                 Ok(NativeAdvertisedModel {
+                    roster_identity: None,
                     model_id: model_id.to_owned(),
                     name: name.to_owned(),
                     description: option
@@ -222,8 +276,9 @@ impl NativeModelObservation {
         }
         let reasoning_effort = Self::select_config(value, "reasoning_effort")?;
         Ok(Some(Self {
+            native_provider: None,
             current_model_id,
-            available_models,
+            available_models: unique_advertised_models(available_models),
             reasoning_effort,
             standing:
                 "provider-reported-configuration-not-independent-selection-or-inference-proof"
@@ -312,6 +367,85 @@ impl NativeModelObservation {
     }
 }
 
+/// Session permission modes disclosed by the native ACP provider (`modes` on
+/// session/new|load|resume, `current_mode_update` afterwards). The provider
+/// decides what each mode allows; AIKit carries the advertised ids exactly and
+/// never invents, renames or orders them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeModeObservation {
+    pub current_mode_id: String,
+    pub available_modes: Vec<NativeModeOption>,
+    pub standing: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeModeOption {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+pub const NATIVE_MODE_STANDING: &str =
+    "provider-reported-configuration-not-independent-selection-or-inference-proof";
+
+impl NativeModeObservation {
+    /// Read an ACP `modes` block. A malformed block yields `None`: the agent
+    /// advertised nothing AIKit can offer exactly, so no control is invented.
+    pub fn from_acp(value: &Value) -> Option<Self> {
+        let current = value
+            .get("currentModeId")
+            .or_else(|| value.get("modeId"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())?;
+        let modes = value
+            .get("availableModes")
+            .and_then(Value::as_array)?
+            .iter()
+            .map(|mode| {
+                let id = mode
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.trim().is_empty())?;
+                let name = mode
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.trim().is_empty())?;
+                Some(NativeModeOption {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                    description: mode
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if modes.is_empty() || !modes.iter().any(|mode| mode.id == current) {
+            return None;
+        }
+        Some(Self {
+            current_mode_id: current.to_owned(),
+            available_modes: modes,
+            standing: NATIVE_MODE_STANDING.into(),
+        })
+    }
+
+    /// The same advertised set with another advertised mode current. `None`
+    /// when the mode was never advertised.
+    pub fn with_current(&self, mode_id: &str) -> Option<Self> {
+        self.advertises(mode_id).then(|| Self {
+            current_mode_id: mode_id.to_owned(),
+            ..self.clone()
+        })
+    }
+
+    pub fn advertises(&self, mode_id: &str) -> bool {
+        self.available_modes.iter().any(|mode| mode.id == mode_id)
+    }
+}
+
 /// Explicit bridge between a transport-native session and canonical AIKit
 /// identity. `agent_session` is intentionally optional: transport session ids are
 /// not promoted automatically.
@@ -325,6 +459,9 @@ pub struct NativeSessionBinding {
     pub opened_as: SessionOpenMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_observation: Option<NativeModelObservation>,
+    /// Provider-advertised session permission modes, when the agent has any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_observation: Option<NativeModeObservation>,
     #[serde(default)]
     pub provenance: Vec<String>,
 }
@@ -337,6 +474,7 @@ impl NativeSessionBinding {
             agent: None,
             opened_as,
             model_observation: None,
+            mode_observation: None,
             provenance: Vec::new(),
         }
     }
@@ -432,6 +570,13 @@ pub enum ConnectionSignalKind {
     AgentMessageChunk {
         text: String,
     },
+    /// One completed assistant text message, as the wire closed it. Some
+    /// wires complete whole messages (no fine-grained deltas between): the
+    /// honest progress fact they publish is the finished segment, not a
+    /// growing partial.
+    AgentMessageSegment {
+        text: String,
+    },
     /// Provider-exposed thinking, never reconstructed hidden reasoning.
     AgentThoughtChunk {
         text: String,
@@ -460,6 +605,12 @@ pub enum ConnectionSignalKind {
     /// explicit request. It changes no canonical AgentSession identity.
     ModelConfigured {
         model_observation: NativeModelObservation,
+    },
+    /// The provider's current session permission mode, either confirmed after
+    /// an explicit `session/set_mode` or reported by the agent itself
+    /// (`current_mode_update`). It changes no canonical AgentSession identity.
+    ModeConfigured {
+        mode_observation: NativeModeObservation,
     },
     /// Provider history emitted while an explicit native session load is still
     /// pending. It is preserved as source evidence, separately from new live
@@ -506,6 +657,7 @@ pub struct AcpV1ConnectionAdapter {
     next_request_id: u64,
     next_sequence: u64,
     capabilities: ConnectionCapabilities,
+    session_capabilities: AcpSessionCapabilities,
     pending: BTreeMap<u64, PendingAcpRequest>,
     provenance: Vec<String>,
 }
@@ -540,6 +692,7 @@ impl AcpV1ConnectionAdapter {
                 additional_directories: false,
                 mcp_servers: false,
             },
+            session_capabilities: AcpSessionCapabilities::default(),
             pending: BTreeMap::new(),
             provenance,
         }
@@ -547,6 +700,36 @@ impl AcpV1ConnectionAdapter {
 
     pub fn negotiated_capabilities(&self) -> &ConnectionCapabilities {
         &self.capabilities
+    }
+
+    /// The negotiated `agentCapabilities.sessionCapabilities` facts, parsed at
+    /// initialize. Absent capabilities are false.
+    pub fn negotiated_session_capabilities(&self) -> &AcpSessionCapabilities {
+        &self.session_capabilities
+    }
+
+    /// Open an existing native session through ACP `session/resume` — the
+    /// operation stabilized 2026-04-23 that, unlike `session/load`, performs
+    /// no history replay: the response carries no replayed history and none is
+    /// fabricated here. Mirrors the `session/new` open shape (session id, cwd,
+    /// mcp servers) and returns the same opened-session command; the response
+    /// resolves through the same `SessionOpened` binding path. Gated on the
+    /// negotiated `sessionCapabilities.resume`; a target that did not
+    /// advertise it is refused before any wire message is emitted.
+    pub fn session_resume(
+        &mut self,
+        native_session_id: impl Into<String>,
+        cwd: impl Into<String>,
+        mcp_servers: Vec<Value>,
+    ) -> Result<ConnectionCommand> {
+        self.open_session(SessionOpenRequest {
+            mode: SessionOpenMode::Resume,
+            native_session_id: Some(native_session_id.into()),
+            cwd: cwd.into(),
+            additional_directories: Vec::new(),
+            mcp_servers,
+            agent_session: None,
+        })
     }
 
     fn request(
@@ -616,11 +799,20 @@ impl AcpV1ConnectionAdapter {
         if capability_present(&agent, "loadSession") || capability_present(&sessions, "load") {
             open.insert(SessionOpenMode::Load);
         }
-        if capability_present(&sessions, "resume") {
+        let resume = capability_present(&sessions, "resume");
+        if resume {
             open.insert(SessionOpenMode::Resume);
         }
-        // ACP v1 has no generic attach-to-live-session method. A target-specific
-        // extension may be represented by another adapter, never inferred here.
+        // ACP v1 grew post-pin session lifecycle operations under
+        // `sessionCapabilities` while `protocolVersion` stayed 1. Attach has
+        // no dedicated method: where the target advertises `resume`, the
+        // stabilized `session/resume` operation (2026-04-23) is the one honest
+        // route to an existing native session, and open_session refuses
+        // naming that capability when it is absent.
+        self.session_capabilities = AcpSessionCapabilities {
+            resume,
+            close: capability_present(&sessions, "close"),
+        };
         self.capabilities.session_open = open;
         self.capabilities.additional_directories =
             capability_present(&sessions, "additionalDirectories");
@@ -706,6 +898,10 @@ impl AcpV1ConnectionAdapter {
                     .filter(|v| !v.is_null())
                     .map(NativeModelObservation::from_acp)
                     .transpose()?;
+                binding.mode_observation = result
+                    .get("modes")
+                    .filter(|v| !v.is_null())
+                    .and_then(NativeModeObservation::from_acp);
                 Ok(vec![self.signal(
                     Some(native_session_id),
                     ConnectionSignalKind::SessionOpened { binding },
@@ -847,10 +1043,26 @@ impl AgentConnectionAdapter for AcpV1ConnectionAdapter {
     }
 
     fn open_session(&mut self, request: SessionOpenRequest) -> Result<ConnectionCommand> {
-        if !self.capabilities.supports(request.mode) {
+        // Resume and attach both ride the stabilized `session/resume`
+        // operation; both are gated on the negotiated
+        // `agentCapabilities.sessionCapabilities.resume` fact, and the refusal
+        // names that capability rather than a protocol-generation claim.
+        let resume_routed = matches!(
+            request.mode,
+            SessionOpenMode::Resume | SessionOpenMode::Attach
+        );
+        if !self.capabilities.supports(request.mode)
+            && !(resume_routed && self.capabilities.supports(SessionOpenMode::Resume))
+        {
             return Err(AikitError::new(
                 "connection.session_operation_unsupported",
-                format!("ACP target does not advertise {:?}", request.mode),
+                if resume_routed {
+                    "ACP target does not advertise agentCapabilities.sessionCapabilities.resume; \
+                     there is no protocol operation to open an existing native session"
+                        .to_owned()
+                } else {
+                    format!("ACP target does not advertise {:?}", request.mode)
+                },
             ));
         }
         if !request.additional_directories.is_empty() && !self.capabilities.additional_directories {
@@ -863,13 +1075,7 @@ impl AgentConnectionAdapter for AcpV1ConnectionAdapter {
         let method = match request.mode {
             SessionOpenMode::Create => "session/new",
             SessionOpenMode::Load => "session/load",
-            SessionOpenMode::Resume => "session/resume",
-            SessionOpenMode::Attach => {
-                return Err(AikitError::new(
-                    "connection.session_operation_unsupported",
-                    "ACP v1 has no generic attach operation",
-                ));
-            }
+            SessionOpenMode::Resume | SessionOpenMode::Attach => "session/resume",
         };
         let mut params = json!({
             "cwd": request.cwd,

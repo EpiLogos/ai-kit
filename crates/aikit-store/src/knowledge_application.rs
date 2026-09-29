@@ -269,6 +269,7 @@ mod tests {
             provider: ProviderRef::parse("provider/wiki/test").unwrap(),
             authority: SourceAuthority::Authored,
             ranking: None,
+            corroborated_by: Vec::new(),
         };
         let projection = KnowledgeSearchHit {
             address: KnowledgeAddress::ProjectMap(resource.clone()),
@@ -294,6 +295,7 @@ mod tests {
             provider: ProviderRef::parse("provider/project-map/federation").unwrap(),
             authority: SourceAuthority::Authored,
             ranking: None,
+            corroborated_by: Vec::new(),
         };
         store
             .remember_search_hits(std::slice::from_ref(&fallback))

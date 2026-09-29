@@ -4,9 +4,9 @@
 Every slice that touches runtime source reconciles product-ground, which
 regenerates three files that every other in-flight branch also regenerates:
 
-    ProjectCentral/user/capability-matrix.csv   (record store: code_refs, code_basis)
-    ProjectCentral/user/capability-matrix.md    (rendering)
-    ProjectCentral/user/aikit.html              (rendering / account page)
+    ProjectCentral/user/telos/capability-matrix.csv   (record store: code_refs, code_basis)
+    ProjectCentral/user/telos/capability-matrix.md    (rendering)
+    ProjectCentral/user/telos/aikit.html              (rendering / account page)
 
 Because every slice touches them, every open PR conflicts on them as soon as
 another PR merges. This script performs the resolution that used to be a
@@ -51,9 +51,9 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-CSV_PATH = "ProjectCentral/user/capability-matrix.csv"
-MD_PATH = "ProjectCentral/user/capability-matrix.md"
-HTML_PATH = "ProjectCentral/user/aikit.html"
+CSV_PATH = "ProjectCentral/user/telos/capability-matrix.csv"
+MD_PATH = "ProjectCentral/user/telos/capability-matrix.md"
+HTML_PATH = "ProjectCentral/user/telos/aikit.html"
 MANIFEST_PATH = "ProjectCentral/user/capability-matrix.json"
 FORCED_ARTIFACTS = (CSV_PATH, MD_PATH, HTML_PATH)
 

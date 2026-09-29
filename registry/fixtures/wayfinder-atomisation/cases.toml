@@ -1,0 +1,79 @@
+[[case]]
+id = "already-bounded-stops"
+parent = "one owner-owned function repair with exact failing test"
+expected = "do-not-split"
+reason = "already one independently verifiable difference"
+
+[[case]]
+id = "disjoint-writes-parallel"
+parent = "two independent adapters in separate files with independent conformance tests"
+expected = "parallel"
+write_collision = false
+
+[[case]]
+id = "shared-registry-serialises"
+parent = "two features both mutate the same capability registry"
+expected = "serial-or-parent-integration"
+write_collision = true
+
+[[case]]
+id = "ui-native-split"
+parent = "UI needs status that current native owner does not publish"
+expected = "native-then-ui-then-integration"
+ui_may_invent_semantics = false
+
+[[case]]
+id = "weak-child-no-architecture-choice"
+parent = "large Wayfinder leaves two materially different user outcomes unresolved"
+expected = "retain-parent-decision"
+child_may_choose = false
+
+[[case]]
+id = "parent-coverage-needs-join"
+parent = "native producer atom and UI consumer atom both pass independently"
+expected = "integration-verification-still-required"
+joined_relation_auto_complete = false
+
+[[case]]
+id = "context-local-atoms-bundle"
+parent = "three small changes share the same owner source files and test target"
+expected = "one-dispatch-packet"
+one_session_per_atom = false
+
+[[case]]
+id = "discovered-local-repair-owned"
+parent = "worker finds a small defect required for packet success inside its claimed write neighbourhood"
+expected = "repair-inline-and-verify"
+defer_to_human = false
+
+[[case]]
+id = "repair-collides-with-sibling"
+parent = "worker discovers necessary repair in a file currently claimed by another packet"
+expected = "preserve-and-coordinate-parent"
+worker_may_race_sibling = false
+
+[[case]]
+id = "factory-now-packet"
+parent = "six atoms form two context-local write-disjoint packets"
+expected = "two-child-nows-not-six"
+one_child_now_per_atom = false
+
+[[case]]
+id = "prompt-export-portable"
+parent = "ChatGPT Web decomposes a Wayfinder for manual paste into Zcode"
+expected = "portable-packet-prompts"
+requires_factory_refs = false
+prompt_is_execution_carrier = true
+
+[[case]]
+id = "native-factory-custody"
+parent = "Factory Run invokes the atomisation Method internally"
+expected = "native-packet-custody"
+prompt_is_canonical_work_record = false
+child_now_is_native_continuation = true
+
+[[case]]
+id = "mode-meaning-parity"
+parent = "same Wayfinder packet is exported externally in one run and natively dispatched in another"
+expected = "same-atom-acceptance-semantics"
+separate_method_identity_required = false

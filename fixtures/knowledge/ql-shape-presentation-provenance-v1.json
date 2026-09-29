@@ -1,0 +1,35 @@
+{
+  "schema": "aikit.pinned-owner-reading/v1",
+  "owner": "QL-MEF",
+  "source_base": "a3b1169",
+  "source_files": {
+    "crates/ql-core/src/shape_presentation.rs": "163ab18606b19fd55e9e1f398463cbc96c8e5b8844e8ec67797aa7b81edcc18a",
+    "crates/ql-cli/src/shape_command.rs": "d214a0d0bf76d6e454733a29deb4455cf41e2c927d372c127e6f283830f16241",
+    "docs/geometry/SHAPE-PRESENTATION-CONTRACT.md": "0012207e911b41a2355da129a4eea86bf0123df4edf40965dc6c67bd8df3ea3b"
+  },
+  "readings": [
+    {
+      "path": "fixtures/knowledge/ql-sixfold-presentation-v1.json",
+      "sha256": "4d148c4155b5a16ff6bcafedf024bae3b3f60206a965b70a4fe69b58a1660139",
+      "command": [
+        "ql",
+        "shape",
+        "presentation",
+        "ql:shape:1.0.0:constellation:sixfold",
+        "--json"
+      ]
+    },
+    {
+      "path": "fixtures/knowledge/ql-direct-conjugate-grid-presentation-v1.json",
+      "sha256": "2a639e763b626d675b2f0508d7c1b368506f979e57de260be360869f4998d9bf",
+      "command": [
+        "ql",
+        "shape",
+        "presentation",
+        "ql:shape:1.0.0:6x6:direct-conjugate",
+        "--json"
+      ]
+    }
+  ],
+  "standing": "Executed native owner output; numerical display convention, not new QL semantics. Exact producing source bytes are identified by SHA-256."
+}

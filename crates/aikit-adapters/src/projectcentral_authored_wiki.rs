@@ -173,7 +173,7 @@ pub struct AuthoredWikiWorldReading {
     /// collisions, ambiguities, withheld targets). Pending authored relations
     /// are disclosed per project through `pending`, not as one string per
     /// occurrence.
-    pub absences: Vec<String>,
+    pub absences: Vec<ProjectAuthoredAbsence>,
     /// Per-project rollups of pending authored relations. Search/resolve/frame
     /// replies carry at most their own scope's rollup; `knowledge status`
     /// carries every project plus this per-target detail.
@@ -182,6 +182,14 @@ pub struct AuthoredWikiWorldReading {
     /// Work-relative project display). Scoped knowledge queries use it to keep
     /// another project's authored edges out of their results.
     pub edge_projects: BTreeMap<String, String>,
+}
+
+/// A compilation failure belongs to the Project that produced it even when
+/// all Projects are compiled into one world reading.
+#[derive(Debug, Clone)]
+pub struct ProjectAuthoredAbsence {
+    pub project: String,
+    pub message: String,
 }
 
 /// Discover and compile every ProjectCentral authored-Markdown wiki
@@ -220,25 +228,34 @@ pub fn compile_world_authored_wiki(central_root: &Path) -> AuthoredWikiWorldRead
             match ProjectCentralFilesystemBinding::inspect(&project_root, Some(central_root)) {
                 Ok(binding) => binding,
                 Err(error) => {
-                    absences.push(format!(
-                        "ProjectCentral authored wiki unavailable at {home}: {}",
-                        error.message()
-                    ));
+                    absences.push(ProjectAuthoredAbsence {
+                        project: home.clone(),
+                        message: format!(
+                            "ProjectCentral authored wiki unavailable at {home}: {}",
+                            error.message()
+                        ),
+                    });
                     continue;
                 }
             };
         let projected = match projectcentral_authored_wiki(&binding) {
             Ok(projected) => projected,
             Err(error) => {
-                absences.push(format!(
-                    "ProjectCentral authored wiki compile failed at {home}: {}",
-                    error.message()
-                ));
+                absences.push(ProjectAuthoredAbsence {
+                    project: home.clone(),
+                    message: format!(
+                        "ProjectCentral authored wiki compile failed at {home}: {}",
+                        error.message()
+                    ),
+                });
                 continue;
             }
         };
         for absence in projected.absences {
-            absences.push(format!("{home}: {absence}"));
+            absences.push(ProjectAuthoredAbsence {
+                project: home.clone(),
+                message: format!("{home}: {absence}"),
+            });
         }
         // Identical pendings collapse: one rollup per project, one row per
         // distinct (subject, target, relation), occurrences counted.
@@ -255,9 +272,12 @@ pub fn compile_world_authored_wiki(central_root: &Path) -> AuthoredWikiWorldRead
                 edge_projects.insert(key, home.clone());
                 edges.push(edge);
             } else {
-                absences.push(format!(
-                    "Authored wiki at {home} re-declares edge {key} from an earlier project; kept the first"
-                ));
+                absences.push(ProjectAuthoredAbsence {
+                    project: home.clone(),
+                    message: format!(
+                        "Authored wiki at {home} re-declares edge {key} from an earlier project; kept the first"
+                    ),
+                });
             }
         }
     }
@@ -618,7 +638,7 @@ mod tests {
             reading
                 .absences
                 .iter()
-                .all(|absence| !absence.contains("Future Concept")),
+                .all(|absence| !absence.message.contains("Future Concept")),
             "{:?}",
             reading.absences
         );
@@ -626,7 +646,7 @@ mod tests {
             reading
                 .absences
                 .iter()
-                .any(|absence| absence.contains("bare")),
+                .any(|absence| absence.project == "Work/bare" && absence.message.contains("bare")),
             "{:?}",
             reading.absences
         );
@@ -730,7 +750,8 @@ mod tests {
         assert_eq!(reading.pending[0].targets[0].target, "shared.md");
         assert!(
             reading.absences.iter().any(|absence| {
-                absence.contains("ambiguous") && absence.contains("name the intended target")
+                absence.message.contains("ambiguous")
+                    && absence.message.contains("name the intended target")
             }),
             "{:?}",
             reading.absences
@@ -760,7 +781,9 @@ mod tests {
         assert_eq!(reading.pending.len(), 1);
         assert!(
             reading.absences.iter().any(|absence| {
-                absence.contains("withheld under a .no-agent-retrieval boundary")
+                absence
+                    .message
+                    .contains("withheld under a .no-agent-retrieval boundary")
             }),
             "{:?}",
             reading.absences
@@ -790,8 +813,8 @@ mod tests {
             reading
                 .absences
                 .iter()
-                .any(|absence| absence.contains("oversized.md")
-                    && absence.contains("bounded read size")),
+                .any(|absence| absence.message.contains("oversized.md")
+                    && absence.message.contains("bounded read size")),
             "{:?}",
             reading.absences
         );

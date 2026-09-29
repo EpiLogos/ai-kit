@@ -8,24 +8,24 @@ use serde_json::{json, Value};
 
 use crate::agent_connection::*;
 use crate::interactive_connection::{
-    InteractiveAgentConnectionAdapter, NativeModelControls, PermissionDecision,
+    InteractiveAgentConnectionAdapter, NativeModeControls, NativeModelControls, PermissionDecision,
 };
+
+const PI_NO_PERMISSION_MODES: &str =
+    "Pi RPC publishes no in-session permission modes (no tool-permission gate to switch)";
 
 #[derive(Debug, Clone)]
 enum Pending {
     Initialize,
-    Attach {
-        canonical: ResourceRef,
-        requested_native_session: Option<String>,
-    },
+    Attach(ResourceRef),
+    Prompt,
+    Control,
     SetModel {
         native_session_id: String,
         selection_id: String,
         provider: String,
         model_id: String,
     },
-    Prompt,
-    Control,
 }
 
 #[derive(Debug, Clone)]
@@ -47,10 +47,13 @@ pub struct PiRpcConnectionAdapter {
     binding: Option<NativeSessionBinding>,
     stop: Option<(String, Option<String>)>,
     expected_model: Option<(String, String)>,
-    model_observation: Option<crate::agent_connection::NativeModelObservation>,
     models_discovered: bool,
     native_models: BTreeMap<String, PiNativeModel>,
+    model_observation: Option<crate::agent_connection::NativeModelObservation>,
     abort_acknowledged: bool,
+    /// The person asked for this turn to stop (an `abort` was sent). Pi may
+    /// acknowledge it only after the turn has already settled.
+    abort_requested: bool,
 }
 
 impl PiRpcConnectionAdapter {
@@ -66,10 +69,11 @@ impl PiRpcConnectionAdapter {
             binding: None,
             stop: None,
             expected_model: None,
-            model_observation: None,
             models_discovered: false,
             native_models: BTreeMap::new(),
+            model_observation: None,
             abort_acknowledged: false,
+            abort_requested: false,
         }
     }
 
@@ -126,32 +130,18 @@ impl PiRpcConnectionAdapter {
         }
     }
 
-    fn selection_id(provider: &str, model_id: &str) -> Result<String> {
-        if provider.trim().is_empty() || provider.contains('/') || model_id.trim().is_empty() {
-            return Err(error(
-                "connection.pi_rpc.invalid_model_catalogue",
-                "Pi model entries require a non-empty slash-free provider and non-empty model id",
-            ));
-        }
-        let selection_id = format!("{provider}/{model_id}");
-        if selection_id.len() > 256 {
-            return Err(error(
-                "connection.pi_rpc.invalid_model_catalogue",
-                "Pi provider/model identity exceeds the native model control bound",
-            ));
-        }
-        Ok(selection_id)
+    fn selection_id(provider: &str, model_id: &str) -> String {
+        format!("{provider}/{model_id}")
     }
 
     fn discover_models(&mut self, data: &Value) -> Result<()> {
         let models = data["models"].as_array().ok_or_else(|| {
             error(
                 "connection.pi_rpc.invalid_model_catalogue",
-                "Pi get_available_models returned no models array",
+                "Pi get_available_models returned no model list",
             )
         })?;
         let mut discovered = BTreeMap::new();
-        let mut exact_routes = BTreeSet::new();
         for model in models {
             let provider = model["provider"]
                 .as_str()
@@ -171,10 +161,8 @@ impl PiRpcConnectionAdapter {
                         "Pi advertised a model without an id",
                     )
                 })?;
-            let selection_id = Self::selection_id(provider, model_id)?;
-            if !exact_routes.insert((provider.to_owned(), model_id.to_owned()))
-                || discovered.contains_key(&selection_id)
-            {
+            let selection_id = Self::selection_id(provider, model_id);
+            if discovered.contains_key(&selection_id) {
                 return Err(error(
                     "connection.pi_rpc.duplicate_model",
                     "Pi advertised a duplicate provider/model identity",
@@ -190,6 +178,7 @@ impl PiRpcConnectionAdapter {
                     provider: provider.to_owned(),
                     model_id: model_id.to_owned(),
                     advertised: NativeAdvertisedModel {
+                        roster_identity: None,
                         model_id: selection_id,
                         name: format!("{native_name} · {provider}"),
                         description: model["description"].as_str().map(ToOwned::to_owned),
@@ -240,66 +229,51 @@ impl PiRpcConnectionAdapter {
                     "Pi native state does not confirm the selected provider/model; no default or fallback is admitted",
                 ));
             }
-            self.model_observation = Some(NativeModelObservation {
-                current_model_id: model.clone(),
+        }
+        // Model observation belongs to the native session even when no durable
+        // AIKit policy selected it. Keep Pi's human name; a missing name is an
+        // explicit absence, never a provider transport id posing as a title.
+        let provider = data["model"]["provider"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty());
+        let model = data["model"]["id"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty());
+        self.model_observation = match (provider, model, self.native_models.is_empty()) {
+            (Some(provider), Some(model), false) => {
+                let selection_id = Self::selection_id(provider, model);
+                Some(NativeModelObservation {
+                    native_provider: Some(provider.to_owned()),
+                    current_model_id: selection_id,
+                    available_models: self.native_models.values().map(|model| model.advertised.clone()).collect(),
+                    reasoning_effort: None,
+                    standing: "Pi native get_available_models + get_state; configuration, not an inference receipt".into(),
+                })
+            }
+            (_, Some(model), _) => Some(NativeModelObservation {
+                native_provider: provider.map(str::to_owned),
+                current_model_id: model.into(),
                 available_models: vec![NativeAdvertisedModel {
-                    model_id: model.clone(),
-                    name: data["model"]["name"].as_str().unwrap_or(model).into(),
+                    roster_identity: provider.map(|provider| {
+                        crate::agent_connection::NativeModelRosterIdentity {
+                            provider_ref: format!("provider:{provider}"),
+                            provider_native_id: model.to_owned(),
+                            harness_slug: Some("pi".into()),
+                        }
+                    }),
+                    model_id: model.into(),
+                    name: data["model"]["name"]
+                        .as_str()
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or("Unnamed model")
+                        .into(),
                     description: None,
                 }],
                 reasoning_effort: None,
-                standing: format!(
-                    "Pi native get_state; provider={provider}; configuration, not an inference receipt"
-                ),
-            });
-        } else {
-            if !self.models_discovered {
-                return Err(error(
-                    "connection.pi_rpc.models_not_discovered",
-                    "Discover Pi native models before attachment",
-                ));
-            }
-            if data["model"].is_null() {
-                self.model_observation = None;
-                self.observed_session = Some(id.into());
-                return Ok(id.into());
-            }
-            let provider = data["model"]["provider"]
-                .as_str()
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    error(
-                        "connection.pi_rpc.invalid_state",
-                        "Pi native state returned a model without a provider",
-                    )
-                })?;
-            let model_id = data["model"]["id"]
-                .as_str()
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    error(
-                        "connection.pi_rpc.invalid_state",
-                        "Pi native state returned a model without an id",
-                    )
-                })?;
-            let current_model_id = Self::selection_id(provider, model_id)?;
-            if !self.native_models.contains_key(&current_model_id) {
-                return Err(error(
-                    "connection.pi_rpc.current_model_not_advertised",
-                    "Pi native state names a provider/model absent from get_available_models",
-                ));
-            }
-            self.model_observation = Some(NativeModelObservation {
-                current_model_id,
-                available_models: self
-                    .native_models
-                    .values()
-                    .map(|model| model.advertised.clone())
-                    .collect(),
-                reasoning_effort: None,
-                standing: "Pi native get_available_models + get_state; exact provider/model configuration, not an inference receipt".into(),
-            });
-        }
+                standing: "Pi native get_state; configuration, not an inference receipt".into(),
+            }),
+            _ => None,
+        };
         self.observed_session = Some(id.into());
         Ok(id.into())
     }
@@ -344,7 +318,7 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
             || self
                 .pending
                 .values()
-                .any(|p| matches!(p, Pending::Attach { .. }))
+                .any(|p| matches!(p, Pending::Attach(_)))
         {
             return Err(error(
                 "connection.pi_rpc.single_session",
@@ -360,11 +334,22 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
                 "Pi context belongs to its native process launch; this adapter cannot change directories or MCP configuration",
             ));
         }
-        if self.expected_model.is_none() && !self.models_discovered {
+        if !self.models_discovered && self.observed_session.is_none() {
             return Err(error(
                 "connection.pi_rpc.not_initialized",
-                "Discover Pi native models before attachment",
+                "Read Pi native state before attachment",
             ));
+        }
+        if let (Some(requested), Some(observed)) = (
+            request.native_session_id.as_ref(),
+            self.observed_session.as_ref(),
+        ) {
+            if requested != observed {
+                return Err(error(
+                    "connection.pi_rpc.session_mismatch",
+                    "Requested native Pi session does not match the observed process",
+                ));
+            }
         }
         let canonical = request.agent_session.ok_or_else(|| {
             error(
@@ -372,14 +357,7 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
                 "An explicit canonical AgentSession is required",
             )
         })?;
-        Ok(self.request(
-            "get_state",
-            json!({}),
-            Pending::Attach {
-                canonical,
-                requested_native_session: request.native_session_id,
-            },
-        ))
+        Ok(self.request("get_state", json!({}), Pending::Attach(canonical)))
     }
 
     fn prompt(&mut self, request: PromptRequest) -> Result<ConnectionCommand> {
@@ -396,11 +374,13 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
             })?;
         self.stop = None;
         self.abort_acknowledged = false;
+        self.abort_requested = false;
         Ok(self.request("prompt", json!({"message": text}), Pending::Prompt))
     }
 
     fn cancel(&mut self, request: CancelRequest) -> Result<ConnectionCommand> {
         self.require_session(&request.native_session_id)?;
+        self.abort_requested = true;
         Ok(self.request("abort", json!({}), Pending::Control))
     }
 
@@ -422,31 +402,19 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
             }
             return match pending {
                 Pending::Initialize => {
-                    let status = if self.expected_model.is_some() {
-                        self.observe_state(&message["data"])?;
-                        "Pi native session and pinned provider/model observed; configuration is not an inference receipt"
-                    } else {
+                    let status = if message["data"].get("models").is_some() {
                         self.discover_models(&message["data"])?;
                         "Pi native model catalogue observed; model configuration is not an inference receipt"
+                    } else {
+                        self.observe_state(&message["data"])?;
+                        "Pi native session observed; permission and resume faculties are not claimed"
                     };
                     Ok(vec![self.signal(ConnectionSignalKind::Status {
                         message: status.into(),
                     })])
                 }
-                Pending::Attach {
-                    canonical,
-                    requested_native_session,
-                } => {
+                Pending::Attach(canonical) => {
                     let id = self.observe_state(&message["data"])?;
-                    if requested_native_session
-                        .as_deref()
-                        .is_some_and(|requested| requested != id)
-                    {
-                        return Err(error(
-                            "connection.pi_rpc.session_mismatch",
-                            "Requested native Pi session does not match the observed process",
-                        ));
-                    }
                     let mut binding = NativeSessionBinding::unbound(id, SessionOpenMode::Attach)
                         .bind_agent_session(canonical);
                     binding.provenance = self.provenance.clone();
@@ -456,6 +424,7 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
                         self.signal(ConnectionSignalKind::SessionOpened { binding })
                     ])
                 }
+                Pending::Prompt => Ok(Vec::new()), // Acceptance is not completion.
                 Pending::SetModel {
                     native_session_id,
                     selection_id,
@@ -480,14 +449,13 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
                     })?;
                     observation.current_model_id = selection_id;
                     self.model_observation = Some(observation.clone());
-                    if let Some(binding) = self.binding.as_mut() {
+                    if let Some(binding) = &mut self.binding {
                         binding.model_observation = Some(observation.clone());
                     }
                     Ok(vec![self.signal(ConnectionSignalKind::ModelConfigured {
                         model_observation: observation,
                     })])
                 }
-                Pending::Prompt => Ok(Vec::new()), // Acceptance is not completion.
                 Pending::Control => {
                     if message["command"] == "abort" {
                         self.abort_acknowledged = true;
@@ -528,15 +496,39 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
                         result["errorMessage"].as_str().map(str::to_owned),
                     ));
                 }
-                Some(ConnectionSignalKind::Status {
+                let mut signals = Vec::new();
+                // A completed assistant message is real progress: this wire
+                // closes whole messages, so the finished segment is what a
+                // turn observer can honestly show while the turn goes on.
+                if result["role"] == "assistant" {
+                    if let Some(text) = assistant_message_text(result) {
+                        signals
+                            .push(self.signal(ConnectionSignalKind::AgentMessageSegment { text }));
+                    }
+                }
+                signals.push(self.signal(ConnectionSignalKind::Status {
                     message: message.to_string(),
-                })
+                }));
+                return Ok(signals);
             }
             Some("agent_settled") => {
                 let (reason, detail) = self.stop.take().unwrap_or(("unknown".into(), None));
                 Some(match reason.as_str() {
                     "aborted" => ConnectionSignalKind::Cancelled,
                     "unknown" if self.abort_acknowledged => ConnectionSignalKind::Cancelled,
+                    // After the person's abort, the in-flight tool or request
+                    // ends with Pi's own "operation was aborted" error: that is
+                    // the stop, not a provider failure. Pi may acknowledge the
+                    // abort only after this settles, so the request counts.
+                    "error"
+                        if self.abort_acknowledged
+                            || (self.abort_requested
+                                && detail
+                                    .as_deref()
+                                    .is_some_and(|text| text.contains("aborted"))) =>
+                    {
+                        ConnectionSignalKind::Cancelled
+                    }
                     "unknown" => ConnectionSignalKind::Failed {
                         reason: "Pi settled without a terminal assistant result".into(),
                     },
@@ -578,6 +570,24 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
 }
 
 impl InteractiveAgentConnectionAdapter for PiRpcConnectionAdapter {
+    /// Pi RPC has queue-delivery modes (steering/follow-up) but no permission
+    /// modes: it publishes no tool-permission gate to switch. Stated, not
+    /// inherited, so a later Pi protocol change has one place to land.
+    fn session_mode_controls(&self, _native_session_id: &str) -> NativeModeControls {
+        NativeModeControls::unavailable(PI_NO_PERMISSION_MODES)
+    }
+
+    fn set_session_mode(
+        &mut self,
+        _native_session_id: &str,
+        _provider_mode_id: &str,
+    ) -> Result<ConnectionCommand> {
+        Err(error(
+            "connection.pi_rpc.mode_selection_unsupported",
+            PI_NO_PERMISSION_MODES,
+        ))
+    }
+
     fn session_model_controls(&self, native_session_id: &str) -> NativeModelControls {
         if self.expected_model.is_some() {
             return NativeModelControls::unavailable(
@@ -664,8 +674,8 @@ impl InteractiveAgentConnectionAdapter for PiRpcConnectionAdapter {
         _provider_reasoning_effort: &str,
     ) -> Result<ConnectionCommand> {
         Err(AikitError::new(
-            "connection.pi_rpc.reasoning_effort_selection_unsupported",
-            "Pi reports its current thinking level but this adapter has no discovered bounded reasoning-effort selector",
+            "connection.reasoning_effort_selection_unsupported",
+            "this provider does not advertise a bounded ACP reasoning-effort selector",
         ))
     }
 
@@ -685,4 +695,28 @@ impl InteractiveAgentConnectionAdapter for PiRpcConnectionAdapter {
 
 fn error(code: &'static str, detail: &str) -> AikitError {
     AikitError::new(code, detail)
+}
+
+/// The text of a completed assistant message, in the content shapes Pi's wire
+/// produces: a plain string, or an array of typed blocks carrying the text
+/// ones. Nothing usable means None — never a fabricated segment.
+fn assistant_message_text(message: &Value) -> Option<String> {
+    let text = match &message["content"] {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(blocks) => {
+            let joined = blocks
+                .iter()
+                .filter(|block| block["type"] == "text")
+                .filter_map(|block| block["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("");
+            Some(joined)
+        }
+        _ => None,
+    }?;
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }

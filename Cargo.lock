@@ -55,10 +55,12 @@ dependencies = [
  "base64",
  "blake3",
  "chacha20poly1305",
+ "fs4",
  "getrandom 0.4.3",
  "jiff",
  "keyring",
  "pulldown-cmark",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",
@@ -141,6 +143,7 @@ dependencies = [
 name = "aikit-tui"
 version = "0.1.0"
 dependencies = [
+ "aikit-adapters",
  "aikit-core",
  "aikit-store",
  "crossterm",

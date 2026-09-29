@@ -111,7 +111,9 @@ pub fn orientation_packet(
 ) -> Result<Option<String>, String> {
     let central_root = process_central_root(event.cwd.as_deref());
     orientation_packet_in(
-        &SystemRunner::new(),
+        // The packet asks the owner one question: a probe, bounded like every
+        // read surface, so a hanging `ctrl` cannot stall the hook.
+        &SystemRunner::probe(),
         central_root.as_deref(),
         event.cwd.as_deref(),
         config,

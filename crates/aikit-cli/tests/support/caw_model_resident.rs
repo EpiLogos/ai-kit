@@ -182,6 +182,11 @@ fn assert_no_secret(path: &Path) {
 fn catalogued_profileless_model_reaches_actual_resident_and_returns_with_scoped_credential() {
     let mut w = World::new();
     let target = model_setup(&w, "normal", true);
+    // A configured ordinary preference cannot replace the explicit governed
+    // model, its credential delivery, or its native confirmation.
+    aikit_cli::model_defaults::write(&w.home, &aikit_cli::model_defaults::from_value(
+        &json!({"root":{"model_id":"different-default","native_provider":"different-provider"}})
+    ).unwrap()).unwrap();
     start_model(&mut w, true);
     let opened = w.request(target.clone());
     assert_eq!(opened["ok"], true, "{opened}");

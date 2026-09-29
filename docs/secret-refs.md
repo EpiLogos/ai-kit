@@ -141,7 +141,14 @@ selected-model path uses (OS store, explicit `--from-env` import, or a
 declared ref through the resolver suite) and is injected under the declared
 variable into the scrubbed final-child environment — never an empty or
 ambient value. Where the profile records an own-login fact for the provider,
-an unbound key is an honest absence and the harness's native login stands;
-where it does not, an unbound key refuses the launch with the bind
+an unbound key is an honest absence and the harness's native login stands.
+The Codex model-selected `provider:openai` path additionally requires the
+selected Codex executable to report a ChatGPT login, then launches under a
+scrubbed environment without `OPENAI_API_KEY` delivery. `CODEX_HOME`, when
+set, is retained so that the probe and child use the same native login store;
+for a selected Codex ACP session, AIKit also pins the wrapper's `CODEX_PATH`
+to the exact installed executable whose login was checked, rather than
+inheriting that variable or letting the wrapper choose a bundled binary.
+Where the profile records no own-login fact, an unbound key refuses with the bind
 remediation instead of starting a body that cannot authenticate. A revoked
 or expired binding refuses either way.

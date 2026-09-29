@@ -43,6 +43,31 @@ struct RoutineInvocationLedger {
     schema: String,
     #[serde(default)]
     invocations: Vec<RoutineInvocationEvidence>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    execution_outcomes: BTreeMap<ResourceRef, RoutineExecutionOutcome>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RoutineExecutionStatus {
+    Completed,
+    Failed,
+    Unreturned,
+}
+
+/// Actual runner return, not admission, grant, or verification evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutineExecutionOutcome {
+    pub status: RoutineExecutionStatus,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RoutineInvocationHistory {
+    #[serde(flatten)]
+    pub evidence: RoutineInvocationEvidence,
+    pub outcome: Option<RoutineExecutionOutcome>,
 }
 
 impl Default for RoutineInvocationLedger {
@@ -50,6 +75,7 @@ impl Default for RoutineInvocationLedger {
         Self {
             schema: ROUTINE_INVOCATION_LEDGER_VERSION.into(),
             invocations: Vec::new(),
+            execution_outcomes: BTreeMap::new(),
         }
     }
 }
@@ -179,6 +205,56 @@ impl RoutineInvocationStore {
         Ok(self.load()?.invocations)
     }
 
+    /// Read the same admission ledger with its actual execution returns.
+    /// Older admitted entries without a retained return stay explicitly unknown.
+    pub fn history(&self) -> Result<Vec<RoutineInvocationHistory>> {
+        let ledger = self.load()?;
+        Ok(ledger
+            .invocations
+            .into_iter()
+            .map(|evidence| RoutineInvocationHistory {
+                outcome: ledger
+                    .execution_outcomes
+                    .get(&evidence.invocation_ref)
+                    .cloned(),
+                evidence,
+            })
+            .collect())
+    }
+
+    pub fn record_outcome(
+        &self,
+        invocation_ref: &ResourceRef,
+        outcome: RoutineExecutionOutcome,
+    ) -> Result<()> {
+        let _lock = ContextLock::acquire(
+            &self.home,
+            "routine-invocations",
+            LockOptions::default().with_purpose("retain native Routine execution return"),
+        )?;
+        let mut ledger = self.load()?;
+        if !ledger
+            .invocations
+            .iter()
+            .any(|row| &row.invocation_ref == invocation_ref)
+        {
+            return Err(AikitError::new(
+                "routine.invocation_not_found",
+                "Execution return has no admitted Routine invocation",
+            ));
+        }
+        if let Some(existing) = ledger.execution_outcomes.get(invocation_ref) {
+            if existing == &outcome {
+                return Ok(());
+            }
+            return Err(AikitError::new("routine.outcome_conflict", "The admitted invocation already has a different execution return; it cannot be rewritten"));
+        }
+        ledger
+            .execution_outcomes
+            .insert(invocation_ref.clone(), outcome);
+        self.write(&ledger)
+    }
+
     pub fn path(&self) -> PathBuf {
         self.home.state().join("routine-invocations.json")
     }
@@ -235,6 +311,17 @@ impl RoutineInvocationStore {
                 }
             }
             previous = Some(&evidence.invocation_ref);
+        }
+        if ledger.execution_outcomes.keys().any(|reference| {
+            !ledger
+                .invocations
+                .iter()
+                .any(|row| &row.invocation_ref == reference)
+        }) {
+            return Err(AikitError::new(
+                "routine.invalid_invocation_ledger",
+                "Execution return refers to an invocation that was never admitted",
+            ));
         }
         Ok(ledger)
     }
