@@ -369,12 +369,16 @@ impl TurnSlot {
     }
 
     pub fn complete(&self, outcome: ConversationTurnOutcome) {
-        self.finished
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // The outcome is stored before `finished` is raised, both under the
+        // slot lock: a waiter that reads `finished` then finds the outcome
+        // either still here or already taken by another owner — never not
+        // yet stored.
         if let Ok(mut guard) = self.outcome.lock() {
             if guard.is_none() {
                 *guard = Some(outcome);
             }
+            self.finished
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             self.signal.notify_all();
         }
     }
@@ -1487,6 +1491,11 @@ impl GatewayConversationEngine {
                 return (outcome, Some(streamed));
             }
             if turn.finished() {
+                // The outcome may have landed between the timed-out wait and
+                // this check: take it now if it is still in the slot.
+                if let Some(outcome) = turn.wait_timeout(Duration::ZERO) {
+                    return (outcome, Some(streamed));
+                }
                 // The turn reached a terminal outcome whose record another
                 // owner — the restart drain — already took: this waiter's
                 // recording and streaming duty ends here. The caller's owner

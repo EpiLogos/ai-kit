@@ -522,7 +522,20 @@ impl Harness {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        panic!("timed out waiting for {what}");
+        let executed: Vec<_> = self
+            .recording
+            .executed
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|operation| format!("{:?}", operation.operation))
+            .collect();
+        let events: Vec<_> = self
+            .stream_events()
+            .iter()
+            .map(|event| format!("{}:{}", event["kind"], event["content"]))
+            .collect();
+        panic!("timed out waiting for {what}; executed {executed:?}; stream {events:?}");
     }
 }
 
