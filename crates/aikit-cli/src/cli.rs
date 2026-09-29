@@ -242,7 +242,7 @@ pub enum Command {
     /// List bypasses issued and spent.
     Bypasses(BypassesArgs),
     /// Run, inspect and query the Agency Gateway service.
-    Gateway(GatewayCmd),
+    Gateway(Box<GatewayCmd>),
     /// Who and where am I: the joined World inhabitation reading
     /// (`aikit.inhabitation-reading/v1`) over Central, Actuation, Factory and
     /// AIKit's own SessionSpace/Redis projections. (`world whoami` is the same
@@ -501,7 +501,7 @@ pub enum SystemGroupCommand {
     /// Record review decisions for catalogued capsule revisions.
     Trust(TrustCmd),
     /// Run, inspect and query the Agency Gateway service.
-    Gateway(GatewayCmd),
+    Gateway(Box<GatewayCmd>),
     /// Print shell integration to be sourced from an rc file. Never evaluated
     /// automatically.
     Shell(ShellCmd),
