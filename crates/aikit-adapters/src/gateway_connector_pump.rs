@@ -141,6 +141,7 @@ struct WorkerContext {
 /// Spawn one pump per enabled factory. Disabled entries are named on stderr
 /// and not started. Workers exit when `shutdown` is set; join them before the
 /// service's final state write.
+#[allow(clippy::too_many_arguments)] // one fact per connector family; a bundle would only rename the list
 pub fn spawn_connector_workers(
     gateway: Arc<Mutex<AgencyGateway>>,
     shutdown: Arc<AtomicBool>,
@@ -700,7 +701,7 @@ pub mod tests {
         }
 
         fn next_event(&mut self) -> ConnectorFuture<'_, Option<InboundEvent>> {
-            let result = (|| -> Result<Option<InboundEvent>> {
+            let compute = || -> Result<Option<InboundEvent>> {
                 let next = self.inner.events.lock().unwrap().pop_front();
                 match next {
                     Some(Some(event)) => Ok(Some(event)),
@@ -716,7 +717,8 @@ pub mod tests {
                         ))
                     }
                 }
-            })();
+            };
+            let result = compute();
             Box::pin(async move { result })
         }
 

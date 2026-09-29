@@ -948,6 +948,7 @@ pub fn run_gateway_service_with_hooks(
 
 type OccupancyHook = Option<Arc<dyn GatewayOccupancyReader>>;
 
+#[allow(clippy::too_many_arguments)] // the listener's facts are distinct; a bundle would only rename them
 fn serve_websocket_listener(
     listener: TcpListener,
     gateway: Arc<Mutex<AgencyGateway>>,
@@ -1002,6 +1003,7 @@ fn serve_websocket_listener(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // the connection's facts are distinct; a bundle would only rename them
 fn handle_websocket_connection(
     stream: TcpStream,
     gateway: Arc<Mutex<AgencyGateway>>,

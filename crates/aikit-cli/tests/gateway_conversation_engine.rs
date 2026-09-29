@@ -2414,11 +2414,9 @@ fn an_ask_to_an_unknown_position_is_refused_and_nothing_is_recorded() {
     let router = FixtureAskRouter::new();
     router.script_refusal(AikitError::new(
         "gateway.unknown_position",
-        format!(
-            "No Position with handle @nobody is defined in this World. Nothing was sent; no \
-             Communique was recorded. List the Positions and their handles with `aikit gateway \
-             who --json`."
-        ),
+        "No Position with handle @nobody is defined in this World. Nothing was sent; no \
+         Communique was recorded. List the Positions and their handles with `aikit gateway \
+         who --json`.",
     ));
     let harness = Harness::with_ask_router(aikit_adapters::EnginePolicy::default(), router);
 
@@ -2573,8 +2571,7 @@ fn an_ask_to_a_registered_profile_without_a_position_holds_for_the_agency() {
     });
     let error = router
         .route(&canned_ask_to("@notregistered", "anyone?"))
-        .err()
-        .expect("an unknown handle is refused");
+        .expect_err("an unknown handle is refused");
     assert_eq!(error.code(), "gateway.unknown_position", "{error}");
 }
 

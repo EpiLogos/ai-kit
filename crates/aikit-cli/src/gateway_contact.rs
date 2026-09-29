@@ -1562,6 +1562,14 @@ pub fn send(
             "Pass the words with --body TEXT or --body-file PATH.",
         ));
     }
+    if request.require_workcell.is_some() && request.instance.is_none() {
+        return Err(three_part(
+            "gateway.require_workcell_without_instance",
+            "--require-workcell binds an exact instance, and no --instance was named.",
+            nothing_sent(),
+            "Name the generation with --instance GENERATION_REF (read it from `aikit gateway who --json`), or drop --require-workcell for a durable Position route.",
+        ));
+    }
     let sender = resolve_sender(owners, request.from_position)?;
     let recipient = resolve_recipient(owners, request.to, request.project_world, cwd)?;
     let (local_workcell, workcell_basis) = local_workcell(owners, cwd);
@@ -1572,14 +1580,6 @@ pub fn send(
     // here first, then only the required Workcell's remote), and a same-named
     // peer under another generation is never a route.
     if let Some(generation) = request.instance {
-        if request.require_workcell.is_some() && generation.trim().is_empty() {
-            return Err(three_part(
-                "gateway.invalid_instance",
-                "--instance must name a generation ref.",
-                nothing_sent(),
-                "Read the current instance with `aikit gateway who --json` (occupancy.generation_ref).",
-            ));
-        }
         let mut instance = CommuniqueInstance {
             generation_ref: generation.trim().to_owned(),
             required_workcell_ref: request.require_workcell.map(|w| w.trim().to_owned()),
