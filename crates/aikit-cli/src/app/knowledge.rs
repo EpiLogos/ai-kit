@@ -1858,9 +1858,8 @@ impl Service {
         // survives between CLI processes). Every GitNexus subprocess this
         // provider spawns — capability probe, index, search — now runs under
         // `gitnexus_budget()`, so one huge or hung repository is killed and
-        // disclosed rather than stalling the query; indexing itself runs in
-        // bounded parallel across projects so N repos cost roughly one
-        // budget's wall time, not N of them summed.
+        // disclosed rather than stalling the query. Reads no longer index at
+        // all; per-project admission still runs in bounded parallel.
         let code_budget = gitnexus_budget();
         let parallelism = std::thread::available_parallelism()
             .map(|n| n.get().clamp(1, MAX_GITNEXUS_PARALLELISM))
@@ -1873,13 +1872,6 @@ impl Service {
         // so a test — and an operator — pins code intelligence to a known
         // binary instead of depending on whatever the host happens to have.
         let gitnexus_binary = self.gitnexus_binary.clone();
-        // `gitnexus analyze` records each indexed repo in one global
-        // `registry.json` by an unlocked read-modify-write, and `query --repo`
-        // resolves the repo name through that registry. Two concurrent
-        // analyses can each write back their own copy, silently dropping the
-        // other repo's entry so its code never surfaces. Probes and adoption
-        // stay parallel; the registry-writing index step runs one at a time.
-        let index_lock = std::sync::Mutex::new(());
         let mut gitnexus_unavailable: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut project_sources = Vec::with_capacity(work_projects.len());
         for project in &work_projects {
@@ -1898,7 +1890,6 @@ impl Service {
                         let project = project.clone();
                         let source = source.clone();
                         let binary = gitnexus_binary.clone();
-                        let index_lock = &index_lock;
                         scope.spawn(move || {
                             let runner = SystemRunner::new()
                                 .with_cwd(&project.root)
@@ -1920,22 +1911,15 @@ impl Service {
                                 ),
                             };
                             let status = provider.status();
-                            // A query reads the existing derived index; it
-                            // never re-indexes one that exists (that made
-                            // every `knowledge` call cost minutes). Only an
-                            // unindexed project is indexed here; freshness
-                            // of an existing index is disclosed, not
-                            // re-checked (`aikit knowledge code index`).
-                            let adopted = provider.adopt_existing_index(&project.root);
-                            let index_error =
-                                if status.available && status.capabilities.index && !adopted {
-                                    let _registry = index_lock
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                    provider.index(&project.root, false).err()
-                                } else {
-                                    None
-                                };
+                            // A Knowledge read admits the owner index that
+                            // already exists and queries a private copy of
+                            // it; it never builds, rebuilds or registers one
+                            // (`aikit knowledge code index` does). A Project
+                            // without an admissible index — no index yet, or
+                            // not a Git repository — is disclosed as its own
+                            // degradation instead of being indexed here.
+                            let admission = provider.open_existing(&project.root).err();
+                            let index_error = if status.available { admission } else { None };
                             (project, provider, index_error)
                         })
                     })
@@ -1951,10 +1935,9 @@ impl Service {
             });
             for (project, provider, index_error) in outcomes {
                 if let Some(error) = index_error {
-                    // A timed-out call surfaces here exactly like any other
-                    // index failure: `error` already names the budget it
-                    // violated (`mux.command_timeout`), so the project is
-                    // disclosed as degraded, never silently dropped.
+                    // An index that cannot be admitted — absent, incomplete,
+                    // or without a recorded commit — is disclosed as this
+                    // project's degradation, never silently dropped.
                     // Per-project code state, scoped like `authored_pending`:
                     // never the global per-query absence that leaked another
                     // project's code degradation into a scoped reply.

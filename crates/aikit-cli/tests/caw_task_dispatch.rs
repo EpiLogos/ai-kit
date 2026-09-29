@@ -388,7 +388,7 @@ fn real_pi_task_startup_uses_allocated_now_instead_of_ambient_config() {
     let ambient = world.root.join("ambient-outside-task");
     let prepared = prepare_actual_pi_task(&world);
     world.start_with_pi_config_ambient(Some(&ambient));
-    let opened = world.open(&prepared, &world.root.join("Work/demo/src"));
+    let opened = world.open(&prepared, &world.root.join("Work/demo"));
     assert_eq!(opened["ok"], true, "{opened}");
     assert_eq!(opened["data"]["inference_observed"], false);
     assert_eq!(opened["data"]["protocol"], "pi-rpc");
@@ -434,7 +434,7 @@ fn real_pi_task_refuses_redirected_allocated_config_directory() {
     fs::create_dir(&outside).unwrap();
     std::os::unix::fs::symlink(&outside, now.join("pi-agent")).unwrap();
     world.start();
-    let refused = world.open(&prepared, &world.root.join("Work/demo/src"));
+    let refused = world.open(&prepared, &world.root.join("Work/demo"));
     assert_eq!(refused["ok"], false, "{refused}");
     assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
 }
@@ -840,7 +840,7 @@ fn unhosted_pending_abort_revalidates_ready_with_fresh_revision_and_stale_cas_re
         Some(&resumed["revision"])
     );
     w.start();
-    assert_eq!(w.open(resumed, &w.root.join("Work/demo/src"))["ok"], true);
+    assert_eq!(w.open(resumed, &w.root.join("Work/demo"))["ok"], true);
     let repeated = w.command(&[
         "encounter-task-abort".into(),
         "--agent-session".into(),
@@ -971,7 +971,7 @@ fn expired_unhosted_ready_is_reprepared_with_same_native_now_and_fresh_lease() {
         assert_eq!(resumed["requirements"][key], ready["requirements"][key]);
     }
     w.start();
-    assert_eq!(w.open(resumed, &w.root.join("Work/demo/src"))["ok"], true);
+    assert_eq!(w.open(resumed, &w.root.join("Work/demo"))["ok"], true);
 }
 
 #[test]
