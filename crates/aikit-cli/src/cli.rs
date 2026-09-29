@@ -649,6 +649,7 @@ impl Command {
             Self::Wiki(c) => wiki_route(&c.command),
             Self::WikiShape(c) => wiki_shape_route(&c.command),
             Self::WikiConstruct(_) => "wiki_construct::run",
+            Self::Decide(c) => decide_route(c),
             Self::Family(_) => "cmd_family",
             Self::ConfigContribution(_) => "config_plane::contribution_document",
             Self::Config(_) => "config_plane::dispatch",
@@ -703,6 +704,13 @@ impl Command {
 }
 
 /// Route a parsed `system` invocation: bare stays the owner disclosure.
+fn decide_route(args: &DecideCmd) -> &'static str {
+    match &args.command {
+        DecideSub::Status(_) => "cmd_decide_status",
+        DecideSub::Invoke(_) => "cmd_decide_invoke",
+    }
+}
+
 pub fn system_route(args: &SystemArgs) -> &'static str {
     match &args.command {
         None => "cmd_system",
