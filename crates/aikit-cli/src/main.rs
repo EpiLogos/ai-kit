@@ -1625,6 +1625,14 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                     project_world: a.project_world.as_deref(),
                     instance: a.instance.as_deref(),
                     require_workcell: a.require_workcell.as_deref(),
+                    owner: aikit_cli::gateway_contact::owner_address::OwnerAsk {
+                        subject: a.subject,
+                        propose: a.propose,
+                        proposed_owner: a.proposed_owner,
+                        options: a.options,
+                        now_ref: a.now_ref,
+                        evidence_refs: a.evidence,
+                    },
                 },
             )?)
         }

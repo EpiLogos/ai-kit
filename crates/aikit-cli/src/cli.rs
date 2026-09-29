@@ -2040,8 +2040,9 @@ pub struct GatewayWhoArgs {
 /// `aikit gateway send`.
 #[derive(Debug, Args)]
 pub struct GatewaySendArgs {
-    /// Recipient Position: `central:position:<world>:<slug>` or `@handle`.
-    #[arg(long, value_name = "POSITION|@HANDLE")]
+    /// Recipient Position: `central:position:<world>:<slug>`, `@handle`, an
+    /// agent ref, or `@owner` — the person, reached through their Inbox.
+    #[arg(long, value_name = "POSITION|@HANDLE|@owner")]
     pub to: String,
     /// The words to send.
     #[arg(long, value_name = "TEXT", conflicts_with = "body_file")]
@@ -2073,6 +2074,26 @@ pub struct GatewaySendArgs {
         requires = "instance"
     )]
     pub require_workcell: Option<String>,
+    /// To @owner: the one-line subject (default: the body's first line).
+    #[arg(long, value_name = "TEXT")]
+    pub subject: Option<String>,
+    /// To @owner: ask the person to accept or decline work, not a question.
+    #[arg(long)]
+    pub propose: bool,
+    /// To @owner with --propose: the owner that would carry the work out
+    /// (e.g. `factory`); accepting then commissions it there.
+    #[arg(long = "for", value_name = "OWNER", requires = "propose")]
+    pub proposed_owner: Option<String>,
+    /// To @owner: an answer the person can pick (repeatable, at most 8).
+    #[arg(long = "option", value_name = "TEXT")]
+    pub options: Vec<String>,
+    /// To @owner: the NOW this ask belongs to; it cannot archive while the
+    /// person's decision is outstanding, and its reading carries the answer.
+    #[arg(long = "now", value_name = "NOW_REF")]
+    pub now_ref: Option<String>,
+    /// To @owner: evidence the person can open (repeatable).
+    #[arg(long = "evidence", value_name = "REF")]
+    pub evidence: Vec<String>,
     #[command(flatten)]
     pub carrier: GatewayQueryArgs,
 }
