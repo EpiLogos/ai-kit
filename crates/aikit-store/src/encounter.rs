@@ -69,6 +69,7 @@ impl EncounterStore {
             CREATE TABLE IF NOT EXISTS encounter_blocks(id INTEGER PRIMARY KEY AUTOINCREMENT,session TEXT NOT NULL,kind TEXT NOT NULL,text TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS encounter_block_session ON encounter_blocks(session,id);
             CREATE TABLE IF NOT EXISTS encounter_block_exclusions(session TEXT NOT NULL,block_id INTEGER NOT NULL,basis TEXT NOT NULL,PRIMARY KEY(session,block_id));").map_err(failure)?;
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS encounter_message_chunks(session TEXT NOT NULL,block_id INTEGER NOT NULL,prefix_bytes INTEGER NOT NULL,PRIMARY KEY(session,block_id));").map_err(failure)?;
         delivery::install(&connection)?;
         conversation::install(&connection)?;
         context::install(&connection)?;
@@ -555,11 +556,66 @@ fn draft_in(connection: &Connection, session: &ResourceRef) -> Result<EncounterD
 }
 
 fn project_block(connection: &Connection, session: &ResourceRef, event: &Value) -> Result<()> {
+    let signal_kind = event
+        .pointer("/event/Signal/kind/kind")
+        .and_then(Value::as_str);
+    let final_message = signal_kind == Some("agent-message-segment");
+    let provisional = signal_kind == Some("agent-message-chunk");
+    if final_message {
+        // Only replace this message's provisional projection. The immutable
+        // journal remains the evidence for both the stream and the final text.
+        let mut query = connection.prepare("SELECT block_id,prefix_bytes FROM encounter_message_chunks WHERE session=?1 ORDER BY block_id").map_err(failure)?;
+        let rows = query
+            .query_map(params![session.as_str()], |r| {
+                Ok((r.get::<_, u64>(0)?, r.get::<_, usize>(1)?))
+            })
+            .map_err(failure)?;
+        for row in rows {
+            let (id, prefix) = row.map_err(failure)?;
+            if prefix == 0 {
+                connection
+                    .execute(
+                        "DELETE FROM encounter_blocks WHERE session=?1 AND id=?2",
+                        params![session.as_str(), id],
+                    )
+                    .map_err(failure)?;
+            } else {
+                let text: String = connection
+                    .query_row(
+                        "SELECT text FROM encounter_blocks WHERE session=?1 AND id=?2",
+                        params![session.as_str(), id],
+                        |r| r.get(0),
+                    )
+                    .map_err(failure)?;
+                let retained = text
+                    .get(..prefix)
+                    .ok_or_else(|| failure("Invalid provisional message boundary"))?;
+                connection
+                    .execute(
+                        "UPDATE encounter_blocks SET text=?3 WHERE session=?1 AND id=?2",
+                        params![session.as_str(), id, retained],
+                    )
+                    .map_err(failure)?;
+            }
+        }
+    }
+    if final_message
+        || event["kind"] == "user-message"
+        || event["kind"] == "binding"
+        || event.pointer("/event/TurnEnded").is_some()
+    {
+        connection
+            .execute(
+                "DELETE FROM encounter_message_chunks WHERE session=?1",
+                params![session.as_str()],
+            )
+            .map_err(failure)?;
+    }
     let (kind, text) = if event["kind"] == "user-message" {
         ("user", event["text"].as_str().unwrap_or("").to_owned())
     } else if let Some(signal) = event.pointer("/event/Signal/kind") {
         match signal["kind"].as_str() {
-            Some("agent-message-chunk") => (
+            Some("agent-message-chunk" | "agent-message-segment") => (
                 "assistant",
                 signal["text"].as_str().unwrap_or("").to_owned(),
             ),
@@ -587,6 +643,9 @@ fn project_block(connection: &Connection, session: &ResourceRef, event: &Value) 
     } else {
         return Ok(());
     };
+    if final_message && text.is_empty() {
+        return Ok(());
+    }
     // Chunks are bounded by bytes, without splitting UTF-8 code points. Adjacent
     // exposed thinking/message updates coalesce only within this storage block.
     let mut remaining = text.as_str();
@@ -603,6 +662,9 @@ fn project_block(connection: &Connection, session: &ResourceRef, event: &Value) 
                 && held_text.len() + part.len() <= 16 * 1024
         }) {
             let _ = held_kind;
+            if provisional {
+                connection.execute("INSERT OR IGNORE INTO encounter_message_chunks(session,block_id,prefix_bytes) VALUES(?1,?2,?3)",params![session.as_str(),id,held_text.len()]).map_err(failure)?;
+            }
             connection
                 .execute(
                     "UPDATE encounter_blocks SET text=?2 WHERE id=?1",
@@ -616,6 +678,9 @@ fn project_block(connection: &Connection, session: &ResourceRef, event: &Value) 
                     params![session.as_str(), kind, part],
                 )
                 .map_err(failure)?;
+            if provisional {
+                connection.execute("INSERT INTO encounter_message_chunks(session,block_id,prefix_bytes) VALUES(?1,?2,0)",params![session.as_str(),connection.last_insert_rowid()]).map_err(failure)?;
+            }
         }
         remaining = &remaining[end..];
         if remaining.is_empty() {
@@ -628,6 +693,115 @@ fn project_block(connection: &Connection, session: &ResourceRef, event: &Value) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn final_message_reconciles_only_its_provisional_chunks_across_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(root.path());
+        let session = ResourceRef::parse("agent-session/native-completed-message").unwrap();
+        let other = ResourceRef::parse("agent-session/other-completed-message").unwrap();
+        let signal = |kind: &str, text: &str| serde_json::json!({"kind":"provider","event":{"Signal":{"kind":{"kind":kind,"text":text}}}});
+        let store = EncounterStore::open(&home).unwrap();
+        store
+            .append(
+                &session,
+                &serde_json::json!({"kind":"user-message","text":"controlled source inquiry"}),
+            )
+            .unwrap();
+        store
+            .append(
+                &session,
+                &signal("agent-message-chunk", "First provisional"),
+            )
+            .unwrap();
+        store
+            .append(
+                &session,
+                &signal("agent-message-segment", "First complete. "),
+            )
+            .unwrap();
+        store
+            .append(&session, &signal("agent-message-chunk", &"é".repeat(17000)))
+            .unwrap();
+        store
+            .append(&other, &signal("agent-message-chunk", "unrelated stream"))
+            .unwrap();
+        drop(store);
+        let store = EncounterStore::open(&home).unwrap();
+        store
+            .append(
+                &session,
+                &signal("agent-message-segment", "Second complete."),
+            )
+            .unwrap();
+        let view = store.view(&session, None).unwrap();
+        assert_eq!(view["blocks"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            view["blocks"][1]["text"],
+            "First complete. Second complete."
+        );
+        assert_eq!(
+            store.view(&other, None).unwrap()["blocks"][0]["text"],
+            "unrelated stream"
+        );
+        // Tool boundaries and later messages preserve earlier completed blocks.
+        store.append(&session, &serde_json::json!({"kind":"provider","event":{"Signal":{"kind":{"kind":"tool-call","payload":{"name":"read"}}}}})).unwrap();
+        store
+            .append(&session, &signal("agent-message-chunk", "Third partial"))
+            .unwrap();
+        store
+            .append(
+                &session,
+                &signal("agent-message-segment", "Third complete."),
+            )
+            .unwrap();
+        store
+            .append(
+                &session,
+                &serde_json::json!({"event":{"TurnEnded":{"stop":{"Completed":{}}}}}),
+            )
+            .unwrap();
+        let view = store.view(&session, None).unwrap();
+        assert_eq!(
+            view["blocks"][1]["text"],
+            "First complete. Second complete."
+        );
+        assert_eq!(view["blocks"][3]["text"], "Third complete.");
+        let journal = store.events(&session, 0, 100).unwrap();
+        assert!(journal.events.iter().any(|e| e
+            .event
+            .pointer("/event/Signal/kind/text")
+            .and_then(Value::as_str)
+            == Some("First provisional")));
+        assert!(journal.events.iter().any(|e| e
+            .event
+            .pointer("/event/Signal/kind/text")
+            .and_then(Value::as_str)
+            == Some("Third partial")));
+    }
+
+    #[test]
+    fn empty_completed_message_removes_only_its_provisional_text() {
+        let root = tempfile::tempdir().unwrap();
+        let store = EncounterStore::open(&AikitHome::at(root.path())).unwrap();
+        let session = ResourceRef::parse("agent-session/empty-completed-message").unwrap();
+        for (kind, text) in [
+            ("agent-message-segment", "Prior completed text"),
+            ("agent-message-chunk", " provisional suffix"),
+            ("agent-message-segment", ""),
+        ] {
+            store
+                .append(
+                    &session,
+                    &serde_json::json!({"event":{"Signal":{"kind":{"kind":kind,"text":text}}}}),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            store.view(&session, None).unwrap()["blocks"][0]["text"],
+            "Prior completed text"
+        );
+    }
+
     #[test]
     fn every_journal_event_carries_the_owner_observation_time() {
         let root = tempfile::tempdir().unwrap();

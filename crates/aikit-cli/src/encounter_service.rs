@@ -35,11 +35,19 @@ pub use agency::mint::{
 };
 pub use agency::model::EncounterModelOpen;
 pub(crate) use agency::model::PreparedModel;
+pub use agency::speech::{
+    configure as configure_local_speech, disclose as disclose_local_speech, LocalSpeechConfig,
+};
 pub use agency::{
     conversation::{ConversationEntry, ConversationRecipientSpec, ConversationSendRequest},
     EncounterA2aFraming, EncounterAddressedTurn, EncounterAgencyBinding, EncounterContextPacket,
     EncounterGroupRecipient,
 };
+
+#[path = "encounter_prime_launch.rs"]
+pub(crate) mod prime_launch;
+#[path = "encounter_prime_resume.rs"]
+mod prime_resume;
 
 #[path = "encounter_addressing.rs"]
 mod encounter_addressing;
@@ -1127,6 +1135,8 @@ impl EncounterService {
             && previous.as_ref().is_some_and(|p| {
                 p["cwd"] != json!(cwd)
                     || p["protocol"] != json!(configured.protocol)
+                    || p["body_ref"] != json!(configured.body_ref)
+                    || p["body_revision"] != json!(configured.body_revision)
                     || p["provider_argv_digest"]
                         != json!(blake3::hash(
                             serde_json::to_string(&configured.argv)
@@ -1172,7 +1182,12 @@ impl EncounterService {
             blake3::hash(agent_session.as_str().as_bytes()).to_hex()
         ))
         .map_err(error)?;
-        if reconnect && configured.protocol != EncounterProtocol::Acp {
+        if reconnect
+            && !matches!(
+                configured.protocol,
+                EncounterProtocol::Acp | EncounterProtocol::PrimeRpc
+            )
+        {
             return Err(AikitError::new(
                 "encounter.reconnect_unsupported",
                 "This native provider does not publish a supported resume operation; ACP reconnect rides the capability-gated session/resume, and this protocol has no reconnect route through the encounter service; no replacement session was created",
@@ -1238,20 +1253,12 @@ impl EncounterService {
         // record the child wrote through its inherited skill, correlated to
         // the child's locus digest like every faculty receipt.
         let child_message_dir = if configured.protocol == EncounterProtocol::PrimeRpc {
-            launch_argv.extend(["--agent-session".into(), agent_session.to_string()]);
-            let dir = self.home.state().join("encounter-child-messages").join(
-                blake3::hash(agent_session.as_str().as_bytes())
-                    .to_hex()
-                    .to_string(),
-            );
-            std::fs::create_dir_all(&dir).map_err(error)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-                    .map_err(error)?;
+            let dir = prime_launch::child_message_dir(&self.home, &agent_session)?;
+            // AIKit's model/task wrappers carry their own typed arguments.
+            // They add native context only at their admitted final exec seam.
+            if model.is_none() && !task_bound {
+                prime_launch::append_context(&self.home, &agent_session, &mut launch_argv)?;
             }
-            launch_argv.extend(["--child-message-dir".into(), dir.display().to_string()]);
             Some(dir)
         } else {
             None
@@ -1263,6 +1270,24 @@ impl EncounterService {
         // and take no environment from this spawn.
         let launch_environment = if model.is_none() && !task_bound {
             agency::model::profile_environment(&self.home, &agent_session, &configured)?
+        } else {
+            None
+        };
+        let prime_resume_target = if reconnect && configured.protocol == EncounterProtocol::PrimeRpc
+        {
+            let native = previous
+                .as_ref()
+                .and_then(|p| p["native_session_id"].as_str())
+                .ok_or_else(|| error("Prior native session identity is missing"))?;
+            // Selected-model/task launchers re-exec AIKit and do not expose
+            // --prime-bin. Resolve their already-admitted native body through
+            // the same execution seam used at that final exec boundary.
+            let (native_argv, native_environment) =
+                agency::model::execution(&self.home, &agent_session, &body_provider)?;
+            Some((
+                native.to_owned(),
+                prime_resume::locate(&native_argv, native, &cwd, native_environment.as_ref())?,
+            ))
         } else {
             None
         };
@@ -1283,14 +1308,18 @@ impl EncounterService {
             for argv in &configured.argv_fallback {
                 let mut variant = configured.clone();
                 variant.argv = argv.clone();
-                launch_variants.push(crate::model_defaults::launch_argv(
+                let mut argv = crate::model_defaults::launch_argv(
                     &variant,
                     if task_bound {
                         None
                     } else {
                         launch_default.as_ref()
                     },
-                )?);
+                )?;
+                if configured.protocol == EncounterProtocol::PrimeRpc && !task_bound {
+                    prime_launch::append_context(&self.home, &agent_session, &mut argv)?;
+                }
+                launch_variants.push(argv);
             }
         }
         let single_variant = launch_variants.len() == 1;
@@ -1347,6 +1376,12 @@ impl EncounterService {
                                 cwd.to_string_lossy().into_owned(),
                                 provenance.clone(),
                             );
+                            let adapter = match &prime_resume_target {
+                                Some((id, path)) => {
+                                    adapter.with_resume_target(id.clone(), path.clone())?
+                                }
+                                None => adapter,
+                            };
                             match &model {
                                 Some(model) => adapter.with_selected_model(
                                     &model.policy.native_provider,
@@ -2134,6 +2169,11 @@ impl EncounterService {
                     let mut row = provider_launch_facts(p.protocol, &p.argv);
                     row["id"] = json!(p.id);
                     row["label"] = json!(p.label);
+                    // Admission chooses an acting body before a resident exists.
+                    // Keep the configured pins available in that catalogue, as
+                    // they already are in Resident::provider_view.
+                    row["body_ref"] = json!(p.body_ref);
+                    row["body_revision"] = json!(p.body_revision);
                     row
                 })
                 .collect::<Vec<_>>())),
@@ -2696,6 +2736,29 @@ mod tests {
             refused_unsafe.to_string().contains("safe id"),
             "an unsafe id never reaches the filesystem: {refused_unsafe}"
         );
+    }
+
+    #[test]
+    fn provider_catalogue_retains_configured_body_pins_without_launching_a_resident() {
+        let home = test_home();
+        let mut provider = profile_provider("pinned-body", "gemini");
+        provider.body_ref = Some("agent-body/catalogue-contract".into());
+        provider.body_revision = Some("source-revision-for-catalogue-contract".into());
+        EncounterService::configure(&home, provider).unwrap();
+        let service = EncounterService::new(home).unwrap();
+
+        let rows = service.apply(EncounterRequest::Providers).unwrap();
+        let row = &rows.as_array().unwrap()[0];
+        assert_eq!(row["body_ref"], "agent-body/catalogue-contract");
+        assert_eq!(
+            row["body_revision"],
+            "source-revision-for-catalogue-contract"
+        );
+        assert_eq!(row["id"], "pinned-body");
+        assert_eq!(row["command"], "gemini");
+        assert!(row.get("argv").is_none());
+        assert!(row.get("env").is_none());
+        assert!(service.residents.lock().unwrap().is_empty());
     }
 
     #[test]
