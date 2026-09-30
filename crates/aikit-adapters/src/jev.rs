@@ -25,8 +25,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const POLL: Duration = Duration::from_millis(10);
-const HEADER_LIMIT: usize = 32 * 1024;
+pub(crate) const POLL: Duration = Duration::from_millis(10);
+pub(crate) const HEADER_LIMIT: usize = 32 * 1024;
 const CONTROLLED_KEY: &str = "aikit-controlled-protocol-only";
 
 #[derive(Clone, Default)]
@@ -223,7 +223,12 @@ impl CurlJevProvider {
                 Ok(http) => {
                     attempt.http_status = Some(http.status);
                     if http.status == 200 {
-                        JevResponse::parse_for(&http.body, request).and_then(|answer| {
+                        JevResponse::parse(&http.body).and_then(|answer| {
+                            // This transport speaks for the TypeSafe provider
+                            // (official, or its controlled stand-in), so the
+                            // hosted identity law applies here, at the
+                            // transport — not in the provider-neutral protocol.
+                            answer.validate_typesafe_for(request)?;
                             attempt.model_version = Some(answer.model.clone());
                             attempt.usage = Some(answer.usage.clone());
                             attempt.tariff_cost_microusd = Some(limits.tariff.cost_microusd(&answer.usage)?);
@@ -352,19 +357,19 @@ impl JevInvocation {
         self.failure = Some(failure(&e));
     }
 }
-fn failure(e: &AikitError) -> JevFailure {
+pub(crate) fn failure(e: &AikitError) -> JevFailure {
     JevFailure {
         code: e.code().into(),
         message: e.message().into(),
     }
 }
-fn error(code: &'static str, message: impl Into<String>) -> AikitError {
+pub(crate) fn error(code: &'static str, message: impl Into<String>) -> AikitError {
     AikitError::new(code, message)
 }
-fn millis(duration: Duration) -> u64 {
+pub(crate) fn millis(duration: Duration) -> u64 {
     duration.as_millis().min(u64::MAX as u128) as u64
 }
-fn quote(s: &str) -> String {
+pub(crate) fn quote(s: &str) -> String {
     let mut out = String::from("\"");
     for c in s.chars() {
         match c {
@@ -379,7 +384,7 @@ fn quote(s: &str) -> String {
     out.push('"');
     out
 }
-fn boundary(cancel: &JevCancellation, deadline: Instant) -> Result<()> {
+pub(crate) fn boundary(cancel: &JevCancellation, deadline: Instant) -> Result<()> {
     if cancel.is_cancelled() {
         return Err(error(
             "jev.cancelled",
@@ -394,7 +399,7 @@ fn boundary(cancel: &JevCancellation, deadline: Instant) -> Result<()> {
     }
     Ok(())
 }
-fn pause(delay: Duration, cancel: &JevCancellation, deadline: Instant) -> Result<()> {
+pub(crate) fn pause(delay: Duration, cancel: &JevCancellation, deadline: Instant) -> Result<()> {
     let until = Instant::now()
         .checked_add(delay)
         .unwrap_or(deadline)
@@ -405,7 +410,7 @@ fn pause(delay: Duration, cancel: &JevCancellation, deadline: Instant) -> Result
     }
     boundary(cancel, deadline)
 }
-fn read_bounded(
+pub(crate) fn read_bounded(
     mut pipe: impl Read,
     limit: usize,
     overflow: Arc<AtomicBool>,
@@ -430,7 +435,7 @@ fn read_bounded(
     }
     Ok(data)
 }
-fn bounded_process(
+pub(crate) fn bounded_process(
     mut command: Command,
     config: Vec<u8>,
     cancel: &JevCancellation,
@@ -511,17 +516,17 @@ fn bounded_process(
         )
     })
 }
-enum RetryAfter {
+pub(crate) enum RetryAfter {
     Absent,
     Seconds(u64),
     Invalid,
 }
-struct HttpResponse {
-    status: u16,
-    retry_after: RetryAfter,
-    body: Vec<u8>,
+pub(crate) struct HttpResponse {
+    pub(crate) status: u16,
+    pub(crate) retry_after: RetryAfter,
+    pub(crate) body: Vec<u8>,
 }
-fn parse_http(mut bytes: &[u8]) -> Result<HttpResponse> {
+pub(crate) fn parse_http(mut bytes: &[u8]) -> Result<HttpResponse> {
     let invalid = || {
         error(
             "jev.invalid_http",

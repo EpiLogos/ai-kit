@@ -7,6 +7,10 @@
 //! with no flags brings up that endpoint; queries find it flagless; doctor
 //! accounts for it in every state; a shutdown stops it and persists state.
 
+#[path = "support/serve_guard.rs"]
+mod serve_guard;
+use serve_guard::ServeGuard;
+
 use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
@@ -84,15 +88,17 @@ fn a_bare_query_without_a_gateway_fails_honestly_and_names_the_start_command() {
 #[test]
 fn flagless_serve_binds_the_well_known_endpoint_and_queries_find_it() {
     let home = TempDir::new().unwrap();
-    let mut serve = Command::new(bin())
-        .args(["gateway", "serve"])
-        .env("AIKIT_HOME", home.path())
-        .env("HOME", home.path())
-        .current_dir(home.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("aikit gateway serve should spawn");
+    let mut serve = ServeGuard::new(
+        Command::new(bin())
+            .args(["gateway", "serve"])
+            .env("AIKIT_HOME", home.path())
+            .env("HOME", home.path())
+            .current_dir(home.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("aikit gateway serve should spawn"),
+    );
     wait_for_socket(home.path());
 
     let (ok, protocol, _) = run(home.path(), &["gateway", "protocol"]);
@@ -174,15 +180,17 @@ fn restart_restores_semantic_state_from_the_default_location() {
     )
     .unwrap();
 
-    let mut serve = Command::new(bin())
-        .args(["gateway", "serve"])
-        .env("AIKIT_HOME", home.path())
-        .env("HOME", home.path())
-        .current_dir(home.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut serve = ServeGuard::new(
+        Command::new(bin())
+            .args(["gateway", "serve"])
+            .env("AIKIT_HOME", home.path())
+            .env("HOME", home.path())
+            .current_dir(home.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     wait_for_socket(home.path());
     let (ok, status, _) = run(home.path(), &["gateway", "status"]);
     assert!(ok, "{status}");
@@ -385,24 +393,26 @@ fn serve_with_a_token_location_answers_on_the_websocket_and_the_home_socket_toge
     let home = TempDir::new().unwrap();
     let token = token_file(home.path(), 0o600);
     let bind = free_bind();
-    let child = Command::new(bin())
-        .args([
-            "gateway",
-            "serve",
-            "--ws",
-            &bind,
-            "--ws-token-location",
-            &format!("file:{}", token.display()),
-            "--unix",
-        ])
-        .env("AIKIT_HOME", home.path())
-        .env("HOME", home.path())
-        .env_remove("AIKIT_GATEWAY_TOKEN")
-        .current_dir(home.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let child = ServeGuard::new(
+        Command::new(bin())
+            .args([
+                "gateway",
+                "serve",
+                "--ws",
+                &bind,
+                "--ws-token-location",
+                &format!("file:{}", token.display()),
+                "--unix",
+            ])
+            .env("AIKIT_HOME", home.path())
+            .env("HOME", home.path())
+            .env_remove("AIKIT_GATEWAY_TOKEN")
+            .current_dir(home.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
     wait_for_socket(home.path());
 
     // The home socket: local verbs keep working while the WebSocket is served.
