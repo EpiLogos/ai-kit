@@ -596,6 +596,13 @@ fn write_line_to(stdin: &mut ChildStdin, line: &str, argv: &[String]) -> Result<
     })
 }
 
+/// How long a group refused with EPERM is given for its mid-exit leader to
+/// become waitable. The transition was measured at up to ~10ms on a heavily
+/// loaded Mac; this bound only caps the wait for a leader that is not
+/// actually exiting.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const LEADER_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Retains an exited group leader until the group has been terminated. Keeping
 /// it unreaped reserves its PID/PGID, so a later Drop cannot signal a reused ID.
 struct OwnedChild {
@@ -634,6 +641,24 @@ impl OwnedChild {
         }
     }
 
+    /// Observe the leader until its exit is waitable or `grace` elapses.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn await_leader_exit(
+        &mut self,
+        grace: std::time::Duration,
+    ) -> std::io::Result<Option<ExitStatus>> {
+        let deadline = std::time::Instant::now() + grace;
+        loop {
+            if let Some(status) = self.poll_exit()? {
+                return Ok(Some(status));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn pid(&self) -> rustix::process::Pid {
         rustix::process::Pid::from_raw(self.child.id() as i32).expect("OS child PID is positive")
@@ -658,9 +683,15 @@ impl OwnedChild {
                 Err(rustix::io::Errno::PERM) if leader_exit_observed.is_some() => {}
                 // The leader can exit between the observation above and the
                 // signal: the group then refuses with EPERM although nothing
-                // signalable remains. Observe again before calling it a
-                // failure (a child that exits on its own raced exactly here).
-                Err(rustix::io::Errno::PERM) if self.poll_exit()?.is_some() => {}
+                // signalable remains. A leader that is still *mid-exit* is
+                // refused the same way: its descriptors are already closed (so
+                // a reader has seen EOF) but the kernel has not yet made it a
+                // waitable zombie, so an immediate re-observation still sees
+                // it running. Give that transition a bounded moment to become
+                // observable before calling the teardown a failure; a leader
+                // that never finishes exiting is still reported.
+                Err(rustix::io::Errno::PERM)
+                    if self.await_leader_exit(LEADER_EXIT_GRACE)?.is_some() => {}
                 Err(error) => return Err(error.into()),
             }
         }
@@ -733,6 +764,26 @@ mod tests {
         // Drop terminates the exited child; a reaped group leader may refuse
         // an explicit signal in restricted environments, so no unwrap here.
         drop(control);
+    }
+
+    /// A target that exits on its own closes stdout before the kernel makes
+    /// it a waitable zombie; in that window macOS refuses the group signal
+    /// with EPERM. Teardown right after the reader sees EOF — exactly what a
+    /// host does when a harness dies mid-request — must confirm, not report
+    /// an uncertain cleanup. The window is narrow, so the race is repeated.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn teardown_right_after_a_self_exit_eof_is_confirmed() {
+        let argv = vec!["sh".into(), "-c".into(), "exit 0".into()];
+        for attempt in 0..200 {
+            let (writer, mut reader, control) =
+                ConnectionProcess::spawn_split_with_environment(&argv, None, None).unwrap();
+            assert!(reader.read_line().is_err(), "the target wrote nothing");
+            if let Err(failure) = control.terminate() {
+                panic!("attempt {attempt}: teardown of a self-exited target failed: {failure}");
+            }
+            drop(writer);
+        }
     }
 
     #[test]
