@@ -32,6 +32,10 @@ pub struct NewConversationRecipient {
     pub delivery_ref: ResourceRef,
     #[serde(default)]
     pub agent_ref: Option<String>,
+    /// Where this recipient's session lives when it is not on this owner:
+    /// `{kind:"ssh", target, cwd?, aikit?, workcell}`. Absent = this owner.
+    #[serde(default)]
+    pub route: Option<Value>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReplyReading {
@@ -50,6 +54,8 @@ pub struct ConversationRecipientReading {
     pub agent_session: ResourceRef,
     pub delivery_ref: ResourceRef,
     pub agent_ref: Option<String>,
+    /// The remote route this recipient is reached by, if not local.
+    pub route: Option<Value>,
     /// unsent | sent | held | refused
     pub dispatch: String,
     pub dispatch_detail: Option<String>,
@@ -74,6 +80,12 @@ pub struct ConversationReading {
 /// Work the owner's worker can do now, derived from durable state alone.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConversationWork {
+    /// A remote recipient was asked; its own owner's delivery and reply are
+    /// read until the turn ends, then snapshotted here before any inclusion.
+    Poll {
+        request: ResourceRef,
+        participant: String,
+    },
     /// Recipient never reached the dispatch boundary (or was held busy).
     Dispatch {
         request: ResourceRef,
@@ -95,11 +107,19 @@ pub(super) fn install(connection: &Connection) -> Result<()> {
             request TEXT NOT NULL, participant TEXT NOT NULL, session TEXT NOT NULL, delivery TEXT NOT NULL, agent TEXT,
             dispatch TEXT NOT NULL DEFAULT 'unsent', dispatch_detail TEXT,
             inclusion TEXT NOT NULL DEFAULT 'pending', inclusion_detail TEXT, entry_id TEXT, revision TEXT,
-            attempts INTEGER NOT NULL DEFAULT 0,
+            attempts INTEGER NOT NULL DEFAULT 0, route TEXT, remote TEXT,
             PRIMARY KEY(request,participant));
             CREATE INDEX IF NOT EXISTS conversation_recipient_delivery ON conversation_recipients(session,delivery);",
         )
-        .map_err(failure)
+        .map_err(failure)?;
+    // Homes that recorded requests before remote routes existed gain the columns.
+    for column in ["route TEXT", "remote TEXT"] {
+        let _ = connection.execute(
+            &format!("ALTER TABLE conversation_recipients ADD COLUMN {column}"),
+            [],
+        );
+    }
+    Ok(())
 }
 
 fn now_ms() -> u64 {
@@ -222,7 +242,7 @@ fn read_request(
     };
     let mut query = connection
         .prepare(
-            "SELECT participant,session,delivery,agent,dispatch,dispatch_detail,inclusion,inclusion_detail,entry_id,revision,attempts
+            "SELECT participant,session,delivery,agent,dispatch,dispatch_detail,inclusion,inclusion_detail,entry_id,revision,attempts,route,remote
              FROM conversation_recipients WHERE request=?1 ORDER BY rowid",
         )
         .map_err(failure)?;
@@ -240,6 +260,8 @@ fn read_request(
                 row.get::<_, Option<String>>(8)?,
                 row.get::<_, Option<String>>(9)?,
                 row.get::<_, u32>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
             ))
         })
         .map_err(failure)?
@@ -258,20 +280,48 @@ fn read_request(
         entry_id,
         revision,
         attempts,
+        route,
+        remote,
     ) in rows
     {
         let session = ResourceRef::parse(session)?;
         let delivery = ResourceRef::parse(delivery)?;
-        let held = delivery_of(connection, &session, &delivery)?;
-        let reply = match &held {
-            Some(d) => reduce_reply(connection, d)?,
-            None => None,
+        let route: Option<Value> = route
+            .map(|r| serde_json::from_str(&r))
+            .transpose()
+            .map_err(failure)?;
+        let remote: Option<Value> = remote
+            .map(|r| serde_json::from_str(&r))
+            .transpose()
+            .map_err(failure)?;
+        // A local recipient's delivery and reply are this owner's journal; a
+        // remote recipient's are its own owner's, known here by the durable
+        // snapshot this owner took of them.
+        let (held, reply) = if route.is_some() {
+            let delivery_row = remote
+                .as_ref()
+                .and_then(|r| r.get("delivery"))
+                .and_then(|d| serde_json::from_value::<EncounterDelivery>(d.clone()).ok());
+            let reply = remote
+                .as_ref()
+                .and_then(|r| r.get("reply"))
+                .filter(|r| !r.is_null())
+                .and_then(|r| serde_json::from_value::<ReplyReading>(r.clone()).ok());
+            (delivery_row, reply)
+        } else {
+            let held = delivery_of(connection, &session, &delivery)?;
+            let reply = match &held {
+                Some(d) => reduce_reply(connection, d)?,
+                None => None,
+            };
+            (held, reply)
         };
         recipients.push(ConversationRecipientReading {
             participant_key: participant,
             agent_session: session,
             delivery_ref: delivery,
             agent_ref: agent,
+            route,
             dispatch,
             dispatch_detail,
             delivery: held,
@@ -350,13 +400,14 @@ impl EncounterStore {
                 .map_err(failure)?;
                 for recipient in recipients {
                     tx.execute(
-                        "INSERT INTO conversation_recipients(request,participant,session,delivery,agent) VALUES(?1,?2,?3,?4,?5)",
+                        "INSERT INTO conversation_recipients(request,participant,session,delivery,agent,route) VALUES(?1,?2,?3,?4,?5,?6)",
                         params![
                             request.as_str(),
                             recipient.participant_key,
                             recipient.agent_session.as_str(),
                             recipient.delivery_ref.as_str(),
-                            recipient.agent_ref
+                            recipient.agent_ref,
+                            recipient.route.as_ref().map(|r| r.to_string())
                         ],
                     )
                     .map_err(failure)?;
@@ -491,23 +542,46 @@ impl EncounterStore {
             .map_err(failure)?;
         Ok(())
     }
+    /// Record the durable snapshot of a remote recipient's delivery and reply,
+    /// taken from its own owner. Once the turn ended the snapshot is final:
+    /// inclusion works from it, never from a second read of the remote.
+    pub fn conversation_record_remote(
+        &self,
+        request: &ResourceRef,
+        participant: &str,
+        remote: &Value,
+    ) -> Result<()> {
+        let connection = self.connection.lock().map_err(failure)?;
+        connection
+            .execute(
+                "UPDATE conversation_recipients SET remote=?3 WHERE request=?1 AND participant=?2 AND route IS NOT NULL
+                   AND (remote IS NULL OR json_extract(remote,'$.delivery.phase') NOT IN ('returned','failed','cancelled','reconciled-no-replay'))",
+                params![request.as_str(), participant, remote.to_string()],
+            )
+            .map_err(failure)?;
+        Ok(())
+    }
     /// What the owner's worker should do now, from durable state only.
     pub fn conversation_work(&self, limit: usize) -> Result<Vec<ConversationWork>> {
         let connection = self.connection.lock().map_err(failure)?;
         let mut query = connection
             .prepare(
                 "SELECT r.request, r.participant,
-                   CASE WHEN r.dispatch IN ('unsent','held') THEN 'dispatch'
-                        WHEN r.inclusion IN ('pending','failed','conflict') AND d.phase='returned' THEN 'incorporate' END AS work
+                   CASE
+                     WHEN r.dispatch IN ('unsent','held') THEN 'dispatch'
+                     WHEN r.route IS NULL AND r.inclusion IN ('pending','failed','conflict') AND d.phase='returned' THEN 'incorporate'
+                     WHEN r.route IS NOT NULL AND r.dispatch='sent' AND r.inclusion IN ('pending','failed','conflict')
+                          AND json_extract(r.remote,'$.delivery.phase')='returned' THEN 'incorporate'
+                     WHEN r.route IS NOT NULL AND r.dispatch='sent' AND r.inclusion IN ('pending','failed','conflict')
+                          AND (r.remote IS NULL OR json_extract(r.remote,'$.delivery.phase') NOT IN ('returned','failed','cancelled','reconciled-no-replay')) THEN 'poll'
+                   END AS work
                  FROM conversation_recipients r
-                 LEFT JOIN encounter_deliveries d ON d.session=r.session AND d.delivery=r.delivery
-                 WHERE (r.dispatch IN ('unsent','held'))
-                    OR (r.dispatch='sent' AND r.inclusion IN ('pending','failed','conflict') AND d.phase='returned')
-                 ORDER BY r.rowid LIMIT ?1",
+                 LEFT JOIN encounter_deliveries d ON d.session=r.session AND d.delivery=r.delivery AND r.route IS NULL
+                 ORDER BY r.rowid",
             )
             .map_err(failure)?;
         let rows = query
-            .query_map([limit as i64], |row| {
+            .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -529,9 +603,14 @@ impl EncounterStore {
                         request,
                         participant,
                     }),
+                    Some("poll") => Some(ConversationWork::Poll {
+                        request,
+                        participant,
+                    }),
                     _ => None,
                 }
             })
+            .take(limit)
             .map(Ok)
             .collect()
     }
@@ -584,6 +663,7 @@ mod tests {
             agent_session: r(session),
             delivery_ref: r(delivery),
             agent_ref: Some(format!("agent/{key}")),
+            route: None,
         }
     }
 

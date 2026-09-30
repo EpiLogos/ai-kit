@@ -59,6 +59,15 @@ pub struct ConversationEntry {
 pub struct ConversationRecipientSpec {
     pub participant_key: String,
     pub agent_session: ResourceRef,
+    /// A session held by another Workcell's owner: `{kind:"ssh", target, cwd?,
+    /// aikit?, workcell}`. The session, its admission, its delivery and its
+    /// reply stay with that owner; this owner records the request, asks, reads
+    /// the reply back and includes it in the Flow it holds. Absent = this owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<Value>,
+    /// The enduring agent, when it cannot be read from a local binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_ref: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -113,6 +122,140 @@ fn clip(text: &str, chars: usize) -> String {
     let cut: String = text.chars().take(chars).collect();
     format!("{cut}… [entry continues in the Flow]")
 }
+/// Marks a remote owner that could not be reached (as opposed to one that refused).
+const ROUTE_UNAVAILABLE: &str = "conversation.route_unavailable";
+
+/// One encounter request to an owner on another Workcell, over its declared
+/// route. `Err` carries the owner's own refusal code and message, or
+/// `conversation.route_unavailable` when the owner could not be reached at all.
+fn remote_encounter(
+    route: &Value,
+    request: &Value,
+) -> std::result::Result<Value, (String, String)> {
+    let unavailable = |why: String| (ROUTE_UNAVAILABLE.to_owned(), why);
+    let kind = route["kind"].as_str().unwrap_or_default();
+    if !matches!(kind, "ssh" | "exec") {
+        return Err(("conversation.route".into(), "unsupported route kind".into()));
+    }
+    if kind == "exec" {
+        // An independently owned world on this host: its own AIKit home and
+        // Central root, reached by running its owner's client with that
+        // environment. The transport is local; the ownership is not shared.
+        let aikit = route["aikit"]
+            .as_str()
+            .ok_or_else(|| unavailable("route has no aikit".into()))?;
+        let cwd = route["cwd"]
+            .as_str()
+            .ok_or_else(|| unavailable("route has no cwd".into()))?;
+        let mut command = std::process::Command::new(aikit);
+        command.args([
+            "session-space",
+            "-C",
+            cwd,
+            "encounter",
+            "--request-json",
+            &request.to_string(),
+        ]);
+        command.env_remove("CENTRAL_NATIVE_TOKEN");
+        if let Some(vars) = route["env"].as_object() {
+            for (name, value) in vars {
+                if let Some(value) = value.as_str() {
+                    command.env(name, value);
+                }
+            }
+        }
+        let output = command
+            .output()
+            .map_err(|e| unavailable(format!("owner client unavailable: {e}")))?;
+        let value: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+            unavailable(format!(
+                "no JSON answer: {}",
+                String::from_utf8_lossy(&output.stderr)
+                    .lines()
+                    .last()
+                    .unwrap_or("")
+                    .chars()
+                    .take(200)
+                    .collect::<String>()
+            ))
+        })?;
+        return if value["ok"] == true {
+            Ok(value["data"].clone())
+        } else {
+            Err((
+                value["error"]["code"]
+                    .as_str()
+                    .unwrap_or("conversation.remote_refused")
+                    .to_owned(),
+                value["error"]["message"]
+                    .as_str()
+                    .unwrap_or("the other owner refused")
+                    .to_owned(),
+            ))
+        };
+    }
+    let target = route["target"]
+        .as_str()
+        .ok_or_else(|| unavailable("route has no target".into()))?;
+    let cwd = route["cwd"].as_str().unwrap_or("~");
+    let aikit = route["aikit"].as_str().unwrap_or("aikit");
+    let quoted = format!("'{}'", request.to_string().replace('\'', "'\\''"));
+    // The remote owner's own environment (its AIKIT_HOME, Central root…) travels
+    // in the route's declaration, never in the request.
+    let env_prefix: String = route["env"]
+        .as_object()
+        .map(|vars| {
+            vars.iter()
+                .filter(|(name, _)| name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+                .filter_map(|(name, value)| {
+                    value
+                        .as_str()
+                        .map(|v| format!("{name}='{}' ", v.replace('\'', "'\\''")))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let command =
+        format!("env {env_prefix}{aikit} session-space -C {cwd} encounter --request-json {quoted}");
+    let output = std::process::Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            target,
+            &command,
+        ])
+        .output()
+        .map_err(|e| unavailable(format!("ssh unavailable: {e}")))?;
+    let value: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+        unavailable(format!(
+            "no JSON answer from {target}: {}",
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .last()
+                .unwrap_or("")
+                .chars()
+                .take(200)
+                .collect::<String>()
+        ))
+    })?;
+    if value["ok"] == true {
+        Ok(value["data"].clone())
+    } else {
+        Err((
+            value["error"]["code"]
+                .as_str()
+                .unwrap_or("conversation.remote_refused")
+                .to_owned(),
+            value["error"]["message"]
+                .as_str()
+                .unwrap_or("the remote owner refused")
+                .to_owned(),
+        ))
+    }
+}
+
 fn sweep_guard() -> &'static Mutex<()> {
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
     GUARD.get_or_init(|| Mutex::new(()))
@@ -181,20 +324,44 @@ impl EncounterService {
         let request_digest = digest(&json!({
             "flow": request.flow_location.get("ref"), "sender": request.sender,
             "entry": request.entry,
-            "recipients": request.recipients.iter().map(|r| json!([r.participant_key, r.agent_session])).collect::<Vec<_>>(),
+            "recipients": request.recipients.iter().map(|r| json!([r.participant_key, r.agent_session, r.route])).collect::<Vec<_>>(),
         }));
         let mut recipients = Vec::new();
         for spec in &request.recipients {
-            let agent_ref = self
-                .check_agency(&spec.agent_session)
-                .ok()
-                .flatten()
-                .map(|(binding, _)| binding.agent_ref.as_str().to_owned());
+            if let Some(route) = &spec.route {
+                let ssh = route["kind"] == "ssh"
+                    && route["target"]
+                        .as_str()
+                        .is_some_and(|t| !t.trim().is_empty() && !t.starts_with('-'));
+                let exec = route["kind"] == "exec"
+                    && route["aikit"].as_str().is_some_and(|a| a.starts_with('/'))
+                    && route["cwd"].as_str().is_some_and(|c| c.starts_with('/'));
+                let usable = (ssh || exec)
+                    && route["workcell"]
+                        .as_str()
+                        .is_some_and(|w| w.starts_with("workcell:"));
+                if !usable {
+                    return Err(AikitError::new(
+                        "conversation.route",
+                        "A remote recipient's route needs kind `ssh` (a target) or `exec` (an absolute client path and cwd), and the Workcell that holds the session",
+                    ));
+                }
+            }
+            let agent_ref = spec.agent_ref.clone().or_else(|| {
+                if spec.route.is_some() {
+                    return None;
+                }
+                self.check_agency(&spec.agent_session)
+                    .ok()
+                    .flatten()
+                    .map(|(binding, _)| binding.agent_ref.as_str().to_owned())
+            });
             recipients.push(NewConversationRecipient {
                 participant_key: spec.participant_key.clone(),
                 agent_session: spec.agent_session.clone(),
                 delivery_ref: delivery_for(&request.request_ref, &spec.participant_key)?,
                 agent_ref,
+                route: spec.route.clone(),
             });
         }
         let body = json!({
@@ -361,6 +528,110 @@ impl EncounterService {
         Ok(text)
     }
 
+    /// Ask a recipient whose session is held by another Workcell's owner. The
+    /// remote owner does its own admission (binding, allowed sender, permitted
+    /// source) exactly as for a local send; this owner only carries the request.
+    fn conversation_dispatch_remote(
+        &self,
+        reading: &ConversationReading,
+        recipient: &ConversationRecipientReading,
+    ) {
+        let request = &reading.request_ref;
+        let set = |standing: &str, detail: Option<&str>| {
+            let _ = self.store.conversation_set_dispatch(
+                request,
+                &recipient.participant_key,
+                standing,
+                detail,
+            );
+        };
+        let route = recipient
+            .route
+            .as_ref()
+            .expect("remote recipient has a route");
+        let text = match self.conversation_packet_text(reading, recipient) {
+            Ok(text) => text,
+            Err(reason) if reason.contains("not readable") => return set("refused", Some(&reason)),
+            Err(reason) => return set("held", Some(&reason)),
+        };
+        let binding = match remote_encounter(
+            route,
+            &json!({"action": "agency-read", "agent_session": recipient.agent_session}),
+        ) {
+            Ok(binding) => binding,
+            Err((code, message)) if code == ROUTE_UNAVAILABLE => {
+                return set("held", Some(&message))
+            }
+            Err((code, message)) => return set("refused", Some(&format!("{code}: {message}"))),
+        };
+        let turn = json!({
+            "action": "send", "agent_session": recipient.agent_session,
+            "turn": {
+                "delivery_ref": recipient.delivery_ref, "sender": reading.body["sender"],
+                "expected_binding_revision": binding["revision"],
+                "packet": {
+                    "text": text,
+                    "source_refs": [reading.body["flow"]["location"]["ref"]],
+                    "audience": [binding["agent_ref"]],
+                },
+            },
+        });
+        match remote_encounter(route, &turn) {
+            Ok(result) => set(
+                "sent",
+                result
+                    .get("queued")
+                    .and_then(Value::as_bool)
+                    .filter(|q| *q)
+                    .map(|_| "queued"),
+            ),
+            Err((code, message))
+                if code == "encounter.delivery_pending" || code == ROUTE_UNAVAILABLE =>
+            {
+                set("held", Some(&format!("{code}: {message}")))
+            }
+            Err((code, message)) => set("refused", Some(&format!("{code}: {message}"))),
+        }
+    }
+
+    /// Read a remote recipient's delivery and reply from its own owner and
+    /// keep a durable snapshot. Once its turn has ended the snapshot is final and
+    /// inclusion works from it; a remote that is briefly unreachable is simply
+    /// read again on the next sweep.
+    fn conversation_poll_remote(&self, request: &ResourceRef, participant: &str) -> Result<()> {
+        let Some(reading) = self.store.conversation(request)? else {
+            return Ok(());
+        };
+        let Some(recipient) = reading
+            .recipients
+            .iter()
+            .find(|r| r.participant_key == participant)
+        else {
+            return Ok(());
+        };
+        let Some(route) = recipient.route.as_ref() else {
+            return Ok(());
+        };
+        let probe = json!({"agent_session": recipient.agent_session, "delivery_ref": recipient.delivery_ref});
+        let with_action = |action: &str| {
+            let mut value = probe.clone();
+            value["action"] = json!(action);
+            value
+        };
+        let Ok(delivery) = remote_encounter(route, &with_action("delivery")) else {
+            return Ok(());
+        };
+        if delivery.is_null() {
+            return Ok(());
+        }
+        let reply = remote_encounter(route, &with_action("delivery-reply")).unwrap_or(Value::Null);
+        self.store.conversation_record_remote(
+            request,
+            participant,
+            &json!({"delivery": delivery, "reply": reply, "polled_ms": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)}),
+        )
+    }
+
     fn conversation_dispatch(
         &self,
         reading: &ConversationReading,
@@ -375,6 +646,9 @@ impl EncounterService {
                 detail,
             );
         };
+        if recipient.route.is_some() {
+            return self.conversation_dispatch_remote(reading, recipient);
+        }
         let session = &recipient.agent_session;
         let binding = match self.check_agency(session) {
             Ok(Some((binding, _))) => binding,
@@ -503,7 +777,13 @@ impl EncounterService {
         if let Some(generation) = generation {
             input["generation"] = generation;
         }
-        if let Ok(workcell) = std::env::var("AIKIT_WORKCELL_REF") {
+        if let Some(workcell) = recipient
+            .route
+            .as_ref()
+            .and_then(|r| r["workcell"].as_str())
+        {
+            input["workcell"] = json!(workcell);
+        } else if let Ok(workcell) = std::env::var("AIKIT_WORKCELL_REF") {
             input["workcell"] = json!(workcell);
         }
         match Self::conversation_owners().run_ctrl_action("central.flow.append", &input) {
@@ -561,6 +841,12 @@ impl EncounterService {
             match item {
                 ConversationWork::Dispatch { request, .. } => {
                     let _ = self.conversation_step(&request);
+                }
+                ConversationWork::Poll {
+                    request,
+                    participant,
+                } => {
+                    let _ = self.conversation_poll_remote(&request, &participant);
                 }
                 ConversationWork::Incorporate {
                     request,
@@ -636,6 +922,7 @@ fn recipient_json(recipient: &ConversationRecipientReading) -> Value {
         "participant_key": recipient.participant_key,
         "agent_session": recipient.agent_session,
         "agent_ref": recipient.agent_ref,
+        "workcell": recipient.route.as_ref().and_then(|r| r["workcell"].as_str()),
         "delivery_ref": recipient.delivery_ref,
         "state": state,
         "dispatch": {"standing": recipient.dispatch, "detail": recipient.dispatch_detail},

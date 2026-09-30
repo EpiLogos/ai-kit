@@ -339,6 +339,17 @@ pub enum EncounterRequest {
         agent_session: ResourceRef,
         delivery_ref: ResourceRef,
     },
+    /// The reply one delivery produced, reduced from this owner's journal. A
+    /// conversation owner on another Workcell reads this over its route.
+    DeliveryReply {
+        agent_session: ResourceRef,
+        delivery_ref: ResourceRef,
+    },
+    /// The agent, Agency and current revision of a session's Agency binding: the
+    /// basis a remote sender composes its addressed turn against.
+    AgencyRead {
+        agent_session: ResourceRef,
+    },
     /// One authored Flow entry put to several recipients (O:I #558): records
     /// the request, commits the entry through Central, dispatches each
     /// recipient as its own addressed delivery, and — owner-side, with no UI
@@ -1990,7 +2001,9 @@ impl EncounterService {
             EncounterRequest::OpenModel { request } => self.open_model(*request),
             request @ (EncounterRequest::Send { .. }
             | EncounterRequest::SendGroup { .. }
-            | EncounterRequest::Delivery { .. }) => self.agency_request(request),
+            | EncounterRequest::Delivery { .. }
+            | EncounterRequest::DeliveryReply { .. }
+            | EncounterRequest::AgencyRead { .. }) => self.agency_request(request),
             request @ (EncounterRequest::ConversationSend { .. }
             | EncounterRequest::ConversationRead { .. }
             | EncounterRequest::ConversationList { .. }

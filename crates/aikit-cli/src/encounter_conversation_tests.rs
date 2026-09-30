@@ -147,6 +147,8 @@ impl Fixture {
                     .map(|(key, session)| ConversationRecipientSpec {
                         participant_key: (*key).into(),
                         agent_session: (*session).clone(),
+                        route: None,
+                        agent_ref: None,
                     })
                     .collect(),
             }),
@@ -553,6 +555,7 @@ fn a_crash_before_any_effect_or_between_the_entry_commit_and_its_record_is_finis
                     agent_session: ada.clone(),
                     delivery_ref: r("delivery/conv-crash1-ada"),
                     agent_ref: None,
+                    route: None,
                 }],
             )
             .unwrap();

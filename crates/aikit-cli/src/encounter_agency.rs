@@ -972,6 +972,27 @@ impl EncounterService {
                 self.require_attached(&agent_session)?;
                 Ok(json!(self.store.delivery(&agent_session, &delivery_ref)?))
             }
+            EncounterRequest::DeliveryReply {
+                agent_session,
+                delivery_ref,
+            } => {
+                self.require_attached(&agent_session)?;
+                Ok(json!(self
+                    .store
+                    .delivery_reply(&agent_session, &delivery_ref)?))
+            }
+            EncounterRequest::AgencyRead { agent_session } => {
+                self.require_attached(&agent_session)?;
+                let (binding, _) = self.check_agency(&agent_session)?.ok_or_else(|| {
+                    AikitError::new(
+                        "encounter.agency_required",
+                        "This session has no native Agency binding",
+                    )
+                })?;
+                Ok(
+                    json!({"agent_ref": binding.agent_ref, "agency_ref": binding.agency_ref, "revision": binding.revision}),
+                )
+            }
             _ => Err(error("Not an Agency delivery operation")),
         }
     }
