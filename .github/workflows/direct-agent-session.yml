@@ -17,11 +17,23 @@ jobs:
   native-quality:
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    env:
+      # The full-workspace regression and lint builds exhausted the runner's
+      # disk (0 MB free, ld SIGBUS) on #445/#392. Tests are unchanged; only
+      # debuginfo goes. Same remedy as native-protocol (#468).
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Free runner disk the job never uses
+        shell: bash
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
       - run: rustup component add rustfmt clippy
       - uses: Swatinem/rust-cache@v2
