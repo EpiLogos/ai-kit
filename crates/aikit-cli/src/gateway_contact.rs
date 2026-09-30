@@ -73,6 +73,9 @@ use crate::gateway_owners::{
 };
 use crate::secret_location::SecretLocation;
 
+#[path = "gateway_owner_address.rs"]
+pub mod owner_address;
+
 pub const POPULATION_READING_SCHEMA: &str = "aikit.population-reading/v1";
 pub const GATEWAY_REMOTES_SCHEMA: &str = "aikit.gateway-remotes/v1";
 
@@ -1152,6 +1155,8 @@ pub struct SendRequest<'a> {
     pub instance: Option<&'a str>,
     /// With `instance`: the Workcell that generation must stand on.
     pub require_workcell: Option<&'a str>,
+    /// What is asked when the recipient is the owner (`@owner`).
+    pub owner: owner_address::OwnerAsk,
 }
 
 /// The Workcell a tenure names, when it names one.
@@ -1561,6 +1566,11 @@ pub fn send(
             nothing_sent(),
             "Pass the words with --body TEXT or --body-file PATH.",
         ));
+    }
+    // The person occupies no Position: addressing them is a request in
+    // Central's receiving ledger, which their Inbox reads.
+    if owner_address::is_owner_address(request.to) {
+        return owner_address::send_to_owner(owners, &request);
     }
     if request.require_workcell.is_some() && request.instance.is_none() {
         return Err(three_part(
@@ -3469,7 +3479,15 @@ impl CommuniqueRelayTick {
             gateway_ref: String::new(),
         };
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        forward_pass(&self.home, &owners, &gateway, &cwd)
+        let mut report = forward_pass(&self.home, &owners, &gateway, &cwd)?;
+        // The person's decisions travel back on the same tick; a failing
+        // reply pass is reported, never allowed to stop the relay.
+        report["owner_replies"] =
+            match owner_address::owner_reply_pass(&self.home, &owners, &gateway, &cwd) {
+                Ok(replies) => replies["owner_replies"].clone(),
+                Err(error) => json!({ "error": error.to_string() }),
+            };
+        Ok(report)
     }
 }
 

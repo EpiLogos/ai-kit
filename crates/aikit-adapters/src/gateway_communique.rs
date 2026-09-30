@@ -75,6 +75,10 @@ pub enum SenderAttribution {
     Claimed,
     /// No Position could be resolved for the sender.
     Unknown,
+    /// The person themself: a decision recorded by Central receiving under
+    /// their authenticated human review, carried back to the asking Position.
+    /// It names no Position or generation — the owner occupies none.
+    Owner,
 }
 
 impl SenderAttribution {
@@ -83,6 +87,7 @@ impl SenderAttribution {
             Self::Verified => "verified",
             Self::Claimed => "claimed",
             Self::Unknown => "unknown",
+            Self::Owner => "owner",
         }
     }
 }
@@ -269,6 +274,7 @@ impl Communique {
     /// The sender identity as it is attributed — never taken from the body.
     pub fn sender_label(&self) -> String {
         match (self.attribution, self.from_position_ref.as_deref()) {
+            (SenderAttribution::Owner, _) => "the owner (decision recorded in Central)".into(),
             (SenderAttribution::Unknown, _) | (_, None) => "<unknown sender>".into(),
             (SenderAttribution::Verified, Some(position)) => position.to_owned(),
             (SenderAttribution::Claimed, Some(position)) => {
@@ -367,7 +373,9 @@ fn check_attribution(
     let consistent = match attribution {
         SenderAttribution::Verified => from_position.is_some() && from_generation.is_some(),
         SenderAttribution::Claimed => from_position.is_some(),
-        SenderAttribution::Unknown => from_position.is_none() && from_generation.is_none(),
+        SenderAttribution::Unknown | SenderAttribution::Owner => {
+            from_position.is_none() && from_generation.is_none()
+        }
     };
     if !consistent {
         return Err(invalid(
