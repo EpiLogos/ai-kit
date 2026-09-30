@@ -20,7 +20,7 @@ use aikit_core::hooks::{HookDecision, HookEvent, HookEventKind};
 pub fn event_needs_reground(kind: &HookEventKind) -> bool {
     matches!(
         kind,
-        HookEventKind::SessionStart | HookEventKind::UserPromptSubmit | HookEventKind::PreCompact
+        HookEventKind::SessionStart | HookEventKind::UserPromptSubmit
     )
 }
 
@@ -74,6 +74,12 @@ pub fn reground<R: CommandRunner>(
 /// ground at SessionStart and names where to read it on demand; an occupied
 /// body's prompt turns carry no floor (Refocus owns their re-orientation).
 /// Every other body re-grounds as before, prompt turns only on change.
+///
+/// Pre-compaction is not a delivery boundary: no harness adds that event's
+/// output to the model context. What compaction does is discard the ground the
+/// session already holds, so the session's floor record is cleared there and
+/// the first prompt after compaction re-grounds instead of being skipped as
+/// "unchanged".
 #[allow(clippy::too_many_arguments)]
 pub fn session_floor<R: CommandRunner>(
     decision: &mut HookDecision,
@@ -85,6 +91,14 @@ pub fn session_floor<R: CommandRunner>(
     occupied: bool,
     ledger: Option<&FloorLedger>,
 ) {
+    if event.kind == HookEventKind::PreCompact {
+        if let (Some(ledger), Some(session)) =
+            (ledger, crate::refocus::hook_session(&event.payload))
+        {
+            ledger.forget(&session);
+        }
+        return;
+    }
     match lean_entry {
         Some(entry) if event.kind == HookEventKind::SessionStart => {
             decision.injected.insert(0, entry.to_owned())
@@ -127,6 +141,12 @@ impl FloorLedger {
             let _ = std::fs::write(self.path(session), digest);
         }
     }
+
+    /// Drop what this session is recorded as holding (its context was
+    /// compacted away), so the next prompt turn carries the ground again.
+    pub fn forget(&self, session: &str) {
+        let _ = std::fs::remove_file(self.path(session));
+    }
 }
 
 /// Whether this process is a body stamped into a World Position occupancy
@@ -141,18 +161,18 @@ pub fn process_is_occupied() -> bool {
 /// its `Work` tree.
 pub fn process_central_root(project_root: Option<&Path>) -> Option<PathBuf> {
     let project_root = project_root?;
-    if let Some(root) = std::env::var_os("CENTRAL_ROOT").filter(|value| !value.is_empty()) {
-        let root = PathBuf::from(root);
-        if project_root.starts_with(root.join("Work")) {
-            return Some(root);
-        }
-        return None;
-    }
-    let home = std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))?;
-    let root = PathBuf::from(home).join("Central");
-    project_root.starts_with(root.join("Work")).then_some(root)
+    let root =
+        if let Some(root) = std::env::var_os("CENTRAL_ROOT").filter(|value| !value.is_empty()) {
+            PathBuf::from(root)
+        } else {
+            let home = std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))?;
+            PathBuf::from(home).join("Central")
+        };
+    // A Project at any depth beneath `Work`, or a workcell seat that is a
+    // linked checkout of one: both stand in this Central world.
+    aikit_adapters::central_temporal::project_ground_root(&root, project_root).map(|_| root)
 }
 
 /// The Central root enclosing `path`, when `path` is the root itself or
@@ -206,7 +226,7 @@ mod tests {
     fn only_causal_orientation_events_read_central() {
         assert!(event_needs_reground(&HookEventKind::SessionStart));
         assert!(event_needs_reground(&HookEventKind::UserPromptSubmit));
-        assert!(event_needs_reground(&HookEventKind::PreCompact));
+        assert!(!event_needs_reground(&HookEventKind::PreCompact));
         assert!(!event_needs_reground(&HookEventKind::PreToolUse));
         assert!(!event_needs_reground(&HookEventKind::PostToolUse));
     }
@@ -436,8 +456,8 @@ mod tests {
     fn central_failure_is_visible_but_never_becomes_hook_denial() {
         let runner =
             ScriptedRunner::new().failing("projectcentral.now.inspect", 9, "owner unavailable");
-        let event = HookEvent::new("codex", HookEventKind::PreCompact, json!({}));
-        let mut result = decision(HookEventKind::PreCompact);
+        let event = HookEvent::new("codex", HookEventKind::UserPromptSubmit, json!({}));
+        let mut result = decision(HookEventKind::UserPromptSubmit);
         reground(
             &mut result,
             &event,
@@ -452,5 +472,76 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("Central temporal")));
+    }
+
+    #[test]
+    fn compaction_clears_the_record_so_the_next_prompt_regrounds() {
+        let state = tempfile::tempdir().unwrap();
+        let ledger = FloorLedger::in_state(state.path());
+        let project = Path::new("/home/me/Central/Work/example");
+        let central = Path::new("/home/me/Central");
+        let payload = json!({"session_id": "s-compact"});
+        let prompt = HookEvent::new("codex", HookEventKind::UserPromptSubmit, payload.clone());
+        let mut first = decision(HookEventKind::UserPromptSubmit);
+        session_floor(
+            &mut first,
+            &prompt,
+            Some(project),
+            Some(central),
+            &handoff_runner(),
+            None,
+            false,
+            Some(&ledger),
+        );
+        assert!(
+            !first.injected.is_empty(),
+            "first prompt carries the ground"
+        );
+        let mut repeat = decision(HookEventKind::UserPromptSubmit);
+        session_floor(
+            &mut repeat,
+            &prompt,
+            Some(project),
+            Some(central),
+            &handoff_runner(),
+            None,
+            false,
+            Some(&ledger),
+        );
+        assert!(
+            repeat.injected.is_empty(),
+            "unchanged ground is not re-sent"
+        );
+        let compact = HookEvent::new("codex", HookEventKind::PreCompact, payload.clone());
+        let mut before = decision(HookEventKind::PreCompact);
+        session_floor(
+            &mut before,
+            &compact,
+            Some(project),
+            Some(central),
+            &handoff_runner(),
+            None,
+            false,
+            Some(&ledger),
+        );
+        assert!(
+            before.injected.is_empty(),
+            "pre-compaction delivers nothing"
+        );
+        let mut after = decision(HookEventKind::UserPromptSubmit);
+        session_floor(
+            &mut after,
+            &prompt,
+            Some(project),
+            Some(central),
+            &handoff_runner(),
+            None,
+            false,
+            Some(&ledger),
+        );
+        assert!(
+            !after.injected.is_empty(),
+            "the first prompt after compaction re-grounds the compacted session"
+        );
     }
 }

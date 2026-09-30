@@ -1,0 +1,5 @@
+#!/bin/sh
+# Composition handle only. The native AIKit hook engine prepares and delivers
+# the development entry through the existing injected-context channel; this
+# step runs nothing and can never gate a prompt.
+exit 0

@@ -2,12 +2,12 @@ schema = 1
 id = "hook/aikit/knowledge-route"
 kind = "hook"
 name = "Knowledge route steering"
-description = "Proactive knowledge routing for AIKit projects: on SessionStart and UserPromptSubmit, when the session stands inside an AIKit project, injects one short line directing the agent to run the native knowledge route (aikit knowledge search/resolve/open/read/route/explain/history, aikit wiki query) before raw find/grep/Read. The line rides the hook chain's inject phase — content goes through the capsule machinery, never hand-edited settings. Fail-open; composes only when enabled and trusted."
-tags = ["aikit", "knowledge", "steering", "sessionstart", "userpromptsubmit"]
+description = "Proactive knowledge routing for AIKit projects: at SessionStart (including the re-entry after compaction, resume or clear), when the session stands inside an AIKit project, injects one short line directing the agent to run the native knowledge route (aikit knowledge search/resolve/open/read/route/explain/history, aikit wiki query) before raw find/grep/Read. The line rides the hook chain's inject phase — content goes through the capsule machinery, never hand-edited settings. Fail-open; composes only when enabled and trusted."
+tags = ["aikit", "knowledge", "steering", "sessionstart"]
 
 [hook]
 entry = "payload/knowledge-route"
-events = ["SessionStart", "UserPromptSubmit"]
+events = ["SessionStart"]
 phase = "inject"
 timeout = "5s"
 failure = "open"

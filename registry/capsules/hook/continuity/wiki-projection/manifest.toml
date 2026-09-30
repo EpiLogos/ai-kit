@@ -7,3 +7,9 @@ tags = ["aikit", "continuity", "wiki", "feedback"]
 [hook]
 entry = "payload/wiki-projection"
 events = ["SessionStart", "UserPromptSubmit"]
+# The payload is a no-op handle: the native engine does the reading. It still
+# runs as a chain step, so it must never be able to gate a prompt — a missing
+# or unstartable payload is a recorded non-event, not a denial.
+phase = "inject"
+failure = "open"
+timeout = "5s"
