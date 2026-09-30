@@ -1939,6 +1939,7 @@ impl GatewayConversationEngine {
         let provenance = match communique.attribution {
             SenderAttribution::Verified => String::new(),
             SenderAttribution::Claimed => " (claimed, not verified)".into(),
+            SenderAttribution::Owner => " (the owner's recorded decision)".into(),
             SenderAttribution::Unknown => {
                 " (no occupancy on this gateway names this conversation; attributed \
                  <unknown sender>)"

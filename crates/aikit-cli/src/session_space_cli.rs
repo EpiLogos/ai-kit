@@ -197,6 +197,17 @@ enum Command {
         #[arg(long)]
         expected_revision: Option<String>,
     },
+    /// Admit one sender and one packet source (a Flow) to an existing native
+    /// Agency binding: the owner-side half of bringing an agent into a shared
+    /// Flow. Widens nothing else. Owner-only, not gateway/IPC input.
+    EncounterAgencyAdmit {
+        #[arg(long)]
+        agent_session: String,
+        #[arg(long)]
+        sender: String,
+        #[arg(long)]
+        source_ref: String,
+    },
     /// Mint a fresh per-project native Agency chain from the owner's standing
     /// template, actualise it through the real native owner, and provision this
     /// session's binding. Owner-only, like encounter-agency-configure.
@@ -651,6 +662,18 @@ fn run(cli: Cli) -> Result<()> {
                 &serde_json::json!({"configured":true,"standing":"native-owner-provisioning-not-default-selection"}),
             )
         }
+        Command::EncounterAgencyAdmit {
+            agent_session,
+            sender,
+            source_ref,
+        } => emit(
+            &crate::encounter_service::EncounterService::admit_agency_disclosure(
+                service.home(),
+                &aikit_core::ResourceRef::parse(agent_session)?,
+                &aikit_core::ResourceRef::parse(sender)?,
+                &aikit_core::ResourceRef::parse(source_ref)?,
+            )?,
+        ),
         Command::EncounterAgencyMint {
             agent_session,
             project_cwd,

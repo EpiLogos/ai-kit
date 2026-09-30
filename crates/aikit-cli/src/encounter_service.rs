@@ -39,6 +39,7 @@ pub use agency::speech::{
     configure as configure_local_speech, disclose as disclose_local_speech, LocalSpeechConfig,
 };
 pub use agency::{
+    conversation::{ConversationEntry, ConversationRecipientSpec, ConversationSendRequest},
     EncounterA2aFraming, EncounterAddressedTurn, EncounterAgencyBinding, EncounterContextPacket,
     EncounterGroupRecipient,
 };
@@ -345,6 +346,37 @@ pub enum EncounterRequest {
     Delivery {
         agent_session: ResourceRef,
         delivery_ref: ResourceRef,
+    },
+    /// The reply one delivery produced, reduced from this owner's journal. A
+    /// conversation owner on another Workcell reads this over its route.
+    DeliveryReply {
+        agent_session: ResourceRef,
+        delivery_ref: ResourceRef,
+    },
+    /// The agent, Agency and current revision of a session's Agency binding: the
+    /// basis a remote sender composes its addressed turn against.
+    AgencyRead {
+        agent_session: ResourceRef,
+    },
+    /// One authored Flow entry put to several recipients (O:I #558): records
+    /// the request, commits the entry through Central, dispatches each
+    /// recipient as its own addressed delivery, and — owner-side, with no UI
+    /// involved — appends each returned reply to the Flow under its author.
+    ConversationSend {
+        request: Box<ConversationSendRequest>,
+    },
+    /// Read one request: per-recipient standing, the reply so far, inclusion.
+    ConversationRead {
+        request_ref: ResourceRef,
+    },
+    /// Requests bound to one Flow source, newest first.
+    ConversationList {
+        flow_ref: String,
+    },
+    /// Bring one request forward now (entry, dispatch, inclusion). Never
+    /// replays an uncertain delivery.
+    ConversationReconcile {
+        request_ref: ResourceRef,
     },
     /// Resume the actually recorded native session; never silently create a new one.
     Reconnect {
@@ -2004,7 +2036,13 @@ impl EncounterService {
             EncounterRequest::OpenModel { request } => self.open_model(*request),
             request @ (EncounterRequest::Send { .. }
             | EncounterRequest::SendGroup { .. }
-            | EncounterRequest::Delivery { .. }) => self.agency_request(request),
+            | EncounterRequest::Delivery { .. }
+            | EncounterRequest::DeliveryReply { .. }
+            | EncounterRequest::AgencyRead { .. }) => self.agency_request(request),
+            request @ (EncounterRequest::ConversationSend { .. }
+            | EncounterRequest::ConversationRead { .. }
+            | EncounterRequest::ConversationList { .. }
+            | EncounterRequest::ConversationReconcile { .. }) => self.conversation_request(request),
             // Reconnect never reaches this match: apply() routes it through
             // reconnect_native before the read lease is taken, so the
             // lifecycle guard always holds for reconnects.
@@ -2461,6 +2499,7 @@ pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
     let listener = UnixListener::bind(socket).map_err(error)?;
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600)).map_err(error)?;
     let service = Arc::new(EncounterService::new(home)?);
+    agency::conversation::spawn_worker(&service);
     let clients = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     listener.set_nonblocking(true).map_err(error)?;
