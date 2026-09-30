@@ -614,6 +614,211 @@ impl EncounterStore {
             .map(Ok)
             .collect()
     }
+    /// The conversation recipient a local delivery belongs to, if it belongs to
+    /// one: the request and participant it was made for.
+    pub fn conversation_recipient_for_delivery(
+        &self,
+        session: &ResourceRef,
+        delivery: &ResourceRef,
+    ) -> Result<Option<(ResourceRef, String)>> {
+        let connection = self.connection.lock().map_err(failure)?;
+        let held: Option<(String, String)> = connection
+            .query_row(
+                "SELECT request,participant FROM conversation_recipients WHERE session=?1 AND delivery=?2 AND route IS NULL",
+                params![session.as_str(), delivery.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(failure)?;
+        held.map(|(request, participant)| Ok((ResourceRef::parse(request)?, participant)))
+            .transpose()
+    }
+    /// Sessions that hold a queued conversation delivery: a recipient asked while
+    /// its session was busy with a turn of its own (a composer turn, another
+    /// delivery) waits durably here for the turn boundary. The owner's worker
+    /// drains these when that turn ends; it does not wait for a session open.
+    pub fn conversation_queued_sessions(&self) -> Result<Vec<ResourceRef>> {
+        let connection = self.connection.lock().map_err(failure)?;
+        let mut query = connection
+            .prepare(
+                "SELECT DISTINCT d.session FROM encounter_deliveries d
+                 JOIN conversation_recipients r ON r.session=d.session AND r.delivery=d.delivery AND r.route IS NULL
+                 WHERE d.phase='queued' AND r.dispatch='sent' AND r.inclusion NOT IN ('included','refused') ORDER BY d.session",
+            )
+            .map_err(failure)?;
+        let rows = query
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(failure)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(failure)?;
+        rows.into_iter().map(ResourceRef::parse).collect()
+    }
+    /// A recipient that was asked (its delivery is waiting queued) is refused
+    /// before it runs: the standing is `refused`, with the reason. Only a
+    /// dispatch that has not started a turn can be refused this way.
+    pub fn conversation_refuse_queued(
+        &self,
+        request: &ResourceRef,
+        participant: &str,
+        detail: &str,
+    ) -> Result<()> {
+        let connection = self.connection.lock().map_err(failure)?;
+        connection
+            .execute(
+                "UPDATE conversation_recipients SET dispatch='refused',dispatch_detail=?3,inclusion='refused',inclusion_detail=?3
+                 WHERE request=?1 AND participant=?2 AND inclusion<>'included' AND dispatch IN ('sent','held','unsent')",
+                params![request.as_str(), participant, detail],
+            )
+            .map_err(failure)?;
+        Ok(())
+    }
+    /// Reconcile, at owner start, every local conversation delivery that was
+    /// sent (or was about to be) but whose provider turn has no live
+    /// continuation in this owner: the resident that carried it died with the
+    /// previous owner. The journal decides. If it holds the turn's terminal event
+    /// the delivery is finished from it (the reply is then included by the
+    /// ordinary worker). If it does not, the turn's outcome is unknown: the
+    /// delivery becomes `reconciled-no-replay` — read as `uncertain` — with the
+    /// exact source continuation named, which also releases the session's single
+    /// delivery slot. The turn is never dispatched again. `live` holds the
+    /// connection generations this owner actually carries.
+    pub fn conversation_reconcile_lost(
+        &self,
+        live: &std::collections::BTreeSet<String>,
+    ) -> Result<Vec<Value>> {
+        let mut connection = self.connection.lock().map_err(failure)?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        let candidates: Vec<(String, String, String, u64, Option<String>)> = {
+            let mut query = tx
+                .prepare(
+                    "SELECT d.session,d.delivery,d.phase,d.first_cursor,json_extract(d.request,'$.connection_generation')
+                     FROM encounter_deliveries d
+                     JOIN conversation_recipients r ON r.session=d.session AND r.delivery=d.delivery AND r.route IS NULL
+                     WHERE d.phase IN ('dispatching','submitted','uncertain') ORDER BY d.first_cursor",
+                )
+                .map_err(failure)?;
+            let rows = query
+                .query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })
+                .map_err(failure)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(failure)?;
+            rows
+        };
+        let mut reconciled = Vec::new();
+        for (session, delivery, phase, first_cursor, generation) in candidates {
+            if generation.as_ref().is_some_and(|g| live.contains(g)) {
+                continue;
+            }
+            // Terminal evidence for this very turn: an ended turn on the same
+            // connection generation after the delivery was reserved.
+            let terminal: Option<(u64, String)> = tx
+                .query_row(
+                    "SELECT cursor, json_extract(event,'$.event.TurnEnded') FROM encounter_events
+                     WHERE session=?1 AND cursor>?2 AND json_extract(event,'$.event.TurnEnded') IS NOT NULL
+                       AND (json_extract(event,'$.delivery_ref')=?3
+                            OR (json_extract(event,'$.delivery_ref') IS NULL AND ?4 IS NOT NULL
+                                AND json_extract(event,'$.connection_generation')=?4))
+                     ORDER BY cursor LIMIT 1",
+                    params![session, first_cursor, delivery, generation],
+                    |r| Ok((r.get(0)?, r.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(failure)?;
+            if let Some((cursor, ended_turn)) = terminal {
+                let stop = serde_json::from_str::<Value>(&ended_turn)
+                    .ok()
+                    .and_then(|turn| turn.get("stop").cloned())
+                    .unwrap_or(Value::Null);
+                let ended = if stop.get("Completed").is_some() {
+                    "returned"
+                } else if stop == "Cancelled" {
+                    "cancelled"
+                } else {
+                    "failed"
+                };
+                tx.execute(
+                    "UPDATE encounter_deliveries SET phase=?3,terminal_cursor=?4,detail=?5 WHERE session=?1 AND delivery=?2 AND phase IN ('dispatching','submitted','uncertain')",
+                    params![session, delivery, ended, cursor, stop.to_string()],
+                )
+                .map_err(failure)?;
+                reconciled.push(json!({"delivery_ref": delivery, "outcome": ended, "terminal_cursor": cursor, "source": "owner-journal-terminal-event"}));
+                continue;
+            }
+            let last: Option<u64> = tx
+                .query_row(
+                    "SELECT MAX(cursor) FROM encounter_events WHERE session=?1 AND cursor>=?2 AND (json_extract(event,'$.delivery_ref')=?3
+                       OR (json_extract(event,'$.delivery_ref') IS NULL AND ?4 IS NOT NULL AND json_extract(event,'$.connection_generation')=?4))",
+                    params![session, first_cursor, delivery, generation],
+                    |r| r.get(0),
+                )
+                .map_err(failure)?;
+            // The provider's own session id, as its events for this turn (or this
+            // connection generation) named it; the open's binding when none did.
+            let native: Option<String> = tx
+                .query_row(
+                    "SELECT json_extract(event,'$.event.Signal.native_session_id') FROM encounter_events
+                     WHERE session=?1 AND cursor>=?2 AND json_extract(event,'$.event.Signal.native_session_id') IS NOT NULL
+                       AND (json_extract(event,'$.delivery_ref')=?3
+                            OR (json_extract(event,'$.delivery_ref') IS NULL AND ?4 IS NOT NULL
+                                AND json_extract(event,'$.connection_generation')=?4))
+                     ORDER BY cursor DESC LIMIT 1",
+                    params![session, first_cursor, delivery, generation],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(failure)?;
+            let native = match native {
+                Some(native) => Some(native),
+                None => tx
+                    .query_row(
+                        "SELECT json_extract(event,'$.native_session_id') FROM encounter_events
+                         WHERE session=?1 AND json_extract(event,'$.kind')='binding' AND cursor<=?2
+                           AND (?3 IS NULL OR json_extract(event,'$.connection_generation') IS ?3)
+                         ORDER BY cursor DESC LIMIT 1",
+                        params![session, first_cursor, generation],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(failure)?
+                    .flatten(),
+            };
+            let continuation = format!(
+                "source continuation: session {session}, connection generation {}, native session {}, journal cursors {first_cursor}..{}",
+                generation.as_deref().unwrap_or("unrecorded"),
+                native.as_deref().unwrap_or("unrecorded"),
+                last.map_or("none".to_owned(), |c| c.to_string()),
+            );
+            let detail = format!(
+                "owner restarted with no live provider continuation for this delivery (was {phase}) and the journal holds no terminal event for its turn; the outcome is unknown, the turn was not replayed. {continuation}"
+            );
+            tx.execute(
+                "UPDATE encounter_deliveries SET phase='reconciled-no-replay',detail=?3 WHERE session=?1 AND delivery=?2 AND phase IN ('dispatching','submitted','uncertain')",
+                params![session, delivery, detail],
+            )
+            .map_err(failure)?;
+            tx.execute(
+                "INSERT INTO encounter_events(session,event) VALUES(?1,?2)",
+                params![
+                    session,
+                    stamp_observed_at(json!({
+                        "kind":"delivery-continuation-lost","delivery_ref":delivery,"was_phase":phase,
+                        "connection_generation":generation,"native_session_id":native,
+                        "first_cursor":first_cursor,"last_cursor":last,
+                        "standing":"owner-journal-reconciliation: no terminal event; not success, not replayed"
+                    }))
+                    .to_string()
+                ],
+            )
+            .map_err(failure)?;
+            reconciled.push(json!({"delivery_ref": delivery, "outcome": "uncertain", "detail": detail, "source": "owner-journal-no-terminal-event"}));
+        }
+        tx.commit().map_err(failure)?;
+        Ok(reconciled)
+    }
     /// The reply a delivery produced, reduced from the owner journal.
     pub fn delivery_reply(
         &self,
@@ -899,5 +1104,171 @@ mod tests {
             reply.text.len() <= REPLY_LIMIT_BYTES && reply.text.chars().all(|c| c == 'é'),
             "cut on a character boundary"
         );
+    }
+    #[test]
+    fn a_conversation_delivery_with_no_live_continuation_is_settled_from_the_journal_and_the_slot_is_released(
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let store = EncounterStore::open(&AikitHome::at(root.path())).unwrap();
+        let (dead, live, ended, plain) = (
+            r("agent-session/dead"),
+            r("agent-session/live"),
+            r("agent-session/ended"),
+            r("agent-session/plain"),
+        );
+        let request = r("conversation/q");
+        store
+            .create_conversation(
+                &request,
+                "d",
+                &json!({"flow":{}}),
+                &[
+                    recipient("p-dead", dead.as_str(), "delivery/dead-1"),
+                    recipient("p-live", live.as_str(), "delivery/live-1"),
+                    recipient("p-ended", ended.as_str(), "delivery/ended-1"),
+                ],
+            )
+            .unwrap();
+        for (session, delivery, generation) in [
+            (&dead, "delivery/dead-1", "g-dead"),
+            (&live, "delivery/live-1", "g-live"),
+            (&ended, "delivery/ended-1", "g-ended"),
+            (&plain, "delivery/plain-1", "g-plain"),
+        ] {
+            dispatch(&store, session, delivery, generation);
+            store
+                .append(session, &chunk(generation, "partial "))
+                .unwrap();
+        }
+        // A turn that ended is finished by the journal itself.
+        store.append(&ended, &turn_end("g-ended")).unwrap();
+        let mut carried = std::collections::BTreeSet::new();
+        carried.insert("g-live".to_owned());
+        let settled = store.conversation_reconcile_lost(&carried).unwrap();
+        assert_eq!(
+            settled.len(),
+            1,
+            "only the lost, unfinished, conversation delivery: {settled:?}"
+        );
+        let lost = store
+            .delivery(&dead, &r("delivery/dead-1"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(lost.phase, "reconciled-no-replay");
+        let detail = lost.detail.unwrap();
+        for named in [
+            "g-dead",
+            "agent-session/dead",
+            "not replayed",
+            "no terminal event",
+            "native session n,",
+        ] {
+            assert!(detail.contains(named), "{named}: {detail}");
+        }
+        assert_eq!(
+            store
+                .delivery(&live, &r("delivery/live-1"))
+                .unwrap()
+                .unwrap()
+                .phase,
+            "submitted",
+            "a continuation this owner carries is untouched"
+        );
+        assert_eq!(
+            store
+                .delivery(&ended, &r("delivery/ended-1"))
+                .unwrap()
+                .unwrap()
+                .phase,
+            "returned"
+        );
+        assert_eq!(
+            store
+                .delivery(&plain, &r("delivery/plain-1"))
+                .unwrap()
+                .unwrap()
+                .phase,
+            "submitted",
+            "a delivery that is not a conversation recipient's is not this reconciliation's"
+        );
+        // The session's single slot is free again; the lost one is not resent.
+        store
+            .reserve_delivery(
+                &dead,
+                &r("delivery/dead-2"),
+                &r("human:ann"),
+                &json!({"connection_generation": "g-new"}),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .delivery(&dead, &r("delivery/dead-1"))
+                .unwrap()
+                .unwrap()
+                .phase,
+            "reconciled-no-replay"
+        );
+        // Settling twice changes nothing.
+        assert!(store
+            .conversation_reconcile_lost(&carried)
+            .unwrap()
+            .is_empty());
+        let reading = store.conversation(&request).unwrap().unwrap();
+        assert!(reading.recipients[0]
+            .reply
+            .as_ref()
+            .is_some_and(|reply| !reply.complete));
+    }
+
+    #[test]
+    fn a_queued_conversation_delivery_is_found_by_its_session_and_can_be_refused_before_it_runs() {
+        let root = tempfile::tempdir().unwrap();
+        let store = EncounterStore::open(&AikitHome::at(root.path())).unwrap();
+        let ada = r("agent-session/ada");
+        let request = r("conversation/q");
+        store
+            .create_conversation(
+                &request,
+                "d",
+                &json!({"flow":{}}),
+                &[recipient("p-ada", ada.as_str(), "delivery/ada-1")],
+            )
+            .unwrap();
+        store
+            .queue_delivery(
+                &ada,
+                &r("delivery/ada-1"),
+                &r("human:ann"),
+                &json!({"queued": true}),
+            )
+            .unwrap();
+        assert!(
+            store.conversation_queued_sessions().unwrap().is_empty(),
+            "not until it is dispatched-and-waiting"
+        );
+        store
+            .conversation_set_dispatch(&request, "p-ada", "sent", Some("queued"))
+            .unwrap();
+        assert_eq!(
+            store.conversation_queued_sessions().unwrap(),
+            vec![ada.clone()]
+        );
+        assert_eq!(
+            store
+                .conversation_recipient_for_delivery(&ada, &r("delivery/ada-1"))
+                .unwrap(),
+            Some((request.clone(), "p-ada".to_owned()))
+        );
+        store
+            .conversation_refuse_queued(
+                &request,
+                "p-ada",
+                "conversation.participant_left: Ada has left",
+            )
+            .unwrap();
+        let reading = store.conversation(&request).unwrap().unwrap();
+        assert_eq!(reading.recipients[0].dispatch, "refused");
+        assert_eq!(reading.recipients[0].inclusion, "refused");
+        assert!(store.conversation_work(10).unwrap().is_empty());
     }
 }
