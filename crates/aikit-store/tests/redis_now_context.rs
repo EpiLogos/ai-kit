@@ -29,6 +29,7 @@ fn view(version: u64, disclosure: &str, change_cursor: u64) -> PreparedNowContex
         dependency_revisions: BTreeMap::from([("factory/run".into(), format!("f{version}"))]),
         disclosure_revision: disclosure.into(),
         factory_revision: Some(format!("factory-{version}")),
+        decision_provider: None,
         change_cursor,
     };
     PreparedNowContext {

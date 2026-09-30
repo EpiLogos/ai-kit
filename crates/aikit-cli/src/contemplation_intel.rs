@@ -923,6 +923,7 @@ pub fn now_contemplate(args: NowContemplateArgs) -> Result<Value> {
         model: returned_model.unwrap_or_default(),
         answers: merged_answers,
         usage,
+        latency_ms: None,
     });
 
     // Final revalidation immediately before the decision is returned, so a
@@ -1691,6 +1692,7 @@ pub fn now_publish_intelligence(args: NowPublishIntelligenceArgs) -> Result<Valu
         dependency_revisions: BTreeMap::new(),
         disclosure_revision: args.disclosure_revision.clone(),
         factory_revision: None,
+        decision_provider: None,
         change_cursor,
     };
     let view = PreparedNowContext {

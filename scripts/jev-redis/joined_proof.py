@@ -189,7 +189,23 @@ def main():
     ap.add_argument("--jev-model", default=MODEL)
     ap.add_argument("--jev-budget-microusd", type=int, default=3000)
     ap.add_argument("--allow-env-import", action="store_true")
+    ap.add_argument("--selection-mode", choices=["jev", "provider"], default="jev",
+                    help="arm-3 selection transport: hosted/controlled Jev, or the elected "
+                         "decision provider (a managed local model / self-hosted endpoint)")
+    ap.add_argument("--decision-provider-file",
+                    help="aikit.decision-provider/v1 config for --selection-mode provider")
+    ap.add_argument("--decision-threshold", type=float, default=None,
+                    help="explicit provider relevance threshold (no default is invented; "
+                         "thresholds are not copied across providers)")
     args = ap.parse_args()
+    if args.selection_mode == "provider":
+        if not args.decision_provider_file:
+            ap.error("--selection-mode provider requires --decision-provider-file")
+        if args.decision_threshold is None:
+            ap.error("--selection-mode provider requires an explicit --decision-threshold")
+    else:
+        if args.decision_threshold is None:
+            args.decision_threshold = 0.5
 
     root_tmp = tempfile.TemporaryDirectory(prefix="aikit-jev-now-joined-")
     base = pathlib.Path(root_tmp.name).resolve()
@@ -588,16 +604,28 @@ def main():
                 "activity": activity_value,
             }
 
-        selection = {
-            "mode": "jev", "credential_ref": credential_ref,
-            "limits": limits(args.jev_model, args.jev_budget_microusd),
-            "state": {
-                "undertaking": "Select all complementary capabilities needed for the bounded change",
-                "catalogue_question": "Can the current catalogue completely represent the need?",
-            },
-            "relevance_threshold": 0.5, "allow_env_import": allow_env,
-            "curl": None, "controlled_endpoint": controlled,
-        }
+        if args.selection_mode == "provider":
+            selection = {
+                "mode": "provider",
+                "provider_file": str(pathlib.Path(args.decision_provider_file).resolve()),
+                "state": {
+                    "undertaking": "Select all complementary capabilities needed for the bounded change",
+                    "catalogue_question": "Can the current catalogue completely represent the need?",
+                },
+                "relevance_threshold": args.decision_threshold,
+                "allow_env_import": allow_env,
+            }
+        else:
+            selection = {
+                "mode": "jev", "credential_ref": credential_ref,
+                "limits": limits(args.jev_model, args.jev_budget_microusd),
+                "state": {
+                    "undertaking": "Select all complementary capabilities needed for the bounded change",
+                    "catalogue_question": "Can the current catalogue completely represent the need?",
+                },
+                "relevance_threshold": args.decision_threshold, "allow_env_import": allow_env,
+                "curl": None, "controlled_endpoint": controlled,
+            }
         jev_req = prep_request(
             jev_cfg, "agent/comparison-worker", "agent-session/comparison-jev",
             unit_refs[0], selection, public_candidates + [verifier_canary]
@@ -613,10 +641,11 @@ def main():
                          "--participant-ref", "agent/comparison-worker"], jev_env, central)
         jev_ms = (time.perf_counter() - t0) * 1000.0
         selected = jev_result["selection"]["selectedCandidateRefs"]
-        if len(selected) < 2 or jev_result["selection"]["catalogueSufficientNoul"] >= 0.5:
-            raise RuntimeError("controlled Jev arm did not expose multi-capability selection + catalogue gap")
+        arm = "provider" if args.selection_mode == "provider" else "controlled Jev"
+        if len(selected) < 2 or jev_result["selection"]["catalogueSufficientNoul"] >= args.decision_threshold:
+            raise RuntimeError(f"{arm} arm did not expose multi-capability selection + catalogue gap")
         if "context-source/verifier-canary" not in jev_result["selection"]["withheldFromJev"]:
-            raise RuntimeError("egress-denied verifier material was sent to Jev")
+            raise RuntimeError(f"egress-denied verifier material was sent to {arm}")
         if "VERIFIER_EXPECTATION_CANARY" in json.dumps(jev_inspect):
             raise RuntimeError("verifier canary leaked into worker prepared context")
 
@@ -824,7 +853,9 @@ def main():
             "jev_assisted": None if jev_result is None else {
                 "elapsed_ms": jev_ms, "prepare_ms": jev_prepare_ms,
                 "inspect_ms": jev_inspect_ms, "context_discovery_calls_after_entry": 0,
-                "jev_calls": 1, "redis_prepared": True,
+                "jev_calls": 0 if args.selection_mode == "provider" else 1,
+                "decision_transport": args.selection_mode,
+                "redis_prepared": True,
                 "prepared_version": jev_result["publishedVersion"],
                 "selection": jev_result["selection"],
             },
@@ -837,6 +868,13 @@ def main():
 
     result = {
         "schema": "aikit.jev-redis-now-joined-proof/v1",
+        "arm3_selection_transport": {
+            "mode": args.selection_mode,
+            "provider_file": (
+                str(pathlib.Path(args.decision_provider_file).resolve())
+                if args.selection_mode == "provider" else None),
+            "explicit_threshold": args.decision_threshold,
+        },
         "sources": {
             "central_root": str(central), "central_source_ref": source_ref,
             "central_matrix_manifest_source_ref": matrix_manifest_source_ref,

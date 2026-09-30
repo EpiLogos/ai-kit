@@ -70,6 +70,7 @@ fn prepared(
         dependency_revisions: BTreeMap::new(),
         disclosure_revision: "disclosure-1".into(),
         factory_revision: Some("factory-r1".into()),
+        decision_provider: None,
         change_cursor: 0,
     };
     PreparedNowContext {

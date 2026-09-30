@@ -120,6 +120,13 @@ pub struct NowContextBasis {
     pub disclosure_revision: String,
     #[serde(default)]
     pub factory_revision: Option<String>,
+    /// Identity digest of the decision provider (mode, endpoint standing,
+    /// selected model, calibration basis) behind any model-assisted selection.
+    /// A provider, runtime or calibration change moves the basis digest, so an
+    /// incompatible cached determination can never present itself as the same
+    /// basis; canonical source revisions and NOW state are unaffected.
+    #[serde(default)]
+    pub decision_provider: Option<String>,
     #[serde(default)]
     pub change_cursor: u64,
 }
@@ -131,6 +138,10 @@ impl NowContextBasis {
         if !bounded(&self.disclosure_revision, 4096)
             || self
                 .factory_revision
+                .as_ref()
+                .is_some_and(|v| !bounded(v, 4096))
+            || self
+                .decision_provider
                 .as_ref()
                 .is_some_and(|v| !bounded(v, 4096))
             || self.source_revisions.len() > 256
@@ -1555,6 +1566,7 @@ mod tests {
             dependency_revisions: BTreeMap::new(),
             disclosure_revision: "d1".into(),
             factory_revision: Some("f1".into()),
+            decision_provider: None,
             change_cursor: 0,
         };
         let mut view = PreparedNowContext {

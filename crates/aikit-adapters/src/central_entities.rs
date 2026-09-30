@@ -486,6 +486,15 @@ fn read_agent_entities(root: &Path, absences: &mut Vec<String>) -> Result<Vec<Wi
             if let Some(provenance) = record.get("intent_provenance") {
                 entry["intent_provenance"] = provenance.clone();
             }
+            // The expressive character is a ref the profile carries; it travels
+            // with the relation so participant disclosure can name it.
+            if let Some(character) = record
+                .get("expressive_character_ref")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+            {
+                entry["expressive_character_ref"] = json!(character);
+            }
             profiles.push(entry);
         }
     }

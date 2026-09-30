@@ -310,6 +310,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::A2a(a)) => cmd_a2a(cwd, a),
         Some(Command::Routine(c)) => cmd_routine(c),
         Some(Command::Jev(c)) => cmd_jev(c),
+        Some(Command::Decide(c)) => cmd_decide(c),
         Some(Command::NowContext(c)) => cmd_now_context(cwd, c),
         Some(Command::Factory(c)) => cmd_factory(c),
         Some(Command::Trust(a)) => cmd_trust(cwd, a),
@@ -1251,6 +1252,14 @@ fn cmd_jev(command: JevCmd) -> Result<Reply> {
     data_reply(data)
 }
 
+fn cmd_decide(command: DecideCmd) -> Result<Reply> {
+    let data = match command.command {
+        DecideSub::Status(args) => aikit_cli::decide::decide_status(args)?,
+        DecideSub::Invoke(args) => aikit_cli::decide::decide_invoke(args)?,
+    };
+    data_reply(data)
+}
+
 fn cmd_now_context(cwd: &std::path::Path, command: NowContextCmd) -> Result<Reply> {
     let data = match command.command {
         NowContextSub::Status(args) => aikit_cli::jev_now::now_status(args)?,
@@ -1535,6 +1544,15 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                     conversation: Some(aikit_adapters::GatewayConversationHooks {
                         turn_sources: Some(conversation),
                         policy: None,
+                        // `/ask` behind a connector conversation routes with
+                        // the exact `gateway send` laws — the same owners and
+                        // declared remotes this home serves.
+                        ask_router: Some(std::sync::Arc::new(
+                            aikit_cli::gateway_contact::ContactAskRouter {
+                                home: home.clone(),
+                                cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                            },
+                        )),
                     }),
                     coexistence: coexistence.gate,
                 },
@@ -3524,7 +3542,8 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
     let mut warnings = diagnostic_warnings(&service);
     let data = match command {
         KnowledgeSub::Search(a) => {
-            let result = service.knowledge_search(&a.query, a.limit)?;
+            let mut result = service.knowledge_search(&a.query, a.limit)?;
+            service.jev_rerank_result(&mut result, a.limit);
             warnings.extend(result.absences.clone());
             jval!(result)
         }
@@ -3532,7 +3551,8 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
             // One query path: a plain typed string is legitimate input and is
             // lowered into the Vāk resolver contract before resolution.
             let expression = aikit_core::resource::parse_or_search_expression(&a.query)?;
-            let resolution = service.knowledge_resolve(&expression, a.limit)?;
+            let mut resolution = service.knowledge_resolve(&expression, a.limit)?;
+            service.jev_rerank_result(&mut resolution, a.limit);
             warnings.extend(resolution.absences.clone());
             jval!(resolution)
         }
