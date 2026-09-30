@@ -846,6 +846,22 @@ impl EncounterService {
         if let Err(failure) = self.check_resident_context(session, &resident, "queued-drain") {
             return refuse(&failure);
         }
+        // A recipient asked as a conversation participant is asked again, now:
+        // if they left, never joined, or their seat no longer matches this
+        // session while the request waited, the queued work is refused here and
+        // never run. A Flow that cannot be read now waits. This is the last check
+        // before the turn is claimed, so it judges membership as it stands at the
+        // boundary itself.
+        match self.conversation_admit_queued(session, &row.delivery_ref) {
+            None | Some(conversation::Admission::Admit) => {}
+            Some(conversation::Admission::Refuse(detail)) => {
+                return refuse(&AikitError::new(
+                    "conversation.recipient_refused",
+                    format!("the recipient may no longer be asked: {detail}"),
+                ))
+            }
+            Some(conversation::Admission::Hold(_)) => return QueuedOutcome::Deferred,
+        }
         // Claim queued → dispatching with this resident's connection
         // generation, so provider events attribute to the drained delivery.
         let claimed = match self.store.dispatch_queued_delivery(
