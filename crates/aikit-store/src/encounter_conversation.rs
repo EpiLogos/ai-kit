@@ -1,0 +1,823 @@
+//! Durable conversation requests in the encounter journal (O:I #558, PF2).
+//!
+//! One request binds an authored Flow entry to its recipients. Each recipient
+//! has its own delivery (the existing per-session `encounter_deliveries` row),
+//! its own dispatch standing, and its own inclusion of the returned reply in
+//! the Flow. This is coordinated state, not a transaction across products:
+//! every independently successful effect is recorded and the remaining step is
+//! reconciled from here, so a dead process, a closed UI or a busy recipient
+//! leaves a readable, resumable record. Nothing in it is human authorship, a
+//! completed task, or proof that a recipient understood anything.
+//!
+//! The reply is reduced from the owner's own journal: the agent-message chunks
+//! that carry the delivery's ref between its first and terminal cursor. No
+//! provider runtime offers a turn or output id, so correlation is the
+//! per-session serialization the delivery table already enforces, never the
+//! newest assistant block.
+use super::{failure, stamp_observed_at, validate, EncounterStore};
+use crate::encounter::EncounterDelivery;
+use aikit_core::{AikitError, ResourceRef, Result};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+/// A reply is retained whole up to this bound; beyond it the reading discloses
+/// the continuation instead of truncating silently.
+pub const REPLY_LIMIT_BYTES: usize = 512 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewConversationRecipient {
+    pub participant_key: String,
+    pub agent_session: ResourceRef,
+    pub delivery_ref: ResourceRef,
+    #[serde(default)]
+    pub agent_ref: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReplyReading {
+    pub text: String,
+    /// The delivery's turn ended as completed.
+    pub complete: bool,
+    pub bytes: usize,
+    /// More output exists than the bound retains.
+    pub truncated: bool,
+    pub first_cursor: u64,
+    pub last_cursor: Option<u64>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationRecipientReading {
+    pub participant_key: String,
+    pub agent_session: ResourceRef,
+    pub delivery_ref: ResourceRef,
+    pub agent_ref: Option<String>,
+    /// unsent | sent | held | refused
+    pub dispatch: String,
+    pub dispatch_detail: Option<String>,
+    pub delivery: Option<EncounterDelivery>,
+    pub reply: Option<ReplyReading>,
+    /// pending | included | conflict | failed | refused
+    pub inclusion: String,
+    pub inclusion_detail: Option<String>,
+    pub entry_id: Option<String>,
+    pub revision: Option<String>,
+    pub attempts: u32,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationReading {
+    pub request_ref: ResourceRef,
+    pub body: Value,
+    /// Where the authored entry landed in the Flow once it was committed:
+    /// `{entry_id, revision, document_revision}`. Absent until then.
+    pub source: Option<Value>,
+    pub recipients: Vec<ConversationRecipientReading>,
+}
+/// Work the owner's worker can do now, derived from durable state alone.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConversationWork {
+    /// Recipient never reached the dispatch boundary (or was held busy).
+    Dispatch {
+        request: ResourceRef,
+        participant: String,
+    },
+    /// Recipient's turn returned and its reply is not yet in the Flow.
+    Incorporate {
+        request: ResourceRef,
+        participant: String,
+    },
+}
+
+pub(super) fn install(connection: &Connection) -> Result<()> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS conversation_requests(
+            request TEXT PRIMARY KEY, digest TEXT NOT NULL, body TEXT NOT NULL, created_ms INTEGER NOT NULL, source TEXT);
+            CREATE TABLE IF NOT EXISTS conversation_recipients(
+            request TEXT NOT NULL, participant TEXT NOT NULL, session TEXT NOT NULL, delivery TEXT NOT NULL, agent TEXT,
+            dispatch TEXT NOT NULL DEFAULT 'unsent', dispatch_detail TEXT,
+            inclusion TEXT NOT NULL DEFAULT 'pending', inclusion_detail TEXT, entry_id TEXT, revision TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(request,participant));
+            CREATE INDEX IF NOT EXISTS conversation_recipient_delivery ON conversation_recipients(session,delivery);",
+        )
+        .map_err(failure)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Reduce the reply for one delivery from the journal. Events are selected by
+/// the delivery ref the owner stamped at append, so another delivery's output
+/// on the same session can never be read as this reply.
+fn reduce_reply(
+    connection: &Connection,
+    delivery: &EncounterDelivery,
+) -> Result<Option<ReplyReading>> {
+    let mut query = connection
+        .prepare(
+            "SELECT cursor, json_extract(event,'$.event.Signal.kind.text') FROM encounter_events
+             WHERE session=?1 AND cursor>=?2 AND (?3 IS NULL OR cursor<=?3)
+               AND json_extract(event,'$.delivery_ref')=?4
+               AND json_extract(event,'$.event.Signal.kind.kind')='agent-message-chunk'
+             ORDER BY cursor",
+        )
+        .map_err(failure)?;
+    let rows = query
+        .query_map(
+            params![
+                delivery.agent_session.as_str(),
+                delivery.first_cursor,
+                delivery.terminal_cursor,
+                delivery.delivery_ref.as_str()
+            ],
+            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .map_err(failure)?;
+    let mut text = String::new();
+    let mut last = None;
+    let mut bytes = 0usize;
+    let mut truncated = false;
+    for row in rows {
+        let (cursor, piece) = row.map_err(failure)?;
+        let piece = piece.unwrap_or_default();
+        bytes += piece.len();
+        last = Some(cursor);
+        if truncated {
+            continue;
+        }
+        if text.len() + piece.len() > REPLY_LIMIT_BYTES {
+            let mut end = REPLY_LIMIT_BYTES - text.len();
+            while !piece.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.push_str(&piece[..end]);
+            truncated = true;
+        } else {
+            text.push_str(&piece);
+        }
+    }
+    if last.is_none() && delivery.phase != "returned" {
+        return Ok(None);
+    }
+    Ok(Some(ReplyReading {
+        text,
+        complete: delivery.phase == "returned",
+        bytes,
+        truncated,
+        first_cursor: delivery.first_cursor,
+        last_cursor: last,
+    }))
+}
+
+fn delivery_of(
+    connection: &Connection,
+    session: &ResourceRef,
+    delivery: &ResourceRef,
+) -> Result<Option<EncounterDelivery>> {
+    connection
+        .query_row(
+            "SELECT sender,request,phase,first_cursor,terminal_cursor,detail FROM encounter_deliveries WHERE session=?1 AND delivery=?2",
+            params![session.as_str(), delivery.as_str()],
+            |row| {
+                let parse = |text: String| {
+                    ResourceRef::parse(text).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+                    })
+                };
+                Ok(EncounterDelivery {
+                    agent_session: session.clone(),
+                    delivery_ref: delivery.clone(),
+                    sender: parse(row.get(0)?)?,
+                    request: serde_json::from_str(&row.get::<_, String>(1)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+                    })?,
+                    phase: row.get(2)?,
+                    first_cursor: row.get(3)?,
+                    terminal_cursor: row.get(4)?,
+                    detail: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(failure)
+}
+
+fn read_request(
+    connection: &Connection,
+    request: &ResourceRef,
+) -> Result<Option<ConversationReading>> {
+    let held: Option<(String, Option<String>)> = connection
+        .query_row(
+            "SELECT body,source FROM conversation_requests WHERE request=?1",
+            [request.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(failure)?;
+    let Some((body, source)) = held else {
+        return Ok(None);
+    };
+    let mut query = connection
+        .prepare(
+            "SELECT participant,session,delivery,agent,dispatch,dispatch_detail,inclusion,inclusion_detail,entry_id,revision,attempts
+             FROM conversation_recipients WHERE request=?1 ORDER BY rowid",
+        )
+        .map_err(failure)?;
+    let rows = query
+        .query_map([request.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, u32>(10)?,
+            ))
+        })
+        .map_err(failure)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(failure)?;
+    let mut recipients = Vec::new();
+    for (
+        participant,
+        session,
+        delivery,
+        agent,
+        dispatch,
+        dispatch_detail,
+        inclusion,
+        inclusion_detail,
+        entry_id,
+        revision,
+        attempts,
+    ) in rows
+    {
+        let session = ResourceRef::parse(session)?;
+        let delivery = ResourceRef::parse(delivery)?;
+        let held = delivery_of(connection, &session, &delivery)?;
+        let reply = match &held {
+            Some(d) => reduce_reply(connection, d)?,
+            None => None,
+        };
+        recipients.push(ConversationRecipientReading {
+            participant_key: participant,
+            agent_session: session,
+            delivery_ref: delivery,
+            agent_ref: agent,
+            dispatch,
+            dispatch_detail,
+            delivery: held,
+            reply,
+            inclusion,
+            inclusion_detail,
+            entry_id,
+            revision,
+            attempts,
+        });
+    }
+    Ok(Some(ConversationReading {
+        request_ref: request.clone(),
+        body: serde_json::from_str(&body).map_err(failure)?,
+        source: source
+            .map(|s| serde_json::from_str(&s))
+            .transpose()
+            .map_err(failure)?,
+        recipients,
+    }))
+}
+
+impl EncounterStore {
+    /// Record a conversation request and its recipients before any effect. The
+    /// request identity is idempotent: the same ref with the same digest is a
+    /// replay; the same ref with another digest is refused and changes nothing.
+    pub fn create_conversation(
+        &self,
+        request: &ResourceRef,
+        digest: &str,
+        body: &Value,
+        recipients: &[NewConversationRecipient],
+    ) -> Result<(bool, ConversationReading)> {
+        if recipients.is_empty() || recipients.len() > 32 {
+            return Err(failure("A conversation request needs 1–32 recipients"));
+        }
+        let mut sessions = std::collections::BTreeSet::new();
+        let mut participants = std::collections::BTreeSet::new();
+        for recipient in recipients {
+            validate(&recipient.agent_session)?;
+            if !sessions.insert(recipient.agent_session.clone())
+                || !participants.insert(recipient.participant_key.clone())
+            {
+                return Err(AikitError::new(
+                    "conversation.duplicate_recipient",
+                    "One participant or session appears twice in this request; a recipient is scheduled once",
+                ));
+            }
+        }
+        let body_text = serde_json::to_string(body).map_err(failure)?;
+        let mut connection = self.connection.lock().map_err(failure)?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        let held: Option<String> = tx
+            .query_row(
+                "SELECT digest FROM conversation_requests WHERE request=?1",
+                [request.as_str()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(failure)?;
+        let fresh = match held {
+            Some(existing) if existing != digest => {
+                return Err(AikitError::new(
+                    "conversation.request_conflict",
+                    "This request identity is already bound to a different entry, target or basis; no effect performed",
+                ))
+            }
+            Some(_) => false,
+            None => {
+                tx.execute(
+                    "INSERT INTO conversation_requests(request,digest,body,created_ms) VALUES(?1,?2,?3,?4)",
+                    params![request.as_str(), digest, body_text, now_ms()],
+                )
+                .map_err(failure)?;
+                for recipient in recipients {
+                    tx.execute(
+                        "INSERT INTO conversation_recipients(request,participant,session,delivery,agent) VALUES(?1,?2,?3,?4,?5)",
+                        params![
+                            request.as_str(),
+                            recipient.participant_key,
+                            recipient.agent_session.as_str(),
+                            recipient.delivery_ref.as_str(),
+                            recipient.agent_ref
+                        ],
+                    )
+                    .map_err(failure)?;
+                }
+                tx.execute(
+                    "INSERT INTO encounter_events(session,event) VALUES(?1,?2)",
+                    params![
+                        recipients[0].agent_session.as_str(),
+                        stamp_observed_at(json!({"kind":"conversation-request-recorded","request_ref":request,"standing":"coordination-record-not-authorship"})).to_string()
+                    ],
+                )
+                .map_err(failure)?;
+                true
+            }
+        };
+        let reading =
+            read_request(&tx, request)?.ok_or_else(|| failure("Recorded request disappeared"))?;
+        tx.commit().map_err(failure)?;
+        Ok((fresh, reading))
+    }
+    /// Record where the authored entry landed. Set once; the same entry
+    /// recorded again is a no-op, a different one is refused.
+    pub fn conversation_record_source(&self, request: &ResourceRef, source: &Value) -> Result<()> {
+        let text = serde_json::to_string(source).map_err(failure)?;
+        let connection = self.connection.lock().map_err(failure)?;
+        let held: Option<Option<String>> = connection
+            .query_row(
+                "SELECT source FROM conversation_requests WHERE request=?1",
+                [request.as_str()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(failure)?;
+        match held {
+            None => Err(failure("No such conversation request")),
+            Some(Some(existing)) => {
+                let existing: Value = serde_json::from_str(&existing).map_err(failure)?;
+                if existing["entry_id"] == source["entry_id"] {
+                    Ok(())
+                } else {
+                    Err(AikitError::new(
+                        "conversation.source_conflict",
+                        "This request is already bound to another Flow entry",
+                    ))
+                }
+            }
+            Some(None) => {
+                connection
+                    .execute("UPDATE conversation_requests SET source=?2 WHERE request=?1 AND source IS NULL", params![request.as_str(), text])
+                    .map_err(failure)?;
+                Ok(())
+            }
+        }
+    }
+    pub fn conversation(&self, request: &ResourceRef) -> Result<Option<ConversationReading>> {
+        let connection = self.connection.lock().map_err(failure)?;
+        read_request(&connection, request)
+    }
+    /// Requests bound to one Flow entry's source (newest first, bounded).
+    pub fn conversations_for_flow(
+        &self,
+        flow_ref: &str,
+        limit: usize,
+    ) -> Result<Vec<ConversationReading>> {
+        let refs: Vec<String> = {
+            let connection = self.connection.lock().map_err(failure)?;
+            let mut query = connection
+                .prepare(
+                    "SELECT request FROM conversation_requests WHERE json_extract(body,'$.flow.location.ref')=?1 ORDER BY created_ms DESC, rowid DESC LIMIT ?2",
+                )
+                .map_err(failure)?;
+            let rows = query
+                .query_map(params![flow_ref, limit.min(200) as i64], |r| {
+                    r.get::<_, String>(0)
+                })
+                .map_err(failure)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(failure)?;
+            rows
+        };
+        let connection = self.connection.lock().map_err(failure)?;
+        refs.into_iter()
+            .filter_map(|r| ResourceRef::parse(r).ok())
+            .map(|r| read_request(&connection, &r))
+            .filter_map(|r| r.transpose())
+            .collect()
+    }
+    pub fn conversation_set_dispatch(
+        &self,
+        request: &ResourceRef,
+        participant: &str,
+        dispatch: &str,
+        detail: Option<&str>,
+    ) -> Result<()> {
+        if !matches!(dispatch, "unsent" | "sent" | "held" | "refused") {
+            return Err(failure("Unknown dispatch standing"));
+        }
+        let connection = self.connection.lock().map_err(failure)?;
+        connection
+            .execute(
+                "UPDATE conversation_recipients SET dispatch=?3,dispatch_detail=?4 WHERE request=?1 AND participant=?2 AND dispatch NOT IN ('sent','refused')",
+                params![request.as_str(), participant, dispatch, detail],
+            )
+            .map_err(failure)?;
+        Ok(())
+    }
+    /// Record where inclusion of a recipient's reply stands. `included` is
+    /// terminal and keeps the Flow entry it became; every other standing can be
+    /// retried by the worker.
+    pub fn conversation_record_inclusion(
+        &self,
+        request: &ResourceRef,
+        participant: &str,
+        inclusion: &str,
+        entry_id: Option<&str>,
+        revision: Option<&str>,
+        detail: Option<&str>,
+    ) -> Result<()> {
+        if !matches!(
+            inclusion,
+            "pending" | "included" | "conflict" | "failed" | "refused"
+        ) {
+            return Err(failure("Unknown inclusion standing"));
+        }
+        let connection = self.connection.lock().map_err(failure)?;
+        connection
+            .execute(
+                "UPDATE conversation_recipients SET inclusion=?3,entry_id=COALESCE(?4,entry_id),revision=COALESCE(?5,revision),inclusion_detail=?6,attempts=attempts+1
+                 WHERE request=?1 AND participant=?2 AND inclusion<>'included'",
+                params![request.as_str(), participant, inclusion, entry_id, revision, detail],
+            )
+            .map_err(failure)?;
+        Ok(())
+    }
+    /// What the owner's worker should do now, from durable state only.
+    pub fn conversation_work(&self, limit: usize) -> Result<Vec<ConversationWork>> {
+        let connection = self.connection.lock().map_err(failure)?;
+        let mut query = connection
+            .prepare(
+                "SELECT r.request, r.participant,
+                   CASE WHEN r.dispatch IN ('unsent','held') THEN 'dispatch'
+                        WHEN r.inclusion IN ('pending','failed','conflict') AND d.phase='returned' THEN 'incorporate' END AS work
+                 FROM conversation_recipients r
+                 LEFT JOIN encounter_deliveries d ON d.session=r.session AND d.delivery=r.delivery
+                 WHERE (r.dispatch IN ('unsent','held'))
+                    OR (r.dispatch='sent' AND r.inclusion IN ('pending','failed','conflict') AND d.phase='returned')
+                 ORDER BY r.rowid LIMIT ?1",
+            )
+            .map_err(failure)?;
+        let rows = query
+            .query_map([limit as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map_err(failure)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(failure)?;
+        rows.into_iter()
+            .filter_map(|(request, participant, work)| {
+                let request = ResourceRef::parse(request).ok()?;
+                match work.as_deref() {
+                    Some("dispatch") => Some(ConversationWork::Dispatch {
+                        request,
+                        participant,
+                    }),
+                    Some("incorporate") => Some(ConversationWork::Incorporate {
+                        request,
+                        participant,
+                    }),
+                    _ => None,
+                }
+            })
+            .map(Ok)
+            .collect()
+    }
+    /// The reply a delivery produced, reduced from the owner journal.
+    pub fn delivery_reply(
+        &self,
+        session: &ResourceRef,
+        delivery: &ResourceRef,
+    ) -> Result<Option<ReplyReading>> {
+        validate(session)?;
+        let connection = self.connection.lock().map_err(failure)?;
+        match delivery_of(&connection, session, delivery)? {
+            Some(held) => reduce_reply(&connection, &held),
+            None => Ok(None),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AikitHome;
+
+    fn chunk(generation: &str, text: &str) -> Value {
+        json!({"kind":"provider","connection_generation":generation,
+               "event":{"Signal":{"sequence":1,"native_session_id":"n","kind":{"kind":"agent-message-chunk","text":text}}}})
+    }
+    fn turn_end(generation: &str) -> Value {
+        json!({"kind":"provider","connection_generation":generation,"event":{"TurnEnded":{"stop":{"Completed":"EndTurn"}}}})
+    }
+    fn r(s: &str) -> ResourceRef {
+        ResourceRef::parse(s).unwrap()
+    }
+    fn dispatch(store: &EncounterStore, session: &ResourceRef, delivery: &str, generation: &str) {
+        store
+            .reserve_delivery(
+                session,
+                &r(delivery),
+                &r("human:ann"),
+                &json!({"connection_generation": generation}),
+            )
+            .unwrap();
+        store
+            .delivery_ack(session, &r(delivery), true, None)
+            .unwrap();
+    }
+    fn recipient(key: &str, session: &str, delivery: &str) -> NewConversationRecipient {
+        NewConversationRecipient {
+            participant_key: key.into(),
+            agent_session: r(session),
+            delivery_ref: r(delivery),
+            agent_ref: Some(format!("agent/{key}")),
+        }
+    }
+
+    #[test]
+    fn each_recipient_reads_only_its_own_reply_even_when_both_run_at_once() {
+        let root = tempfile::tempdir().unwrap();
+        let store = EncounterStore::open(&AikitHome::at(root.path())).unwrap();
+        let (ada, ash) = (r("agent-session/ada"), r("agent-session/ash"));
+        let request = r("conversation/q1");
+        store
+            .create_conversation(&request, "d1", &json!({"flow":{"location":{"ref":"central:path:/x:Control/user/flows/f.html"},"entry_id":"e-q"}}),
+                &[recipient("p-ada", ada.as_str(), "delivery/ada-1"), recipient("p-ash", ash.as_str(), "delivery/ash-1")])
+            .unwrap();
+        dispatch(&store, &ada, "delivery/ada-1", "g-ada");
+        dispatch(&store, &ash, "delivery/ash-1", "g-ash");
+        // Interleaved streaming, plus an unrelated assistant event on a session
+        // with no delivery in flight (attributed to nothing).
+        store
+            .append(&ada, &chunk("g-ada", "Ada: the claim "))
+            .unwrap();
+        store
+            .append(&ash, &chunk("g-ash", "Ash: a counter"))
+            .unwrap();
+        store
+            .append(&ada, &chunk("g-ada", "rests on step two."))
+            .unwrap();
+        store
+            .append(&ash, &chunk("g-ash", "example works."))
+            .unwrap();
+        let mid = store.conversation(&request).unwrap().unwrap();
+        assert_eq!(
+            mid.recipients[0].reply.as_ref().unwrap().text,
+            "Ada: the claim rests on step two."
+        );
+        assert!(
+            !mid.recipients[0].reply.as_ref().unwrap().complete,
+            "partial output is not a completion"
+        );
+        store.append(&ash, &turn_end("g-ash")).unwrap();
+        let after = store.conversation(&request).unwrap().unwrap();
+        let (a, b) = (&after.recipients[0], &after.recipients[1]);
+        assert_eq!(
+            b.reply.as_ref().unwrap().text,
+            "Ash: a counterexample works."
+        );
+        assert!(b.reply.as_ref().unwrap().complete);
+        assert_eq!(b.delivery.as_ref().unwrap().phase, "returned");
+        assert_eq!(
+            a.delivery.as_ref().unwrap().phase,
+            "submitted",
+            "a sibling's completion does not complete this one"
+        );
+        assert!(
+            !a.reply.as_ref().unwrap().text.contains("Ash"),
+            "no cross-contamination"
+        );
+    }
+
+    #[test]
+    fn an_event_outside_any_delivery_is_never_read_as_a_reply() {
+        let root = tempfile::tempdir().unwrap();
+        let store = EncounterStore::open(&AikitHome::at(root.path())).unwrap();
+        let ada = r("agent-session/ada");
+        store
+            .append(&ada, &chunk("g-old", "stray from an earlier generation"))
+            .unwrap();
+        dispatch(&store, &ada, "delivery/ada-1", "g-new");
+        store
+            .append(&ada, &chunk("g-old", "late stray after the send"))
+            .unwrap();
+        store
+            .append(&ada, &chunk("g-new", "the real answer"))
+            .unwrap();
+        store.append(&ada, &turn_end("g-new")).unwrap();
+        let reply = store
+            .delivery_reply(&ada, &r("delivery/ada-1"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.text, "the real answer");
+        assert!(reply.complete);
+    }
+
+    #[test]
+    fn a_request_is_idempotent_and_a_changed_one_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let store = EncounterStore::open(&AikitHome::at(root.path())).unwrap();
+        let body = json!({"flow":{"location":{"ref":"x"},"entry_id":"e1"}});
+        let recipients = [recipient("p-ada", "agent-session/ada", "delivery/ada-1")];
+        let (fresh, _) = store
+            .create_conversation(&r("conversation/q"), "digest-a", &body, &recipients)
+            .unwrap();
+        assert!(fresh);
+        let (again, reading) = store
+            .create_conversation(&r("conversation/q"), "digest-a", &body, &recipients)
+            .unwrap();
+        assert!(!again);
+        assert_eq!(reading.recipients.len(), 1);
+        let refused = store
+            .create_conversation(&r("conversation/q"), "digest-b", &body, &recipients)
+            .unwrap_err();
+        assert_eq!(refused.code(), "conversation.request_conflict");
+        let twice = store
+            .create_conversation(
+                &r("conversation/q2"),
+                "d",
+                &body,
+                &[
+                    recipient("p-ada", "agent-session/ada", "delivery/a"),
+                    recipient("p-ada", "agent-session/ash", "delivery/b"),
+                ],
+            )
+            .unwrap_err();
+        assert_eq!(twice.code(), "conversation.duplicate_recipient");
+    }
+
+    #[test]
+    fn work_is_derived_from_durable_state_and_survives_a_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(root.path());
+        let ada = r("agent-session/ada");
+        let request = r("conversation/q");
+        {
+            let store = EncounterStore::open(&home).unwrap();
+            store
+                .create_conversation(
+                    &request,
+                    "d",
+                    &json!({"flow":{}}),
+                    &[recipient("p-ada", ada.as_str(), "delivery/ada-1")],
+                )
+                .unwrap();
+            assert_eq!(
+                store.conversation_work(10).unwrap(),
+                vec![ConversationWork::Dispatch {
+                    request: request.clone(),
+                    participant: "p-ada".into()
+                }]
+            );
+            dispatch(&store, &ada, "delivery/ada-1", "g1");
+            store
+                .conversation_set_dispatch(&request, "p-ada", "sent", None)
+                .unwrap();
+            assert!(
+                store.conversation_work(10).unwrap().is_empty(),
+                "nothing to do until the turn returns"
+            );
+            store.append(&ada, &chunk("g1", "answer")).unwrap();
+            store.append(&ada, &turn_end("g1")).unwrap();
+        }
+        // The owner died; a fresh one sees the same remaining work.
+        let store = EncounterStore::open(&home).unwrap();
+        assert_eq!(
+            store.conversation_work(10).unwrap(),
+            vec![ConversationWork::Incorporate {
+                request: request.clone(),
+                participant: "p-ada".into()
+            }]
+        );
+        store
+            .conversation_record_inclusion(
+                &request,
+                "p-ada",
+                "failed",
+                None,
+                None,
+                Some("owner unavailable"),
+            )
+            .unwrap();
+        assert_eq!(
+            store.conversation_work(10).unwrap().len(),
+            1,
+            "a failed inclusion is retried, not forgotten"
+        );
+        store
+            .conversation_record_inclusion(
+                &request,
+                "p-ada",
+                "included",
+                Some("e-42"),
+                Some("r7"),
+                None,
+            )
+            .unwrap();
+        assert!(store.conversation_work(10).unwrap().is_empty());
+        // `included` is terminal: a late failure report cannot undo it.
+        store
+            .conversation_record_inclusion(&request, "p-ada", "failed", None, None, Some("stale"))
+            .unwrap();
+        let done = store.conversation(&request).unwrap().unwrap();
+        assert_eq!(done.recipients[0].inclusion, "included");
+        assert_eq!(done.recipients[0].entry_id.as_deref(), Some("e-42"));
+    }
+
+    #[test]
+    fn a_turn_end_wakes_the_registered_worker_once_per_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let store = EncounterStore::open(&AikitHome::at(root.path())).unwrap();
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = count.clone();
+        store.on_turn_ended(move || {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let ada = r("agent-session/ada");
+        dispatch(&store, &ada, "delivery/ada-1", "g1");
+        store.append(&ada, &chunk("g1", "partial")).unwrap();
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "partial output does not wake incorporation"
+        );
+        store.append(&ada, &turn_end("g1")).unwrap();
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_long_reply_discloses_its_bound_instead_of_truncating_silently() {
+        let root = tempfile::tempdir().unwrap();
+        let store = EncounterStore::open(&AikitHome::at(root.path())).unwrap();
+        let ada = r("agent-session/ada");
+        dispatch(&store, &ada, "delivery/ada-1", "g1");
+        let piece = "é".repeat(64 * 1024); // 128 KiB per chunk, multi-byte
+        for _ in 0..6 {
+            store.append(&ada, &chunk("g1", &piece)).unwrap();
+        }
+        store.append(&ada, &turn_end("g1")).unwrap();
+        let reply = store
+            .delivery_reply(&ada, &r("delivery/ada-1"))
+            .unwrap()
+            .unwrap();
+        assert!(reply.truncated && reply.complete);
+        assert_eq!(reply.bytes, 6 * 128 * 1024);
+        assert!(
+            reply.text.len() <= REPLY_LIMIT_BYTES && reply.text.chars().all(|c| c == 'é'),
+            "cut on a character boundary"
+        );
+    }
+}

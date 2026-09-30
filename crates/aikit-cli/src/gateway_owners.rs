@@ -171,6 +171,28 @@ impl ProcessOwners {
         Err(CtrlFailure::Refused { command, envelope })
     }
 
+    /// Run one Central action through the real `ctrl`: the action's data on
+    /// success; its refusal (code, message, details) or the owner's absence
+    /// otherwise. The conversation owner uses this for Flow append and read.
+    pub(crate) fn run_ctrl_action(
+        &self,
+        action: &str,
+        input: &Value,
+    ) -> std::result::Result<Value, CtrlActionError> {
+        match self.ctrl_action(action, input) {
+            Ok(data) => Ok(data),
+            Err(CtrlFailure::Unavailable(owner)) => Err(CtrlActionError::Unavailable(owner.reason)),
+            Err(CtrlFailure::Refused { envelope, .. }) => Err(CtrlActionError::Refused {
+                code: envelope
+                    .pointer("/error/code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("refused")
+                    .to_owned(),
+                message: ctrl_refusal_reason(&envelope),
+            }),
+        }
+    }
+
     fn json_process(
         &self,
         argv: Vec<String>,
@@ -196,6 +218,13 @@ impl ProcessOwners {
         })?;
         Ok((output.status, value))
     }
+}
+
+/// How a Central action ended for a caller that is not the gateway.
+#[derive(Debug)]
+pub(crate) enum CtrlActionError {
+    Refused { code: String, message: String },
+    Unavailable(String),
 }
 
 enum CtrlFailure {
