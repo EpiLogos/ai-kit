@@ -2237,6 +2237,7 @@ impl Service {
             event.kind,
             aikit_core::hooks::HookEventKind::SessionStart
                 | aikit_core::hooks::HookEventKind::UserPromptSubmit
+                | aikit_core::hooks::HookEventKind::PreCompact
         ) {
             let id = CapsuleId::parse(crate::development_entry::CAPABILITY)?;
             if let Some(active) = self.view.active.get(&id) {

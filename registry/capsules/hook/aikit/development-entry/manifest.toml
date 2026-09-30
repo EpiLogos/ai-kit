@@ -6,7 +6,7 @@ description = "Concern-selected operative context for a body entered directly in
 tags = ["aikit", "continuity", "now-context", "development", "entry"]
 [hook]
 entry = "payload/development-entry"
-events = ["SessionStart", "UserPromptSubmit"]
+events = ["SessionStart", "UserPromptSubmit", "PreCompact"]
 phase = "inject"
 failure = "open"
 timeout = "5s"

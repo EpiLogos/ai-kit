@@ -1016,6 +1016,9 @@ pub struct EntryLedger {
     pub prepared_version: Option<u64>,
     pub source_revisions: BTreeMap<String, String>,
     pub emitted_at_unix_ms: u64,
+    /// Set at pre-compaction: the next prompt re-delivers the entry.
+    #[serde(default)]
+    pub redeliver_pending: bool,
 }
 
 fn ledger_path(state: &Path, client: &str, session: &str) -> PathBuf {
@@ -1218,61 +1221,70 @@ pub fn deliver(request: &EntryRequest<'_>) -> Result<Option<String>> {
 
     match event.kind {
         // Re-entry after compaction, resume or clear: the body's context lost
-        // what it was given. Re-deliver the same prepared bytes (warm, no
+        // what it was given. Claude and zcode report it as `source`, pi as
+        // `reason`. Re-deliver the same prepared bytes (warm, no
         // re-selection); rebuild from the recorded concern if Redis lost it.
         HookEventKind::SessionStart => {
-            let source = event
+            let why = event
                 .payload
                 .get("source")
+                .or_else(|| event.payload.get("reason"))
                 .and_then(Value::as_str)
-                .unwrap_or("startup");
-            if !matches!(source, "compact" | "resume" | "clear") {
+                .unwrap_or("startup")
+                .to_owned();
+            if !matches!(
+                why.as_str(),
+                "compact" | "resume" | "clear" | "fork" | "reload"
+            ) {
                 return Ok(None);
             }
-            let Some(ledger) = ledger else {
+            let Some(mut ledger) = ledger else {
                 return Ok(None);
             };
-            if let Some(Ok(store)) = &store {
-                if let Ok((participant, _)) = participant_refs(request.client, &session) {
-                    if let Ok(Some(view)) = store.read_prepared(&participant, false, None) {
-                        if let Some(text) = view.continuation.clone() {
-                            mark_emitted(
-                                store,
-                                request.client,
-                                &session,
-                                view.version,
-                                &view.digest()?,
-                                &view.basis_digest,
-                            );
-                            store_receipt(
-                                request.state,
-                                request.client,
-                                &session,
-                                &json!({
-                                    "schema": ENTRY_SCHEMA, "event": "SessionStart", "source": source,
-                                    "delivery": "re-delivered-warm", "prepared_version": view.version,
-                                    "elapsed_ms": started.elapsed().as_millis() as u64,
-                                }),
-                            );
-                            return Ok(Some(format!("{text}\n(re-delivered after {source}: prepared v{} from Redis NOW, not re-selected)", view.version)));
-                        }
-                    }
-                }
-            }
-            // Redis is working context, not the owner: rebuild from the concern.
-            let rebuilt = prepare(
+            let text = redeliver(
                 request,
                 &scope,
                 &session,
-                &ledger.concern,
+                &ledger,
                 store.as_ref(),
                 started,
-                "rebuilt-after-loss",
+                &why,
             )?;
-            return Ok(Some(format!("{rebuilt}\n(rebuilt after {source}: the hot view was unavailable; recomputed from the recorded concern)")));
+            ledger.redeliver_pending = false;
+            store_ledger(request.state, &ledger);
+            return Ok(Some(text));
+        }
+        // Compaction discards the entry from the body's context, and no
+        // harness carries this event's output. Where the harness re-fires
+        // SessionStart afterwards the entry returns there; everywhere else
+        // (Codex, pi) the next prompt carries it.
+        HookEventKind::PreCompact => {
+            if let Some(mut ledger) = ledger {
+                ledger.redeliver_pending = true;
+                store_ledger(request.state, &ledger);
+            }
+            return Ok(None);
         }
         HookEventKind::UserPromptSubmit => {}
         _ => return Ok(None),
+    }
+
+    if let Some(mut pending) = ledger
+        .clone()
+        .filter(|l| l.redeliver_pending && l.checkout == scope.checkout)
+    {
+        let text = redeliver(
+            request,
+            &scope,
+            &session,
+            &pending,
+            store.as_ref(),
+            started,
+            "compaction",
+        )?;
+        pending.redeliver_pending = false;
+        store_ledger(request.state, &pending);
+        return Ok(Some(text));
     }
 
     // A later prompt: announce what changed under the prepared basis, once.
@@ -1344,6 +1356,63 @@ pub fn deliver(request: &EntryRequest<'_>) -> Result<Option<String>> {
         "prepared",
     )
     .map(Some)
+}
+
+/// Re-deliver a session's entry after its context lost it: the prepared view's
+/// own rendered bytes from Redis when the hot view is present, otherwise a
+/// rebuild from the concern AIKit recorded (Redis is working context, not the
+/// owner of what was asked).
+fn redeliver(
+    request: &EntryRequest<'_>,
+    scope: &EntryScope,
+    session: &str,
+    ledger: &EntryLedger,
+    store: Option<&std::result::Result<RedisNowStore, String>>,
+    started: Instant,
+    why: &str,
+) -> Result<String> {
+    if let Some(Ok(store)) = store {
+        if let Ok((participant, _)) = participant_refs(request.client, session) {
+            if let Ok(Some(view)) = store.read_prepared(&participant, false, None) {
+                if let Some(text) = view.continuation.clone() {
+                    mark_emitted(
+                        store,
+                        request.client,
+                        session,
+                        view.version,
+                        &view.digest()?,
+                        &view.basis_digest,
+                    );
+                    store_receipt(
+                        request.state,
+                        request.client,
+                        session,
+                        &json!({
+                            "schema": ENTRY_SCHEMA, "event": request.event.kind.as_str(), "why": why,
+                            "delivery": "re-delivered-warm", "prepared_version": view.version,
+                            "elapsed_ms": started.elapsed().as_millis() as u64,
+                        }),
+                    );
+                    return Ok(format!(
+                        "{text}\n(re-delivered after {why}: prepared v{} from Redis NOW, not re-selected)",
+                        view.version
+                    ));
+                }
+            }
+        }
+    }
+    let rebuilt = prepare(
+        request,
+        scope,
+        session,
+        &ledger.concern,
+        store,
+        started,
+        "rebuilt-after-loss",
+    )?;
+    Ok(format!(
+        "{rebuilt}\n(rebuilt after {why}: the hot view was unavailable; recomputed from the recorded concern)"
+    ))
 }
 
 fn prepare(
@@ -1433,6 +1502,7 @@ fn prepare(
             .map(|s| (s.absolute.display().to_string(), s.revision.clone()))
             .collect(),
         emitted_at_unix_ms: now_ms(),
+        redeliver_pending: false,
     };
     store_ledger(request.state, &ledger);
     store_receipt(
@@ -1595,6 +1665,7 @@ mod tests {
             prepared_version: Some(1),
             source_revisions: BTreeMap::new(),
             emitted_at_unix_ms: 0,
+            redeliver_pending: false,
         };
         store_ledger(temp.path(), &ledger);
         assert_eq!(load_ledger(temp.path(), "claude", "s1"), Some(ledger));
