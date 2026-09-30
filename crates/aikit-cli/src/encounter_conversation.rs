@@ -256,6 +256,218 @@ fn remote_encounter(
     }
 }
 
+/// What the owner needs of a Flow to decide who may be asked and who may answer:
+/// its participants as authored, and its entry ids (to resolve a history
+/// horizon). The private collections — notes, journal, packet, media — are
+/// never carried out of the read.
+pub(super) struct FlowFacts {
+    pub(super) participants: Vec<Value>,
+    pub(super) entry_ids: Vec<String>,
+}
+/// `Err` is why the Flow could not be read now (Central unavailable or
+/// refusing); the caller decides whether that holds the work or refuses it.
+fn flow_facts(location: &Value) -> std::result::Result<FlowFacts, String> {
+    let read = ProcessOwners::from_env()
+        .run_ctrl_action("central.files.read", &json!({"location": location}))
+        .map_err(|e| match e {
+            CtrlActionError::Refused { code, message } => {
+                format!("flow unreadable ({code}): {message}")
+            }
+            CtrlActionError::Unavailable(reason) => format!("Central unavailable: {reason}"),
+        })?;
+    let unreadable = |why: &str| format!("flow unreadable: {why}");
+    if read["content_encoding"]
+        .as_str()
+        .is_some_and(|e| !e.is_empty() && e != "utf8" && e != "utf-8")
+    {
+        return Err(unreadable("the Flow document is not utf-8 text"));
+    }
+    let content = read["content"]
+        .as_str()
+        .ok_or_else(|| unreadable("no content"))?;
+    const OPEN: &str = "id=\"ql-doc\">";
+    let start = content
+        .find(OPEN)
+        .ok_or_else(|| unreadable("no document island"))?
+        + OPEN.len();
+    let end = content[start..]
+        .find("</script>")
+        .ok_or_else(|| unreadable("unterminated document island"))?
+        + start;
+    let doc: Value = serde_json::from_str(
+        &content[start..end]
+            .replace("<\\/script", "</script")
+            .replace("<\\!--", "<!--"),
+    )
+    .map_err(|e| unreadable(&format!("document island is not JSON: {e}")))?;
+    Ok(FlowFacts {
+        participants: doc
+            .pointer("/meta/participants")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+        entry_ids: doc
+            .get("entries")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e["id"].as_str().map(str::to_owned))
+            .collect(),
+    })
+}
+
+/// A recipient the Flow does not let this session answer as.
+#[derive(Debug, PartialEq)]
+pub(crate) struct SeatRefusal {
+    pub code: &'static str,
+    pub message: String,
+}
+impl SeatRefusal {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+    fn detail(&self) -> String {
+        format!("{}: {}", self.code, self.message)
+    }
+    fn error(self) -> AikitError {
+        AikitError::new(self.code, self.message)
+    }
+}
+fn present(value: Option<&Value>) -> Option<&str> {
+    value.and_then(Value::as_str).filter(|s| !s.is_empty())
+}
+
+/// May this session be asked as this participant, and answer as them? The Flow
+/// declares the seat: who it is for (`binding.ref`, the enduring agent), which
+/// session answers from it (`ref`), whether the participant is still in the
+/// conversation, and from where they may read. A request is only carried to a
+/// seat whose declaration it matches, and a reply never binds a seat to an agent
+/// the seat did not declare.
+///
+/// `agent_ref` is the enduring agent the request proves for this recipient: the
+/// owner's own reading of the session's Agency binding for a local session, the
+/// carried `agent_ref` (and later the other owner's Agency reading) for a
+/// remote one. `strict` demands that proof of an unbound seat; a bound seat
+/// with no proof yet is decided when the proof arrives.
+/// `asked_revision` is the document revision the asked entry was committed at,
+/// once known. `membership` also judges whether the participant is still in the
+/// conversation and may read the asked entry (left, observer, kind, history
+/// horizon, joined after the entry); when the request is first accepted only
+/// the structural facts are (a participant who is not in the Flow cannot be
+/// addressed), and the rest is judged for each recipient at dispatch.
+pub(super) fn seat_check(
+    facts: &FlowFacts,
+    participant_key: &str,
+    session: &ResourceRef,
+    agent_ref: Option<&str>,
+    strict: bool,
+    asked_revision: Option<i64>,
+    membership: bool,
+) -> std::result::Result<(), SeatRefusal> {
+    let Some(seat) = facts
+        .participants
+        .iter()
+        .find(|p| p["key"] == participant_key)
+    else {
+        return Err(SeatRefusal::new(
+            "conversation.not_a_participant",
+            format!("{participant_key} is not a participant in this Flow"),
+        ));
+    };
+    let name = seat["name"]
+        .as_str()
+        .or_else(|| seat["initial"].as_str())
+        .unwrap_or(participant_key);
+    if membership {
+        if seat.get("left").is_some_and(|left| !left.is_null()) {
+            return Err(SeatRefusal::new(
+                "conversation.participant_left",
+                format!("{name} has left this Flow"),
+            ));
+        }
+        if seat["role"].as_str() == Some("observer") {
+            return Err(SeatRefusal::new(
+                "conversation.observer_cannot_contribute",
+                format!("{name} is an observer in this Flow"),
+            ));
+        }
+        if seat["kind"].as_str() != Some("agent") {
+            return Err(SeatRefusal::new(
+                "conversation.recipient_not_agent",
+                format!(
+                    "{name} is not an agent participant; an agent session cannot answer as them"
+                ),
+            ));
+        }
+        if let Some(from) = present(seat.get("historyFrom")) {
+            if !facts.entry_ids.iter().any(|id| id == from) {
+                return Err(SeatRefusal::new(
+                    "conversation.history_unresolved",
+                    format!("{name}'s readable-history horizon names an entry this Flow does not hold ({from}); what they may read cannot be established"),
+                ));
+            }
+        }
+        if let (Some(joined), Some(asked)) = (
+            seat.pointer("/joined/revision").and_then(Value::as_i64),
+            asked_revision,
+        ) {
+            // A participant joined at revision J is in the document from J+1; the
+            // asked entry exists from `asked`. Anyone who joined at or after the
+            // entry's own revision was not in the conversation when it was asked.
+            if joined >= asked {
+                return Err(SeatRefusal::new(
+                    "conversation.joined_after_entry",
+                    format!("{name} joined this Flow (revision {joined}) after the asked entry was committed (revision {asked})"),
+                ));
+            }
+        }
+    }
+    if let Some(declared) = present(seat.get("ref")) {
+        if declared != session.as_str() {
+            return Err(SeatRefusal::new(
+                "conversation.seat_session_mismatch",
+                format!(
+                    "{name}'s seat answers from {declared}; this request routes it to {session}"
+                ),
+            ));
+        }
+    }
+    match (present(seat.pointer("/binding/ref")), agent_ref) {
+        (Some(bound), Some(agent)) => {
+            // The Flow's own append accepts the enduring agent, or (when it was
+            // bound from a session identity) that session.
+            if bound != agent && bound != session.as_str() {
+                return Err(SeatRefusal::new(
+                    "conversation.seat_bound_to_another_agent",
+                    format!(
+                        "{name}'s seat is declared for {bound}; the session {session} is {agent}"
+                    ),
+                ));
+            }
+        }
+        (None, None) if strict => {
+            return Err(SeatRefusal::new(
+                "conversation.seat_unproven",
+                format!("{name}'s seat is not bound to an agent and this request carries no agent_ref to prove which agent answers; a reply must not bind the seat to an agent the request does not name"),
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// The answer to "may this recipient be asked now".
+pub(super) enum Admission {
+    Admit,
+    /// Refused, with `code: reason`; nothing runs.
+    Refuse(String),
+    /// Cannot be decided now (the Flow is unreadable); wait.
+    Hold(String),
+}
+
 fn sweep_guard() -> &'static Mutex<()> {
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
     GUARD.get_or_init(|| Mutex::new(()))
@@ -326,6 +538,21 @@ impl EncounterService {
             "entry": request.entry,
             "recipients": request.recipients.iter().map(|r| json!([r.participant_key, r.agent_session, r.route])).collect::<Vec<_>>(),
         }));
+        // A request already recorded is a replay: it is recognised (or refused as
+        // a change) by its identity and never re-judged against a Flow that has
+        // moved on since. Membership and seats are judged when it is first
+        // recorded, and again at every dispatch and inclusion.
+        let replay = self.store.conversation(&request.request_ref)?.is_some();
+        let facts = if replay {
+            None
+        } else {
+            Some(flow_facts(&request.flow_location).map_err(|why| {
+                AikitError::new(
+                    "conversation.flow_unreadable",
+                    format!("The Flow could not be read to check who may be asked; nothing was recorded. {why}"),
+                )
+            })?)
+        };
         let mut recipients = Vec::new();
         for spec in &request.recipients {
             if let Some(route) = &spec.route {
@@ -347,15 +574,43 @@ impl EncounterService {
                     ));
                 }
             }
-            let agent_ref = spec.agent_ref.clone().or_else(|| {
-                if spec.route.is_some() {
-                    return None;
-                }
-                self.check_agency(&spec.agent_session)
+            // The enduring agent this recipient is: for a session this owner
+            // holds, the owner's own reading of its Agency binding (a carried
+            // claim that disagrees with it is refused, never preferred); for a
+            // remote one, what the request carries.
+            let agent_ref = if spec.route.is_some() {
+                spec.agent_ref.clone()
+            } else {
+                let held = self
+                    .check_agency(&spec.agent_session)
                     .ok()
                     .flatten()
-                    .map(|(binding, _)| binding.agent_ref.as_str().to_owned())
-            });
+                    .map(|(binding, _)| binding.agent_ref.as_str().to_owned());
+                if let (Some(carried), Some(held)) = (&spec.agent_ref, &held) {
+                    if carried != held {
+                        return Err(AikitError::new(
+                            "conversation.agent_ref_mismatch",
+                            format!(
+                                "The request names {carried} for {}, but that session is {held}",
+                                spec.agent_session
+                            ),
+                        ));
+                    }
+                }
+                held.or_else(|| spec.agent_ref.clone())
+            };
+            if let Some(facts) = &facts {
+                seat_check(
+                    facts,
+                    &spec.participant_key,
+                    &spec.agent_session,
+                    agent_ref.as_deref(),
+                    spec.route.is_some(),
+                    None,
+                    false,
+                )
+                .map_err(SeatRefusal::error)?;
+            }
             recipients.push(NewConversationRecipient {
                 participant_key: spec.participant_key.clone(),
                 agent_session: spec.agent_session.clone(),
@@ -528,6 +783,90 @@ impl EncounterService {
         Ok(text)
     }
 
+    /// Is this recipient still someone this conversation may ask (or include)?
+    /// Membership and the seat are read from the Flow as it stands now — never
+    /// from what was true when the request was recorded — so a participant who
+    /// has since left, was never a participant, joined after the asked entry, has
+    /// no resolvable history horizon, or whose seat is declared for another
+    /// agent or session is refused *before any turn runs*. A Flow that cannot be
+    /// read now holds the work rather than deciding it.
+    fn conversation_admit(
+        &self,
+        reading: &ConversationReading,
+        recipient: &ConversationRecipientReading,
+        proven_agent: Option<&str>,
+        strict: bool,
+    ) -> Admission {
+        let facts = match flow_facts(&reading.body["flow"]["location"]) {
+            Ok(facts) => facts,
+            Err(why) => return Admission::Hold(why),
+        };
+        let asked = reading
+            .source
+            .as_ref()
+            .and_then(|s| s["document_revision"].as_i64());
+        // A request that names an agent must agree with the agent the session
+        // proves itself to be.
+        if let (Some(carried), Some(proven)) = (recipient.agent_ref.as_deref(), proven_agent) {
+            if carried != proven {
+                return Admission::Refuse(
+                    SeatRefusal::new(
+                        "conversation.agent_ref_mismatch",
+                        format!(
+                            "The request names {carried} for {}, but that session is {proven}",
+                            recipient.agent_session
+                        ),
+                    )
+                    .detail(),
+                );
+            }
+        }
+        let agent = proven_agent.or(recipient.agent_ref.as_deref());
+        match seat_check(
+            &facts,
+            &recipient.participant_key,
+            &recipient.agent_session,
+            agent,
+            strict,
+            asked,
+            true,
+        ) {
+            Ok(()) => Admission::Admit,
+            Err(refusal) => Admission::Refuse(refusal.detail()),
+        }
+    }
+
+    /// The same question asked of a queued delivery at the moment it would be
+    /// dispatched (its turn boundary). `None`: the delivery is not a conversation
+    /// recipient's.
+    pub(super) fn conversation_admit_queued(
+        &self,
+        session: &ResourceRef,
+        delivery: &ResourceRef,
+    ) -> Option<Admission> {
+        let (request, participant) = self
+            .store
+            .conversation_recipient_for_delivery(session, delivery)
+            .ok()??;
+        let reading = self.store.conversation(&request).ok()??;
+        let recipient = reading
+            .recipients
+            .iter()
+            .find(|r| r.participant_key == participant)?;
+        let proven = self
+            .check_agency(session)
+            .ok()
+            .flatten()
+            .map(|(binding, _)| binding.agent_ref.as_str().to_owned());
+        let admission = self.conversation_admit(&reading, recipient, proven.as_deref(), true);
+        if let Admission::Refuse(detail) = &admission {
+            let _ = self
+                .store
+                .conversation_refuse_queued(&request, &participant, detail);
+        }
+        Some(admission)
+    }
+
     /// Ask a recipient whose session is held by another Workcell's owner. The
     /// remote owner does its own admission (binding, allowed sender, permitted
     /// source) exactly as for a local send; this owner only carries the request.
@@ -564,6 +903,11 @@ impl EncounterService {
             }
             Err((code, message)) => return set("refused", Some(&format!("{code}: {message}"))),
         };
+        match self.conversation_admit(reading, recipient, binding["agent_ref"].as_str(), true) {
+            Admission::Admit => {}
+            Admission::Refuse(detail) => return set("refused", Some(&detail)),
+            Admission::Hold(why) => return set("held", Some(&why)),
+        }
         let turn = json!({
             "action": "send", "agent_session": recipient.agent_session,
             "turn": {
@@ -665,6 +1009,11 @@ impl EncounterService {
                 )
             }
         };
+        match self.conversation_admit(reading, recipient, Some(binding.agent_ref.as_str()), true) {
+            Admission::Admit => {}
+            Admission::Refuse(detail) => return set("refused", Some(&detail)),
+            Admission::Hold(why) => return set("held", Some(&why)),
+        }
         let text = match self.conversation_packet_text(reading, recipient) {
             Ok(text) => text,
             // A recipient that cannot read the asked entry never receives it.
@@ -745,6 +1094,22 @@ impl EncounterService {
                     detail,
                 )
             };
+        // The reply is included only if its author still is a participant who may
+        // contribute, from the seat it was asked as: someone who left while their
+        // turn ran is not written into the Flow.
+        match self.conversation_admit(&reading, recipient, None, false) {
+            Admission::Admit => {}
+            Admission::Refuse(detail) => return record("refused", None, None, Some(&detail)),
+            Admission::Hold(why) => {
+                let exhausted = recipient.attempts + 1 >= MAX_INCLUSION_ATTEMPTS;
+                return record(
+                    if exhausted { "refused" } else { "failed" },
+                    None,
+                    None,
+                    Some(&why),
+                );
+            }
+        }
         if reply.text.trim().is_empty() {
             return record(
                 "refused",
@@ -856,7 +1221,32 @@ impl EncounterService {
                 }
             }
         }
-        Ok(count)
+        // A recipient asked while its session was busy with a turn of its own —
+        // a composer turn, not a conversation delivery — waits queued for that
+        // turn to end. Every turn end on the session is the boundary, not only an
+        // open: whatever the session's queue holds is delivered as soon as the
+        // session can take it, re-admitted first (membership included).
+        let mut queued = 0;
+        for session in self.store.conversation_queued_sessions()? {
+            queued += 1;
+            let _ = self.drain_queued_deliveries(&session);
+        }
+        Ok(count + queued)
+    }
+
+    /// At owner start: a delivery this owner's predecessor sent, whose turn has
+    /// no live continuation here, is settled from the journal — finished if the
+    /// journal holds the turn's end, otherwise named uncertain with its source
+    /// continuation and released. Never dispatched again.
+    pub(super) fn conversation_recover_lost(&self) -> Result<Vec<Value>> {
+        let live: BTreeSet<String> = self
+            .residents
+            .lock()
+            .map_err(error)?
+            .values()
+            .map(|resident| resident.generation.clone())
+            .collect();
+        self.store.conversation_reconcile_lost(&live)
     }
 
     /// The readback: request, per-recipient standing, and the reply so far.
@@ -954,12 +1344,15 @@ pub(crate) fn spawn_worker(service: &Arc<EncounterService>) {
             let _ = wake.send(());
         }
     });
+    // Before anything is served: settle what a previous owner left in flight.
+    let _ = service.conversation_recover_lost();
     let weak = Arc::downgrade(service);
     std::thread::spawn(move || {
         let mut first = true;
+        let mut wait = Duration::from_secs(2);
         loop {
             if !first {
-                match sleeper.recv_timeout(Duration::from_secs(2)) {
+                match sleeper.recv_timeout(wait) {
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     _ => while sleeper.try_recv().is_ok() {},
                 }
@@ -967,6 +1360,17 @@ pub(crate) fn spawn_worker(service: &Arc<EncounterService>) {
             first = false;
             let Some(service) = weak.upgrade() else { break };
             let _ = service.conversation_sweep();
+            // A delivery still waiting on a busy session is looked at again soon:
+            // the turn boundary can land just after a wake.
+            wait = if service
+                .store
+                .conversation_queued_sessions()
+                .is_ok_and(|queued| !queued.is_empty())
+            {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_secs(2)
+            };
         }
     });
 }
