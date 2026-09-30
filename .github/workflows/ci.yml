@@ -154,6 +154,29 @@ jobs:
             sleep $((attempt * 10))
           done
       - run: gitnexus --version
+      # `gitnexus analyze` builds its full-text index with the LadybugDB FTS
+      # extension. When the extension is not already installed under $HOME it
+      # downloads it inside analyze with a 15 s bound and, if that fails,
+      # still exits 0 with no full-text index, so later queries find nothing.
+      # Install it once here, where a network failure is a setup failure, and
+      # prove a fresh process can LOAD it offline.
+      - name: Install the LadybugDB FTS extension GitNexus indexes with
+        shell: bash
+        run: |
+          set -euo pipefail
+          installer="$(npm root --global)/gitnexus/scripts/install-duckdb-extension.mjs"
+          export GITNEXUS_LBUG_MAX_DB_SIZE=$((16 * 1024 * 1024 * 1024))
+          for attempt in 1 2 3; do
+            if node "$installer" fts; then
+              node "$installer" fts --verify-only
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "LadybugDB FTS extension install failed after three attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
       # The Project-scope step reads Central's World (central.world,
       # effective-sources, file-map) through the real ctrl. Without it every
       # Project fails for "ctrl not found" before GitNexus is ever asked, and

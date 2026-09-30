@@ -47,6 +47,12 @@ pub struct GitNexusCodeIndexProvider<R> {
     root: Option<PathBuf>,
     indexed: bool,
     index_observation: Option<String>,
+    /// Why keyword search over the admitted index cannot answer, when the
+    /// index's own metadata says so. GitNexus completes `analyze` with exit 0
+    /// even when its bounded LadybugDB FTS extension INSTALL failed or timed
+    /// out; the graph is written but no full-text index exists, and every
+    /// later `query` returns an empty answer carrying only a `warning`.
+    keyword_search_unavailable: Option<String>,
     isolate_reads: bool,
     cli: GitNexusCliSurface,
 }
@@ -81,6 +87,7 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
             root: None,
             indexed: false,
             index_observation: None,
+            keyword_search_unavailable: None,
             isolate_reads: false,
             cli,
         }
@@ -114,6 +121,7 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
             root: None,
             indexed: false,
             index_observation: None,
+            keyword_search_unavailable: None,
             isolate_reads: false,
             cli,
         }
@@ -132,6 +140,7 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
             root: None,
             indexed: false,
             index_observation: None,
+            keyword_search_unavailable: None,
             isolate_reads: false,
             cli: self.cli.clone(),
         }
@@ -144,41 +153,10 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
         self.root = Some(root.to_path_buf());
         self.isolate_reads = true;
         self.indexed = false;
+        self.keyword_search_unavailable = None;
         self.index_observation = Some("existing index absent; explicit indexing required".into());
         let directory = root.join(".gitnexus");
-        let primary = directory.join("gitnexus.json");
-        let file = match std::fs::File::open(&primary) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::File::open(directory.join("meta.json")).map_err(|error| {
-                    AikitError::new("knowledge.gitnexus_existing_index", error.to_string())
-                })?
-            }
-            Err(error) => {
-                return Err(AikitError::new(
-                    "knowledge.gitnexus_existing_index",
-                    error.to_string(),
-                ))
-            }
-        };
-        let mut bytes = Vec::new();
-        file.take(1024 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|error| {
-                AikitError::new("knowledge.gitnexus_existing_index", error.to_string())
-            })?;
-        if bytes.len() > 1024 * 1024 {
-            return Err(AikitError::new(
-                "knowledge.gitnexus_existing_index",
-                "index metadata exceeds 1 MiB",
-            ));
-        }
-        let meta: Value = serde_json::from_slice(&bytes).map_err(|error| {
-            AikitError::new(
-                "knowledge.gitnexus_existing_index",
-                format!("invalid index metadata: {error}"),
-            )
-        })?;
+        let meta = read_index_metadata(root)?;
         let commit = meta
             .get("lastCommit")
             .and_then(Value::as_str)
@@ -196,10 +174,16 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
             ));
         }
         self.revision = Some(SourceRevision::parse(format!("git:{commit}"))?);
+        self.keyword_search_unavailable = keyword_search_gap(&meta);
         self.indexed = true;
         // Resolve native queries by actual root, never a colliding project alias.
         self.repo_name = root.to_string_lossy().into_owned();
-        self.index_observation = Some(format!("existing index at {commit}; freshness against current source and branch is unverified; no rebuild performed"));
+        let mut observation = format!("existing index at {commit}; freshness against current source and branch is unverified; no rebuild performed");
+        if let Some(gap) = &self.keyword_search_unavailable {
+            observation.push_str("; ");
+            observation.push_str(gap);
+        }
+        self.index_observation = Some(observation);
         Ok(self.status())
     }
 
@@ -446,6 +430,12 @@ impl<R: CommandRunner> CodeIndexProvider for GitNexusCodeIndexProvider<R> {
             .require(&argv, "knowledge.gitnexus_index_failed")?;
         self.root = Some(root.to_path_buf());
         self.indexed = true;
+        // `analyze` exits 0 whether or not it built the full-text index; the
+        // index's own metadata is the completion record that says which.
+        self.keyword_search_unavailable = read_index_metadata(root)
+            .ok()
+            .and_then(|meta| keyword_search_gap(&meta));
+        self.index_observation = self.keyword_search_unavailable.clone();
         Ok(self.status())
     }
 
@@ -455,6 +445,9 @@ impl<R: CommandRunner> CodeIndexProvider for GitNexusCodeIndexProvider<R> {
         }
         self.require_capability(self.cli.search, "query")?;
         self.require_indexed()?;
+        if let Some(gap) = &self.keyword_search_unavailable {
+            return Err(keyword_search_error(gap.clone(), &self.repo_name));
+        }
         let value = self.run_json(
             &[
                 "query".into(),
@@ -466,6 +459,19 @@ impl<R: CommandRunner> CodeIndexProvider for GitNexusCodeIndexProvider<R> {
             ],
             "knowledge.gitnexus_query_failed",
         )?;
+        // A query that could not reach the full-text index answers with no
+        // keyword hits and a `warning`; that is a degraded provider, not an
+        // honest absence of matching code.
+        if let Some(warning) = value
+            .get("warning")
+            .and_then(Value::as_str)
+            .filter(|warning| warning.contains("FTS"))
+        {
+            return Err(keyword_search_error(
+                format!("GitNexus query ran without its full-text index: {warning}"),
+                &self.repo_name,
+            ));
+        }
         Ok(self.search_hits(&value, limit))
     }
 
@@ -585,6 +591,62 @@ impl<R: CommandRunner> CodeIndexProvider for GitNexusCodeIndexProvider<R> {
             )?,
         })
     }
+}
+
+/// The native index metadata GitNexus writes at the end of `analyze`
+/// (`gitnexus.json`, or `meta.json` from older releases), bounded to 1 MiB.
+fn read_index_metadata(root: &Path) -> Result<Value> {
+    let directory = root.join(".gitnexus");
+    let file = match std::fs::File::open(directory.join("gitnexus.json")) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::File::open(directory.join("meta.json")).map_err(|error| {
+                AikitError::new("knowledge.gitnexus_existing_index", error.to_string())
+            })?
+        }
+        Err(error) => {
+            return Err(AikitError::new(
+                "knowledge.gitnexus_existing_index",
+                error.to_string(),
+            ))
+        }
+    };
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| AikitError::new("knowledge.gitnexus_existing_index", error.to_string()))?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(AikitError::new(
+            "knowledge.gitnexus_existing_index",
+            "index metadata exceeds 1 MiB",
+        ));
+    }
+    serde_json::from_slice(&bytes).map_err(|error| {
+        AikitError::new(
+            "knowledge.gitnexus_existing_index",
+            format!("invalid index metadata: {error}"),
+        )
+    })
+}
+
+/// Why keyword search cannot answer over an index, read from the index's own
+/// `capabilities.fts.status`. Metadata that predates the capability record
+/// says nothing either way, and is not treated as a gap.
+fn keyword_search_gap(meta: &Value) -> Option<String> {
+    let status = meta
+        .pointer("/capabilities/fts/status")
+        .and_then(Value::as_str)?;
+    (status != "available").then(|| {
+        format!(
+            "full-text index {status}: GitNexus analyze built the graph without the LadybugDB FTS \
+             extension (its bounded INSTALL failed or timed out), so keyword search cannot \
+             answer; install the extension and run `gitnexus analyze --repair-fts`"
+        )
+    })
+}
+
+fn keyword_search_error(detail: String, repo: &str) -> AikitError {
+    AikitError::new("knowledge.gitnexus_fts_unavailable", detail).with("repo", repo.to_string())
 }
 
 fn discover_cli<R: CommandRunner>(runner: &R, binary: &str) -> GitNexusCliSurface {
@@ -797,26 +859,28 @@ mod tests {
     use super::*;
 
     fn runner(query: &str) -> Arc<ScriptedRunner> {
-        Arc::new(
-            ScriptedRunner::new()
-                .on("gitnexus --version", "1.6.9\n")
-                .on(
-                    "gitnexus --help",
-                    "analyze query context impact trace detect-changes check cypher\n",
-                )
-                .on("analyze --help", "--index-only --force --name <name>\n")
-                .on("gitnexus impact --help", "--mode <callgraph|pdg>\n")
-                .on("analyze /tmp/project", "Indexed\n")
-                .on("query auth", query)
-                .on("context login", r#"{"symbol":{"name":"login"}}"#)
-                .on("impact login", r#"{"risk":"LOW"}"#)
-                .on("trace login validate", r#"{"status":"found","path":[]}"#)
-                .on(
-                    "detect-changes",
-                    "Changed symbols: 0\nAffected processes: 0\n",
-                )
-                .on("check --cycles --json", r#"{"status":"clean","cycles":[]}"#),
-        )
+        Arc::new(scripted(query))
+    }
+
+    fn scripted(query: &str) -> ScriptedRunner {
+        ScriptedRunner::new()
+            .on("gitnexus --version", "1.6.9\n")
+            .on(
+                "gitnexus --help",
+                "analyze query context impact trace detect-changes check cypher\n",
+            )
+            .on("analyze --help", "--index-only --force --name <name>\n")
+            .on("gitnexus impact --help", "--mode <callgraph|pdg>\n")
+            .on("analyze /tmp/project", "Indexed\n")
+            .on("query auth", query)
+            .on("context login", r#"{"symbol":{"name":"login"}}"#)
+            .on("impact login", r#"{"risk":"LOW"}"#)
+            .on("trace login validate", r#"{"status":"found","path":[]}"#)
+            .on(
+                "detect-changes",
+                "Changed symbols: 0\nAffected processes: 0\n",
+            )
+            .on("check --cycles --json", r#"{"status":"clean","cycles":[]}"#)
     }
 
     fn provider(query: &str) -> GitNexusCodeIndexProvider<Arc<ScriptedRunner>> {
@@ -859,6 +923,66 @@ mod tests {
         assert_eq!(hits[0].provider_binding.as_deref(), Some("provider-77"));
         assert!(hits[0].resource.as_str().starts_with("code:"));
         assert!(!hits[0].resource.as_str().contains("provider-77"));
+    }
+
+    /// GitNexus 1.6.9 `analyze` exits 0 when its bounded LadybugDB FTS
+    /// extension INSTALL fails or times out (a fresh HOME on a CI runner with
+    /// a slow network); it writes `capabilities.fts.status: "unavailable"` to
+    /// the index metadata and every later `query` answers with no keyword
+    /// hits. Reading that as "no matching code" made the real conformance
+    /// tests fail intermittently with a missing symbol; the provider must name
+    /// the degraded index instead.
+    #[test]
+    fn an_index_built_without_full_text_search_refuses_keyword_search_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".gitnexus")).unwrap();
+        std::fs::write(
+            dir.path().join(".gitnexus/gitnexus.json"),
+            r#"{"lastCommit":"abc","capabilities":{"graph":{"status":"available"},"fts":{"provider":"ladybugdb-fts","status":"unavailable"}}}"#,
+        )
+        .unwrap();
+        let calls = Arc::new(
+            scripted(r#"{"definitions":[]}"#)
+                .on(&format!("analyze {}", dir.path().display()), "Indexed\n"),
+        );
+        let observed = Arc::clone(&calls);
+        let mut provider = GitNexusCodeIndexProvider::new(
+            calls,
+            "demo",
+            SourceRef::parse("source:git/demo").unwrap(),
+            None,
+        );
+        let status = provider.index(dir.path(), true).unwrap();
+        assert!(status.indexed, "the graph itself was built");
+        assert!(
+            status.detail.contains("full-text index unavailable"),
+            "status discloses the missing full-text index: {}",
+            status.detail
+        );
+        let error = provider
+            .search("auth", 5)
+            .expect_err("a keyword-blind index is not an empty answer");
+        assert_eq!(error.code(), "knowledge.gitnexus_fts_unavailable");
+        assert!(
+            !observed
+                .call_lines()
+                .iter()
+                .any(|line| line.contains("query auth")),
+            "no query is spent on an index whose metadata already says it cannot answer"
+        );
+    }
+
+    #[test]
+    fn a_query_that_ran_without_full_text_search_is_an_error_not_an_empty_answer() {
+        let mut provider = provider(
+            r#"{"processes":[],"process_symbols":[],"definitions":[],"warning":"FTS indexes missing — keyword search degraded. Run: gitnexus analyze --repair-fts (or gitnexus analyze --force) to rebuild indexes."}"#,
+        );
+        provider.index(Path::new("/tmp/project"), false).unwrap();
+        let error = provider
+            .search("auth", 5)
+            .expect_err("a degraded query is not an honest absence");
+        assert_eq!(error.code(), "knowledge.gitnexus_fts_unavailable");
+        assert!(error.message().contains("FTS indexes missing"));
     }
 
     #[test]
