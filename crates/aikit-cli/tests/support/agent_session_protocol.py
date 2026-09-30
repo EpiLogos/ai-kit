@@ -48,6 +48,8 @@ for line in sys.stdin:
     method = message.get("method")
     ident = message.get("id")
     if method == "initialize":
+        if mode == "slow-initialize":
+            time.sleep(0.5)
         # Resume advertised: the encounter reconnect rides the capability-gated
         # session/resume (no history replay), not session/load.
         result(ident, {"protocolVersion": 1, "agentCapabilities": {"loadSession": True,
