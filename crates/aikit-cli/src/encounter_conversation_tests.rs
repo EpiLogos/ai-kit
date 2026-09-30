@@ -527,3 +527,152 @@ fn a_replayed_request_is_recognised_and_a_changed_one_under_the_same_identity_is
         "a refused change writes nothing"
     );
 }
+
+#[test]
+fn a_crash_before_any_effect_or_between_the_entry_commit_and_its_record_is_finished_by_the_next_owner(
+) {
+    let f = Fixture::new(need_ctrl!());
+    let flow = f.flow_ref();
+    let (space_a, ada) =
+        f.world
+            .attach_with("ada", &["human:ann"], &[&flow], "conversation_provider.py");
+    // Boundary 1 — the request was recorded, then the owner died before anything happened.
+    {
+        let service = EncounterService::new(f.world.home.clone()).unwrap();
+        f.world.open(&service, &space_a, &ada, "ada");
+        let body = json!({"schema":"aikit.conversation-request/v1","flow":{"location":f.loc},"sender":"human:ann","actor":"human:ann","actor_kind":"human",
+            "entry":{"author_key":"p-ann","html":"<p>Recorded, then the owner died.</p>","at":"2026-09-30T09:00:00.000Z","relations":[],"addressees":[],"basis_revision":0}});
+        service
+            .store
+            .create_conversation(
+                &r("conversation/crash1"),
+                "digest-1",
+                &body,
+                &[aikit_store::encounter::NewConversationRecipient {
+                    participant_key: "p-ada".into(),
+                    agent_session: ada.clone(),
+                    delivery_ref: r("delivery/conv-crash1-ada"),
+                    agent_ref: None,
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            f.central.doc(&f.loc)["entries"].as_array().unwrap().len(),
+            0,
+            "nothing has happened in the Flow"
+        );
+    }
+    // Boundary 2 — the entry reached the Flow (Central committed it) but the owner never noted that.
+    let committed = f.central.action("central.flow.append", json!({
+        "location": f.loc, "operation_ref": "conv-entry:conversation/crash1", "author_key": "p-ann", "html": "<p>Recorded, then the owner died.</p>",
+        "at": "2026-09-30T09:00:00.000Z", "addressees": ["p-ada"], "intent": "response", "relations": [], "basis_revision": 0,
+        "actor": "human:ann", "actor_kind": "human"}));
+    assert_eq!(committed["ok"], true, "{committed}");
+    assert_eq!(
+        f.central.doc(&f.loc)["entries"].as_array().unwrap().len(),
+        1
+    );
+    // A fresh owner with a worker completes it: the same entry is recovered, never doubled, and Ada is asked once.
+    let service = Arc::new(EncounterService::new(f.world.home.clone()).unwrap());
+    // A restarted owner resumes the recorded session explicitly; it never opens it afresh.
+    service
+        .apply(EncounterRequest::Reconnect {
+            space: space_a.clone(),
+            agent_session: ada.clone(),
+            provider: "ada".into(),
+            cwd: f.world.cwd.clone(),
+        })
+        .map_err(|failure| failure.to_string())
+        .unwrap();
+    spawn_worker(&service);
+    wait_for(&service, "conversation/crash1", &[("p-ada", "included")]);
+    let doc = f.central.doc(&f.loc);
+    let entries = doc["entries"].as_array().unwrap();
+    assert_eq!(
+        entries.len(),
+        2,
+        "the entry once, Ada's answer once: {entries:#?}"
+    );
+    assert_eq!(
+        entries.iter().filter(|e| e["authorKey"] == "p-ann").count(),
+        1,
+        "the authored entry was recovered, not doubled"
+    );
+    let prompts = std::fs::read_to_string(f.world.cwd.join("ada.log"))
+        .unwrap()
+        .matches("session/prompt")
+        .count();
+    assert_eq!(prompts, 1, "the recipient was asked exactly once");
+}
+
+#[test]
+fn a_crash_after_the_reply_reached_the_flow_but_before_the_owner_noted_it_recovers_the_same_entry()
+{
+    let f = Fixture::new(need_ctrl!());
+    let (ada, ash) = {
+        let service = Arc::new(EncounterService::new(f.world.home.clone()).unwrap());
+        let (ada, ash) = open_both(&f, &service);
+        f.send(
+            &service,
+            "conversation/crash2",
+            "<p>Is the claim sound?</p>",
+            &[("p-ada", &ada), ("p-ash", &ash)],
+        )
+        .unwrap();
+        wait_for(
+            &service,
+            "conversation/crash2",
+            &[("p-ada", "returned"), ("p-ash", "returned")],
+        );
+        (ada, ash)
+    };
+    // The owner appended Ada's reply to the Flow and died before recording it: do exactly that step, with the
+    // exact payload the owner builds, through Central.
+    let service = EncounterService::new(f.world.home.clone()).unwrap();
+    let reading = service
+        .apply(EncounterRequest::ConversationRead {
+            request_ref: r("conversation/crash2"),
+        })
+        .unwrap();
+    let ada_row = reading["recipients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["participant_key"] == "p-ada")
+        .unwrap();
+    let text = ada_row["reply"]["text"].as_str().unwrap().to_owned();
+    let entry = &reading["entry"];
+    let appended = f.central.action("central.flow.append", json!({
+        "location": f.loc, "operation_ref": "conv-reply:conversation/crash2:p-ada", "author_key": "p-ada", "html": format!("<p>{text}</p>"),
+        "at": "2026-09-30T09:30:00.000Z",
+        "relations": [{"type":"reply","entryId": entry["entry_id"], "revision": entry["document_revision"], "anchor": null}],
+        "addressees": ["p-ann"], "intent": "contribution", "basis_revision": entry["document_revision"],
+        "actor": ada.as_str(), "actor_kind": "agent", "agent_session_ref": ada.as_str(), "agent_ref": "agent:ada"}));
+    assert_eq!(appended["ok"], true, "{appended}");
+    let before = f.central.doc(&f.loc)["entries"].as_array().unwrap().len();
+    let service = Arc::new(service);
+    spawn_worker(&service);
+    wait_for(
+        &service,
+        "conversation/crash2",
+        &[("p-ada", "included"), ("p-ash", "included")],
+    );
+    let doc = f.central.doc(&f.loc);
+    let adas: Vec<&Value> = doc["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["authorKey"] == "p-ada")
+        .collect();
+    assert_eq!(
+        adas.len(),
+        1,
+        "Ada's reply is in the Flow once, recovered not doubled"
+    );
+    assert_eq!(
+        doc["entries"].as_array().unwrap().len(),
+        before + 1,
+        "only Ash's answer was added"
+    );
+    let _ = ash;
+}
