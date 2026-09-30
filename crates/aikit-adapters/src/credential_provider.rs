@@ -122,6 +122,15 @@ impl NativeSecureStoreProvider {
     }
 
     fn entry(credential_ref: &CredentialRef) -> std::result::Result<Entry, KeyringError> {
+        // keyring's v1 `Entry::new` sets the platform store on first use, but it
+        // flips its "store set" flag before the store exists: a second thread
+        // arriving in that window gets `NoDefaultStore`, and the native store
+        // would read as unavailable. The first construction runs alone here, so
+        // every caller sees the store the platform actually has.
+        static FIRST_USE: std::sync::Once = std::sync::Once::new();
+        FIRST_USE.call_once(|| {
+            let _ = Entry::new(AIKIT_KEYRING_SERVICE, "aikit-store-initialisation");
+        });
         Entry::new(AIKIT_KEYRING_SERVICE, credential_ref.as_str())
     }
 
