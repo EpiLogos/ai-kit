@@ -276,7 +276,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
             Some(SystemGroupCommand::Hook(c)) => cmd_hook(cwd, c, json_mode),
             Some(SystemGroupCommand::ModelCatalogue(a)) => cmd_model_catalogue(cwd, a),
             Some(SystemGroupCommand::Trust(a)) => cmd_trust(cwd, a),
-            Some(SystemGroupCommand::Gateway(c)) => cmd_gateway(c),
+            Some(SystemGroupCommand::Gateway(c)) => cmd_gateway(*c),
             Some(SystemGroupCommand::Shell(c)) => cmd_shell(c),
             Some(SystemGroupCommand::Generations(c)) => match c.command {
                 SystemGenerationsCommand::Prune(a) => cmd_prune(cwd, a),
@@ -376,7 +376,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Alias(c)) => cmd_alias(cwd, c, json_mode),
         Some(Command::Mux(c)) => cmd_mux(cwd, c),
         Some(Command::Shell(c)) => cmd_shell(c),
-        Some(Command::Gateway(c)) => cmd_gateway(c),
+        Some(Command::Gateway(c)) => cmd_gateway(*c),
         Some(Command::Whoami(a)) => cmd_whoami(cwd, a, json_mode),
         Some(Command::Refocus(a)) => cmd_refocus(cwd, a, json_mode),
         Some(Command::Inhabit(a)) => cmd_inhabit(cwd, a, json_mode),
@@ -1634,6 +1634,14 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                     project_world: a.project_world.as_deref(),
                     instance: a.instance.as_deref(),
                     require_workcell: a.require_workcell.as_deref(),
+                    owner: aikit_cli::gateway_contact::owner_address::OwnerAsk {
+                        subject: a.subject,
+                        propose: a.propose,
+                        proposed_owner: a.proposed_owner,
+                        options: a.options,
+                        now_ref: a.now_ref,
+                        evidence_refs: a.evidence,
+                    },
                 },
             )?)
         }

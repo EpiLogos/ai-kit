@@ -24,9 +24,16 @@ use std::{
 #[path = "encounter_agency_mint.rs"]
 pub(crate) mod mint;
 
+#[path = "encounter_conversation.rs"]
+pub(crate) mod conversation;
+
 #[cfg(test)]
 #[path = "encounter_agency_queue_tests.rs"]
 mod queue_tests;
+
+#[cfg(test)]
+#[path = "encounter_conversation_tests.rs"]
+mod conversation_tests;
 
 #[path = "encounter_model.rs"]
 pub(crate) mod model;
@@ -301,6 +308,44 @@ impl EncounterService {
             .and_then(|f| f.sync_all())
             .map_err(error)?;
         Ok(())
+    }
+    /// Admit exactly one sender and one packet source to an existing native
+    /// Agency binding — the owner-side half of bringing an agent into a shared
+    /// Flow. It widens nothing else: the binding's Agent, Agency, World and
+    /// every other sender/source are untouched, it runs through the binding's
+    /// own revision CAS, and admitting what is already admitted changes
+    /// nothing. Owner-only, like `configure_agency`: a message cannot do this.
+    pub fn admit_agency_disclosure(
+        home: &AikitHome,
+        session: &ResourceRef,
+        sender: &ResourceRef,
+        source: &ResourceRef,
+    ) -> Result<Value> {
+        let current = read_binding(home, session)?.ok_or_else(|| {
+            AikitError::new(
+                "encounter.agency_required",
+                "Admission needs a native Agency binding on this session, not a profile or display name",
+            )
+        })?;
+        if current.allowed_senders.contains(sender)
+            && current.allowed_packet_sources.contains(source)
+        {
+            return Ok(json!({"admitted":false,"unchanged":true,"revision":current.revision}));
+        }
+        let mut next = current.clone();
+        next.allowed_senders.insert(sender.clone());
+        next.allowed_packet_sources.insert(source.clone());
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(error)?;
+        let nonce = blake3::hash(&now.as_nanos().to_le_bytes()).to_hex();
+        next.revision =
+            SourceRevision::parse(format!("rev/aikit-admit-{}-{}", now.as_secs(), &nonce[..4]))?;
+        Self::configure_agency(home, session, &next, Some(&current.revision))?;
+        Ok(
+            json!({"admitted":true,"unchanged":false,"revision":next.revision,"sender":sender,"source":source,
+            "standing":"owner-side admission of one sender and one packet source; no other disclosure changed"}),
+        )
     }
     pub(super) fn lock_agency(&self, session: &ResourceRef) -> Result<ContextLock> {
         ContextLock::acquire(
@@ -926,6 +971,27 @@ impl EncounterService {
             } => {
                 self.require_attached(&agent_session)?;
                 Ok(json!(self.store.delivery(&agent_session, &delivery_ref)?))
+            }
+            EncounterRequest::DeliveryReply {
+                agent_session,
+                delivery_ref,
+            } => {
+                self.require_attached(&agent_session)?;
+                Ok(json!(self
+                    .store
+                    .delivery_reply(&agent_session, &delivery_ref)?))
+            }
+            EncounterRequest::AgencyRead { agent_session } => {
+                self.require_attached(&agent_session)?;
+                let (binding, _) = self.check_agency(&agent_session)?.ok_or_else(|| {
+                    AikitError::new(
+                        "encounter.agency_required",
+                        "This session has no native Agency binding",
+                    )
+                })?;
+                Ok(
+                    json!({"agent_ref": binding.agent_ref, "agency_ref": binding.agency_ref, "revision": binding.revision}),
+                )
             }
             _ => Err(error("Not an Agency delivery operation")),
         }

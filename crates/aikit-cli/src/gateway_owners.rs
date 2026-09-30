@@ -89,6 +89,37 @@ pub trait ContactOwners {
         request: &CustodyAssign,
         cwd: &Path,
     ) -> Result<Result<Value, OwnerRefusal>, OwnerUnavailable>;
+    /// `central.receiving.submit {project?, ...}` — the person is addressed
+    /// through Central's receiving ledger, never a gateway-side inbox. The
+    /// credential is the host's `CENTRAL_NATIVE_TOKEN`, never the input.
+    fn receiving_submit(
+        &self,
+        _project: Option<&str>,
+        _input: &Value,
+    ) -> Result<Result<Value, OwnerRefusal>, OwnerUnavailable> {
+        Err(not_offered("central.receiving.submit"))
+    }
+    /// `central.receiving.list {project?, limit}` — one register's page.
+    fn receiving_list(&self, _project: Option<&str>) -> Result<Value, OwnerUnavailable> {
+        Err(not_offered("central.receiving.list"))
+    }
+    /// `central.receiving.read {project?, return_ref}`.
+    fn receiving_read(
+        &self,
+        _project: Option<&str>,
+        _return_ref: &str,
+    ) -> Result<Value, OwnerUnavailable> {
+        Err(not_offered("central.receiving.read"))
+    }
+    /// The Work Projects Central discloses (`central.world` → work.projects).
+    fn world_projects(&self) -> Result<Vec<String>, OwnerUnavailable> {
+        Err(not_offered("central.world"))
+    }
+}
+
+/// An owner seam that does not speak this verb (a fixture, an older build).
+fn not_offered(action: &str) -> OwnerUnavailable {
+    unavailable(action, "this owner seam does not offer the verb")
 }
 
 /// The arguments of one custody assignment, as Factory names them.
@@ -171,6 +202,39 @@ impl ProcessOwners {
         Err(CtrlFailure::Refused { command, envelope })
     }
 
+    /// A read whose refusal is simply the owner being unable to answer.
+    fn ctrl_read(&self, action: &str, input: &Value) -> Result<Value, OwnerUnavailable> {
+        self.ctrl_action(action, input)
+            .map_err(|failure| match failure {
+                CtrlFailure::Unavailable(unavailable) => unavailable,
+                CtrlFailure::Refused { command, envelope } => {
+                    unavailable(&command, ctrl_refusal_reason(&envelope))
+                }
+            })
+    }
+
+    /// Run one Central action through the real `ctrl`: the action's data on
+    /// success; its refusal (code, message, details) or the owner's absence
+    /// otherwise. The conversation owner uses this for Flow append and read.
+    pub(crate) fn run_ctrl_action(
+        &self,
+        action: &str,
+        input: &Value,
+    ) -> std::result::Result<Value, CtrlActionError> {
+        match self.ctrl_action(action, input) {
+            Ok(data) => Ok(data),
+            Err(CtrlFailure::Unavailable(owner)) => Err(CtrlActionError::Unavailable(owner.reason)),
+            Err(CtrlFailure::Refused { envelope, .. }) => Err(CtrlActionError::Refused {
+                code: envelope
+                    .pointer("/error/code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("refused")
+                    .to_owned(),
+                message: ctrl_refusal_reason(&envelope),
+            }),
+        }
+    }
+
     fn json_process(
         &self,
         argv: Vec<String>,
@@ -196,6 +260,13 @@ impl ProcessOwners {
         })?;
         Ok((output.status, value))
     }
+}
+
+/// How a Central action ended for a caller that is not the gateway.
+#[derive(Debug)]
+pub(crate) enum CtrlActionError {
+    Refused { code: String, message: String },
+    Unavailable(String),
 }
 
 enum CtrlFailure {
@@ -335,6 +406,60 @@ impl ContactOwners for ProcessOwners {
                 unavailable(&command, ctrl_refusal_reason(&envelope))
             }
         })
+    }
+
+    fn receiving_submit(
+        &self,
+        project: Option<&str>,
+        input: &Value,
+    ) -> Result<Result<Value, OwnerRefusal>, OwnerUnavailable> {
+        let mut input = input.clone();
+        input["project"] = project.map(Value::from).unwrap_or(Value::Null);
+        match self.ctrl_action("central.receiving.submit", &input) {
+            Ok(value) => Ok(Ok(value)),
+            Err(CtrlFailure::Unavailable(unavailable)) => Err(unavailable),
+            Err(CtrlFailure::Refused { command, envelope }) => Ok(Err(OwnerRefusal {
+                command,
+                code: envelope
+                    .pointer("/error/code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("central.receiving_refused")
+                    .to_owned(),
+                fact: ctrl_refusal_reason(&envelope),
+                consequence: "Nothing reached the owner; Central recorded no request.".into(),
+                action: "Correct what Central names and send again.".into(),
+            })),
+        }
+    }
+
+    fn receiving_list(&self, project: Option<&str>) -> Result<Value, OwnerUnavailable> {
+        self.ctrl_read(
+            "central.receiving.list",
+            &serde_json::json!({ "project": project, "limit": 200 }),
+        )
+    }
+
+    fn receiving_read(
+        &self,
+        project: Option<&str>,
+        return_ref: &str,
+    ) -> Result<Value, OwnerUnavailable> {
+        self.ctrl_read(
+            "central.receiving.read",
+            &serde_json::json!({ "project": project, "return_ref": return_ref }),
+        )
+    }
+
+    fn world_projects(&self) -> Result<Vec<String>, OwnerUnavailable> {
+        let world = self.ctrl_read("central.world", &serde_json::json!({}))?;
+        Ok(world
+            .pointer("/work/projects")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|project| project.get("name").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect())
     }
 
     fn occupancy_list(&self) -> Result<Value, OwnerUnavailable> {
