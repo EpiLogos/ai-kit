@@ -101,15 +101,15 @@ sys.stdout.write(json.dumps({
     bin
 }
 
-struct QueueWorld {
-    _temp: tempfile::TempDir,
-    home: AikitHome,
-    cwd: PathBuf,
+pub(super) struct QueueWorld {
+    pub(super) _temp: tempfile::TempDir,
+    pub(super) home: AikitHome,
+    pub(super) cwd: PathBuf,
     actuation_bin: PathBuf,
 }
 
 impl QueueWorld {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let home = AikitHome::at(root.join("home"));
@@ -127,6 +127,22 @@ impl QueueWorld {
     /// Attach one session to its own space, configure its selected Agency
     /// (staged against the stub native owner) and its controlled ACP provider.
     fn attach(&self, id: &str) -> (SessionSpaceRef, ResourceRef) {
+        self.attach_with(
+            id,
+            &["human:owner", "agent:sender"],
+            &["source/shared"],
+            "caw_provider.py",
+        )
+    }
+    /// The same attachment with an explicit disclosure (who may address this
+    /// session, which packet sources it may receive) and provider fixture.
+    pub(super) fn attach_with(
+        &self,
+        id: &str,
+        senders: &[&str],
+        sources: &[&str],
+        provider: &str,
+    ) -> (SessionSpaceRef, ResourceRef) {
         let space = SessionSpaceRef::parse(&format!("session-space/{id}")).unwrap();
         let session = r(&format!("agent-session/{id}"));
         let store = SessionSpaceApplicationStore::new(self.home.clone());
@@ -187,8 +203,8 @@ impl QueueWorld {
                 content_digest: format!("blake3:{}", blake3::hash(&bytes).to_hex()),
             },
             actuation_bin: self.actuation_bin.clone(),
-            allowed_senders: [r("human:owner"), r("agent:sender")].into(),
-            allowed_packet_sources: [r("source/shared")].into(),
+            allowed_senders: senders.iter().map(|s| r(s)).collect(),
+            allowed_packet_sources: sources.iter().map(|s| r(s)).collect(),
             context: Some(EncounterContextAdmission {
                 sources: vec![EncounterRequiredSource {
                     source: r(&format!("source/{id}-context")),
@@ -215,7 +231,8 @@ impl QueueWorld {
                     "python3".into(),
                     "-u".into(),
                     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("tests/fixtures/caw_provider.py")
+                        .join("tests/fixtures")
+                        .join(provider)
                         .into_os_string()
                         .into_string()
                         .unwrap(),
@@ -237,7 +254,7 @@ impl QueueWorld {
         (space, session)
     }
 
-    fn open(
+    pub(super) fn open(
         &self,
         service: &EncounterService,
         space: &SessionSpaceRef,

@@ -32,9 +32,19 @@ mod delivery;
 pub use delivery::{DeliveryReservation, EncounterDelivery};
 #[path = "encounter_context.rs"]
 pub mod context;
+#[path = "encounter_conversation.rs"]
+mod conversation;
+pub use conversation::{
+    ConversationReading, ConversationRecipientReading, ConversationWork, NewConversationRecipient,
+    ReplyReading, REPLY_LIMIT_BYTES,
+};
+
+/// Called, with no store lock held, after a provider turn-end event commits.
+type TerminalNotifier = Box<dyn Fn() + Send + Sync>;
 
 pub struct EncounterStore {
     connection: Mutex<Connection>,
+    terminal_notifier: Mutex<Option<TerminalNotifier>>,
 }
 fn failure(error: impl std::fmt::Display) -> AikitError {
     AikitError::new("encounter.storage", error.to_string())
@@ -60,9 +70,11 @@ impl EncounterStore {
             CREATE INDEX IF NOT EXISTS encounter_block_session ON encounter_blocks(session,id);
             CREATE TABLE IF NOT EXISTS encounter_block_exclusions(session TEXT NOT NULL,block_id INTEGER NOT NULL,basis TEXT NOT NULL,PRIMARY KEY(session,block_id));").map_err(failure)?;
         delivery::install(&connection)?;
+        conversation::install(&connection)?;
         context::install(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
+            terminal_notifier: Mutex::new(None),
         })
     }
     pub fn append(&self, session: &ResourceRef, event: &Value) -> Result<u64> {
@@ -83,7 +95,24 @@ impl EncounterStore {
         project_block(&transaction, session, &event)?;
         delivery::finish(&transaction, session, &event, cursor)?;
         transaction.commit().map_err(failure)?;
+        let turn_ended = event.pointer("/event/TurnEnded").is_some();
+        drop(connection);
+        if turn_ended {
+            if let Ok(held) = self.terminal_notifier.lock() {
+                if let Some(notify) = held.as_ref() {
+                    notify();
+                }
+            }
+        }
         Ok(cursor)
+    }
+    /// Register the owner's wake-up for a finished provider turn. The notifier
+    /// only wakes a worker; all work is derived from durable state, so a missed
+    /// or coalesced wake is recovered by the worker's next sweep.
+    pub fn on_turn_ended(&self, notify: impl Fn() + Send + Sync + 'static) {
+        if let Ok(mut held) = self.terminal_notifier.lock() {
+            *held = Some(Box::new(notify));
+        }
     }
     /// Bounded encounter presentation from the canonical owner journal.
     pub fn view(&self, session: &ResourceRef, before: Option<u64>) -> Result<Value> {
