@@ -66,6 +66,7 @@ fn fixture_central() -> PathBuf {
             "agent_ref": "agent:hermes",
             "revision": "p1",
             "scope": "personal",
+            "expressive_character_ref": "central:Control/agents/expressive-material/character/hermes.expression.json",
             "intent_provenance": {
                 "schema": "central.agent-profile-provenance/v1",
                 "intent_expression": "be hermes, and hold it",
@@ -315,6 +316,11 @@ fn the_profile_identifier_and_intent_survive_from_centrals_own_shape() {
     assert_eq!(
         profile["intent_provenance"]["recognition"].as_str(),
         Some("unrecognised")
+    );
+    // The expressive character ref travels with the profile relation.
+    assert_eq!(
+        profile["expressive_character_ref"].as_str(),
+        Some("central:Control/agents/expressive-material/character/hermes.expression.json")
     );
 }
 

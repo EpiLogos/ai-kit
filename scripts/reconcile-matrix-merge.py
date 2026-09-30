@@ -12,10 +12,13 @@ Because every slice touches them, every open PR conflicts on them as soon as
 another PR merges. This script performs the resolution that used to be a
 six-step manual dance:
 
-    1. take main's version of the three artifacts (never trust a 3-way merge
+    1. read main's version of the three artifacts, and this branch's own row
+       edits, and run every refusal (conflict markers, deleted rows, overlapping
+       row edits) *before writing anything* -- a refused run leaves the merge
+       exactly as git left it
+    2. take main's version of the three artifacts (never trust a 3-way merge
        of generated content, and never rely on `git checkout --theirs`, which
        silently no-ops on a path git no longer considers unmerged)
-    2. refuse loudly if any of them still carries conflict markers
     3. re-apply *this branch's own* capability-matrix.csv row edits, recovered
        from the diff between the merge base and the branch tip (not retyped)
     4. regenerate the renderings through the product-ground pyz's plan/apply
@@ -54,7 +57,10 @@ from pathlib import Path
 CSV_PATH = "ProjectCentral/user/telos/capability-matrix.csv"
 MD_PATH = "ProjectCentral/user/telos/capability-matrix.md"
 HTML_PATH = "ProjectCentral/user/telos/aikit.html"
-MANIFEST_PATH = "ProjectCentral/user/capability-matrix.json"
+MANIFEST_PATH = "ProjectCentral/user/telos/capability-matrix.json"
+# Before the carriers moved to telos/ (#398) they sat directly under ProjectCentral/user.
+# A branch cut before that move still has them there at its merge base and tip.
+LEGACY_DIR = "ProjectCentral/user/"
 FORCED_ARTIFACTS = (CSV_PATH, MD_PATH, HTML_PATH)
 
 ACCOUNT = "aikit.html"
@@ -79,9 +85,14 @@ def git(root: Path, *args: str, check: bool = True) -> str:
     return run(["git", *args], cwd=root, check=check).stdout.strip()
 
 
-def git_show(root: Path, ref: str, relpath: str) -> str:
+def git_show_carrier(root: Path, ref: str, relpath: str) -> str:
+    """Read a carrier at `ref`, falling back to its pre-telos location."""
     result = run(["git", "show", f"{ref}:{relpath}"], cwd=root, check=False)
     if result.returncode != 0:
+        legacy = LEGACY_DIR + relpath.rsplit("/", 1)[1]
+        legacy_result = run(["git", "show", f"{ref}:{legacy}"], cwd=root, check=False)
+        if legacy_result.returncode == 0:
+            return legacy_result.stdout
         raise fail(f"cannot read {relpath} at {ref}: {result.stderr.strip()}")
     return result.stdout
 
@@ -108,21 +119,6 @@ def by_id(records: list[dict[str, str]]) -> dict[str, dict[str, str]]:
             raise fail(f"duplicate CSV row id: {key}")
         keyed[key] = record
     return keyed
-
-
-def check_no_conflict_markers(paths: dict[str, Path]) -> None:
-    offenders = []
-    for name, path in paths.items():
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if CONFLICT_MARKER_RE.search(text):
-            offenders.append(name)
-    if offenders:
-        raise fail(
-            "refusing to proceed: conflict markers remain after taking main's version of "
-            + ", ".join(offenders)
-            + ". Nothing was staged. Inspect and fix these files (or the commit on origin/main "
-            "that produced them) before rerunning."
-        )
 
 
 def build_merged_csv(main_header: list[str], main_rows: dict[str, dict[str, str]],
@@ -178,44 +174,46 @@ def main() -> int:
         note = " (git shows it conflicted)" if path in conflicted else " (not flagged conflicted by git, forcing anyway)"
         print(f"    - {path}{note}")
 
-    print("==> Taking main's version of the three shared artifacts")
-    paths = {name: root / name for name in FORCED_ARTIFACTS}
-    for name, path in paths.items():
-        path.write_text(git_show(root, "MERGE_HEAD", name), encoding="utf-8")
-
-    manifest_path = root / MANIFEST_PATH
-    manifest_base = git_show(root, base, MANIFEST_PATH)
-    manifest_branch = git_show(root, "HEAD", MANIFEST_PATH)
-    if manifest_branch != manifest_base:
-        print(f"    - {MANIFEST_PATH}: branch itself edits the manifest; leaving working-tree resolution as-is")
-        if CONFLICT_MARKER_RE.search(manifest_path.read_text(encoding="utf-8", errors="replace")):
-            raise fail(f"{MANIFEST_PATH} still contains conflict markers and this branch edits it structurally; resolve it by hand.")
-    else:
-        manifest_path.write_text(git_show(root, "MERGE_HEAD", MANIFEST_PATH), encoding="utf-8")
-        print(f"    - {MANIFEST_PATH}: branch did not touch it; took main's version too")
-
-    check_no_conflict_markers(paths)
+    # Preflight: every read and every refusal happens here, before anything in the
+    # working tree is written, so a failure leaves the merge exactly as git left it.
+    print("==> Reading main's version of the three shared artifacts")
+    main_text = {name: git_show_carrier(root, "MERGE_HEAD", name) for name in FORCED_ARTIFACTS}
+    offenders = [name for name, text in main_text.items() if CONFLICT_MARKER_RE.search(text)]
+    if offenders:
+        raise fail(
+            "refusing to proceed: conflict markers are committed on origin/main in "
+            + ", ".join(offenders)
+            + ". Nothing was written. Fix the commit on origin/main that produced them before rerunning."
+        )
     print("    OK: no conflict markers in any shared artifact")
 
+    manifest_path = root / MANIFEST_PATH
+    manifest_base = git_show_carrier(root, base, MANIFEST_PATH)
+    manifest_branch = git_show_carrier(root, "HEAD", MANIFEST_PATH)
+    manifest_main = git_show_carrier(root, "MERGE_HEAD", MANIFEST_PATH)
+    branch_edits_manifest = manifest_branch != manifest_base
+    if branch_edits_manifest:
+        print(f"    - {MANIFEST_PATH}: branch itself edits the manifest; leaving working-tree resolution as-is")
+        if manifest_path.is_file() and CONFLICT_MARKER_RE.search(manifest_path.read_text(encoding="utf-8", errors="replace")):
+            raise fail(f"{MANIFEST_PATH} still contains conflict markers and this branch edits it structurally; resolve it by hand. Nothing was written.")
+    else:
+        print(f"    - {MANIFEST_PATH}: branch did not touch it; will take main's version too")
+
     print("==> Recovering this branch's own capability-matrix.csv row edits (base -> HEAD)")
-    base_header, base_records = parse_csv(git_show(root, base, CSV_PATH))
-    head_header, head_records = parse_csv(git_show(root, "HEAD", CSV_PATH))
-    main_header, main_records = parse_csv(git_show(root, "MERGE_HEAD", CSV_PATH))
+    base_header, base_records = parse_csv(git_show_carrier(root, base, CSV_PATH))
+    head_header, head_records = parse_csv(git_show_carrier(root, "HEAD", CSV_PATH))
+    main_header, main_records = parse_csv(main_text[CSV_PATH])
     main_row_order = [r["id"] for r in main_records]
     base_rows, head_rows, main_rows = by_id(base_records), by_id(head_records), by_id(main_records)
 
     removed = set(base_rows) - set(head_rows)
     if removed:
-        raise fail(f"this branch deletes capability-matrix.csv row(s) {sorted(removed)}; resolve that by hand, this tool only reapplies edits/additions.")
+        raise fail(f"this branch deletes capability-matrix.csv row(s) {sorted(removed)}; resolve that by hand, this tool only reapplies edits/additions. Nothing was written.")
 
     modified = {rid for rid, row in head_rows.items() if rid in base_rows and row != base_rows[rid]}
     added = set(head_rows) - set(base_rows)
     branch_changed_ids = modified | added
-    if not branch_changed_ids:
-        print("    Branch has no capability-matrix.csv edits relative to the merge base; nothing to reapply.")
-        print("    main's shared artifacts are now in place. Review with git diff/status, then commit.")
-        return 0
-    print(f"    Branch's own row edits: {sorted(branch_changed_ids)}")
+    print(f"    Branch's own row edits: {sorted(branch_changed_ids) or 'none'}")
 
     overlap = {
         rid for rid in branch_changed_ids
@@ -227,8 +225,35 @@ def main() -> int:
         raise fail(
             "genuine conflicting edits on the same capability-matrix.csv row(s) "
             f"{sorted(overlap)}: both this branch and origin/main changed them differently since "
-            "the merge base. This tool only reapplies non-overlapping edits; resolve these rows by hand."
+            "the merge base. This tool only reapplies non-overlapping edits; resolve these rows by hand "
+            "(see the aikit-capability-matrix-conflict-resolution note: code_basis and last_reconciled_at are generated). "
+            "Nothing was written."
         )
+
+    snapshot = {
+        path: (path.read_bytes() if path.is_file() else None)
+        for path in [root / n for n in (*FORCED_ARTIFACTS, MANIFEST_PATH)]
+    }
+
+    def restore_snapshot() -> None:
+        for path, data in snapshot.items():
+            if data is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(data)
+
+    print("==> Writing main's version of the shared artifacts")
+    paths = {name: root / name for name in FORCED_ARTIFACTS}
+    for name, path in paths.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(main_text[name], encoding="utf-8")
+    if not branch_edits_manifest:
+        manifest_path.write_text(manifest_main, encoding="utf-8")
+
+    if not branch_changed_ids:
+        print("    Branch has no capability-matrix.csv edits relative to the merge base; nothing to reapply.")
+        print("    main's shared artifacts are now in place. Review with git diff/status, then commit.")
+        return 0
 
     merged_csv = build_merged_csv(main_header, main_rows, head_header, head_rows, branch_changed_ids, main_row_order)
     if CONFLICT_MARKER_RE.search(merged_csv):
@@ -273,7 +298,8 @@ def main() -> int:
                 detail.append(f"plan reports record(s) this branch never touched: {sorted(extra)} -- another PR's reconciliation may have been clobbered")
             if missing:
                 detail.append(f"plan does not report record(s) this branch touched: {sorted(missing)} -- the edit may be a no-op or was lost")
-            raise fail("changed-records invariant violated: " + "; ".join(detail) + ". Nothing was staged.")
+            restore_snapshot()
+            raise fail("changed-records invariant violated: " + "; ".join(detail) + ". Working tree restored to the state git left it; nothing was staged.")
         print("    OK: plan.changed_records == this branch's own row edits, exactly")
 
         required_review = plan["required_review"]
@@ -296,6 +322,7 @@ def main() -> int:
             cwd=workdir, text=True, capture_output=True,
         )
         if apply_result.returncode != 0:
+            restore_snapshot()
             raise fail(f"apply failed: {apply_result.stderr.strip() or apply_result.stdout.strip()}. Nothing further was staged.")
         receipt_path = Path(apply_result.stdout.strip())
         print(f"    Applied. Transaction receipt: {receipt_path}")
