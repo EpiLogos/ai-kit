@@ -869,7 +869,10 @@ impl EncounterService {
                 }),
             )?;
         }
-        let (argv, environment) = (resolved.argv, resolved.environment);
+        let (mut argv, environment) = (resolved.argv, resolved.environment);
+        if provider.protocol == EncounterProtocol::PrimeRpc {
+            crate::encounter_service::prime_launch::append_context(home, session, &mut argv)?;
+        }
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| error("Missing native model executable"))?;

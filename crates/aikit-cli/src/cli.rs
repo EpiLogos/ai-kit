@@ -5044,6 +5044,16 @@ pub enum SessionSpaceCommand {
         #[arg(long)]
         provider_id: String,
     },
+    /// Configure explicit machine-local speech stages; never starts an inference.
+    EncounterSpeechConfigure {
+        #[arg(long)]
+        config_json: String,
+    },
+    /// Disclose local stages around the actual admitted native text body.
+    EncounterSpeechRead {
+        #[arg(long)]
+        agent_session: String,
+    },
     /// Provision or withdraw a native Agency binding under an exact revision.
     /// This is an owner-only operation, not gateway/IPC input.
     EncounterAgencyConfigure {
