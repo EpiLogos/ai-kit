@@ -84,9 +84,9 @@ use crate::gateway_communique::{
 use crate::gateway_connector::{ConnectorOperation, OutboundOperationKind};
 use crate::gateway_connector_pump::{ConnectorPumpControls, ConnectorQueues};
 use crate::gateway_runtime::{
-    execute_gateway_command, AgencyGateway, GatewayAgentReply, GatewayAgentReplyFailure,
-    GatewayBinding, GatewayCommand, GatewayConversationOperation, GatewayResponse,
-    GatewayStreamEvent,
+    execute_gateway_command, AgencyGateway, DrainReport, DrainedTurn, GatewayAgentReply,
+    GatewayAgentReplyFailure, GatewayBinding, GatewayCommand, GatewayConversationOperation,
+    GatewayResponse, GatewayStreamEvent,
 };
 use crate::gateway_service::{persist_gateway_state, SubscriptionHub};
 
@@ -541,6 +541,11 @@ impl FixtureTurnSource {
                 return;
             }
         }
+    }
+
+    /// How many turns this source has ever been prompted for, finished or not.
+    pub fn prompted_turns(&self) -> usize {
+        self.turns.lock().expect("fixture turns").len()
     }
 
     /// How many turns are parked unfinished right now.
@@ -1120,6 +1125,19 @@ pub fn parse_slash(text: &str) -> SlashParse {
         "new" | "reset" => SlashParse::Operation(GatewayConversationOperation::New),
         "sessions" => SlashParse::Operation(GatewayConversationOperation::Sessions),
         "restart" => SlashParse::Operation(GatewayConversationOperation::Restart),
+        // `/upgrade` reads the plan; changing anything takes the explicit
+        // word `apply`.
+        "upgrade" => match argument.map(str::to_ascii_lowercase).as_deref() {
+            None | Some("plan") => {
+                SlashParse::Operation(GatewayConversationOperation::Upgrade { apply: false })
+            }
+            Some("apply") => {
+                SlashParse::Operation(GatewayConversationOperation::Upgrade { apply: true })
+            }
+            Some(other) => SlashParse::Unknown(format!(
+                "/upgrade {other} (use /upgrade to read the plan, /upgrade apply to start it)"
+            )),
+        },
         "ask" => {
             let mut words = remainder.split_whitespace();
             let Some(recipient) = words.next() else {
@@ -1193,6 +1211,31 @@ struct EngineInner {
     draining: bool,
 }
 
+/// The conversation an upgrade was asked for from, so its receipt returns
+/// there. Only refs: the receipt is posted through the running gateway
+/// (`Announce`), never by reaching into a connector.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpgradeOrigin {
+    pub binding_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to_sequence: Option<u64>,
+}
+
+/// What a conversation's `/upgrade` asks of the machine's upgrade owner. The
+/// engine holds no installer and no service manager; the binary that owns
+/// them wires this once at service assembly. The upgrade itself runs in a
+/// worker that outlives the gateway process, because the gateway is what the
+/// upgrade restarts.
+pub trait GatewayUpgradeLauncher: Send + Sync + 'static {
+    /// The plan, as data and one plain-words line. Changes nothing.
+    fn plan(&self) -> Result<(Value, String)>;
+    /// Start the managed upgrade in a detached worker; the receipt returns to
+    /// `origin` once the new build is verified running.
+    fn start(&self, origin: UpgradeOrigin) -> Result<(Value, String)>;
+}
+
 /// What a canonical operation answered, and whether the service should now
 /// exit cleanly so its service manager rematerialises it.
 pub struct ConversationExecution {
@@ -1214,6 +1257,9 @@ pub struct GatewayConversationEngine {
     /// (`GatewayConversationHooks::ask_router`). Absent, `/ask` refuses
     /// honestly: no occupancy or recipient owners stand behind this gateway.
     ask: OnceLock<Arc<dyn GatewayAskRouter>>,
+    /// The managed-upgrade owner behind `/upgrade`, wired once at service
+    /// assembly. Absent, `/upgrade` says so and names the command to run.
+    upgrade: OnceLock<Arc<dyn GatewayUpgradeLauncher>>,
     inner: Mutex<EngineInner>,
 }
 
@@ -1237,6 +1283,7 @@ impl GatewayConversationEngine {
             resolver,
             policy,
             ask: OnceLock::new(),
+            upgrade: OnceLock::new(),
             inner: Mutex::new(EngineInner {
                 in_flight: BTreeMap::new(),
                 draining: false,
@@ -1251,6 +1298,17 @@ impl GatewayConversationEngine {
         if self.ask.set(router).is_err() {
             eprintln!(
                 "conversation engine: an ask router was already attached; the second was refused"
+            );
+        }
+    }
+
+    /// Wire the upgrade owner behind `/upgrade`. Called once at service
+    /// assembly; a second attach is refused on stderr, never silently replaced.
+    pub fn attach_upgrade_launcher(&self, launcher: Arc<dyn GatewayUpgradeLauncher>) {
+        if self.upgrade.set(launcher).is_err() {
+            eprintln!(
+                "conversation engine: an upgrade launcher was already attached; the second was \
+                 refused"
             );
         }
     }
@@ -1823,6 +1881,10 @@ impl GatewayConversationEngine {
                 Ok((result, Some(line), None, false))
             }
             GatewayConversationOperation::Restart => self.restart(),
+            GatewayConversationOperation::Announce { text } => {
+                Ok((json!({"announced": true}), Some(text.clone()), None, false))
+            }
+            GatewayConversationOperation::Upgrade { apply } => self.upgrade(binding_ref, *apply),
             GatewayConversationOperation::PauseConnector { connector_ref } => {
                 self.set_paused(binding_ref, connector_ref.clone(), true)
             }
@@ -2428,10 +2490,18 @@ impl GatewayConversationEngine {
         ))
     }
 
-    /// The restart drain: stop admitting, resolve the in-flight turn under
-    /// the bounded policy, record honestly, persist. The service exits after
-    /// answering so its service manager rematerialises it.
-    fn restart(self: &Arc<Self>) -> Result<(Value, Option<String>, Option<ResourceRef>, bool)> {
+    /// The drain: stop admitting, resolve every in-flight turn under a bounded
+    /// grace, record honestly, persist — and report exactly what it met. No
+    /// binding is needed: a restart asked for by an upgrade, a signal or an
+    /// operator drains the whole gateway the same way.
+    ///
+    /// A turn that does not finish inside the grace is interrupted, and what
+    /// it did before then is an uncertain effect: the interruption is
+    /// journaled on its stream, named in the report, and the turn is never
+    /// replayed.
+    pub fn drain(self: &Arc<Self>, reason: &str, grace: Option<Duration>) -> Result<DrainReport> {
+        let grace = grace.unwrap_or(self.policy.turn_grace);
+        let started_at_unix_ms = crate::gateway_posture::unix_ms_now();
         // The drain takes the in-flight turns out — removing each record is
         // what makes the drain its outcome's owner, so the turn's own worker
         // stands down and exactly one of the two journals the outcome.
@@ -2440,28 +2510,35 @@ impl GatewayConversationEngine {
             inner.draining = true;
             std::mem::take(&mut inner.in_flight).into_iter().collect()
         };
-        let mut resolved = 0usize;
-        let mut interrupted = 0usize;
+        let mut turns_resolved = Vec::new();
+        let mut turns_interrupted = Vec::new();
         for (binding_ref, in_flight) in taken {
-            let outcome = match in_flight.turn.wait_timeout(self.policy.turn_grace) {
-                Some(outcome) => {
-                    resolved += 1;
-                    outcome
-                }
+            let (outcome, was_interrupted, detail) = match in_flight.turn.wait_timeout(grace) {
+                Some(outcome) => (outcome, false, None),
                 None => {
                     let receipt = in_flight
                         .turn
-                        .interrupt(Some("gateway restart drain".into()))
+                        .interrupt(Some(format!("gateway drain: {reason}")))
                         .unwrap_or_else(|error| format!("interrupt could not be issued: {error}"));
-                    interrupted += 1;
-                    in_flight
+                    let outcome = in_flight
                         .turn
                         .wait_timeout(self.policy.interrupt_grace)
                         .unwrap_or(ConversationTurnOutcome::Interrupted {
-                            detail: Some(receipt),
-                        })
+                            detail: Some(receipt.clone()),
+                        });
+                    (outcome, true, Some(receipt))
                 }
             };
+            let record = DrainedTurn {
+                binding_ref: binding_ref.to_string(),
+                in_reply_to_sequence: in_flight.in_reply_to_sequence,
+                detail,
+            };
+            if was_interrupted {
+                turns_interrupted.push(record);
+            } else {
+                turns_resolved.push(record);
+            }
             let binding = {
                 let kernel = self.gateway.lock().map_err(|_| poisoned())?;
                 kernel.binding(&binding_ref).cloned()
@@ -2477,10 +2554,35 @@ impl GatewayConversationEngine {
             }
         }
         self.persist()?;
+        let (pending_operations, communiques) = {
+            let kernel = self.gateway.lock().map_err(|_| poisoned())?;
+            (
+                kernel.pending_operation_refs(),
+                kernel.communiques().counts(),
+            )
+        };
+        Ok(DrainReport {
+            reason: reason.to_owned(),
+            started_at_unix_ms,
+            finished_at_unix_ms: crate::gateway_posture::unix_ms_now(),
+            grace_ms: grace.as_millis() as u64,
+            turns_resolved,
+            turns_interrupted,
+            pending_operations,
+            communiques,
+        })
+    }
+
+    /// The restart drain: [`drain`](Self::drain), then answer; the service
+    /// exits so its service manager rematerialises it.
+    fn restart(self: &Arc<Self>) -> Result<(Value, Option<String>, Option<ResourceRef>, bool)> {
+        let report = self.drain("conversation restart", None)?;
+        let resolved = report.turns_resolved.len();
+        let interrupted = report.turns_interrupted.len();
         let summary = json!({
             "resolved": resolved,
             "interrupted": interrupted,
-            "turn_grace_ms": self.policy.turn_grace.as_millis() as u64,
+            "turn_grace_ms": report.grace_ms,
         });
         Ok((
             json!({"restarting": true, "drain": summary}),
@@ -2490,6 +2592,72 @@ impl GatewayConversationEngine {
             )),
             None,
             true,
+        ))
+    }
+
+    /// `/upgrade` (plan) and `/upgrade apply` (start) for one conversation.
+    /// The worker that performs the upgrade is not a child of this process:
+    /// this gateway is what it restarts.
+    fn upgrade(
+        self: &Arc<Self>,
+        binding_ref: &ResourceRef,
+        apply: bool,
+    ) -> Result<(Value, Option<String>, Option<ResourceRef>, bool)> {
+        let Some(launcher) = self.upgrade.get() else {
+            let line = "no upgrade owner stands behind this gateway; run `aikit gateway upgrade \
+                        plan` on the machine it serves"
+                .to_owned();
+            return Ok((
+                json!({"upgrade": "unavailable", "reason": line}),
+                Some(line),
+                None,
+                false,
+            ));
+        };
+        if !apply {
+            let (plan, line) = launcher.plan()?;
+            return Ok((
+                json!({"upgrade": "plan", "plan": plan}),
+                Some(line),
+                None,
+                false,
+            ));
+        }
+        let origin = {
+            let kernel = self.gateway.lock().map_err(|_| poisoned())?;
+            let binding = kernel.binding(binding_ref).cloned();
+            // A group admits several senders under one binding, and a slash
+            // command carries a message's authority, not an owner's. Changing
+            // the machine is asked for in a direct conversation.
+            if binding
+                .as_ref()
+                .is_some_and(|b| b.address.scope_id.as_deref() == Some("group"))
+            {
+                let line = "/upgrade apply is refused in a group conversation: a group \
+                            admits several senders. Ask in a direct conversation with this \
+                            gateway, or run `aikit gateway upgrade apply` on the machine"
+                    .to_owned();
+                return Ok((
+                    json!({"upgrade": "refused", "reason": line}),
+                    Some(line),
+                    None,
+                    false,
+                ));
+            }
+            UpgradeOrigin {
+                binding_ref: binding_ref.to_string(),
+                connector_ref: binding.as_ref().map(|b| b.connector_ref.to_string()),
+                in_reply_to_sequence: None,
+            }
+        };
+        let (started, line) = launcher.start(origin)?;
+        // The gateway keeps serving: the worker drains it once the new build is
+        // installed, and the receipt comes back to this conversation.
+        Ok((
+            json!({"upgrade": "started", "started": started}),
+            Some(line),
+            None,
+            false,
         ))
     }
 

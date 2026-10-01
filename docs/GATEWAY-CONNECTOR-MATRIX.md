@@ -26,3 +26,35 @@ Gateway connector seam. **Different by design**, not a gap.
 
 Update this table only from executed evidence; a capability moves rows when
 its proof moves, never from intention.
+
+## Operational parity — lifecycle, upgrade and remote reach
+
+The table above is about platforms. This one is about how the gateway is run,
+kept current and reached. Installed Hermes: v0.21.1 (2026.9.7), checkout
+`20f7ef4df5e1`; upstream `main` `7239625ae1b7` (2026-09-30); live documentation
+read 2026-09-30 through a summarising fetch. **Shipped** = present in the
+installed source (file:line in the research record); **upstream** = newer than
+installed; **claim** = documented but not found in the installed source.
+
+| Behaviour | Hermes | O:I (this change) | Standing |
+|---|---|---|---|
+| Restart requested from inside the gateway survives the restart | detached updater; result recorded before the disruptive step; the next gateway claims the pending marker and reports — **shipped** | durable transaction; worker under the service manager (LaunchAgent / transient unit), not a child; the new gateway re-adopts an orphan and delivers the receipt once | D: scripted-driver suite (worker death, dead-worker resume, receipt delivered once) and real-binary suite (real gateway processes, detached worker, scripted supervisor and installer: upgrade, install failure, flip-then-fail rollback, broken new build rolled back, foreground left running, SIGTERM drain). M: real launchd (Mac) and real systemd (Omarchy) under controlled instances, five scenarios each; I: the real services of both machines upgraded through `gateway upgrade apply` (`docs/implementation/GATEWAY-OPERATIONS-ACCEPTANCE.md`) |
+| The requester hears the outcome | `/restart`/`/update` notice through the requester's own adapter — **shipped** | `/upgrade apply` receipt announced into the asking conversation | D |
+| Drain | refuse new turns, wait ≤1800 s, interrupt with `resume_pending` — **shipped** | bounded grace (default 60 s), interrupt and **record**; no auto-resume | D |
+| Stop by signal drains | SIGUSR1 / exit codes 75, 78 — **shipped** | `SIGTERM`/`SIGINT` drain then exit 0 | D (real binary) |
+| The running version is checked after the update | `code_sha` comparison across the fleet — **shipped** | the process's own revision, pid, start time and executable digest; upgrade verifies a *different* process runs the *expected image* | D (real binary: a stale resident is found, upgraded, and the new pid states the new revision). I: Mac pid 47288 and Omarchy pid 2348420 each state revision `6e452a600a4c` and their executable digest |
+| Stale resident noticed | fleet check at update time — **shipped** | `gateway doctor`, `oi doctor`, `oi update --check` | D |
+| Rollback | update backups (`--backup`) — **shipped** | installer rollback + verification of the previous build | D |
+| Update skips the gateway restart | `--no-gateway-restart` — **upstream** (v0.21.4); documented, **absent from the installed parser** | `upgrade apply` without `--install` restarts onto an installed build; with it, the installer is the managed one | — |
+| Multiplexed single gateway per host | default upstream (v0.21.3–5) — **upstream**; installed default is one per profile | one gateway per Workcell; placement is a separate axis | not adopted |
+| Remote client modes | loopback / LAN bind / Tailscale (docs only) / SSH tunnel for Desktop — **shipped (partial)** | `local-ipc`, `loopback-service`, `private-tailnet`, `tailscale-serve`, `ssh-tunnel` composed; `remote-authenticated-endpoint` refused by default; Funnel never configured | see `GATEWAY-OPERATING-MODES.md` |
+| Client auth | API key mandatory even on loopback, non-empty, constant-time — **shipped** | peer/owner tokens; owner-only token files; bind class guard | D |
+| Pairing / DM admission | pairing codes, allowlists, `decline` (upstream) | per-binding ingress policy (Allow/Pair/Deny + owner allowlist) | C |
+| Delivery ledger | at-least-once, 3 attempts, 24 h — **shipped** | unreceipted operations retained and named, never blindly re-sent | D |
+
+Documentation-versus-code discrepancies found in the specimen and **not
+carried**: live docs say launchd uses `KeepAlive.SuccessfulExit=false` while
+the installed plist uses `KeepAlive true`; docs describe
+`--no-gateway-restart` which the installed parser lacks; docs promise a 5–15 s
+outage while installed restarts are drain-first.
+

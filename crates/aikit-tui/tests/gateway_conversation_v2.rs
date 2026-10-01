@@ -307,6 +307,8 @@ impl FakeGateway {
                         detail: Some("fixture link".into()),
                         provenance: vec!["fixture".into()],
                     }],
+                    build: None,
+                    listeners: Vec::new(),
                 },
             },
             GatewayCommand::Ecology => GatewayResponse::Ecology {

@@ -122,13 +122,110 @@ fn clip(text: &str, chars: usize) -> String {
     let cut: String = text.chars().take(chars).collect();
     format!("{cut}… [entry continues in the Flow]")
 }
+/// The longest a legacy route may hold the conversation sweep.
+const LEGACY_ROUTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A string as one single-quoted shell word.
+fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// A path as a shell word: `~` and `~/` stay unquoted so the remote shell
+/// expands them; the rest is quoted.
+fn shell_quote_path(path: &str) -> String {
+    if path == "~" {
+        "~".to_owned()
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        format!("~/{}", shell_quote(rest))
+    } else {
+        shell_quote(path)
+    }
+}
+
+/// Run a command to completion within `limit`, killing it if it overruns. A
+/// hung remote must not hold the serialised conversation sweep.
+fn output_within(
+    mut command: std::process::Command,
+    limit: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command.spawn()?;
+    let started = std::time::Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output();
+        }
+        if started.elapsed() >= limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("did not answer within {} s", limit.as_secs()),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 /// Marks a remote owner that could not be reached (as opposed to one that refused).
 const ROUTE_UNAVAILABLE: &str = "conversation.route_unavailable";
 
-/// One encounter request to an owner on another Workcell, over its declared
-/// route. `Err` carries the owner's own refusal code and message, or
-/// `conversation.route_unavailable` when the owner could not be reached at all.
+/// One encounter request to an owner on another Workcell. `Err` carries the
+/// owner's own refusal code and message, or `conversation.route_unavailable`
+/// when the owner could not be reached at all.
+///
+/// The route is decided once, by negotiation, and never by "try one then the
+/// other" (a request that might have reached the owner must not also be sent
+/// down a second path): see [`crate::gateway_encounter_relay`].
 fn remote_encounter(
+    route: &Value,
+    request: &Value,
+) -> std::result::Result<Value, (String, String)> {
+    use crate::gateway_encounter_relay::{choose, relay_native, Choice, NativeFailure};
+    let unavailable = |why: String| (ROUTE_UNAVAILABLE.to_owned(), why);
+    let kind = route["kind"].as_str().unwrap_or_default();
+    if !matches!(kind, "gateway" | "ssh" | "exec") {
+        return Err(("conversation.route".into(), "unsupported route kind".into()));
+    }
+    // `exec` is an independently owned world on this host; it has no gateway.
+    if kind != "exec" {
+        if let Some(workcell) = route["workcell"].as_str() {
+            let home = aikit_store::home::AikitHome::discover().map_err(|error| {
+                unavailable(format!(
+                    "no AIKit home to read gateway endpoints from: {error}"
+                ))
+            })?;
+            match choose(&home, workcell) {
+                Choice::Native(remote) => {
+                    let action = request["action"].as_str().unwrap_or_default();
+                    return relay_native(&remote, action, request).map_err(
+                        |failure| match failure {
+                            NativeFailure::Owner(code, message) => (code, message),
+                            NativeFailure::Route(why) => unavailable(why),
+                        },
+                    );
+                }
+                Choice::Unavailable(why) => return Err(unavailable(why)),
+                Choice::Legacy(why) if kind == "gateway" => return Err(unavailable(why)),
+                Choice::Legacy(_) => {}
+            }
+        } else if kind == "gateway" {
+            return Err((
+                "conversation.route".into(),
+                "a gateway route names the Workcell that holds the session".into(),
+            ));
+        }
+    }
+    remote_encounter_legacy(route, request)
+}
+
+/// The ssh / exec route: for a Workcell with no declared gateway endpoint, or
+/// whose gateway is a build that does not advertise the relay feature. Bounded
+/// end to end and never built from unquoted request fields.
+fn remote_encounter_legacy(
     route: &Value,
     request: &Value,
 ) -> std::result::Result<Value, (String, String)> {
@@ -164,8 +261,7 @@ fn remote_encounter(
                 }
             }
         }
-        let output = command
-            .output()
+        let output = output_within(command, LEGACY_ROUTE_TIMEOUT)
             .map_err(|e| unavailable(format!("owner client unavailable: {e}")))?;
         let value: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
             unavailable(format!(
@@ -197,9 +293,22 @@ fn remote_encounter(
     let target = route["target"]
         .as_str()
         .ok_or_else(|| unavailable("route has no target".into()))?;
+    // A target is a host, optionally user@host: never an option, never a
+    // shell fragment.
+    if target.starts_with('-')
+        || target.is_empty()
+        || !target.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | ':' | '-' | '[' | ']')
+        })
+    {
+        return Err((
+            "conversation.route".into(),
+            format!("`{target}` is not an ssh host"),
+        ));
+    }
     let cwd = route["cwd"].as_str().unwrap_or("~");
     let aikit = route["aikit"].as_str().unwrap_or("aikit");
-    let quoted = format!("'{}'", request.to_string().replace('\'', "'\\''"));
+    let quoted = shell_quote(&request.to_string());
     // The remote owner's own environment (its AIKIT_HOME, Central root…) travels
     // in the route's declaration, never in the request.
     let env_prefix: String = route["env"]
@@ -210,24 +319,31 @@ fn remote_encounter(
                 .filter_map(|(name, value)| {
                     value
                         .as_str()
-                        .map(|v| format!("{name}='{}' ", v.replace('\'', "'\\''")))
+                        .map(|v| format!("{name}={} ", shell_quote(v)))
                 })
                 .collect()
         })
         .unwrap_or_default();
-    let command =
-        format!("env {env_prefix}{aikit} session-space -C {cwd} encounter --request-json {quoted}");
-    let output = std::process::Command::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            target,
-            &command,
-        ])
-        .output()
-        .map_err(|e| unavailable(format!("ssh unavailable: {e}")))?;
+    let command = format!(
+        "env {env_prefix}{} session-space -C {} encounter --request-json {quoted}",
+        shell_quote_path(aikit),
+        shell_quote_path(cwd)
+    );
+    let mut ssh = std::process::Command::new("ssh");
+    ssh.args([
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "ServerAliveInterval=5",
+        "-o",
+        "ServerAliveCountMax=3",
+        target,
+        &command,
+    ]);
+    let output =
+        output_within(ssh, LEGACY_ROUTE_TIMEOUT).map_err(|e| unavailable(format!("ssh: {e}")))?;
     let value: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
         unavailable(format!(
             "no JSON answer from {target}: {}",
@@ -563,14 +679,18 @@ impl EncounterService {
                 let exec = route["kind"] == "exec"
                     && route["aikit"].as_str().is_some_and(|a| a.starts_with('/'))
                     && route["cwd"].as_str().is_some_and(|c| c.starts_with('/'));
-                let usable = (ssh || exec)
+                // A gateway route names only the Workcell that holds the
+                // session: the endpoint is the one both gateways already
+                // declare for each other, never carried in the request.
+                let gateway = route["kind"] == "gateway";
+                let usable = (ssh || exec || gateway)
                     && route["workcell"]
                         .as_str()
                         .is_some_and(|w| w.starts_with("workcell:"));
                 if !usable {
                     return Err(AikitError::new(
                         "conversation.route",
-                        "A remote recipient's route needs kind `ssh` (a target) or `exec` (an absolute client path and cwd), and the Workcell that holds the session",
+                        "A remote recipient's route needs kind `gateway` (the Workcell that holds the session, reached through the gateway endpoint declared for it), `ssh` (a target) or `exec` (an absolute client path and cwd), and the Workcell that holds the session",
                     ));
                 }
             }
