@@ -50,6 +50,7 @@ installed; **claim** = documented but not found in the installed source.
 | Remote client modes | loopback / LAN bind / Tailscale (docs only) / SSH tunnel for Desktop — **shipped (partial)** | `local-ipc`, `loopback-service`, `private-tailnet`, `tailscale-serve`, `ssh-tunnel` composed; `remote-authenticated-endpoint` refused by default; Funnel never configured | see `GATEWAY-OPERATING-MODES.md` |
 | Client auth | API key mandatory even on loopback, non-empty, constant-time — **shipped** | peer/owner tokens; owner-only token files; bind class guard | D |
 | Pairing / DM admission | pairing codes, allowlists, `decline` (upstream) | per-binding ingress policy (Allow/Pair/Deny + owner allowlist) | C |
+| A request to an agent on another Workcell | not applicable (one machine per gateway) | one route, negotiated once: `EncounterRelay` over the gateway carrier when the peer advertises `encounter-request-relay`, else the named legacy ssh route | R/I: Mac→Omarchy, installed `6e452a600a4c`, controlled ACP body, ssh broken before each send, gateway stopped 30 s mid-flight, 2 requests → 2 prompts, each reply included once (`docs/implementation/GATEWAY-OPERATIONS-ACCEPTANCE.md`) |
 | Delivery ledger | at-least-once, 3 attempts, 24 h — **shipped** | unreceipted operations retained and named, never blindly re-sent | D |
 
 Documentation-versus-code discrepancies found in the specimen and **not

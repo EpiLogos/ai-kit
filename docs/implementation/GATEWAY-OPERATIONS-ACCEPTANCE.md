@@ -29,7 +29,7 @@ not a level.
 | 8 | Setup, status and recovery reachable by CLI, TUI/desktop and connector commands, keeping streaming, stop/restart, group bounds, attachments, return-to-origin | ai-kit | `/upgrade`, `/upgrade apply` (group refused), `Announce`, TUI operation names | `upgrade_is_planned_on_request_started_only_by_apply_and_never_from_a_group`; tui suite | D | the desktop surface itself is not built; streaming, attachments and return-to-origin are the existing engine paths, re-run green, not re-proved here |
 | 9 | Upgrade is a complete native lifecycle: inspect/plan → choose candidate → recovery basis → managed install → drain/restart/rebind → running-version verification → resumed conversation → visible receipt; including one requested through the gateway itself; exact pending work and uncertain effects retained | ai-kit (driver), O:I (`oi update`) | `gateway_upgrade.rs`, `gateway_upgrade_system.rs`; O:I `update_flow.rs` two-phase apply, direction, resident readings | scripted driver suite (14); real-binary suite: stale→upgrade→verify, install fails, flip-then-fail rollback, broken new build rolled back, foreground left running, SIGTERM drain; O:I 23 tests; **real launchd on this Mac, controlled instance** (see below) | D, R, M (launchd on the Mac, systemd on Omarchy), I (both machines) | — |
 | 10 | Terminal loss, failed build, service restart, mixed peer versions, one machine offline, retry, supported rollback exercised; no blind replay of uncertain model/tool effects; no silent downgrade of exact routing | ai-kit | worker detached from the gateway; adoption of orphans; drain records uncertain effects; per-feature refusal | worker-death and resume (D); rollback (R); mixed versions (`doctor` peer reading, D); exact route refuses a successor (D) | D, R | one-machine-offline and mixed-version across the two real machines pending (row 11) |
-| 11 | Usable operating modes; one easy managed upgrade route; **actual new-running-version proof on both machines**; **native remote Flow delivery** | ai-kit, O:I, Workcell | all of the above | the managed install and `gateway upgrade apply` on both real services (below) | running version: **I on both machines**. Remote Flow delivery: **not yet shown** | a Flow request Mac→Omarchy over the gateway relay with the ssh route shown unusable throughout |
+| 11 | Usable operating modes; one easy managed upgrade route; **actual new-running-version proof on both machines**; **native remote Flow delivery** | ai-kit, O:I, Workcell | all of the above | the managed install and `gateway upgrade apply` on both real services; the Flow driver's gateway route (below) | running version: **I on both machines**. Remote Flow delivery: **R/I with a controlled body** — two requests, replies included once | a real model body; the real Omarchy gateway as relay target; the reverse direction; independent verification |
 | 12 | Parity map, native tests and operator guidance updated | ai-kit docs | `GATEWAY-CONNECTOR-MATRIX.md` (operational parity), `GATEWAY-OPERATING-MODES.md`, `GATEWAY-UPGRADE.md`, `GATEWAY-CONTACT-AND-DAY.md`, `GATEWAY-BOT-TO-BOT.md`; O:I `docs/INSTALL-UPDATE-FLOW.md` | doc-parity test | D | O:I `.wayfinder/maps/plural-flow-now.md` section for the remote route after row 11 |
 
 ## Executed evidence (this tree, macOS, debug builds, shared machine under load)
@@ -115,6 +115,49 @@ the new binary and the doctor said so with the owner command; within minutes
 macOS had listed the binary and Omarchy reached the Mac gateway (`aikit gateway
 --at workcell:mac protocol` answered with the new identity). No `sudo` was run.
 
+## Native remote Flow delivery (Mac → Omarchy over the gateway relay)
+
+`desktop/cradle/tests/plural-flow-acceptance.mjs` (O:I) with `PF_ROUTE=gateway`,
+against the **installed** `6e452a600a4c` on both machines, real owners, Central's
+real `ctrl` with `central.flow.*`, and the real Actuation owner minting each
+agent's Agency. The agent body is the **controlled ACP fixture**
+(`crates/aikit-cli/tests/fixtures/conversation_provider.py`): its replies are
+protocol fixtures derived from the asked entry, never model output — this run
+proves the route and the owners, not a model.
+
+Setup, as the driver performs it: a disposable world on each machine; on
+Omarchy a **controlled gateway instance** (`aikit-gateway-pflab.service`, port
+7790, own `AIKIT_HOME`, distinct peer and owner tokens; the real gateway there
+untouched) serving that world's owner; on the Mac a declared remote
+`workcell:omarchy` for it (probed: an endpoint that answers as another Workcell
+is refused). The participant on the other Workcell routes as
+`{kind:"gateway", workcell:"workcell:omarchy"}`.
+
+**ssh is broken before each send and stays broken** (the owner's `ssh` is a shim
+that fails while a flag file exists; the flag existed before the first request
+and after the last). So a delivery that lands did not use ssh. Then, while the
+remote agent works, the Omarchy gateway is **stopped for 30 s and started again**
+(real systemd, `SIGTERM`): the remote recipient stays `unknown`/`returned` until
+the gateway is back, then `included`.
+
+| Request | Ada (this machine) | Ash (Omarchy) |
+|---|---|---|
+| `conversation/pf-remote-1790883626688` | included, 1 attempt | dispatch `sent`, `included`, 1 attempt; entry `verified from agent-session/pf-ash-o`, `reply → 1@r7` |
+| `conversation/pf-remote-1790883721564` | included | `included`; `verified`, `reply → 4@r10` |
+
+On Omarchy: the body received **2 `session/prompt`** in total — one per request,
+never replayed across the outage; the lab gateway's journal shows the two
+outages exactly (`19:40:29 gateway drained for stop: 0 turns, 0 operations …
+stopped cleanly` → started `19:41:00`; `19:42:04` → `19:42:34`). The Flow has 6
+entries: each recipient's reply appears once per request, attributed from its
+own session. The scratch worlds, the lab gateway instance and both owners were
+shut down and removed afterwards (`aikit-gateway.service`, the real one, was
+never stopped).
+
+What this does not show: a model body; the real Omarchy gateway as the relay
+target (a controlled instance served, to leave the real one undisturbed); the
+reverse direction (Omarchy asking a Mac agent); a person using the desktop.
+
 ## Defects found by the lane's own gates after the first push
 
 * **Linux CI (`V2 crate — aikit-cli`)**: `a_foreground_gateway_is_installed_…`
@@ -129,16 +172,14 @@ macOS had listed the binary and Omarchy reached the Mac gateway (`aikit gateway
 
 ## Not shown
 
-* A Flow request delivered to another Workcell over the gateway relay (the
-  driver is written; the controlled lab gateway on Omarchy and the proof run are
-  the remaining step).
+* A Flow request delivered to another Workcell with a real model body, with the
+  real Omarchy gateway as relay target, or in the reverse direction.
 * An independent verifier's account of the whole path and of a consequential
   failure with its recovery.
 * A Tailscale Serve front on a controlled port; Funnel is never configured.
 * An owner-scope administrator token on a *remote* gateway (`--at` uses the
   peer token: relay and read, never stop or drain).
-* The Linux run of the whole `aikit-cli` suite: CI reported the first failure
-  only (nextest cancels); the full Linux result is read from the PR's checks.
+* — (the Linux suite: CI on the merged PR passed all 22 checks).
 
 ## Owner-only steps this lane will not take
 
