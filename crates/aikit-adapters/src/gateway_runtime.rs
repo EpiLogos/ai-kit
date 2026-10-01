@@ -560,6 +560,16 @@ pub struct DrainReport {
     pub communiques: Vec<CommuniqueCount>,
 }
 
+impl DrainReport {
+    /// Whether a drain actually ran and counted. A report from a gateway that has
+    /// the drain but predates this field carries no `measured` flag; it does carry
+    /// the times the drain started and finished, which a default (never-run) report
+    /// does not. Reading only the flag would call a real drain "not measured".
+    pub fn was_measured(&self) -> bool {
+        self.measured || self.started_at_unix_ms != 0
+    }
+}
+
 /// Qualitatively distinct co-internal relations the gateway ecology can name.
 /// Listing a mode discloses that the relation is representable; it never
 /// authorises it. Authority is a separate AIKit capability grant.
@@ -2210,6 +2220,38 @@ pub fn text_send(text: impl Into<String>) -> OutboundOperationKind {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_drain_report_from_a_gateway_that_predates_the_measured_flag_still_reads_as_measured() {
+        // An older gateway that has the drain sends a report with its times and no
+        // `measured` field. It ran; its counts are real.
+        let from_an_older_gateway: DrainReport = serde_json::from_value(serde_json::json!({
+            "reason": "upgrade upg-x",
+            "started_at_unix_ms": 1_000,
+            "finished_at_unix_ms": 1_250,
+            "grace_ms": 60_000,
+            "turns_resolved": [],
+            "turns_interrupted": [],
+            "pending_operations": [],
+            "communiques": []
+        }))
+        .unwrap();
+        assert!(
+            !from_an_older_gateway.measured,
+            "the old report carries no flag"
+        );
+        assert!(
+            from_an_older_gateway.was_measured(),
+            "but it carries the times of a drain that ran"
+        );
+        // The report of a predecessor that has no drain at all is the default one.
+        assert!(!DrainReport::default().was_measured());
+        assert!(DrainReport {
+            measured: true,
+            ..DrainReport::default()
+        }
+        .was_measured());
+    }
+
     use super::*;
     use aikit_adapters::{
         ConnectorCapabilities, ConnectorConnectionState, ConnectorOperation, DeliveryState,

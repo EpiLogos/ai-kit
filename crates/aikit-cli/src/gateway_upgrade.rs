@@ -763,7 +763,7 @@ impl<E: UpgradeEnv> Driver<'_, E> {
             true,
         ) {
             Ok(report) => {
-                if report.measured {
+                if report.was_measured() {
                     self.note(
                         transaction,
                         true,
@@ -1082,7 +1082,10 @@ impl<E: UpgradeEnv> Driver<'_, E> {
         // The counts are stated only when a drain measured them. A predecessor
         // without a drain was stopped by its shutdown: what was in flight is
         // unknown, and the receipt says "unknown", not "0".
-        let measured = transaction.drain.as_ref().filter(|report| report.measured);
+        let measured = transaction
+            .drain
+            .as_ref()
+            .filter(|report| report.was_measured());
         let effects = match measured {
             Some(report) => format!(
                 "{} turn(s) finished, {} interrupted and recorded, {} unreceipted operation(s) \
@@ -1221,7 +1224,7 @@ pub fn receipt_json(transaction: &Transaction) -> Value {
         "after": transaction.after,
         "drain": transaction.drain,
         "uncertain_effects": transaction.drain.as_ref().map(|report| {
-            if report.measured {
+            if report.was_measured() {
                 json!({
                     "measured": true,
                     "interrupted_turns": report.turns_interrupted,
@@ -1271,7 +1274,7 @@ pub fn receipt_markdown(transaction: &Transaction) -> String {
         describe(&transaction.after)
     ));
     if let Some(drain) = &transaction.drain {
-        if !drain.measured {
+        if !drain.was_measured() {
             text.push_str(
                 "- drain: **not measured** — the predecessor predates the drain and was stopped \
                  with its clean shutdown; what it had in flight is unknown, not zero\n",
