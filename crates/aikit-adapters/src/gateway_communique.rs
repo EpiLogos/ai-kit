@@ -677,15 +677,40 @@ impl CommuniqueJournal {
             communique.instance_hold,
             communique.state,
         )?;
-        if let Some(existing) = self.index.get(&communique.communique_ref) {
-            let existing = &self.records[*existing];
+        if let Some(&position) = self.index.get(&communique.communique_ref) {
+            let existing = &self.records[position];
             if existing.body == communique.body
                 && existing.to_position_ref == communique.to_position_ref
                 && existing.to_instance == communique.to_instance
                 && existing.from_position_ref == communique.from_position_ref
                 && existing.origin_gateway_ref == communique.origin_gateway_ref
             {
-                return Ok((existing.clone(), true));
+                // The same message returning to the gateway that relayed it
+                // away: its occupant moved back (A → B → A before any turn).
+                // The local copy says "forwarded", which made it undeliverable
+                // here, and the peer's copy says "forwarded" back — so neither
+                // could ever be delivered. A relay is only ever sent for an
+                // undelivered record, so a message that returns is undelivered
+                // and is this gateway's to deliver again.
+                let forwarded_away = matches!(
+                    self.records[position].forward,
+                    Some(CommuniqueForward::Forwarded { .. })
+                );
+                if forwarded_away && self.records[position].state.is_undelivered() {
+                    let record = &mut self.records[position];
+                    record.forward = None;
+                    record.received_from_gateway_ref = Some(relayed_by.into());
+                    record.transitions.push(CommuniqueTransition {
+                        at_unix_ms,
+                        state: record.state,
+                        basis: format!(
+                            "returned from gateway {relayed_by}: its recipient stands here again"
+                        ),
+                        generation_ref: None,
+                    });
+                    return Ok((record.clone(), false));
+                }
+                return Ok((self.records[position].clone(), true));
             }
             return Err(invalid(
                 "agency_gateway.communique_identity_rewrite",
@@ -1176,6 +1201,70 @@ mod tests {
             vec!["aikit:communique:one", "aikit:communique:two"]
         );
         assert_eq!(journal.conversation(B, A), thread);
+    }
+
+    #[test]
+    fn a_communique_that_is_relayed_away_and_then_relayed_back_is_deliverable_again_here() {
+        // A Position's occupant moves A → B → A before anyone takes a turn.
+        // A relayed it to B; B (whose occupant left) relays it back. Each
+        // journal's copy says "forwarded", and neither could be delivered.
+        let mut at_a = CommuniqueJournal::default();
+        let mut at_b = CommuniqueJournal::default();
+        let mut remote = draft("flap", Some(A), B, CommuniqueState::Pending);
+        remote.forward_to_workcell_ref = Some("workcell:b".into());
+        let (record, _) = at_a.send("agency-gateway/a", remote).unwrap();
+        at_a.record_forward(
+            &record.communique_ref,
+            CommuniqueForwardOutcome::Forwarded {
+                workcell_ref: "workcell:b".into(),
+                remote_gateway_ref: "agency-gateway/b".into(),
+                at_unix_ms: 11,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(at_a.inbox(B).is_empty(), "relayed away: not A's to deliver");
+
+        // B receives it, then its occupant leaves and B relays it back.
+        let (at_b_copy, replayed) = at_b.ingest(record.clone(), "agency-gateway/a", 12).unwrap();
+        assert!(!replayed);
+        at_b.record_forward(
+            &at_b_copy.communique_ref,
+            CommuniqueForwardOutcome::Forwarded {
+                workcell_ref: "workcell:a".into(),
+                remote_gateway_ref: "agency-gateway/a".into(),
+                at_unix_ms: 13,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(at_b.inbox(B).is_empty());
+
+        // The message returns to A. It is NOT a replay: A delivers it.
+        let (returned, replayed) = at_a.ingest(at_b_copy, "agency-gateway/b", 14).unwrap();
+        assert!(!replayed, "a returning message is not a duplicate");
+        assert!(returned.forward.is_none());
+        assert_eq!(at_a.inbox(B).len(), 1, "deliverable at A again");
+        assert!(returned
+            .transitions
+            .last()
+            .unwrap()
+            .basis
+            .contains("returned from gateway agency-gateway/b"));
+        // Delivered once; a second return of the same message is a replay and
+        // delivers nothing twice.
+        let delivered = at_a
+            .acknowledge(
+                B,
+                "actuation:generation:b1",
+                None,
+                std::slice::from_ref(&returned.communique_ref),
+                15,
+                "at the turn boundary",
+            )
+            .unwrap();
+        assert_eq!(delivered[0].state, CommuniqueState::Delivered);
+        assert!(at_a.inbox(B).is_empty());
     }
 
     #[test]

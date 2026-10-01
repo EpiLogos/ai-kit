@@ -1455,17 +1455,45 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                      runs. Add --unix to serve this home's socket as well."
                 );
             }
-            let gateway_ref = a
+            let owner_token = aikit_cli::gateway_ops::serve_owner_token(&a)?;
+            // An operator-named ref (flag or service environment) replaces the
+            // one a saved state was written under; with none named, the saved
+            // ref stands and `agency-gateway/local` is only the first-run name.
+            let configured_ref = a
                 .gateway_ref
+                .clone()
                 .or_else(|| std::env::var("AIKIT_GATEWAY_REF").ok())
-                .unwrap_or_else(|| "agency-gateway/local".into());
-            let gateway_ref =
-                aikit_core::resource::ResourceRef::parse(&gateway_ref).map_err(|error| {
+                .filter(|value| !value.trim().is_empty());
+            let parse_gateway_ref = |gateway_ref: &str| {
+                aikit_core::resource::ResourceRef::parse(gateway_ref).map_err(|error| {
                     AikitError::new(
                         "cli.gateway_ref_invalid",
                         format!("parse gateway ref {gateway_ref}: {error}"),
                     )
-                })?;
+                })
+            };
+            let gateway_ref =
+                parse_gateway_ref(configured_ref.as_deref().unwrap_or("agency-gateway/local"))?;
+            let configured_gateway_ref = match configured_ref.as_deref() {
+                Some(value) => Some(parse_gateway_ref(value)?),
+                None => None,
+            };
+            // Which build this process is: the revision the binary was built
+            // from and the Workcell it serves, read from the process itself.
+            let process = aikit_adapters::GatewayBuildIdentity::of_this_process(
+                // The full source revision when the build could read it (inside
+                // a checkout, or stamped by the caller); otherwise the short
+                // one the managed updater stamps for an exported cut. A
+                // process that cannot name its build is a finding, never a
+                // guess.
+                option_env!("AIKIT_BUILD_SOURCE_REVISION")
+                    .or(option_env!("SUITE_BUILD_REVISION"))
+                    .unwrap_or("unknown"),
+                option_env!("AIKIT_BUILD_SOURCE_DIRTY") == Some("1"),
+                std::env::var(aikit_cli::gateway_contact::WORKCELL_ENV)
+                    .ok()
+                    .filter(|value| !value.trim().is_empty()),
+            );
             // The Routine dispatcher ticks beside the carriers. A dispatcher
             // that cannot be built (no Central root to resolve time against)
             // degrades the service to carriers-only, said in plain words.
@@ -1534,6 +1562,28 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
             for line in &coexistence.lines {
                 eprintln!("gateway coexistence: {line}");
             }
+            // SIGTERM (launchctl bootout, systemctl stop) and SIGINT become a
+            // drain-then-exit instead of a process killed mid-turn. A second
+            // signal while the drain runs takes the default action, so a stuck
+            // drain can still be ended.
+            let stop_signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            #[cfg(unix)]
+            for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+                signal_hook::flag::register_conditional_default(
+                    signal,
+                    std::sync::Arc::clone(&stop_signal),
+                )
+                .and_then(|_| {
+                    signal_hook::flag::register(signal, std::sync::Arc::clone(&stop_signal))
+                })
+                .map_err(|error| {
+                    AikitError::new(
+                        "cli.gateway_signal_handler",
+                        format!("install the stop-signal handler: {error}"),
+                    )
+                })?;
+            }
+            let stop_signal = Some(stop_signal);
             aikit_adapters::run_gateway_service_with_hooks(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
@@ -1553,11 +1603,133 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                                 cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
                             },
                         )),
+                        upgrade_launcher: None,
                     }),
                     coexistence: coexistence.gate,
+                    owner_token,
+                    process: Some(process),
+                    configured_gateway_ref,
+                    stop_signal,
+                    // A peer's Flow request is answered by this Workcell's own
+                    // encounter owner, at the moment of asking.
+                    encounter_relay: Some(std::sync::Arc::new(
+                        aikit_cli::gateway_encounter_relay::OwnerEncounterRelay {
+                            home: home.clone(),
+                        },
+                    )),
                 },
             )?;
             Ok(Reply::Text("gateway service stopped cleanly".into()))
+        }
+        GatewaySub::Recover(a) => {
+            let data = aikit_cli::gateway_recover::recover(&home, a.apply)?;
+            Ok(Reply::Data {
+                context: EnvelopeContext::default(),
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
+        GatewaySub::Modes => {
+            let data = aikit_cli::gateway_modes::reading(&home)?;
+            Ok(Reply::Data {
+                context: EnvelopeContext::default(),
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
+        GatewaySub::Setup(a) => {
+            use aikit_cli::gateway_modes as modes;
+            let mut inputs = modes::gather_inputs(&home, &a.mode);
+            inputs.port = a.port;
+            inputs.bind = a.bind.clone();
+            inputs.gateway_ref = a.gateway_ref.clone();
+            inputs.workcell_ref = a.workcell_ref.clone();
+            inputs.peer_token_location = a.ws_token_location.clone();
+            inputs.owner_token_location = a.ws_owner_token_location.clone();
+            inputs.peer_remote_token_location = a.peer_token_location.clone();
+            inputs.allow_wide_bind = a.allow_wide_bind;
+            for peer in &a.peers {
+                let (workcell, endpoint) = peer.split_once('=').ok_or_else(|| {
+                    AikitError::new(
+                        "cli.usage",
+                        format!("--peer takes WORKCELL=HOST:PORT; got `{peer}`"),
+                    )
+                })?;
+                inputs
+                    .peers
+                    .push((workcell.to_owned(), endpoint.to_owned()));
+            }
+            let plan = modes::plan_setup(&inputs)?;
+            let data = if a.apply {
+                let effects = modes::SystemSetupEffects {
+                    home: home.clone(),
+                    home_dir: inputs.home_dir.clone(),
+                };
+                let results = modes::apply_setup(&plan, &effects, a.apply_tailscale)?;
+                jval!({"plan": plan, "applied": true, "results": results,
+                       "next": "aikit gateway doctor"})
+            } else {
+                jval!({"plan": plan, "applied": false,
+                       "next": "re-run with --apply to do this; nothing has changed"})
+            };
+            Ok(Reply::Data {
+                context: EnvelopeContext::default(),
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
+        GatewaySub::Doctor => {
+            let data = aikit_cli::gateway_doctor::run(&home)?;
+            Ok(Reply::Data {
+                context: EnvelopeContext::default(),
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
+        GatewaySub::Upgrade(cmd) => {
+            use aikit_cli::gateway_upgrade_system as upgrade;
+            let data = match cmd.command {
+                GatewayUpgradeSub::Plan(a) => {
+                    upgrade::plan_command(&home, a.channel.as_deref(), a.install)?
+                }
+                GatewayUpgradeSub::Apply(a) => upgrade::apply_command(
+                    &home,
+                    upgrade::ApplyOptions {
+                        install: a.install,
+                        channel: a.channel,
+                        origin: a
+                            .origin_binding
+                            .map(|binding_ref| aikit_adapters::UpgradeOrigin {
+                                binding_ref,
+                                connector_ref: None,
+                                in_reply_to_sequence: None,
+                            }),
+                        requested_by: "cli".into(),
+                        auto_rollback: !a.no_rollback,
+                        drain_grace_secs: a.drain_grace_secs,
+                        verify_timeout_secs: a.verify_timeout_secs,
+                        exit_wait_secs: a.exit_wait_secs,
+                        foreground: a.foreground,
+                        wait: a.wait,
+                    },
+                )?,
+                GatewayUpgradeSub::Status(a) => upgrade::status_command(&home, a.id.as_deref())?,
+                GatewayUpgradeSub::Resume(a) => {
+                    upgrade::resume_command(&home, a.id.as_deref(), a.foreground)?
+                }
+                GatewayUpgradeSub::Rollback(a) => upgrade::rollback_command(&home, &a.id)?,
+                GatewayUpgradeSub::Worker(a) => upgrade::worker_command(&home, &a.transaction)?,
+            };
+            Ok(Reply::Data {
+                context: EnvelopeContext::default(),
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
         }
         GatewaySub::Tick => {
             let data = gateway_tick(&home)?;
@@ -1578,6 +1750,8 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                     token_location: a.token_location,
                     gateway_ref: a.gateway_ref,
                     workcell_ref: a.workcell_ref,
+                    owner_token_location: a.owner_token_location,
+                    allow_wide_bind: a.allow_wide_bind,
                 },
             )?;
             Ok(Reply::Data {
@@ -1694,12 +1868,14 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 websocket_bind,
                 websocket_path,
                 token_location,
-            } => aikit_cli::gateway_contact::remote_add(
+                no_probe,
+            } => aikit_cli::gateway_contact::remote_add_probed(
                 &home,
                 &workcell,
                 &websocket_bind,
                 &websocket_path,
                 &token_location,
+                !no_probe,
             )?,
             GatewayRemoteSub::List => aikit_cli::gateway_contact::remote_list(&home)?,
             GatewayRemoteSub::Remove { workcell } => {
@@ -1787,7 +1963,12 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Connector(_)
                 | GatewaySub::Agent(_)
                 | GatewaySub::Coexistence(_)
-                | GatewaySub::Hoist(_) => unreachable!("handled above"),
+                | GatewaySub::Hoist(_)
+                | GatewaySub::Upgrade(_)
+                | GatewaySub::Doctor
+                | GatewaySub::Modes
+                | GatewaySub::Setup(_)
+                | GatewaySub::Recover(_) => unreachable!("handled above"),
             };
             let args = match query {
                 GatewaySub::Protocol(a)
@@ -1809,7 +1990,12 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Connector(_)
                 | GatewaySub::Agent(_)
                 | GatewaySub::Coexistence(_)
-                | GatewaySub::Hoist(_) => unreachable!("handled above"),
+                | GatewaySub::Hoist(_)
+                | GatewaySub::Upgrade(_)
+                | GatewaySub::Doctor
+                | GatewaySub::Modes
+                | GatewaySub::Setup(_)
+                | GatewaySub::Recover(_) => unreachable!("handled above"),
             };
             let target = aikit_cli::gateway_ops::carrier_target(&home, &args)?;
             let response =

@@ -1,0 +1,1220 @@
+//! The real machine behind [`crate::gateway_upgrade`]: the gateway's own
+//! carrier, the managed installer, the platform service manager, and the
+//! detached worker an upgrade runs in.
+//!
+//! **Why the worker is not a child.** The gateway is what an upgrade
+//! restarts, and an upgrade can be asked for through the gateway. A plain
+//! child of the gateway dies with it: systemd's `KillMode=control-group`
+//! signals every process in the unit's cgroup, and launchd stops a job's
+//! remaining processes. So the worker is started under the *service manager*
+//! as its own one-shot job — a LaunchAgent with no `KeepAlive`, or a transient
+//! systemd unit — which a restart of the gateway does not touch. Hermes learned
+//! the same lesson and records the updater's result *before* the disruptive
+//! step; here the whole transaction is durable before every step.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use aikit_adapters::{
+    gateway_command_within, DrainReport, GatewayBuildIdentity, GatewayCarrierTarget,
+    GatewayCommand, GatewayConversationOperation, GatewayLifecycle, GatewayResponse,
+    GatewayUpgradeLauncher, UpgradeOrigin,
+};
+use aikit_core::resource::ResourceRef;
+use aikit_core::{AikitError, Result};
+use aikit_store::home::AikitHome;
+use serde_json::{json, Value};
+
+use crate::gateway_contact::three_part;
+use crate::gateway_install::{
+    start_installed_service, ServiceControl, ServiceEnvironment, ServicePlatform,
+    SystemServiceControl,
+};
+use crate::gateway_upgrade::{
+    default_plan, plan_line, plan_reading, write_atomic, CommandOutcome, Driver, Identity,
+    Installer, Mode, Running, StartAction, Store, Transaction, UpgradeEnv,
+};
+
+/// Start a worker as a plain detached process instead of under the service
+/// manager (`process`). Only for development and tests, where no service
+/// manager is stood up; the default is the manager.
+pub const WORKER_MODE_ENV: &str = "AIKIT_UPGRADE_WORKER_MODE";
+
+fn unix_socket_target(home: &AikitHome) -> GatewayCarrierTarget {
+    GatewayCarrierTarget::UnixSocket(home.gateway_socket())
+}
+
+/// The real machine.
+pub struct SystemEnv {
+    pub home: AikitHome,
+    pub home_dir: PathBuf,
+    control: Box<dyn ServiceControl>,
+}
+
+impl SystemEnv {
+    pub fn new(home: AikitHome) -> Result<Self> {
+        let home_dir = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+            AikitError::new(
+                "gateway_upgrade.home_unresolved",
+                "no HOME is set; the gateway service definition cannot be located",
+            )
+        })?;
+        Ok(Self {
+            home,
+            home_dir,
+            control: Box::new(SystemServiceControl),
+        })
+    }
+
+    pub fn store(&self) -> Store {
+        Store::new(&self.home.state())
+    }
+
+    /// The executable the service definition starts (what a supervisor would
+    /// exec after a restart), else `aikit` on PATH.
+    fn service_executable(&self) -> Option<PathBuf> {
+        if let Ok(platform) = ServicePlatform::current() {
+            if let Ok(definition) = std::fs::read_to_string(platform.unit_path(&self.home_dir)) {
+                if let Some(path) = executable_named_by(&definition, platform) {
+                    return Some(path);
+                }
+            }
+        }
+        crate::probe::which("aikit")
+    }
+
+    /// The pid recorded by the gateway's state lock, for a gateway that does
+    /// not yet report its own (one built before build identity).
+    fn pid_from_state_lock(&self) -> Option<u32> {
+        let lock = self.home.gateway_state();
+        let mut name = lock.file_name()?.to_os_string();
+        name.push(".lock");
+        let text = std::fs::read_to_string(lock.with_file_name(name)).ok()?;
+        text.split_whitespace()
+            .skip_while(|word| *word != "pid")
+            .nth(1)
+            .and_then(|pid| pid.trim_matches(|c: char| !c.is_ascii_digit()).parse().ok())
+    }
+}
+
+/// The executable a service definition runs: launchd's first
+/// `ProgramArguments` string, systemd's `ExecStart` program.
+pub fn executable_named_by(definition: &str, platform: ServicePlatform) -> Option<PathBuf> {
+    match platform {
+        ServicePlatform::LaunchAgent => {
+            let after = definition.split("<key>ProgramArguments</key>").nth(1)?;
+            let first = after.split("<string>").nth(1)?.split("</string>").next()?;
+            Some(PathBuf::from(first.trim()))
+        }
+        ServicePlatform::SystemdUser => definition
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("ExecStart="))
+            .and_then(|command| command.split_whitespace().next())
+            .map(|program| PathBuf::from(program.trim_matches('"'))),
+    }
+}
+
+fn revision_from_version_line(line: &str) -> Option<String> {
+    let open = line.find('(')?;
+    let close = line[open..].find(')')? + open;
+    let inside = line[open + 1..close].trim();
+    (!inside.is_empty()).then(|| inside.to_owned())
+}
+
+/// Identify an executable: its real path, digest, and the revision its own
+/// `--version` reports.
+pub fn identify_executable(path: &Path) -> Option<Identity> {
+    let resolved = std::fs::canonicalize(path).ok()?;
+    let sha256 = aikit_adapters::sha256_of_file(&resolved);
+    let revision = std::process::Command::new(&resolved)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find_map(revision_from_version_line)
+        })
+        .unwrap_or_else(|| "unknown".into());
+    Some(Identity {
+        revision,
+        executable_sha256: sha256,
+        executable_path: Some(resolved.display().to_string()),
+    })
+}
+
+fn running_from_protocol(
+    features: Vec<String>,
+    build: Option<GatewayBuildIdentity>,
+    fallback_pid: Option<u32>,
+    installed_service: bool,
+) -> Option<Running> {
+    match build {
+        Some(build) => Some(Running {
+            pid: build.pid,
+            started_at_unix_ms: build.started_at_unix_ms,
+            identity: Identity {
+                revision: build.revision.clone(),
+                executable_sha256: build.executable_sha256.clone(),
+                executable_path: build.executable_path.clone(),
+            },
+            lifecycle: build.lifecycle,
+            workcell_ref: build.workcell_ref,
+            features,
+        }),
+        // A gateway that predates build identity answers `protocol` without a
+        // `build` block: it is running, it cannot say what, and its pid is on
+        // its state lock. Its lifecycle is read from whether a service
+        // definition stands behind it.
+        None => fallback_pid.map(|pid| Running {
+            pid,
+            started_at_unix_ms: 0,
+            identity: Identity {
+                revision: "unknown".into(),
+                executable_sha256: None,
+                executable_path: None,
+            },
+            lifecycle: if installed_service {
+                match ServicePlatform::current() {
+                    Ok(ServicePlatform::LaunchAgent) => GatewayLifecycle::SupervisedLaunchd,
+                    Ok(ServicePlatform::SystemdUser) => GatewayLifecycle::SupervisedSystemd,
+                    Err(_) => GatewayLifecycle::Foreground,
+                }
+            } else {
+                GatewayLifecycle::Foreground
+            },
+            workcell_ref: None,
+            features,
+        }),
+    }
+}
+
+impl UpgradeEnv for SystemEnv {
+    fn now_unix_ms(&self) -> u64 {
+        aikit_adapters::gateway_posture::unix_ms_now()
+    }
+
+    fn read_running(&self) -> Result<Option<Running>> {
+        let target = unix_socket_target(&self.home);
+        match gateway_command_within(
+            &target,
+            GatewayCommand::Protocol,
+            None,
+            Duration::from_secs(3),
+        ) {
+            Ok(GatewayResponse::Protocol {
+                features, build, ..
+            }) => Ok(running_from_protocol(
+                features,
+                build,
+                self.pid_from_state_lock(),
+                crate::gateway_install::is_installed(&self.home_dir),
+            )),
+            Ok(_) => Ok(None),
+            // Nothing is listening (refused, no socket) or it did not answer
+            // in time: no gateway is answering.
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn installed_identity(&self) -> Result<Option<Identity>> {
+        Ok(self
+            .service_executable()
+            .and_then(|path| identify_executable(&path)))
+    }
+
+    fn run_installer(
+        &self,
+        argv: &[String],
+        timeout: Duration,
+        log: &Path,
+    ) -> Result<CommandOutcome> {
+        use std::io::Write;
+        let Some((program, arguments)) = argv.split_first() else {
+            return Err(AikitError::new(
+                "gateway_upgrade.installer_empty",
+                "the installer command is empty",
+            ));
+        };
+        let log_file = std::fs::File::create(log).map_err(|error| {
+            AikitError::new(
+                "gateway_upgrade.io",
+                format!("create {}: {error}", log.display()),
+            )
+        })?;
+        let mut command = std::process::Command::new(program);
+        command
+            .args(arguments)
+            .stdin(std::process::Stdio::null())
+            .stdout(log_file.try_clone().map_err(|error| {
+                AikitError::new("gateway_upgrade.io", format!("duplicate the log: {error}"))
+            })?)
+            .stderr(log_file);
+        let mut child = command.spawn().map_err(|error| {
+            AikitError::new(
+                "gateway_upgrade.installer_spawn",
+                format!("could not run {program}: {error}"),
+            )
+        })?;
+        let started = std::time::Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if started.elapsed() >= timeout => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let mut note = std::fs::OpenOptions::new().append(true).open(log).ok();
+                    if let Some(file) = note.as_mut() {
+                        let _ = writeln!(file, "\n[killed after {} ms]", timeout.as_millis());
+                    }
+                    return Ok(CommandOutcome {
+                        success: false,
+                        detail: format!(
+                            "{program} did not finish within {} ms",
+                            timeout.as_millis()
+                        ),
+                    });
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(200)),
+                Err(error) => {
+                    return Err(AikitError::new(
+                        "gateway_upgrade.installer_wait",
+                        format!("waiting for {program}: {error}"),
+                    ))
+                }
+            }
+        };
+        let tail = std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("")
+            .chars()
+            .take(240)
+            .collect::<String>();
+        Ok(CommandOutcome {
+            success: status.success(),
+            detail: if status.success() {
+                format!("{program} exited 0 ({})", log.display())
+            } else {
+                format!(
+                    "{program} exited {} — {tail} ({})",
+                    status
+                        .code()
+                        .map_or("by signal".to_owned(), |c| c.to_string()),
+                    log.display()
+                )
+            },
+        })
+    }
+
+    fn drain(
+        &self,
+        expected_pid: u32,
+        reason: &str,
+        grace: Duration,
+        exit: bool,
+    ) -> Result<DrainReport> {
+        let target = unix_socket_target(&self.home);
+        let asked = gateway_command_within(
+            &target,
+            GatewayCommand::Drain {
+                expected_pid: Some(expected_pid),
+                reason: reason.to_owned(),
+                exit,
+                grace_ms: Some(grace.as_millis() as u64),
+            },
+            None,
+            grace + Duration::from_secs(60),
+        );
+        match asked {
+            Ok(GatewayResponse::Drained { report, .. }) => Ok(report),
+            Ok(other) => Err(AikitError::new(
+                "gateway_upgrade.drain_unexpected",
+                format!("the gateway answered a drain with {other:?}"),
+            )),
+            Err(error) => {
+                let code = error
+                    .details()
+                    .get("gateway_error_code")
+                    .cloned()
+                    .unwrap_or_default();
+                // A predecessor that predates the drain does not know the
+                // command. It is stopped with its clean shutdown instead (it
+                // persists after every command and closes its carriers), and
+                // the report says that is what happened.
+                if matches!(
+                    code.as_str(),
+                    "agency_gateway.unsupported_command" | "agency_gateway.invalid_request_json"
+                ) && exit
+                {
+                    gateway_command_within(
+                        &target,
+                        GatewayCommand::Shutdown,
+                        None,
+                        Duration::from_secs(10),
+                    )?;
+                    return Ok(DrainReport {
+                        reason: format!(
+                            "{reason} (the predecessor has no drain: it was stopped with its clean shutdown)"
+                        ),
+                        ..DrainReport::default()
+                    });
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn start_service(&self, lifecycle: GatewayLifecycle) -> Result<StartAction> {
+        if !lifecycle.restarts_itself() {
+            return Ok(StartAction::OperatorMustStart(
+                "start the gateway with the command you run it with (`aikit gateway serve …`)"
+                    .into(),
+            ));
+        }
+        match start_installed_service(self.control.as_ref(), &self.home_dir) {
+            Ok(what) => Ok(StartAction::Requested(what)),
+            Err(error) => Ok(StartAction::OperatorMustStart(error.to_string())),
+        }
+    }
+
+    fn backup_state(&self, into: &Path) -> Result<Vec<String>> {
+        let mut copied = Vec::new();
+        let Ok(entries) = std::fs::read_dir(self.home.state()) else {
+            return Ok(copied);
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_gateway_state =
+                name.starts_with("gateway") && name.ends_with(".json") && !name.ends_with(".lock");
+            if is_gateway_state && entry.path().is_file() {
+                let destination = into.join(&name);
+                std::fs::copy(entry.path(), &destination).map_err(|error| {
+                    AikitError::new(
+                        "gateway_upgrade.io",
+                        format!("copy {} for recovery: {error}", entry.path().display()),
+                    )
+                })?;
+                copied.push(destination.display().to_string());
+            }
+        }
+        Ok(copied)
+    }
+
+    fn announce(&self, origin: &UpgradeOrigin, text: &str) -> Result<()> {
+        let binding_ref = ResourceRef::parse(&origin.binding_ref).map_err(|error| {
+            AikitError::new(
+                "gateway_upgrade.origin_invalid",
+                format!("origin binding {}: {error}", origin.binding_ref),
+            )
+        })?;
+        gateway_command_within(
+            &unix_socket_target(&self.home),
+            GatewayCommand::Conversation {
+                binding_ref,
+                operation: GatewayConversationOperation::Announce {
+                    text: text.to_owned(),
+                },
+            },
+            None,
+            Duration::from_secs(10),
+        )
+        .map(|_| ())
+    }
+
+    fn sleep(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Installer resolution
+// ---------------------------------------------------------------------------
+
+/// The managed installer for this machine: `oi update --apply` for the
+/// gateway's own product, with `oi update --rollback` as the supported way
+/// back. `None` when `oi` is not installed (an upgrade can still restart onto
+/// an already-installed build).
+pub fn resolve_installer(channel: Option<&str>) -> Option<Installer> {
+    let oi = crate::probe::which("oi")?;
+    let mut install = vec![
+        oi.display().to_string(),
+        "update".to_owned(),
+        "--apply".to_owned(),
+    ];
+    if let Some(channel) = channel {
+        install.extend(["--channel".to_owned(), channel.to_owned()]);
+    }
+    install.push("ai-kit".to_owned());
+    Some(Installer {
+        install,
+        rollback: vec![
+            oi.display().to_string(),
+            "update".into(),
+            "--rollback".into(),
+        ],
+        timeout_ms: 45 * 60 * 1_000,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The detached worker
+// ---------------------------------------------------------------------------
+
+fn worker_short_id(id: &str) -> String {
+    id.trim_start_matches("upg-").chars().take(12).collect()
+}
+
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// A LaunchAgent plist for a one-shot worker: runs once at load, is never
+/// kept alive, and logs beside its transaction.
+pub fn render_worker_plist(
+    label: &str,
+    arguments: &[String],
+    environment: &BTreeMap<String, String>,
+    log: &Path,
+) -> String {
+    let arguments = arguments
+        .iter()
+        .map(|argument| format!("        <string>{}</string>", xml_escape(argument)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let environment = environment
+        .iter()
+        .map(|(name, value)| {
+            format!(
+                "      <key>{}</key>\n      <string>{}</string>",
+                xml_escape(name),
+                xml_escape(value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+{arguments}
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+{environment}
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>{log}</string>
+    <key>StandardErrorPath</key>
+    <string>{log}</string>
+  </dict>
+</plist>
+"#,
+        label = xml_escape(label),
+        log = xml_escape(&log.display().to_string()),
+    )
+}
+
+/// What the worker needs in its environment: the gateway service's own
+/// relation to its owners, this home, and the service instance it manages.
+fn worker_environment(home: &AikitHome, home_dir: &Path) -> Result<BTreeMap<String, String>> {
+    // The service's own owner relation when it can be discovered (a Central
+    // root with its ctrl/actuation/factory); otherwise just what the worker
+    // itself needs — it drains, restarts and verifies a gateway, it does not
+    // run Routines. Never a credential.
+    let mut values = ServiceEnvironment::discover(home_dir, home)
+        .map(|environment| environment.values)
+        .unwrap_or_default();
+    values.insert("HOME".into(), home_dir.display().to_string());
+    values.insert("AIKIT_HOME".into(), home.root().display().to_string());
+    for name in [
+        crate::gateway_install::SERVICE_INSTANCE_ENV,
+        crate::gateway_contact::WORKCELL_ENV,
+        crate::gateway_install::GATEWAY_REF_ENV,
+        WORKER_MODE_ENV,
+    ] {
+        if let Ok(value) = std::env::var(name) {
+            values.insert(name.to_owned(), value);
+        }
+    }
+    // The installer (`oi`) and the toolchain it builds with must be findable
+    // by an unattended job: keep the directories of every tool the upgrade
+    // will run, beside the service's own.
+    if let Some(path) = std::env::var_os("PATH") {
+        let existing = values.get("PATH").cloned().unwrap_or_default();
+        let mut directories: Vec<String> = existing
+            .split(':')
+            .filter(|d| !d.is_empty())
+            .map(str::to_owned)
+            .collect();
+        for directory in std::env::split_paths(&path) {
+            let directory = directory.display().to_string();
+            if !directories.contains(&directory) {
+                directories.push(directory);
+            }
+        }
+        values.insert("PATH".into(), directories.join(":"));
+    }
+    Ok(values)
+}
+
+/// Start the worker for `id` where the gateway's restart cannot reach it.
+/// Returns a description of where it runs.
+pub fn spawn_worker(home: &AikitHome, id: &str) -> Result<String> {
+    let aikit = std::env::current_exe().map_err(|error| {
+        AikitError::new(
+            "gateway_upgrade.executable_unknown",
+            format!("cannot locate this executable to start the upgrade worker: {error}"),
+        )
+    })?;
+    // Run the worker on the managed path a restart will also resolve, not on
+    // whichever build this process happens to be.
+    let aikit = crate::probe::which("aikit").unwrap_or(aikit);
+    let store = Store::new(&home.state());
+    let log = store.dir(id).join("worker.log");
+    std::fs::create_dir_all(store.dir(id)).map_err(|error| {
+        AikitError::new(
+            "gateway_upgrade.io",
+            format!("create the upgrade dir: {error}"),
+        )
+    })?;
+    let arguments = vec![
+        aikit.display().to_string(),
+        "gateway".into(),
+        "upgrade".into(),
+        "worker".into(),
+        "--txn".into(),
+        id.to_owned(),
+    ];
+    let home_dir = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| AikitError::new("gateway_upgrade.home_unresolved", "no HOME is set"))?;
+    let environment = worker_environment(home, &home_dir)?;
+    let short = worker_short_id(id);
+
+    if std::env::var(WORKER_MODE_ENV).as_deref() == Ok("process") {
+        return spawn_detached_process(&arguments, &environment, &log);
+    }
+    match ServicePlatform::current()? {
+        ServicePlatform::LaunchAgent => {
+            let label = format!("ai.aikit.gateway-upgrade.{short}");
+            let plist_path = home_dir
+                .join("Library/LaunchAgents")
+                .join(format!("{label}.plist"));
+            if let Some(parent) = plist_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    AikitError::new(
+                        "gateway_upgrade.io",
+                        format!("create LaunchAgents: {error}"),
+                    )
+                })?;
+            }
+            write_atomic(
+                &plist_path,
+                render_worker_plist(&label, &arguments, &environment, &log).as_bytes(),
+            )?;
+            let control = SystemServiceControl;
+            let uid = control
+                .run("id", &["-u".to_owned()])
+                .ok()
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .and_then(|text| text.trim().parse::<u32>().ok())
+                .unwrap_or(501);
+            let domain = format!("gui/{uid}");
+            let loaded = control.run(
+                "launchctl",
+                &[
+                    "bootstrap".into(),
+                    domain.clone(),
+                    plist_path.display().to_string(),
+                ],
+            )?;
+            if !loaded.status.success() {
+                let _ = std::fs::remove_file(&plist_path);
+                return Err(three_part(
+                    "gateway_upgrade.worker_start_failed",
+                    format!(
+                        "launchctl could not start the upgrade worker: {}",
+                        String::from_utf8_lossy(&loaded.stderr).trim()
+                    ),
+                    "The upgrade was recorded but nothing is running it.",
+                    format!(
+                        "Resume it in the foreground: `aikit gateway upgrade resume {id} --foreground`"
+                    ),
+                ));
+            }
+            Ok(format!("launchd job {label} ({domain})"))
+        }
+        ServicePlatform::SystemdUser => {
+            let unit = format!("aikit-gateway-upgrade-{short}");
+            let mut command: Vec<String> = vec![
+                "--user".into(),
+                format!("--unit={unit}"),
+                "--collect".into(),
+                "--quiet".into(),
+            ];
+            for (name, value) in &environment {
+                command.push(format!("--setenv={name}={value}"));
+            }
+            command.push("--".into());
+            command.extend(arguments.iter().cloned());
+            let started = SystemServiceControl.run("systemd-run", &command)?;
+            if started.status.success() {
+                Ok(format!("systemd transient unit {unit}"))
+            } else {
+                Err(three_part(
+                    "gateway_upgrade.worker_start_failed",
+                    format!(
+                        "systemd-run could not start the upgrade worker: {}",
+                        String::from_utf8_lossy(&started.stderr).trim()
+                    ),
+                    "The upgrade was recorded but nothing is running it.",
+                    format!(
+                        "Resume it in the foreground: `aikit gateway upgrade resume {id} --foreground`"
+                    ),
+                ))
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn spawn_detached_process(
+    arguments: &[String],
+    environment: &BTreeMap<String, String>,
+    log: &Path,
+) -> Result<String> {
+    use std::os::unix::process::CommandExt;
+    let log_file = std::fs::File::create(log).map_err(|error| {
+        AikitError::new(
+            "gateway_upgrade.io",
+            format!("create {}: {error}", log.display()),
+        )
+    })?;
+    let (program, rest) = arguments.split_first().expect("a worker command");
+    let child = std::process::Command::new(program)
+        .args(rest)
+        .envs(environment)
+        .stdin(std::process::Stdio::null())
+        .stdout(log_file.try_clone().map_err(|error| {
+            AikitError::new("gateway_upgrade.io", format!("duplicate the log: {error}"))
+        })?)
+        .stderr(log_file)
+        // Its own process group: a signal or a hang-up aimed at the gateway
+        // or the terminal does not reach it.
+        .process_group(0)
+        .spawn()
+        .map_err(|error| {
+            AikitError::new(
+                "gateway_upgrade.worker_start_failed",
+                format!("could not start the upgrade worker: {error}"),
+            )
+        })?;
+    Ok(format!("detached process {}", child.id()))
+}
+
+#[cfg(not(unix))]
+fn spawn_detached_process(
+    _arguments: &[String],
+    _environment: &BTreeMap<String, String>,
+    _log: &Path,
+) -> Result<String> {
+    Err(AikitError::new(
+        "gateway_upgrade.worker_unsupported",
+        "a detached upgrade worker needs a unix platform",
+    ))
+}
+
+/// The worker's last act: remove its own one-shot job. A leftover definition
+/// is harmless (RunAtLoad fires once per login) but untidy, and is named by
+/// `upgrade status`.
+pub fn retire_worker(home: &AikitHome, id: &str) {
+    if std::env::var(WORKER_MODE_ENV).as_deref() == Ok("process") {
+        return;
+    }
+    let short = worker_short_id(id);
+    let Some(home_dir) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    let _ = home;
+    if let Ok(ServicePlatform::LaunchAgent) = ServicePlatform::current() {
+        let label = format!("ai.aikit.gateway-upgrade.{short}");
+        let plist = home_dir
+            .join("Library/LaunchAgents")
+            .join(format!("{label}.plist"));
+        let _ = std::fs::remove_file(&plist);
+        let control = SystemServiceControl;
+        let uid = control
+            .run("id", &["-u".to_owned()])
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .and_then(|text| text.trim().parse::<u32>().ok())
+            .unwrap_or(501);
+        // Last: this boots the job this process is running in.
+        let _ = control.run(
+            "launchctl",
+            &["bootout".into(), format!("gui/{uid}/{label}")],
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+/// `upgrade plan`: what runs, what is installed, what an apply would do.
+pub fn plan_command(home: &AikitHome, channel: Option<&str>, install: bool) -> Result<Value> {
+    let env = SystemEnv::new(home.clone())?;
+    let installer = install.then(|| resolve_installer(channel)).flatten();
+    let peers = declared_remote_readings(home);
+    plan_reading(&env, installer.as_ref(), peers)
+}
+
+pub struct ApplyOptions {
+    pub install: bool,
+    pub channel: Option<String>,
+    pub origin: Option<UpgradeOrigin>,
+    pub requested_by: String,
+    pub auto_rollback: bool,
+    pub drain_grace_secs: Option<u64>,
+    pub verify_timeout_secs: Option<u64>,
+    pub exit_wait_secs: Option<u64>,
+    /// Drive the transaction in this process instead of a detached worker.
+    pub foreground: bool,
+    /// Wait (bounded) for the worker and return the finished receipt.
+    pub wait: bool,
+}
+
+/// `upgrade apply`: create the transaction, then drive it — detached by
+/// default, because the gateway this restarts may be what asked.
+pub fn apply_command(home: &AikitHome, options: ApplyOptions) -> Result<Value> {
+    let env = SystemEnv::new(home.clone())?;
+    let store = env.store();
+    let installer = if options.install {
+        Some(resolve_installer(options.channel.as_deref()).ok_or_else(|| {
+            three_part(
+                "gateway_upgrade.installer_absent",
+                "--install needs the managed installer, and `oi` is not on PATH.",
+                "Nothing was changed.",
+                "Install O:I (`oi`), or restart onto an already-installed build with `aikit gateway upgrade apply --restart-only`.",
+            )
+        })?)
+    } else {
+        None
+    };
+    let mode = if installer.is_some() {
+        Mode::InstallThenRestart
+    } else {
+        Mode::RestartOnly
+    };
+    let mut plan = default_plan(mode, installer, None);
+    plan.auto_rollback = options.auto_rollback;
+    if let Some(secs) = options.drain_grace_secs {
+        plan.drain_grace_ms = secs * 1_000;
+    }
+    if let Some(secs) = options.verify_timeout_secs {
+        plan.verify_timeout_ms = secs * 1_000;
+    }
+    if let Some(secs) = options.exit_wait_secs {
+        plan.exit_wait_ms = secs * 1_000;
+    }
+    let driver = Driver {
+        env: &env,
+        store: &store,
+    };
+    let mut transaction = driver.create(options.requested_by, options.origin, plan)?;
+    if options.foreground {
+        let _lock = lock_driver(&store, &transaction.id)?;
+        driver.drive(&mut transaction)?;
+        return Ok(json!({
+            "upgrade": transaction.id,
+            "phase": transaction.phase,
+            "outcome": transaction.outcome,
+            "receipt": store.dir(&transaction.id).join("receipt.md").display().to_string(),
+        }));
+    }
+    let worker = spawn_worker(home, &transaction.id)?;
+    let mut reading = json!({
+        "upgrade": transaction.id,
+        "started": true,
+        "worker": worker,
+        "status": "aikit gateway upgrade status",
+        "receipt": store.dir(&transaction.id).join("receipt.md").display().to_string(),
+    });
+    if options.wait {
+        let waited = wait_for(&store, &transaction.id, Duration::from_secs(45 * 60 + 300));
+        reading["phase"] = json!(waited.phase);
+        reading["outcome"] = json!(waited.outcome);
+    }
+    Ok(reading)
+}
+
+fn wait_for(store: &Store, id: &str, limit: Duration) -> Transaction {
+    let started = std::time::Instant::now();
+    loop {
+        if let Ok(transaction) = store.load(id) {
+            if transaction.phase.is_terminal() || started.elapsed() >= limit {
+                return transaction;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn lock_driver(store: &Store, id: &str) -> Result<aikit_adapters::GatewayStateLock> {
+    aikit_adapters::acquire_gateway_state_lock(
+        &store.dir(id).join("driver"),
+        Duration::from_secs(2),
+        "gateway upgrade worker",
+    )
+}
+
+/// `upgrade worker --txn`: the detached finaliser. Drives the transaction to
+/// a terminal phase and retires its own job.
+pub fn worker_command(home: &AikitHome, id: &str) -> Result<Value> {
+    let env = SystemEnv::new(home.clone())?;
+    let store = env.store();
+    let _lock = lock_driver(&store, id)?;
+    let mut transaction = store.load(id)?;
+    let driver = Driver {
+        env: &env,
+        store: &store,
+    };
+    let result = driver.drive(&mut transaction);
+    let reading = json!({
+        "upgrade": transaction.id,
+        "phase": transaction.phase,
+        "outcome": transaction.outcome,
+    });
+    drop(_lock);
+    if transaction.phase.is_terminal() {
+        retire_worker(home, id);
+    }
+    result.map(|()| reading)
+}
+
+/// `upgrade resume ID`: another driver finishes what a stopped worker left.
+pub fn resume_command(home: &AikitHome, id: Option<&str>, foreground: bool) -> Result<Value> {
+    let env = SystemEnv::new(home.clone())?;
+    let store = env.store();
+    let transaction = match id {
+        Some(id) => store.load(id)?,
+        None => store.in_flight().ok_or_else(|| {
+            AikitError::new(
+                "gateway_upgrade.nothing_to_resume",
+                "no upgrade is in flight; `aikit gateway upgrade status` lists them",
+            )
+        })?,
+    };
+    if transaction.phase.is_terminal() && transaction.receipt_delivered {
+        return Ok(json!({
+            "upgrade": transaction.id,
+            "phase": transaction.phase,
+            "note": "already finished and its receipt delivered",
+        }));
+    }
+    if foreground {
+        return worker_command(home, &transaction.id);
+    }
+    let worker = spawn_worker(home, &transaction.id)?;
+    Ok(json!({"upgrade": transaction.id, "resumed": true, "worker": worker}))
+}
+
+/// `upgrade status [ID]`: the transaction, its steps and its receipt path.
+pub fn status_command(home: &AikitHome, id: Option<&str>) -> Result<Value> {
+    let store = Store::new(&home.state());
+    let transaction = match id {
+        Some(id) => Some(store.load(id)?),
+        None => store.in_flight().or_else(|| store.latest()),
+    };
+    let Some(transaction) = transaction else {
+        return Ok(json!({"upgrades": [], "note": "no upgrade has run on this home"}));
+    };
+    Ok(json!({
+        "upgrade": transaction.id,
+        "phase": transaction.phase,
+        "terminal": transaction.phase.is_terminal(),
+        "outcome": transaction.outcome,
+        "before": transaction.before,
+        "after": transaction.after,
+        "steps": transaction.steps,
+        "receipt_delivered": transaction.receipt_delivered,
+        "receipt": store.dir(&transaction.id).join("receipt.md").display().to_string(),
+        "all": store.list().iter().map(|t| json!({"id": t.id, "phase": t.phase})).collect::<Vec<_>>(),
+    }))
+}
+
+/// `upgrade rollback ID`: restore the previous build of a finished or stuck
+/// upgrade and verify it runs.
+pub fn rollback_command(home: &AikitHome, id: &str) -> Result<Value> {
+    let env = SystemEnv::new(home.clone())?;
+    let store = env.store();
+    let mut transaction = store.load(id)?;
+    if transaction
+        .plan
+        .installer
+        .as_ref()
+        .is_none_or(|installer| installer.rollback.is_empty())
+    {
+        return Err(three_part(
+            "gateway_upgrade.no_rollback",
+            format!("Upgrade {id} recorded no installer rollback."),
+            "Nothing was changed.",
+            "Restore the previous build with your installer, then `aikit gateway upgrade apply --restart-only`.",
+        ));
+    }
+    let _lock = lock_driver(&store, id)?;
+    transaction.phase = crate::gateway_upgrade::Phase::RollingBack;
+    transaction.outcome = None;
+    transaction.receipt_delivered = false;
+    store.save(&transaction)?;
+    let driver = Driver {
+        env: &env,
+        store: &store,
+    };
+    driver.drive(&mut transaction)?;
+    Ok(json!({
+        "upgrade": transaction.id,
+        "phase": transaction.phase,
+        "outcome": transaction.outcome,
+    }))
+}
+
+/// The upgrade owner behind a conversation's `/upgrade`: the plan on request,
+/// and on `apply` a transaction whose receipt returns to that conversation.
+pub struct ConversationUpgradeLauncher {
+    pub home: AikitHome,
+}
+
+impl GatewayUpgradeLauncher for ConversationUpgradeLauncher {
+    fn plan(&self) -> Result<(Value, String)> {
+        let plan = plan_command(&self.home, None, false)?;
+        let line = plan_line(&plan);
+        Ok((plan, line))
+    }
+
+    fn start(&self, origin: UpgradeOrigin) -> Result<(Value, String)> {
+        let binding = origin.binding_ref.clone();
+        let started = apply_command(
+            &self.home,
+            ApplyOptions {
+                install: false,
+                channel: None,
+                origin: Some(origin),
+                requested_by: format!("conversation:{binding}"),
+                auto_rollback: true,
+                drain_grace_secs: None,
+                verify_timeout_secs: None,
+                exit_wait_secs: None,
+                foreground: false,
+                wait: false,
+            },
+        )?;
+        let id = started["upgrade"].as_str().unwrap_or("?").to_owned();
+        let line = format!(
+            "upgrade {id} started in a worker that outlives this gateway: it drains the \
+             gateway, restarts it on the installed build, verifies the new process and reports \
+             here"
+        );
+        Ok((started, line))
+    }
+}
+
+/// A non-terminal transaction whose worker is gone: the *new* gateway notices
+/// on its tick and starts a resume worker, so a dead worker never strands an
+/// upgrade or its receipt. A transaction whose driver lock is held has a live
+/// worker and is left alone, as is one touched in the last half minute.
+pub fn adopt_orphans(home: &AikitHome) -> Result<Option<String>> {
+    let store = Store::new(&home.state());
+    let Some(transaction) = store.in_flight() else {
+        // A finished upgrade whose receipt could not be announced yet.
+        let undelivered = store
+            .list()
+            .into_iter()
+            .rev()
+            .find(|t| t.phase.is_terminal() && !t.receipt_delivered && t.origin.is_some());
+        return Ok(match undelivered {
+            Some(transaction) if quiet_for(&transaction, 30_000) => {
+                match lock_driver(&store, &transaction.id) {
+                    Ok(lock) => {
+                        drop(lock);
+                        spawn_worker(home, &transaction.id).ok()
+                    }
+                    Err(_) => None,
+                }
+            }
+            _ => None,
+        });
+    };
+    if !quiet_for(&transaction, 30_000) {
+        return Ok(None);
+    }
+    match lock_driver(&store, &transaction.id) {
+        Ok(lock) => {
+            drop(lock);
+            Ok(spawn_worker(home, &transaction.id).ok())
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+fn quiet_for(transaction: &Transaction, millis: u64) -> bool {
+    aikit_adapters::gateway_posture::unix_ms_now().saturating_sub(transaction.updated_at_unix_ms)
+        >= millis
+}
+
+/// Each declared remote gateway, asked what build it runs and which protocol
+/// features it supports. A peer that does not answer is named, not omitted: a
+/// mixed-version pair is a fact about the fleet an upgrade should show.
+pub fn declared_remote_readings(home: &AikitHome) -> Vec<Value> {
+    let Ok(remotes) = crate::gateway_contact::load_remotes(home) else {
+        return Vec::new();
+    };
+    remotes.remotes.iter().map(probe_remote).collect()
+}
+
+/// Ask one declared remote gateway what it is: which Workcell it says it
+/// serves, which build, which features. The declared Workcell is what claims
+/// and relays are recorded against, so the answered one is compared to it by
+/// the caller — a gateway declared as one Workcell that serves another is an
+/// identity fault, not a detail.
+pub fn probe_remote(remote: &crate::gateway_contact::GatewayRemote) -> Value {
+    let token = crate::secret_location::SecretLocation::parse(&remote.token_location)
+        .and_then(|location| location.resolve());
+    let mut reading = json!({
+        "workcell_ref": remote.workcell_ref,
+        "endpoint": remote.websocket_bind,
+        "listener_class": aikit_adapters::ListenerClass::classify_bind(&remote.websocket_bind),
+    });
+    let token = match token {
+        Ok(token) => token,
+        Err(error) => {
+            reading["reachable"] = json!(false);
+            reading["detail"] = json!(format!("its token could not be read: {error}"));
+            return reading;
+        }
+    };
+    let target = GatewayCarrierTarget::WebSocket {
+        bind: remote.websocket_bind.clone(),
+        path: remote.websocket_path.clone(),
+        bearer_token: token.expose().to_owned(),
+    };
+    match gateway_command_within(
+        &target,
+        GatewayCommand::Protocol,
+        None,
+        Duration::from_secs(3),
+    ) {
+        Ok(GatewayResponse::Protocol {
+            features, build, ..
+        }) => {
+            let missing: Vec<&str> = aikit_adapters::GATEWAY_PROTOCOL_FEATURES
+                .iter()
+                .copied()
+                .filter(|wanted| !features.iter().any(|f| f == wanted))
+                .collect();
+            reading["reachable"] = json!(true);
+            reading["revision"] = json!(build.as_ref().map(|b| b.revision.clone()));
+            reading["pid"] = json!(build.as_ref().map(|b| b.pid));
+            reading["features"] = json!(features);
+            reading["missing_features"] = json!(missing);
+            reading["answers_as_workcell"] = json!(build.and_then(|b| b.workcell_ref));
+        }
+        Ok(_) => {
+            reading["reachable"] = json!(false);
+            reading["detail"] = json!("it answered, but not with a protocol reading");
+        }
+        Err(error) => {
+            reading["reachable"] = json!(false);
+            reading["detail"] = json!(error.to_string());
+        }
+    }
+    reading
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_executable_a_supervisor_runs_is_read_from_its_definition() {
+        let plist = r#"<key>ProgramArguments</key>
+    <array>
+        <string>/Users/x/.local/bin/aikit</string>
+        <string>gateway</string>
+    </array>"#;
+        assert_eq!(
+            executable_named_by(plist, ServicePlatform::LaunchAgent),
+            Some(PathBuf::from("/Users/x/.local/bin/aikit"))
+        );
+        let unit = "[Service]\nExecStart=/home/frank/.local/bin/aikit gateway serve --unix\nRestart=always\n";
+        assert_eq!(
+            executable_named_by(unit, ServicePlatform::SystemdUser),
+            Some(PathBuf::from("/home/frank/.local/bin/aikit"))
+        );
+        assert_eq!(executable_named_by("", ServicePlatform::LaunchAgent), None);
+    }
+
+    #[test]
+    fn a_revision_is_read_from_the_version_line() {
+        assert_eq!(
+            revision_from_version_line("aikit 0.1.0 (64d4e12fd9)"),
+            Some("64d4e12fd9".to_owned())
+        );
+        assert_eq!(revision_from_version_line("aikit 0.1.0"), None);
+    }
+
+    #[test]
+    fn the_worker_is_a_one_shot_job_that_is_never_kept_alive_and_runs_the_named_transaction() {
+        let mut environment = BTreeMap::new();
+        environment.insert("AIKIT_HOME".to_owned(), "/home/x/.aikit".to_owned());
+        let plist = render_worker_plist(
+            "ai.aikit.gateway-upgrade.abc",
+            &[
+                "/bin/aikit".into(),
+                "gateway".into(),
+                "upgrade".into(),
+                "worker".into(),
+                "--txn".into(),
+                "upg-abc".into(),
+            ],
+            &environment,
+            Path::new("/tmp/worker.log"),
+        );
+        assert!(plist.contains("<key>KeepAlive</key>\n    <false/>"));
+        assert!(plist.contains("<key>RunAtLoad</key>\n    <true/>"));
+        assert!(plist.contains("<string>upg-abc</string>"));
+        assert!(plist.contains("<key>AIKIT_HOME</key>"));
+        assert!(plist.contains("ai.aikit.gateway-upgrade.abc"));
+    }
+
+    #[test]
+    fn a_gateway_that_predates_build_identity_is_still_a_running_process_with_a_pid() {
+        let running = running_from_protocol(
+            vec!["communique-exact-instance".into()],
+            None,
+            Some(4242),
+            false,
+        )
+        .expect("a running process");
+        assert_eq!(running.pid, 4242);
+        assert_eq!(running.identity.revision, "unknown");
+        assert_eq!(running.lifecycle, GatewayLifecycle::Foreground);
+        assert!(running_from_protocol(vec![], None, None, true).is_none());
+    }
+}

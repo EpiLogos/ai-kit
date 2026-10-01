@@ -45,6 +45,41 @@ use crate::secret_location::SecretLocation;
 
 pub const LAUNCH_AGENT_LABEL: &str = "ai.aikit.gateway";
 pub const SYSTEMD_UNIT_NAME: &str = "aikit-gateway.service";
+/// Names one extra, separately managed gateway service instance: the LaunchAgent
+/// becomes `ai.aikit.gateway.<instance>` and the unit
+/// `aikit-gateway-<instance>.service`. A controlled instance (a test, a
+/// rehearsal, a second Workcell on one host) then has its own definition,
+/// log and lifecycle and can be restarted, upgraded or killed without
+/// touching the real service. Unset, the default names apply.
+pub const SERVICE_INSTANCE_ENV: &str = "AIKIT_GATEWAY_SERVICE_INSTANCE";
+
+fn service_instance() -> Option<String> {
+    std::env::var(SERVICE_INSTANCE_ENV)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| {
+            !value.is_empty()
+                && value
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
+}
+
+/// The LaunchAgent label this process manages.
+pub fn service_label() -> String {
+    match service_instance() {
+        Some(instance) => format!("{LAUNCH_AGENT_LABEL}.{instance}"),
+        None => LAUNCH_AGENT_LABEL.to_owned(),
+    }
+}
+
+/// The systemd user unit this process manages.
+pub fn systemd_unit_name() -> String {
+    match service_instance() {
+        Some(instance) => format!("aikit-gateway-{instance}.service"),
+        None => SYSTEMD_UNIT_NAME.to_owned(),
+    }
+}
 pub const SERVICE_VERSION: &str = "aikit.gateway-service-install/v1";
 pub const GATEWAY_REF_ENV: &str = "AIKIT_GATEWAY_REF";
 
@@ -89,10 +124,10 @@ impl ServicePlatform {
         match self {
             Self::LaunchAgent => home_dir
                 .join("Library/LaunchAgents")
-                .join(format!("{LAUNCH_AGENT_LABEL}.plist")),
+                .join(format!("{}.plist", service_label())),
             Self::SystemdUser => home_dir
                 .join(".config/systemd/user")
-                .join(SYSTEMD_UNIT_NAME),
+                .join(systemd_unit_name()),
         }
     }
 
@@ -101,7 +136,7 @@ impl ServicePlatform {
     pub fn log_location(self, home_dir: &Path) -> String {
         match self {
             Self::LaunchAgent => log_path(home_dir).display().to_string(),
-            Self::SystemdUser => format!("journalctl --user -u {SYSTEMD_UNIT_NAME}"),
+            Self::SystemdUser => format!("journalctl --user -u {}", systemd_unit_name()),
         }
     }
 }
@@ -120,7 +155,7 @@ pub fn systemd_unit_path(home_dir: &Path) -> PathBuf {
 pub fn log_path(home_dir: &Path) -> PathBuf {
     home_dir
         .join("Library/Logs")
-        .join(format!("{LAUNCH_AGENT_LABEL}.log"))
+        .join(format!("{}.log", service_label()))
 }
 
 /// The only process material carried into the service manager. Credentials are resolved
@@ -255,6 +290,14 @@ pub struct ServiceOptions {
     pub gateway_ref: Option<String>,
     /// `AIKIT_WORKCELL_REF` for the service.
     pub workcell_ref: Option<String>,
+    /// Where a second bearer token lives that grants a WebSocket client OWNER
+    /// scope (drain, restart, upgrade). Without it no network client can do
+    /// more than relay, ask occupancy, send and read.
+    pub owner_token_location: Option<String>,
+    /// Allow a WebSocket bind that is reachable beyond the tailnet (every
+    /// interface, or a routable address). Off by default: widening exposure
+    /// is a deliberate act, never a side effect of naming a bind.
+    pub allow_wide_bind: bool,
 }
 
 fn nothing_installed() -> &'static str {
@@ -293,6 +336,30 @@ impl ServiceOptions {
                         "Pass the address the other Workcells reach, e.g. --ws 100.109.102.82:7800.",
                     ));
                 }
+                // Exposure is decided by where the carrier binds. Loopback and
+                // tailnet addresses are private; every interface or a
+                // routable address is not, and is never chosen by accident.
+                match aikit_adapters::ListenerClass::classify_bind(bind) {
+                    class @ (aikit_adapters::ListenerClass::Wildcard
+                    | aikit_adapters::ListenerClass::Public)
+                        if !self.allow_wide_bind =>
+                    {
+                        return Err(three_part(
+                            "gateway.service_ws_wide_bind",
+                            format!(
+                                "--ws {bind} binds a {} address: the gateway would answer beyond \
+                                 the tailnet and this machine, with only a bearer token (and no \
+                                 TLS) between it and the network.",
+                                class.as_str()
+                            ),
+                            nothing_installed(),
+                            "Bind the machine's tailnet address (`tailscale ip -4`), or 127.0.0.1 \
+                             behind `tailscale serve`; pass --allow-wide-bind only if exposing \
+                             it is what you mean.",
+                        ));
+                    }
+                    _ => {}
+                }
                 let parsed = SecretLocation::parse(location).map_err(|error| {
                     three_part(
                         "gateway.service_token_location_invalid",
@@ -316,6 +383,33 @@ impl ServiceOptions {
                 }
             }
             (None, None) => {}
+        }
+        if let Some(owner) = &self.owner_token_location {
+            // The owner token is read by the unattended service like the peer
+            // token: prove now that it resolves, is owner-only, and is a
+            // different secret, rather than at the first restart.
+            let resolved = SecretLocation::parse(owner)
+                .and_then(|location| location.resolve())
+                .map_err(|error| {
+                    three_part(
+                        "gateway.service_owner_token_unusable",
+                        format!("--ws-owner-token-location {owner}: {error}"),
+                        nothing_installed(),
+                        "Name an owner-only, non-empty file (file:/ABSOLUTE/PATH, chmod 600) or a keychain/pass/op/varlock ref.",
+                    )
+                })?;
+            if let Some(peer) = &self.token_location {
+                let peer_value =
+                    SecretLocation::parse(peer).and_then(|location| location.resolve());
+                if peer_value.is_ok_and(|value| value.expose() == resolved.expose()) {
+                    return Err(three_part(
+                        "gateway.service_owner_token_distinct",
+                        "--ws-owner-token-location holds the same secret as --ws-token-location; one token cannot grant two scopes.",
+                        nothing_installed(),
+                        "Generate a separate token for owner scope (umask 077 && openssl rand -hex 32 > FILE).",
+                    ));
+                }
+            }
         }
         if let Some(gateway_ref) = &self.gateway_ref {
             aikit_core::resource::ResourceRef::parse(gateway_ref).map_err(|error| {
@@ -345,6 +439,7 @@ impl ServiceOptions {
 
     /// `aikit gateway serve …` arguments after the binary.
     pub fn serve_arguments(&self) -> Vec<String> {
+        // (the owner token, when declared, follows the peer token below)
         let mut arguments = vec![
             "gateway".to_owned(),
             "serve".to_owned(),
@@ -357,6 +452,9 @@ impl ServiceOptions {
                 "--ws-token-location".to_owned(),
                 location.clone(),
             ]);
+            if let Some(owner) = &self.owner_token_location {
+                arguments.extend(["--ws-owner-token-location".to_owned(), owner.clone()]);
+            }
         }
         arguments
     }
@@ -401,7 +499,11 @@ pub fn render_plist_for(
         .map(|argument| format!("        <string>{}</string>", xml_escape(argument)))
         .collect::<Vec<_>>()
         .join("\n");
-    let environment = service_environment(environment, options);
+    let mut environment = service_environment(environment, options);
+    environment.push((
+        "AIKIT_GATEWAY_LIFECYCLE".to_owned(),
+        "supervised-launchd".to_owned(),
+    ));
     let environment = if environment.is_empty() {
         String::new()
     } else {
@@ -433,6 +535,8 @@ pub fn render_plist_for(
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>ExitTimeOut</key>
+    <integer>60</integer>
     <key>StandardOutPath</key>
     <string>{log}</string>
     <key>StandardErrorPath</key>
@@ -440,7 +544,7 @@ pub fn render_plist_for(
   </dict>
 </plist>
 "#,
-        label = LAUNCH_AGENT_LABEL,
+        label = service_label(),
         arguments = arguments,
         environment = environment,
         log = xml_escape(&log.display().to_string()),
@@ -484,7 +588,12 @@ pub fn render_systemd_unit(
 ) -> String {
     let mut command = vec![systemd_word(&binary.display().to_string())];
     command.extend(options.serve_arguments().iter().map(|a| systemd_word(a)));
-    let environment = service_environment(environment, options)
+    let mut values = service_environment(environment, options);
+    values.push((
+        "AIKIT_GATEWAY_LIFECYCLE".to_owned(),
+        "supervised-systemd".to_owned(),
+    ));
+    let environment = values
         .iter()
         .map(|(name, value)| format!("Environment={}\n", systemd_word(&format!("{name}={value}"))))
         .collect::<String>();
@@ -501,6 +610,7 @@ ExecStart={command}\n\
 {environment}\
 Restart=always\n\
 RestartSec=5\n\
+TimeoutStopSec=60\n\
 \n\
 [Install]\n\
 WantedBy=default.target\n",
@@ -658,6 +768,64 @@ pub fn is_installed(home_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Ask the installed service's manager to start the gateway (a no-op for one
+/// that is already running). The service definition must exist: this never
+/// installs. Returns what was asked, in words.
+pub fn start_installed_service(control: &dyn ServiceControl, home_dir: &Path) -> Result<String> {
+    let platform = ServicePlatform::current()?;
+    let unit = platform.unit_path(home_dir);
+    if !unit.exists() {
+        return Err(three_part(
+            "gateway.service_not_installed",
+            format!("No gateway service definition exists at {}.", unit.display()),
+            "Nothing was started.",
+            "Install it with `aikit gateway install-service`, or start `aikit gateway serve` yourself.",
+        ));
+    }
+    match platform {
+        ServicePlatform::LaunchAgent => {
+            let domain = gui_domain(control);
+            let target = format!("{domain}/{}", service_label());
+            let kicked = run(control, "launchctl", &["kickstart", &target])?;
+            if kicked.status.success() {
+                return Ok(format!("launchctl kickstart {target}"));
+            }
+            // Not loaded into the domain (booted out, or never bootstrapped):
+            // bootstrap reads the definition and runs it (RunAtLoad).
+            let unit_arg = unit.display().to_string();
+            let loaded = run(control, "launchctl", &["bootstrap", &domain, &unit_arg])?;
+            if loaded.status.success() {
+                Ok(format!("launchctl bootstrap {domain} {unit_arg}"))
+            } else {
+                Err(three_part(
+                    "gateway.service_start_failed",
+                    format!(
+                        "launchctl refused to start {target}: {} / {}",
+                        stderr_of(&kicked),
+                        stderr_of(&loaded)
+                    ),
+                    "The gateway was not started.",
+                    "Read `launchctl print` for the label, then start it by hand.",
+                ))
+            }
+        }
+        ServicePlatform::SystemdUser => {
+            let name = systemd_unit_name();
+            let started = run(control, "systemctl", &["--user", "start", &name])?;
+            if started.status.success() {
+                Ok(format!("systemctl --user start {name}"))
+            } else {
+                Err(three_part(
+                    "gateway.service_start_failed",
+                    format!("systemctl --user start {name} refused: {}", stderr_of(&started)),
+                    "The gateway was not started.",
+                    "Check `systemctl --user status` and `journalctl --user -u`, then start it by hand.",
+                ))
+            }
+        }
+    }
+}
+
 /// Install on this platform with the real service manager.
 pub fn install(
     home_dir: &Path,
@@ -766,13 +934,14 @@ pub fn install_with(
                 let enabled = run(
                     control,
                     "systemctl",
-                    &["--user", "enable", "--now", SYSTEMD_UNIT_NAME],
+                    &["--user", "enable", "--now", &systemd_unit_name()],
                 )?;
                 if enabled.status.success() {
                     Ok(())
                 } else {
                     Err(format!(
-                        "systemctl --user enable --now {SYSTEMD_UNIT_NAME} refused: {}",
+                        "systemctl --user enable --now {} refused: {}",
+                        systemd_unit_name(),
                         stderr_of(&enabled)
                     ))
                 }
@@ -801,8 +970,8 @@ pub fn install_with(
         "action": "installed",
         "platform": platform.as_str(),
         "label": match platform {
-            ServicePlatform::LaunchAgent => LAUNCH_AGENT_LABEL,
-            ServicePlatform::SystemdUser => SYSTEMD_UNIT_NAME,
+            ServicePlatform::LaunchAgent => service_label(),
+            ServicePlatform::SystemdUser => systemd_unit_name(),
         },
         "unit": unit_text,
         "log": platform.log_location(home_dir),
@@ -863,7 +1032,7 @@ pub fn uninstall_with(
             let booted_out = run(
                 control,
                 "launchctl",
-                &["bootout", &format!("{domain}/{LAUNCH_AGENT_LABEL}")],
+                &["bootout", &format!("{domain}/{}", service_label())],
             )?;
             if !booted_out.status.success() {
                 let _ = run(control, "launchctl", &["unload", &unit_text]);
@@ -873,7 +1042,7 @@ pub fn uninstall_with(
             let _ = run(
                 control,
                 "systemctl",
-                &["--user", "disable", "--now", SYSTEMD_UNIT_NAME],
+                &["--user", "disable", "--now", &systemd_unit_name()],
             )?;
         }
     }
@@ -891,8 +1060,8 @@ pub fn uninstall_with(
         "action": "uninstalled",
         "platform": platform.as_str(),
         "label": match platform {
-            ServicePlatform::LaunchAgent => LAUNCH_AGENT_LABEL,
-            ServicePlatform::SystemdUser => SYSTEMD_UNIT_NAME,
+            ServicePlatform::LaunchAgent => service_label(),
+            ServicePlatform::SystemdUser => systemd_unit_name(),
         },
         "note": "the gateway is no longer kept alive; scheduled automations and the relay pass will not run until it is started again",
     }))
@@ -958,6 +1127,8 @@ mod tests {
             token_location: Some(format!("file:{}", token.display())),
             gateway_ref: Some("agency-gateway/omarchy".into()),
             workcell_ref: Some("workcell:omarchy".into()),
+            owner_token_location: None,
+            allow_wide_bind: false,
         }
     }
 

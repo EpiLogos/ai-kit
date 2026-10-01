@@ -30,9 +30,11 @@ aikit gateway inbox [--position P] [--ack] --json
 aikit gateway conversation --with @factory-guardian --json
 aikit gateway delegate --communique aikit:communique:… --work work:cradle-fix [--run R] [--journey J] [--workflow-unit U] --reason "…"
 aikit gateway forward --json
-aikit gateway remote add --workcell workcell:omarchy --ws 100.92.62.101:7800 --token-location file:/Users/me/.aikit/omarchy-gateway.token
-aikit gateway serve --ws HOST:PORT --ws-token-location file:/ABS/PATH --unix
-aikit gateway install-service [--ws HOST:PORT --ws-token-location file:/ABS/PATH] [--workcell-ref W] [--gateway-ref G]
+aikit gateway remote add --workcell workcell:omarchy --ws 100.92.62.101:7788 --token-location file:/Users/me/.aikit/omarchy-gateway.token
+aikit gateway serve --ws HOST:PORT --ws-token-location file:/ABS/PATH [--ws-owner-token-location file:/ABS/PATH] --unix
+aikit gateway install-service [--ws HOST:PORT --ws-token-location file:/ABS/PATH [--ws-owner-token-location file:/ABS/PATH]] [--workcell-ref W] [--gateway-ref G]
+aikit gateway doctor                       # every finding about this gateway, each with its fix
+aikit gateway upgrade plan|apply|status|resume|rollback   # see GATEWAY-UPGRADE.md
 aikit gateway remote list | remove --workcell W
 aikit gateway hoist --to workcell:omarchy [--apply [--ssh user@host] [--yes]] | --receive [--force]
 aikit gateway --at workcell:omarchy status | who | send | inbox | conversation | forward
@@ -209,6 +211,28 @@ it runs, and an offline writer holds it for a single command. The two can
 never interleave, and a sender is never blocked because the gateway service
 is stopped.
 
+### What a network carrier may do: peer and owner scope
+
+The WebSocket carrier used to grant every gateway command to any holder of its
+one bearer token: restoring a whole snapshot, shutting the service down,
+binding conversations, and sending a Communique the kernel accepted as
+`verified` no matter who built it. A Workcell that could relay could also
+rewrite and stop the gateway it relayed to.
+
+There are now two scopes (`GATEWAY-OPERATING-MODES.md` has the full table):
+
+| Scope | Granted by | May |
+|---|---|---|
+| **peer** | the ordinary token (`--ws-token-location`) | `protocol`, `status`, `discover`, `ecology`; send, inbox, ack, read, conversation, escalate, counts; relay (`ingest`, forward queue, standing); occupancy read/list; the four relayed Flow-conversation actions |
+| **owner** | the owner token (`--ws-owner-token-location`), or the Unix socket | everything, including `drain`, `shutdown`, `snapshot`, `restore`, `bind`, conversation control |
+
+A peer that asks for an owner command is refused with
+`agency_gateway.carrier_scope_denied` (an answer on the same connection, not a
+closed socket). A command the gateway does not know at all is refused as
+`agency_gateway.unsupported_command` and names what it does support, so a
+newer peer degrades on the one thing missing. The two tokens must differ.
+Without an owner token no network client is an owner.
+
 ### Serving the gateway for other Workcells
 
 `aikit gateway serve` with no flags serves this home's Unix socket
@@ -216,7 +240,7 @@ is stopped.
 its authenticated WebSocket carrier:
 
 ```sh
-aikit gateway serve --ws 100.92.62.101:7800 --ws-token-location file:/home/frank/.aikit/gateway.token --unix
+aikit gateway serve --ws 100.92.62.101:7788 --ws-token-location file:/home/frank/.aikit/gateway.token --unix
 ```
 
 - `--ws-token-location` names where the bearer token lives, either an
@@ -236,7 +260,7 @@ Unix socket, and it also serves the WebSocket when you pass `--ws` and
 service's environment:
 
 ```sh
-aikit gateway install-service --ws 100.92.62.101:7800 \
+aikit gateway install-service --ws 100.92.62.101:7788 \
   --ws-token-location file:/home/frank/.aikit/gateway.token \
   --workcell-ref workcell:omarchy --gateway-ref agency-gateway/omarchy
 ```
@@ -253,8 +277,20 @@ It also carries the owner relation the dispatcher and the relay pass need:
 system paths. It carries no credentials. A socket left by a gateway that has
 exited is cleared under the gateway state lock. A gateway that is still
 answering is refused.
-Install refuses a WebSocket without a token location, and a token file that
-is not owner-only, before it writes anything. If the service manager refuses
+Install refuses a WebSocket without a token location, a token file that is not
+owner-only, an owner token equal to the peer token, and a bind that is
+reachable beyond the tailnet (every interface, or a routable address) unless
+`--allow-wide-bind` says that is what you mean. Bind the tailnet address
+(`tailscale ip -4`), or `127.0.0.1` behind `tailscale serve`.
+
+A WebSocket address that does not exist yet — a tailnet address before
+Tailscale is up, at login or after wake — is not a failure: that carrier
+waits and retries every two seconds while the Unix carrier keeps serving, and
+`status`/`doctor` show it as `waiting`. The definition also declares its
+lifecycle (`AIKIT_GATEWAY_LIFECYCLE`), gives launchd `ExitTimeOut 60` and
+systemd `TimeoutStopSec=60` so a stop can drain, and `SIGTERM` (what
+`launchctl bootout` and `systemctl stop` send) now drains the gateway and
+exits cleanly instead of killing it mid-turn. If the service manager refuses
 the start, the definition is removed again. `aikit gateway uninstall-service`
 is the exact inverse. On Linux the user manager runs while you are logged in.
 To keep the gateway up without a login, the machine owner enables lingering
@@ -281,7 +317,7 @@ serves its own gateway and declares the other one.
 2. **Serve.** On the Mac:
 
    ```sh
-   aikit gateway install-service --ws 100.109.102.82:7800 \
+   aikit gateway install-service --ws 100.109.102.82:7788 \
      --ws-token-location file:$HOME/.aikit/gateway.token \
      --workcell-ref workcell:mac --gateway-ref agency-gateway/mac
    ```
@@ -289,7 +325,7 @@ serves its own gateway and declares the other one.
    On Omarchy:
 
    ```sh
-   aikit gateway install-service --ws 100.92.62.101:7800 \
+   aikit gateway install-service --ws 100.92.62.101:7788 \
      --ws-token-location file:$HOME/.aikit/gateway.token \
      --workcell-ref workcell:omarchy --gateway-ref agency-gateway/omarchy
    ```
@@ -297,19 +333,23 @@ serves its own gateway and declares the other one.
 3. **Declare each other.** On the Mac:
 
    ```sh
-   aikit gateway remote add --workcell workcell:omarchy --ws 100.92.62.101:7800 \
+   aikit gateway remote add --workcell workcell:omarchy --ws 100.92.62.101:7788 \
      --token-location file:$HOME/.aikit/omarchy-gateway.token
    ```
 
    On Omarchy:
 
    ```sh
-   aikit gateway remote add --workcell workcell:mac --ws 100.109.102.82:7800 \
+   aikit gateway remote add --workcell workcell:mac --ws 100.109.102.82:7788 \
      --token-location file:$HOME/.aikit/mac-gateway.token
    ```
 
-4. **Check.** `aikit gateway who --json` on either machine lists the other
-   under `data.remotes` with `status: reachable`. A Position occupied on the
+4. **Check.** `aikit gateway remote add` asks the endpoint what it is and
+   refuses one that says it serves a different Workcell than the one
+   declared (`--no-probe` skips the question). `aikit gateway who --json` on
+   either machine lists the other under `data.remotes` with
+   `status: reachable`, and `aikit gateway doctor` reports each peer's build
+   and any protocol feature it lacks. A Position occupied on the
    other machine shows `observed_via: "gateway:agency-gateway/<other>"`.
 
 Shell commands run outside the service, such as `aikit gateway send` and the
