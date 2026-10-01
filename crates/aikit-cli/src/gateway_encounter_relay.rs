@@ -158,12 +158,22 @@ fn peer_features(remote: &GatewayRemote) -> std::result::Result<Vec<String>, Str
 
 /// Decide the route for a request to the owner on `workcell_ref`.
 pub fn choose(home: &AikitHome, workcell_ref: &str) -> Choice {
-    let declared = load_remotes(home).ok().and_then(|remotes| {
-        remotes
-            .remotes
-            .into_iter()
-            .find(|remote| remote.workcell_ref == workcell_ref)
-    });
+    // A registry that cannot be read is not "no endpoint declared": an operator
+    // who declared one must not be silently routed over ssh because the file is
+    // damaged. The request is held, with the reason.
+    let remotes = match load_remotes(home) {
+        Ok(remotes) => remotes,
+        Err(error) => {
+            return Choice::Unavailable(format!(
+                "the declared gateway endpoints cannot be read, so no route is chosen \
+                 (nothing was sent over any other route): {error}"
+            ))
+        }
+    };
+    let declared = remotes
+        .remotes
+        .into_iter()
+        .find(|remote| remote.workcell_ref == workcell_ref);
     let Some(remote) = declared else {
         return Choice::Legacy(format!(
             "no gateway endpoint is declared for {workcell_ref}"
@@ -275,6 +285,29 @@ mod tests {
         match choose(&home, "workcell:elsewhere") {
             Choice::Legacy(reason) => assert!(reason.contains("no gateway endpoint is declared")),
             other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_damaged_endpoint_registry_holds_the_request_and_never_falls_back_to_ssh() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path().to_path_buf());
+        std::fs::create_dir_all(
+            crate::gateway_contact::remotes_path(&home)
+                .parent()
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(crate::gateway_contact::remotes_path(&home), b"{ not json").unwrap();
+        match choose(&home, "workcell:omarchy") {
+            Choice::Unavailable(reason) => {
+                assert!(reason.contains("cannot be read"), "{reason}");
+                assert!(
+                    reason.contains("nothing was sent over any other route"),
+                    "{reason}"
+                );
+            }
+            other => panic!("a damaged registry must hold, not route: {other:?}"),
         }
     }
 

@@ -26,35 +26,39 @@ not a level.
 | 5 | Listener binding, transport, Workcell placement, connector identity and session continuity kept separate; a connection mode creates no second agent/conversation model | ai-kit | `ListenerClass`, `CarrierScope`, the five axes in `GATEWAY-OPERATING-MODES.md` | `gateway_posture` unit tests; carrier-scope test `a_peer_token_relays_and_reads_but_only_the_owner_token_can_stop_the_gateway` | D | — |
 | 6 | The one native route traced (admitted message → queue → exact recipient/occurrence → turn → response → Flow/connector Return) and its defects repaired | ai-kit | Communique A→B→A fix; process-reported identity; configured-ref precedence; scope-checked carrier; one Flow carrier (`EncounterRelay`); hardened legacy ssh route | engine/contact suites; `gateway_encounter_relay` tests; flap regression | D | **three journals are still three** (Communique, connector conversation, Flow Encounter) — named in `GATEWAY-BOT-TO-BOT.md`; four routing deciders in `gateway_contact.rs` (`route_to_occupancy`, `place_instance`, `forward_pass_via`, `relay_attempt`) not merged; connector plane has no durable outbound queue or attempt marker; the sender copy never learns remote delivery |
 | 7 | Agent-identity addressability: an unembodied registered agent remains addressable; durable-address succession proved separately from exact generation and required-Workcell targeting | ai-kit | existing (`a_registered_profile_without_a_position_is_addressable…`, `a_durable_route_follows_succession_and_an_exact_route_refuses_the_successor`, `a_required_workcell_mismatch_is_held…`) re-run on the lane tree | `gateway_contact` suite | D (19 tests, this tree) | no new behaviour; not re-proved across the remote Flow route (row 11) |
-| 8 | Setup, status and recovery reachable by CLI, TUI/desktop and connector commands, keeping streaming, stop/restart, group bounds, attachments, return-to-origin | ai-kit | `/upgrade`, `/upgrade apply` (group refused), `Announce`, TUI operation names | `upgrade_is_planned_on_request_started_only_by_apply_and_never_from_a_group`; tui suite | D | the desktop surface itself is not built; streaming, attachments and return-to-origin are the existing engine paths, re-run green, not re-proved here |
+| 8 | Setup, status and recovery reachable by CLI, TUI/desktop and connector commands, keeping streaming, stop/restart, group bounds, attachments, return-to-origin | ai-kit | `/upgrade`, `/upgrade apply` (group refused), `Announce`, TUI operation names | `upgrade_is_planned_on_request_started_only_by_apply_and_never_from_a_group`; tui suite; real-binary `…reported_back_into_it` | D, R | the desktop surface itself is not built; streaming, attachments and return-to-origin are the existing engine paths, re-run green, not re-proved here |
 | 9 | Upgrade is a complete native lifecycle: inspect/plan → choose candidate → recovery basis → managed install → drain/restart/rebind → running-version verification → resumed conversation → visible receipt; including one requested through the gateway itself; exact pending work and uncertain effects retained | ai-kit (driver), O:I (`oi update`) | `gateway_upgrade.rs`, `gateway_upgrade_system.rs`; O:I `update_flow.rs` two-phase apply, direction, resident readings | scripted driver suite (14); real-binary suite: stale→upgrade→verify, install fails, flip-then-fail rollback, broken new build rolled back, foreground left running, SIGTERM drain; O:I 23 tests; **real launchd on this Mac, controlled instance** (see below) | D, R, M (launchd on the Mac, systemd on Omarchy), I (both machines) | — |
 | 10 | Terminal loss, failed build, service restart, mixed peer versions, one machine offline, retry, supported rollback exercised; no blind replay of uncertain model/tool effects; no silent downgrade of exact routing | ai-kit | worker detached from the gateway; adoption of orphans; drain records uncertain effects; per-feature refusal | worker-death and resume (D); rollback (R); mixed versions (`doctor` peer reading, D); exact route refuses a successor (D) | D, R | one-machine-offline and mixed-version across the two real machines pending (row 11) |
 | 11 | Usable operating modes; one easy managed upgrade route; **actual new-running-version proof on both machines**; **native remote Flow delivery** | ai-kit, O:I, Workcell | all of the above | the managed install and `gateway upgrade apply` on both real services; the Flow driver's gateway route (below) | running version: **I on both machines**. Remote Flow delivery: **R/I with a controlled body** — two requests, replies included once | a real model body; the real Omarchy gateway as relay target; the reverse direction; independent verification |
 | 12 | Parity map, native tests and operator guidance updated | ai-kit docs | `GATEWAY-CONNECTOR-MATRIX.md` (operational parity), `GATEWAY-OPERATING-MODES.md`, `GATEWAY-UPGRADE.md`, `GATEWAY-CONTACT-AND-DAY.md`, `GATEWAY-BOT-TO-BOT.md`; O:I `docs/INSTALL-UPDATE-FLOW.md` | doc-parity test | D | O:I `.wayfinder/maps/plural-flow-now.md` section for the remote route after row 11 |
 
-## Executed evidence (this tree, macOS, debug builds, shared machine under load)
+## Executed evidence
+
+Linux (Omarchy, x86_64, debug builds) unless stated; the Mac's disk was too full to rebuild.
 
 | Command | Result |
 |---|---|
-| `cargo test -p aikit-adapters --lib -- gateway_` | 81 passed |
-| `cargo test -p aikit-cli --lib -- gateway_ encounter_conversation` | 64 passed |
-| `cargo test -p aikit-cli --test gateway_upgrade_native -- --test-threads=1` | 6 scenarios passed — five in one run, the broken-build rollback in its own run after the last fixture repair |
-| `cargo test -p aikit-cli --test gateway_conversation_engine` | 28 passed, 1 ignored |
+| `cargo test -p aikit-adapters --lib -- gateway_` | 82 passed |
+| `cargo test -p aikit-cli --lib -- gateway_ encounter_conversation` | 72 passed |
+| `cargo test -p aikit-cli --test gateway_upgrade_native` — **each test as its own process, two at a time** (what nextest does) | 9 of 9 exit 0: upgrade + verify, install fails, flip-then-fail rollback, broken new build rolled back, **a restart that brings up the old image is not reported as the upgrade**, foreground left running, SIGTERM drain, **an install that cannot fit is refused first**, **an upgrade asked for in a conversation survives the restart and the receipt returns to it** |
+| `cargo test -p aikit-cli --test gateway_conversation_engine` | 29 passed, 1 ignored |
 | `cargo test -p aikit-cli --test gateway_contact --test gateway_command --test gateway_connector_runtime` | 8 + 8 + 19 passed |
 | `cargo test -p aikit-tui --test gateway_conversation_v2` | 15 passed |
-| O:I `cargo test` (update flow, suite doctor) | 23 passed |
-| `cargo fmt --all -- --check` | clean |
 | `cargo clippy --locked -p aikit-adapters -p aikit-cli -p aikit-tui --all-targets -- -D warnings` | clean |
+| `cargo fmt --all -- --check` | clean |
+| CI on the merged PR (#477) | all 22 checks passed (Linux and macOS) |
 
-Defects the executed tests found in *this lane's own work*, repaired before
-this record: the upgrade fixture invoked the gateway through a link named
-`current` (the binary dispatches on its own name — nothing started); the
-doctor judged a gateway "stale" in the seconds before the new process had read
-its own executable digest (comparison is now three-valued and verification
-waits for the digest); the scripted installer overwrote its previous-build
-pointer with the binary; an application-managed gateway was drained although
-nothing would restart it (now left running with the exact command named);
-plist argument parsing in the doctor. None was weakened to pass.
+Defects the executed tests found in *this lane's own work* before and after
+the first merge, all repaired with the test that found them kept (none weakened):
+the upgrade fixture invoked the gateway through a link named `current` (the
+binary dispatches on its own name — nothing started); the doctor judged a
+gateway "stale" in the seconds before the new process had read its own
+executable digest (comparison is now three-valued and verification waits for the
+digest); the scripted installer overwrote its previous-build pointer with the
+binary; an application-managed gateway was drained although nothing would
+restart it; plist argument parsing in the doctor; under nextest, shared binary
+copies rewritten while another process executed them (`ETXTBSY`); a
+`stage_and_link` left unused outside tests (O:I clippy).
 
 ## Real service manager: launchd, this Mac (controlled instance)
 
@@ -104,7 +108,7 @@ gateway upgrade plan` first, read as data):
 | running before | pid 30455, build unreported (predates identity): stopped through its clean shutdown | pid 1697929, same |
 | transaction | `upg-01m3vnczax54…` `completed` | `upg-01m3vz7w916g…` `completed` |
 | running after | **pid 47288, revision `6e452a600a4c`, sha256 `7b62a599a736…`, `supervised-launchd`** | **pid 2348420, revision `6e452a600a4c`, sha256 `367d0a2a66b5…`, `supervised-systemd`** |
-| uncertain effects | 0 turns interrupted, 0 unreceipted operations, nothing replayed | same |
+| what was in flight | **unknown, not zero**: both predecessors predate the drain and were stopped through their clean shutdown, so no drain counted anything. The receipts (written before this was caught) say "0 interrupted"; that was a default report, not a measurement (repaired below). Nothing was replayed: nothing in the code replays | same |
 | gateway ref | `agency-gateway/mac` (was answering as `agency-gateway/local`: the identity drift the research found, repaired by the configured ref winning) | `agency-gateway/omarchy` |
 | doctor after | `gateway.current`, `listener.private`; remaining: peer features (until Omarchy was upgraded), lifecycle undeclared (the service definition predates it) | `gateway.current`, `peer.ok` — "peer workcell:mac answers and runs the same build" |
 
@@ -158,6 +162,36 @@ What this does not show: a model body; the real Omarchy gateway as the relay
 target (a controlled instance served, to leave the real one undisturbed); the
 reverse direction (Omarchy asking a Mac agent); a person using the desktop.
 
+## Independent verification (a session that did not build it)
+
+A fresh verifier read the commission and this record, exercised the usable path
+read-only on both real services, re-ran two real-binary failure/recovery tests,
+and read the code adversarially. **Verdict: not yet a usable end-to-end feature
+as the commission is worded.** What it reproduced: both real services' pid,
+revision and digest-against-the-file match this record; a peer token is refused
+`snapshot` on the real Omarchy gateway (`carrier_scope_denied`); the broken-build
+and flip-then-fail rollbacks pass; throwaway-home plans refuse
+`remote-authenticated-endpoint` and `tailscale-funnel`. What it found, and where
+each is now:
+
+| Finding | State |
+|---|---|
+| Both real receipts said "0 interrupted … nothing was replayed" from a default drain report: the predecessor predated the drain, so the count was **unknown** | **Repaired**: `DrainReport.measured`; the step note, summary, receipt JSON and markdown say "not measured … unknown, not zero" when no drain ran; unit test `a_predecessor_without_a_drain_is_reported_unmeasured_never_as_zero_interrupted`. (The two real receipts above were written before this and are corrected in the table.) |
+| `/upgrade apply` was tested only with a stub launcher | **A real defect found by writing the real test**: the serve path left `upgrade_launcher: None`, so on a real service `/upgrade apply` could never start an upgrade. Wired. New real-binary test: a real out-of-process connector, a real detached worker, the restart, and the receipt announced into the same conversation once (`an_upgrade_asked_for_in_a_conversation_survives_the_restart_and_is_reported_back_into_it`) |
+| The same-pid check in `verify` and the "expected image" check could not be failed by any real-binary test | **Repaired**: unit test `the_old_process_still_answering_is_never_verified_as_the_new_one`; real-binary test `a_restart_that_brings_up_the_old_image_is_never_reported_as_the_upgrade` (a supervisor pinned to the old file: a new pid on the old image ends `rolled-back`, never `completed`) |
+| Nothing pinned that a peer cannot `drain` | **Repaired**: the scope test now sends `drain` over the peer carrier and expects `carrier_scope_denied` |
+| macOS reads the executable digest by path in the background (an in-place overwrite could make a stale resident look current) | **Repaired**: the executable is opened at start and the digest read from that handle (`sha256_of_open_file`); test: the digest of an open handle survives a rename-swap of the path |
+| `AIKIT_HOME` does not isolate the service: `setup` from a throwaway home planned to replace the real service | **Repaired**: setup refuses (`gateway.setup_other_homes_service`) when the installed definition serves another home; the doctor says `service.serves_other_home` instead of "not answering" |
+| No free-disk preflight (the Mac was at 100% while the verifier ran) | **Repaired**: `doctor` reports `disk.low` (fail under 512 MiB, warn under 5 GiB); `upgrade apply --install` refuses before anything changes under 3 GiB (`gateway_upgrade.disk_low`; `AIKIT_INSTALL_MIN_FREE_MIB` adjusts it). The refusal fired by itself on a 785 MiB tmpfs during testing; test `an_install_that_cannot_fit_is_refused_before_anything_is_changed` |
+| Recovery preferred the older copy over a newer decodable one | **Repaired**: newest by modification time; test |
+| `choose()` swallowed an unreadable endpoint registry and fell back to ssh | **Repaired**: an unreadable registry holds the request with the reason; test |
+| `rehearse.py` lived only in a scratchpad | **Repaired**: `scripts/gateway-upgrade-rehearse.py` |
+| Dangling `--restart-only` hint | **Repaired**: the flag exists; and `--candidate <rev>` makes "choose the candidate" a first-class step of `plan`/`apply` |
+| Found while testing (not by the verifier): a receipt announced while the connector was not ready was dropped with a note on stderr and the transaction said "delivered" | **Repaired**: an announcement that cannot be queued is an error the driver sees and the tick retries (`an_announcement_that_cannot_be_queued_is_an_error_the_caller_sees…`) |
+| Found while testing: a gateway merely slow to answer at the start (loaded machine) was read as "not running", which would skip the drain and start a second gateway | **Repaired**: the first reading tells "nothing listening" from "did not answer in time" (retried); the latter ends `failed-before-change` with nothing touched; test |
+| Pending outbound operations stay pending forever; the Communique planes are still three journals; `/upgrade` through a live Telegram/Slack chat; in-flight turn drained through the carrier with a live harness; Serve/ssh-tunnel exercised; owner-scope admin of a remote gateway | **Carried, with owners and closing conditions, in EpiLogos/ai-kit#481** |
+| A real `oi update --rollback` and a real (not scripted) `oi` install-then-restart in one transaction were never exercised | **Open in this record** — run on Omarchy against the merged cut (below) |
+
 ## Defects found by the lane's own gates after the first push
 
 * **Linux CI (`V2 crate — aikit-cli`)**: `a_foreground_gateway_is_installed_…`
@@ -172,14 +206,17 @@ reverse direction (Omarchy asking a Mac agent); a person using the desktop.
 
 ## Not shown
 
+* A real `oi update --rollback` and a real `oi` install-then-restart in one
+  transaction (the tests and rehearsals use a scripted installer).
+* `/upgrade apply` in a live Telegram/Slack conversation on a real service; a
+  real in-flight turn drained through the carrier (ai-kit#481).
 * A Flow request delivered to another Workcell with a real model body, with the
   real Omarchy gateway as relay target, or in the reverse direction.
-* An independent verifier's account of the whole path and of a consequential
-  failure with its recovery.
-* A Tailscale Serve front on a controlled port; Funnel is never configured.
+* A Tailscale Serve front on a controlled port (needs the owner's consent to a
+  Serve change); Funnel is never configured.
 * An owner-scope administrator token on a *remote* gateway (`--at` uses the
-  peer token: relay and read, never stop or drain).
-* — (the Linux suite: CI on the merged PR passed all 22 checks).
+  peer token: relay and read, never stop, drain or restore).
+* A second independent verification of the repaired tree.
 
 ## Owner-only steps this lane will not take
 

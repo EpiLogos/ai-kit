@@ -224,8 +224,14 @@ pub fn unix_ms_now() -> u64 {
 
 /// SHA-256 of a file, hex. `None` when it cannot be read.
 pub fn sha256_of_file(path: &Path) -> Option<String> {
+    sha256_of_open_file(std::fs::File::open(path).ok()?)
+}
+
+/// SHA-256 of an already-open file, hex. An open handle keeps naming the inode
+/// it was opened on: if the path is replaced afterwards (a managed install swaps
+/// files by rename), the digest is still of the file that was opened.
+pub fn sha256_of_open_file(mut file: std::fs::File) -> Option<String> {
     use std::io::Read;
-    let mut file = std::fs::File::open(path).ok()?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 1 << 16];
     loop {
@@ -404,17 +410,23 @@ impl GatewayProcessRecord {
         let digest = std::sync::Arc::new(std::sync::OnceLock::new());
         if build.executable_sha256.is_none() {
             let cell = std::sync::Arc::clone(&digest);
-            let path = build.executable_path.clone();
+            // The image is OPENED here, at start, and read later in the
+            // background: `/proc/self/exe` where there is one (it names the image
+            // this process runs even after its file was replaced or removed), else
+            // the executable's path opened now — a handle that keeps the inode this
+            // process started from if the path is later swapped by rename.
+            let own_image = Path::new("/proc/self/exe");
+            let handle = if own_image.exists() {
+                std::fs::File::open(own_image).ok()
+            } else {
+                build
+                    .executable_path
+                    .as_deref()
+                    .map(Path::new)
+                    .and_then(|path| std::fs::File::open(path).ok())
+            };
             std::thread::spawn(move || {
-                // `/proc/self/exe` reads the image this process is running
-                // even after its file was replaced or removed.
-                let own_image = Path::new("/proc/self/exe");
-                let value = if own_image.exists() {
-                    sha256_of_file(own_image)
-                } else {
-                    path.as_deref().map(Path::new).and_then(sha256_of_file)
-                };
-                let _ = cell.set(value);
+                let _ = cell.set(handle.and_then(sha256_of_open_file));
             });
         }
         Self {
@@ -474,6 +486,22 @@ pub fn resolved_executable(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_digest_of_an_open_handle_is_of_the_file_that_was_opened_not_of_what_the_path_names_later()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aikit");
+        std::fs::write(&path, b"the image this process started from").unwrap();
+        let expected = sha256_of_file(&path).unwrap();
+        let handle = std::fs::File::open(&path).unwrap();
+        // A managed install swaps the file by rename: the path now names a new image.
+        let replacement = dir.path().join("aikit.new");
+        std::fs::write(&replacement, b"a newer image").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert_ne!(sha256_of_file(&path).unwrap(), expected);
+        assert_eq!(sha256_of_open_file(handle).unwrap(), expected);
+    }
 
     #[test]
     fn a_bind_is_classified_by_who_could_reach_it() {

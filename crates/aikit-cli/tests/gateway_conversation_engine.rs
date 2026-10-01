@@ -2878,6 +2878,31 @@ fn a_drain_needs_no_binding_and_names_each_interrupted_turn_and_never_replays_it
     assert_eq!(harness.stream_events().len(), 3);
 }
 
+#[test]
+fn an_announcement_that_cannot_be_queued_is_an_error_the_caller_sees_not_a_line_lost_on_stderr() {
+    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
+    // A binding the gateway does not hold: the line has nowhere to go.
+    let missing = r("gateway-binding/never-bound");
+    let announced = harness.engine.execute(
+        missing.clone(),
+        aikit_adapters::GatewayConversationOperation::Announce {
+            text: "gateway upgrade upg-x — completed".into(),
+        },
+    );
+    assert!(
+        announced.is_err(),
+        "an announcement that was not queued must say so, so the sender can try again"
+    );
+    // The same announcement to the bound conversation is queued and answered.
+    let delivered = harness.engine.execute(
+        harness.binding_ref.clone(),
+        aikit_adapters::GatewayConversationOperation::Announce {
+            text: "gateway upgrade upg-x — completed".into(),
+        },
+    );
+    assert!(delivered.is_ok());
+}
+
 /// What a conversation's `/upgrade` asks of the machine's upgrade owner.
 struct RecordingUpgrade {
     plans: Mutex<usize>,

@@ -1606,7 +1606,14 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                                 cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
                             },
                         )),
-                        upgrade_launcher: None,
+                        // `/upgrade` behind a connector conversation: the plan on
+                        // request, and on `apply` a worker that outlives this
+                        // process and reports back into that conversation.
+                        upgrade_launcher: Some(std::sync::Arc::new(
+                            aikit_cli::gateway_upgrade_system::ConversationUpgradeLauncher {
+                                home: home.clone(),
+                            },
+                        )),
                     }),
                     coexistence: coexistence.gate,
                     owner_token,
@@ -1696,14 +1703,18 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
         GatewaySub::Upgrade(cmd) => {
             use aikit_cli::gateway_upgrade_system as upgrade;
             let data = match cmd.command {
-                GatewayUpgradeSub::Plan(a) => {
-                    upgrade::plan_command(&home, a.channel.as_deref(), a.install)?
-                }
+                GatewayUpgradeSub::Plan(a) => upgrade::plan_command(
+                    &home,
+                    a.channel.as_deref(),
+                    a.candidate.as_deref(),
+                    a.install,
+                )?,
                 GatewayUpgradeSub::Apply(a) => upgrade::apply_command(
                     &home,
                     upgrade::ApplyOptions {
                         install: a.install,
                         channel: a.channel,
+                        candidate: a.candidate,
                         origin: a
                             .origin_binding
                             .map(|binding_ref| aikit_adapters::UpgradeOrigin {

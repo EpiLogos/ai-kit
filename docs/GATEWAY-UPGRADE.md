@@ -12,6 +12,8 @@ aikit gateway doctor                   # is the running gateway the installed bu
 aikit gateway upgrade plan             # what runs, what is installed, what each peer runs
 aikit gateway upgrade apply            # drain, restart on the installed build, verify
 aikit gateway upgrade apply --install  # …and run the managed installer first (oi update)
+aikit gateway upgrade apply --install --candidate <rev>   # …building exactly that commit
+aikit gateway upgrade apply --restart-only                # restart onto what is installed; no installer
 aikit gateway upgrade status           # the transaction, its steps, its receipt
 ```
 
@@ -31,7 +33,7 @@ inspect/plan → choose the candidate → retain a recovery basis → managed in
 | Step | What happens | Where it is recorded |
 |---|---|---|
 | inspect / plan | the running process is read (`protocol`: revision, pid, start time, executable digest, lifecycle); the installed build is what the service definition's executable resolves to; every declared peer is asked what it runs and which features it lacks | `upgrade plan` |
-| choose | `--install` runs the managed installer (`oi update --apply [--channel mainline] ai-kit`); without it the upgrade restarts onto the build already installed | the transaction's `plan` |
+| choose | `--install` runs the managed installer (`oi update --apply [--channel mainline] [--candidate ai-kit=<rev>] ai-kit`); `--candidate` names the exact commit to build. Without `--install` the upgrade restarts onto the build already installed. `--install` refuses first when less than 3 GiB is free where the install builds (`gateway_upgrade.disk_low`): nothing is changed | the transaction's `plan` |
 | recovery basis | the gateway's state files are copied aside; the installed build before the upgrade is recorded; the installer's own rollback (`oi update --rollback`) is named | `<state>/gateway-upgrade/<id>/recovery/` |
 | managed install | the installer runs with a time bound and its log kept. The installed build is read before and after: an installer that flipped the build and *then* failed is rolled back, not reported as "unchanged" | `installer.log` |
 | drain | see below | the transaction's `drain` |
@@ -54,6 +56,12 @@ grace (default 60 s), interrupts what has not finished, journals the
 interruption on its stream, persists state, answers, and lets the process exit.
 It also runs on `SIGTERM` (`launchctl bootout`, `systemctl stop`), so a stop
 that nobody called an upgrade is no longer a turn killed unrecorded.
+
+**A predecessor that predates the drain cannot be drained.** The first upgrade of
+such a gateway stops it with its clean shutdown (it persists after every command),
+and the receipt says the drain was **not measured**: what the old process had in
+flight at that moment is *unknown*, not zero. "0 interrupted" is only ever stated
+from a drain that ran and counted. Nothing is replayed either way.
 
 Two kinds of work are *uncertain* after a restart, and the receipt names each:
 
@@ -143,7 +151,10 @@ belongs to Tailscale, not to a binary that changes on every update (see
 
 ## Controlled instances
 
-A rehearsal should never touch the real service. `AIKIT_GATEWAY_SERVICE_INSTANCE=<name>`
+`scripts/gateway-upgrade-rehearse.py` runs the five scenarios (upgrade, already
+current, installer fails, installer flips then fails, new build exits at once)
+against such an instance under the platform's real service manager and prints an
+evidence document. A rehearsal should never touch the real service. `AIKIT_GATEWAY_SERVICE_INSTANCE=<name>`
 makes `install-service`, `uninstall-service`, the upgrade worker and the doctor
 manage `ai.aikit.gateway.<name>` (launchd) or `aikit-gateway-<name>.service`
 (systemd) instead, with its own `AIKIT_HOME`, socket and port. The upgrade

@@ -2621,10 +2621,15 @@ mod tests {
         );
         assert_eq!(status["response"]["status"]["build"]["pid"], 1);
 
-        // The peer may not stop the gateway, restore its state, or read its
-        // snapshot; the refusal is an answer on the same connection.
+        // The peer may not stop the gateway, drain it, restore its state, or read
+        // its snapshot; the refusal is an answer on the same connection. Drain
+        // exits the process: it is as much a stop as a shutdown.
         for (id, command) in [
             ("stop", serde_json::json!({"type":"shutdown"})),
+            (
+                "drain",
+                serde_json::json!({"type":"drain","reason":"a peer asked","exit":true}),
+            ),
             ("snap", serde_json::json!({"type":"snapshot"})),
             (
                 "restore",

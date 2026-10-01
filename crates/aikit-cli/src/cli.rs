@@ -2211,6 +2211,10 @@ pub struct GatewayUpgradePlanArgs {
     /// The managed update channel (`mainline` or `source`).
     #[arg(long, value_name = "CHANNEL", requires = "install")]
     pub channel: Option<String>,
+    /// Choose the candidate: the exact revision (a commit) of this product the
+    /// managed installer builds and installs (`oi update --candidate ai-kit=REV`).
+    #[arg(long, value_name = "REV", requires = "install")]
+    pub candidate: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -2219,9 +2223,17 @@ pub struct GatewayUpgradeApplyArgs {
     /// upgrade restarts the gateway onto the build already installed.
     #[arg(long)]
     pub install: bool,
+    /// Restart onto the build already installed and run no installer. This is
+    /// what `apply` does without `--install`; the flag says so explicitly.
+    #[arg(long, conflicts_with_all = ["install", "channel", "candidate"])]
+    pub restart_only: bool,
     /// The managed update channel for --install (`mainline` or `source`).
     #[arg(long, value_name = "CHANNEL", requires = "install")]
     pub channel: Option<String>,
+    /// Choose the candidate: the exact revision (a commit) of this product the
+    /// managed installer builds and installs (`oi update --candidate ai-kit=REV`).
+    #[arg(long, value_name = "REV", requires = "install")]
+    pub candidate: Option<String>,
     /// Do not restore the previous build automatically when the new one does
     /// not come up; leave the exact steps in the receipt instead.
     #[arg(long)]

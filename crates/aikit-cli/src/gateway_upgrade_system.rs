@@ -219,6 +219,55 @@ impl UpgradeEnv for SystemEnv {
         }
     }
 
+    fn read_running_strict(&self) -> Result<Option<Running>> {
+        let target = unix_socket_target(&self.home);
+        let mut last = String::new();
+        for attempt in 0..4 {
+            match gateway_command_within(
+                &target,
+                GatewayCommand::Protocol,
+                None,
+                Duration::from_secs(3),
+            ) {
+                Ok(GatewayResponse::Protocol {
+                    features, build, ..
+                }) => {
+                    return Ok(running_from_protocol(
+                        features,
+                        build,
+                        self.pid_from_state_lock(),
+                        crate::gateway_install::is_installed(&self.home_dir),
+                    ))
+                }
+                Ok(_) => return Ok(None),
+                Err(error) => {
+                    let text = error.to_string();
+                    // Nothing is listening: no socket, or a stale one.
+                    let not_listening = !self.home.gateway_socket().exists()
+                        || text.contains("Connection refused")
+                        || text.contains("No such file")
+                        || text.contains("os error 61")
+                        || text.contains("os error 111")
+                        || text.contains("os error 2)");
+                    if not_listening {
+                        return Ok(None);
+                    }
+                    last = text;
+                    if attempt < 3 {
+                        std::thread::sleep(Duration::from_secs(2));
+                    }
+                }
+            }
+        }
+        Err(AikitError::new(
+            "gateway_upgrade.gateway_unresponsive",
+            format!(
+                "a gateway holds this home's socket and did not answer in time (it may be \
+                 busy or stuck): {last}."
+            ),
+        ))
+    }
+
     fn installed_identity(&self) -> Result<Option<Identity>> {
         Ok(self
             .service_executable()
@@ -439,7 +488,7 @@ impl UpgradeEnv for SystemEnv {
 /// gateway's own product, with `oi update --rollback` as the supported way
 /// back. `None` when `oi` is not installed (an upgrade can still restart onto
 /// an already-installed build).
-pub fn resolve_installer(channel: Option<&str>) -> Option<Installer> {
+pub fn resolve_installer(channel: Option<&str>, candidate: Option<&str>) -> Option<Installer> {
     let oi = crate::probe::which("oi")?;
     let mut install = vec![
         oi.display().to_string(),
@@ -448,6 +497,9 @@ pub fn resolve_installer(channel: Option<&str>) -> Option<Installer> {
     ];
     if let Some(channel) = channel {
         install.extend(["--channel".to_owned(), channel.to_owned()]);
+    }
+    if let Some(candidate) = candidate {
+        install.extend(["--candidate".to_owned(), format!("ai-kit={candidate}")]);
     }
     install.push("ai-kit".to_owned());
     Some(Installer {
@@ -778,16 +830,81 @@ pub fn retire_worker(home: &AikitHome, id: &str) {
 // ---------------------------------------------------------------------------
 
 /// `upgrade plan`: what runs, what is installed, what an apply would do.
-pub fn plan_command(home: &AikitHome, channel: Option<&str>, install: bool) -> Result<Value> {
+pub fn plan_command(
+    home: &AikitHome,
+    channel: Option<&str>,
+    candidate: Option<&str>,
+    install: bool,
+) -> Result<Value> {
+    if let Some(candidate) = candidate {
+        validate_candidate(candidate)?;
+    }
     let env = SystemEnv::new(home.clone())?;
-    let installer = install.then(|| resolve_installer(channel)).flatten();
+    let installer = install
+        .then(|| resolve_installer(channel, candidate))
+        .flatten();
     let peers = declared_remote_readings(home);
     plan_reading(&env, installer.as_ref(), peers)
+}
+
+/// A candidate names a revision to build: a commit id or a branch-like name, never
+/// anything that could be read as an option or carry shell syntax.
+pub fn validate_candidate(candidate: &str) -> Result<()> {
+    let ok = !candidate.is_empty()
+        && !candidate.starts_with('-')
+        && candidate.len() <= 128
+        && candidate
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(three_part(
+            "gateway_upgrade.candidate_invalid",
+            format!("`{candidate}` is not a revision the installer can build."),
+            "Nothing was changed.",
+            "Name a commit (`git rev-parse <branch>`) or a branch: letters, digits, `.`, `_`, `-`, `/`.",
+        ))
+    }
+}
+
+/// Free kibibytes on the volume holding `path` (`df -Pk`); `None` when it cannot
+/// be read.
+pub fn free_kib(path: &Path) -> Option<u64> {
+    let output = std::process::Command::new("df")
+        .args(["-Pk"])
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .nth(1)?
+        .split_whitespace()
+        .nth(3)?
+        .parse::<u64>()
+        .ok()
+}
+
+/// A managed install builds the suite: it needs room, and a full disk is how a
+/// build (and a gateway state write) fails halfway. Checked before anything changes.
+pub const INSTALL_MIN_FREE_KIB: u64 = 3 * 1024 * 1024;
+
+/// The floor in use: `AIKIT_INSTALL_MIN_FREE_MIB` overrides the default for an
+/// operator who builds elsewhere, or for a rehearsal on a small volume.
+pub fn install_min_free_kib() -> u64 {
+    std::env::var("AIKIT_INSTALL_MIN_FREE_MIB")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|mib| mib.saturating_mul(1024))
+        .unwrap_or(INSTALL_MIN_FREE_KIB)
 }
 
 pub struct ApplyOptions {
     pub install: bool,
     pub channel: Option<String>,
+    pub candidate: Option<String>,
     pub origin: Option<UpgradeOrigin>,
     pub requested_by: String,
     pub auto_rollback: bool,
@@ -805,8 +922,32 @@ pub struct ApplyOptions {
 pub fn apply_command(home: &AikitHome, options: ApplyOptions) -> Result<Value> {
     let env = SystemEnv::new(home.clone())?;
     let store = env.store();
+    if let Some(candidate) = options.candidate.as_deref() {
+        validate_candidate(candidate)?;
+    }
+    if options.install {
+        let at = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.state());
+        if let Some(free) = free_kib(&at) {
+            let floor = install_min_free_kib();
+            if free < floor {
+                return Err(three_part(
+                    "gateway_upgrade.disk_low",
+                    format!(
+                        "{} MiB are free where the managed install builds ({}); it needs at least {} MiB (AIKIT_INSTALL_MIN_FREE_MIB changes the floor).",
+                        free / 1024,
+                        at.display(),
+                        floor / 1024
+                    ),
+                    "Nothing was changed; the running gateway was not touched.",
+                    "Free space (build caches of retired work are the usual cause), then run it again; or restart onto the installed build with `aikit gateway upgrade apply`.",
+                ));
+            }
+        }
+    }
     let installer = if options.install {
-        Some(resolve_installer(options.channel.as_deref()).ok_or_else(|| {
+        Some(resolve_installer(options.channel.as_deref(), options.candidate.as_deref()).ok_or_else(|| {
             three_part(
                 "gateway_upgrade.installer_absent",
                 "--install needs the managed installer, and `oi` is not on PATH.",
@@ -1003,7 +1144,7 @@ pub struct ConversationUpgradeLauncher {
 
 impl GatewayUpgradeLauncher for ConversationUpgradeLauncher {
     fn plan(&self) -> Result<(Value, String)> {
-        let plan = plan_command(&self.home, None, false)?;
+        let plan = plan_command(&self.home, None, None, false)?;
         let line = plan_line(&plan);
         Ok((plan, line))
     }
@@ -1015,6 +1156,7 @@ impl GatewayUpgradeLauncher for ConversationUpgradeLauncher {
             ApplyOptions {
                 install: false,
                 channel: None,
+                candidate: None,
                 origin: Some(origin),
                 requested_by: format!("conversation:{binding}"),
                 auto_rollback: true,

@@ -41,44 +41,52 @@ fn load(path: &Path) -> Option<GatewaySnapshot> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
-/// Copies that decode, newest first: upgrade recovery bases, then a leftover
-/// atomic-write temporary.
+/// Copies that decode, newest first BY WHEN THEY WERE WRITTEN (file modification
+/// time), whichever kind they are: upgrade recovery bases, or a leftover
+/// atomic-write temporary. The kind decides nothing; the newest copy is the one
+/// that lost the least.
 fn candidates(home: &AikitHome) -> Vec<Candidate> {
-    let mut found = Vec::new();
+    let mut found: Vec<(std::time::SystemTime, Candidate)> = Vec::new();
+    let modified = |path: &Path| {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .unwrap_or(std::time::UNIX_EPOCH)
+    };
     let upgrades = home.state().join("gateway-upgrade");
     if let Ok(entries) = std::fs::read_dir(&upgrades) {
-        let mut dirs: Vec<PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_dir())
-            .collect();
-        dirs.sort();
-        dirs.reverse();
-        for dir in dirs {
+        for dir in entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
             let copy = dir.join("recovery/gateway.json");
             if let Some(snapshot) = load(&copy) {
                 let id = dir
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                found.push(Candidate {
-                    path: copy,
-                    source: format!("the recovery basis of upgrade {id}"),
-                    snapshot,
-                });
+                found.push((
+                    modified(&copy),
+                    Candidate {
+                        path: copy,
+                        source: format!("the recovery basis of upgrade {id}"),
+                        snapshot,
+                    },
+                ));
             }
         }
     }
     let state = home.gateway_state();
     let temporary = state.with_extension("json.tmp");
     if let Some(snapshot) = load(&temporary) {
-        found.push(Candidate {
-            path: temporary,
-            source: "an unfinished atomic write that still decodes".to_owned(),
-            snapshot,
-        });
+        found.push((
+            modified(&temporary),
+            Candidate {
+                path: temporary,
+                source: "an unfinished atomic write that still decodes".to_owned(),
+                snapshot,
+            },
+        ));
     }
-    found
+    // Newest first; the path breaks a tie so the order is deterministic.
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.path.cmp(&a.1.path)));
+    found.into_iter().map(|(_, candidate)| candidate).collect()
 }
 
 fn gateway_answers(home: &AikitHome) -> bool {
@@ -245,6 +253,38 @@ mod tests {
         assert!(std::fs::read(quarantined[0].path())
             .unwrap()
             .starts_with(b"{\"version\""));
+    }
+
+    #[test]
+    fn the_newest_decodable_copy_wins_whatever_kind_it_is() {
+        let (_dir, home) = home();
+        std::fs::write(home.gateway_state(), b"{\"torn").unwrap();
+        let basis = home.state().join("gateway-upgrade/upg-001/recovery");
+        std::fs::create_dir_all(&basis).unwrap();
+        std::fs::write(
+            basis.join("gateway.json"),
+            snapshot_bytes("agency-gateway/old"),
+        )
+        .unwrap();
+        // The leftover temporary is written AFTER the recovery basis.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(
+            home.gateway_state().with_extension("json.tmp"),
+            snapshot_bytes("agency-gateway/newer"),
+        )
+        .unwrap();
+        let plan = recover(&home, false).unwrap();
+        assert!(
+            plan["restore_from"]["source"]
+                .as_str()
+                .unwrap()
+                .contains("unfinished atomic write"),
+            "{plan}"
+        );
+        recover(&home, true).unwrap();
+        let restored: GatewaySnapshot =
+            serde_json::from_slice(&std::fs::read(home.gateway_state()).unwrap()).unwrap();
+        assert_eq!(restored.gateway_ref.as_str(), "agency-gateway/newer");
     }
 
     #[test]

@@ -533,6 +533,12 @@ pub struct DrainedTurn {
 /// finish is named so nobody has to guess what a restart cost.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct DrainReport {
+    /// Whether a drain actually ran and counted. `false` means the counts below
+    /// are UNKNOWN, not zero: a predecessor that predates the drain was stopped
+    /// with its clean shutdown, and what it had in flight at that moment was
+    /// never read.
+    #[serde(default)]
+    pub measured: bool,
     pub reason: String,
     pub started_at_unix_ms: u64,
     pub finished_at_unix_ms: u64,
