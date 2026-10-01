@@ -234,13 +234,21 @@ pub fn classify_depth(concern: &str) -> Depth {
         "off by one",
         "wrong exit code",
         "misspell",
+        "smallest fix",
+        "smallest change",
+        "minimal fix",
+        "fix the bug",
+        "bug",
+        "broken",
+        "regression",
+        "never reach",
+        "is ignored",
+        "is dropped",
     ];
     let designish = design.iter().any(|word| lowered.contains(word));
     let repairish = repair.iter().any(|word| lowered.contains(word));
     let short = concern.chars().count() <= 400;
-    if repairish && short && !designish {
-        Depth::Shallow
-    } else if short && !designish && query_terms(concern).len() <= 6 {
+    if short && !designish && (repairish || query_terms(concern).len() <= 6) {
         Depth::Shallow
     } else {
         Depth::Substantial
@@ -297,6 +305,27 @@ pub struct Inventory {
     pub praxis: Vec<PraxisCandidate>,
     pub matrix: Option<Value>,
     pub absences: Vec<String>,
+}
+
+/// Lower-case content words of a text: split on anything but letters and
+/// digits, three characters or more, stop words dropped, a plural `s` folded.
+fn words(text: &str) -> BTreeSet<String> {
+    const STOP: [&str; 30] = [
+        "the", "and", "for", "with", "this", "that", "from", "into", "when", "what", "which",
+        "use", "how", "its", "are", "not", "any", "all", "one", "own", "has", "have", "does",
+        "can", "you", "your", "never", "only", "every", "each",
+    ];
+    text.split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|w| w.chars().count() >= 3 && !STOP.contains(&w.as_str()))
+        .map(|w| {
+            if w.len() > 4 && w.ends_with('s') && !w.ends_with("ss") {
+                w[..w.len() - 1].to_owned()
+            } else {
+                w
+            }
+        })
+        .collect()
 }
 
 fn is_authored(path: &str) -> bool {
@@ -606,22 +635,51 @@ pub fn collect_inventory(
         )),
     }
 
-    // Praxis: the active catalogue, by form.
+    // Praxis: the active catalogue, by form. Matching is on whole words with
+    // rarity weighting across the catalogue — a word half the repertoire's
+    // descriptions use ("design", "view") says little about which practice
+    // this concern calls for.
+    let active: Vec<_> = view
+        .catalog_index
+        .values()
+        .filter(|entry| entry.kind == Kind::Skill && view.is_active(&entry.id))
+        .collect();
+    let concern_words = words(concern);
+    let vocabularies: Vec<BTreeSet<String>> = active
+        .iter()
+        .map(|entry| {
+            words(&format!(
+                "{} {}",
+                entry.name.replace('-', " "),
+                praxis_payload(&entry.description)
+            ))
+        })
+        .collect();
+    let catalogue = active.len().max(1) as f64;
+    let weight = |word: &String| {
+        let df = vocabularies.iter().filter(|v| v.contains(word)).count();
+        if df == 0 {
+            0.0
+        } else {
+            (1.0 + catalogue / df as f64).ln()
+        }
+    };
+    let total: f64 = concern_words.iter().map(weight).sum();
     let mut praxis = Vec::new();
-    for entry in view.catalog_index.values() {
-        if entry.kind != Kind::Skill || !view.is_active(&entry.id) {
-            continue;
-        }
-        let form = praxis_form(&entry.description);
-        let payload = praxis_payload(&entry.description);
-        let haystack = format!("{} {}", entry.name, payload).to_lowercase();
-        let matched = terms
+    for (entry, vocabulary) in active.iter().zip(&vocabularies) {
+        let matched: Vec<&String> = concern_words
             .iter()
-            .filter(|term| haystack.contains(term.as_str()))
-            .count();
-        if matched == 0 {
+            .filter(|w| vocabulary.contains(*w))
+            .collect();
+        let mandatory = concern.contains(entry.name.as_str());
+        if matched.len() < 2 && !mandatory {
             continue;
         }
+        let score = if total > 0.0 {
+            matched.iter().map(|w| weight(w)).sum::<f64>() / total
+        } else {
+            0.0
+        };
         let skill_file = capsule_roots
             .get(&entry.id)
             .map(|root| root.join("payload/SKILL.md"))
@@ -629,11 +687,14 @@ pub fn collect_inventory(
         praxis.push(PraxisCandidate {
             id: entry.id.to_string(),
             name: entry.name.clone(),
-            form: form.as_str().to_owned(),
-            payload: payload.chars().take(220).collect(),
+            form: praxis_form(&entry.description).as_str().to_owned(),
+            payload: praxis_payload(&entry.description)
+                .chars()
+                .take(220)
+                .collect(),
             skill_file,
-            score: matched as f64 / terms.len().max(1) as f64,
-            mandatory: concern.contains(entry.name.as_str()),
+            score,
+            mandatory,
         });
     }
     praxis.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.id.cmp(&b.id)));
@@ -671,12 +732,17 @@ pub fn ordinary_selection(inventory: &Inventory, depth: Depth) -> Selection {
         .take(CAPABILITY_LIMIT)
         .cloned()
         .collect();
-    let pick = |form: PraxisForm| {
+    // Candidates already share at least two content words with the concern.
+    // A Methodology orients a whole field, so its description shares few
+    // words with any one concern: it is chosen relative to the other
+    // Methodologies, not against an absolute bar. Methods and Skills name a
+    // narrower act and must clear one.
+    let pick = |form: PraxisForm, floor: f64| {
         inventory
             .praxis
             .iter()
             .filter(|p| p.form == form.as_str())
-            .find(|p| p.mandatory || p.score >= 0.2)
+            .find(|p| p.mandatory || p.score >= floor)
             .cloned()
     };
     let (methodology, method, skills) = match depth {
@@ -692,13 +758,13 @@ pub fn ordinary_selection(inventory: &Inventory, depth: Depth) -> Selection {
                 .collect(),
         ),
         Depth::Substantial => (
-            pick(PraxisForm::Methodology),
-            pick(PraxisForm::Method),
+            pick(PraxisForm::Methodology, 0.0),
+            pick(PraxisForm::Method, 0.15),
             inventory
                 .praxis
                 .iter()
                 .filter(|p| p.form == PraxisForm::Skill.as_str())
-                .filter(|p| p.mandatory || p.score >= 0.25)
+                .filter(|p| p.mandatory || p.score >= 0.18)
                 .take(SKILL_LIMIT)
                 .cloned()
                 .collect(),
@@ -723,6 +789,13 @@ fn candidate_item(
     title: &str,
     excerpt: String,
 ) -> Result<NowContextItem> {
+    // The store refuses empty material: a hit whose first matching line was
+    // blank still carries its own name.
+    let excerpt = if excerpt.trim().is_empty() {
+        title.to_owned()
+    } else {
+        excerpt
+    };
     Ok(NowContextItem {
         source_ref: ResourceRef::parse(reference)?,
         source_revision: revision.to_owned(),
@@ -1569,6 +1642,13 @@ mod tests {
         );
         assert_eq!(
             classify_depth("the hook dispatch returns the wrong exit code for usage errors"),
+            Depth::Shallow
+        );
+        assert_eq!(
+            classify_depth(
+                "pi prompts never reach the prompt reader because the carrier sends `text`. \
+                 Make the smallest fix and show it as a unified diff with its unit test."
+            ),
             Depth::Shallow
         );
         assert_eq!(
