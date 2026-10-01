@@ -171,8 +171,22 @@ pub fn substantive_concern(prompt: &str) -> Option<String> {
         "[SYSTEM NOTIFICATION",
         "<local-command",
         "<command-name>",
+        "<ci-monitor-event>",
     ] {
         if trimmed.contains(generated) {
+            return None;
+        }
+    }
+    // Harness and app events arrive as a tag-wrapped turn (`<event-name …>`);
+    // a person's own prompt does not open with a markup tag. The list above
+    // names the known events; this catches the next one before it is mistaken
+    // for a concern (a CI-monitor event was, on the installed cut).
+    if let Some(rest) = trimmed.strip_prefix('<') {
+        let tag: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if tag.len() >= 3 && tag.contains('-') && rest[tag.len()..].starts_with(['>', ' ']) {
             return None;
         }
     }
@@ -2008,6 +2022,18 @@ mod tests {
         );
         assert!(substantive_concern("[SYSTEM NOTIFICATION - NOT USER INPUT] done").is_none());
         assert!(substantive_concern("ok").is_none());
+        assert!(substantive_concern(
+            "<ci-monitor-event>\"Auto-fix pull requests\" reports 6 CI checks failed</ci-monitor-event>"
+        )
+        .is_none());
+        assert!(substantive_concern(
+            "<build-status phase=\"done\">the release build finished</build-status>"
+        )
+        .is_none());
+        // A person may still open with an angle bracket in ordinary prose.
+        assert!(
+            substantive_concern("<3 thanks — now fix the flaky retry test in gateway").is_some()
+        );
         assert_eq!(
             substantive_concern("Fix the wrong exit code in hook dispatch").as_deref(),
             Some("Fix the wrong exit code in hook dispatch")
