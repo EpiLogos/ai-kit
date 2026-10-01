@@ -1,5 +1,8 @@
 #!/bin/sh
 # Knowledge route steering — the knowledge-route capsule's inject-phase payload.
+# It rides SessionStart only: the line is standing orientation, and a harness
+# re-fires SessionStart when compaction, resume or clear discards it, so a
+# per-prompt copy would only repeat what the session already holds.
 #
 # The dispatcher (aikit hook dispatch <client> <event>) feeds the event JSON on
 # stdin and, for a step in the inject phase, turns non-empty stdout into
@@ -26,7 +29,13 @@ esac
 
 # Walk up to the project root. Silence outside AIKit projects is the design,
 # not an oversight: the line is only meaningful where the faculty exists.
+# The walk stops below $HOME: `~/.aikit` is AIKit's own home, not a project
+# marker, and counting it would steer every session anywhere under $HOME.
+home=${HOME:-}
 while :; do
+    if [ -n "$home" ] && [ "$dir" = "$home" ]; then
+        break
+    fi
     if [ -d "$dir/.aikit" ]; then
         printf '%s\n' '[aikit knowledge-route] This session stands in an AIKit project: for any question about what this project knows, decided, or maintains, you must proactively run the native knowledge route first — aikit knowledge search, resolve, open, read, route, explain, history, and aikit wiki query — before raw find/grep/Read. Raw file search is not a substitute for recorded knowledge; fall back to it only for code-local lookups, or after the faculty has returned nothing.'
         exit 0

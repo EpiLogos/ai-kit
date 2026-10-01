@@ -1513,6 +1513,78 @@ fn select_candidates(
     }
 }
 
+/// Provider-assisted relevance over a caller-assembled candidate inventory:
+/// the same elected-provider path, threshold law and egress filter the NOW
+/// preparation uses, for callers (the development entry) that build their own
+/// candidates from the session's concern. No source revalidation happens
+/// here; the caller's candidates carry their own revisions.
+pub(crate) fn provider_select(
+    provider_file: &Path,
+    state: Value,
+    relevance_threshold: f64,
+    candidates: &[NowContextItem],
+) -> Result<(Vec<NowContextItem>, Value)> {
+    let selection = SelectionMode::Provider {
+        provider_file: provider_file.to_path_buf(),
+        state,
+        relevance_threshold,
+        allow_env_import: false,
+    };
+    let mut revalidate = || -> Result<()> { Ok(()) };
+    let (selected, evidence) = select_candidates(&selection, candidates, &mut revalidate)?;
+    let evidence = serde_json::to_value(&evidence)
+        .map_err(|e| fail("now_context.encode", format!("selection evidence: {e}")))?;
+    Ok((selected, evidence))
+}
+
+/// A Project's capability rows and matrix evidence (identity, view, axes,
+/// digests), read through the native matrix reader over its full declared
+/// scope. `Ok(None)` when the Project carries no matrix.
+pub(crate) fn project_matrix_rows(
+    projectcentral: &Path,
+) -> Result<Option<(Vec<MatrixCapabilityRow>, Value)>> {
+    let Some((manifest, csv)) = [
+        projectcentral.join("user").join("telos"),
+        projectcentral.join("user"),
+        projectcentral.join("telos"),
+    ]
+    .into_iter()
+    .map(|base| {
+        (
+            base.join("capability-matrix.json"),
+            base.join("capability-matrix.csv"),
+        )
+    })
+    .find(|(manifest, csv)| manifest.is_file() && csv.is_file()) else {
+        return Ok(None);
+    };
+    let carriers =
+        json!({"manifest": manifest.display().to_string(), "csv": csv.display().to_string()});
+    let config = MatrixPrepare {
+        manifest,
+        csv,
+        view_id: None,
+        capability_refs: Vec::new(),
+        full_scope: true,
+        agent_visibility: AgentVisibility::Payload,
+        external_egress: ExternalEgress::Allowed,
+    };
+    let (_, evidence) = read_matrix(&config)?;
+    let summary = json!({
+        "matrix_id": evidence.matrix_id,
+        "whole_account_ref": evidence.whole_account_ref,
+        "view_id": evidence.view_id,
+        "view_title": evidence.view_title,
+        "row_axis": evidence.row_axis,
+        "column_axis": evidence.column_axis,
+        "declared_capabilities": evidence.declared_capability_refs.len(),
+        "manifest_digest": evidence.manifest_digest,
+        "csv_digest": evidence.csv_digest,
+        "carriers": carriers,
+    });
+    Ok(Some((evidence.capability_rows, summary)))
+}
+
 pub fn now_status(args: NowStatusArgs) -> Result<Value> {
     let config: RedisNowConfig = read_json(&args.config_file, "Redis NOW config", 256 * 1024)?;
     let secret = resolve_secret(&config, args.allow_env_import)?;

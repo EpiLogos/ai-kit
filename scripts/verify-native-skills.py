@@ -176,6 +176,7 @@ if seen_carriers != EXPECTED_CARRIERS:
 EXPECTED_HOOKS = {
     "hook/central/fs-guardrail",
     "hook/aikit/knowledge-route",
+    "hook/aikit/development-entry",
     "hook/continuity/turn-ledger",
     "hook/continuity/entity-disclosure",
     "hook/continuity/domain-activation",

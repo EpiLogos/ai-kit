@@ -2195,12 +2195,19 @@ impl Service {
                         // process, and hook dispatches share no context id —
                         // so the key is the resolved scope root, which is
                         // exactly what the selected sources hang from.
-                        let scope_key = central
+                        let scope = central
                             .as_deref()
                             .or(self.descriptor.project_root.as_deref())
                             .unwrap_or(&self.invocation_cwd)
                             .display()
                             .to_string();
+                        // Per session as well: a changed reading must reach
+                        // every live session in the scope, not only the first
+                        // one to prompt after the change.
+                        let scope_key = match crate::refocus::hook_session(&event.payload) {
+                            Some(session) => format!("{scope}#session:{session}"),
+                            None => scope,
+                        };
                         let deliver = event.kind == aikit_core::hooks::HookEventKind::SessionStart
                             || crate::wiki_projection::load_last_delivered(&self.home, &scope_key)
                                 .as_deref()
@@ -2218,6 +2225,45 @@ impl Service {
                     Err(error) => decision
                         .warnings
                         .push(format!("Wiki projection unavailable: {}", error.message())),
+                }
+            }
+        }
+
+        // Development entry: the concern-selected operative context for a body
+        // entered directly into a Project checkout or seat. Operative only when
+        // the composition selects its capsule; a failure is named in the
+        // body's context (ordinary operation continues) and never gates.
+        if matches!(
+            event.kind,
+            aikit_core::hooks::HookEventKind::SessionStart
+                | aikit_core::hooks::HookEventKind::UserPromptSubmit
+                | aikit_core::hooks::HookEventKind::PreCompact
+        ) {
+            let id = CapsuleId::parse(crate::development_entry::CAPABILITY)?;
+            if let Some(active) = self.view.active.get(&id) {
+                let central = crate::temporal::central_root_enclosing(event.cwd.as_deref());
+                let roots = self.catalog.capsule_roots();
+                let state = self.home.state();
+                let outcome = crate::development_entry::EntryConfig::from_table(&active.config)
+                    .and_then(|config| {
+                        crate::development_entry::deliver(&crate::development_entry::EntryRequest {
+                            event,
+                            client: &event.client,
+                            config: &config,
+                            state: &state,
+                            central: central.as_deref(),
+                            view: &self.view,
+                            capsule_roots: &roots,
+                        })
+                    });
+                match outcome {
+                    Ok(Some(text)) => decision.injected.push(text),
+                    Ok(None) => {}
+                    Err(error) => decision.injected.push(format!(
+                        "[Development entry unavailable] {}: {} — nothing was prepared for this turn; ordinary operation continues.",
+                        error.code(),
+                        error.message()
+                    )),
                 }
             }
         }

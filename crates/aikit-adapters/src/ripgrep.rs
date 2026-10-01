@@ -67,6 +67,10 @@ pub struct SearchRequest {
     pub max_file_bytes: u64,
     /// Maximum matches retained; matches beyond it are disclosed as truncation.
     pub limit: usize,
+    /// Per-file match cap (`--max-count`). A ranked caller that only needs
+    /// evidence per file sets it, so one file full of a common word cannot
+    /// spend the whole retained budget before other files are seen.
+    pub max_count_per_file: Option<u64>,
     pub timeout: Option<Duration>,
 }
 
@@ -82,6 +86,7 @@ impl SearchRequest {
             hidden: false,
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             limit: usize::MAX,
+            max_count_per_file: None,
             timeout: Some(Duration::from_secs(30)),
         }
     }
@@ -111,6 +116,10 @@ impl SearchRequest {
             argv.push("--hidden".into());
             argv.push("--no-ignore".into());
         }
+        if let Some(cap) = self.max_count_per_file {
+            argv.push("--max-count".into());
+            argv.push(cap.to_string());
+        }
         for glob in &self.include_globs {
             argv.push("--glob".into());
             argv.push(glob.clone());
@@ -123,6 +132,20 @@ impl SearchRequest {
         argv.push(self.pattern.clone());
         for root in &self.roots {
             argv.push(root.to_string_lossy().into_owned());
+        }
+        argv
+    }
+
+    /// The exact argv of the count form of this request: the same scope,
+    /// budgets and globs, answering `path NUL matching-line-count` per file
+    /// instead of match events. Nothing is truncated: every file is counted.
+    pub fn count_argv(&self, executable: &Path) -> Vec<String> {
+        let mut argv = self.argv(executable);
+        if let Some(json) = argv.iter().position(|arg| arg == "--json") {
+            argv.splice(json..=json, ["--count".to_string(), "--null".to_string()]);
+        }
+        if let Some(cap) = argv.iter().position(|arg| arg == "--max-count") {
+            argv.drain(cap..=cap + 1);
         }
         argv
     }
@@ -236,6 +259,40 @@ impl<R: CommandRunner> RipgrepSearcher<R> {
     }
 }
 
+impl<R: CommandRunner> RipgrepSearcher<R> {
+    /// Count matching lines per file over the request's whole scope. The
+    /// exact, untruncated companion of [`RipgrepSearcher::search`] for a
+    /// ranking caller whose match pass was truncated.
+    pub fn count(&self, request: &SearchRequest) -> Result<Vec<(PathBuf, u64)>> {
+        if request.is_no_match() {
+            return Ok(Vec::new());
+        }
+        let argv = request.count_argv(&self.executable);
+        let output = match request.timeout {
+            Some(budget) => self.runner.run_with_timeout(&argv, budget)?,
+            None => self.runner.run(&argv)?,
+        };
+        if output.status != 0 && output.status != 1 {
+            return Err(AikitError::new(
+                "search.ripgrep_failed",
+                format!("ripgrep count exited with status {}", output.status),
+            )
+            .with("command", argv.join(" ")));
+        }
+        let mut counts = Vec::new();
+        for line in output.stdout.lines() {
+            let Some((path, count)) = line.split_once('\0') else {
+                continue;
+            };
+            if let Ok(count) = count.trim().parse::<u64>() {
+                counts.push((PathBuf::from(path), count));
+            }
+        }
+        counts.sort();
+        Ok(counts)
+    }
+}
+
 fn parse_events(stream: &str, limit: usize) -> Result<RipgrepOutcome> {
     let mut outcome = RipgrepOutcome::default();
     for line in stream.lines() {
@@ -312,6 +369,7 @@ mod tests {
             hidden: true,
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             limit: 10,
+            max_count_per_file: None,
             timeout: Some(Duration::from_secs(30)),
         }
     }
