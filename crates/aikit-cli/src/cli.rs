@@ -1597,7 +1597,7 @@ pub struct NowEntryRefineArgs {
     pub client: String,
     #[arg(long)]
     pub session: String,
-    #[arg(long = "cwd", value_name = "DIR")]
+    #[arg(long = "checkout", value_name = "DIR")]
     pub checkout: std::path::PathBuf,
 }
 

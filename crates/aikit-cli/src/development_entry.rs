@@ -1815,7 +1815,7 @@ fn spawn_refinement(client: &str, session: &str, cwd: &Path) -> std::result::Res
             client,
             "--session",
             session,
-            "--cwd",
+            "--checkout",
         ])
         .arg(cwd)
         .current_dir(cwd)
