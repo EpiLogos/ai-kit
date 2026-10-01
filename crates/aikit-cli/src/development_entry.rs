@@ -1011,6 +1011,11 @@ pub fn render(
             Depth::Substantial => "substantial",
         }
     ));
+    // Degradations come before the lists: the entry is bounded, and what is
+    // missing or unavailable must never be the part that gets cut.
+    for degradation in &selection.degradations {
+        lines.push(format!("degraded: {degradation}"));
+    }
     if !selection.sources.is_empty() {
         lines.push(
             "sources (open exactly these first; revision = content digest at preparation):".into(),
@@ -1074,9 +1079,6 @@ pub fn render(
                     .unwrap_or_default()
             ));
         }
-    }
-    for degradation in &selection.degradations {
-        lines.push(format!("degraded: {degradation}"));
     }
     if let Some((version, digest)) = prepared {
         lines.push(format!(
@@ -1772,6 +1774,35 @@ fn prepare(
 
 /// Start the provider refinement as its own process group, so a harness
 /// killing the hook process does not kill the refinement with it.
+fn merge_additive(ordinary: &Selection, judged: &Selection) -> Selection {
+    let mut merged = ordinary.clone();
+    merged.mode = judged.mode.clone();
+    merged.decision = judged.decision.clone();
+    merged.degradations = judged.degradations.clone();
+    for source in &judged.sources {
+        if !merged.sources.iter().any(|s| s.absolute == source.absolute) {
+            merged.sources.push(source.clone());
+        }
+    }
+    for capability in &judged.capabilities {
+        if !merged.capabilities.iter().any(|c| c.id == capability.id) {
+            merged.capabilities.push(capability.clone());
+        }
+    }
+    if merged.methodology.is_none() {
+        merged.methodology = judged.methodology.clone();
+    }
+    if merged.method.is_none() {
+        merged.method = judged.method.clone();
+    }
+    for skill in &judged.skills {
+        if !merged.skills.iter().any(|p| p.id == skill.id) {
+            merged.skills.push(skill.clone());
+        }
+    }
+    merged
+}
+
 fn spawn_refinement(client: &str, session: &str, cwd: &Path) -> std::result::Result<(), String> {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -1850,7 +1881,7 @@ pub fn refine(cwd: &Path, client: &str, session: &str) -> Result<Value> {
         service.resolved(),
         &roots,
     );
-    let refined = provider_selection(
+    let judged = provider_selection(
         &inventory,
         depth,
         &ledger.concern,
@@ -1858,7 +1889,12 @@ pub fn refine(cwd: &Path, client: &str, session: &str) -> Result<Value> {
         &provider_file,
         threshold,
     );
-    let provider_failed = refined.mode != "provider";
+    // Additive only. In the matched trials the elected local model dropped the
+    // correct capability row and Methodology the ordinary ranking had found;
+    // an optional decision service may add what the ranking missed, but what
+    // it judges immaterial stays in the entry and is reported as its view.
+    let refined = merge_additive(&ordinary_selection(&inventory, depth), &judged);
+    let provider_failed = judged.mode != "provider";
     let mut outcome = json!({
         "schema": ENTRY_SCHEMA, "event": "refinement", "session": session,
         "base_version": ledger.prepared_version, "mode": refined.mode,
@@ -1867,6 +1903,15 @@ pub fn refine(cwd: &Path, client: &str, session: &str) -> Result<Value> {
     });
     if provider_failed {
         outcome["outcome"] = json!("provider-unavailable; the emitted ordinary entry stands");
+        // The entry promised a refinement; the body learns it is not coming.
+        let mut current = load_ledger(&state, client, session).unwrap_or(ledger.clone());
+        if current.prepared_version == ledger.prepared_version {
+            current.refinement = Some(format!(
+                "[Development entry: decision-provider refinement unavailable] {}. The ordinary selection already delivered stands; nothing was refined.",
+                refined.degradations.first().cloned().unwrap_or_else(|| "the elected provider did not answer".into())
+            ));
+            store_ledger(&state, &current);
+        }
     } else {
         let text = render(&scope, &ledger.concern, &refined, None);
         let mut published = None;
@@ -1899,11 +1944,30 @@ pub fn refine(cwd: &Path, client: &str, session: &str) -> Result<Value> {
                     "refused: the session prepared a newer entry while the provider was deciding"
                 );
             } else {
-                let delta = render_refinement(
+                let mut delta = render_refinement(
                     &ledger.selected,
                     &refined,
                     published.as_ref().map(|(v, _)| *v),
                 );
+                let judged_keys = selected_keys(&judged);
+                let doubted: Vec<&String> = ledger
+                    .selected
+                    .iter()
+                    .filter(|k| !judged_keys.contains(k))
+                    .collect();
+                if !doubted.is_empty() {
+                    let note =
+                        format!(
+                        "  (the provider judged these not material; they stay in your entry: {})",
+                        doubted.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")
+                    );
+                    delta = Some(match delta {
+                        Some(text) => format!("{text}\n{note}"),
+                        None => format!(
+                            "[Development entry reviewed] the elected decision provider added nothing.\n{note}"
+                        ),
+                    });
+                }
                 outcome["outcome"] = json!(if delta.is_some() {
                     "refined"
                 } else {
@@ -2068,5 +2132,77 @@ mod tests {
         store_ledger(temp.path(), &ledger);
         assert_eq!(load_ledger(temp.path(), "claude", "s1"), Some(ledger));
         assert_eq!(load_ledger(temp.path(), "codex", "s1"), None);
+    }
+
+    #[test]
+    fn a_degradation_survives_the_entry_bound() {
+        let mut selection = ordinary_selection(&inventory(), Depth::Substantial);
+        for index in 0..80 {
+            selection.sources.push(SourceCandidate {
+                project: "ai-kit".into(),
+                path: format!("docs/long-document-{index}.md"),
+                absolute: format!("/c/docs/long-document-{index}.md").into(),
+                revision: "blake3:0123456789abcdef".into(),
+                score: 0.4,
+                snippet: "x".repeat(120),
+                line: Some(1),
+                authored: true,
+                mandatory: false,
+            });
+        }
+        selection
+            .degradations
+            .push("prepared NOW view not published (now_context.redis_unavailable)".into());
+        let rendered = render(
+            &EntryScope {
+                project: "ai-kit".into(),
+                project_id: "ai-kit".into(),
+                primary: "/c/Work/ai-kit".into(),
+                checkout: "/c/Work/ai-kit".into(),
+                branch: None,
+                head: None,
+            },
+            "design something",
+            &selection,
+            None,
+        );
+        assert!(rendered.chars().count() <= MAX_RENDERED_CHARS);
+        assert!(
+            rendered.contains("degraded: prepared NOW view not published"),
+            "the unavailable part must not be what the bound cuts"
+        );
+    }
+
+    #[test]
+    fn a_provider_may_add_but_never_drop_what_the_ordinary_ranking_found() {
+        let ordinary = ordinary_selection(&inventory(), Depth::Substantial);
+        let mut judged = ordinary.clone();
+        judged.mode = "provider".into();
+        judged.methodology = None;
+        judged.skills.clear();
+        let extra = PraxisCandidate {
+            id: "skill/aikit/verification".into(),
+            name: "verification-extra".into(),
+            form: "skill".into(),
+            payload: String::new(),
+            skill_file: None,
+            score: 0.1,
+            mandatory: false,
+        };
+        judged.skills.push(PraxisCandidate {
+            id: "skill/x/added".into(),
+            ..extra
+        });
+        let merged = merge_additive(&ordinary, &judged);
+        assert_eq!(
+            merged.methodology, ordinary.methodology,
+            "a dropped Methodology stays"
+        );
+        assert!(merged
+            .skills
+            .iter()
+            .any(|p| p.id == "skill/aikit/verification"));
+        assert!(merged.skills.iter().any(|p| p.id == "skill/x/added"));
+        assert_eq!(merged.mode, "provider");
     }
 }
