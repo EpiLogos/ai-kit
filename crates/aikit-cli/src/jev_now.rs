@@ -1558,6 +1558,8 @@ pub(crate) fn project_matrix_rows(
     .find(|(manifest, csv)| manifest.is_file() && csv.is_file()) else {
         return Ok(None);
     };
+    let carriers =
+        json!({"manifest": manifest.display().to_string(), "csv": csv.display().to_string()});
     let config = MatrixPrepare {
         manifest,
         csv,
@@ -1578,6 +1580,7 @@ pub(crate) fn project_matrix_rows(
         "declared_capabilities": evidence.declared_capability_refs.len(),
         "manifest_digest": evidence.manifest_digest,
         "csv_digest": evidence.csv_digest,
+        "carriers": carriers,
     });
     Ok(Some((evidence.capability_rows, summary)))
 }

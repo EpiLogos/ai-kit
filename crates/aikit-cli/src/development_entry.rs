@@ -58,6 +58,9 @@ use serde_json::{json, Value};
 pub const CAPABILITY: &str = "hook/aikit/development-entry";
 pub const ENTRY_SCHEMA: &str = "aikit.development-entry/v1";
 
+/// What a session receives once its prepared disclosure has been revoked.
+const REVOKED_NOTICE: &str = "[Development entry withheld] this session's prepared disclosure was revoked; nothing is re-delivered, and nothing is rebuilt under the revoked disclosure. Ordinary operation continues.";
+
 /// Rendered entry budget. The entry names; it does not carry bodies.
 const MAX_RENDERED_CHARS: usize = 4_500;
 const MAX_CONCERN_CHARS: usize = 2_000;
@@ -553,7 +556,16 @@ pub fn collect_inventory(
         .filter(|source| source.project == scope.project)
         .map(|source| source.path.clone())
         .collect();
-    match crate::jev_now::project_matrix_rows(&scope.primary.join("ProjectCentral")) {
+    // The matrix the body would read or edit: the checkout's own (a seat's
+    // lane may be changing it), falling back to the primary's.
+    let projectcentral = [
+        scope.checkout.join("ProjectCentral"),
+        scope.primary.join("ProjectCentral"),
+    ]
+    .into_iter()
+    .find(|path| path.is_dir())
+    .unwrap_or_else(|| scope.primary.join("ProjectCentral"));
+    match crate::jev_now::project_matrix_rows(&projectcentral) {
         Ok(Some((rows, evidence))) => {
             matrix = Some(evidence);
             for row in rows {
@@ -1092,6 +1104,77 @@ pub struct EntryLedger {
     /// Set at pre-compaction: the next prompt re-delivers the entry.
     #[serde(default)]
     pub redeliver_pending: bool,
+    /// What the emitted entry selected (`source:`, `capability:`, `praxis:`
+    /// keys), so a later refinement can say what it changed.
+    #[serde(default)]
+    pub selected: Vec<String>,
+    /// A decision-provider refinement that finished after the entry was
+    /// emitted, waiting for the session's next prompt.
+    #[serde(default)]
+    pub refinement: Option<String>,
+}
+
+fn selected_keys(selection: &Selection) -> Vec<String> {
+    selection
+        .sources
+        .iter()
+        .map(|s| format!("source:{}:{}", s.project, s.path))
+        .chain(
+            selection
+                .capabilities
+                .iter()
+                .map(|c| format!("capability:{}", c.id)),
+        )
+        .chain(
+            selection
+                .methodology
+                .iter()
+                .chain(selection.method.iter())
+                .chain(selection.skills.iter())
+                .map(|p| format!("praxis:{}", p.id)),
+        )
+        .collect()
+}
+
+/// What a refinement changed, as the body will read it. `None` when the
+/// decision provider confirmed the emitted selection unchanged.
+fn render_refinement(before: &[String], after: &Selection, version: Option<u64>) -> Option<String> {
+    let after_keys = selected_keys(after);
+    let added: Vec<&String> = after_keys.iter().filter(|k| !before.contains(k)).collect();
+    let dropped: Vec<&String> = before.iter().filter(|k| !after_keys.contains(k)).collect();
+    if added.is_empty() && dropped.is_empty() {
+        return None;
+    }
+    let mut lines = vec![format!(
+        "[Development entry refined] the elected decision provider reviewed this session's entry{}; its judgement grants nothing and the sources stay authoritative.",
+        version.map(|v| format!(" (prepared v{v})")).unwrap_or_default()
+    )];
+    for key in &added {
+        let detail = after
+            .sources
+            .iter()
+            .find(|s| &&format!("source:{}:{}", s.project, s.path) == key)
+            .map(|s| format!(" — {}", s.absolute.display()))
+            .or_else(|| {
+                after
+                    .methodology
+                    .iter()
+                    .chain(after.method.iter())
+                    .chain(after.skills.iter())
+                    .find(|p| &&format!("praxis:{}", p.id) == key)
+                    .and_then(|p| {
+                        p.skill_file
+                            .as_ref()
+                            .map(|f| format!(" ({}; read: {})", p.form, f.display()))
+                    })
+            })
+            .unwrap_or_default();
+        lines.push(format!("  + {key}{detail}"));
+    }
+    for key in &dropped {
+        lines.push(format!("  - {key} (judged not material to this concern)"));
+    }
+    Some(lines.join("\n"))
 }
 
 fn ledger_path(state: &Path, client: &str, session: &str) -> PathBuf {
@@ -1156,6 +1239,7 @@ fn redis_store(config: &EntryConfig) -> Option<std::result::Result<RedisNowStore
     })())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn publish_view(
     store: &RedisNowStore,
     client: &str,
@@ -1164,9 +1248,15 @@ fn publish_view(
     concern: &str,
     selection: &Selection,
     rendered: &str,
+    expected: Option<u64>,
 ) -> Result<(u64, String)> {
     let (participant, agent_session) = participant_refs(client, session)?;
-    let current = store.current_version(&participant, None)?;
+    // A refinement publishes against the exact version its hook emitted; a
+    // newer preparation in between makes the store refuse it as stale.
+    let current = match expected {
+        Some(version) => version,
+        None => store.current_version(&participant, None)?,
+    };
     let mut source_revisions = BTreeMap::new();
     let mut items = Vec::new();
     for source in &selection.sources {
@@ -1342,6 +1432,23 @@ pub fn deliver(request: &EntryRequest<'_>) -> Result<Option<String>> {
         _ => return Ok(None),
     }
 
+    if let Some(mut refined) = ledger
+        .clone()
+        .filter(|l| l.refinement.is_some() && l.checkout == scope.checkout)
+    {
+        let text = refined.refinement.take().unwrap_or_default();
+        store_ledger(request.state, &refined);
+        store_receipt(
+            request.state,
+            request.client,
+            &session,
+            &json!({
+                "schema": ENTRY_SCHEMA, "event": "UserPromptSubmit", "delivery": "refinement-emitted",
+                "prepared_version": refined.prepared_version,
+            }),
+        );
+        return Ok(Some(text));
+    }
     if let Some(mut pending) = ledger
         .clone()
         .filter(|l| l.redeliver_pending && l.checkout == scope.checkout)
@@ -1446,7 +1553,14 @@ fn redeliver(
 ) -> Result<String> {
     if let Some(Ok(store)) = store {
         if let Ok((participant, _)) = participant_refs(request.client, session) {
-            if let Ok(Some(view)) = store.read_prepared(&participant, false, None) {
+            let read = store.read_prepared(&participant, false, None);
+            if read
+                .as_ref()
+                .is_err_and(|error| error.code() == "now_context.disclosure_revoked")
+            {
+                return Ok(REVOKED_NOTICE.to_owned());
+            }
+            if let Ok(Some(view)) = read {
                 if let Some(text) = view.continuation.clone() {
                     mark_emitted(
                         store,
@@ -1501,21 +1615,24 @@ fn prepare(
     let depth = classify_depth(concern);
     let inventory = collect_inventory(central, scope, concern, request.view, request.capsule_roots);
     let inventory_ms = started.elapsed().as_millis() as u64;
-    let mut selection = match request.config.selection.as_deref() {
+    // The provider never runs inside the hook: a decision model on a loaded
+    // machine outlasts every harness's hook budget (pi kills at 10 s), and a
+    // killed hook delivers nothing at all. The ordinary selection goes out
+    // now; the provider refines it in a detached process and the next prompt
+    // carries what it changed.
+    let mut selection = ordinary_selection(&inventory, depth);
+    let refine = match request.config.selection.as_deref() {
         Some("provider") => match (
             &request.config.provider_file,
             request.config.relevance_threshold,
         ) {
-            (Some(file), Some(threshold)) => {
-                provider_selection(&inventory, depth, concern, scope, file, threshold)
-            }
+            (Some(_), Some(_)) => true,
             _ => {
-                let mut ordinary = ordinary_selection(&inventory, depth);
-                ordinary.degradations.push("provider selection configured without provider_file and an explicit relevance_threshold; ordinary selection used".into());
-                ordinary
+                selection.degradations.push("provider selection configured without provider_file and an explicit relevance_threshold; ordinary selection used".into());
+                false
             }
         },
-        _ => ordinary_selection(&inventory, depth),
+        _ => false,
     };
     selection
         .degradations
@@ -1532,8 +1649,14 @@ fn prepare(
             concern,
             &selection,
             &first,
+            None,
         ) {
             Ok((version, digest)) => prepared = Some((version, digest)),
+            // A revoked disclosure is not re-emitted under the same revision:
+            // the selection stays unsent.
+            Err(error) if error.code() == "now_context.disclosure_revoked" => {
+                return Ok(REVOKED_NOTICE.to_owned());
+            }
             Err(error) => selection.degradations.push(format!(
                 "prepared NOW view not published ({}: {})",
                 error.code(),
@@ -1544,6 +1667,9 @@ fn prepare(
             "Redis NOW unavailable ({reason}); entry delivered without a hot view"
         )),
         None => {}
+    }
+    if refine {
+        selection.mode = "ordinary now; the elected decision provider refines it in the background and the next prompt carries any change".into();
     }
     let rendered = render(
         scope,
@@ -1569,15 +1695,45 @@ fn prepare(
         checkout: scope.checkout.clone(),
         rendered_digest: blake3::hash(rendered.as_bytes()).to_hex().to_string(),
         prepared_version: prepared.as_ref().map(|(v, _)| *v),
+        // The watched basis: every selected source and, when capability rows
+        // were selected, the matrix carriers they came from.
         source_revisions: selection
             .sources
             .iter()
             .map(|s| (s.absolute.display().to_string(), s.revision.clone()))
+            .chain(
+                inventory
+                    .matrix
+                    .iter()
+                    .filter(|_| !selection.capabilities.is_empty())
+                    .flat_map(|matrix| {
+                        ["manifest", "csv"]
+                            .map(|key| matrix["carriers"][key].as_str().map(str::to_owned))
+                    })
+                    .flatten()
+                    .filter_map(|path| {
+                        content_revision(Path::new(&path)).map(|revision| (path, revision))
+                    }),
+            )
             .collect(),
         emitted_at_unix_ms: now_ms(),
         redeliver_pending: false,
+        selected: selected_keys(&selection),
+        refinement: None,
     };
     store_ledger(request.state, &ledger);
+    if refine {
+        if let Err(reason) = spawn_refinement(request.client, session, &scope.checkout) {
+            store_receipt(
+                request.state,
+                request.client,
+                session,
+                &json!({
+                    "schema": ENTRY_SCHEMA, "event": "refinement-spawn", "failed": reason,
+                }),
+            );
+        }
+    }
     store_receipt(
         request.state,
         request.client,
@@ -1612,6 +1768,166 @@ fn prepare(
         }),
     );
     Ok(rendered)
+}
+
+/// Start the provider refinement as its own process group, so a harness
+/// killing the hook process does not kill the refinement with it.
+fn spawn_refinement(client: &str, session: &str, cwd: &Path) -> std::result::Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    std::process::Command::new(exe)
+        .args([
+            "--json",
+            "now-context",
+            "entry-refine",
+            "--client",
+            client,
+            "--session",
+            session,
+            "--cwd",
+        ])
+        .arg(cwd)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// The detached refinement: the elected decision provider judges the same
+/// inventory for the recorded concern, and its selection is published by
+/// compare-and-swap against the version the hook emitted. A preparation that
+/// moved on in the meantime makes the store refuse it as stale — a late
+/// decision never replaces newer context. What changed waits in the
+/// session's ledger for its next prompt.
+pub fn refine(cwd: &Path, client: &str, session: &str) -> Result<Value> {
+    let started = Instant::now();
+    let service = crate::app::Service::discover(cwd)?;
+    let id = CapsuleId::parse(CAPABILITY)?;
+    let active = service.resolved().active.get(&id).ok_or_else(|| {
+        fail(
+            "development_entry.not_selected",
+            "the development-entry capsule is not active here",
+        )
+    })?;
+    let config = EntryConfig::from_table(&active.config)?;
+    let (Some(provider_file), Some(threshold)) =
+        (config.provider_file.clone(), config.relevance_threshold)
+    else {
+        return Err(fail(
+            "development_entry.provider_unconfigured",
+            "refinement needs provider_file and an explicit relevance_threshold",
+        ));
+    };
+    let state = service.home().state();
+    let central = crate::temporal::central_root_enclosing(Some(cwd)).ok_or_else(|| {
+        fail(
+            "development_entry.no_world",
+            "no Central world encloses this checkout",
+        )
+    })?;
+    let scope = resolve_scope(&central, cwd).ok_or_else(|| {
+        fail(
+            "development_entry.no_project",
+            "this checkout is not a Project",
+        )
+    })?;
+    let ledger = load_ledger(&state, client, session).ok_or_else(|| {
+        fail(
+            "development_entry.no_entry",
+            "this session has no emitted entry to refine",
+        )
+    })?;
+    let roots = service.snapshot().capsule_roots();
+    let depth = classify_depth(&ledger.concern);
+    let inventory = collect_inventory(
+        &central,
+        &scope,
+        &ledger.concern,
+        service.resolved(),
+        &roots,
+    );
+    let refined = provider_selection(
+        &inventory,
+        depth,
+        &ledger.concern,
+        &scope,
+        &provider_file,
+        threshold,
+    );
+    let provider_failed = refined.mode != "provider";
+    let mut outcome = json!({
+        "schema": ENTRY_SCHEMA, "event": "refinement", "session": session,
+        "base_version": ledger.prepared_version, "mode": refined.mode,
+        "decision": refined.decision, "degradations": refined.degradations,
+        "selected": selected_keys(&refined),
+    });
+    if provider_failed {
+        outcome["outcome"] = json!("provider-unavailable; the emitted ordinary entry stands");
+    } else {
+        let text = render(&scope, &ledger.concern, &refined, None);
+        let mut published = None;
+        if let Some(Ok(store)) = redis_store(&config) {
+            match publish_view(
+                &store,
+                client,
+                session,
+                &scope,
+                &ledger.concern,
+                &refined,
+                &text,
+                ledger.prepared_version,
+            ) {
+                Ok(done) => published = Some(done),
+                Err(error) => {
+                    outcome["outcome"] =
+                        json!(format!("refused: {}: {}", error.code(), error.message()));
+                }
+            }
+        }
+        // The ledger is the session's own record; re-read it so a prompt that
+        // re-prepared meanwhile is never overwritten by this late answer.
+        let mut current = load_ledger(&state, client, session).unwrap_or(ledger.clone());
+        let moved = current.prepared_version != ledger.prepared_version
+            || current.rendered_digest != ledger.rendered_digest;
+        if outcome.get("outcome").is_none() {
+            if moved {
+                outcome["outcome"] = json!(
+                    "refused: the session prepared a newer entry while the provider was deciding"
+                );
+            } else {
+                let delta = render_refinement(
+                    &ledger.selected,
+                    &refined,
+                    published.as_ref().map(|(v, _)| *v),
+                );
+                outcome["outcome"] = json!(if delta.is_some() {
+                    "refined"
+                } else {
+                    "confirmed-unchanged"
+                });
+                current.refinement = delta;
+                current.selected = selected_keys(&refined);
+                if let Some((version, _)) = &published {
+                    current.prepared_version = Some(*version);
+                }
+                for source in &refined.sources {
+                    current.source_revisions.insert(
+                        source.absolute.display().to_string(),
+                        source.revision.clone(),
+                    );
+                }
+                store_ledger(&state, &current);
+            }
+        }
+        outcome["published"] = json!(published.map(|(v, d)| json!({"version": v, "digest": d})));
+    }
+    outcome["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
+    store_receipt(&state, client, session, &outcome);
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -1746,6 +2062,8 @@ mod tests {
             source_revisions: BTreeMap::new(),
             emitted_at_unix_ms: 0,
             redeliver_pending: false,
+            selected: vec![],
+            refinement: None,
         };
         store_ledger(temp.path(), &ledger);
         assert_eq!(load_ledger(temp.path(), "claude", "s1"), Some(ledger));
