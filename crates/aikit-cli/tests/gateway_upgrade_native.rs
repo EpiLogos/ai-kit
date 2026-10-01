@@ -98,12 +98,6 @@ fn patched_build(dst: &Path, revision: &str, replacement: &str) {
     }
 }
 
-fn copy_build(dst: &Path) {
-    std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
-    std::fs::copy(aikit_bin(), dst).unwrap();
-    std::fs::set_permissions(dst, std::fs::Permissions::from_mode(0o755)).unwrap();
-}
-
 fn write_script(path: &Path, body: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -114,39 +108,6 @@ fn flip(link: &Path, target: &Path) {
     std::fs::create_dir_all(link.parent().unwrap()).unwrap();
     let _ = std::fs::remove_file(link);
     std::os::unix::fs::symlink(target, link).unwrap();
-}
-
-/// The two builds, made once per test binary: a copy of `aikit` and a copy
-/// whose embedded revision was rewritten. Each machine hard-links them into its
-/// own managed layout, so a test costs no copy of a few hundred MB.
-struct Builds {
-    a: PathBuf,
-    b: PathBuf,
-    revision_a: String,
-    revision_b: String,
-}
-
-fn shared_builds() -> &'static Builds {
-    static BUILDS: std::sync::OnceLock<Builds> = std::sync::OnceLock::new();
-    BUILDS.get_or_init(|| {
-        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("gateway-upgrade-builds");
-        let _ = std::fs::remove_dir_all(&dir);
-        let revision_a = stamped_revision().to_owned();
-        // Same length, different content, still hexadecimal.
-        let revision_b: String = revision_a
-            .chars()
-            .map(|c| if c == 'f' { '0' } else { 'f' })
-            .collect();
-        assert_ne!(revision_a, revision_b);
-        copy_build(&dir.join("a/aikit"));
-        patched_build(&dir.join("b/aikit"), &revision_a, &revision_b);
-        Builds {
-            a: dir.join("a/aikit"),
-            b: dir.join("b/aikit"),
-            revision_a,
-            revision_b,
-        }
-    })
 }
 
 fn link_or_copy(from: &Path, to: &Path) {
@@ -169,11 +130,18 @@ struct Machine {
 impl Machine {
     fn new() -> Self {
         let dir = TempDir::new().unwrap();
-        let builds = shared_builds();
-        let (revision_a, revision_b) = (builds.revision_a.clone(), builds.revision_b.clone());
+        let revision_a = stamped_revision().to_owned();
+        // Same length, different content, still hexadecimal.
+        let revision_b: String = revision_a
+            .chars()
+            .map(|c| if c == 'f' { '0' } else { 'f' })
+            .collect();
+        assert_ne!(revision_a, revision_b);
         let root = dir.path().join("managed");
-        link_or_copy(&builds.a, &root.join("bin-a/aikit"));
-        link_or_copy(&builds.b, &root.join("bin-b/aikit"));
+        // Build A is the binary under test itself, linked, not copied. Nothing is
+        // shared between machines: each test process (nextest runs one per test)
+        // has its own layout, so nothing is rewritten while another process executes it.
+        link_or_copy(&aikit_bin(), &root.join("bin-a/aikit"));
         write_script(
             &root.join("bin-bad/aikit"),
             "echo 'this build is broken' >&2\nexit 1",
@@ -221,6 +189,17 @@ exit 0"#,
 
     fn root(&self) -> PathBuf {
         self.dir.path().join("managed")
+    }
+
+    /// Build B: `aikit` with its embedded revision rewritten — a different image
+    /// that reports a different build. Made only by the tests that install it
+    /// (it is a copy of a few hundred MB), inside this machine's own directory.
+    fn with_second_build(&self) {
+        patched_build(
+            &self.root().join("bin-b/aikit"),
+            &self.revision_a,
+            &self.revision_b,
+        );
     }
 
     /// A service definition and a scripted service manager, so "ask the manager
@@ -472,6 +451,7 @@ fn outcome(data: &Value) -> &str {
 fn an_upgrade_replaces_the_running_process_with_the_installed_build_and_proves_it_without_losing_a_communique(
 ) {
     let machine = Machine::new();
+    machine.with_second_build();
     let supervisor = Supervisor::start(&machine);
     let before = machine.wait_running();
     assert_eq!(before["build"]["revision"], machine.revision_a);
@@ -636,6 +616,7 @@ fn an_install_that_fails_leaves_the_running_gateway_and_the_installed_build_unto
 #[test]
 fn an_installer_that_flips_the_build_and_then_fails_is_rolled_back_and_not_reported_unchanged() {
     let machine = Machine::new();
+    machine.with_second_build();
     let _supervisor = Supervisor::start(&machine);
     let before = machine.wait_running();
     machine.set_previous("bin-a");
@@ -710,6 +691,7 @@ fn a_new_build_that_does_not_come_up_is_rolled_back_and_the_old_build_is_verifie
 #[test]
 fn a_foreground_gateway_is_installed_for_but_never_stopped() {
     let machine = Machine::new();
+    machine.with_second_build();
     // Run the gateway directly: nothing supervises it.
     let mut child = Command::new(machine.root().join("cur/aikit"))
         .args(["gateway", "serve", "--unix"])

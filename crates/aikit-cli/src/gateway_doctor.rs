@@ -487,12 +487,14 @@ pub fn diagnose(facts: &Facts) -> Report {
                      the installed one: after the restart, inbound connections from other \
                      machines queue until the owner allows the new binary",
                     vec![],
-                    Some(
-                        "owner action (needs sudo; not run by aikit): \
-                         sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add <installed aikit> && \
-                         sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp <installed aikit> \
-                         — or bind 127.0.0.1 behind `tailscale serve` so the allowance belongs to Tailscale",
-                    ),
+                    Some(&firewall_remedy(
+                        facts
+                            .installed
+                            .as_ref()
+                            .and_then(|installed| installed.executable_path.as_deref()),
+                        "<installed aikit>",
+                        true,
+                    )),
                 )),
                 (Some(false), _) => findings.push(finding(
                     "firewall.running_not_allowed",
@@ -500,10 +502,15 @@ pub fn diagnose(facts: &Facts) -> Report {
                     "the macOS application firewall has no allowance for the running gateway \
                      binary: connections from other machines may be waiting for approval",
                     vec![],
-                    Some(
-                        "owner action (needs sudo; not run by aikit): \
-                         sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add <running aikit>",
-                    ),
+                    Some(&firewall_remedy(
+                        facts
+                            .running
+                            .as_ref()
+                            .and_then(|running| running.build.as_ref())
+                            .and_then(|build| build.executable_path.as_deref()),
+                        "<running aikit>",
+                        false,
+                    )),
                 )),
                 _ => {}
             }
@@ -983,6 +990,24 @@ pub fn run(home: &AikitHome) -> Result<Value> {
     Ok(serde_json::to_value(&report).unwrap_or(Value::Null))
 }
 
+/// The owner's command for the application firewall, with the real path (quoted:
+/// managed paths contain spaces). aikit never runs it: it needs `sudo`.
+fn firewall_remedy(path: Option<&str>, placeholder: &str, also_unblock: bool) -> String {
+    let quoted = path
+        .map(|path| format!("'{}'", path.replace('\'', "'\\''")))
+        .unwrap_or_else(|| placeholder.to_owned());
+    let socketfilter = "sudo /usr/libexec/ApplicationFirewall/socketfilterfw";
+    let mut command =
+        format!("owner action (needs sudo; not run by aikit): {socketfilter} --add {quoted}");
+    if also_unblock {
+        command.push_str(&format!(" && {socketfilter} --unblockapp {quoted}"));
+        command.push_str(
+            " — or bind 127.0.0.1 behind `tailscale serve` so the allowance belongs to Tailscale",
+        );
+    }
+    command
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1191,6 +1216,9 @@ mod tests {
         let remedy = finding.remedy.as_deref().unwrap();
         assert!(remedy.contains("sudo"));
         assert!(remedy.contains("tailscale serve"));
+        // The real path, quoted (managed paths contain spaces), not a placeholder.
+        assert!(remedy.contains("--add '/managed/aikit'"), "{remedy}");
+        assert!(!remedy.contains("<installed aikit>"));
         // A loopback-only gateway exposes nothing to the firewall.
         facts.running.as_mut().unwrap().listeners =
             vec![listener("127.0.0.1:7788", ListenerClass::Loopback)];
