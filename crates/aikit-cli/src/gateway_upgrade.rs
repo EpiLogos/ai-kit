@@ -238,6 +238,10 @@ pub struct Transaction {
     pub outcome: Option<Outcome>,
     #[serde(default)]
     pub receipt_delivered: bool,
+    /// The rollback was asked for by an operator (`upgrade rollback`), not taken
+    /// by the driver because the new build failed: the receipt says so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rollback_requested: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -461,6 +465,7 @@ impl<E: UpgradeEnv> Driver<'_, E> {
             steps: Vec::new(),
             outcome: None,
             receipt_delivered: false,
+            rollback_requested: false,
         };
         self.store.save(&transaction)?;
         Ok(transaction)
@@ -1046,11 +1051,19 @@ impl<E: UpgradeEnv> Driver<'_, E> {
                         transaction,
                         Phase::RolledBack,
                         "rolled-back",
-                        format!(
-                            "the new build did not come up; the previous build ({}) is \
-                             running again",
-                            previous.revision
-                        ),
+                        if transaction.rollback_requested {
+                            format!(
+                                "rolled back at the operator's request; the previous build ({}) \
+                                 is running again",
+                                previous.revision
+                            )
+                        } else {
+                            format!(
+                                "the new build did not come up; the previous build ({}) is \
+                                 running again",
+                                previous.revision
+                            )
+                        },
                         vec![],
                     );
                 }
@@ -1871,6 +1884,43 @@ mod tests {
             .summary
             .contains("previous build (aaaa) is running again"));
         assert_eq!(transaction.after.unwrap().identity.revision, "aaaa");
+    }
+
+    #[test]
+    fn a_rollback_an_operator_asked_for_is_not_reported_as_a_build_that_failed() {
+        let script = Script::new(
+            Some(running(11, "bbbb", GatewayLifecycle::SupervisedLaunchd)),
+            identity("bbbb"),
+        );
+        *script.rollback_to.borrow_mut() = Some(identity("aaaa"));
+        *script.next.borrow_mut() = Some((
+            running(12, "aaaa", GatewayLifecycle::SupervisedLaunchd),
+            1_000,
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let driver = Driver {
+            env: &script,
+            store: &store,
+        };
+        let mut transaction = driver
+            .create("test", None, plan(Mode::InstallThenRestart))
+            .unwrap();
+        // The state `upgrade rollback` puts a finished upgrade in.
+        transaction.recovery.installed_before = Some(identity("aaaa"));
+        transaction.installed = Some(identity("bbbb"));
+        transaction.phase = Phase::RollingBack;
+        transaction.rollback_requested = true;
+        driver.drive(&mut transaction).unwrap();
+        assert_eq!(
+            transaction.phase,
+            Phase::RolledBack,
+            "{:?}",
+            transaction.steps
+        );
+        let summary = &transaction.outcome.as_ref().unwrap().summary;
+        assert!(summary.contains("at the operator's request"), "{summary}");
+        assert!(!summary.contains("did not come up"), "{summary}");
     }
 
     #[test]

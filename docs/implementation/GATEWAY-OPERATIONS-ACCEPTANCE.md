@@ -191,7 +191,22 @@ each is now:
 | Found while testing: a gateway merely slow to answer at the start (loaded machine) was read as "not running", which would skip the drain and start a second gateway | **Repaired**: the first reading tells "nothing listening" from "did not answer in time" (retried); the latter ends `failed-before-change` with nothing touched; test |
 | Found by the first real use of the repaired build (Omarchy, `6e452a60` → `0bfe6e4c`, transaction `upg-01m3wqzc…`): the receipt said "the predecessor predates the drain … unknown", but `6e452a60` *has* the drain and it ran. Its report carries no `measured` field (the flag is newer), so it deserialised as `false` | **Repaired**: `DrainReport::was_measured()` — the flag, *or* the times of a drain that ran (a never-run default report has none); unit test `a_drain_report_from_a_gateway_that_predates_the_measured_flag_still_reads_as_measured`. That transaction's receipt keeps its (understated) wording; the upgrade itself was correct (`completed`, new pid, new image) |
 | Pending outbound operations stay pending forever; the Communique planes are still three journals; `/upgrade` through a live Telegram/Slack chat; in-flight turn drained through the carrier with a live harness; Serve/ssh-tunnel exercised; owner-scope admin of a remote gateway | **Carried, with owners and closing conditions, in EpiLogos/ai-kit#481** |
-| A real `oi update --rollback` and a real (not scripted) `oi` install-then-restart in one transaction were never exercised | **Open in this record** — run on Omarchy against the merged cut (below) |
+| A real `oi update --rollback` and a real (not scripted) `oi` install-then-restart in one transaction were never exercised | **Exercised on the real Omarchy service** (section below). It also showed that a rollback the operator asked for was reported as "the new build did not come up"; the receipt now says "rolled back at the operator's request" (`rollback_requested`; unit test) |
+
+## The real `oi`: install, restart and rollback in one lane (Omarchy, real systemd service)
+
+The commission's lifecycle through the **real managed installer** on a **real
+service**, on the repaired build, not a scripted `oi`:
+
+| Step | Command | Result |
+|---|---|---|
+| install a chosen commit, drain, restart, verify — **one transaction** | `aikit gateway upgrade apply --install --candidate 4e07023f2ed5… --wait` (the CLI plans `oi update --apply --candidate ai-kit=<rev> ai-kit`; `plan` shows that argv first) | `upg-01m3wrp9enx13r685yersaev59` **completed**: the worker ran as its own transient systemd unit; the real `oi update --apply` built the cut (release build, about ten minutes, with the service answering throughout); the running gateway was drained (**measured**: 0 turns finished, 0 interrupted, 0 unreceipted operations; nothing replayed) and the supervisor restarted it: **pid 2544323 `0bfe6e4c70de` → pid 2557622 `4e07023f2ed5`, digest `e0b5de577a6e…`, `supervised-systemd`** |
+| the supported rollback | `aikit gateway upgrade rollback upg-01m3wrp9enx13r685yersaev59` (runs the real `oi update --rollback`) | `rolled-back`: the previous cut `0bfe6e4c70de` is the installed one again **and running** (pid 2557953), verified by the process answering as that build |
+| before these, the first repaired-build upgrade | `oi update --apply --candidate ai-kit=0bfe6e4c…` then `aikit gateway upgrade apply --restart-only --wait` from `6e452a60` (which has the drain) | `completed` (`6e452a60` pid 2348420 → `0bfe6e4c` pid 2544323); its receipt understated what was known ("predates the drain") — the defect row above |
+
+Other lanes were building on this machine at the same time (`oi update` holds a
+lock; my install waited for it rather than racing it). The machine ends on
+`0bfe6e4c`, the rolled-back cut.
 
 ## Defects found by the lane's own gates after the first push
 
@@ -207,8 +222,6 @@ each is now:
 
 ## Not shown
 
-* A real `oi update --rollback` and a real `oi` install-then-restart in one
-  transaction (the tests and rehearsals use a scripted installer).
 * `/upgrade apply` in a live Telegram/Slack conversation on a real service; a
   real in-flight turn drained through the carrier (ai-kit#481).
 * A Flow request delivered to another Workcell with a real model body, with the

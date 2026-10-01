@@ -1121,6 +1121,7 @@ pub fn rollback_command(home: &AikitHome, id: &str) -> Result<Value> {
     }
     let _lock = lock_driver(&store, id)?;
     transaction.phase = crate::gateway_upgrade::Phase::RollingBack;
+    transaction.rollback_requested = true;
     transaction.outcome = None;
     transaction.receipt_delivered = false;
     store.save(&transaction)?;
