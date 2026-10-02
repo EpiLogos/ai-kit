@@ -291,11 +291,11 @@ impl StderrCapture {
                 let complete = match state.lock() {
                     Ok(mut state) => {
                         state.drain();
-                        if worker_stop.load(Ordering::Acquire) {
-                            if !state.ended && state.capture_error.is_none() {
-                                state.capture_error =
-                                    Some("Capture stopped before stderr EOF".into());
-                            }
+                        if worker_stop.load(Ordering::Acquire)
+                            && !state.ended
+                            && state.capture_error.is_none()
+                        {
+                            state.capture_error = Some("Capture stopped before stderr EOF".into());
                         }
                         if state.ended || worker_stop.load(Ordering::Acquire) {
                             state.end_capture();
