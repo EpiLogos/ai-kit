@@ -2134,12 +2134,12 @@ impl Service {
                 decision.injected.push(commit.text.clone());
             }
         }
-        // Development entry: the work this Refocus is delivering for,
-        // prepared from its Run. It rides Refocus's own triggers (fresh
-        // occupancy, compaction, work transition, sustained work) and exists
+        // Development entry: the work this body carries, prepared from its
+        // Run. It rides the lean entry at fresh occupancy and Refocus's own
+        // triggers (compaction, work transition, sustained work), and exists
         // only when the body carries exactly one current work. A failure is
         // named to the body; ordinary operation continues.
-        if let (Some(work), true) = (&inhabitation.work, decision.allowed && refocus.is_some()) {
+        if let (Some(work), true) = (&inhabitation.work, decision.allowed) {
             let id = CapsuleId::parse(crate::development_entry::CAPABILITY)?;
             if let Some(active) = self.view.active.get(&id) {
                 let session = crate::refocus::hook_session(&event.payload).unwrap_or_default();
