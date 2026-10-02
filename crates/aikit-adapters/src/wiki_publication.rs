@@ -1387,7 +1387,28 @@ mod native {
                 .collect();
             barrier.wait();
             let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-            assert_eq!(results.iter().filter(|(_, r)| r.is_ok()).count(), 1);
+            let diagnostic = serde_json::json!({
+                "results": results.iter().map(|(writer, result)| match result {
+                    Ok(changed) => serde_json::json!({"writer":writer,"acknowledged":true,"changed":changed}),
+                    Err(error) => serde_json::json!({"writer":writer,"acknowledged":false,
+                        "code":error.code(),"message":error.message(),"details":error.details()}),
+                }).collect::<Vec<_>>(),
+                "observed_source": fs::read_to_string(&path).map_err(|error| error.to_string()),
+                "source_identity": fs::symlink_metadata(&path).map(|metadata|
+                    (metadata.dev(),metadata.ino(),metadata.nlink(),metadata.mode())).map_err(|error| error.to_string()),
+                "lock_identity": fs::symlink_metadata(directory.path().join(".wiki.json.publication.lock"))
+                    .map(|metadata|(metadata.dev(),metadata.ino(),metadata.nlink(),metadata.mode()))
+                    .map_err(|error|error.to_string()),
+                "retained_entries": fs::read_dir(directory.path()).unwrap().map(|entry| {
+                    let entry = entry.unwrap();
+                    let metadata = fs::symlink_metadata(entry.path()).unwrap();
+                    serde_json::json!({"name":entry.file_name().to_string_lossy(),
+                        "dev":metadata.dev(),"ino":metadata.ino(),"nlink":metadata.nlink(),
+                        "mode":metadata.mode(),"len":metadata.len()})
+                }).collect::<Vec<_>>(),
+            });
+            eprintln!("native concurrent publisher results: {diagnostic}");
+            assert_eq!(results.iter().filter(|(_, r)| r.is_ok()).count(), 1, "{diagnostic}");
             assert_eq!(
                 results
                     .iter()
@@ -1395,7 +1416,8 @@ mod native {
                         .as_ref()
                         .is_err_and(|e| e.code() == "knowledge.wiki_concurrent_write"))
                     .count(),
-                1
+                1,
+                "{diagnostic}"
             );
             let acknowledged = results.iter().find(|(_, r)| r.is_ok()).unwrap().0;
             assert_eq!(fs::read_to_string(&path).unwrap(), acknowledged);
