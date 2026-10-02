@@ -1548,7 +1548,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn all_forwarding_layers_preserve_actual_strict_output_and_time_requests() {
-        let boxed: Box<dyn CommandRunner> = Box::new(SystemRunner::new());
+        let boxed: Box<dyn CommandRunner + Send + Sync> = Box::new(SystemRunner::new());
         let shared = std::sync::Arc::new(boxed);
         let reference = &shared;
         let recording = RecordingRunner::new(reference);
