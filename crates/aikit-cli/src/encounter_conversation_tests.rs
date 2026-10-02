@@ -1870,7 +1870,7 @@ fn actual_native_append_outage_keeps_returned_material_retryable_across_restart(
             .unwrap();
         service
             .store
-            .conversation_record_dispatch(request, "p-ada", "sent", None)
+            .conversation_set_dispatch(request, "p-ada", "sent", None)
             .unwrap();
         service
             .store

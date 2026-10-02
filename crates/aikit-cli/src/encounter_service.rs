@@ -1512,7 +1512,7 @@ impl EncounterService {
                     "resident-open",
                     Some(deadline),
                 )?;
-                let receipt = json!({"agent_session":agent_session,"native_session_id":held.lane.binding().native_session_id,"model_observation":held.lane.binding().model_observation,"provider":held.provider,"protocol":held.protocol,"body_basis":held.body_basis,"model_selection":held.model,"resident":true});
+                let receipt = json!({"agent_session":agent_session,"native_session_id":held.lane.binding().native_session_id,"model_observation":held.lane.binding().model_observation,"provider":held.provider,"protocol":held.protocol,"body_basis":held.body_basis,"model_selection":held.model,"resident":true,"inference_observed":false});
                 opening.terminal_recorded = true;
                 drop(agency_lock);
                 return self.open_receipt_with_drain(agent_session, receipt);
