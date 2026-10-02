@@ -737,16 +737,18 @@ mod native {
         use super::*;
         use std::sync::{Arc, Barrier};
 
+        type PathObserver = Box<dyn FnOnce(&Path)>;
+
         std::thread_local! {
-            static BEFORE_MUTATION: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+            static BEFORE_MUTATION: std::cell::RefCell<Option<PathObserver>> =
                 const { std::cell::RefCell::new(None) };
-            static AFTER_MUTATION: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+            static AFTER_MUTATION: std::cell::RefCell<Option<PathObserver>> =
                 const { std::cell::RefCell::new(None) };
-            static BEFORE_SOURCE_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+            static BEFORE_SOURCE_OPEN: std::cell::RefCell<Option<PathObserver>> =
                 const { std::cell::RefCell::new(None) };
-            static AFTER_MATERIAL_READ: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+            static AFTER_MATERIAL_READ: std::cell::RefCell<Option<PathObserver>> =
                 const { std::cell::RefCell::new(None) };
-            static AFTER_NOOP_READ: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+            static AFTER_NOOP_READ: std::cell::RefCell<Option<PathObserver>> =
                 const { std::cell::RefCell::new(None) };
         }
 
