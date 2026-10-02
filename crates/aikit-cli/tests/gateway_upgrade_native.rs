@@ -286,6 +286,9 @@ exit 0"#,
             .env("HOME", self.home())
             .env("AIKIT_HOME", self.home())
             .env("AIKIT_UPGRADE_WORKER_MODE", "process")
+            // The install floor is about the machine's real disk; these homes live
+            // on whatever small volume holds the temp directory.
+            .env("AIKIT_INSTALL_MIN_FREE_MIB", "1")
             .current_dir(self.home())
             .output()
             .unwrap();
@@ -321,6 +324,20 @@ exit 0"#,
         let mut line = String::new();
         BufReader::new(stream).read_line(&mut line).unwrap();
         serde_json::from_str(line.trim()).unwrap()
+    }
+
+    /// `raw`, but a gateway that is down (mid-restart) is `None`, not a panic.
+    fn try_raw(&self, command: Value) -> Option<Value> {
+        let mut stream = UnixStream::connect(self.socket()).ok()?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .ok()?;
+        let request = json!({"request_id": null, "command": command}).to_string();
+        stream.write_all(request.as_bytes()).ok()?;
+        stream.write_all(b"\n").ok()?;
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).ok()?;
+        serde_json::from_str(line.trim()).ok()
     }
 
     fn running(&self) -> Option<Value> {
@@ -362,10 +379,15 @@ struct Supervisor {
 
 impl Supervisor {
     fn start(machine: &Machine) -> Self {
+        Self::start_at(machine, machine.root().join("cur/aikit"))
+    }
+
+    /// A supervisor whose service definition names `current` — which may be a
+    /// file other than the one the installer moves.
+    fn start_at(machine: &Machine, current: PathBuf) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let starts = Arc::new(AtomicUsize::new(0));
         let exits = Arc::new(Mutex::new(Vec::new()));
-        let current = machine.root().join("cur/aikit");
         let home = machine.home();
         let path = machine.path();
         let (s, n, e) = (Arc::clone(&stop), Arc::clone(&starts), Arc::clone(&exits));
@@ -382,9 +404,22 @@ impl Supervisor {
                     // What a service definition declares: a supervisor stands
                     // behind this process and will start the next one.
                     .env("AIKIT_GATEWAY_LIFECYCLE", "supervised-launchd")
+                    // An upgrade asked for in a conversation starts its worker from
+                    // inside the gateway; this machine has no service manager to start
+                    // it under, so it is a detached process (the one-shot job/unit on
+                    // a real machine).
+                    .env("AIKIT_UPGRADE_WORKER_MODE", "process")
                     .current_dir(&home)
                     .stdout(Stdio::null())
-                    .stderr(Stdio::null())
+                    // What the gateway says on stderr is evidence when a test fails.
+                    .stderr(
+                        std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(home.join("gateway.stderr"))
+                            .map(Stdio::from)
+                            .unwrap_or_else(|_| Stdio::null()),
+                    )
                     .spawn();
                 let mut child: Child = match spawned {
                     Ok(child) => child,
@@ -757,4 +792,226 @@ fn a_stop_signal_drains_and_exits_cleanly_instead_of_killing_the_gateway_mid_tur
     // The state it left is complete: a fresh gateway restores the journal.
     let state = std::fs::read_to_string(machine.home().join("state/gateway.json")).unwrap();
     assert!(state.contains("before-stop"));
+}
+
+/// The delivery receipts of the conversation's connector, from the running
+/// gateway's own snapshot: what it was asked to say, in the order it said it.
+fn receipt_details(machine: &Machine) -> Vec<String> {
+    machine
+        .try_raw(json!({"type": "snapshot"}))
+        .and_then(|envelope| {
+            envelope["response"]["snapshot"]["delivery_receipts"]
+                .as_array()
+                .map(|receipts| {
+                    receipts
+                        .iter()
+                        .filter_map(|r| r["detail"].as_str().map(str::to_owned))
+                        .collect()
+                })
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn an_upgrade_asked_for_in_a_conversation_survives_the_restart_and_is_reported_back_into_it() {
+    let machine = Machine::new();
+    machine.with_second_build();
+    // A real out-of-process connector, so the conversation has somewhere to be
+    // answered. It echoes every send it executes into its receipt.
+    let connectors = machine.home().join("state/gateway-connectors.json");
+    std::fs::create_dir_all(connectors.parent().unwrap()).unwrap();
+    std::fs::write(
+        &connectors,
+        json!({
+            "schema": "aikit.gateway-connectors/v1",
+            "connectors": [{
+                "connector_ref": "gateway-connector/specimen/main",
+                "platform": "specimen",
+                "implementation": "stdio",
+                "program": [
+                    assert_cmd::cargo::cargo_bin("gateway-connector-specimen").display().to_string(),
+                    "--connector-ref", "gateway-connector/specimen/main"
+                ]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let supervisor = Supervisor::start(&machine);
+    let before = machine.wait_running();
+    let old_pid = before["build"]["pid"].as_u64().unwrap();
+
+    let binding = json!({"type": "bind", "binding": {
+        "binding_ref": "gateway-binding/specimen",
+        "connector_ref": "gateway-connector/specimen/main",
+        "address": {"platform": "specimen", "conversation_id": "main"},
+        "agent_session_ref": "agent-session/specimen",
+        "agency_ref": "agency/specimen",
+        "actuation_ref": "actuation/specimen",
+        "actuation_stream_ref": "actuation-stream/specimen",
+        "ingress": {"default": "allow", "sender_overrides": {}}
+    }});
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while machine
+        .try_raw(binding.clone())
+        .is_none_or(|answer| answer["ok"] != true)
+    {
+        assert!(Instant::now() < deadline, "the connector never registered");
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    // The installer's work is done (the managed link now names build B); the
+    // conversation asks the gateway to restart onto it.
+    machine.install("bin-b");
+    let asked = machine.raw(json!({"type": "ingest", "event": {
+        "event_ref": "gateway-ingress/socket/upgrade-1",
+        "connector_ref": "gateway-connector/specimen/main",
+        "address": {"platform": "specimen", "conversation_id": "main"},
+        "sender": {"native_sender_id": "owner", "kind": "human"},
+        "kind": "message",
+        "native_event_id": "upgrade-native-1",
+        "native_message_id": "upgrade-message-1",
+        "text": "/upgrade apply"
+    }}));
+    assert_eq!(asked["ok"], true, "{asked}");
+
+    // The old process is replaced by one running build B...
+    let deadline = Instant::now() + Duration::from_secs(300);
+    let after = loop {
+        if let Some(reading) = machine.running() {
+            if reading["build"]["pid"].as_u64() != Some(old_pid)
+                && reading["build"]["revision"] == machine.revision_b
+            {
+                break reading;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the gateway never came back as build B; the upgrade says: {:?}",
+            machine.run(&["gateway", "upgrade", "status"]).1
+        );
+        thread::sleep(Duration::from_millis(500));
+    };
+    assert_ne!(after["build"]["pid"].as_u64(), Some(old_pid));
+
+    // ...and the conversation that asked is told, from the new process, that it
+    // is done: the receipt came back into the same conversation, once.
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let details = loop {
+        let details = receipt_details(&machine);
+        if details.iter().any(|d| d.contains("completed")) {
+            break details;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the conversation was never told how the upgrade ended: {details:?}"
+        );
+        thread::sleep(Duration::from_millis(500));
+    };
+    let told: Vec<&String> = details
+        .iter()
+        .filter(|d| d.contains("gateway upgrade upg-"))
+        .collect();
+    assert_eq!(
+        told.iter().filter(|d| d.contains("completed")).count(),
+        1,
+        "the receipt is announced once: {details:?}"
+    );
+    assert!(
+        told.iter().any(|d| d.contains(&machine.revision_b[..12])),
+        "the receipt names the build now running: {details:?}"
+    );
+    // The line the old process sends when it accepts the ask is an acknowledgement,
+    // best effort: a connector that is not ready (the machine is loaded) drops it
+    // with a note on stderr. The receipt is the durable one, and is retried.
+    // The old gateway left by its drain, not by being killed.
+    assert_eq!(supervisor.exits.lock().unwrap().first(), Some(&Some(0)));
+}
+
+#[test]
+fn a_restart_that_brings_up_the_old_image_is_never_reported_as_the_upgrade() {
+    let machine = Machine::new();
+    machine.with_second_build();
+    // The service definition still names the old file (a supervisor pinned to
+    // build A), while the installer moves the managed link to build B: a NEW
+    // process comes up, but it is not the expected image.
+    let pinned = machine.root().join("pinned/aikit");
+    flip(&pinned, &machine.root().join("bin-a/aikit"));
+    let _supervisor = Supervisor::start_at(&machine, pinned);
+    let before = machine.wait_running();
+    machine.set_next(&machine.root().join("bin-b/aikit").display().to_string());
+    let applied = machine.ok(&[
+        "gateway",
+        "upgrade",
+        "apply",
+        "--install",
+        "--wait",
+        "--exit-wait-secs",
+        "5",
+        "--verify-timeout-secs",
+        "45",
+    ]);
+    assert_ne!(
+        outcome(&applied),
+        "completed",
+        "a different pid on the old image is not an upgrade: {applied}"
+    );
+    assert_eq!(outcome(&applied), "rolled-back", "{applied}");
+    let now = machine.wait_running();
+    assert_eq!(now["build"]["revision"], machine.revision_a);
+    assert_ne!(now["build"]["pid"], before["build"]["pid"]);
+}
+
+#[test]
+fn an_install_that_cannot_fit_is_refused_before_anything_is_changed() {
+    let machine = Machine::new();
+    let _supervisor = Supervisor::start(&machine);
+    let before = machine.wait_running();
+    // The floor is raised past any real disk: the refusal is the preflight's.
+    let output = Command::new(machine.dir.path().join("tools/aikit"))
+        .args([
+            "gateway",
+            "upgrade",
+            "apply",
+            "--install",
+            "--wait",
+            "--json",
+        ])
+        .env_clear()
+        .env("PATH", machine.path())
+        .env("HOME", machine.home())
+        .env("AIKIT_HOME", machine.home())
+        .env("AIKIT_UPGRADE_WORKER_MODE", "process")
+        .env("AIKIT_INSTALL_MIN_FREE_MIB", "999999999999")
+        .current_dir(machine.home())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let envelope: Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    assert_eq!(
+        envelope["error"]["code"], "gateway_upgrade.disk_low",
+        "{envelope}"
+    );
+    assert!(envelope["error"]["details"]["consequence"]
+        .as_str()
+        .unwrap()
+        .contains("Nothing was changed"));
+    // Nothing happened: no transaction, the installer never ran, the same process runs.
+    assert!(
+        !machine.home().join("state/gateway-upgrade").exists()
+            || std::fs::read_dir(machine.home().join("state/gateway-upgrade"))
+                .unwrap()
+                .next()
+                .is_none(),
+        "no transaction was created"
+    );
+    assert!(
+        !machine.root().join("oi.calls").exists(),
+        "the installer never ran"
+    );
+    assert_eq!(
+        machine.wait_running()["build"]["pid"],
+        before["build"]["pid"]
+    );
 }

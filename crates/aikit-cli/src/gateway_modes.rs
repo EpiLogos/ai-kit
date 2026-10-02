@@ -336,6 +336,8 @@ pub struct SetupInputs {
     pub tailnet_address: Option<String>,
     /// Whether a service definition already exists.
     pub service_installed: bool,
+    /// The `AIKIT_HOME` that existing definition serves, when it names one.
+    pub service_home: Option<String>,
     /// Serve mappings already on this node: `(tailnet port, target)`.
     pub serve_targets: Vec<(String, String)>,
     pub funnel_ports: Vec<String>,
@@ -404,6 +406,29 @@ pub fn plan_setup(inputs: &SetupInputs) -> Result<SetupPlan> {
             ),
         ));
     };
+    // The service definition is per user, not per AIKIT_HOME: installing from
+    // another home would replace the service of the home it really serves. Refused
+    // in the plan, before anything is touched; a separate instance is the way.
+    if inputs.service_installed {
+        if let Some(theirs) = &inputs.service_home {
+            let ours = inputs.aikit_home.display().to_string();
+            let canonical = |path: &str| {
+                std::fs::canonicalize(path)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| path.trim_end_matches('/').to_owned())
+            };
+            if canonical(&ours) != canonical(theirs) {
+                return Err(three_part(
+                    "gateway.setup_other_homes_service",
+                    format!(
+                        "The installed gateway service serves AIKIT_HOME={theirs}, and this is {ours}: setting up here would replace that service."
+                    ),
+                    "Nothing was planned or changed.",
+                    "Run setup against the service's own home, or name a separate instance first (`AIKIT_GATEWAY_SERVICE_INSTANCE=<name>`), which manages its own definition.",
+                ));
+            }
+        }
+    }
     let port = if inputs.port == 0 { 7788 } else { inputs.port };
     let mut steps: Vec<SetupStep> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
@@ -897,6 +922,9 @@ pub fn gather_inputs(home: &AikitHome, mode: &str) -> SetupInputs {
             .and_then(|text| text.lines().next().map(|line| line.trim().to_owned()))
             .filter(|line| !line.is_empty()),
         service_installed: crate::gateway_install::is_installed(&home_dir),
+        service_home: facts
+            .as_ref()
+            .and_then(|f| f.service.configured_home.clone()),
         serve_targets: facts
             .as_ref()
             .and_then(|f| f.tailscale.as_ref())
@@ -1006,6 +1034,24 @@ mod tests {
             &again.steps[2],
             SetupStep::InstallService { replace: true, .. }
         ));
+    }
+
+    #[test]
+    fn a_setup_from_another_home_refuses_instead_of_planning_to_replace_the_service() {
+        // The service of /h/.aikit; this setup is run from a throwaway home.
+        let mut other = inputs("tailscale-serve");
+        other.service_installed = true;
+        other.service_home = Some("/h/.aikit".into());
+        other.aikit_home = PathBuf::from("/tmp/throwaway-home");
+        let error = plan_setup(&other).unwrap_err();
+        assert_eq!(error.code(), "gateway.setup_other_homes_service");
+        // From the service's own home it is the ordinary replacement.
+        other.aikit_home = PathBuf::from("/h/.aikit");
+        assert!(plan_setup(&other).is_ok());
+        // With no service installed there is nothing to replace.
+        other.service_installed = false;
+        other.aikit_home = PathBuf::from("/tmp/throwaway-home");
+        assert!(plan_setup(&other).is_ok());
     }
 
     #[test]

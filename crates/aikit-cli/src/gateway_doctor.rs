@@ -85,10 +85,25 @@ pub struct ServiceFacts {
     pub token_location: Option<String>,
     pub owner_token_location: Option<String>,
     pub configured_gateway_ref: Option<String>,
+    /// The `AIKIT_HOME` the installed service serves (from its definition).
+    pub configured_home: Option<String>,
     /// `launchctl print` / `systemctl is-active`: whether the manager has it
     /// loaded and running. `None` when the manager could not be asked.
     pub manager_running: Option<bool>,
 }
+
+/// Free space on the volume that holds the gateway's state.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DiskFacts {
+    pub path: String,
+    pub free_kib: u64,
+}
+
+/// Below this the gateway's whole-file state writes (and anything else on the
+/// volume) start to fail halfway.
+pub const DISK_FAIL_KIB: u64 = 512 * 1024;
+/// Below this a managed install (which builds the suite) will not fit.
+pub const DISK_WARN_KIB: u64 = 5 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FirewallFacts {
@@ -127,6 +142,8 @@ pub struct StateFacts {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Facts {
+    /// The AIKit home these facts were gathered for.
+    pub home: Option<String>,
     pub running: Option<RunningFacts>,
     pub installed: Option<Identity>,
     pub service: ServiceFacts,
@@ -137,6 +154,7 @@ pub struct Facts {
     pub tailscale: Option<TailscaleFacts>,
     pub upgrade: UpgradeFacts,
     pub state: StateFacts,
+    pub disk: Option<DiskFacts>,
     pub foreign_gateways: Vec<String>,
 }
 
@@ -160,6 +178,20 @@ fn finding(
     }
 }
 
+/// Whether the installed service's definition names a different `AIKIT_HOME` than
+/// the one these facts are about. Paths are compared as written and as resolved.
+pub fn service_serves_another_home(facts: &Facts) -> bool {
+    let (Some(ours), Some(theirs)) = (&facts.home, &facts.service.configured_home) else {
+        return false;
+    };
+    let canonical = |path: &str| {
+        std::fs::canonicalize(path)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| path.trim_end_matches('/').to_owned())
+    };
+    canonical(ours) != canonical(theirs)
+}
+
 /// The port of a `HOST:PORT` bind.
 fn port_of(bind: &str) -> Option<&str> {
     bind.rsplit_once(':').map(|(_, port)| port)
@@ -176,6 +208,22 @@ pub fn diagnose(facts: &Facts) -> Report {
             "no gateway answers on this home's socket and no service is installed",
             vec![],
             Some("aikit gateway install-service   (or: aikit gateway serve --unix)"),
+        )),
+        // The installed service belongs to another AIKIT_HOME: it is not this
+        // home's gateway, so "not answering on this socket" says nothing about it.
+        (None, true) if service_serves_another_home(facts) => findings.push(finding(
+            "service.serves_other_home",
+            Severity::Warn,
+            "no gateway answers on this home's socket, and the installed service serves a \
+             different AIKIT_HOME: it is not this home's gateway",
+            vec![
+                format!("this home:    {}", facts.home.clone().unwrap_or_default()),
+                format!(
+                    "the service:  {}",
+                    facts.service.configured_home.clone().unwrap_or_default()
+                ),
+            ],
+            Some("run against the service's home (AIKIT_HOME=…), or name a separate instance with AIKIT_GATEWAY_SERVICE_INSTANCE=<name> before `install-service`"),
         )),
         (None, true) => findings.push(finding(
             "gateway.service_not_answering",
@@ -590,6 +638,35 @@ pub fn diagnose(facts: &Facts) -> Report {
         }
     }
 
+    // -- disk ------------------------------------------------------------------
+    if let Some(disk) = &facts.disk {
+        let mib = disk.free_kib / 1024;
+        if disk.free_kib < DISK_FAIL_KIB {
+            findings.push(finding(
+                "disk.low",
+                Severity::Fail,
+                format!(
+                    "{mib} MiB are free where the gateway keeps its state: it rewrites its whole \
+                     state file on every command, and on a full disk that write can tear"
+                ),
+                vec![format!("volume of {}", disk.path)],
+                Some("free space on that volume (build caches of retired work are the usual cause); `aikit gateway recover` repairs a state file that did tear"),
+            ));
+        } else if disk.free_kib < DISK_WARN_KIB {
+            findings.push(finding(
+                "disk.low",
+                Severity::Warn,
+                format!(
+                    "{mib} MiB are free where the gateway keeps its state: a managed install \
+                     (`upgrade apply --install`) builds the suite and needs at least {} MiB",
+                    crate::gateway_upgrade_system::install_min_free_kib() / 1024
+                ),
+                vec![format!("volume of {}", disk.path)],
+                Some("free space on that volume before installing; restarting onto an already-installed build (`aikit gateway upgrade apply`) needs none"),
+            ));
+        }
+    }
+
     // -- state ----------------------------------------------------------------
     if facts.state.exists && facts.state.parses == Some(false) {
         findings.push(finding(
@@ -798,6 +875,7 @@ pub fn gather(home: &AikitHome) -> Result<Facts> {
                 environment_value(&definition, "AIKIT_GATEWAY_LIFECYCLE");
             facts.service.configured_gateway_ref =
                 environment_value(&definition, "AIKIT_GATEWAY_REF");
+            facts.service.configured_home = environment_value(&definition, "AIKIT_HOME");
             facts.service.websocket_bind = definition_argument(&definition, "--ws");
             facts.service.token_location = definition_argument(&definition, "--ws-token-location");
             facts.service.owner_token_location =
@@ -857,6 +935,11 @@ pub fn gather(home: &AikitHome) -> Result<Facts> {
 
     // The state file.
     let state = home.gateway_state();
+    facts.disk = crate::gateway_upgrade_system::free_kib(&home.state()).map(|free_kib| DiskFacts {
+        path: home.state().display().to_string(),
+        free_kib,
+    });
+    facts.home = Some(home.root().display().to_string());
     facts.state.path = state.display().to_string();
     if let Ok(bytes) = std::fs::read(&state) {
         facts.state.exists = true;
@@ -1116,6 +1199,57 @@ mod tests {
         facts.installed.as_mut().unwrap().revision = "bbbb".into();
         facts.installed.as_mut().unwrap().executable_sha256 = Some("b".repeat(64));
         assert!(ids(&diagnose(&facts)).contains(&"gateway.stale"));
+    }
+
+    #[test]
+    fn a_nearly_full_disk_is_a_failure_and_a_tight_one_a_warning_with_the_install_floor() {
+        let mut facts = healthy();
+        facts.disk = Some(DiskFacts {
+            path: "/home/state".into(),
+            free_kib: 100 * 1024,
+        });
+        let report = diagnose(&facts);
+        let finding = report.findings.iter().find(|f| f.id == "disk.low").unwrap();
+        assert_eq!(finding.severity, Severity::Fail);
+        assert!(finding.what.contains("100 MiB"), "{}", finding.what);
+        assert_eq!(report.verdict, Severity::Fail);
+        facts.disk = Some(DiskFacts {
+            path: "/home/state".into(),
+            free_kib: 2 * 1024 * 1024,
+        });
+        let report = diagnose(&facts);
+        let finding = report.findings.iter().find(|f| f.id == "disk.low").unwrap();
+        assert_eq!(finding.severity, Severity::Warn);
+        assert!(
+            finding.what.contains("3072 MiB"),
+            "the install floor is named: {}",
+            finding.what
+        );
+        facts.disk = Some(DiskFacts {
+            path: "/home/state".into(),
+            free_kib: 50 * 1024 * 1024,
+        });
+        assert!(!ids(&diagnose(&facts)).contains(&"disk.low"));
+    }
+
+    #[test]
+    fn a_service_that_serves_another_home_is_named_not_called_not_answering() {
+        let mut facts = healthy();
+        facts.running = None;
+        facts.home = Some("/tmp/throwaway-home".into());
+        facts.service.configured_home = Some("/h/.aikit".into());
+        let report = diagnose(&facts);
+        assert!(
+            ids(&report).contains(&"service.serves_other_home"),
+            "{:#?}",
+            report.findings
+        );
+        assert!(!ids(&report).contains(&"gateway.service_not_answering"));
+        // The same home: the ordinary finding.
+        facts.home = Some("/h/.aikit".into());
+        let report = diagnose(&facts);
+        assert!(ids(&report).contains(&"gateway.service_not_answering"));
+        assert!(!ids(&report).contains(&"service.serves_other_home"));
     }
 
     #[test]

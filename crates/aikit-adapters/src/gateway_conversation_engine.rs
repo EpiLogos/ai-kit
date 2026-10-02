@@ -1771,25 +1771,29 @@ impl GatewayConversationEngine {
     /// queue. Best effort: a control answer that cannot be queued is said on
     /// stderr, never silently lost.
     fn send_surface_line(&self, binding_ref: &ResourceRef, text: impl Into<String>) {
-        let outcome = (|| -> Result<()> {
-            let mut kernel = self.gateway.lock().map_err(|_| poisoned())?;
-            let prepared = kernel.prepare_operation(
-                binding_ref,
-                OutboundOperationKind::Send {
-                    text: Some(text.into()),
-                    media: Vec::new(),
-                    reply_to_native_message_id: None,
-                },
-            )?;
-            persist_gateway_state(&kernel, self.state_file.as_deref())?;
-            self.queues
-                .queue_for(&prepared.connector_ref)
-                .push(prepared);
-            Ok(())
-        })();
-        if let Err(error) = outcome {
+        if let Err(error) = self.queue_surface_line(binding_ref, text) {
             eprintln!("conversation engine could not answer the surface: {error}");
         }
+    }
+
+    /// The same, but the failure is the caller's to know: a line somebody is
+    /// waiting for (an upgrade's receipt) must not be dropped with a note on
+    /// stderr while the caller believes it was delivered.
+    fn queue_surface_line(&self, binding_ref: &ResourceRef, text: impl Into<String>) -> Result<()> {
+        let mut kernel = self.gateway.lock().map_err(|_| poisoned())?;
+        let prepared = kernel.prepare_operation(
+            binding_ref,
+            OutboundOperationKind::Send {
+                text: Some(text.into()),
+                media: Vec::new(),
+                reply_to_native_message_id: None,
+            },
+        )?;
+        persist_gateway_state(&kernel, self.state_file.as_deref())?;
+        self.queues
+            .queue_for(&prepared.connector_ref)
+            .push(prepared);
+        Ok(())
     }
 
     fn try_typing(&self, binding: &GatewayBinding, active: bool) {
@@ -1833,7 +1837,14 @@ impl GatewayConversationEngine {
         let (result, line, surface_target, restart_requested) =
             self.perform(&binding_ref, &operation)?;
         if let Some(line) = line {
-            self.send_surface_line(surface_target.as_ref().unwrap_or(&binding_ref), line);
+            let target = surface_target.as_ref().unwrap_or(&binding_ref);
+            if matches!(operation, GatewayConversationOperation::Announce { .. }) {
+                // An announcement is a receipt somebody waits to be told: if it
+                // cannot be queued the caller learns it and tries again later.
+                self.queue_surface_line(target, line)?;
+            } else {
+                self.send_surface_line(target, line);
+            }
         }
         Ok(ConversationExecution {
             response: GatewayResponse::Conversation {
@@ -2562,6 +2573,7 @@ impl GatewayConversationEngine {
             )
         };
         Ok(DrainReport {
+            measured: true,
             reason: reason.to_owned(),
             started_at_unix_ms,
             finished_at_unix_ms: crate::gateway_posture::unix_ms_now(),
