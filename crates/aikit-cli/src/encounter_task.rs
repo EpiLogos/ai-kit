@@ -340,6 +340,81 @@ fn inspect(request: &TaskRequest, requirements: &Value) -> Result<Value> {
     }
     Ok(value)
 }
+/// The embedded Codex ACP connection uses npx, which writes package/runtime
+/// cache before the protocol opens. Keep those writes in the actual allocated
+/// Task T; neither ambient npm configuration nor another directory is a grant.
+fn task_npm_cache(
+    record: &TaskRecord,
+    body: &EncounterProvider,
+    argv: &[String],
+) -> Result<Option<PathBuf>> {
+    if body.from_profile.as_deref() != Some("codex")
+        || body.protocol != EncounterProtocol::Acp
+        || argv
+            .first()
+            .and_then(|program| Path::new(program).file_name())
+            != Some(std::ffi::OsStr::new("npx"))
+    {
+        return Ok(None);
+    }
+    let now = record
+        .allocation
+        .as_ref()
+        .ok_or_else(|| error("Codex runtime cache needs the actual native Task allocation"))?
+        .now_directory()?;
+    let requirements = record
+        .requirements
+        .as_ref()
+        .ok_or_else(|| error("Codex runtime cache needs the actual Task write boundary"))?;
+    let inspection = record
+        .inspection
+        .as_ref()
+        .ok_or_else(|| error("Codex runtime cache needs native protection inspection"))?;
+    if !now.is_absolute()
+        || !requirements["writable_paths"]
+            .as_array()
+            .is_some_and(|paths| paths.contains(&json!(now)))
+        || inspection["requirements"] != *requirements
+        || inspection["capabilities"]["supported"] != true
+        || !inspection["capabilities"]["coverage"]
+            .as_array()
+            .is_some_and(|coverage| {
+                [
+                    "file-content",
+                    "file-creation",
+                    "file-removal",
+                    "rename-link",
+                    "truncate",
+                ]
+                .iter()
+                .all(|required| coverage.contains(&json!(required)))
+            })
+    {
+        return Err(error(
+            "Codex runtime cache requires the exact protected Task T write aperture",
+        ));
+    }
+    let cache = now.join("runtime").join("npm-cache");
+    for directory in [&now, &now.join("runtime"), &cache] {
+        match fs::symlink_metadata(directory) {
+            Ok(metadata)
+                if metadata.is_dir()
+                    && !metadata.file_type().is_symlink()
+                    && directory.canonicalize().map_err(error)? == *directory => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && directory != &now => {}
+            Err(failure) => return Err(error(failure)),
+            _ => {
+                return Err(error(
+                    "Codex runtime cache ancestors must be real canonical directories",
+                ))
+            }
+        }
+    }
+    // Missing cache directories are created only by npm after Workcell applies
+    // its object-bound Task aperture; the unsandboxed launcher never mkdirs
+    // through a caller-controlled path or changes HOME.
+    Ok(Some(cache))
+}
 fn validate(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Result<()> {
     if record.schema != "aikit.encounter-task/v1" || !record.ready {
         return Err(error(
@@ -910,6 +985,7 @@ impl EncounterService {
             let default = crate::model_defaults::for_session(home, session, &resolved_body)?;
             model_argv = crate::model_defaults::launch_argv(&resolved_body, default.as_ref())?;
         }
+        let npm_cache = task_npm_cache(&record, &resolved_body, &model_argv)?;
         let mut command = Command::new(&record.request.workcell_boundary_bin);
         command
             .args([
@@ -928,6 +1004,9 @@ impl EncounterService {
             .env_remove("WORKCELL_CONTROL_TOKEN");
         if let Some(environment) = model_environment {
             environment.apply(&mut command);
+        }
+        if let Some(cache) = npm_cache {
+            command.env("npm_config_cache", cache);
         }
         if let Some(config_dir) = pi_config_dir {
             command.env("PI_CODING_AGENT_DIR", config_dir);

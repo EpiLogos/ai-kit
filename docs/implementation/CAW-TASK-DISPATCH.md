@@ -119,6 +119,22 @@ replacing itself with Workcell's native launcher. Central and Workcell control
 bearers are removed before provider execution; credential isolation against
 hostile same-UID readers remains a separate material/installed requirement.
 
+The embedded Codex ACP profile launches through `npx`. Its package and runtime
+cache is derived from this Task's actual Central allocation at
+`T/runtime/npm-cache`, then selected after the model environment is scrubbed.
+The exact native Workcell inspection must admit the allocated writable subtree
+and required filesystem operations. A protected ancestor is compatible with
+that explicit subtree; Workcell determines the protection relation. Existing
+runtime/cache directories must be canonical directories rather than symlinks.
+AIKit creates no cache directory before the material boundary applies and
+neither inherits ambient npm cache settings nor widens the Task grant.
+
+The CAW delivery gate runs real isolated native Task preparation, actual npm
+cache writes and public Codex ACP `--help`, plus production TaskExec redirection
+refusal. These cases carry no credentials or prompt. Native account opening,
+inference and attributable Factory Return require their separate operational
+proof; public package help is not that acceptance.
+
 ## Persistent material and the actual encounter host
 
 To require persistent Workcell material, add this field to the same task request:

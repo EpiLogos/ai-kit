@@ -612,9 +612,11 @@ use aikit_adapters::connection_process::ModelEnvironment;
 /// * a revoked or expired binding refuses either way: a withdrawn key is
 ///   never bypassed through the harness's own login.
 ///
-/// `None` means nothing was declared or bound: the child inherits the
-/// caller's environment. A selected Codex own-login policy takes the separate
-/// `resolved_execution` path, which scrubs ambient keys and pins CODEX_PATH.
+/// `None` means no env-var delivery was declared: the child inherits the
+/// caller's environment. A declared own-login fallback returns an empty
+/// environment when no key is bound, so the final child still scrubs ambient
+/// keys. A selected Codex own-login policy takes the separate
+/// `resolved_execution` path, which also pins CODEX_PATH.
 pub(crate) fn profile_environment(
     home: &AikitHome,
     session: &ResourceRef,
@@ -686,7 +688,7 @@ pub(crate) fn profile_environment(
         let secret = secret.ok_or_else(|| error("Missing delivered key material"))?;
         environment.push_credential(entry.env_var.clone(), secret)?;
     }
-    Ok((!environment.is_empty()).then_some(environment))
+    Ok(Some(environment))
 }
 
 /// The final-exec resolution of a bound-policy launch: the scoped argv and
@@ -709,7 +711,7 @@ fn resolved_execution(
 ) -> Result<ResolvedExecution> {
     let Some(model) = prepare(home, session, provider)? else {
         // No selected-model policy: the profile-declared key delivery is the
-        // whole launch environment (None when nothing is declared and bound),
+        // whole launch environment (None when no env-var delivery is declared),
         // which is the route that carries keys to non-pi harnesses.
         let environment = profile_environment(home, session, provider)?;
         return Ok(ResolvedExecution {
@@ -1038,6 +1040,7 @@ mod tests {
         assert!(environment.is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_unbound_declared_key_with_an_own_login_fact_is_an_honest_absence() {
         let temp = tempfile::tempdir().unwrap();
@@ -1046,7 +1049,47 @@ mod tests {
         // so an unbound binding does not refuse the launch.
         let environment =
             profile_environment(&home, &session(), &provider_with_program("claude")).unwrap();
-        assert!(environment.is_none());
+        // These process-local canaries carry no authentication material. The
+        // finite OS child reports presence only; it never launches a harness
+        // or attempts authentication. Apply the optional environment exactly
+        // as the native child launch does, so an incorrect None exposes the
+        // canaries to this child and fails the functional assertion below.
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg(
+            r#"if [ "${ANTHROPIC_API_KEY+x}" = x ] ||
+                  [ "${OPENAI_API_KEY+x}" = x ] ||
+                  [ "${PI_API_KEY+x}" = x ] ||
+                  [ "${CENTRAL_NATIVE_TOKEN+x}" = x ] ||
+                  [ "${CODEX_PATH+x}" = x ] ||
+                  [ "${NPM_CONFIG_CACHE+x}" = x ] ||
+                  [ "${npm_config_cache+x}" = x ] ||
+                  [ "${AIKIT_UNRELATED_ENV_CANARY+x}" = x ]; then
+                  printf 'ambient-present\n'
+               else
+                  printf 'ambient-withheld\n'
+               fi"#,
+        );
+        for name in [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "PI_API_KEY",
+            "CENTRAL_NATIVE_TOKEN",
+            "CODEX_PATH",
+            "NPM_CONFIG_CACHE",
+            "npm_config_cache",
+            "AIKIT_UNRELATED_ENV_CANARY",
+        ] {
+            command.env(name, "nonsecret-presence-canary");
+        }
+        if let Some(environment) = environment.as_ref() {
+            assert!(environment.is_empty(), "own-login delivers no bound key");
+            environment.apply(&mut command);
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert_eq!(output.stdout, b"ambient-withheld\n");
+        assert!(environment.is_some(), "declared delivery retains the scrub");
     }
 
     #[test]

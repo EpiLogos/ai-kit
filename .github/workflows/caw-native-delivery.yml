@@ -122,6 +122,12 @@ jobs:
             echo "AIKIT_CAW_CENTRAL_BIN=$GITHUB_WORKSPACE/.caw-native/Central/target/debug/ctrl"
           } >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/caw-evidence"
+          mkdir -p "$RUNNER_TEMP/caw-evidence/native-npm"
+          {
+            echo "AIKIT_CAW_NPM_BIN=$(command -v npm)"
+            echo "AIKIT_CAW_NPX_BIN=$(command -v npx)"
+            echo "AIKIT_CAW_NATIVE_NPM_EVIDENCE_DIR=$RUNNER_TEMP/caw-evidence/native-npm"
+          } >> "$GITHUB_ENV"
           git archive --format=tar.gz HEAD > "$RUNNER_TEMP/caw-evidence/aikit-source.tar.gz"
           {
             echo "AIKit=$(git rev-parse HEAD)"
@@ -154,10 +160,46 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p aikit-cli --test caw_task_dispatch -- --ignored --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
+          cargo test --locked -p aikit-cli --test caw_task_dispatch -- --ignored --skip npm_runtime:: --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
           grep -q TASK_NATIVE_PROTECTED_DISPATCH_EXECUTED "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
           grep -q TASK_NATIVE_PERSISTENT_STORAGE_EXECUTED "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
           grep -q TASK_NATIVE_WORKCELL_HOSTED_ENCOUNTER_EXECUTED "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
+      - name: Actual Task cache boundary and public ACP help without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout 10m cargo test --locked -p aikit-cli --test caw_task_dispatch npm_runtime::native_workcell_scrubbed_npm_writes_cache_only_inside_actual_task_t -- --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/native-npm-boundary.log"
+          timeout 10m cargo test --locked -p aikit-cli --test caw_task_dispatch npm_runtime::native_codex_task_exec_refuses_redirected_runtime_cache_without_task_write -- --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/native-npm-redirection.log"
+      - name: Own-login environment scrub regression and negative sensitivity
+        shell: bash
+        run: |
+          set -euo pipefail
+          case_name=an_unbound_declared_key_with_an_own_login_fact_is_an_honest_absence
+          timeout 10m cargo test --locked -p aikit-cli --lib "$case_name" -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/own-login-scrub.log"
+          grep -q 'test result: ok. 1 passed;' "$RUNNER_TEMP/caw-evidence/own-login-scrub.log"
+          source=crates/aikit-cli/src/encounter_model.rs
+          retained="$RUNNER_TEMP/caw-evidence/encounter_model.rs.accepted"
+          cp "$source" "$retained"
+          trap 'cp "$retained" "$source"' EXIT
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/aikit-cli/src/encounter_model.rs')
+          body = path.read_text()
+          accepted = '    Ok(Some(environment))\n}\n\n/// The final-exec'
+          predecessor = '    Ok((!environment.is_empty()).then_some(environment))\n}\n\n/// The final-exec'
+          assert body.count(accepted) == 1
+          path.write_text(body.replace(accepted, predecessor))
+          PY
+          git diff -- "$source" > "$RUNNER_TEMP/caw-evidence/own-login-scrub-negative.patch"
+          set +e
+          timeout 10m cargo test --locked -p aikit-cli --lib "$case_name" -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/own-login-scrub-negative.log"
+          test_status=${PIPESTATUS[0]}
+          set -e
+          test "$test_status" -ne 0
+          grep -E -q "test .*${case_name} .*FAILED" "$RUNNER_TEMP/caw-evidence/own-login-scrub-negative.log"
+          cp "$retained" "$source"
+          trap - EXIT
+          git diff --exit-code -- "$source"
       - name: Receipt, admission, ACP, placement, recurrence and duplicate regressions
         shell: bash
         run: |

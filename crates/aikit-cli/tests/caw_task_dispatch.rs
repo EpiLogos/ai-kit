@@ -1119,6 +1119,9 @@ fn first_pending_preparation_remains_bound_to_same_native_request() {
 #[path = "support/caw_task_material.rs"]
 mod material;
 
+#[path = "support/caw_task_npm_runtime.rs"]
+mod npm_runtime;
+
 #[test]
 #[ignore = "requires exact native Central, Actuation and Workcell executables; mandatory prepared-run lane"]
 fn native_prepared_run_preserves_authority_and_existing_worktree() {

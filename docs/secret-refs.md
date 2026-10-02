@@ -142,6 +142,9 @@ declared ref through the resolver suite) and is injected under the declared
 variable into the scrubbed final-child environment — never an empty or
 ambient value. Where the profile records an own-login fact for the provider,
 an unbound key is an honest absence and the harness's native login stands.
+The declared env-var delivery still applies an empty scrubbed child environment
+in that case, including when no selected-model policy is present. Absence of a
+bound key does not restore unrelated ambient credentials or control bearers.
 The Codex model-selected `provider:openai` path additionally requires the
 selected Codex executable to report a ChatGPT login, then launches under a
 scrubbed environment without `OPENAI_API_KEY` delivery. `CODEX_HOME`, when
