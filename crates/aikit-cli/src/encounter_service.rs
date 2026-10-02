@@ -2224,7 +2224,7 @@ impl EncounterService {
                     })?;
             }
         }
-        let opened_mode_observation = host.identity(&agent_session)?.binding.mode_observation;
+        let opened_mode_observation = lane.binding().mode_observation.clone();
         self.store.append(&agent_session,&json!({"kind":"binding","connection_generation":generation,"space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":owner_launcher_argv_digest,"body_basis":body_basis,"now_context_config_digest":blake3::hash(serde_json::to_vec(&configured.now_context).expect("NOW config JSON").as_slice()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"mode_observation":opened_mode_observation,"model_selection":model_reading,"launch_model_default":launch_default,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-resume"} else {"new-native-session"},"composed_tools_route":if mcp_native_fallback.is_some() {"harness-native-mcp-config-seam"} else {"session-wire-or-none"},"mcp_native_fallback_reason":mcp_native_fallback.as_ref().map(|(reason, _)| reason.clone())}))?;
         opening.binding_recorded = true;
         let drain = lane.clone();
