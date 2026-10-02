@@ -28,6 +28,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::Digest;
 
+#[path = "wiki_publication.rs"]
+pub mod publication;
+
 #[derive(Debug, Deserialize)]
 struct Manifest {
     schema: String,
@@ -488,45 +491,40 @@ impl ProjectCentralFilesystemBinding {
     /// `base_hash` is the SHA-256 `load_project_wiki_for_maintenance` returned
     /// alongside the objects `plan` was built from. The wiki is agent-maintained,
     /// so concurrent writers are the normal case: this re-verifies that hash
-    /// against the file on disk immediately before the rename — mirroring the
-    /// gate `crates/aikit-cli/src/wiki.rs` runs on its own write paths — and
+    /// under the shared canonical publication lock through durable rename, and
     /// refuses with the same typed error rather than silently discarding a
-    /// peer's write that landed first. The refusal leaves the on-disk file
-    /// exactly as the peer left it and removes the temp file; nothing of this
-    /// mutation is applied. A rewrite that happens to land byte-identical
+    /// peer's write that landed first. A pre-publication refusal leaves the
+    /// on-disk source exactly as the peer left it. Failed stages stay unpromoted;
+    /// post-publication readback loss is returned as an uncertain effect.
+    /// A rewrite that happens to land byte-identical
     /// content is never treated as a conflict.
+    /// Returns the physical owner's actual changed acknowledgement: `false`
+    /// leaves the exact bytes and modification time untouched.
     pub fn persist_agent_wiki(
         &self,
         plan: &AgentWikiMaintenancePlan,
         base_hash: &str,
-    ) -> Result<()> {
-        let key = ResourceRef::parse(self.semantic.canonical_wiki.as_str())?;
+    ) -> Result<bool> {
+        let before_publication = |error: AikitError| error.with("command_effect", "none");
+        let key = ResourceRef::parse(self.semantic.canonical_wiki.as_str())
+            .map_err(before_publication)?;
         let path = self.paths.get(&key).ok_or_else(|| {
             AikitError::new(
                 "projectcentral.canonical_wiki_unavailable",
                 "canonical ProjectCentral Agent Wiki is unavailable",
             )
-        })?;
-        let rendered = render_wiki_objects(&plan.next_objects)?;
-        let temporary = path.with_extension("json.aikit-tmp");
-        fs::write(&temporary, &rendered)
-            .map_err(|error| io_error("projectcentral.wiki_write", &temporary, error))?;
-
-        if current_wiki_hash(path)?.as_deref() != Some(base_hash) {
-            let _ = fs::remove_file(&temporary);
-            return Err(AikitError::new(
-                "knowledge.wiki_concurrent_write",
-                format!(
-                    "{} changed since it was read; a peer write landed first. Re-read the file and re-apply this mutation.",
-                    path.display()
-                ),
-            )
-            .with("path", path.display().to_string()));
-        }
-
-        fs::rename(&temporary, path)
-            .map_err(|error| io_error("projectcentral.wiki_replace", path, error))?;
-        Ok(())
+        }).map_err(before_publication)?;
+        let input = fs::read_to_string(path)
+            .map_err(|error| {
+                let kind = format!("{:?}", error.kind());
+                let raw_os_error = serde_json::json!(error.raw_os_error()).to_string();
+                before_publication(io_error("projectcentral.wiki_read", path, error)
+                    .with("cause_kind", kind).with("cause_raw_os_error", raw_os_error))
+            })?;
+        let rendered = render_wiki_objects(&input, &plan.next_objects)
+            .map_err(before_publication)?;
+        publication::publish_wiki(path, &rendered, base_hash)
+            .map_err(|error| error.with("command_effect", "unknown"))
     }
 
     pub fn project_root(&self) -> &Path {
@@ -1074,32 +1072,35 @@ fn content_hash(bytes: &[u8]) -> String {
     format!("{:x}", digest.finalize())
 }
 
-/// The current on-disk hash of the canonical Agent Wiki at `path`, or `None`
-/// when the file no longer exists — itself a change from whatever a caller
-/// read, so a base hash can never match it.
-fn current_wiki_hash(path: &Path) -> Result<Option<String>> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(content_hash(&bytes))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(io_error("projectcentral.wiki_read", path, error)),
+/// Preserve document headers and extension-bearing objects. An unchanged
+/// maintenance plan keeps its exact source bytes.
+fn render_wiki_objects(input: &str, objects: &[aikit_core::WikiObject]) -> Result<String> {
+    let current = parse_wiki_objects(input)?.into_iter()
+        .map(|object| (object.ref_id().clone(), object)).collect::<BTreeMap<_, _>>();
+    let next = objects.iter().cloned()
+        .map(|object| (object.ref_id().clone(), object)).collect::<BTreeMap<_, _>>();
+    if current == next {
+        return Ok(input.to_string());
     }
-}
-
-fn render_wiki_objects(objects: &[aikit_core::WikiObject]) -> Result<String> {
+    let mut document = serde_json::from_str::<Value>(input).map_err(|error| {
+        AikitError::new("projectcentral.wiki_serialize", error.to_string())
+    })?;
     let objects = objects
         .iter()
         .map(wiki_object_value)
         .collect::<Result<Vec<_>>>()?;
-    serde_json::to_string_pretty(&serde_json::json!({
-        "profile": CENTRAL_WIKI_PROFILE,
-        "objects": objects
-    }))
+    document.as_object_mut().ok_or_else(|| AikitError::new(
+        "projectcentral.wiki_serialize", "Agent Wiki document is not an object"))?
+        .insert("objects".into(), Value::Array(objects));
+    let rendered = serde_json::to_string_pretty(&document)
     .map_err(|error| {
         AikitError::new(
             "projectcentral.wiki_serialize",
             format!("could not serialize Agent Wiki: {error}"),
         )
-    })
+    })?;
+    aikit_core::WikiDocument::parse(&rendered)?.validate()?;
+    Ok(format!("{rendered}\n"))
 }
 
 fn wiki_object_value(object: &aikit_core::WikiObject) -> Result<Value> {
@@ -1547,6 +1548,32 @@ mod tests {
         assert!(reloaded
             .node(&ResourceRef::parse("wiki:node:uncontended").unwrap())
             .is_some());
+    }
+
+    #[test]
+    fn maintenance_preserves_header_extensions_and_exact_no_op_source() {
+        let (_temp, central, project) = fixture();
+        let path = project.join("ProjectCentral/agents/wiki/wiki.json");
+        let mut document: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        document["retained_owner_field"] = serde_json::json!({"meaning":"kept", "revision":7});
+        let input = format!("  {}\n\n", serde_json::to_string(&document).unwrap());
+        fs::write(&path, &input).unwrap();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let (current, basis) = binding.load_project_wiki_for_maintenance().unwrap();
+        let unchanged = plan_agent_wiki_maintenance(AgentWikiMaintenanceRequest {
+            current_objects: current.clone(), upserts: vec![],
+            observed_source_revisions: binding.observed_source_revisions(), human_source_proposals: vec![],
+        }).unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(!binding.persist_agent_wiki(&unchanged, &basis).unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), input);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        let plan = maintenance_plan(&binding, current, "wiki:node:retained-header");
+        assert!(binding.persist_agent_wiki(&plan, &basis).unwrap());
+        let after: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["retained_owner_field"], document["retained_owner_field"]);
+        assert!(SemanticWikiIndex::rebuild(binding.load_project_wiki().unwrap()).unwrap()
+            .node(&ResourceRef::parse("wiki:node:retained-header").unwrap()).is_some());
     }
 
     /// The race this whole change exists for: writer A reads the canonical

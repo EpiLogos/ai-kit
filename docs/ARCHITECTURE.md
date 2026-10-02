@@ -402,6 +402,41 @@ are not. `aikit doctor --json` is the published installed verification entry
 of this contract; the acceptance test
 `doctor_json_is_the_installed_native_verification_path` guards it.
 
+Multi-leg Wiki mutations retain the original failure code, message and details
+and add whole-invocation effect evidence in `error.details`. `command_effect`
+is `none`, `present` or `unknown`; `none` requires an observed pre-effect phase
+with no earlier effect. A failed second leg or `published="false"` alone does
+not establish absence. `completed_effects` and `failed_effect` are JSON strings
+describing acknowledged effects and the failed owner phase separately. The
+original failure remains available in the JSON-string `original_error`;
+existing cause, source, revision and publication markers are retained.
+Incomplete effects carry `outcome="partial"` or `"unknown"` and
+`automatic_retry="false"`. A caller must preserve the whole native envelope;
+it must not roll back acknowledged sources, resend automatically or mint a
+replacement operation identity. An unchanged Wiki is not a new publication.
+
+Wiki and SourcePool material have distinct effect scopes. Ingest may acknowledge
+Wiki publication and then fail preparing, publishing or pruning source-material
+shards. Each acknowledgement names only the effect actually observed; it does
+not promise a multi-file transaction. An OS material-write acknowledgement is
+not a claim of unverified durability or complete reconstruction. For a command
+that may mutate, an unmarked failure is conservatively uncertain. Explicit
+publication, partial/unknown outcome, completed effects or malformed/conflicting
+effect evidence take precedence over a claimed whole-command `none`.
+
+SourcePool refresh renders every next shard before effects, captures the old
+material bases, then delegates replacement and atomic no-clobber first creation
+to the shared physical publication adapter. Only after required replacements
+are acknowledged can exact old stale bases be removed through that adapter.
+Participating writers share its advisory lock; arbitrary external filesystem
+mutation is not excluded. Removal uncertainty carries `removed="true"` with
+the exact old basis and original cause; it is not Wiki publication. An
+incomplete corpus IO read refuses apply before Wiki/material refresh, retaining
+old bytes instead of treating unavailable material as deletion. Dry run still
+discloses skipped files. This does not establish fresh retrieval of retained
+unavailable material or resolve later audience withdrawal policy.
+
+
 ---
 
 ## 13. Performance budgets (experience targets, not correctness assumptions)

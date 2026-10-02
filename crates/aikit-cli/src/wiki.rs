@@ -33,7 +33,7 @@ use aikit_core::knowledge_wiki_write::{
     WikiMutationLedger, WikiMutationOutcome, ROOT_WIKI_SPACE_REF,
 };
 use aikit_core::projectcentral::{
-    plan_agent_wiki_maintenance, AgentWikiMaintenanceRequest, HumanSourceRevisionProposal,
+    plan_agent_wiki_maintenance, AgentWikiMaintenancePlan, AgentWikiMaintenanceRequest, HumanSourceRevisionProposal,
     CENTRAL_ROOT_WIKI_SOURCE, PROJECTCENTRAL_WIKI_SOURCE,
 };
 use aikit_core::resource::{ResourceRef, SourceRef};
@@ -460,8 +460,13 @@ fn space_link(args: &WikiSpaceLinkArgs) -> Result<WikiOutcome> {
         // The federated case: each side is written in its own file, through its
         // own gate, each advancing only the revisions it touches.
         Some(child_file) => {
-            let parent_outcome = mutate_file(&args.file, link)?;
-            let child_outcome = mutate_file(child_file, link)?;
+            let parent_receipt = mutate_file_receipt(&args.file, link)?;
+            let completed = parent_receipt.completed_effects();
+            let child_receipt = mutate_file_receipt(child_file, link).map_err(|error| {
+                extend_command_failure(error, &completed)
+            })?;
+            let parent_outcome = parent_receipt.outcome;
+            let child_outcome = child_receipt.outcome;
             let mut warnings = parent_outcome.warnings.clone();
             warnings.extend(child_outcome.warnings.clone());
             Ok(WikiOutcome::reported(
@@ -1231,11 +1236,18 @@ fn walk_corpus(root: &Path, extension: &str) -> Result<WalkedCorpus> {
     }
     let suffix = format!(".{extension}");
     let mut found: Vec<(String, PathBuf)> = Vec::new();
+    let mut skipped = Vec::new();
     for entry in walkdir::WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_map(std::result::Result::ok)
     {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                skipped.push(format!("corpus walk could not read an entry: {error}"));
+                continue;
+            }
+        };
         if !entry.file_type().is_file() {
             continue;
         }
@@ -1286,7 +1298,6 @@ fn walk_corpus(root: &Path, extension: &str) -> Result<WalkedCorpus> {
     found.sort_by(|left, right| left.0.cmp(&right.0));
 
     let mut corpus = Vec::with_capacity(found.len());
-    let mut skipped = Vec::new();
     for (relative, path) in found {
         match std::fs::read(&path) {
             Ok(bytes) => match String::from_utf8(bytes) {
@@ -1423,8 +1434,15 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
 
     let update = args.update;
     let file_display = args.file.display().to_string();
+    if !io_skipped.is_empty() {
+        return Err(command_failure(AikitError::new("knowledge.ingest_corpus_incomplete",
+            "corpus IO was incomplete; retained Wiki and SourcePool material were not refreshed")
+            .with("skipped", jval!(io_skipped).to_string()), &[], "AIKit/SourcePool",
+            &args.corpus, "read_corpus", "none"));
+    }
+    let rendered_material = render_source_pool(&material)?;
     let mut unchanged = 0usize;
-    let outcome = mutate_file(&args.file, |doc, ledger| {
+    let receipt = mutate_file_receipt(&args.file, |doc, ledger| {
         for object in objects {
             let ref_id = object.ref_id().clone();
             let touched = if doc.holds(&ref_id) {
@@ -1453,7 +1471,10 @@ fn ingest(args: &WikiIngestArgs) -> Result<WikiOutcome> {
         }
         Ok(())
     })?;
-    let written = write_source_pool(&pool_dir, &material)?;
+    let written = write_source_pool(&pool_dir, &rendered_material).map_err(|error| {
+        extend_command_failure(error, &receipt.completed_effects())
+    })?;
+    let outcome = receipt.outcome;
     summary["applied"] = jval!(true);
     summary["unchanged"] = jval!(unchanged);
     summary["source_pool_files"] = jval!(written);
@@ -1486,62 +1507,98 @@ fn source_pool_dir(args: &WikiIngestArgs) -> PathBuf {
 /// discoverable with headroom for a single outsized record.
 const SOURCE_POOL_SHARD_BYTES: usize = 1024 * 1024;
 
-/// Write the SourcePool material as discoverable `corpus-NNN.json` shards.
-///
-/// Only files this command owns are touched: stale `corpus-*.json` shards
-/// from a previous, larger run are removed so a shrinking corpus cannot
-/// leave orphaned bindings behind, and nothing else in the directory is
-/// read, moved or deleted.
-fn write_source_pool(dir: &Path, material: &[SourceMaterial]) -> Result<usize> {
-    std::fs::create_dir_all(dir).map_err(|error| {
-        AikitError::new(
-            "knowledge.ingest_source_pool_unwritable",
-            format!("{} could not be created: {error}", dir.display()),
-        )
-    })?;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with("corpus-") && name.ends_with(".json") {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
-    }
-    let mut shards = 0usize;
+/// Render the complete next material set before any Wiki or material effect.
+fn render_source_pool(material: &[SourceMaterial]) -> Result<Vec<String>> {
+    let mut rendered = Vec::new();
     let mut shard: Vec<&SourceMaterial> = Vec::new();
     let mut bytes = 0usize;
-    let flush = |shard: &mut Vec<&SourceMaterial>, shards: &mut usize| -> Result<()> {
-        if shard.is_empty() {
-            return Ok(());
+    let flush = |shard: &mut Vec<&SourceMaterial>, rendered: &mut Vec<String>| -> Result<()> {
+        if !shard.is_empty() {
+            rendered.push(serde_json::to_string_pretty(shard).map_err(|error| {
+                command_failure(AikitError::new("knowledge.ingest_source_pool_unwritable",
+                    format!("SourcePool material could not be rendered: {error}")), &[],
+                    "AIKit/SourcePool", Path::new("corpus"), "render", "none")
+            })?);
+            shard.clear();
         }
-        let path = dir.join(format!("corpus-{:03}.json", *shards));
-        let text = serde_json::to_string_pretty(&shard).map_err(|error| {
-            AikitError::new(
-                "knowledge.ingest_source_pool_unwritable",
-                format!("SourcePool material could not be rendered: {error}"),
-            )
-        })?;
-        std::fs::write(&path, text).map_err(|error| {
-            AikitError::new(
-                "knowledge.ingest_source_pool_unwritable",
-                format!("{} could not be written: {error}", path.display()),
-            )
-        })?;
-        *shards += 1;
-        shard.clear();
         Ok(())
     };
     for item in material {
         let size = item.body.len() + item.binding.title.len() + 512;
         if bytes + size > SOURCE_POOL_SHARD_BYTES && !shard.is_empty() {
-            flush(&mut shard, &mut shards)?;
+            flush(&mut shard, &mut rendered)?;
             bytes = 0;
         }
         shard.push(item);
         bytes += size;
     }
-    flush(&mut shard, &mut shards)?;
-    Ok(shards)
+    flush(&mut shard, &mut rendered)?;
+    Ok(rendered)
+}
+
+/// Recognise only the exact names emitted by the native shard writer. No lossy
+/// decoding or alternate zero padding may grant ownership of a foreign file.
+fn corpus_shard_index(name: &std::ffi::OsStr) -> Option<usize> {
+    let name = name.to_str()?;
+    let index = name.strip_prefix("corpus-")?.strip_suffix(".json")?.parse::<usize>().ok()?;
+    (name == format!("corpus-{index:03}.json")).then_some(index)
+}
+
+/// Refresh discoverable material through the same physical publication owner.
+/// The corpus remains source; these files remain a reconstructable material
+/// projection. All required replacements precede stale removal. A multi-file
+/// failure retains its exact acknowledgements, never promises a transaction.
+fn write_source_pool(dir: &Path, rendered: &[String]) -> Result<usize> {
+    let mut completed = Vec::new();
+    let io_failure = |path: &Path, phase: &str, error: std::io::Error, effects: &[Value], effect: &str| {
+        command_failure(AikitError::new("knowledge.ingest_source_pool_unwritable",
+            format!("{}: {error}", path.display()))
+            .with("cause_kind", format!("{:?}", error.kind()))
+            .with("cause_raw_os_error", jval!(error.raw_os_error()).to_string()),
+            effects, "AIKit/SourcePool", path, phase, effect)
+    };
+    if !dir.is_dir() {
+        std::fs::create_dir_all(dir)
+            .map_err(|error| io_failure(dir, "prepare_directory", error, &completed, "unknown"))?;
+        completed.push(jval!({"owner":"AIKit/SourcePool", "action":"prepare_directory",
+            "source_path":dir.display().to_string()}));
+    }
+    let entries = std::fs::read_dir(dir)
+        .map_err(|error| io_failure(dir, "inventory", error, &completed, "none"))?;
+    let mut previous = BTreeMap::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| io_failure(dir, "inventory", error, &completed, "none"))?;
+        if let Some(index) = corpus_shard_index(&entry.file_name()) {
+            let name = format!("corpus-{index:03}.json");
+            let path = entry.path();
+            let basis = aikit_adapters::projectcentral::publication::material_basis(&path)
+                .map_err(|error| command_failure(error, &completed, "AIKit/SourcePool",
+                    &path, "read_basis", "none"))?;
+            previous.insert(name, basis);
+        }
+    }
+    for (index, text) in rendered.iter().enumerate() {
+        let name = format!("corpus-{index:03}.json");
+        let path = dir.join(&name);
+        let changed = match previous.get(&name) {
+            Some(basis) => aikit_adapters::projectcentral::publication::publish_wiki(&path, text, basis),
+            None => aikit_adapters::projectcentral::publication::publish_absent_material(&path, text),
+        }.map_err(|error| command_failure(error, &completed, "AIKit/SourcePool", &path, "publication", "unknown"))?;
+        if changed {
+            completed.push(jval!({"owner":"AIKit/SourcePool", "action":"publish_material",
+                "source_path":path.display().to_string(), "base_hash":previous.get(&name),
+                "published_hash":content_hash(text.as_bytes())}));
+        }
+    }
+    for (name, basis) in previous {
+        if (0..rendered.len()).any(|index| name == format!("corpus-{index:03}.json")) { continue; }
+        let path = dir.join(&name);
+        aikit_adapters::projectcentral::publication::remove_material(&path, &basis)
+            .map_err(|error| command_failure(error, &completed, "AIKit/SourcePool", &path, "prune", "unknown"))?;
+        completed.push(jval!({"owner":"AIKit/SourcePool", "action":"remove_stale_material",
+            "source_path":path.display().to_string(), "base_hash":basis}));
+    }
+    Ok(rendered.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -1773,8 +1830,9 @@ fn root_space(document: &WikiDocument) -> Result<&WikiSpace> {
 // ---------------------------------------------------------------------------
 
 /// Run one mutation against one file and persist it: read, mutate in memory,
-/// validate the whole, render, atomic rename. A refusal anywhere leaves the
-/// file byte-identical — the rendered text exists only after the gate. The
+/// validate the whole, render, atomic rename. A pre-publication refusal leaves
+/// the source byte-identical; lost readback after rename is an uncertain effect.
+/// The
 /// hash of what was read travels to `persist` as the compare-and-swap base, so
 /// a peer's write landing between this read and the rename is refused rather
 /// than silently overwritten.
@@ -1782,11 +1840,97 @@ fn mutate_file<F>(path: &Path, mutate: F) -> Result<WikiMutationOutcome>
 where
     F: FnOnce(&mut WikiDocument, &mut WikiMutationLedger) -> Result<()>,
 {
-    let input = read(path)?;
+    Ok(mutate_file_receipt(path, mutate)?.outcome)
+}
+
+/// A local acknowledgement of the existing owner's actual publication, not
+/// another store or operation identity. A semantic no-op is not a new write.
+struct WikiFileReceipt {
+    outcome: WikiMutationOutcome,
+    publication: Option<Value>,
+}
+
+impl WikiFileReceipt {
+    fn completed_effects(&self) -> Vec<Value> {
+        self.publication.iter().cloned().collect()
+    }
+}
+
+fn mutate_file_receipt<F>(path: &Path, mutate: F) -> Result<WikiFileReceipt>
+where
+    F: FnOnce(&mut WikiDocument, &mut WikiMutationLedger) -> Result<()>,
+{
+    let before_publication = |error, phase| {
+        command_failure(error, &[], "AIKit/Wiki", path, phase, "none")
+    };
+    let input = read(path).map_err(|error| before_publication(error, "read"))?;
+    let physical_path = std::fs::canonicalize(path).map_err(|error| {
+        before_publication(AikitError::new("knowledge.wiki_file_unreadable", error.to_string())
+            .with("path", path.display().to_string()), "resolve_source")
+    })?;
     let base_hash = content_hash(input.as_bytes());
-    let (rendered, outcome) = apply_wiki_mutation(&input, mutate)?;
-    persist(path, &rendered, &base_hash)?;
-    Ok(outcome)
+    let (rendered, outcome) = apply_wiki_mutation(&input, mutate)
+        .map_err(|error| before_publication(error, "plan"))?;
+    let changed = aikit_adapters::projectcentral::publication::publish_wiki(path, &rendered, &base_hash)
+        .map_err(|error| command_failure(error, &[], "AIKit/Wiki", path, "publication", "unknown"))?;
+    let publication = changed.then(|| jval!({
+        "owner": "AIKit/Wiki", "action": "publish_wiki",
+        "source_path": physical_path.display().to_string(),
+        "base_hash": base_hash, "published_hash": content_hash(rendered.as_bytes()),
+        "touched": &outcome.touched,
+    }));
+    Ok(WikiFileReceipt { outcome, publication })
+}
+
+/// Preserve the native cause verbatim while describing this invocation's
+/// phases. JSON-valued details remain strings in the public schema-1 envelope.
+fn command_failure(
+    error: AikitError, completed: &[Value], owner: &str, path: &Path,
+    phase: &str, failed_effect: &str,
+) -> AikitError {
+    let original = error.details().get("original_error").cloned().unwrap_or_else(|| {
+        jval!({"code":error.code(), "message":error.message(), "details":error.details()}).to_string()
+    });
+    let mut all_completed = completed.to_vec();
+    if let Some(previous) = error.details().get("completed_effects") {
+        if let Ok(effects) = serde_json::from_str::<Vec<Value>>(previous) {
+            all_completed.extend(effects);
+        }
+    }
+    let uncertain = failed_effect != "none"
+        || error.details().get("published").is_some_and(|value| value == "true")
+        || error.details().get("outcome").is_some_and(|value| value == "unknown");
+    let effect = if uncertain { "unknown" } else if all_completed.is_empty() { "none" } else { "present" };
+    let failure = jval!({"owner":owner, "source_path":path.display().to_string(),
+        "phase":phase, "effect":failed_effect});
+    let error = error.with("original_error", original)
+        .with("command_effect", effect)
+        .with("completed_effects", jval!(all_completed).to_string())
+        .with("failed_effect", failure.to_string());
+    if effect == "none" { error } else {
+        error.with("outcome", if uncertain { "unknown" } else { "partial" })
+            .with("automatic_retry", "false")
+    }
+}
+
+fn extend_command_failure(error: AikitError, completed: &[Value]) -> AikitError {
+    // The child owner already classified its actual phase. Preserve that leg,
+    // adding earlier acknowledged effects instead of replacing its cause.
+    let mut all_completed = completed.to_vec();
+    if let Some(previous) = error.details().get("completed_effects") {
+        if let Ok(effects) = serde_json::from_str::<Vec<Value>>(previous) {
+            all_completed.extend(effects);
+        }
+    }
+    let child_effect = error.details().get("command_effect").map(String::as_str);
+    let known = matches!(child_effect, Some("none") | Some("present"));
+    let effect = if !known { "unknown" } else if child_effect == Some("none") && all_completed.is_empty() { "none" } else { "present" };
+    let error = error.with("command_effect", effect)
+        .with("completed_effects", jval!(all_completed).to_string());
+    if effect == "none" { error } else {
+        error.with("outcome", if known { "partial" } else { "unknown" })
+            .with("automatic_retry", "false")
+    }
 }
 
 fn read(path: &Path) -> Result<String> {
@@ -1796,6 +1940,8 @@ fn read(path: &Path) -> Result<String> {
             format!("could not read {}: {error}", path.display()),
         )
         .with("path", path.display().to_string())
+        .with("cause_kind", format!("{:?}", error.kind()))
+        .with("cause_raw_os_error", jval!(error.raw_os_error()).to_string())
     })
 }
 
@@ -1808,72 +1954,13 @@ fn content_hash(bytes: &[u8]) -> String {
     format!("{:x}", digest.finalize())
 }
 
-/// The current on-disk hash of `path`, or `None` when the file no longer
-/// exists — itself a change from whatever a caller read, so a base hash can
-/// never match it.
-fn current_hash(path: &Path) -> Result<Option<String>> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(content_hash(&bytes))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(AikitError::new(
-            "knowledge.wiki_file_unreadable",
-            format!(
-                "could not re-read {} to verify it is unchanged before writing: {error}",
-                path.display()
-            ),
-        )
-        .with("path", path.display().to_string())),
-    }
-}
-
-/// The atomic write: a temp file next to the target, then a rename — gated by
-/// an optimistic concurrency check run immediately before the rename.
-/// `base_hash` is the SHA-256 of the exact bytes the caller read before it
-/// mutated in memory; every write path in this file captures it at the same
-/// `read` call the mutation was built from. If the file on disk no longer
-/// hashes to that value, a peer's write landed first: this write refuses
-/// rather than silently discard it, and the target is left exactly as the
-/// peer left it — nothing of the peer's write is touched, and nothing of this
-/// mutation is applied. A crash mid-write still leaves the previous revision
-/// on disk, never a half document.
+/// Every native Wiki writer delegates exact-basis, metadata-preserving
+/// publication to the shared physical-file lock protocol.
 fn persist(path: &Path, rendered: &str, base_hash: &str) -> Result<()> {
-    let file_name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| "wiki.json".to_string());
-    let temp = path.with_file_name(format!(".{file_name}.tmp-{}", std::process::id()));
-    std::fs::write(&temp, rendered).map_err(|error| {
-        AikitError::new(
-            "knowledge.wiki_write_failed",
-            format!("could not write {}: {error}", temp.display()),
-        )
-        .with("path", temp.display().to_string())
-    })?;
-
-    if current_hash(path)?.as_deref() != Some(base_hash) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(AikitError::new(
-            "knowledge.wiki_concurrent_write",
-            format!(
-                "{} changed since it was read; a peer write landed first. Re-read the file and re-apply this mutation.",
-                path.display()
-            ),
-        )
-        .with("path", path.display().to_string()));
-    }
-
-    std::fs::rename(&temp, path).map_err(|error| {
-        let _ = std::fs::remove_file(&temp);
-        AikitError::new(
-            "knowledge.wiki_write_failed",
-            format!("could not replace {}: {error}", path.display()),
-        )
-        .with("path", path.display().to_string())
-    })
+    aikit_adapters::projectcentral::publication::publish_wiki(path, rendered, base_hash)?;
+    Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Small helpers
 // ---------------------------------------------------------------------------
 
 fn mutation_outcome(outcome: &WikiMutationOutcome) -> Value {
@@ -1971,6 +2058,14 @@ struct WikiMaintenanceRequest {
 /// proposals ride the receipt as decision pressure only, and a refused write
 /// leaves the file exactly as a peer left it.
 fn maintenance(cwd: &Path, args: &WikiMaintenanceArgs) -> Result<WikiOutcome> {
+    maintenance_command(cwd, args).map_err(|error| {
+        if error.details().contains_key("command_effect") { error } else {
+            command_failure(error, &[], "AIKit/Wiki", &cwd.join(PROJECTCENTRAL_WIKI_SOURCE), "prepare", "none")
+        }
+    })
+}
+
+fn maintenance_command(cwd: &Path, args: &WikiMaintenanceArgs) -> Result<WikiOutcome> {
     let binding = ProjectCentralFilesystemBinding::inspect(cwd, None)?;
     let (current_objects, base_hash) = binding.load_project_wiki_for_maintenance()?;
     let raw = if args.request.as_os_str() == "-" {
@@ -2003,26 +2098,25 @@ fn maintenance(cwd: &Path, args: &WikiMaintenanceArgs) -> Result<WikiOutcome> {
         observed_source_revisions: request.observed_source_revisions,
         human_source_proposals: request.human_source_proposals,
     })?;
-    binding.persist_agent_wiki(&plan, &base_hash)?;
-    let persisted = binding.load_project_wiki()?;
-    if persisted != plan.next_objects {
-        return Err(AikitError::new(
-            "knowledge.wiki_concurrent_write",
-            "readback after persist does not match the committed plan; a peer write landed in \
-             the window between the write and the readback — re-read and reconcile",
-        )
-        .with("wiki", PROJECTCENTRAL_WIKI_SOURCE));
-    }
+    let source_path = binding.project_root().join(PROJECTCENTRAL_WIKI_SOURCE);
+    let changed = binding.persist_agent_wiki(&plan, &base_hash).map_err(|error| {
+        let absent = error.details().get("command_effect").is_some_and(|value| value == "none");
+        command_failure(error, &[], "AIKit/Wiki", &source_path, "publication", if absent { "none" } else { "unknown" })
+    })?;
+    let completed = maintenance_completed(&binding, &plan, &base_hash, changed);
+    let persisted = maintenance_readback(&binding, &plan, &completed)?;
     let stale_resources = plan
         .stale_resources
         .iter()
         .map(|resource| resource.to_string())
         .collect::<Vec<_>>();
     let human_source_proposals = serde_json::to_value(&plan.human_source_proposals)
-        .map_err(|error| AikitError::new("knowledge.wiki_write_failed", error.to_string()))?;
+        .map_err(|error| command_failure(AikitError::new("knowledge.wiki_write_failed", error.to_string()),
+            &completed, "AIKit/Wiki", &source_path, "return", "none"))?;
     Ok(WikiOutcome {
         data: jval!({
             "state": "maintained",
+            "changed": changed,
             "wiki": PROJECTCENTRAL_WIKI_SOURCE,
             "objects": persisted.len(),
             "current_index_revision": plan.current_index_revision,
@@ -2032,6 +2126,33 @@ fn maintenance(cwd: &Path, args: &WikiMaintenanceArgs) -> Result<WikiOutcome> {
         warnings: vec![],
         exit_code: json::EXIT_OK,
     })
+}
+
+fn maintenance_completed(
+    binding: &ProjectCentralFilesystemBinding, plan: &AgentWikiMaintenancePlan, base_hash: &str, changed: bool,
+) -> Vec<Value> {
+    if changed { vec![jval!({
+        "owner":"AIKit/Wiki", "action":"publish_wiki",
+        "source_path":binding.project_root().join(PROJECTCENTRAL_WIKI_SOURCE).display().to_string(),
+        "source_ref":PROJECTCENTRAL_WIKI_SOURCE, "base_hash":base_hash,
+        "plan_index_revision":plan.current_index_revision,
+    })] } else { vec![] }
+}
+
+fn maintenance_readback(
+    binding: &ProjectCentralFilesystemBinding, plan: &AgentWikiMaintenancePlan, completed: &[Value],
+) -> Result<Vec<WikiObject>> {
+    let path = binding.project_root().join(PROJECTCENTRAL_WIKI_SOURCE);
+    let lost_readback = |error| command_failure(error, completed, "AIKit/Wiki", &path, "readback", "none");
+    let persisted = binding.load_project_wiki().map_err(lost_readback)?;
+    if persisted != plan.next_objects {
+        return Err(lost_readback(AikitError::new(
+            "knowledge.wiki_concurrent_write",
+            "readback after persist does not match the committed plan; a peer write landed in \
+             the window between the write and the readback — re-read and reconcile",
+        ).with("wiki", PROJECTCENTRAL_WIKI_SOURCE)));
+    }
+    Ok(persisted)
 }
 
 fn read_stdin() -> Result<String> {
@@ -2191,12 +2312,15 @@ mod concurrency_tests {
         let leftovers: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_name() != "wiki.json")
+            .filter(|entry| entry.file_name() != "wiki.json"
+                && entry.file_name() != ".wiki.json.publication.lock")
             .collect();
         assert!(
             leftovers.is_empty(),
             "a refused write must not leave a temp file behind: {leftovers:?}"
         );
+        assert!(fs::metadata(dir.path().join(".wiki.json.publication.lock")).unwrap().is_file(),
+            "the shared lock inode persists across publications and process restarts");
     }
 
     /// A rewrite that lands byte-identical content is not a peer's change —
@@ -2295,6 +2419,59 @@ mod maintenance_tests {
         let path = dir.path().join("request.json");
         write(&path, &format!(r#"{{"upserts":[{upserts_json}]}}"#));
         (dir, path)
+    }
+
+    #[test]
+    fn actual_peer_write_after_maintenance_publication_keeps_its_acknowledgement() {
+        let (_temp, project) = fixture();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, None).unwrap();
+        let (current_objects, basis) = binding.load_project_wiki_for_maintenance().unwrap();
+        let upsert = WikiObject::parse(&serde_json::from_str(&revision_two_upsert("Acknowledged owner plan")).unwrap()).unwrap();
+        let plan = plan_agent_wiki_maintenance(AgentWikiMaintenanceRequest {
+            current_objects, upserts: vec![upsert], observed_source_revisions: binding.observed_source_revisions(),
+            human_source_proposals: vec![],
+        }).unwrap();
+        let changed = binding.persist_agent_wiki(&plan, &basis).unwrap();
+        assert!(changed);
+        let completed = maintenance_completed(&binding, &plan, &basis, changed);
+        let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+        let peer = WikiObject::parse(&serde_json::from_str(&revision_two_upsert("Actual later peer")
+            .replace("\"revision\":2", "\"revision\":3")).unwrap()).unwrap();
+        mutate_file(&path, |doc, ledger| {
+            ledger.record(doc.update_object(peer)?);
+            Ok(())
+        }).unwrap();
+        let failure = maintenance_readback(&binding, &plan, &completed).unwrap_err();
+        assert_eq!(failure.code(), "knowledge.wiki_concurrent_write");
+        assert_eq!(failure.details()["command_effect"], "present");
+        assert_eq!(failure.details()["outcome"], "partial");
+        let retained: Value = serde_json::from_str(&failure.details()["completed_effects"]).unwrap();
+        assert_eq!(retained, jval!(completed));
+        let index = SemanticWikiIndex::rebuild(binding.load_project_wiki().unwrap()).unwrap();
+        assert_eq!(index.node(&ResourceRef::parse("wiki:node:purpose").unwrap()).unwrap().revision, 3);
+    }
+
+    #[test]
+    fn no_op_maintenance_then_real_read_failure_does_not_claim_publication() {
+        let (_temp, project) = fixture();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, None).unwrap();
+        let (current_objects, basis) = binding.load_project_wiki_for_maintenance().unwrap();
+        let plan = plan_agent_wiki_maintenance(AgentWikiMaintenanceRequest {
+            current_objects, upserts: vec![], observed_source_revisions: binding.observed_source_revisions(),
+            human_source_proposals: vec![],
+        }).unwrap();
+        let changed = binding.persist_agent_wiki(&plan, &basis).unwrap();
+        assert!(!changed);
+        let completed = maintenance_completed(&binding, &plan, &basis, changed);
+        assert!(completed.is_empty());
+        fs::remove_file(project.join(PROJECTCENTRAL_WIKI_SOURCE)).unwrap();
+        let original = binding.load_project_wiki().unwrap_err();
+        let failure = maintenance_readback(&binding, &plan, &completed).unwrap_err();
+        assert_eq!(failure.code(), original.code());
+        assert_eq!(failure.message(), original.message());
+        assert_eq!(failure.details()["command_effect"], "none");
+        assert_eq!(failure.details()["completed_effects"], "[]");
+        assert!(!failure.details().contains_key("published"));
     }
 
     #[test]

@@ -1,8 +1,9 @@
 //! `aikit wiki` end to end.
 //!
 //! The acceptance criteria are the framing law itself: a command names the file
-//! it writes, the whole validates before anything is persisted, a refusal
-//! leaves the file byte-identical, a dry run writes nothing, and the root
+//! it writes, the whole validates before anything is persisted, a pre-effect
+//! refusal leaves that file byte-identical, partial/unknown effects retain their
+//! real acknowledgements, a dry run writes nothing, and the root
 //! commands see the Central layout without ever inventing state.
 
 use std::fs;
@@ -152,11 +153,68 @@ fn root_document(children: &[&str]) -> String {
     )
 }
 
+fn native_tempdir(prefix: &str) -> TempDir {
+    let temporary = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
+    fs::create_dir_all(&temporary).unwrap();
+    tempfile::Builder::new().prefix(prefix).tempdir_in(&temporary).unwrap()
+}
+
 fn fixture() -> (TempDir, TempDir) {
-    let work = TempDir::new().unwrap();
-    let scratch = TempDir::new().unwrap();
+    let work = native_tempdir("native-wiki-work-");
+    let scratch = native_tempdir("native-wiki-cwd-");
     write(&work.path().join("wiki.json"), &document());
     (work, scratch)
+}
+
+#[test]
+fn canonical_wiki_writers_delegate_one_publication_contract() {
+    for (name, source) in [
+        ("wiki", include_str!("../src/wiki.rs")),
+        ("shape", include_str!("../src/wiki_shape.rs")),
+        ("construction", include_str!("../src/wiki_construct.rs")),
+        ("maintenance", include_str!("../../aikit-adapters/src/projectcentral.rs")),
+    ] {
+        assert!(source.contains("publication::publish_wiki("), "{name} must use the canonical publication contract");
+        assert!(!source.contains(".construction.lock") && !source.contains(".tmp-{}")
+            && !source.contains("fs::rename(&temporary, path)"),
+            "{name} must not retain an independent canonical publication route");
+    }
+}
+
+#[test]
+fn concurrent_real_cli_writers_preserve_every_acknowledged_node() {
+    use std::sync::{Arc, Barrier};
+    let (work, scratch) = fixture();
+    let path = work.path().join("wiki.json");
+    let barrier = Arc::new(Barrier::new(5));
+    let handles: Vec<_> = (0..4).map(|index| {
+        let path = path.clone();
+        let cwd = scratch.path().to_path_buf();
+        let barrier = barrier.clone();
+        std::thread::spawn(move || {
+            let resource = format!("wiki:node:concurrent-{index}");
+            barrier.wait();
+            let (status, envelope) = wiki(&cwd, &["wiki", "node", "create", &resource,
+                "--file", path.to_str().unwrap(), "--space", "wiki:space:child",
+                "--type", "Claim", "--source", "source:test:concurrent"]);
+            (resource, status, envelope)
+        })
+    }).collect();
+    barrier.wait();
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert!(results.iter().any(|(_, code, _)| *code == 0));
+    let source = read(&path);
+    let surviving = aikit_core::WikiDocument::parse(&source).unwrap();
+    surviving.validate().unwrap();
+    for (resource, status, envelope) in results {
+        if status == 0 {
+            assert!(surviving.holds(&aikit_core::ResourceRef::parse(&resource).unwrap()),
+                "acknowledged native result was lost: {resource}");
+        } else {
+            assert_eq!(envelope["error"]["code"], "knowledge.wiki_concurrent_write", "{envelope}");
+        }
+    }
+    assert!(surviving.holds(&aikit_core::ResourceRef::parse("wiki:node:a").unwrap()));
 }
 
 #[test]
@@ -519,8 +577,8 @@ fn a_refused_write_leaves_the_file_byte_identical() {
 
 #[test]
 fn a_prune_dry_run_writes_nothing_and_apply_removes_exactly_one_ref() {
-    let central = TempDir::new().unwrap();
-    let scratch = TempDir::new().unwrap();
+    let central = native_tempdir("native-wiki-root-");
+    let scratch = native_tempdir("native-wiki-cwd-");
     write(
         &central.path().join("Control/agents/wiki/wiki.json"),
         &root_document(&["central:wiki:project:alpha", "central:wiki:project:beta"]),
@@ -599,8 +657,8 @@ fn a_prune_dry_run_writes_nothing_and_apply_removes_exactly_one_ref() {
 
 #[test]
 fn the_root_doctor_reports_the_dangling_and_healthy_sets_and_writes_nothing() {
-    let central = TempDir::new().unwrap();
-    let scratch = TempDir::new().unwrap();
+    let central = native_tempdir("native-wiki-root-");
+    let scratch = native_tempdir("native-wiki-cwd-");
 
     // alpha is federated and real; beta is a ref with no project behind it.
     write(
@@ -649,8 +707,8 @@ fn the_root_doctor_reports_the_dangling_and_healthy_sets_and_writes_nothing() {
 
 #[test]
 fn the_root_doctor_exits_zero_when_every_child_resolves() {
-    let central = TempDir::new().unwrap();
-    let scratch = TempDir::new().unwrap();
+    let central = native_tempdir("native-wiki-root-");
+    let scratch = native_tempdir("native-wiki-cwd-");
 
     write(
         &central.path().join("Control/agents/wiki/wiki.json"),
@@ -692,8 +750,8 @@ fn the_root_doctor_exits_zero_when_every_child_resolves() {
 
 #[test]
 fn adopt_federates_an_authored_project_wiki_idempotently() {
-    let central = TempDir::new().unwrap();
-    let scratch = TempDir::new().unwrap();
+    let central = native_tempdir("native-wiki-root-");
+    let scratch = native_tempdir("native-wiki-cwd-");
     write(
         &central.path().join("Control/agents/wiki/wiki.json"),
         &root_document(&[]),
@@ -750,8 +808,8 @@ fn adopt_federates_an_authored_project_wiki_idempotently() {
 
 #[test]
 fn an_adopt_refuses_a_project_that_has_no_authored_wiki() {
-    let central = TempDir::new().unwrap();
-    let scratch = TempDir::new().unwrap();
+    let central = native_tempdir("native-wiki-root-");
+    let scratch = native_tempdir("native-wiki-cwd-");
     write(
         &central.path().join("Control/agents/wiki/wiki.json"),
         &root_document(&[]),
@@ -1626,6 +1684,10 @@ fn ingest_apply_writes_objects_then_refuses_a_rerun_without_update() {
         .expect("the source pool directory is written")
         .flatten()
         .map(|entry| entry.path())
+        .filter(|path| path.file_name().is_some_and(|name| {
+            let name = name.to_string_lossy();
+            name.starts_with("corpus-") && name.ends_with(".json")
+        }))
         .collect();
     assert_eq!(shards.len(), 1, "{shards:?}");
     let material: Value = serde_json::from_str(&read(&shards[0])).unwrap();
@@ -1897,4 +1959,414 @@ fn ingest_refuses_a_corpus_path_that_is_not_a_directory() {
         .as_str()
         .unwrap()
         .contains("not a directory"));
+}
+
+#[test]
+fn federated_link_failure_retains_the_first_publication_and_exact_cause() {
+    let (work, scratch) = fixture();
+    let parent = work.path().join("parent.json");
+    let missing = work.path().join("missing-child.json");
+    let root = "wiki:space:central-root";
+    let child = "wiki:space:project/phase-return";
+    write(&parent, &format!("{{\"objects\":[{}]}}", space(root, 1, &[], &[], &[])));
+    let args = ["wiki", "space", "link", root, child, "--file", parent.to_str().unwrap(),
+        "--child-file", missing.to_str().unwrap()];
+    let (code, failure) = wiki(scratch.path(), &args);
+    assert_ne!(code, 0);
+    assert_eq!(failure["error"]["code"], "knowledge.wiki_file_unreadable");
+    let details = &failure["error"]["details"];
+    assert_eq!(details["command_effect"], "present");
+    assert_eq!(details["outcome"], "partial");
+    assert_eq!(details["automatic_retry"], "false");
+    let completed: Value = serde_json::from_str(details["completed_effects"].as_str().unwrap()).unwrap();
+    assert_eq!(completed.as_array().unwrap().len(), 1);
+    assert_eq!(completed[0]["owner"], "AIKit/Wiki");
+    assert_eq!(completed[0]["source_path"], fs::canonicalize(&parent).unwrap().display().to_string());
+    let original: Value = serde_json::from_str(details["original_error"].as_str().unwrap()).unwrap();
+    assert_eq!(original["code"], "knowledge.wiki_file_unreadable");
+    assert_eq!(original["details"]["path"], missing.display().to_string());
+    let retained: Value = serde_json::from_str(&read(&parent)).unwrap();
+    assert_eq!(retained["objects"][0]["revision"], 2);
+    assert_eq!(retained["objects"][0]["child_space_refs"][0], child);
+    assert!(!missing.exists(), "the failed peer was never invented");
+
+    // The same real invocation now has a no-op first leg. Its second read
+    // failure cannot claim that a new publication occurred on replay.
+    let before = read(&parent);
+    let modified = fs::metadata(&parent).unwrap().modified().unwrap();
+    let (_, failure) = wiki(scratch.path(), &args);
+    assert_eq!(failure["error"]["details"]["command_effect"], "none");
+    assert_eq!(failure["error"]["details"]["completed_effects"], "[]");
+    assert_eq!(read(&parent), before);
+    assert_eq!(fs::metadata(&parent).unwrap().modified().unwrap(), modified);
+}
+
+#[test]
+fn ingest_material_preparation_failure_keeps_the_acknowledged_wiki() {
+    let (work, scratch) = fixture();
+    let corpus = work.path().join("corpus");
+    ingest_corpus_fixture(&corpus);
+    let wiki_json = work.path().join("ingested.json");
+    let blocked_pool = work.path().join("ordinary-file");
+    write(&wiki_json, "{\"objects\":[]}");
+    write(&blocked_pool, "retain this ordinary file");
+    let (code, failure) = wiki(scratch.path(), &["wiki", "ingest", corpus.to_str().unwrap(),
+        "--file", wiki_json.to_str().unwrap(), "--source-pool", blocked_pool.to_str().unwrap(), "--apply"]);
+    assert_ne!(code, 0);
+    assert_eq!(failure["error"]["code"], "knowledge.ingest_source_pool_unwritable");
+    let details = &failure["error"]["details"];
+    assert_eq!(details["command_effect"], "unknown", "an actual directory preparation attempt is not proof of no effect");
+    assert_eq!(details["automatic_retry"], "false");
+    let completed: Value = serde_json::from_str(details["completed_effects"].as_str().unwrap()).unwrap();
+    assert_eq!(completed.as_array().unwrap().len(), 1);
+    assert_eq!(completed[0]["owner"], "AIKit/Wiki");
+    let failed: Value = serde_json::from_str(details["failed_effect"].as_str().unwrap()).unwrap();
+    assert_eq!(failed["owner"], "AIKit/SourcePool");
+    assert_eq!(failed["phase"], "prepare_directory");
+    let retained: Value = serde_json::from_str(&read(&wiki_json)).unwrap();
+    assert!(retained["objects"].as_array().unwrap().iter().any(|object| object["ref"] == "wiki:node:record/A24"));
+    assert_eq!(read(&blocked_pool), "retain this ordinary file");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn actual_created_unreadable_source_pool_retains_known_wiki_and_directory_effects() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    struct CreatedPoolPermissions {
+        path: std::path::PathBuf,
+        identity: Option<(u64, u64)>,
+    }
+    impl Drop for CreatedPoolPermissions {
+        fn drop(&mut self) {
+            if let Some(identity) = self.identity {
+                if let Ok(metadata) = fs::symlink_metadata(&self.path) {
+                    if metadata.is_dir() && (metadata.dev(), metadata.ino()) == identity {
+                        if let Err(error) = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o700)) {
+                            eprintln!("actual owned test directory cleanup failed for {}: {error}", self.path.display());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let uid = Command::new("/usr/bin/id").arg("-u").output().unwrap();
+    assert!(uid.status.success(), "actual UID prerequisite failed: {uid:?}");
+    let uid = String::from_utf8(uid.stdout).unwrap();
+    assert_ne!(uid.trim(), "0", "real directory EACCES qualification requires a nonroot Linux/Mac process");
+    let (work, scratch) = fixture();
+    let corpus = work.path().join("corpus");
+    ingest_corpus_fixture(&corpus);
+    let wiki_json = work.path().join("ingested.json");
+    write(&wiki_json, "{\"objects\":[]}");
+    fs::set_permissions(&wiki_json, fs::Permissions::from_mode(0o644)).unwrap();
+    let before_wiki = read(&wiki_json);
+    let pool = work.path().join("ingested.sources");
+    assert!(!pool.exists());
+    let args = ["wiki", "ingest", corpus.to_str().unwrap(), "--file", wiki_json.to_str().unwrap(), "--apply"];
+    // Only the native child's creation mode changes. Existing source metadata
+    // is preserved by actual publication; no global test-process umask changes.
+    let output = Command::new("/bin/sh")
+        .args(["-c", "umask 0444 || exit 125; exec \"$@\"", "native-directory-partial"])
+        .arg(assert_cmd::cargo::cargo_bin("aikit")).args(args).arg("--json")
+        .current_dir(scratch.path()).output().unwrap();
+    let _pool_cleanup = CreatedPoolPermissions {
+        path: pool.clone(),
+        identity: fs::symlink_metadata(&pool).ok().filter(|metadata| metadata.is_dir())
+            .map(|metadata| (metadata.dev(), metadata.ino())),
+    };
+    assert_ne!(output.status.code(), Some(125), "actual subprocess-local umask must be available");
+    assert!(!output.status.success(), "actual unreadable directory inventory must fail");
+    let failure: Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("actual native error envelope missing: {error}; {output:?}"));
+    assert_eq!(failure["error"]["code"], "knowledge.ingest_source_pool_unwritable");
+    let details = &failure["error"]["details"];
+    assert_eq!(details["command_effect"], "present");
+    assert_eq!(details["outcome"], "partial");
+    assert_eq!(details["automatic_retry"], "false");
+    let completed: Value = serde_json::from_str(details["completed_effects"].as_str().unwrap()).unwrap();
+    assert_eq!(completed.as_array().unwrap().len(), 2);
+    assert_eq!(completed[0]["owner"], "AIKit/Wiki");
+    assert_eq!(completed[0]["source_path"], fs::canonicalize(&wiki_json).unwrap().display().to_string());
+    assert_eq!(completed[1]["owner"], "AIKit/SourcePool");
+    assert_eq!(completed[1]["action"], "prepare_directory");
+    assert_eq!(completed[1]["source_path"], pool.display().to_string());
+    let failed: Value = serde_json::from_str(details["failed_effect"].as_str().unwrap()).unwrap();
+    assert_eq!(failed["phase"], "inventory");
+    assert_eq!(failed["effect"], "none");
+    let original: Value = serde_json::from_str(details["original_error"].as_str().unwrap()).unwrap();
+    assert_eq!(original["code"], "knowledge.ingest_source_pool_unwritable");
+    assert_eq!(original["details"]["cause_kind"], "PermissionDenied");
+    let actual_io = fs::read_dir(&pool).unwrap_err();
+    assert_eq!(actual_io.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(actual_io.raw_os_error().is_some());
+    assert_eq!(original["details"]["cause_raw_os_error"], serde_json::json!(actual_io.raw_os_error()).to_string());
+    assert_ne!(read(&wiki_json), before_wiki, "actual acknowledged Wiki content must survive");
+    let acknowledged: Value = serde_json::from_str(&read(&wiki_json)).unwrap();
+    assert!(acknowledged["objects"].as_array().unwrap().iter()
+        .any(|object| object["ref"] == "wiki:node:record/A24"));
+    assert_eq!(fs::metadata(&wiki_json).unwrap().permissions().mode() & 0o777, 0o644);
+    assert_eq!(fs::metadata(&pool).unwrap().permissions().mode() & 0o777, 0o333);
+    // Cleanup is explicit after the retained physical state and real error
+    // have been inspected. It changes no published Wiki source.
+    drop(_pool_cleanup);
+    assert_eq!(fs::metadata(&pool).unwrap().permissions().mode() & 0o777, 0o700);
+    assert_eq!(fs::read_dir(&pool).unwrap().count(), 0, "no material was published");
+}
+
+#[test]
+fn incomplete_corpus_keeps_all_existing_wiki_and_material_bytes() {
+    let (work, scratch) = fixture();
+    let corpus = work.path().join("corpus");
+    ingest_corpus_fixture(&corpus);
+    let wiki_json = work.path().join("ingested.json");
+    write(&wiki_json, "{\"objects\":[]}");
+    let args = ["wiki", "ingest", corpus.to_str().unwrap(), "--file", wiki_json.to_str().unwrap(), "--apply", "--update"];
+    let (code, envelope) = wiki(scratch.path(), &args);
+    assert_eq!(code, 0, "{envelope}");
+    let material_path = work.path().join("ingested.sources/corpus-000.json");
+    let before_wiki = read(&wiki_json);
+    let before_material = read(&material_path);
+    fs::write(corpus.join("unreadable-text.md"), [0xff, 0xfe]).unwrap();
+    let (code, failure) = wiki(scratch.path(), &args);
+    assert_ne!(code, 0);
+    assert_eq!(failure["error"]["code"], "knowledge.ingest_corpus_incomplete");
+    assert_eq!(failure["error"]["details"]["command_effect"], "none");
+    assert_eq!(read(&wiki_json), before_wiki);
+    assert_eq!(read(&material_path), before_material);
+}
+
+#[cfg(unix)]
+#[test]
+fn rejected_material_replacement_retains_old_shards_and_acknowledged_wiki() {
+    use std::os::unix::fs::MetadataExt;
+    let (work, scratch) = fixture();
+    let corpus = work.path().join("corpus");
+    ingest_corpus_fixture(&corpus);
+    let wiki_json = work.path().join("ingested.json");
+    write(&wiki_json, "{\"objects\":[]}");
+    let args = ["wiki", "ingest", corpus.to_str().unwrap(), "--file", wiki_json.to_str().unwrap(), "--apply", "--update"];
+    let (code, envelope) = wiki(scratch.path(), &args);
+    assert_eq!(code, 0, "{envelope}");
+    let pool = work.path().join("ingested.sources");
+    let old = pool.join("corpus-000.json");
+    let stale = pool.join("corpus-999.json");
+    fs::copy(&old, &stale).unwrap();
+    let alias = work.path().join("actual-retained-material-alias");
+    fs::hard_link(&old, &alias).unwrap();
+    let basis = read(&old);
+    let metadata = fs::metadata(&old).unwrap();
+    let before_wiki = read(&wiki_json);
+    let source = corpus.join("symbolon/episteme/arguments/A24-Arbitration.md");
+    let next = format!("{}\nA subsequent authored observation.\n", read(&source));
+    fs::write(&source, next).unwrap();
+    let (code, failure) = wiki(scratch.path(), &args);
+    assert_ne!(code, 0);
+    assert_eq!(failure["error"]["code"], "knowledge.wiki_publication_identity");
+    let details = &failure["error"]["details"];
+    assert_eq!(details["command_effect"], "present");
+    assert_eq!(details["outcome"], "partial");
+    assert_eq!(details["automatic_retry"], "false");
+    let completed: Value = serde_json::from_str(details["completed_effects"].as_str().unwrap()).unwrap();
+    assert_eq!(completed.as_array().unwrap().len(), 1);
+    assert_eq!(completed[0]["owner"], "AIKit/Wiki");
+    assert_ne!(read(&wiki_json), before_wiki, "the earlier Wiki publication actually completed");
+    let failed: Value = serde_json::from_str(details["failed_effect"].as_str().unwrap()).unwrap();
+    assert_eq!(failed["owner"], "AIKit/SourcePool");
+    assert_eq!(failed["phase"], "read_basis");
+    assert_eq!(failed["effect"], "none");
+    let original: Value = serde_json::from_str(details["original_error"].as_str().unwrap()).unwrap();
+    assert_eq!(original["code"], "knowledge.wiki_publication_identity");
+    assert!(!original["details"].as_object().unwrap().contains_key("published"));
+    assert_eq!(read(&old), basis);
+    assert_eq!(read(&alias), basis);
+    assert_eq!(read(&stale), basis, "stale removal cannot precede the required replacement");
+    let after = fs::metadata(&old).unwrap();
+    assert_eq!((after.dev(), after.ino(), after.uid(), after.gid(), after.mode()),
+        (metadata.dev(), metadata.ino(), metadata.uid(), metadata.gid(), metadata.mode()));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn source_pool_basis_refuses_actual_symlink_and_fifo_substitutions_without_losing_wiki_acknowledgement() {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    use std::time::{Duration, Instant};
+
+    for fifo in [false, true] {
+        let (work, scratch) = fixture();
+        let corpus = work.path().join("corpus");
+        ingest_corpus_fixture(&corpus);
+        let wiki_json = work.path().join("ingested.json");
+        write(&wiki_json, "{\"objects\":[]}");
+        let args = ["wiki", "ingest", corpus.to_str().unwrap(), "--file", wiki_json.to_str().unwrap(), "--apply", "--update"];
+        let (code, envelope) = wiki(scratch.path(), &args);
+        assert_eq!(code, 0, "{envelope}");
+        let pool = work.path().join("ingested.sources");
+        let material = pool.join("corpus-000.json");
+        let physical_material = fs::canonicalize(&pool).unwrap().join("corpus-000.json");
+        let retained = pool.join("retained-original.json");
+        let stale = pool.join("corpus-999.json");
+        fs::copy(&material, &stale).unwrap();
+        let basis = read(&material);
+        let before = fs::metadata(&material).unwrap();
+        fs::rename(&material, &retained).unwrap();
+        let unselected = work.path().join("unselected-source.json");
+        write(&unselected, "retained unselected source");
+        if fifo {
+            let setup = Command::new("/usr/bin/mkfifo").arg(&material).output().unwrap();
+            assert!(setup.status.success(), "actual FIFO setup failed: {setup:?}");
+        } else {
+            std::os::unix::fs::symlink(&unselected, &material).unwrap();
+        }
+        let authored = corpus.join("symbolon/episteme/arguments/A24-Arbitration.md");
+        fs::write(&authored, format!("{}\nA subsequent authored observation.\n", read(&authored))).unwrap();
+        let before_wiki = read(&wiki_json);
+        // The actual native process must return without opening a blocking FIFO.
+        // A timeout retains its real output and fails; it never fabricates a refusal.
+        let mut child = Command::new(assert_cmd::cargo::cargo_bin("aikit"))
+            .args(args).arg("--json").current_dir(scratch.path())
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if child.try_wait().unwrap().is_some() { break; }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                let output = child.wait_with_output().unwrap();
+                panic!("actual SourcePool basis refusal did not return within its test bound: {output:?}");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(!output.status.success(), "actual nonordinary source must be refused");
+        let failure: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("actual native error envelope missing: {error}; {output:?}"));
+        assert_eq!(failure["error"]["code"], "knowledge.wiki_publication_identity");
+        let details = &failure["error"]["details"];
+        assert_eq!(details["command_effect"], "present");
+        assert_eq!(details["outcome"], "partial");
+        assert_eq!(details["automatic_retry"], "false");
+        let completed: Value = serde_json::from_str(details["completed_effects"].as_str().unwrap()).unwrap();
+        assert_eq!(completed.as_array().unwrap().len(), 1);
+        assert_eq!(completed[0]["owner"], "AIKit/Wiki");
+        assert_eq!(completed[0]["source_path"], fs::canonicalize(&wiki_json).unwrap().display().to_string());
+        assert_ne!(read(&wiki_json), before_wiki);
+        let failed: Value = serde_json::from_str(details["failed_effect"].as_str().unwrap()).unwrap();
+        assert_eq!(failed["owner"], "AIKit/SourcePool");
+        assert_eq!(failed["source_path"], material.display().to_string());
+        assert_eq!(failed["phase"], "read_basis");
+        assert_eq!(failed["effect"], "none");
+        let original: Value = serde_json::from_str(details["original_error"].as_str().unwrap()).unwrap();
+        assert_eq!(original["code"], "knowledge.wiki_publication_identity");
+        assert_eq!(original["details"]["path"], physical_material.display().to_string());
+        assert!(!original["details"].as_object().unwrap().contains_key("published"));
+        assert_eq!(read(&retained), basis);
+        assert_eq!(read(&stale), basis, "no prune after basis refusal");
+        assert_eq!(read(&unselected), "retained unselected source");
+        let after = fs::metadata(&retained).unwrap();
+        assert_eq!((after.dev(), after.ino(), after.uid(), after.gid(), after.mode()),
+            (before.dev(), before.ino(), before.uid(), before.gid(), before.mode()));
+        let substituted = fs::symlink_metadata(&material).unwrap();
+        if fifo { assert!(substituted.file_type().is_fifo()); }
+        else { assert!(substituted.file_type().is_symlink()); }
+    }
+}
+
+#[test]
+fn source_material_replacement_completes_before_stale_shards_are_removed() {
+    let (work, scratch) = fixture();
+    let corpus = work.path().join("corpus");
+    ingest_corpus_fixture(&corpus);
+    let wiki_json = work.path().join("ingested.json");
+    write(&wiki_json, "{\"objects\":[]}");
+    let args = ["wiki", "ingest", corpus.to_str().unwrap(), "--file", wiki_json.to_str().unwrap(), "--apply", "--update"];
+    let (code, envelope) = wiki(scratch.path(), &args);
+    assert_eq!(code, 0, "{envelope}");
+    let pool = work.path().join("ingested.sources");
+    let material = pool.join("corpus-000.json");
+    let stale = pool.join("corpus-999.json");
+    fs::copy(&material, &stale).unwrap();
+    let unrelated = pool.join("retained-other-owner.txt");
+    write(&unrelated, "other owner's material");
+    let source = corpus.join("symbolon/episteme/arguments/A24-Arbitration.md");
+    let next = format!("{}\nA subsequent authored observation.\n", read(&source));
+    fs::write(&source, &next).unwrap();
+    let (code, envelope) = wiki(scratch.path(), &args);
+    assert_eq!(code, 0, "{envelope}");
+    assert!(!stale.exists());
+    let retained: Value = serde_json::from_str(&read(&material)).unwrap();
+    let record = retained.as_array().unwrap().iter().find(|item| item["binding"]["source"] == "central:source:corpus:A24").unwrap();
+    assert_eq!(record["body"], next);
+    assert_eq!(read(&unrelated), "other owner's material");
+}
+
+#[cfg(unix)]
+#[test]
+fn actual_process_file_size_failure_during_staging_keeps_previous_material() {
+    let (work, scratch) = fixture();
+    let corpus = work.path().join("corpus");
+    ingest_corpus_fixture(&corpus);
+    let wiki_json = work.path().join("ingested.json");
+    write(&wiki_json, "{\"objects\":[]}");
+    let args = ["wiki", "ingest", corpus.to_str().unwrap(), "--file", wiki_json.to_str().unwrap(), "--apply", "--update"];
+    let (code, envelope) = wiki(scratch.path(), &args);
+    assert_eq!(code, 0, "{envelope}");
+    let pool = work.path().join("ingested.sources");
+    let material = pool.join("corpus-000.json");
+    let previous_material = read(&material);
+    let source = corpus.join("symbolon/episteme/arguments/A24-Arbitration.md");
+    fs::write(&source, format!("{}\n{}\n", read(&source), "Actual subsequent authored content. ".repeat(256))).unwrap();
+    let (code, envelope) = wiki(scratch.path(), &args);
+    assert_eq!(code, 0, "{envelope}");
+    let acknowledged_wiki = read(&wiki_json);
+    // Retain a real earlier material cut beside the current acknowledged
+    // Wiki, as the interrupted old refresh can leave it. No fake receipt.
+    fs::write(&material, &previous_material).unwrap();
+    let stale = pool.join("corpus-999.json");
+    fs::copy(&material, &stale).unwrap();
+    let binary = assert_cmd::cargo::cargo_bin("aikit");
+    let output = Command::new("/bin/sh")
+        .args(["-c", "ulimit -f 1 || exit 125; exec \"$@\"", "bounded-real-file-write"])
+        .arg(binary).args(args).arg("--json").current_dir(scratch.path()).output().unwrap();
+    assert_ne!(output.status.code(), Some(125), "native process file-size limit must be available");
+    assert!(!output.status.success(), "a real bounded write must fail, not a simulated provider");
+    assert_eq!(read(&wiki_json), acknowledged_wiki, "the first leg was a byte-identical no-op");
+    assert_eq!(read(&material), previous_material, "a failed stage must not truncate the retained destination");
+    assert_eq!(read(&stale), previous_material, "no destructive pruning before required replacement acknowledgement");
+}
+
+#[cfg(unix)]
+#[test]
+fn real_refresh_prunes_only_canonical_native_shards_and_preserves_foreign_names() {
+    use std::os::unix::ffi::OsStringExt;
+    let (work, scratch) = fixture();
+    let corpus = work.path().join("corpus");
+    ingest_corpus_fixture(&corpus);
+    let wiki_json = work.path().join("ingested.json");
+    write(&wiki_json, "{\"objects\":[]}");
+    let args = ["wiki", "ingest", corpus.to_str().unwrap(), "--file", wiki_json.to_str().unwrap(), "--apply", "--update"];
+    let (code, envelope) = wiki(scratch.path(), &args);
+    assert_eq!(code, 0, "{envelope}");
+    let pool = work.path().join("ingested.sources");
+    let canonical = pool.join("corpus-000.json");
+    let stale = pool.join("corpus-999.json");
+    let large_index_stale = pool.join("corpus-1000.json");
+    fs::copy(&canonical, &stale).unwrap();
+    fs::copy(&canonical, &large_index_stale).unwrap();
+    let foreign = [pool.join("corpus-notes.json"), pool.join("corpus-0000.json"),
+        pool.join(std::ffi::OsString::from_vec(b"corpus-\xff.json".to_vec()))];
+    for (index, path) in foreign.iter().enumerate() {
+        fs::write(path, format!("authored foreign source {index}\n")).unwrap();
+    }
+    let before: Vec<_> = foreign.iter().map(|path| fs::read(path).unwrap()).collect();
+    let source = corpus.join("symbolon/episteme/arguments/A24-Arbitration.md");
+    fs::write(&source, format!("{}\nActual next authored observation.\n", read(&source))).unwrap();
+    let (code, envelope) = wiki(scratch.path(), &args);
+    assert_eq!(code, 0, "{envelope}");
+    assert!(!stale.exists(), "the canonical native stale shard is removed");
+    assert!(!large_index_stale.exists(), "canonical native indices above 999 are still owned");
+    for (path, bytes) in foreign.iter().zip(before) { assert_eq!(fs::read(path).unwrap(), bytes); }
+    let material: Value = serde_json::from_str(&read(&canonical)).unwrap();
+    assert!(material.as_array().unwrap().iter().any(|record| record["binding"]["source"] == "central:source:corpus:A24"
+        && record["body"].as_str().unwrap().contains("Actual next authored observation.")));
 }

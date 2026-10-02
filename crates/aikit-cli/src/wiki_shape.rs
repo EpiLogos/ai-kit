@@ -419,56 +419,13 @@ fn content_hash(bytes: &[u8]) -> String {
     format!("{:x}", digest.finalize())
 }
 
-fn current_hash(path: &Path) -> Result<Option<String>> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(content_hash(&bytes))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(AikitError::new(
-            "knowledge.wiki_file_unreadable",
-            format!(
-                "could not re-read {} to verify it is unchanged before writing: {error}",
-                path.display()
-            ),
-        )
-        .with("path", path.display().to_string())),
-    }
-}
-
+/// Every native Wiki writer delegates exact-basis, metadata-preserving
+/// publication to the shared physical-file lock protocol.
 fn persist(path: &Path, rendered: &str, base_hash: &str) -> Result<()> {
-    let file_name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| "wiki.json".to_string());
-    let temp = path.with_file_name(format!(".{file_name}.tmp-{}", std::process::id()));
-    std::fs::write(&temp, rendered).map_err(|error| {
-        AikitError::new(
-            "knowledge.wiki_write_failed",
-            format!("could not write {}: {error}", temp.display()),
-        )
-        .with("path", temp.display().to_string())
-    })?;
-
-    if current_hash(path)?.as_deref() != Some(base_hash) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(AikitError::new(
-            "knowledge.wiki_concurrent_write",
-            format!(
-                "{} changed since it was read; a peer write landed first. Re-read the file and re-apply this mutation.",
-                path.display()
-            ),
-        )
-        .with("path", path.display().to_string()));
-    }
-
-    std::fs::rename(&temp, path).map_err(|error| {
-        let _ = std::fs::remove_file(&temp);
-        AikitError::new(
-            "knowledge.wiki_write_failed",
-            format!("could not replace {}: {error}", path.display()),
-        )
-        .with("path", path.display().to_string())
-    })
+    aikit_adapters::projectcentral::publication::publish_wiki(path, rendered, base_hash)?;
+    Ok(())
 }
+
 
 fn mutation_outcome(outcome: &WikiMutationOutcome) -> Value {
     jval!({
