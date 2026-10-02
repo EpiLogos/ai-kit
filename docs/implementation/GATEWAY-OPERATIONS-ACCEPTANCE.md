@@ -223,11 +223,17 @@ through the real `oi` in one transaction, the Mac by `oi update --apply
 | doctor after | `gateway.current`, `peer.ok` — "peer workcell:omarchy answers and runs the same build" | `gateway.current`, `peer.ok` — "peer workcell:mac answers and runs the same build" |
 
 The two machines run the same build, each says so about the other, and each
-reaches the other over the gateway carrier. One doctor reading was wrong:
-`firewall.running_not_allowed` stayed on the Mac while macOS itself answered
-`--getappblocked <that binary>` with "is permitted" — `--listapps` lags what the
-firewall auto-allows. The doctor now asks the firewall about each path directly
-and treats its answer as the evidence (`firewall_says_permitted`; test).
+reaches the other over the gateway carrier. One doctor reading was misleading:
+`firewall.running_not_allowed` (a Warn, with a `sudo` remedy) stayed on the Mac
+while Omarchy reached the Mac gateway — macOS admits signed binaries it never
+lists, and `socketfilterfw --listapps` cannot say which. A first attempt to ask
+`--getappblocked <path>` instead was **wrong**, found by the second independent
+verifier: that call answers "is permitted" for *any* path (`/bin/ls`,
+`/usr/bin/true`, a path that does not exist), which would have made the check
+unable to fire. The doctor now says only what the list can show (an Info: "the
+list does not name this binary; macOS may still admit it"), names the real test —
+a peer running `aikit gateway --at workcell:<this> protocol` — and gives the
+owner's `sudo` command only for the case where that queues or times out.
 
 ## Defects found by the lane's own gates after the first push
 
