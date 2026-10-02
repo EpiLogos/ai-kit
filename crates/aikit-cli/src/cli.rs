@@ -1066,7 +1066,6 @@ fn now_context_route(command: &NowContextCmd) -> &'static str {
         NowContextSub::Contemplate(_) => "cmd_now_contemplate",
         NowContextSub::TestSelection(_) => "cmd_now_test_selection",
         NowContextSub::PublishIntelligence(_) => "cmd_now_publish_intelligence",
-        NowContextSub::EntryRefine(_) => "cmd_now_entry_refine",
     }
 }
 
@@ -1623,21 +1622,6 @@ pub enum NowContextSub {
     /// into the participant's prepared view through the existing CAS publish
     /// path, and append one replayable change per published item.
     PublishIntelligence(Box<NowPublishIntelligenceArgs>),
-    /// Refine one session's development entry with the elected decision
-    /// provider, publishing by compare-and-swap against the emitted version.
-    /// The development-entry hook starts this detached; it is not a step a
-    /// person needs to run.
-    EntryRefine(NowEntryRefineArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct NowEntryRefineArgs {
-    #[arg(long)]
-    pub client: String,
-    #[arg(long)]
-    pub session: String,
-    #[arg(long = "checkout", value_name = "DIR")]
-    pub checkout: std::path::PathBuf,
 }
 
 #[derive(Debug, Args)]

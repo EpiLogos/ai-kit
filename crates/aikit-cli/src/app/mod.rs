@@ -2134,6 +2134,41 @@ impl Service {
                 decision.injected.push(commit.text.clone());
             }
         }
+        // Development entry: the work this Refocus is delivering for,
+        // prepared from its Run. It rides Refocus's own triggers (fresh
+        // occupancy, compaction, work transition, sustained work) and exists
+        // only when the body carries exactly one current work. A failure is
+        // named to the body; ordinary operation continues.
+        if let (Some(work), true) = (&inhabitation.work, decision.allowed && refocus.is_some()) {
+            let id = CapsuleId::parse(crate::development_entry::CAPABILITY)?;
+            if let Some(active) = self.view.active.get(&id) {
+                let session = crate::refocus::hook_session(&event.payload).unwrap_or_default();
+                let cwd = event
+                    .cwd
+                    .clone()
+                    .unwrap_or_else(|| self.invocation_cwd.clone());
+                let roots = self.catalog.capsule_roots();
+                let outcome = crate::development_entry::EntryConfig::from_table(&active.config)
+                    .and_then(|config| {
+                        crate::development_entry::deliver(
+                            work,
+                            &cwd,
+                            &event.client,
+                            &session,
+                            &config,
+                            &roots,
+                        )
+                    });
+                decision.injected.push(match outcome {
+                    Ok(text) => text,
+                    Err(error) => format!(
+                        "[Development entry unavailable] {}: {} — the work above stands; nothing was prepared for it this turn.",
+                        error.code(),
+                        error.message()
+                    ),
+                });
+            }
+        }
         Ok((decision, refocus))
     }
 
@@ -2225,45 +2260,6 @@ impl Service {
                     Err(error) => decision
                         .warnings
                         .push(format!("Wiki projection unavailable: {}", error.message())),
-                }
-            }
-        }
-
-        // Development entry: the concern-selected operative context for a body
-        // entered directly into a Project checkout or seat. Operative only when
-        // the composition selects its capsule; a failure is named in the
-        // body's context (ordinary operation continues) and never gates.
-        if matches!(
-            event.kind,
-            aikit_core::hooks::HookEventKind::SessionStart
-                | aikit_core::hooks::HookEventKind::UserPromptSubmit
-                | aikit_core::hooks::HookEventKind::PreCompact
-        ) {
-            let id = CapsuleId::parse(crate::development_entry::CAPABILITY)?;
-            if let Some(active) = self.view.active.get(&id) {
-                let central = crate::temporal::central_root_enclosing(event.cwd.as_deref());
-                let roots = self.catalog.capsule_roots();
-                let state = self.home.state();
-                let outcome = crate::development_entry::EntryConfig::from_table(&active.config)
-                    .and_then(|config| {
-                        crate::development_entry::deliver(&crate::development_entry::EntryRequest {
-                            event,
-                            client: &event.client,
-                            config: &config,
-                            state: &state,
-                            central: central.as_deref(),
-                            view: &self.view,
-                            capsule_roots: &roots,
-                        })
-                    });
-                match outcome {
-                    Ok(Some(text)) => decision.injected.push(text),
-                    Ok(None) => {}
-                    Err(error) => decision.injected.push(format!(
-                        "[Development entry unavailable] {}: {} — nothing was prepared for this turn; ordinary operation continues.",
-                        error.code(),
-                        error.message()
-                    )),
                 }
             }
         }

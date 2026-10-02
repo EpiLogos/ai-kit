@@ -2,7 +2,7 @@ schema = 1
 id = "hook/aikit/development-entry"
 kind = "hook"
 name = "Development entry"
-description = "Concern-selected operative context for a body entered directly into a Project checkout or workcell seat: at the first real prompt, the native engine selects exact sources (with revisions), the Project's capability-matrix rows and the practice depth the concern calls for (a small repair selects no Methodology), publishes the prepared view to the participant's Redis NOW, and re-delivers it after compaction or resume. References, not bodies. Absent by default; configure selection (ordinary | provider with provider_file and an explicit relevance_threshold) and redis_config. Delivery is emission on the harness context channel, not observed use."
+description = "The prepared operative context of the work a body is carrying. When Refocus delivers (fresh occupancy, compaction, a current-work transition, sustained work) for a body whose Position carries exactly one current work, the native engine prepares that Run through the existing NOW preparation: the work child NOW's exact sources, the WorkflowUnit's authored concern, required difference, praxis, verification and Return, and the unit's capability rows from the Project matrix, published to the participant's Redis NOW. Nothing is inferred from chat text; no current work, no entry. Absent by default; configure redis_config. Delivery is emission on the harness context channel, not observed use."
 tags = ["aikit", "continuity", "now-context", "development", "entry"]
 [hook]
 entry = "payload/development-entry"

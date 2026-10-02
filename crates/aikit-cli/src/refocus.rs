@@ -671,6 +671,10 @@ pub struct HookInhabitation {
     /// Replaces the historical temporal floor at SessionStart.
     pub lean_entry: Option<String>,
     pub refocus: Option<RefocusCommit>,
+    /// The work the delivered Refocus is for, when the join resolved exactly
+    /// one current work with its Run, unit and child NOW. The development
+    /// entry prepares this work; it is never derived from the prompt.
+    pub work: Option<crate::development_entry::WorkBinding>,
     pub warnings: Vec<String>,
 }
 
@@ -874,6 +878,7 @@ pub fn hook_prepare(ctx: &HookContext<'_>, event: &HookEvent) -> HookInhabitatio
                 .push(format!("refocus state could not be saved: {error}"));
         }
         if let RefocusDecision::Deliver(trigger) = decision {
+            out.work = crate::development_entry::WorkBinding::from_joined(&joined);
             out.refocus = Some(compose_delivery(
                 ctx,
                 &owners,
@@ -941,6 +946,7 @@ pub fn hook_prepare(ctx: &HookContext<'_>, event: &HookEvent) -> HookInhabitatio
         input.env_position = Some(position.clone());
         input.env_generation = Some(generation.clone());
         let joined = join(&owners, &input, &AikitReads::default());
+        out.work = crate::development_entry::WorkBinding::from_joined(&joined);
         out.refocus = Some(compose_delivery(
             ctx,
             &owners,
