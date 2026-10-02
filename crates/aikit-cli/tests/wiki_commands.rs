@@ -1319,8 +1319,26 @@ fn ingest_never_reads_a_room_the_owner_withheld_from_agent_retrieval() {
         &corpus.join("private/endpoint.md"),
         "---\nrecord_id: withheld-record\nrecord_type: note\n---\n\n# Withheld record\n",
     );
+    // A real unreadable-as-text body would become an IO diagnostic if the
+    // withheld subtree were read before its source eligibility was checked.
+    fs::write(corpus.join("private/not-agent-readable.md"), [0xff]).unwrap();
     let wiki_json = work.path().join("ingested.json");
     write(&wiki_json, "{\n  \"objects\": []\n}\n");
+
+    let (code, dry_run) = wiki(
+        scratch.path(),
+        &[
+            "wiki",
+            "ingest",
+            corpus.to_str().unwrap(),
+            "--file",
+            wiki_json.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{dry_run}");
+    assert_eq!(dry_run["data"]["records_selected"], 1);
+    assert_eq!(dry_run["data"]["io_skipped"], 0);
+    assert_eq!(read(&wiki_json), "{\n  \"objects\": []\n}\n");
 
     let (code, envelope) = wiki(
         scratch.path(),
@@ -1335,6 +1353,14 @@ fn ingest_never_reads_a_room_the_owner_withheld_from_agent_retrieval() {
     );
     assert_eq!(code, 0, "{envelope}");
     assert_eq!(envelope["data"]["records_selected"], Value::from(1));
+    assert_eq!(envelope["data"]["io_skipped"], 0);
+    let source_pool = work.path().join("ingested.sources");
+    let shard = read(&source_pool.join("corpus-000.json"));
+    assert!(shard.contains("open-record"));
+    assert!(!shard.contains("withheld-record"));
+    let material: Value = serde_json::from_str(&shard).unwrap();
+    assert!(material.as_array().unwrap().iter()
+        .any(|record| record["binding"]["source"] == "central:source:corpus:open-record"));
 
     let (code, envelope) = wiki(
         scratch.path(),
@@ -1356,6 +1382,79 @@ fn ingest_never_reads_a_room_the_owner_withheld_from_agent_retrieval() {
             .contains("withheld-record")),
         "the withheld room's record is not in the wiki: {hits:?}"
     );
+}
+
+#[test]
+fn selected_withheld_corpus_root_refuses_dry_run_and_apply_without_pruning_retained_material() {
+    let (work, scratch) = fixture();
+    let corpus = work.path().join("corpus");
+    write(
+        &corpus.join("open/record.md"),
+        "---\nrecord_id: retained-record\nrecord_type: note\n---\n\n# Retained record\n",
+    );
+    let wiki_json = work.path().join("ingested.json");
+    let pool = work.path().join("retained.sources");
+    write(&wiki_json, "{\n  \"objects\": []\n}\n");
+    let ingest_args = [
+        "wiki", "ingest", corpus.to_str().unwrap(), "--file",
+        wiki_json.to_str().unwrap(), "--source-pool", pool.to_str().unwrap(),
+    ];
+    let mut apply_args = ingest_args.to_vec();
+    apply_args.push("--apply");
+    let (code, initial) = wiki(scratch.path(), &apply_args);
+    assert_eq!(code, 0, "{initial}");
+    assert_eq!(initial["data"]["records_selected"], 1);
+    let retained_material: Value = serde_json::from_str(&read(&pool.join("corpus-000.json"))).unwrap();
+    assert!(retained_material.as_array().unwrap().iter()
+        .any(|record| record["binding"]["source"] == "central:source:corpus:retained-record"));
+    let mut retained = vec![(wiki_json.clone(), fs::read(&wiki_json).unwrap(), fs::metadata(&wiki_json).unwrap())];
+    for entry in fs::read_dir(&pool).unwrap() {
+        let path = entry.unwrap().path();
+        retained.push((path.clone(), fs::read(&path).unwrap(), fs::metadata(&path).unwrap()));
+    }
+    let before_names = fs::read_dir(&pool).unwrap().map(|entry| entry.unwrap().file_name())
+        .collect::<std::collections::BTreeSet<_>>();
+    write(&corpus.join(".no-agent-retrieval"), "The selected corpus is withheld.\n");
+    fs::write(corpus.join("open/not-agent-readable.md"), [0xff]).unwrap();
+
+    for args in [&ingest_args[..], &apply_args[..]] {
+        let (code, failure) = wiki(scratch.path(), args);
+        assert_ne!(code, 0, "{failure}");
+        assert_eq!(failure["error"]["code"], "knowledge.ingest_corpus_withheld");
+        let details = &failure["error"]["details"];
+        assert_eq!(details["command_effect"], "none");
+        assert_eq!(details["completed_effects"], "[]");
+        let failed: Value = serde_json::from_str(details["failed_effect"].as_str().unwrap()).unwrap();
+        assert_eq!(failed["phase"], "selection");
+        assert_eq!(failed["effect"], "none");
+        assert_eq!(failed["source_path"], corpus.to_str().unwrap());
+        for (path, bytes, metadata) in &retained {
+            assert_eq!(fs::read(path).unwrap(), *bytes, "{}", path.display());
+            let current = fs::metadata(path).unwrap();
+            assert_eq!(current.modified().unwrap(), metadata.modified().unwrap(), "{}", path.display());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                assert_eq!(current.ino(), metadata.ino(), "{}", path.display());
+            }
+        }
+        assert_eq!(fs::read_dir(&pool).unwrap().map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>(), before_names);
+    }
+
+    // A selected unmarked sibling remains useful; this refusal does not
+    // widen the marker's meaning to neighbouring corpora or retained copies.
+    let sibling = work.path().join("allowed-sibling");
+    write(&sibling.join("record.md"), "---\nrecord_id: allowed-sibling\nrecord_type: note\n---\n\n# Allowed sibling\n");
+    let sibling_wiki = work.path().join("sibling.json");
+    write(&sibling_wiki, "{\n  \"objects\": []\n}\n");
+    let (code, allowed) = wiki(scratch.path(), &[
+        "wiki", "ingest", sibling.to_str().unwrap(), "--file",
+        sibling_wiki.to_str().unwrap(), "--apply",
+    ]);
+    assert_eq!(code, 0, "{allowed}");
+    assert_eq!(allowed["data"]["records_selected"], 1);
+    assert!(read(&work.path().join("sibling.sources/corpus-000.json")).contains("allowed-sibling"));
 }
 
 fn ingest_corpus_fixture(root: &Path) {
@@ -2353,10 +2452,22 @@ fn real_refresh_prunes_only_canonical_native_shards_and_preserves_foreign_names(
     let large_index_stale = pool.join("corpus-1000.json");
     fs::copy(&canonical, &stale).unwrap();
     fs::copy(&canonical, &large_index_stale).unwrap();
-    let foreign = [pool.join("corpus-notes.json"), pool.join("corpus-0000.json"),
-        pool.join(std::ffi::OsString::from_vec(b"corpus-\xff.json".to_vec()))];
+    let mut foreign = vec![pool.join("corpus-notes.json"), pool.join("corpus-0000.json"),
+        pool.join("corpus-β.json")];
     for (index, path) in foreign.iter().enumerate() {
         fs::write(path, format!("authored foreign source {index}\n")).unwrap();
+    }
+    let non_utf8 = pool.join(std::ffi::OsString::from_vec(b"corpus-\xff.json".to_vec()));
+    match fs::write(&non_utf8, "authored foreign source with non-UTF8 filename\n") {
+        Ok(()) => foreign.push(non_utf8),
+        Err(error) => {
+            // The actual Mac CI filesystem rejects this filename with EILSEQ
+            // (Darwin errno 92). Retain that precise capacity limit while the
+            // Unicode and canonical-lookalike preservation cases still run.
+            assert!(cfg!(target_os = "macos") && error.raw_os_error() == Some(92),
+                "unexpected native non-UTF8 filename creation failure: {error}");
+            eprintln!("non-UTF8 filename preservation subcase unavailable: {error}; portable foreign-name cases remain active");
+        }
     }
     let before: Vec<_> = foreign.iter().map(|path| fs::read(path).unwrap()).collect();
     let source = corpus.join("symbolon/episteme/arguments/A24-Arbitration.md");

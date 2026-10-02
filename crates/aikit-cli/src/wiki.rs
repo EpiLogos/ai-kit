@@ -1234,6 +1234,48 @@ fn walk_corpus(root: &Path, extension: &str) -> Result<WalkedCorpus> {
         )
         .with("corpus", root.display().to_string()));
     }
+    // A selected excluded root is a refusal, not an empty successful refresh:
+    // an empty apply would otherwise prune material retained from an earlier run.
+    let check_root = || {
+        if root
+            .join(aikit_core::projectcentral::NO_AGENT_RETRIEVAL_MARKER)
+            .exists()
+        {
+            Err(command_failure(
+                AikitError::new(
+                    "knowledge.ingest_corpus_withheld",
+                    "the selected corpus root is withheld from agent retrieval",
+                )
+                .with("corpus", root.display().to_string()),
+                &[],
+                "AIKit/SourcePool",
+                root,
+                "selection",
+                "none",
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    check_root()?;
+    // Bound admission to the declared corpus, including its root. External
+    // ancestor and retained-copy withdrawal policy are separate contracts.
+    let withheld = |path: &Path| {
+        let mut directory = path.parent();
+        while let Some(ancestor) = directory {
+            if ancestor
+                .join(aikit_core::projectcentral::NO_AGENT_RETRIEVAL_MARKER)
+                .exists()
+            {
+                return true;
+            }
+            if ancestor == root {
+                break;
+            }
+            directory = ancestor.parent();
+        }
+        false
+    };
     let suffix = format!(".{extension}");
     let mut found: Vec<(String, PathBuf)> = Vec::new();
     let mut skipped = Vec::new();
@@ -1257,16 +1299,7 @@ fn walk_corpus(root: &Path, extension: &str) -> Result<WalkedCorpus> {
         // and the NOW-field reader honour. Ingest is a read; a room the
         // owner withheld from agent retrieval must not enter the wiki
         // through the back door of a corpus walk.
-        let withheld = path
-            .ancestors()
-            .skip(1)
-            .take_while(|ancestor| *ancestor != root)
-            .any(|ancestor| {
-                ancestor
-                    .join(aikit_core::projectcentral::NO_AGENT_RETRIEVAL_MARKER)
-                    .exists()
-            });
-        if withheld {
+        if withheld(path) {
             continue;
         }
         let name = path
@@ -1299,6 +1332,10 @@ fn walk_corpus(root: &Path, extension: &str) -> Result<WalkedCorpus> {
 
     let mut corpus = Vec::with_capacity(found.len());
     for (relative, path) in found {
+        check_root()?;
+        if withheld(&path) {
+            continue;
+        }
         match std::fs::read(&path) {
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(text) => corpus.push((relative, text)),
@@ -1311,6 +1348,7 @@ fn walk_corpus(root: &Path, extension: &str) -> Result<WalkedCorpus> {
             )),
         }
     }
+    check_root()?;
     Ok(WalkedCorpus {
         files: corpus,
         skipped,
@@ -2145,7 +2183,17 @@ fn maintenance_readback(
     let path = binding.project_root().join(PROJECTCENTRAL_WIKI_SOURCE);
     let lost_readback = |error| command_failure(error, completed, "AIKit/Wiki", &path, "readback", "none");
     let persisted = binding.load_project_wiki().map_err(lost_readback)?;
-    if persisted != plan.next_objects {
+    // Container order is not object identity. Compare complete objects by
+    // native ref while keeping every inner ordered value and extension exact.
+    let persisted_by_ref = persisted.iter()
+        .map(|object| (object.ref_id(), object)).collect::<BTreeMap<_, _>>();
+    let planned_by_ref = plan.next_objects.iter()
+        .map(|object| (object.ref_id(), object)).collect::<BTreeMap<_, _>>();
+    if persisted.len() != plan.next_objects.len()
+        || persisted_by_ref.len() != persisted.len()
+        || planned_by_ref.len() != plan.next_objects.len()
+        || persisted_by_ref != planned_by_ref
+    {
         return Err(lost_readback(AikitError::new(
             "knowledge.wiki_concurrent_write",
             "readback after persist does not match the committed plan; a peer write landed in \
@@ -2404,7 +2452,10 @@ mod maintenance_tests {
 
     /// A minimal ProjectCentral project: manifest plus canonical Agent Wiki.
     fn fixture() -> (TempDir, PathBuf) {
-        let temp = TempDir::new().unwrap();
+        let temporary = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
+        fs::create_dir_all(&temporary).unwrap();
+        let temp = tempfile::Builder::new().prefix("native-wiki-maintenance-")
+            .tempdir_in(&temporary).unwrap();
         let project = temp.path().join("Work/demo");
         write(&project.join("ProjectCentral/project.json"), MANIFEST);
         write(
@@ -2415,7 +2466,10 @@ mod maintenance_tests {
     }
 
     fn request_file(upserts_json: &str) -> (TempDir, PathBuf) {
-        let dir = TempDir::new().unwrap();
+        let temporary = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
+        fs::create_dir_all(&temporary).unwrap();
+        let dir = tempfile::Builder::new().prefix("native-wiki-maintenance-request-")
+            .tempdir_in(&temporary).unwrap();
         let path = dir.path().join("request.json");
         write(&path, &format!(r#"{{"upserts":[{upserts_json}]}}"#));
         (dir, path)
@@ -2506,18 +2560,94 @@ mod maintenance_tests {
     #[test]
     fn maintenance_replay_with_no_upserts_keeps_the_document_whole() {
         let (_temp, project) = fixture();
+        let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+        let mut original: Value = serde_json::from_str(&wiki_document()).unwrap();
+        original["owner_header"] = jval!({"retained": true});
+        original["objects"][1]["owner_extension"] = jval!({"ordered": ["first", "second"], "retained": true});
+        write(&path, &serde_json::to_string(&original).unwrap());
+        let before = fs::read(&path).unwrap();
+        let before_metadata = fs::metadata(&path).unwrap();
         let (_request_dir, request) = request_file("");
         let outcome = maintenance(&project, &WikiMaintenanceArgs { request }).unwrap();
         assert_eq!(outcome.data["objects"], 2);
-        // An empty upsert set re-persists the same objects; the document is
-        // still whole and valid either way.
-        let index = SemanticWikiIndex::rebuild(binding_objects(
-            &project.join("ProjectCentral/agents/wiki/wiki.json"),
-        ))
-        .unwrap();
-        assert!(index
-            .node(&ResourceRef::parse("wiki:node:purpose").unwrap())
-            .is_some());
+        assert_eq!(outcome.data["changed"], false);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let after_metadata = fs::metadata(&path).unwrap();
+        assert_eq!(after_metadata.modified().unwrap(), before_metadata.modified().unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(after_metadata.ino(), before_metadata.ino());
+        }
+        // The retained source starts with the Space, whereas the plan's native
+        // identity order starts with the Node. Neither rewrites this no-op.
+        let persisted = binding_objects(&path);
+        assert_eq!(persisted[0].ref_id().as_str(), "wiki:space:project");
+        let index = SemanticWikiIndex::rebuild(persisted).unwrap();
+        let node = index.node(&ResourceRef::parse("wiki:node:purpose").unwrap()).unwrap();
+        assert_eq!(node.extensions["owner_extension"]["ordered"], jval!(["first", "second"]));
+    }
+
+    #[test]
+    fn maintenance_readback_accepts_actual_top_level_reordering_only() {
+        let (_temp, project) = fixture();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, None).unwrap();
+        let (current_objects, basis) = binding.load_project_wiki_for_maintenance().unwrap();
+        let plan = plan_agent_wiki_maintenance(AgentWikiMaintenanceRequest {
+            current_objects, upserts: vec![], observed_source_revisions: binding.observed_source_revisions(),
+            human_source_proposals: vec![],
+        }).unwrap();
+        let changed = binding.persist_agent_wiki(&plan, &basis).unwrap();
+        assert!(!changed);
+        let completed = maintenance_completed(&binding, &plan, &basis, changed);
+        let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+        let mut peer: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        peer["objects"].as_array_mut().unwrap().reverse();
+        write(&path, &serde_json::to_string(&peer).unwrap());
+        let readback = maintenance_readback(&binding, &plan, &completed).unwrap();
+        assert_eq!(readback[0].ref_id().as_str(), "wiki:node:purpose");
+        assert_eq!(readback.len(), 2);
+        assert!(completed.is_empty());
+    }
+
+    #[test]
+    fn maintenance_readback_rejects_actual_inner_changes_loss_and_duplicate_identity() {
+        for alteration in ["inner-order", "extension", "missing", "duplicate"] {
+            let (_temp, project) = fixture();
+            let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+            let mut original: Value = serde_json::from_str(&wiki_document()).unwrap();
+            original["objects"][1]["owner_extension"] = jval!({"ordered": ["first", "second"], "retained": true});
+            write(&path, &serde_json::to_string(&original).unwrap());
+            let binding = ProjectCentralFilesystemBinding::inspect(&project, None).unwrap();
+            let (current_objects, basis) = binding.load_project_wiki_for_maintenance().unwrap();
+            let plan = plan_agent_wiki_maintenance(AgentWikiMaintenanceRequest {
+                current_objects, upserts: vec![], observed_source_revisions: binding.observed_source_revisions(),
+                human_source_proposals: vec![],
+            }).unwrap();
+            let changed = binding.persist_agent_wiki(&plan, &basis).unwrap();
+            assert!(!changed);
+            let completed = maintenance_completed(&binding, &plan, &basis, changed);
+            let mut peer: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            match alteration {
+                "inner-order" => peer["objects"][1]["owner_extension"]["ordered"].as_array_mut().unwrap().reverse(),
+                "extension" => peer["objects"][1]["owner_extension"]["retained"] = jval!(false),
+                "missing" => { peer["objects"].as_array_mut().unwrap().remove(1); }
+                "duplicate" => {
+                    let node = peer["objects"][1].clone();
+                    peer["objects"][0] = node;
+                }
+                _ => unreachable!(),
+            }
+            let actual_peer = serde_json::to_string(&peer).unwrap();
+            write(&path, &actual_peer);
+            let failure = maintenance_readback(&binding, &plan, &completed).unwrap_err();
+            assert_eq!(failure.code(), "knowledge.wiki_concurrent_write", "{alteration}");
+            assert_eq!(failure.details()["command_effect"], "none", "{alteration}");
+            assert_eq!(failure.details()["completed_effects"], "[]", "{alteration}");
+            let original_error: Value = serde_json::from_str(&failure.details()["original_error"]).unwrap();
+            assert_eq!(original_error["code"], "knowledge.wiki_concurrent_write", "{alteration}");
+            assert_eq!(read(&path).unwrap(), actual_peer, "readback does not undo the actual peer's {alteration}");
+        }
     }
 
     #[test]
