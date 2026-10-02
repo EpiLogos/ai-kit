@@ -961,8 +961,15 @@ pub fn gather(home: &AikitHome) -> Result<Facts> {
             let enabled = run_capture(socketfilterfw, &["--getglobalstate"])
                 .is_some_and(|text| text.contains("enabled"));
             let listed = run_capture(socketfilterfw, &["--listapps"]).unwrap_or_default();
+            // The list can lag behind what the firewall actually does with a binary
+            // it has just auto-allowed, so each path is also asked directly: the
+            // firewall's own answer for it is the evidence, the list is a fallback.
             let is_listed = |path: Option<&str>| {
-                path.map(|path| listed.lines().any(|line| line.contains(path)))
+                path.map(|path| {
+                    listed.lines().any(|line| line.contains(path))
+                        || run_capture(socketfilterfw, &["--getappblocked", path])
+                            .is_some_and(|answer| firewall_says_permitted(&answer))
+                })
             };
             let running_exe = facts
                 .running
@@ -1071,6 +1078,14 @@ pub fn run(home: &AikitHome) -> Result<Value> {
     let facts = gather(home)?;
     let report = diagnose(&facts);
     Ok(serde_json::to_value(&report).unwrap_or(Value::Null))
+}
+
+/// Whether the application firewall's answer to `--getappblocked <path>` says the
+/// binary's incoming connections are permitted ("Incoming connection to … is
+/// permitted."), as opposed to blocked or not part of the firewall's rules.
+pub fn firewall_says_permitted(answer: &str) -> bool {
+    let answer = answer.to_ascii_lowercase();
+    answer.contains("is permitted") && !answer.contains("not permitted")
 }
 
 /// The owner's command for the application firewall, with the real path (quoted:
@@ -1250,6 +1265,20 @@ mod tests {
         let report = diagnose(&facts);
         assert!(ids(&report).contains(&"gateway.service_not_answering"));
         assert!(!ids(&report).contains(&"service.serves_other_home"));
+    }
+
+    #[test]
+    fn the_firewalls_own_answer_for_a_path_is_read_as_permitted_or_not() {
+        assert!(firewall_says_permitted(
+            "Incoming connection to /Users/x/Library/Application Support/OI/products/ai-kit/abc/bin/aikit is permitted.\n"
+        ));
+        assert!(!firewall_says_permitted(
+            "Incoming connection to /x/aikit is blocked.\n"
+        ));
+        assert!(!firewall_says_permitted(
+            "The application is not part of the firewall."
+        ));
+        assert!(!firewall_says_permitted(""));
     }
 
     #[test]
