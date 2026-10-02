@@ -234,6 +234,9 @@ try:
         evidence["scenarios"].append(entry)
     status, _ = aikit("gateway", "doctor")
     evidence["doctor_verdict"] = status.get("data", {}).get("verdict") if isinstance(status, dict) else None
+    findings = status.get("data", {}).get("findings", []) if isinstance(status, dict) else []
+    evidence["doctor_findings"] = [{"id": f.get("id"), "severity": f.get("severity"), "what": (f.get("what") or "")[:160]}
+                                   for f in findings if str(f.get("severity")).lower() not in ("ok", "info")]
     evidence["leftover_worker_definitions"] = []
     if system == "darwin":
         la = os.path.expanduser("~/Library/LaunchAgents")

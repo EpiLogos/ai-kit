@@ -1106,7 +1106,6 @@ pub fn rollback_command(home: &AikitHome, id: &str) -> Result<Value> {
     let env = SystemEnv::new(home.clone())?;
     let store = env.store();
     let mut transaction = store.load(id)?;
-    require_latest(&store, id)?;
     if transaction
         .plan
         .installer
@@ -1120,6 +1119,7 @@ pub fn rollback_command(home: &AikitHome, id: &str) -> Result<Value> {
             "Restore the previous build with your installer, then `aikit gateway upgrade apply --restart-only`.",
         ));
     }
+    require_latest(&store, id)?;
     let _lock = lock_driver(&store, id)?;
     transaction.phase = crate::gateway_upgrade::Phase::RollingBack;
     transaction.rollback_requested = true;
@@ -1138,21 +1138,50 @@ pub fn rollback_command(home: &AikitHome, id: &str) -> Result<Value> {
     }))
 }
 
-/// `oi update --rollback` restores the previous set of the LATEST update. For an
-/// older upgrade that is a different build than the one that transaction would
-/// verify, so it is refused rather than ending in a confusing needs-operator.
+/// Whether this upgrade left a newly installed build in place: it ran the installer,
+/// the install took effect, and it was not undone. A restart-only upgrade, a
+/// `no-change`, an install that failed before changing anything and one already rolled
+/// back changed no installed set that the installer's rollback would restore.
+fn installed_a_build(transaction: &crate::gateway_upgrade::Transaction) -> bool {
+    use crate::gateway_upgrade::Phase;
+    transaction.plan.installer.is_some()
+        && transaction
+            .steps
+            .iter()
+            .any(|step| step.phase == Phase::Installed && step.ok)
+        && !matches!(
+            transaction.phase,
+            Phase::FailedBeforeChange | Phase::RolledBack
+        )
+        && transaction
+            .outcome
+            .as_ref()
+            .is_none_or(|outcome| outcome.status != "no-change")
+}
+
+/// `oi update --rollback` restores the previous set of the LATEST update that changed
+/// the installed build. For an older install that is a different build than the one
+/// that transaction would verify, so it is refused rather than ending in a confusing
+/// needs-operator. A restart-only or `no-change` upgrade run since does not count: it
+/// changed no installed set.
 fn require_latest(store: &Store, id: &str) -> Result<()> {
-    match store.list().last() {
-        Some(latest) if latest.id != id => Err(three_part(
+    match store.list().into_iter().rev().find(installed_a_build) {
+        Some(latest) if latest.id == id => Ok(()),
+        Some(latest) => Err(three_part(
             "gateway_upgrade.rollback_not_latest",
             format!(
-                "Upgrade {id} is not the latest ({}): the installer's rollback restores the previous set of the latest update.",
+                "Upgrade {id} is not the latest upgrade that changed the installed build ({}): the installer's rollback restores the previous set of that one.",
                 latest.id
             ),
             "Nothing was changed.",
-            format!("Roll back the latest (`aikit gateway upgrade rollback {}`), or restore the build you want with your installer and run `aikit gateway upgrade apply`.", latest.id),
+            format!("Roll back that one (`aikit gateway upgrade rollback {}`), or restore the build you want with your installer and run `aikit gateway upgrade apply`.", latest.id),
         )),
-        _ => Ok(()),
+        None => Err(three_part(
+            "gateway_upgrade.nothing_to_roll_back",
+            format!("No upgrade has left a newly installed build to roll back (asked for {id})."),
+            "Nothing was changed.",
+            "Restore the build you want with your installer, then `aikit gateway upgrade apply --restart-only`.",
+        )),
     }
 }
 
@@ -1392,25 +1421,133 @@ mod tests {
         store.save(&transaction).unwrap();
     }
 
+    /// An upgrade that ran the installer: `installed` says whether the install took
+    /// effect; `status` is its outcome.
+    fn install_in(
+        store: &Store,
+        id: &str,
+        phase: crate::gateway_upgrade::Phase,
+        updated: u64,
+        installed: bool,
+        status: Option<&str>,
+    ) {
+        let mut transaction: crate::gateway_upgrade::Transaction =
+            serde_json::from_value(serde_json::json!({
+                "schema": crate::gateway_upgrade::TRANSACTION_SCHEMA,
+                "id": id,
+                "created_at_unix_ms": updated,
+                "updated_at_unix_ms": updated,
+                "phase": serde_json::to_value(phase).unwrap(),
+                "requested_by": "test",
+                "plan": {
+                    "mode": "install-then-restart",
+                    "installer": {
+                        "install": ["oi", "update", "--apply", "ai-kit"],
+                        "rollback": ["oi", "update", "--rollback"],
+                        "timeout_ms": 1000
+                    },
+                    "drain_grace_ms": 1000,
+                    "exit_wait_ms": 1000,
+                    "verify_timeout_ms": 1000,
+                    "auto_rollback": true
+                },
+                "steps": if installed {
+                    serde_json::json!([{
+                        "at_unix_ms": updated,
+                        "phase": serde_json::to_value(crate::gateway_upgrade::Phase::Installed).unwrap(),
+                        "ok": true,
+                        "detail": "installed"
+                    }])
+                } else {
+                    serde_json::json!([])
+                },
+                "outcome": status.map(|status| serde_json::json!({
+                    "status": status,
+                    "summary": "test",
+                    "operator_steps": []
+                }))
+            }))
+            .unwrap();
+        transaction.receipt_delivered = true;
+        store.save(&transaction).unwrap();
+    }
+
     #[test]
-    fn only_the_latest_upgrade_can_be_rolled_back() {
+    fn only_the_latest_upgrade_that_changed_the_installed_build_can_be_rolled_back() {
+        use crate::gateway_upgrade::Phase;
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path());
-        transaction_in(
+        // Nothing installed anything yet: there is nothing to roll back.
+        transaction_in(&store, "upg-000", Phase::Completed, 1);
+        assert_eq!(
+            require_latest(&store, "upg-000").unwrap_err().code(),
+            "gateway_upgrade.nothing_to_roll_back"
+        );
+        install_in(
             &store,
             "upg-001",
-            crate::gateway_upgrade::Phase::Completed,
-            1,
+            Phase::Completed,
+            2,
+            true,
+            Some("completed"),
         );
-        transaction_in(
+        install_in(
             &store,
             "upg-002",
-            crate::gateway_upgrade::Phase::Completed,
-            2,
+            Phase::Completed,
+            3,
+            true,
+            Some("completed"),
         );
         let error = require_latest(&store, "upg-001").unwrap_err();
         assert_eq!(error.code(), "gateway_upgrade.rollback_not_latest");
+        assert!(error.message().contains("upg-002"), "{}", error.message());
         assert!(require_latest(&store, "upg-002").is_ok());
+        // Upgrades since that changed no installed set do not displace it: a
+        // restart-only run, a no-change, an install that failed before changing
+        // anything, and one that was already rolled back.
+        transaction_in(&store, "upg-003", Phase::Completed, 4);
+        install_in(
+            &store,
+            "upg-004",
+            Phase::Completed,
+            5,
+            true,
+            Some("no-change"),
+        );
+        install_in(
+            &store,
+            "upg-005",
+            Phase::FailedBeforeChange,
+            6,
+            false,
+            Some("failed-before-change"),
+        );
+        install_in(
+            &store,
+            "upg-006",
+            Phase::RolledBack,
+            7,
+            true,
+            Some("rolled-back"),
+        );
+        assert!(require_latest(&store, "upg-002").is_ok());
+        let error = require_latest(&store, "upg-001").unwrap_err();
+        assert!(error.message().contains("upg-002"), "{}", error.message());
+        // A later install does displace it.
+        install_in(
+            &store,
+            "upg-007",
+            Phase::Completed,
+            8,
+            true,
+            Some("completed"),
+        );
+        assert_eq!(
+            require_latest(&store, "upg-002").unwrap_err().code(),
+            "gateway_upgrade.rollback_not_latest"
+        );
+        assert!(require_latest(&store, "upg-007").is_ok());
     }
 
     #[test]
@@ -1477,6 +1614,26 @@ mod tests {
             Some("worker for upg-001"),
             "an unannounced receipt for a conversation is delivered by the next gateway"
         );
+        assert_eq!(spawned.borrow().len(), 2);
+        // A finished upgrade's receipt is not chased while it is fresh (its worker may
+        // be about to announce it), nor while a worker holds its lock.
+        let mut fresh = store.load("upg-001").unwrap();
+        fresh.updated_at_unix_ms = now;
+        store.save(&fresh).unwrap();
+        assert_eq!(
+            adopt_orphans_with(&home, spawn).unwrap(),
+            None,
+            "a fresh finished upgrade is left to its worker"
+        );
+        fresh.updated_at_unix_ms = now - 60_000;
+        store.save(&fresh).unwrap();
+        let held = lock_driver(&store, "upg-001").unwrap();
+        assert_eq!(
+            adopt_orphans_with(&home, spawn).unwrap(),
+            None,
+            "a finished upgrade whose lock is held is left alone"
+        );
+        drop(held);
         assert_eq!(spawned.borrow().len(), 2);
     }
 

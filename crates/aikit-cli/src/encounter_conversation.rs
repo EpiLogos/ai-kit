@@ -213,7 +213,7 @@ fn remote_encounter(
                 Choice::Legacy(why) => {
                     // Named, not silent: the owner's log says why this request
                     // went the legacy way.
-                    eprintln!("encounter route: {why}; using the {kind} route");
+                    eprintln!("{}", legacy_route_notice(&why, kind));
                 }
             }
         } else if kind == "gateway" {
@@ -224,6 +224,12 @@ fn remote_encounter(
         }
     }
     remote_encounter_legacy(route, request)
+}
+
+/// What the owner's log says when a request goes the legacy way instead of over the
+/// gateway: the reason, and the route it took.
+fn legacy_route_notice(why: &str, kind: &str) -> String {
+    format!("encounter route: {why}; using the {kind} route")
 }
 
 /// The ssh / exec route: for a Workcell with no declared gateway endpoint, or
@@ -1497,4 +1503,18 @@ pub(crate) fn spawn_worker(service: &Arc<EncounterService>) {
             };
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_legacy_route_is_named_with_its_reason_and_the_route_taken() {
+        let notice = legacy_route_notice("the gateway does not advertise the relay", "ssh");
+        assert_eq!(
+            notice,
+            "encounter route: the gateway does not advertise the relay; using the ssh route"
+        );
+    }
 }

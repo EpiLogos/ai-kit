@@ -1322,6 +1322,23 @@ pub fn receipt_line(transaction: &Transaction) -> String {
     line
 }
 
+/// Whether the predecessor may have been stopped while this transaction ran: a
+/// drain was attempted, a new process answered, or a different pid is running at the
+/// end. An upgrade that ended with the predecessor never asked to stop (`no-change`,
+/// an install that failed, a drain that found it busy) stopped nothing, so there is
+/// nothing in flight to report as unknown.
+fn predecessor_may_have_stopped(transaction: &Transaction) -> bool {
+    transaction.drain.is_some()
+        || transaction
+            .steps
+            .iter()
+            .any(|step| step.phase == Phase::Restarting)
+        || matches!(
+            (&transaction.before, &transaction.after),
+            (Some(before), Some(after)) if after.pid != before.pid
+        )
+}
+
 /// The receipt as data: everything an operator or an agent needs to see what
 /// happened, what was retained and what is uncertain.
 pub fn receipt_json(transaction: &Transaction) -> Value {
@@ -1336,13 +1353,13 @@ pub fn receipt_json(transaction: &Transaction) -> Value {
         "after": transaction.after,
         "drain": transaction.drain,
         "uncertain_effects": match (&transaction.drain, &transaction.before) {
-            (None, Some(_)) => json!({
+            (None, Some(_)) if predecessor_may_have_stopped(transaction) => json!({
                 "measured": false,
                 "note": "no drain report was recorded: what the predecessor had in flight \
                          when it stopped is UNKNOWN, not zero",
                 "law": "never replayed",
             }),
-            (None, None) => Value::Null,
+            (None, _) => Value::Null,
             (Some(report), _) => {
             if report.was_measured() {
                 json!({
@@ -1396,10 +1413,16 @@ pub fn receipt_markdown(transaction: &Transaction) -> String {
         describe(&transaction.after)
     ));
     if transaction.drain.is_none() && transaction.before.is_some() {
-        text.push_str(
-            "- drain: **no report recorded** — what the predecessor had in flight when it \
-             stopped is unknown, not zero\n",
-        );
+        if predecessor_may_have_stopped(transaction) {
+            text.push_str(
+                "- drain: **no report recorded** — what the predecessor had in flight when it \
+                 stopped is unknown, not zero\n",
+            );
+        } else {
+            text.push_str(
+                "- drain: none — the previous gateway was never asked to stop by this upgrade\n",
+            );
+        }
     }
     if let Some(drain) = &transaction.drain {
         if !drain.was_measured() {
@@ -1654,6 +1677,10 @@ mod tests {
                 .is_some_and(|limit| self.sleeps.get() >= limit)
             {
                 return Err(AikitError::new("test.worker_died", "the worker was killed"));
+            }
+            // The lenient reading maps "did not answer in time" to "nothing there".
+            if self.unresponsive.get() {
+                return Ok(None);
             }
             self.settle();
             Ok(self.gateway.borrow().clone())
@@ -2318,6 +2345,100 @@ mod tests {
             .unwrap()
             .summary
             .contains("did not answer"));
+    }
+
+    #[test]
+    fn an_old_process_that_does_not_answer_while_restarting_is_waited_for_and_never_replaced_around(
+    ) {
+        let script = Script::new(
+            Some(running(10, "aaaa", GatewayLifecycle::SupervisedLaunchd)),
+            identity("bbbb"),
+        );
+        script.unresponsive.set(true);
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let driver = Driver {
+            env: &script,
+            store: &store,
+        };
+        let mut transaction = driver
+            .create("test", None, plan(Mode::RestartOnly))
+            .unwrap();
+        transaction.before = Some(running(10, "aaaa", GatewayLifecycle::SupervisedLaunchd));
+        transaction.installed = Some(identity("bbbb"));
+        transaction.drain = Some(DrainReport {
+            measured: true,
+            ..DrainReport::default()
+        });
+        transaction.phase = Phase::Restarting;
+        driver.drive(&mut transaction).unwrap();
+        assert_eq!(
+            transaction.phase,
+            Phase::NeedsOperator,
+            "{:?}",
+            transaction.steps
+        );
+        assert_eq!(
+            script.start_calls.get(),
+            0,
+            "a second gateway was not started beside one that held the socket"
+        );
+        assert!(transaction
+            .outcome
+            .as_ref()
+            .unwrap()
+            .summary
+            .contains("did not stop"));
+    }
+
+    #[test]
+    fn a_gateway_that_was_never_asked_to_stop_is_not_reported_as_unknown_work() {
+        // Nothing to do: the predecessor keeps running, so nothing was in flight "when
+        // it stopped". The receipt must not claim an unknown.
+        let script = Script::new(
+            Some(running(10, "aaaa", GatewayLifecycle::SupervisedLaunchd)),
+            identity("aaaa"),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let driver = Driver {
+            env: &script,
+            store: &store,
+        };
+        let mut transaction = driver
+            .create("test", None, plan(Mode::RestartOnly))
+            .unwrap();
+        driver.drive(&mut transaction).unwrap();
+        assert_eq!(
+            transaction.outcome.as_ref().unwrap().status,
+            "no-change",
+            "{:?}",
+            transaction.steps
+        );
+        assert!(transaction.before.is_some() && transaction.drain.is_none());
+        assert!(
+            receipt_json(&transaction)["uncertain_effects"].is_null(),
+            "{}",
+            receipt_json(&transaction)
+        );
+        let markdown = receipt_markdown(&transaction);
+        assert!(
+            markdown.contains("never asked to stop") && !markdown.contains("unknown, not zero"),
+            "{markdown}"
+        );
+        // The same transaction, but the predecessor did stop: unknown, not zero.
+        let mut stopped = transaction.clone();
+        stopped.steps.push(Step {
+            at_unix_ms: 1,
+            phase: Phase::Restarting,
+            ok: true,
+            detail: "a new process is answering: pid 11".into(),
+        });
+        assert_eq!(
+            receipt_json(&stopped)["uncertain_effects"]["measured"],
+            json!(false)
+        );
+        assert!(receipt_markdown(&stopped).contains("unknown, not zero"));
     }
 
     #[test]

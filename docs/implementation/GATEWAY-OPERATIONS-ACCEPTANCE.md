@@ -219,6 +219,40 @@ last rows. Its findings, and where each is now:
 | **Found by the first launchd run of scenario 6 (it failed twice before this was repaired)**: a controlled instance's service definition never carried its own instance name (`AIKIT_GATEWAY_SERVICE_INSTANCE` was read only from the process environment). A gateway started by launchd therefore resolved "the installed build" from the **default** service definition — on that machine, the real service's — and the asked-for upgrade ended `needs-operator` ("expected revision 8c6c48f03996", the real service's executable) while the instance had in fact restarted onto the right image. The real service was never touched | **Repaired**: `ServiceOptions::environment()` writes the instance into the definition (the default service writes none), so a gateway and the workers it starts act on their own definition; test `a_named_instances_definition_carries_its_own_name_and_the_default_service_does_not`. Instances installed before this repair carry no name and are rehearsal instances only |
 | The Mac had no real-`oi` `apply --install` transaction (only `--restart-only`) | **Open**: the Mac's installed cut has since been replaced by another lane's, and moving it would disturb that lane; see "Not shown" |
 
+## Third independent verification (a third session that did not build it)
+
+A third fresh verifier took the **published commit** `417d6d72` of #488 (not the
+builder's tree), re-ran the suites, mutation-tested each repair on Omarchy, ran the
+rehearsal under real systemd with the instance-name fix reverted, and read both real
+services without acting on them. **Verdict: #488 is safe to land as a repair.** It
+did not call the lane a usable end-to-end feature, and neither does this record.
+
+| Finding | State |
+|---|---|
+| Suites on the published commit: fmt clean; adapters `gateway_` 83; cli lib 81; engine 29; the nine real-binary upgrade tests each as its own process, all exit 0; clippy `-D warnings` clean; CI 17 pass, 2 skipped (`proof`, `register`) | reproduced |
+| **Mutation, instance-name fix** (instance push removed): rehearsal scenario 6 **fails under real systemd** ("installed build is 3ee08a9081c9", the real Omarchy unit's executable) — the same failure as on the Mac. Linux therefore shows the bug; the earlier green Linux scenario-6 run (before the fix) could not be reproduced and is **unexplained** | the guard is the rehearsal; carried: not in CI (#481 item 15) |
+| N2, N4: mutation makes the named tests fail | **VERIFIED** |
+| N3: only the `drain()` half was pinned — the lenient reading in `restart()` failed no test | **Repaired**: `an_old_process_that_does_not_answer_while_restarting_is_waited_for_and_never_replaced_around`; the test env's lenient reading now maps "did not answer" to "nothing there", as the real one does |
+| N8: removing the guard from `rollback_command` failed no test | the guard now runs after the installer-recorded check inside `rollback_command`; `require_latest` is tested for every kind of transaction (below) |
+| N9: adopting a fresh finished transaction, or one whose lock is held, failed no test | **Repaired**: both branches pinned in the adoption test |
+| N7: removing the log line fails no test | the wording is a function (`legacy_route_notice`) with a test; **the call itself is not pinned** — stated, not hidden |
+| **Receipts said "UNKNOWN" for a predecessor that was never stopped** (`no-change`, an install that failed, a drain that found it busy): the unmeasured wording was keyed on "no drain report", not on "the predecessor may have stopped" | **Repaired**: `predecessor_may_have_stopped` (a drain was attempted, a new process answered, or a different pid runs at the end); otherwise the receipt says the previous gateway was never asked to stop. Test `a_gateway_that_was_never_asked_to_stop_is_not_reported_as_unknown_work` |
+| **Rollback guard compared transactions, not installs**: after a later restart-only or `no-change` run, `rollback <older install>` was refused naming a run that itself cannot be rolled back | **Repaired**: "latest" is the latest upgrade that left a newly installed build in place (installer ran, install took effect, not undone, not `no-change`); none → `gateway_upgrade.nothing_to_roll_back`. Test `only_the_latest_upgrade_that_changed_the_installed_build_can_be_rolled_back` |
+| Disk-preflight wording said "where the install builds"; the code measures the `$HOME` volume (a shared `target-dir` can be elsewhere) | wording corrected; behaviour carried (#481 item 12) |
+| `docs/GATEWAY-UPGRADE.md` said "five scenarios" | corrected: six |
+| Scenario 6's worker is the machine's installed `aikit` (found by PATH), not the instance's build, so scenario 6 exercises this code on the **gateway side** only | carried (#481 item 13) |
+| `apply --wait` can wait up to its bound on a transaction nothing is driving | reasoned, not exercised; carried (#481 item 14) |
+| The verifier's own rehearsal ended with doctor `warn` | **Explained** (re-run with the rehearsal now recording the doctor's non-info findings): `disk.low`, 1390 MiB free on the small tmpfs the rehearsal's home lives in — a property of the test machine, not of the gateway |
+| The Mac doctor says `fail` `gateway.stale` and the old `firewall.running_not_allowed`: the Mac's installed `aikit` (`8c6c48f03996`) is another lane's cut and predates #485 | an honest reading; the doctor cannot say the installed cut belongs to another lane (not repaired); the Mac is not moved without that lane's cohort |
+
+After the follow-up (Omarchy, real systemd): fmt clean; `aikit-cli` lib 83 passed; adapters 83; engine 29; clippy `-D warnings` clean; the nine real-binary tests exit 0; rehearsal **all six scenarios ok**. Each new test was mutation-checked: the lenient reading in `restart()`, an always-"unknown" receipt, counting a `rolled-back` and counting a `no-change` as the latest install each make the named test fail.
+
+What the verifier could not prove, and neither can this record: the Mac launchd
+scenario 6 on the verifier's own hands (no Mac compiler by rule), a release build, a
+live chat, a real in-flight turn, a real-`oi` install on the Mac. The Mac launchd run
+in this record is the builder's, on the code of `417d6d72`; the follow-up changes
+receipt wording, the rollback guard, tests and docs, none of which scenario 6 exercises.
+
 ## The real `oi`: install, restart and rollback in one lane (Omarchy, real systemd service)
 
 The commission's lifecycle through the **real managed installer** on a **real
@@ -283,7 +317,7 @@ owner's `sudo` command only for the case where that queues or times out.
   Serve change); Funnel is never configured.
 * An owner-scope administrator token on a *remote* gateway (`--at` uses the
   peer token: relay and read, never stop, drain or restore).
-* A third independent verification of the tree repaired after the second.
+* A fourth independent verification of the tree repaired after the third; the Mac launchd rehearsal re-run on the follow-up commit (it needs a Mac release build, which waits for a quiet slot and a memory budget).
 * A real-`oi` `apply --install --candidate` transaction on the Mac (only the restart half has been run there).
 * The carried N5, N6 and N10 (ai-kit#481).
 
