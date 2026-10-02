@@ -208,6 +208,33 @@ Other lanes were building on this machine at the same time (`oi update` holds a
 lock; my install waited for it rather than racing it). The machine ends on
 `0bfe6e4c`, the rolled-back cut.
 
+## Final state: both machines on the merged cut (I)
+
+After #482 merged (`3ee08a90`), each real service was moved onto it — Omarchy
+through the real `oi` in one transaction, the Mac by `oi update --apply
+--candidate ai-kit=3ee08a90…` and then `aikit gateway upgrade apply --restart-only
+--wait` (the Mac's installed CLI at the time had no `--candidate` flag):
+
+| | Mac (launchd) | Omarchy (systemd) |
+|---|---|---|
+| transaction | `upg-01m3y163c4zn…` `completed` | `upg-01m3xzjaqy7d…` `completed` (`apply --install --candidate 3ee08a90… --wait`, real `oi`) |
+| before → after | pid 47288 `6e452a600a4c` → **pid 62095 `3ee08a9081c9`**, digest `462a40671c73…` | pid 2557953 `0bfe6e4c70de` → **pid 2747406 `3ee08a9081c9`**, digest `4e819d5943d4…` |
+| drain | **measured**: 0 turns finished, 0 interrupted, 0 unreceipted operations (an idle gateway; a predecessor whose report predates the `measured` flag still reads as measured) | same |
+| doctor after | `gateway.current`, `peer.ok` — "peer workcell:omarchy answers and runs the same build" | `gateway.current`, `peer.ok` — "peer workcell:mac answers and runs the same build" |
+
+The two machines run the same build, each says so about the other, and each
+reaches the other over the gateway carrier. One doctor reading was misleading:
+`firewall.running_not_allowed` (a Warn, with a `sudo` remedy) stayed on the Mac
+while Omarchy reached the Mac gateway — macOS admits signed binaries it never
+lists, and `socketfilterfw --listapps` cannot say which. A first attempt to ask
+`--getappblocked <path>` instead was **wrong**, found by the second independent
+verifier: that call answers "is permitted" for *any* path (`/bin/ls`,
+`/usr/bin/true`, a path that does not exist), which would have made the check
+unable to fire. The doctor now says only what the list can show (an Info: "the
+list does not name this binary; macOS may still admit it"), names the real test —
+a peer running `aikit gateway --at workcell:<this> protocol` — and gives the
+owner's `sudo` command only for the case where that queues or times out.
+
 ## Defects found by the lane's own gates after the first push
 
 * **Linux CI (`V2 crate — aikit-cli`)**: `a_foreground_gateway_is_installed_…`

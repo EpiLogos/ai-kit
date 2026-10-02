@@ -530,10 +530,12 @@ pub fn diagnose(facts: &Facts) -> Report {
             match (firewall.running_listed, firewall.installed_listed) {
                 (Some(true), Some(false)) => findings.push(finding(
                     "firewall.installed_not_allowed",
-                    Severity::Warn,
-                    "the macOS application firewall allows the running gateway binary but not \
-                     the installed one: after the restart, inbound connections from other \
-                     machines queue until the owner allows the new binary",
+                    Severity::Info,
+                    "the macOS application firewall's list names the running gateway binary but \
+                     not the installed one. macOS also admits signed binaries it never lists \
+                     (it did for the last upgrades), so this may be nothing: after the restart, \
+                     ask a peer — `aikit gateway --at workcell:<this> protocol` — and only if \
+                     that queues or times out does the owner need to allow the new binary",
                     vec![],
                     Some(&firewall_remedy(
                         facts
@@ -546,9 +548,13 @@ pub fn diagnose(facts: &Facts) -> Report {
                 )),
                 (Some(false), _) => findings.push(finding(
                     "firewall.running_not_allowed",
-                    Severity::Warn,
-                    "the macOS application firewall has no allowance for the running gateway \
-                     binary: connections from other machines may be waiting for approval",
+                    Severity::Info,
+                    "the macOS application firewall's list does not name the running gateway \
+                     binary. macOS also admits signed binaries it never lists, and the list \
+                     cannot say which: `socketfilterfw --getappblocked` answers \"permitted\" for \
+                     any path, listed or not. The test is a peer asking this gateway — \
+                     `aikit gateway --at workcell:<this> protocol` from another Workcell; only \
+                     if that queues or times out does the owner need to allow the binary",
                     vec![],
                     Some(&firewall_remedy(
                         facts
