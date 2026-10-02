@@ -101,10 +101,10 @@ fn root_affiliation(root: &Path) -> std::io::Result<Option<RootAffiliation>> {
     {
         use std::os::unix::fs::MetadataExt;
         let metadata = fs::metadata(root)?;
-        return Ok(metadata.is_dir().then_some(RootAffiliation {
+        Ok(metadata.is_dir().then_some(RootAffiliation {
             device: metadata.dev(),
             inode: metadata.ino(),
-        }));
+        }))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
