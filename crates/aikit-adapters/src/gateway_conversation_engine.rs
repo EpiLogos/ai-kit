@@ -1972,17 +1972,31 @@ impl GatewayConversationEngine {
                 communique.communique_ref
             ),
             None => match communique.state {
-                CommuniqueState::Held => format!(
-                    "ask: {}{replay_note} held — {}; it is delivered to the next occupant that \
-                     claims {}{provenance}",
-                    communique.communique_ref,
-                    route
+                CommuniqueState::Held => {
+                    let fact = route
                         .delivery
                         .get("fact")
                         .and_then(Value::as_str)
-                        .unwrap_or("the recipient Position is vacant"),
-                    communique.to_position_ref
-                ),
+                        .unwrap_or("the recipient Position is vacant");
+                    // A held address can come from an AgentProfile without
+                    // Agency or occupancy proof. Keep the owner's consequence
+                    // rather than promising a Position claim for every address.
+                    let consequence = route
+                        .delivery
+                        .get("consequence")
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.trim().is_empty());
+                    let consequence = consequence.map(str::to_owned).unwrap_or_else(|| {
+                        format!(
+                            "it is delivered to the next occupant that claims {}",
+                            communique.to_position_ref
+                        )
+                    });
+                    format!(
+                        "ask: {}{replay_note} held — {fact}; {consequence}{provenance}",
+                        communique.communique_ref
+                    )
+                }
                 _ => format!(
                     "ask: {}{replay_note} queued for {}; delivered at the recipient occupant's \
                      next turn boundary{provenance}",

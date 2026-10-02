@@ -2567,7 +2567,7 @@ fn a_held_ask_answers_with_the_vacancy_notice() {
 }
 
 #[test]
-fn an_ask_to_a_registered_profile_without_a_position_holds_for_the_agency() {
+fn an_ask_to_a_registered_profile_without_a_position_holds_at_the_agent_address() {
     let dir = TempDir::new().unwrap();
     let router = Arc::new(ProductionResolution {
         home: AikitHome::at(dir.path()),
@@ -2580,14 +2580,14 @@ fn an_ask_to_a_registered_profile_without_a_position_holds_for_the_agency() {
         "a7",
     ));
     harness.wait_until(
-        "the ask to the unembodied agency appends its held Communique and answers the chat",
+        "the ask to the Agent address appends its held Communique and answers the chat",
         Duration::from_secs(30),
         |harness| !harness.executed_sends().is_empty(),
     );
 
-    // The journal holds one Communique addressed to the agency at its own
-    // identity, held for it — the registry answered, and no Position gates
-    // the contact.
+    // The profile supplies an Agent address. The journal retains the mail
+    // there without inferring native Agency, occupancy or admission from
+    // that source; the held address stays recoverable.
     let records = harness
         .gateway
         .lock()
@@ -2601,9 +2601,9 @@ fn an_ask_to_a_registered_profile_without_a_position_holds_for_the_agency() {
     assert_eq!(record.state, CommuniqueState::Held);
     let basis = &record.transitions[0].basis;
     assert!(
-        basis.contains("registered agent profile")
-            && basis.contains("not currently embodied")
-            && basis.contains("held for the agency"),
+        basis.contains("Central AgentProfile with no Position")
+            && basis.contains("held for the Agent address")
+            && basis.contains("native identity and Agency admission are not established"),
         "{basis}"
     );
     // Origin provenance still rides the attribution basis.
@@ -2623,13 +2623,17 @@ fn an_ask_to_a_registered_profile_without_a_position_holds_for_the_agency() {
         record.attribution_basis
     );
 
-    // The chat is answered with the held-for-agency notice.
+    // The notice reports held mail and the source's lack of Agency proof.
     let sends = harness.executed_sends();
     assert!(
         sends
             .iter()
-            .any(|text| text.contains("held") && text.contains("not currently embodied")),
-        "the answer carries the held-for-agency fact: {sends:?}"
+            .any(|text| {
+                text.contains("held at the same Agent address")
+                    && text.contains("no native Agency or occupancy proof")
+                    && text.contains("nothing has been delivered")
+            }),
+        "the answer retains the held Agent address without claiming delivery: {sends:?}"
     );
     assert_eq!(harness.source.parked_turns(), 0);
 
