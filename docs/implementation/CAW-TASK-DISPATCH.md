@@ -130,10 +130,10 @@ AIKit creates no cache directory before the material boundary applies and
 neither inherits ambient npm cache settings nor widens the Task grant.
 
 The CAW delivery gate runs real isolated native Task preparation, actual npm
-cache writes and public Codex ACP `--help`, plus production TaskExec redirection
+cache writes and public Codex ACP `--version`, plus production TaskExec redirection
 refusal. These cases carry no credentials or prompt. Native account opening,
 inference and attributable Factory Return require their separate operational
-proof; public package help is not that acceptance.
+proof; public package execution and version are not that acceptance.
 
 ## Persistent material and the actual encounter host
 

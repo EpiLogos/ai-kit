@@ -164,7 +164,7 @@ jobs:
           grep -q TASK_NATIVE_PROTECTED_DISPATCH_EXECUTED "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
           grep -q TASK_NATIVE_PERSISTENT_STORAGE_EXECUTED "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
           grep -q TASK_NATIVE_WORKCELL_HOSTED_ENCOUNTER_EXECUTED "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
-      - name: Actual Task cache boundary and public ACP help without credentials
+      - name: Actual Task cache boundary and public ACP version without credentials
         shell: bash
         run: |
           set -euo pipefail

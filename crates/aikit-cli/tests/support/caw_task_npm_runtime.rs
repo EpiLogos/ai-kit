@@ -385,7 +385,7 @@ fn native_workcell_scrubbed_npm_writes_cache_only_inside_actual_task_t() {
     }
     let npx = PathBuf::from(
         std::env::var_os("AIKIT_CAW_NPX_BIN")
-            .expect("supply actual installed npx for the public ACP --help case"),
+            .expect("supply actual installed npx for the public ACP --version case"),
     );
     assert!(npx.is_absolute() && npx.is_file());
     assert_eq!(npx.file_name().and_then(|name| name.to_str()), Some("npx"));
@@ -396,8 +396,8 @@ fn native_workcell_scrubbed_npm_writes_cache_only_inside_actual_task_t() {
         .to_string(),
     )
     .unwrap();
-    let mut acp_help = Command::new(&boundary);
-    acp_help
+    let mut acp_version = Command::new(&boundary);
+    acp_version
         .current_dir(&world.root)
         .args([
             "exec",
@@ -411,19 +411,20 @@ fn native_workcell_scrubbed_npm_writes_cache_only_inside_actual_task_t() {
             "--",
         ])
         .arg(&npx)
-        .args(["-y", "@agentclientprotocol/codex-acp", "--help"]);
-    ModelEnvironment::new().apply(&mut acp_help);
-    acp_help.env("npm_config_cache", &cache);
-    let output = bounded(&mut acp_help, &evidence, "actual-public-codex-acp-help");
+        .args(["-y", "@agentclientprotocol/codex-acp", "--version"]);
+    ModelEnvironment::new().apply(&mut acp_version);
+    acp_version.env("npm_config_cache", &cache);
+    let output = bounded(&mut acp_version, &evidence, "actual-public-codex-acp-version");
     assert!(
         output.status.success(),
-        "actual public ACP help failed: {}",
+        "actual public ACP version probe failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
         !output.stdout.is_empty(),
-        "actual adapter help must produce its native output"
+        "actual adapter version must produce its native package identity"
     );
+    let reported_version = String::from_utf8(output.stdout).unwrap();
     let packages = fs::read_dir(cache.join("_npx"))
         .unwrap()
         .map(|entry| {
@@ -444,6 +445,11 @@ fn native_workcell_scrubbed_npm_writes_cache_only_inside_actual_task_t() {
     let package: Value = serde_json::from_slice(&package_bytes).unwrap();
     assert_eq!(package["name"], "@agentclientprotocol/codex-acp");
     assert!(package["version"].as_str().is_some_and(|v| !v.is_empty()));
+    assert_eq!(
+        reported_version.trim(),
+        format!("{} {}", package["name"].as_str().unwrap(), package["version"].as_str().unwrap()),
+        "the actual executed public adapter must identify the downloaded package"
+    );
     let package_root = package_path.parent().unwrap().canonicalize().unwrap();
     assert!(package_root.starts_with(cache.canonicalize().unwrap()));
     let binaries = match &package["bin"] {
@@ -465,7 +471,7 @@ fn native_workcell_scrubbed_npm_writes_cache_only_inside_actual_task_t() {
     fs::write(evidence.join("actual-public-acp-package-provenance.json"), json!({
         "name":package["name"],"version":package["version"],"packagePath":package_path,
         "packageSha256":format!("{:x}",Sha256::digest(&package_bytes)),"cachePath":cache,
-        "entryPoints":entries,"standing":"actual public package help; no model prompt, native selection or worker Return"}).to_string()).unwrap();
+        "entryPoints":entries,"standing":"actual public package version; no model prompt, native selection or worker Return"}).to_string()).unwrap();
     assert!(
         cache.join("_cacache").is_dir(),
         "actual npm cache verify must write cache bytes"
