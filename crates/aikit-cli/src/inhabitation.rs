@@ -3101,7 +3101,7 @@ pub(crate) mod tests {
             .expect("one current work with a qualified child NOW binds the entry");
         assert_eq!(binding.run_ref, "run:r1");
         assert_eq!(binding.workflow_unit_ref, "workflow-unit:u1");
-        assert_eq!(binding.child_now_ref, work_child);
+        assert_eq!(binding.child_now_ref.as_deref(), Some(work_child));
         assert_eq!(binding.position_ref, POSITION);
         assert_eq!(
             crate::development_entry::work_concern(&binding).as_deref(),
@@ -3121,6 +3121,22 @@ pub(crate) mod tests {
             &AikitReads::default(),
         );
         assert!(crate::development_entry::WorkBinding::from_joined(&joined).is_none());
+        // Ordinary commissioned work: Factory custody carries no work child
+        // NOW. The work still binds; it simply has no NOW to prepare.
+        let mut ordinary = reading.clone();
+        ordinary["runs"][0]["positions"][0]["custody"][0]["child_now_ref"] =
+            json!({"state": "absent", "reason": "no source-qualified work signal"});
+        let runner = owner_fixture().on("development inhabitation", &ordinary.to_string());
+        let joined = join(
+            &owners(&runner),
+            &env_input(ReadingDepth::Standard),
+            &AikitReads::default(),
+        );
+        assert_eq!(joined.reading.facets.child_now.state, FacetState::Absent);
+        let binding = crate::development_entry::WorkBinding::from_joined(&joined)
+            .expect("ordinary work without a child NOW is still the work");
+        assert_eq!(binding.run_ref, "run:r1");
+        assert!(binding.child_now_ref.is_none());
     }
 
     #[test]

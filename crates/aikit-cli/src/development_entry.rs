@@ -70,7 +70,9 @@ pub struct WorkBinding {
     pub work_ref: Option<String>,
     pub run_ref: String,
     pub workflow_unit_ref: String,
-    pub child_now_ref: String,
+    /// The work's source-qualified child NOW, when Factory attaches one.
+    /// Ordinary commissioned work has none; the work is still the work.
+    pub child_now_ref: Option<String>,
     pub work_digest: Option<String>,
     /// The `factory development workflow-unit` reading.
     pub workflow_unit: Value,
@@ -86,6 +88,15 @@ impl WorkBinding {
         if identity.current_work_outcome.as_deref() != Some("one") {
             return None;
         }
+        // The child NOW follows the join's own verdict: present is prepared;
+        // absent (Factory custody carries no work child NOW — ordinary
+        // commissioned work) is delivered without a prepared view; a refusal
+        // (stale custody, conflicting owners) means no entry at all.
+        let child_now_ref = match reading.facets.child_now.state {
+            aikit_core::inhabitation::FacetState::Present => Some(identity.child_now_ref.clone()?),
+            aikit_core::inhabitation::FacetState::Absent => None,
+            _ => return None,
+        };
         let refs = &identity.current_work_refs;
         Some(Self {
             central_root: PathBuf::from(joined.trail.central_root.as_ref()?),
@@ -97,7 +108,7 @@ impl WorkBinding {
             work_ref: refs.get("work_ref").cloned(),
             run_ref: refs.get("run_ref")?.clone(),
             workflow_unit_ref: refs.get("workflow_unit_ref")?.clone(),
-            child_now_ref: identity.child_now_ref.clone()?,
+            child_now_ref,
             work_digest: identity.current_work_digest.clone(),
             workflow_unit: joined.trail.workflow_unit.clone()?,
         })
@@ -276,7 +287,9 @@ pub fn preparation_request(
         "schema": PREPARE_SCHEMA,
         "redis": redis,
         "project_ref": format!("project/{}", binding.project),
-        "now_ref": binding.child_now_ref,
+        "now_ref": binding.child_now_ref.as_deref().ok_or_else(|| {
+            fail("development_entry.no_work_now", "the work carries no child NOW to prepare")
+        })?,
         "participant_ref": binding.participant_ref(),
         "agent_session": agent_session,
         "concern": concern,
@@ -322,7 +335,7 @@ fn bounded(text: &str, max: usize) -> String {
 /// the entry is bounded and those lines must never be what is cut.
 pub fn render(
     binding: &WorkBinding,
-    view: &PreparedNowContext,
+    view: Option<&PreparedNowContext>,
     notes: &[String],
     practice_files: &BTreeMap<String, PathBuf>,
 ) -> String {
@@ -336,7 +349,7 @@ pub fn render(
         binding.run_ref,
         binding.workflow_unit_ref,
         binding.position_ref,
-        binding.child_now_ref
+        binding.child_now_ref.as_deref().unwrap_or("none")
     ));
     if let Some(concern) = unit_field(unit, "developmental_concern") {
         lines.push(format!("concern (authored): {}", bounded(&concern, 400)));
@@ -382,6 +395,14 @@ pub fn render(
             });
         }
     }
+    let Some(view) = view else {
+        let named = unit_list(unit, "capability_refs");
+        if !named.is_empty() {
+            lines.push(format!("capabilities the unit names: {}", named.join(", ")));
+        }
+        lines.push("no prepared NOW view: Factory custody carries no work child NOW for this work, so no NOW sources were prepared. The unit above is the work; open what it names.".into());
+        return bounded(&lines.join("\n"), MAX_RENDERED_CHARS);
+    };
     let (capabilities, sources): (Vec<_>, Vec<_>) = view.items.iter().partition(|item| {
         item.source_ref.as_str().starts_with("matrix:") || item.title.starts_with("cap.")
     });
@@ -440,6 +461,10 @@ pub fn deliver(
     config: &EntryConfig,
     capsule_roots: &BTreeMap<CapsuleId, PathBuf>,
 ) -> Result<String> {
+    let files = practice_files(&binding.workflow_unit, capsule_roots);
+    if binding.child_now_ref.is_none() {
+        return Ok(render(binding, None, &[], &files));
+    }
     let path = config.redis_config.as_ref().ok_or_else(|| {
         fail(
             "development_entry.redis_unconfigured",
@@ -463,8 +488,6 @@ pub fn deliver(
     let store = RedisNowStore::new(redis.clone())?;
     let participant = ResourceRef::parse(binding.participant_ref())?;
     let agent_session = format!("agent-session/{client}:{session}");
-    let files = practice_files(&binding.workflow_unit, capsule_roots);
-
     if let Ok(Some(view)) = store.read_prepared(&participant, false, None) {
         let same_work = view
             .continuation
@@ -475,7 +498,7 @@ pub fn deliver(
                     && c["workflow_unit_ref"].as_str() == Some(binding.workflow_unit_ref.as_str())
             });
         if same_work && view.agent_session.as_str() == agent_session {
-            let mut text = render(binding, &view, &[], &files);
+            let mut text = render(binding, Some(&view), &[], &files);
             text.push_str("\n(re-delivered: the work and its prepared view are unchanged)");
             return Ok(text);
         }
@@ -491,7 +514,7 @@ pub fn deliver(
                 "the prepared view was not readable after publication",
             )
         })?;
-    Ok(render(binding, &view, &notes, &files))
+    Ok(render(binding, Some(&view), &notes, &files))
 }
 
 #[cfg(test)]
@@ -509,7 +532,7 @@ mod tests {
             work_ref: Some("work:01".into()),
             run_ref: "run:01".into(),
             workflow_unit_ref: "workflow-unit:01".into(),
-            child_now_ref: "central:now:project:O-I:abc".into(),
+            child_now_ref: Some("central:now:project:O-I:abc".into()),
             work_digest: Some("digest-1".into()),
             workflow_unit: unit,
         }
@@ -593,7 +616,7 @@ mod tests {
         .unwrap();
         let text = render(
             &binding(unit()),
-            &view,
+            Some(&view),
             &["a note".into()],
             &BTreeMap::new(),
         );
@@ -652,7 +675,7 @@ mod tests {
             "participant_ref":"participant/p","agent_session":"agent-session/pi:s","version":1,
             "basis":{"disclosure_revision":"d"},"basis_digest":"x","concern":"c","prepared_at_unix_ms":0
         })).unwrap();
-        let text = render(&b, &view, &[], &BTreeMap::new());
+        let text = render(&b, Some(&view), &[], &BTreeMap::new());
         assert!(
             text.contains("verification owed: the review names the message it answers"),
             "{text}"
@@ -660,5 +683,17 @@ mod tests {
         assert!(text.contains("Return: Return the review: intent against performance and the evidence refs → central:source:project:O-I:ProjectCentral/now"));
         assert!(text.contains("stop when: Stop when there is no performed evidence to disclose"));
         assert!(text.contains("skill/ql/aletheia-expressive-return"));
+    }
+
+    #[test]
+    fn work_without_a_child_now_is_still_the_work() {
+        let mut b = binding(real_unit());
+        b.child_now_ref = None;
+        let text = render(&b, None, &[], &BTreeMap::new());
+        assert!(text.contains("child NOW none"));
+        assert!(text.contains("concern (authored): Review what Anima performed"));
+        assert!(text.contains("verification owed:"));
+        assert!(text.contains("no prepared NOW view: Factory custody carries no work child NOW"));
+        assert!(text.contains("capabilities the unit names: capability/expression-observe"));
     }
 }
