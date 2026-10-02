@@ -692,8 +692,18 @@ pub fn hook_session(payload: &Value) -> Option<String> {
 
 fn signal_for(event: &HookEvent) -> Option<RefocusSignal> {
     Some(match &event.kind {
+        // Claude, Codex and zcode report why a session started as `source`;
+        // pi reports it as `reason` (startup | reload | new | resume | fork).
         HookEventKind::SessionStart => RefocusSignal::SessionStart(SessionSource::parse(
-            event.payload.get("source").and_then(Value::as_str),
+            pick(&event.payload, &["source"])
+                .or_else(|| {
+                    pick(&event.payload, &["reason"]).map(|reason| match reason.as_str() {
+                        "new" | "reload" => "startup".to_owned(),
+                        "fork" => "resume".to_owned(),
+                        _ => reason,
+                    })
+                })
+                .as_deref(),
         )),
         HookEventKind::UserPromptSubmit => RefocusSignal::UserPromptSubmit { work: None },
         HookEventKind::PreCompact => RefocusSignal::PreCompact,
@@ -846,6 +856,10 @@ pub fn hook_prepare(ctx: &HookContext<'_>, event: &HookEvent) -> HookInhabitatio
             reading,
             joined.trail.project_name.as_deref(),
         ));
+        // Fresh occupancy: the lean entry names the current work by ref only;
+        // the development entry carries what that work is. It rides this
+        // entry as well as Refocus deliveries.
+        out.work = crate::development_entry::WorkBinding::from_joined(&joined);
         // Keep the hot World projection current at occupancy, so readers
         // (peers, UI, `aikit whoami --hot`) need not re-run the owner joins.
         if let Some(path) = &ctx.world_redis {
@@ -1065,6 +1079,48 @@ mod tests {
         assert!(deliver(&commit, "SessionStart"));
         let state = ctx.store.load("sess-1", GENERATION).unwrap();
         assert_eq!(state.delivered.unwrap().trigger, RefocusTrigger::Fresh);
+    }
+
+    #[test]
+    fn a_pi_session_start_reports_its_reason_and_still_refocuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = owner_fixture();
+        let ctx = ctx(dir.path(), &runner, env(true));
+        let pi_start = event(
+            HookEventKind::SessionStart,
+            json!({"session_id": "sess-1", "reason": "startup", "type": "session_start"}),
+        );
+        let result = hook_prepare(&ctx, &pi_start);
+        assert!(result.lean_entry.is_some());
+        let commit = result.refocus.expect("pi's startup is a fresh occupancy");
+        assert_eq!(commit.trigger, RefocusTrigger::Fresh);
+    }
+
+    #[test]
+    fn fresh_occupancy_hands_the_current_work_to_the_development_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = owner_fixture().on(
+            "development inhabitation",
+            &json!({
+                "schema": "factory.inhabitation-reading/v1",
+                "central_project_ref": {"state": "present", "value": "O-I"},
+                "runs": [{"run_ref": "run:r1", "positions": [{
+                    "position_ref": POSITION,
+                    "custody": [{"custody_ref": "factory:custody:c1", "work_ref": "work:w1", "state": "in-progress",
+                        "child_now_ref": {"state": "absent", "reason": "no source-qualified work signal"}}]
+                }], "occupants": []}]
+            })
+            .to_string(),
+        );
+        let ctx = ctx(dir.path(), &runner, env(true));
+        let result = hook_prepare(&ctx, &start("startup"));
+        assert!(result.lean_entry.is_some());
+        let work = result
+            .work
+            .expect("the lean entry's current work is handed over");
+        assert_eq!(work.run_ref, "run:r1");
+        assert_eq!(work.workflow_unit_ref, "workflow-unit:u1");
+        assert!(work.child_now_ref.is_none());
     }
 
     #[test]
