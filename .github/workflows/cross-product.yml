@@ -242,3 +242,199 @@ jobs:
             ${{ runner.temp }}/composition.log
             ${{ runner.temp }}/composition-basis.txt
           if-no-files-found: error
+
+  native-seat-guard:
+    name: Native seat guard — ${{ matrix.os }} — ${{ matrix.scope }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            scope: full-three
+            full: true
+            minutes: 90
+          - os: macos-15
+            scope: bounded-two
+            full: false
+            minutes: 25
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.minutes }}
+    env:
+      # Root-declared initial isolated test basis. No latest/installed claim.
+      SEAT_GUARD_GATE_PRODUCT_REVISION: 7220e83dc3dc3cc72a0bceebbf33533f86117c96
+      SEAT_GUARD_GATE_RUN_SHA256: 36f6061f5cc7a73d34a06b3d98faabffdfbfeb70cd15d6356a036926956bc77a
+      SEAT_GUARD_GATE_MANIFEST_SHA256: c5c7cd0560ae11388d95c27e90fa5965daef7b210359cb33022cb15117f51a40
+      SEAT_GUARD_PRECOMMIT_CANDIDATE: ${{ github.workspace }}/crates/aikit-adapters/tests/fixtures/central-seat-guard/v2/pre-commit
+      SEAT_GUARD_PREPUSH_CANDIDATE: ${{ github.workspace }}/crates/aikit-adapters/tests/fixtures/central-seat-guard/v2/pre-push
+    steps:
+      - name: Checkout exact AIKit qualification source
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install the existing native Rust toolchain
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.98.0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v6
+        if: matrix.full
+        with:
+          node-version: "22"
+      - name: Require actual nonroot tools and preserve their homes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(id -u)" -ne 0
+          command -v git
+          command -v python3
+          command -v mkfifo
+          command -v cargo
+          command -v rustc
+          guard_cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+          guard_rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
+          test -d "$guard_cargo_home"
+          test -d "$guard_rustup_home"
+          printf 'CARGO_HOME=%s\nRUSTUP_HOME=%s\n' "$guard_cargo_home" "$guard_rustup_home" >> "$GITHUB_ENV"
+          printf 'PLAYWRIGHT_BROWSERS_PATH=%s\n' "$RUNNER_TEMP/seat-guard-browser-engines" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/seat-guard-browser-engines"
+      - name: Checkout the exact declared O:I producer source
+        if: matrix.full
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="$RUNNER_TEMP/seat-guard-oi"
+          git init -q "$owner"
+          git -C "$owner" remote add origin https://github.com/EpiLogos/O-I.git
+          git -C "$owner" fetch --depth=1 origin "$SEAT_GUARD_GATE_PRODUCT_REVISION"
+          git -C "$owner" checkout --detach FETCH_HEAD
+          test "$(git -C "$owner" rev-parse HEAD)" = "$SEAT_GUARD_GATE_PRODUCT_REVISION"
+          test -z "$(git -C "$owner" status --porcelain)"
+          echo "SEAT_GUARD_GATE_PRODUCT_REPOSITORY=$owner" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Provision the actual existing landing-tier browser prerequisites
+        if: matrix.full
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --prefix "$SEAT_GUARD_GATE_PRODUCT_REPOSITORY/desktop/cradle" --no-audit --no-fund
+          cd "$SEAT_GUARD_GATE_PRODUCT_REPOSITORY/desktop/cradle"
+          npx playwright install --with-deps chromium webkit
+          test -d "$PLAYWRIGHT_BROWSERS_PATH"
+      - name: Require all three genuine ignored definitions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p aikit-adapters --test native_seat_guard -- --ignored --list 2>&1 | tee "$RUNNER_TEMP/seat-guard-cases.log"
+          python3 - <<'PYCASES'
+          import json
+          import os
+          import pathlib
+          names = ["real_precommit_qualifies_register_and_refuses_material_or_shape_failure", "real_precommit_preserves_primary_nested_foreign_legacy_and_stray_scope", "real_prepush_uses_third_destination_token_and_actual_full_tip_receipt"]
+          temp = pathlib.Path(os.environ["RUNNER_TEMP"])
+          listed = [line[:-6] for line in (temp / "seat-guard-cases.log").read_text().splitlines() if line.endswith(": test")]
+          assert len(listed) == len(set(listed)) == 3, listed
+          assert set(listed) == set(names), (listed, names)
+          reading = {"schema":"central.seat-guard-test-selection/v1", "listed":listed, "linux_selected":names, "mac_selected":names[:2], "mac_main_positive":"unqualified"}
+          (temp / "seat-guard-case-inventory.json").write_text(json.dumps(reading, indent=2) + "\n")
+          PYCASES
+      - name: Exercise all actual Linux cases including fresh full owner gates
+        id: full
+        if: matrix.full
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p aikit-adapters --test native_seat_guard -- --ignored --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/seat-guard-full.log"
+          python3 - <<'PYFULL'
+          import json
+          import os
+          import pathlib
+          import re
+          temp = pathlib.Path(os.environ["RUNNER_TEMP"])
+          text = (temp / "seat-guard-full.log").read_text()
+          names = json.loads((temp / "seat-guard-case-inventory.json").read_text())["linux_selected"]
+          for name in names:
+              assert re.search(r"(?m)^test " + re.escape(name) + r" \.\.\. ok$", text), name
+          assert re.search(r"test result: ok\. 3 passed; 0 failed; 0 ignored;", text), text
+          PYFULL
+      - name: Exercise the two actual bounded Mac cases
+        id: bounded
+        if: ${{ !matrix.full }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for case in \
+            real_precommit_qualifies_register_and_refuses_material_or_shape_failure \
+            real_precommit_preserves_primary_nested_foreign_legacy_and_stray_scope; do
+            cargo test --locked -p aikit-adapters --test native_seat_guard "$case" -- --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/seat-guard-$case.log"
+          done
+          python3 - <<'PYBOUNDED'
+          import json
+          import os
+          import pathlib
+          import re
+          temp = pathlib.Path(os.environ["RUNNER_TEMP"])
+          names = json.loads((temp / "seat-guard-case-inventory.json").read_text())["mac_selected"]
+          for name in names:
+              text = (temp / f"seat-guard-{name}.log").read_text()
+              assert re.search(r"(?m)^test " + re.escape(name) + r" \.\.\. ok$", text), name
+              assert re.search(r"test result: ok\. 1 passed; 0 failed; 0 ignored;", text), text
+          PYBOUNDED
+      - name: Retain actual source, host, tools and evidence hashes
+        if: always()
+        shell: bash
+        env:
+          GUARD_SCOPE: ${{ matrix.scope }}
+          GUARD_FULL_OUTCOME: ${{ steps.full.outcome }}
+          GUARD_BOUNDED_OUTCOME: ${{ steps.bounded.outcome }}
+        run: |
+          set -euo pipefail
+          {
+            git rev-parse HEAD
+            git status --porcelain
+            id
+            uname -a
+            git --version
+            python3 --version
+            rustc -Vv
+            cargo --version
+            if command -v node >/dev/null 2>&1; then node --version; fi
+          } > "$RUNNER_TEMP/seat-guard-actual-tools.log" 2>&1
+          python3 - <<'PYBASIS'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import platform
+          temp = pathlib.Path(os.environ["RUNNER_TEMP"])
+          root = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          evidence = root / "ProjectCentral/now/tmp/native-seat-guard-evidence"
+          def material(path):
+              if not path.is_file():
+                  return {"absent": True}
+              digest = hashlib.sha256()
+              with path.open("rb") as source:
+                  while block := source.read(65536):
+                      digest.update(block)
+              return {"bytes":path.stat().st_size,"sha256":digest.hexdigest()}
+          paths = [root / "Cargo.toml", root / "Cargo.lock", root / "crates/aikit-adapters/Cargo.toml", root / "crates/aikit-adapters/src/runner.rs", root / "crates/aikit-adapters/tests/native_seat_guard.rs", pathlib.Path(os.environ["SEAT_GUARD_PRECOMMIT_CANDIDATE"]), pathlib.Path(os.environ["SEAT_GUARD_PREPUSH_CANDIDATE"])]
+          producer = os.environ.get("SEAT_GUARD_GATE_PRODUCT_REPOSITORY")
+          if producer:
+              paths.extend(pathlib.Path(producer) / member for member in ["gates/run.mjs", "gates/manifest.json", "desktop/cradle/package-lock.json"])
+          reading = {"schema":"central.seat-guard-hosted-qualification/v1", "scope":os.environ["GUARD_SCOPE"], "platform":platform.platform(), "full_outcome":os.environ["GUARD_FULL_OUTCOME"], "bounded_outcome":os.environ["GUARD_BOUNDED_OUTCOME"], "oi_initial_source":os.environ["SEAT_GUARD_GATE_PRODUCT_REVISION"], "source_files":{str(path):material(path) for path in paths}, "evidence":{str(path.relative_to(evidence)):material(path) for path in sorted(evidence.rglob("*")) if path.is_file()} if evidence.is_dir() else {"absent":True}, "standing":"actual controlled test evidence only; no protected install, private Original or human acceptance", "mac_main_positive":"unqualified", "fresh_receipt_required":"Linux actual producer in controlled clone; no transported predecessor"}
+          (temp / "seat-guard-hosted-basis.json").write_text(json.dumps(reading, indent=2) + "\n")
+          PYBASIS
+      - name: Retain full actual qualification outputs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-seat-guard-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/seat-guard-*.log
+            ${{ runner.temp }}/seat-guard-case-inventory.json
+            ${{ runner.temp }}/seat-guard-hosted-basis.json
+            ProjectCentral/now/tmp/native-seat-guard-evidence/
+          retention-days: 14
+          if-no-files-found: error
