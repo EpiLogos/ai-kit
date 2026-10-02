@@ -160,6 +160,104 @@ fn fixture() -> (TempDir, TempDir) {
 }
 
 #[test]
+fn query_reads_a_federated_file_without_rewriting_or_inventing_peer_objects() {
+    let (work, scratch) = fixture();
+    let path = work.path().join("federated.json");
+    let source = format!(
+        "{{\"objects\":[{},{}]}}\n",
+        space(
+            "wiki:space:root",
+            1,
+            &[],
+            &["wiki:space:peer"],
+            &["wiki:node:a"]
+        ),
+        node("wiki:node:a", 1, &["wiki:space:root"]),
+    );
+    write(&path, &source);
+
+    for operation in ["search", "neighbours", "backlinks"] {
+        let subject = if operation == "search" {
+            "wiki:node:a"
+        } else {
+            "wiki:space:root"
+        };
+        let (code, envelope) = wiki(
+            scratch.path(),
+            &[
+                "wiki",
+                "query",
+                operation,
+                subject,
+                "--file",
+                path.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(code, 0, "{operation}: {envelope}");
+        assert!(
+            envelope["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("wiki:space:peer"))),
+            "the external peer is disclosed: {envelope}"
+        );
+        if operation == "search" {
+            assert!(
+                !envelope["data"]["hits"].as_array().unwrap().is_empty(),
+                "{envelope}"
+            );
+        }
+        assert_eq!(read(&path), source, "a query must preserve canonical bytes");
+    }
+
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &[
+            "wiki",
+            "query",
+            "search",
+            "wiki:space:peer",
+            "--file",
+            path.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    assert!(
+        envelope["data"]["hits"].as_array().unwrap().is_empty(),
+        "an external ref is not a fabricated local Wiki object: {envelope}"
+    );
+    assert_eq!(read(&path), source);
+}
+
+#[test]
+fn query_still_refuses_an_unreciprocated_relation_between_local_spaces() {
+    let (work, scratch) = fixture();
+    let path = work.path().join("asymmetric.json");
+    let source = format!(
+        "{{\"objects\":[{},{}]}}\n",
+        space("wiki:space:root", 1, &[], &["wiki:space:child"], &[]),
+        space("wiki:space:child", 1, &[], &[], &[]),
+    );
+    write(&path, &source);
+    let (code, envelope) = wiki(
+        scratch.path(),
+        &[
+            "wiki",
+            "query",
+            "search",
+            "root",
+            "--file",
+            path.to_str().unwrap(),
+        ],
+    );
+    assert_ne!(code, 0, "{envelope}");
+    assert_eq!(read(&path), source);
+}
+
+#[test]
 fn a_healthy_document_validates_and_a_broken_one_fails_with_its_findings() {
     let (work, scratch) = fixture();
     let wiki_json = work.path().join("wiki.json");

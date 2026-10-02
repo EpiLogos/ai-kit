@@ -942,7 +942,26 @@ impl SessionLane {
     /// permission mode and wait for the provider's confirmation. What the mode
     /// allows stays the provider's decision; it applies to the next action.
     pub fn set_mode(&self, provider_mode_id: &str) -> Result<ModeConfigurationReceipt> {
+        self.set_mode_inner(provider_mode_id, None)
+    }
+
+    /// Configure one advertised mode within the caller's cumulative startup
+    /// deadline. Ordinary set_mode keeps its existing unbounded semantics.
+    pub fn set_mode_before(
+        &self,
+        provider_mode_id: &str,
+        deadline: Instant,
+    ) -> Result<ModeConfigurationReceipt> {
+        self.set_mode_inner(provider_mode_id, Some(deadline))
+    }
+
+    fn set_mode_inner(
+        &self,
+        provider_mode_id: &str,
+        deadline: Option<Instant>,
+    ) -> Result<ModeConfigurationReceipt> {
         let _gate = self.shared.gate()?;
+        self.shared.ensure_control_deadline(deadline)?;
         let (native_session_id, previous) = {
             let state = self.shared.state()?;
             let record = state
@@ -985,7 +1004,7 @@ impl SessionLane {
             SessionControlKind::Mode,
         )?;
         self.shared.dispatch(&command)?;
-        match self.shared.await_control(receiver, None)? {
+        match self.shared.await_control(receiver, deadline)? {
             ControlDelivery::Signals(signals) => {
                 if let Some(reason) = signals.iter().find_map(|signal| match &signal.kind {
                     ConnectionSignalKind::Degraded { degradation } => {
@@ -1049,7 +1068,26 @@ impl SessionLane {
         &self,
         provider_reasoning_effort: &str,
     ) -> Result<ModelConfigurationReceipt> {
+        self.set_reasoning_effort_inner(provider_reasoning_effort, None)
+    }
+
+    /// Select provider reasoning within the caller's cumulative control budget.
+    /// Legacy callers retain the existing None semantics.
+    pub fn set_reasoning_effort_before(
+        &self,
+        provider_reasoning_effort: &str,
+        deadline: Instant,
+    ) -> Result<ModelConfigurationReceipt> {
+        self.set_reasoning_effort_inner(provider_reasoning_effort, Some(deadline))
+    }
+
+    fn set_reasoning_effort_inner(
+        &self,
+        provider_reasoning_effort: &str,
+        deadline: Option<Instant>,
+    ) -> Result<ModelConfigurationReceipt> {
         let _gate = self.shared.gate()?;
+        self.shared.ensure_control_deadline(deadline)?;
         let (native_session_id, previous) = {
             let state = self.shared.state()?;
             let record = state
@@ -1089,7 +1127,7 @@ impl SessionLane {
             &native_session_id,
         )?;
         self.shared.dispatch(&command)?;
-        match self.shared.await_control(receiver, None)? {
+        match self.shared.await_control(receiver, deadline)? {
             ControlDelivery::Signals(_) => {}
             ControlDelivery::Failed(reason) => {
                 return Err(AikitError::new(

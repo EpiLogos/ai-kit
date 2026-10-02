@@ -192,3 +192,105 @@ fn policy_changes_do_not_silently_rebase_or_renew_a_task() {
         )
         .is_err());
 }
+
+#[test]
+#[ignore = "requires exact native Central; mandatory CAW workflow"]
+fn existing_child_task_replays_native_ancestry_without_amending_client_request() {
+    let (_dir, request) = world();
+    let owner = NativeCentralPlacement::new(SystemRunner::new());
+    let mut parent_request = request.clone();
+    parent_request.task_ref = ResourceRef::parse("task:native-parent").unwrap();
+    parent_request.purpose = "Existing native parent".into();
+    let parent = owner.allocate(&parent_request).unwrap();
+    // Central authors the child record through its actual public operation.
+    // The legacy AIKit request intentionally has no relationship fields.
+    let input = json!({
+        "task_ref": request.task_ref, "purpose": request.purpose,
+        "participant_refs": request.participant_refs, "source_refs": request.source_refs,
+        "parent_now_ref": parent.allocation["now_ref"], "workcell_ref":"workcell:native-test",
+        "expected_policy_revision": parent.allocation["policy"]["revision"],
+    });
+    let out = SystemRunner::new()
+        .run(&[
+            request.ctrl_bin.display().to_string(),
+            "--json".into(),
+            "--root".into(),
+            request.central_root.display().to_string(),
+            "action".into(),
+            "run".into(),
+            "central.now.allocate".into(),
+            input.to_string(),
+        ])
+        .unwrap();
+    assert!(out.ok(), "{} {}", out.stdout, out.stderr);
+    let allocated: Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(allocated["ok"], true);
+    let native = &allocated["data"];
+    let record_path = request
+        .central_root
+        .join(native["source"]["path"].as_str().unwrap());
+    let original_record = fs::read(&record_path).unwrap();
+    let partial =
+        PathBuf::from(native["writable_destination"].as_str().unwrap()).join("partial-return.bin");
+    fs::write(&partial, b"retained partial output\0before recovery\n").unwrap();
+    let original_request = serde_json::to_vec(&request).unwrap();
+    let task = owner.allocate(&request).unwrap();
+    assert_eq!(task.allocation["created"], false);
+    assert_eq!(task.allocation["now_ref"], native["now_ref"]);
+    assert_eq!(task.allocation["revision"], native["revision"]);
+    assert_eq!(
+        task.allocation["record"]["parent_now_ref"],
+        parent.allocation["now_ref"]
+    );
+    assert_eq!(
+        task.allocation["record"]["workcell_ref"],
+        "workcell:native-test"
+    );
+    assert_eq!(task.allocation["record"]["horizon"], "child");
+    assert_eq!(serde_json::to_vec(&task.request).unwrap(), original_request);
+    assert_eq!(fs::read(&record_path).unwrap(), original_record);
+    assert_eq!(
+        fs::read(&partial).unwrap(),
+        b"retained partial output\0before recovery\n"
+    );
+    // Cleanup may never close a preexisting child after failed preparation.
+    assert_eq!(owner.close_new_allocation(&task).unwrap(), None);
+    assert_eq!(
+        owner.revalidate(&task).unwrap()["record"]["lifecycle"],
+        "active"
+    );
+    let again = owner.allocate(&request).unwrap();
+    assert_eq!(again.allocation["created"], false);
+    assert_eq!(again.allocation["revision"], native["revision"]);
+}
+
+#[test]
+#[ignore = "requires exact native Central; mandatory CAW workflow"]
+fn existing_task_intent_mismatch_refuses_without_changing_native_bytes() {
+    let (_dir, request) = world();
+    let owner = NativeCentralPlacement::new(SystemRunner::new());
+    let task = owner.allocate(&request).unwrap();
+    let path = request
+        .central_root
+        .join(task.allocation["source"]["path"].as_str().unwrap());
+    let before = fs::read(&path).unwrap();
+    for change in 0..3 {
+        let mut wrong = request.clone();
+        match change {
+            0 => wrong.purpose.push_str(" changed intent"),
+            1 => wrong
+                .participant_refs
+                .push(ResourceRef::parse("agent:other").unwrap()),
+            2 => wrong
+                .source_refs
+                .push(ResourceRef::parse("source:other").unwrap()),
+            _ => unreachable!(),
+        }
+        assert!(owner.allocate(&wrong).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+    assert_eq!(
+        owner.revalidate(&task).unwrap()["record"]["lifecycle"],
+        "active"
+    );
+}

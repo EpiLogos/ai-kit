@@ -1034,7 +1034,7 @@ impl Service {
                     aikit_adapters::actuation_model_routes::CredentialEvidence::from_binding_refs(
                         bindings
                             .into_iter()
-                            .filter(|binding| !binding.revoked)
+                            .filter(global_model_credential_binding)
                             .map(|binding| {
                                 aikit_adapters::actuation_model_routes::qualified_credential_ref(
                                     binding.credential_ref.as_str(),
@@ -3929,9 +3929,25 @@ impl PaletteBackend for Service {
 /// A world whose routes declare no credential need probes nothing and reports an
 /// observed, empty roster — a confirmed "this world needs none", never the
 /// "nobody looked" the disclosure's own `not_attempted` default carries.
+/// A protected session declaration is not an operator/global Model-route
+/// capability. The actual session's delivery seam validates it independently.
+fn global_model_credential_binding(
+    binding: &aikit_core::credential::CredentialBindingState,
+) -> bool {
+    crate::credential::global_model_credential_binding(binding)
+}
+
 fn observe_credential_roster(
     home: &AikitHome,
     requirements: &[aikit_core::credential::SecretRequirement],
+) -> Result<aikit_core::credential_world::ProviderRosterKnowledge> {
+    observe_credential_roster_with_origin(home, requirements, None)
+}
+
+fn observe_credential_roster_with_origin(
+    home: &AikitHome,
+    requirements: &[aikit_core::credential::SecretRequirement],
+    native_origin: Option<&Path>,
 ) -> Result<aikit_core::credential_world::ProviderRosterKnowledge> {
     use aikit_adapters::NativeSecureStoreProvider;
     use aikit_core::credential::{SecretProvider, SecretProviderDescriptor};
@@ -3941,6 +3957,7 @@ fn observe_credential_roster(
     let store = aikit_store::credentials::CredentialBindingStore::new(home);
     let mut supported = BTreeSet::new();
     let mut descriptor: Option<SecretProviderDescriptor> = None;
+    let mut harness_descriptors = Vec::new();
 
     for requirement in requirements {
         let binding = store.load(&requirement.credential_ref)?;
@@ -3948,15 +3965,36 @@ fn observe_credential_roster(
         let observed = native.descriptor(&requirement.credential_ref);
         supported.extend(observed.supported_credentials.iter().cloned());
         descriptor.get_or_insert(observed);
+        if let Some(binding) = binding
+            .as_ref()
+            .filter(|binding| binding.is_session_scoped_harness_binding())
+        {
+            let provider = match native_origin {
+                Some(origin) => aikit_adapters::PiHarnessAuthProvider::at(
+                    Some(binding),
+                    origin,
+                    &requirement.consumer_ref,
+                )?,
+                None => aikit_adapters::PiHarnessAuthProvider::from_native(
+                    Some(binding),
+                    &requirement.consumer_ref,
+                )?,
+            };
+            // A descriptor honestly remains unavailable to this global
+            // consumer; the source value is never parsed by a World reading.
+            harness_descriptors.push(provider.descriptor(&requirement.credential_ref));
+        }
     }
 
-    let providers = match descriptor {
+    let mut providers = match descriptor {
         Some(mut native) => {
             native.supported_credentials = supported;
             vec![native]
         }
         None => Vec::new(),
     };
+
+    providers.extend(harness_descriptors);
 
     Ok(ProviderRosterKnowledge::Observed { providers })
 }
@@ -4469,5 +4507,81 @@ mod roster_gate_tests {
             Some(&book),
         );
         assert!(!excluded.authorised && !excluded.policy_allowed);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod scoped_pi_world_consumer_tests {
+    use super::*;
+    use aikit_core::credential::{
+        CredentialRef, SecretMaterialisationClass, SecretRequirement, SecretRequirementRef,
+    };
+    use aikit_core::credential_world::disclose_credential_world;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn real_owner_binding_is_visible_but_cannot_create_global_model_route_success() {
+        let original = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(state.path());
+        let path = original.path().join(".pi/agent/auth.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Intentionally unparsable: metadata-only observation must not read
+        // private bytes or claim a live provider check.
+        std::fs::write(&path, b"unparsed synthetic-private-origin").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let credential = CredentialRef::new("credential:z-ai").unwrap();
+        let binding = aikit_adapters::PiHarnessAuthProvider::declare(
+            original.path(),
+            &credential,
+            "agent-session/scoped-world-consumer-test",
+            "bounded owner/consumer regression",
+            "2099-01-01T00:00:00Z",
+        )
+        .unwrap();
+        aikit_store::CredentialBindingStore::new(&home)
+            .compare_and_save(None, &binding)
+            .unwrap();
+        let retained = aikit_store::CredentialBindingStore::new(&home)
+            .load(&credential)
+            .unwrap()
+            .unwrap();
+        assert!(!global_model_credential_binding(&retained));
+        let requirement = |consumer: &str| SecretRequirement {
+            requirement_ref: SecretRequirementRef::new("secret-requirement:scoped-world-test")
+                .unwrap(),
+            credential_ref: credential.clone(),
+            consumer_ref: consumer.into(),
+            purpose: "actual consumer scope observation".into(),
+            permitted_materialisation: [SecretMaterialisationClass::ProcessEnv].into(),
+        };
+        let global = [requirement("aikit:model-routes")];
+        let roster =
+            observe_credential_roster_with_origin(&home, &global, Some(original.path())).unwrap();
+        let descriptors = roster.providers().unwrap();
+        assert!(descriptors
+            .iter()
+            .any(|p| p.provider_kind == "named-native-pi-auth-source" && !p.available));
+        let disclosure = disclose_credential_world(roster, &global, true, false);
+        assert!(disclosure.fully_observed());
+        assert!(!disclosure
+            .status(&global[0].requirement_ref)
+            .unwrap()
+            .is_selected());
+        let scoped = [requirement("agent-session/scoped-world-consumer-test")];
+        let roster =
+            observe_credential_roster_with_origin(&home, &scoped, Some(original.path())).unwrap();
+        let disclosure = disclose_credential_world(roster, &scoped, true, false);
+        assert!(disclosure
+            .status(&scoped[0].requirement_ref)
+            .unwrap()
+            .is_selected());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"unparsed synthetic-private-origin"
+        );
+        assert!(!serde_json::to_string(&disclosure)
+            .unwrap()
+            .contains("synthetic-private-origin"));
     }
 }

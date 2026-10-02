@@ -292,6 +292,183 @@ fn actual_pi_open_emits_factory_selection_without_inference() {
 }
 
 #[test]
+#[ignore = "requires pinned Actuation and actual installed Pi; explicit CLI native preparation, never prompts"]
+fn explicit_compose_cli_admits_actual_pi_without_ambient_world_composition() {
+    let mut w = World::new();
+    let target = actual_pi_setup(&w);
+    let composition = composition(&w, &target);
+    let basis_path = w.temp.path().join("actual-pi-agency-basis.json");
+    let target_path = w.temp.path().join("actual-pi-resident-target.json");
+    let basis = &target["request"]["expected_agency"]["basis"];
+    fs::write(&basis_path, serde_json::to_vec(basis).unwrap()).unwrap();
+    fs::write(
+        &target_path,
+        serde_json::to_vec(&composition["resident_target"]).unwrap(),
+    )
+    .unwrap();
+    let native = actuation();
+    let mut paths = vec![native.parent().unwrap().to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let path = std::env::join_paths(paths).unwrap();
+    start_model(&mut w, false);
+    let invoke = |selected_target: &Path, selected_basis: &Path, model: &str, provider: &str| {
+        Command::new(env!("CARGO_BIN_EXE_aikit"))
+            .env("AIKIT_HOME", w.home.root())
+            .env("PATH", &path)
+            .env_remove("CAW_SOURCE_API_KEY")
+            .args(["--json", "-C"])
+            .arg(w.temp.path())
+            .args(["compose", "--agency-source"])
+            .arg(selected_basis)
+            .args([
+                "--agent",
+                "agent:root",
+                "--world",
+                "central:root",
+                "--realise",
+                "--model",
+                model,
+                "--provider",
+                provider,
+                "--resident-target",
+            ])
+            .arg(selected_target)
+            .output()
+            .unwrap()
+    };
+    let output = invoke(
+        &target_path,
+        &basis_path,
+        "model:deepseek-v4-pro",
+        "provider:openrouter",
+    );
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reading: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        reading["data"]["composition_scope"]["kind"],
+        "explicit-native-resident"
+    );
+    assert_eq!(
+        reading["data"]["composition_scope"]["ambient_components_claimed"],
+        false
+    );
+    for field in [
+        "basis",
+        "agent_ref",
+        "agency_ref",
+        "world_binding_ref",
+        "world_ref",
+        "scope_ref",
+    ] {
+        assert_eq!(
+            reading["data"]["agency_admission"][field],
+            target["request"]["expected_agency"][field]
+        );
+    }
+    assert!(reading["data"].get("project_binding").is_none());
+    assert!(reading["data"].get("plan").is_none());
+    let realisation = &reading["data"]["realisation"];
+    assert_eq!(realisation["selected"], true);
+    assert_eq!(realisation["executed"], false);
+    assert_eq!(realisation["resident"]["inference_observed"], false);
+    let selection = &realisation["factory_selection"];
+    assert_eq!(selection["model_ref"], "model:deepseek-v4-pro");
+    assert_eq!(selection["provider_ref"], "provider:openrouter");
+    assert_eq!(selection["ranking_policy"], "EXPLICIT_PIN");
+    let actual_basis = &selection["ranking_explanation"]["basis"];
+    assert_eq!(
+        actual_basis["composition_target_basis"]["agency_source"],
+        *basis
+    );
+    assert_eq!(
+        actual_basis["composition_target_basis"]["resident_body_basis"]["harness_profile"],
+        "pi"
+    );
+    assert_eq!(
+        actual_basis["native"]["model_observation"]["current_model_id"],
+        "deepseek/deepseek-v4-pro"
+    );
+    let native_session = &actual_basis["native"]["native_session_id"];
+    assert!(native_session.as_str().is_some_and(|s| !s.is_empty()));
+
+    // Each refusal reaches the same actual owner/basis, without a turn.
+    let wrong_model = invoke(
+        &target_path,
+        &basis_path,
+        "model:unrelated",
+        "provider:openrouter",
+    );
+    assert!(!wrong_model.status.success());
+    let wrong_provider = invoke(
+        &target_path,
+        &basis_path,
+        "model:deepseek-v4-pro",
+        "provider:openai",
+    );
+    assert!(!wrong_provider.status.success());
+    let wrong_target_path = w.temp.path().join("foreign-body-target.json");
+    let mut wrong_target = composition["resident_target"].clone();
+    wrong_target["body"] = json!("unconfigured-foreign-body");
+    fs::write(
+        &wrong_target_path,
+        serde_json::to_vec(&wrong_target).unwrap(),
+    )
+    .unwrap();
+    assert!(!invoke(
+        &wrong_target_path,
+        &basis_path,
+        "model:deepseek-v4-pro",
+        "provider:openrouter"
+    )
+    .status
+    .success());
+    let wrong_basis_path = w.temp.path().join("stale-source-basis.json");
+    let mut wrong_basis = basis.clone();
+    wrong_basis["content_digest"] = json!(format!("blake3:{}", "0".repeat(64)));
+    fs::write(&wrong_basis_path, serde_json::to_vec(&wrong_basis).unwrap()).unwrap();
+    assert!(!invoke(
+        &target_path,
+        &wrong_basis_path,
+        "model:deepseek-v4-pro",
+        "provider:openrouter"
+    )
+    .status
+    .success());
+    let repeat = invoke(
+        &target_path,
+        &basis_path,
+        "model:deepseek-v4-pro",
+        "provider:openrouter",
+    );
+    assert!(
+        repeat.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&repeat.stdout),
+        String::from_utf8_lossy(&repeat.stderr)
+    );
+    let repeated: Value = serde_json::from_slice(&repeat.stdout).unwrap();
+    assert_eq!(
+        repeated["data"]["realisation"]["resident"]["native_session_id"],
+        *native_session
+    );
+    assert_eq!(
+        repeated["data"]["realisation"]["resident"]["inference_observed"],
+        false
+    );
+    assert!(!w.temp.path().join(".aikit").exists());
+    assert!(!w.temp.path().join("ProjectCentral").exists());
+    w.stop();
+    println!("ACTUAL_PI_COMPOSE_CLI_SELECTION_WITHOUT_AMBIENT_COMPOSITION_OR_INFERENCE");
+}
+
+#[test]
 #[ignore = "requires pinned Actuation and native protocol owner; mandatory CAW lane"]
 fn application_realisation_dispatches_native_selected_model_and_requires_the_owner() {
     let mut w = World::new();
@@ -416,27 +593,24 @@ fn compose_cli_realisation_uses_the_same_existing_resident_target() {
     );
     let reading: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
-        reading["data"]["project_binding"]["project"],
-        "central:root"
+        reading["data"]["composition_scope"]["kind"],
+        "explicit-native-resident"
     );
-    assert_eq!(
-        reading["data"]["project_binding"]["locator"]["kind"],
-        "native-world"
-    );
-    assert_eq!(
-        reading["data"]["project_binding"]["locator"]["binding"],
-        "binding:root"
-    );
-    assert_eq!(
-        reading["data"]["project_binding"]["locator"]["scope"],
-        "scope:root"
-    );
-    assert_eq!(
-        reading["data"]["plan"]["project"],
-        reading["data"]["project_binding"]
-    );
-    assert_eq!(reading["data"]["root_meta_project"], true);
-    assert_eq!(reading["data"]["local_project_directory_present"], false);
+    for field in [
+        "basis",
+        "agent_ref",
+        "agency_ref",
+        "world_binding_ref",
+        "world_ref",
+        "scope_ref",
+    ] {
+        assert_eq!(
+            reading["data"]["agency_admission"][field],
+            target["request"]["expected_agency"][field]
+        );
+    }
+    assert!(reading["data"].get("project_binding").is_none());
+    assert!(reading["data"].get("plan").is_none());
     assert!(!w.temp.path().join(".aikit").exists());
     assert!(!w.temp.path().join("ProjectCentral").exists());
     assert_eq!(

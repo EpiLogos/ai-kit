@@ -35,7 +35,7 @@ use aikit_core::resource::{
 };
 use aikit_core::{AikitError, Result};
 use aikit_store::model_catalogue::{load_provider_catalogs, resolved_catalogue};
-use aikit_store::{AikitHome, CredentialBindingStore};
+use aikit_store::AikitHome;
 use serde_json::json;
 
 use crate::credential_delivery::ModelCredential;
@@ -421,24 +421,21 @@ pub(crate) fn joined_routes(
     let (reachable, reach_notes) = harness_provider_reachability(&detection, &capabilities);
     notes.extend(reach_notes);
 
-    let bindings = match CredentialBindingStore::new(home).list() {
-        Ok(bindings) => bindings,
+    let join = match join_global_model_routes(home, &catalogue, &observed, &reachable) {
+        Ok(join) => join,
         Err(bind_error) => {
             notes.push(format!(
                 "credential bindings unreadable ({bind_error}) — routes are reported without \
                  their credential state, never as usable"
             ));
-            Vec::new()
+            join_model_routes_with_reach(
+                &catalogue,
+                &observed,
+                &reachable,
+                &CredentialEvidence::default(),
+            )
         }
     };
-    let credentials = CredentialEvidence::from_binding_refs(
-        bindings
-            .iter()
-            .filter(|binding| !binding.revoked)
-            .map(|binding| binding.credential_ref.as_str().to_string()),
-    );
-
-    let join = join_model_routes_with_reach(&catalogue, &observed, &reachable, &credentials);
     notes.extend(join.notes.clone());
     let set = join
         .route_sets
@@ -446,6 +443,24 @@ pub(crate) fn joined_routes(
         .find(|set| set.model == *model)
         .ok_or_else(|| error(format!("{model} resolved with no route set")))?;
     Ok((set, notes))
+}
+
+/// Join the actual catalogue and observations with global owner eligibility.
+/// Session-scoped native source records remain retained but cannot turn a
+/// global route's Required condition into Satisfied.
+fn join_global_model_routes(
+    home: &AikitHome,
+    catalogue: &aikit_core::resource::ModelCatalogue,
+    observed: &[aikit_adapters::actuation_model_routes::ObservedProviderModel],
+    reachable: &[aikit_adapters::actuation_model_routes::ProviderReachability],
+) -> Result<aikit_adapters::actuation_model_routes::ModelRouteJoin> {
+    let credentials = crate::credential::global_model_credential_evidence(home)?;
+    Ok(join_model_routes_with_reach(
+        catalogue,
+        observed,
+        reachable,
+        &credentials,
+    ))
 }
 
 /// Compose the launch plan for `harness` running `model` (optionally pinned to
@@ -924,6 +939,7 @@ mod tests {
             expires_at: None,
             revoked: false,
             metadata: BTreeMap::new(),
+            harness_auth_source: None,
             declared_secret_ref: None,
             bound_at_unix_seconds: Some(1_700_000_000),
             last_rotated_at_unix_seconds: None,
@@ -1502,6 +1518,78 @@ mod tests {
         assert_eq!(
             lines[2], "home-kept",
             "the allowlist keeps the harness working: {stdout}"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod scoped_pi_route_projection_tests {
+    use super::*;
+    use aikit_adapters::PiHarnessAuthProvider;
+    use aikit_core::credential::CredentialRef;
+    use aikit_store::CredentialBindingStore;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn actual_native_scoped_source_cannot_satisfy_the_global_route_join() {
+        let root = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(root.path().join("owner-state"));
+        let original = root.path().join("native-home");
+        let source = original.join(".pi/agent/auth.json");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"unparsed synthetic native origin").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let binding = PiHarnessAuthProvider::declare(
+            &original,
+            &CredentialRef::new("credential:z-ai").unwrap(),
+            "agent-session/route-query",
+            "bounded actual owner route query",
+            "2099-01-01T00:00:00Z",
+        )
+        .unwrap();
+        let store = CredentialBindingStore::new(&home);
+        store.compare_and_save(None, &binding).unwrap();
+        // This is an actual configured catalogue input through its native
+        // file loader. There is no detected provider or successful model body.
+        let catalogue = home.root().join("model-catalogue");
+        std::fs::create_dir_all(&catalogue).unwrap();
+        std::fs::write(
+            catalogue.join("scoped-route.json"),
+            r#"[{
+            "model":"model:scoped-native-route-regression",
+            "name":"Scoped native source regression",
+            "description":"controlled owner catalogue input; no body invoked",
+            "routes":[{"provider":"provider:z-ai","kind":"provider-native",
+                "provider_native_ids":["scoped-native-route-regression"],
+                "credential":{"condition":"required","hint":"required bounded source"}}],
+            "source":"source/controlled-native-credential-regression"
+        }]"#,
+        )
+        .unwrap();
+        let (catalogue, problems) = resolved_catalogue(&home);
+        let configured = catalogue
+            .entries()
+            .find(|entry| entry.model.as_str() == "model:scoped-native-route-regression")
+            .unwrap_or_else(|| panic!("configured owner entry was not loaded: {problems:?}"));
+        assert_eq!(
+            configured.source.as_str(),
+            "source/controlled-native-credential-regression"
+        );
+        let joined = join_global_model_routes(&home, &catalogue, &[], &[]).unwrap();
+        let selected = joined
+            .route_sets
+            .iter()
+            .find(|set| set.model.as_str() == "model:scoped-native-route-regression")
+            .unwrap();
+        assert!(!selected.routes.is_empty());
+        assert!(selected
+            .routes
+            .iter()
+            .all(|route| matches!(route.credential, CredentialCondition::Required { .. })));
+        assert_eq!(store.load(&binding.credential_ref).unwrap(), Some(binding));
+        assert_eq!(
+            std::fs::read(source).unwrap(),
+            b"unparsed synthetic native origin"
         );
     }
 }

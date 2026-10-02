@@ -1957,7 +1957,23 @@ fn cmd_compose(cwd: &std::path::Path, args: ComposeArgs) -> Result<Reply> {
             )
         })
         .transpose()?;
-    let mut data = service.compose_selected_plan(admission.as_ref())?;
+    let mut data = if args.realise && args.model.is_some() && args.resident_target.is_some() {
+        match admission.as_ref() {
+            Some(admitted) => {
+                admitted.basis.read()?;
+                jval!({
+                    "agency_admission": admitted,
+                    "composition_scope": {
+                        "kind": "explicit-native-resident",
+                        "ambient_components_claimed": false
+                    }
+                })
+            }
+            None => service.compose_selected_plan(None)?,
+        }
+    } else {
+        service.compose_selected_plan(admission.as_ref())?
+    };
     if let Some(path) = &args.resident_target {
         let metadata = std::fs::metadata(path)
             .map_err(|e| AikitError::new("compose.resident_target", e.to_string()))?;
@@ -3367,27 +3383,18 @@ fn run_credential_setup_from_palette(service: &Service) -> Result<Reply> {
     })?;
     let requirements = credential_requirements_for_model_routes(&route_sets);
 
-    let store = aikit_store::CredentialBindingStore::new(service.home());
-    let unresolved: Vec<_> = requirements
-        .into_iter()
-        .filter(|requirement| {
-            store
-                .load(&requirement.credential_ref)
-                .ok()
-                .flatten()
-                .is_none()
-        })
-        .collect();
+    let unresolved =
+        credential::unresolved_global_credential_requirements(service.home(), &requirements)?;
 
     if unresolved.is_empty() {
-        println!("Every credential this world declares is already bound; nothing to set up.");
+        println!("Every credential this world declares has an eligible global binding; nothing to set up.");
         return Ok(Reply::Status(0));
     }
 
     let chosen = if unresolved.len() == 1 {
         &unresolved[0]
     } else {
-        eprintln!("This world has unbound credentials:");
+        eprintln!("This world has unresolved credentials:");
         for (index, requirement) in unresolved.iter().enumerate() {
             eprintln!("  {}) {}", index + 1, requirement.credential_ref.as_str());
         }
@@ -4639,6 +4646,32 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
     };
     match command.command {
         CredentialSub::Setup(a) => {
+            let harness_declaration = a
+                .harness_auth
+                .map(|harness| -> Result<credential::HarnessAuthDeclaration> {
+                    Ok(credential::HarnessAuthDeclaration {
+                        harness,
+                        provider: a.provider.ok_or_else(|| {
+                            AikitError::new(
+                                "credential.harness_auth_options",
+                                "--provider required",
+                            )
+                        })?,
+                        expires_at: a.expires_at.ok_or_else(|| {
+                            AikitError::new(
+                                "credential.harness_auth_options",
+                                "--expires-at required",
+                            )
+                        })?,
+                        expected_binding: a.expected_binding.ok_or_else(|| {
+                            AikitError::new(
+                                "credential.harness_auth_options",
+                                "--expected-binding required",
+                            )
+                        })?,
+                    })
+                })
+                .transpose()?;
             let request = credential::CredentialRequest {
                 credential: aikit_core::credential::CredentialRef::new(a.credential)?,
                 consumer_ref: a.consumer,
@@ -4650,7 +4683,12 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
                 declared_ref: declared_ref(a.declared_ref)?,
                 stdin: a.stdin,
             };
-            let outcome = credential::setup(service.home(), &request)?;
+            let outcome = match harness_declaration.as_ref() {
+                Some(declaration) => {
+                    credential::declare_harness_auth(service.home(), &request, declaration, false)?
+                }
+                None => credential::setup(service.home(), &request)?,
+            };
             let notes = if outcome.binding.declared_secret_ref.is_some() {
                 vec![format!(
                     "the material stays in the declared store; AIKit holds only the \
@@ -4665,6 +4703,7 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
                 jval!({
                     "credential": request.credential.as_str(),
                     "newly_bound": outcome.newly_bound,
+                    "binding_revision": aikit_store::CredentialBindingStore::revision(Some(&outcome.binding))?,
                     "binding": outcome.binding,
                     "resolution": outcome.resolution,
                 }),
@@ -4689,6 +4728,7 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
                 jval!({
                     "credential": request.credential.as_str(),
                     "resolution": inspection.resolution,
+                    "binding_revision": aikit_store::CredentialBindingStore::revision(inspection.persisted_binding.as_ref())?,
                     "persisted_binding": inspection.persisted_binding,
                     "native_provider": inspection.native_provider,
                     "env_available": inspection.env_available,
@@ -4698,13 +4738,48 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
         }
         CredentialSub::List(_) => {
             let bindings = aikit_store::CredentialBindingStore::new(service.home()).list()?;
+            let revisions: std::collections::BTreeMap<_, _> = bindings
+                .iter()
+                .map(|binding| {
+                    Ok((
+                        binding.credential_ref.as_str().to_string(),
+                        aikit_store::CredentialBindingStore::revision(Some(binding))?,
+                    ))
+                })
+                .collect::<Result<_>>()?;
             Ok(reply(
                 &service,
-                jval!({ "bindings": bindings, "count": bindings.len() }),
+                jval!({ "bindings": bindings, "binding_revisions": revisions, "count": bindings.len() }),
                 vec![],
             ))
         }
         CredentialSub::Rotate(a) => {
+            let harness_declaration = a
+                .harness_auth
+                .map(|harness| -> Result<credential::HarnessAuthDeclaration> {
+                    Ok(credential::HarnessAuthDeclaration {
+                        harness,
+                        provider: a.provider.ok_or_else(|| {
+                            AikitError::new(
+                                "credential.harness_auth_options",
+                                "--provider required",
+                            )
+                        })?,
+                        expires_at: a.expires_at.ok_or_else(|| {
+                            AikitError::new(
+                                "credential.harness_auth_options",
+                                "--expires-at required",
+                            )
+                        })?,
+                        expected_binding: a.expected_binding.ok_or_else(|| {
+                            AikitError::new(
+                                "credential.harness_auth_options",
+                                "--expected-binding required",
+                            )
+                        })?,
+                    })
+                })
+                .transpose()?;
             let request = credential::CredentialRequest {
                 credential: aikit_core::credential::CredentialRef::new(a.credential)?,
                 consumer_ref: a.consumer,
@@ -4716,12 +4791,25 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
                 declared_ref: declared_ref(a.declared_ref)?,
                 stdin: a.stdin,
             };
-            let outcome = credential::rotate(service.home(), &request)?;
+            let outcome = match harness_declaration.as_ref() {
+                Some(declaration) => {
+                    let result = credential::declare_harness_auth(
+                        service.home(),
+                        &request,
+                        declaration,
+                        true,
+                    )?;
+                    credential::CredentialRotationOutcome { binding: result.binding,
+                        notes: vec!["original Pi source remains read-only; exact source basis was re-declared".into()] }
+                }
+                None => credential::rotate(service.home(), &request)?,
+            };
             Ok(reply(
                 &service,
                 jval!({
                     "credential": request.credential.as_str(),
                     "rotated": true,
+                    "binding_revision": aikit_store::CredentialBindingStore::revision(Some(&outcome.binding))?,
                     "binding": outcome.binding,
                 }),
                 outcome.notes,
@@ -6774,6 +6862,56 @@ mod session_command_tests {
                 vec!["cmux", "close-workspace", "--workspace", "workspace:21"],
             ],
             "a foreign workspace in the grouped window forces ownership-bounded teardown"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod scoped_pi_palette_projection_tests {
+    use aikit_adapters::PiHarnessAuthProvider;
+    use aikit_cli::credential;
+    use aikit_core::credential::{
+        CredentialRef, SecretMaterialisationClass, SecretRequirement, SecretRequirementRef,
+    };
+    use aikit_store::{AikitHome, CredentialBindingStore};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn palette_retains_actual_scoped_requirement_instead_of_announcing_all_bound() {
+        let root = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(root.path().join("owner-state"));
+        let original = root.path().join("native-home");
+        let source = original.join(".pi/agent/auth.json");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"unparsed synthetic private palette origin").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let binding = PiHarnessAuthProvider::declare(
+            &original,
+            &CredentialRef::new("credential:z-ai").unwrap(),
+            "agent-session/palette-query",
+            "bounded actual palette consumer regression",
+            "2099-01-01T00:00:00Z",
+        )
+        .unwrap();
+        let store = CredentialBindingStore::new(&home);
+        store.compare_and_save(None, &binding).unwrap();
+        let requirement = SecretRequirement {
+            requirement_ref: SecretRequirementRef::new("secret-requirement:palette-z-ai").unwrap(),
+            credential_ref: binding.credential_ref.clone(),
+            consumer_ref: "aikit:model-routes".into(),
+            purpose: "palette actual unresolved owner requirement".into(),
+            permitted_materialisation: [SecretMaterialisationClass::ProcessEnv].into(),
+        };
+        let unresolved = credential::unresolved_global_credential_requirements(
+            &home,
+            std::slice::from_ref(&requirement),
+        )
+        .unwrap();
+        assert_eq!(unresolved, vec![requirement]);
+        assert_eq!(store.load(&binding.credential_ref).unwrap(), Some(binding));
+        assert_eq!(
+            std::fs::read(source).unwrap(),
+            b"unparsed synthetic private palette origin"
         );
     }
 }

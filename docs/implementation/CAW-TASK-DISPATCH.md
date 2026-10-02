@@ -93,11 +93,22 @@ policy relations to the provider prompt. Neither allocation nor configuration
 commissions a Factory Run, invokes a model or records human Recognition.
 
 Preparation persists a pending request before Central allocation. It calls
-`central.work.policy`, `central.now.allocate`, `central.now.read` and
-`central.work.validate`, then constructs and inspects the exact native
+`central.work.policy`, `central.now.list`, `central.now.read`,
+`central.now.allocate` and `central.work.validate`, then constructs and inspects
+the exact native
 `workcell.write-boundary/v1` requirements. The record retains the full owner
 readings, native path identities, provider, launcher, Agency and task revisions.
 `ready:true` means configuration prepared, not execution, completion or Return.
+
+When Central has already allocated this exact Task in the selected scope, AIKit
+reads the unique matching NOW and requires the same purpose, ordered participant
+and source references, active lifecycle and current source revision. It forwards
+that record's immutable work references, parent and Workcell to Central's
+idempotent allocation operation. Central derives the child horizon and remains
+the final identity fence. This preserves a preallocated child NOW and the
+original pending Task request; it neither creates a replacement Task nor reparents
+an existing NOW. A changed or ambiguous record refuses preparation. Workcell-root
+NOWs require their own native owner operation and are not ordinary Task NOWs.
 
 Use returned `launcher.id` with the existing encounter `open`, `send`, `delivery`,
 `read` and `reconnect` operations in [CAW-NATIVE-DELIVERY.md](CAW-NATIVE-DELIVERY.md).

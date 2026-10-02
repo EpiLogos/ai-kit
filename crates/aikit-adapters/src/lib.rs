@@ -60,6 +60,7 @@ pub mod native_git;
 pub mod now_field;
 pub mod okf;
 pub mod openai_realtime;
+pub mod pi_harness_auth;
 pub mod place_technology;
 pub mod prime_rpc_connection;
 pub mod profiles;
@@ -246,6 +247,7 @@ pub use local_source_discovery::{
 };
 pub use native_git::{NativeGitProvider, NATIVE_GIT_PROVIDER_REF, NATIVE_GIT_PROVIDER_VERSION};
 pub use okf::{parse_authored_markdown_relations, parse_okf_markdown, render_okf_markdown};
+pub use pi_harness_auth::PiHarnessAuthProvider;
 pub use projectcentral::{ProjectCentralFileProvider, ProjectCentralFilesystemBinding};
 pub use projectcentral_authored_wiki::{
     projectcentral_authored_wiki, ProjectCentralAuthoredWiki, ProjectCentralAuthoredWikiStatus,

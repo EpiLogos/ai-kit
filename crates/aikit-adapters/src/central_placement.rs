@@ -84,18 +84,110 @@ impl<R: CommandRunner> NativeCentralPlacement<R> {
             .ok_or_else(|| failure("owner_response", "Native ActionResult has no object data"))
     }
 
+    /// Reuse immutable relationships only from the actual owner of this exact
+    /// Task and scope. A legacy client request has no relationship declaration;
+    /// it must not erase an already-allocated child NOW's native ancestry.
+    /// This is a read, not a new allocation or an amendment of the request.
+    fn existing_now_basis(
+        &self,
+        request: &CentralTaskRequest,
+        policy: &Value,
+    ) -> Result<Option<Value>> {
+        let listing = self.call(request, "central.now.list", json!({}))?;
+        if listing["schema"] != "central.now-listing/v1" {
+            return Err(failure(
+                "owner_response",
+                "Central did not return a NOW listing",
+            ));
+        }
+        let rows = listing["records"]
+            .as_array()
+            .ok_or_else(|| failure("owner_response", "Central NOW listing has no record array"))?;
+        let mut matches = rows
+            .iter()
+            .filter(|row| row["task_ref"] == json!(request.task_ref));
+        let Some(row) = matches.next() else {
+            return Ok(None);
+        };
+        if matches.next().is_some() || row["scope_ref"] != policy["scope_ref"] {
+            return Err(failure(
+                "allocation_mismatch",
+                "Task NOW is ambiguous or outside the selected World",
+            ));
+        }
+        let now_ref = text(row, "/now_ref")?;
+        let current = self.call(request, "central.now.read", json!({"now_ref": now_ref}))?;
+        let record = &current["record"];
+        if current["schema"] != "central.now-reading/v1"
+            || record["now_ref"] != row["now_ref"]
+            || record["scope_ref"] != policy["scope_ref"]
+            || record["task_ref"] != json!(request.task_ref)
+            || record["purpose"] != request.purpose
+            || record["participant_refs"] != json!(request.participant_refs)
+            || record["source_refs"] != json!(request.source_refs)
+            || record["lifecycle"] != "active"
+            || record["source_ref"] != current["source"]["ref"]
+            || current["source"]["ref"] != row["source_ref"]
+            || current["revision"]["revision"] != row["revision"]["revision"]
+        {
+            return Err(failure("allocation_mismatch", "Existing NOW does not retain this exact Task intent, scope, source and active basis"));
+        }
+        // The native allocate operation derives child from parent_now_ref.
+        // A Workcell root belongs to central.now.workcell-root and cannot be
+        // replayed as an ordinary Task allocation by this consumer.
+        let expected_horizon = if record["parent_now_ref"].is_null() {
+            Value::Null
+        } else {
+            json!("child")
+        };
+        if record["horizon"] != expected_horizon {
+            return Err(failure(
+                "allocation_mismatch",
+                "Existing NOW requires a different native horizon owner operation",
+            ));
+        }
+        text(&current, "/source/ref")?;
+        text(&current, "/revision/revision")?;
+        if record.get("work_refs").is_some_and(|refs| !refs.is_array()) {
+            return Err(failure(
+                "owner_response",
+                "Native NOW work_refs is not an array",
+            ));
+        }
+        Ok(Some(current))
+    }
+
     pub fn allocate(&self, request: &CentralTaskRequest) -> Result<AllocatedCentralTask> {
         let policy = self.call(request, "central.work.policy", json!({}))?;
         check_policy(&policy)?;
-        let allocation = self.call(
-            request,
-            "central.now.allocate",
-            json!({
-                "task_ref": request.task_ref, "purpose": request.purpose,
-                "participant_refs": request.participant_refs, "source_refs": request.source_refs,
-                "expected_policy_revision": policy["revision"],
-            }),
-        )?;
+        let existing = self.existing_now_basis(request, &policy)?;
+        let mut input = json!({
+            "task_ref": request.task_ref, "purpose": request.purpose,
+            "participant_refs": request.participant_refs, "source_refs": request.source_refs,
+            "expected_policy_revision": policy["revision"],
+        });
+        if let Some(current) = &existing {
+            // Retain this owner's immutable relationship facts. Never infer a
+            // parent or material placement from participant names or a path.
+            for key in ["work_refs", "parent_now_ref", "workcell_ref"] {
+                if let Some(value) = current["record"].get(key) {
+                    input[key] = value.clone();
+                }
+            }
+        }
+        let allocation = self.call(request, "central.now.allocate", input)?;
+        if let Some(current) = &existing {
+            if allocation["created"] != false
+                || allocation["now_ref"] != current["record"]["now_ref"]
+                || allocation["source"]["ref"] != current["source"]["ref"]
+                || allocation["revision"]["revision"] != current["revision"]["revision"]
+                || ["work_refs", "parent_now_ref", "workcell_ref", "horizon"]
+                    .iter()
+                    .any(|key| allocation["record"][*key] != current["record"][*key])
+            {
+                return Err(failure("allocation_mismatch", "Task NOW changed between read and native allocation replay; retain the pending Task"));
+            }
+        }
         if allocation["schema"] != "central.now-allocation/v1"
             || allocation["record"]["task_ref"] != json!(request.task_ref)
             || allocation["record"]["purpose"] != request.purpose

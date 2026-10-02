@@ -3841,6 +3841,18 @@ pub enum CredentialSub {
 
 #[derive(Debug, Args)]
 pub struct CredentialSetupArgs {
+    /// Declare only the original native Pi auth source; never a generic file ref.
+    #[arg(long, value_parser = ["pi"], requires_all = ["provider", "expires_at", "expected_binding"],
+        conflicts_with_all = ["declared_ref", "stdin", "from_env", "env_var", "project_env"])]
+    pub harness_auth: Option<String>,
+    #[arg(long, value_parser = ["zai"], requires = "harness_auth")]
+    pub provider: Option<String>,
+    /// Finite timestamp expiry for this exact session-scoped declaration.
+    #[arg(long, requires = "harness_auth")]
+    pub expires_at: Option<String>,
+    /// 'absent' or the binding_revision returned by credential explain/list/setup.
+    #[arg(long, requires = "harness_auth")]
+    pub expected_binding: Option<String>,
     #[arg(value_name = "CREDENTIAL")]
     pub credential: String,
     #[arg(long, value_name = "CONSUMER", default_value = "operator:aikit")]
@@ -3875,6 +3887,18 @@ pub struct CredentialSetupArgs {
 
 #[derive(Debug, Args)]
 pub struct CredentialRotateArgs {
+    /// Declare only the original native Pi auth source; never a generic file ref.
+    #[arg(long, value_parser = ["pi"], requires_all = ["provider", "expires_at", "expected_binding"],
+        conflicts_with_all = ["declared_ref", "stdin", "from_env", "env_var", "project_env"])]
+    pub harness_auth: Option<String>,
+    #[arg(long, value_parser = ["zai"], requires = "harness_auth")]
+    pub provider: Option<String>,
+    /// Finite timestamp expiry for this exact session-scoped declaration.
+    #[arg(long, requires = "harness_auth")]
+    pub expires_at: Option<String>,
+    /// 'absent' or the binding_revision returned by credential explain/list/setup.
+    #[arg(long, requires = "harness_auth")]
+    pub expected_binding: Option<String>,
     #[arg(value_name = "CREDENTIAL")]
     pub credential: String,
     #[arg(long, value_name = "CONSUMER", default_value = "operator:aikit")]
@@ -5128,4 +5152,49 @@ pub enum SessionSpaceWorkingSurfaceCommand {
     Focus { space: String, binding: String },
     /// Replace this terminal client with attachment to the exact live provider Surface.
     Attach { space: String, binding: String },
+}
+
+#[cfg(test)]
+mod harness_auth_cli_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn named_pi_source_requires_explicit_bounded_basis_and_refuses_competing_sources() {
+        let args = [
+            "aikit",
+            "credential",
+            "setup",
+            "credential:z-ai",
+            "--harness-auth",
+            "pi",
+            "--provider",
+            "zai",
+            "--consumer",
+            "agent-session/native-test",
+            "--purpose",
+            "bounded native test",
+            "--expires-at",
+            "2099-01-01T00:00:00Z",
+            "--expected-binding",
+            "absent",
+            "--headless",
+        ];
+        assert!(Cli::try_parse_from(args).is_ok());
+        let mut missing = args.to_vec();
+        missing.truncate(missing.len() - 3);
+        assert!(Cli::try_parse_from(missing).is_err());
+        for extra in [
+            vec!["--ref", "pass://other"],
+            vec!["--stdin"],
+            vec!["--from-env", "--env-var", "ZAI_API_KEY"],
+        ] {
+            let mut conflict = args.to_vec();
+            conflict.extend(extra);
+            assert!(Cli::try_parse_from(conflict).is_err());
+        }
+        let mut arbitrary = args.to_vec();
+        arbitrary[5] = "file";
+        assert!(Cli::try_parse_from(arbitrary).is_err());
+    }
 }

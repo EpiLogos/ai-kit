@@ -232,9 +232,16 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
                 ],
             );
         }
+        // This is an optional derived lens. Its ceiling cannot lengthen the
+        // budget the application configured for this provider's runner.
+        let ceiling = std::time::Duration::from_secs(15);
+        let timeout = self
+            .runner
+            .configured_timeout()
+            .map_or(ceiling, |configured| configured.min(ceiling));
         Ok(self
             .runner
-            .run_with_timeout(&argv, std::time::Duration::from_secs(15))?
+            .run_with_timeout(&argv, timeout)?
             .require(&argv, code)?
             .stdout)
     }
@@ -907,6 +914,33 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| { line.contains("check --cycles --json --repo demo") }));
+    }
+
+    /// Exercise the production optional-read transport with a genuinely blocking
+    /// OS command. This is a transport-budget proof, not GitNexus graph or provider
+    /// conformance: there is no fabricated executable version, result or index.
+    #[cfg(unix)]
+    #[test]
+    fn optional_read_transport_respects_the_configured_runner_budget() {
+        use std::time::{Duration, Instant};
+
+        let runner = crate::runner::SystemRunner::new().with_timeout(Duration::from_millis(400));
+        let provider = GitNexusCodeIndexProvider::with_binary(
+            runner,
+            "/bin/sh",
+            "transport-budget",
+            SourceRef::parse("source:command/transport-budget").unwrap(),
+            None,
+        );
+        let began = Instant::now();
+        let error = provider
+            .run_read(&["-c".into(), "sleep 30".into()], "transport.read_failed")
+            .unwrap_err();
+        assert_eq!(error.code(), "mux.command_timeout");
+        assert!(
+            began.elapsed() < Duration::from_secs(3),
+            "an optional read must obey the configured subsecond budget, not replace it with fifteen seconds"
+        );
     }
 
     /// The live-ground defect this bound repairs: `gitnexus analyze

@@ -1224,7 +1224,21 @@ fn native_prepared_run_preserves_authority_and_existing_worktree() {
         .as_object_mut()
         .unwrap()
         .remove("workcell_boundary_bin");
-    let mut paths = vec![binary.parent().unwrap().to_path_buf()];
+    // Exercise native publication through the activated primary executable.
+    // Its companion remains beside the canonical owner, outside this PATH.
+    // An unrelated, real executable with the same name must not select it.
+    let activated = w.root.join("activated-owner");
+    let unrelated = w.root.join("unrelated-owner");
+    fs::create_dir_all(&activated).unwrap();
+    fs::create_dir_all(&unrelated).unwrap();
+    let boundary_binary = binary.parent().unwrap().join("workcell-write-boundary");
+    assert!(boundary_binary.is_file(), "native companion required");
+    fs::copy(&boundary_binary, unrelated.join("workcell-write-boundary")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&binary, activated.join("workcell")).unwrap();
+    #[cfg(not(unix))]
+    fs::copy(&binary, activated.join("workcell")).unwrap();
+    let mut paths = vec![activated, unrelated];
     paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
     let configure = |world: &World, request: &Value| {
         Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
@@ -1296,6 +1310,11 @@ fn native_prepared_run_preserves_authority_and_existing_worktree() {
     );
     let record: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(record["ready"], true);
+    assert_eq!(
+        record["prepared_run"]["boundary_executable"],
+        json!(boundary_binary.canonicalize().unwrap()),
+        "native preparation must retain the selected owner's actual sibling"
+    );
     assert_eq!(record["request"]["cwd"], json!(worktree));
     assert_eq!(
         record["prepared_run"]["scope"]["prepared_write_boundary"],

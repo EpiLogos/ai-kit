@@ -95,6 +95,13 @@ impl Output {
 pub trait CommandRunner {
     fn run(&self, argv: &[String]) -> Result<Output>;
 
+    /// The runner's configured budget, when one is available. Optional providers
+    /// may use this to narrow their own ceiling without changing the explicit
+    /// `run_with_timeout` contract for other callers.
+    fn configured_timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     /// Run with a wall-clock budget. A command that has not finished inside the
     /// budget is killed and answered as a runner error (`mux.command_timeout`):
     /// there is no status data to hand back.
@@ -116,6 +123,10 @@ impl<T: CommandRunner + ?Sized> CommandRunner for Box<T> {
     fn run_with_timeout(&self, argv: &[String], timeout: std::time::Duration) -> Result<Output> {
         (**self).run_with_timeout(argv, timeout)
     }
+
+    fn configured_timeout(&self) -> Option<std::time::Duration> {
+        (**self).configured_timeout()
+    }
 }
 
 impl<T: CommandRunner + ?Sized> CommandRunner for &T {
@@ -125,6 +136,10 @@ impl<T: CommandRunner + ?Sized> CommandRunner for &T {
 
     fn run_with_timeout(&self, argv: &[String], timeout: std::time::Duration) -> Result<Output> {
         (**self).run_with_timeout(argv, timeout)
+    }
+
+    fn configured_timeout(&self) -> Option<std::time::Duration> {
+        (**self).configured_timeout()
     }
 }
 
@@ -138,6 +153,10 @@ impl<T: CommandRunner + ?Sized> CommandRunner for std::sync::Arc<T> {
 
     fn run_with_timeout(&self, argv: &[String], timeout: std::time::Duration) -> Result<Output> {
         (**self).run_with_timeout(argv, timeout)
+    }
+
+    fn configured_timeout(&self) -> Option<std::time::Duration> {
+        (**self).configured_timeout()
     }
 }
 
@@ -333,6 +352,10 @@ fn kill_tree(child: &mut std::process::Child) {
 }
 
 impl CommandRunner for SystemRunner {
+    fn configured_timeout(&self) -> Option<std::time::Duration> {
+        self.timeout
+    }
+
     fn run(&self, argv: &[String]) -> Result<Output> {
         let Some((program, args)) = argv.split_first() else {
             return Err(AikitError::new(
@@ -446,6 +469,15 @@ impl<R: CommandRunner> CommandRunner for RecordingRunner<R> {
     fn run(&self, argv: &[String]) -> Result<Output> {
         record(&self.calls, argv);
         self.inner.run(argv)
+    }
+
+    fn run_with_timeout(&self, argv: &[String], timeout: std::time::Duration) -> Result<Output> {
+        record(&self.calls, argv);
+        self.inner.run_with_timeout(argv, timeout)
+    }
+
+    fn configured_timeout(&self) -> Option<std::time::Duration> {
+        self.inner.configured_timeout()
     }
 }
 

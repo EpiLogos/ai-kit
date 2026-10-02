@@ -94,7 +94,32 @@ impl Binding {
             ));
         }
         let executable = resolve_executable("workcell")?;
-        let boundary_executable = resolve_executable("workcell-write-boundary")?;
+        let boundary_executable = executable
+            .parent()
+            .ok_or_else(|| error("Selected Workcell installation has no parent directory"))?
+            .join("workcell-write-boundary");
+        if !boundary_executable.is_file() {
+            return Err(error(
+                "Selected Workcell installation does not provide its boundary executable",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if boundary_executable
+                .metadata()
+                .map_err(error)?
+                .permissions()
+                .mode()
+                & 0o111
+                == 0
+            {
+                return Err(error(
+                    "Selected Workcell boundary executable is not executable",
+                ));
+            }
+        }
+        let boundary_executable = boundary_executable.canonicalize().map_err(error)?;
         // Both programs belong to the selected installed/candidate owner. A
         // similarly named unrelated executable is not a fallback.
         if executable.parent() != boundary_executable.parent() {

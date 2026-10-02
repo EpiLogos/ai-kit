@@ -157,6 +157,7 @@ impl Fixture {
             request: Box::new(ConversationSendRequest {
                 request_ref: r(request),
                 flow_location: self.loc.clone(),
+                expected_document_id: None,
                 sender: r("human:ann"),
                 actor: "human:ann".into(),
                 actor_kind: "human".into(),
@@ -773,6 +774,7 @@ fn refused_with(service: &EncounterService, request: &str, key: &str, code: &str
 
 fn facts(participants: Value, entries: &[&str]) -> super::conversation::FlowFacts {
     super::conversation::FlowFacts {
+        document_id: None,
         participants: participants.as_array().unwrap().clone(),
         entry_ids: entries.iter().map(|e| (*e).to_owned()).collect(),
     }
@@ -1008,6 +1010,7 @@ fn an_unbound_seat_on_another_workcell_is_carried_only_with_the_agent_the_reques
             request: Box::new(ConversationSendRequest {
                 request_ref: r(request),
                 flow_location: f.loc.clone(),
+                expected_document_id: None,
                 sender: r("human:ann"),
                 actor: "human:ann".into(),
                 actor_kind: "human".into(),
@@ -1399,4 +1402,605 @@ fn a_delivery_the_owner_died_holding_is_named_uncertain_released_and_never_repla
             .count(),
         1
     );
+}
+
+#[test]
+#[ignore = "requires actual Central ctrl; invoke explicitly with AIKIT_TEST_CENTRAL_CTRL; no provider process or model"]
+fn actual_native_flow_uuid_mismatch_refuses_before_record_or_effect() {
+    let binary = ctrl().expect("actual Central ctrl is required for this native gate");
+    let mut doc = flow_doc();
+    doc["meta"]["documentId"] = json!("5c347cc8-4926-42cf-919c-1e892681c6a8");
+    let f = Fixture::with_doc(binary, doc);
+    let service = EncounterService::new(f.world.home.clone()).unwrap();
+    let before = f
+        .central
+        .action("central.files.read", json!({"location":f.loc}));
+    let request_ref = r("conversation/native-document-pin-refusal");
+    let request: ConversationSendRequest = serde_json::from_value(json!({
+        "request_ref":request_ref,"flow_location":f.loc,"expected_document_id":"b3243d85-2e4b-43fa-9a23-69ad507d3487",
+        "sender":"human:ann","actor":"human:ann","entry":{"author_key":"p-ann","html":"<p>Retained document only.</p>","at":"2026-10-01T00:00:00Z"},
+        "recipients":[{"participant_key":"p-ada","agent_session":"agent-session/unopened-native-uuid-case"}]
+    })).unwrap();
+    let refused = service
+        .apply(EncounterRequest::ConversationSend {
+            request: Box::new(request),
+        })
+        .unwrap_err();
+    assert_eq!(refused.code(), "conversation.document_mismatch");
+    assert!(service.store.conversation(&request_ref).unwrap().is_none());
+    let after = f
+        .central
+        .action("central.files.read", json!({"location":f.loc}));
+    assert_eq!(after["data"]["content"], before["data"]["content"]);
+    assert_eq!(after["data"]["revision"], before["data"]["revision"]);
+    assert!(service.residents.lock().unwrap().is_empty());
+}
+
+fn pinned_native_request(f: &Fixture, request_ref: &ResourceRef) -> ConversationSendRequest {
+    serde_json::from_value(json!({
+        "request_ref":request_ref,"flow_location":f.loc,"expected_document_id":"5c347cc8-4926-42cf-919c-1e892681c6a8",
+        "sender":"human:ann","actor":"human:ann","entry":{"author_key":"p-ann","html":"<p>Exact native document.</p>","at":"2026-10-01T00:00:00Z"},
+        "recipients":[{"participant_key":"p-ada","agent_session":"agent-session/unopened-native-pin-case"}]
+    })).unwrap()
+}
+
+#[test]
+#[ignore = "requires an actual legacy Central ctrl via AIKIT_TEST_LEGACY_CENTRAL_CTRL; no model/provider"]
+fn actual_legacy_central_pin_unavailable_retains_request_without_append() {
+    let binary = PathBuf::from(
+        std::env::var_os("AIKIT_TEST_LEGACY_CENTRAL_CTRL")
+            .expect("actual legacy Central ctrl is required"),
+    );
+    assert!(binary.is_file());
+    let mut doc = flow_doc();
+    doc["meta"]["documentId"] = json!("5c347cc8-4926-42cf-919c-1e892681c6a8");
+    let f = Fixture::with_doc(binary, doc);
+    let descriptor = crate::gateway_owners::ProcessOwners::from_env()
+        .ctrl_action_descriptor("central.flow.append")
+        .unwrap();
+    assert!(
+        !descriptor["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field["name"] == "expected_document_id"),
+        "this gate requires the actual old owner"
+    );
+    let before = f
+        .central
+        .action("central.files.read", json!({"location":f.loc}));
+    let request_ref = r("conversation/actual-legacy-pin-refusal");
+    let service = EncounterService::new(f.world.home.clone()).unwrap();
+    let reading = service
+        .apply(EncounterRequest::ConversationSend {
+            request: Box::new(pinned_native_request(&f, &request_ref)),
+        })
+        .unwrap();
+    assert!(reading["entry"].is_null());
+    let retained = service.store.conversation(&request_ref).unwrap().unwrap();
+    assert_eq!(
+        retained.body["flow"]["document_id"],
+        "5c347cc8-4926-42cf-919c-1e892681c6a8"
+    );
+    assert!(retained.source.is_none());
+    assert_eq!(retained.recipients[0].dispatch, "unsent");
+    assert_eq!(retained.recipients[0].inclusion, "pending");
+    let after = f
+        .central
+        .action("central.files.read", json!({"location":f.loc}));
+    assert_eq!(after["data"]["content"], before["data"]["content"]);
+    assert_eq!(after["data"]["revision"], before["data"]["revision"]);
+    assert!(service.residents.lock().unwrap().is_empty());
+}
+
+#[test]
+#[ignore = "requires actual repaired Central ctrl via AIKIT_TEST_CENTRAL_CTRL; no model/provider"]
+fn actual_native_central_pin_is_confirmed_and_recovered_after_owner_reopen() {
+    let binary = ctrl().expect("actual repaired Central ctrl is required");
+    let mut doc = flow_doc();
+    doc["meta"]["documentId"] = json!("5c347cc8-4926-42cf-919c-1e892681c6a8");
+    let f = Fixture::with_doc(binary, doc);
+    let request_ref = r("conversation/actual-native-pin-recovery");
+    let first = {
+        let service = EncounterService::new(f.world.home.clone()).unwrap();
+        let reading = service
+            .apply(EncounterRequest::ConversationSend {
+                request: Box::new(pinned_native_request(&f, &request_ref)),
+            })
+            .unwrap();
+        assert!(
+            !reading["request"]["entry"].is_null(),
+            "actual repaired owner must commit the native entry"
+        );
+        assert!(service.residents.lock().unwrap().is_empty());
+        reading["request"]["entry"].clone()
+    };
+    let committed = f.central.doc(&f.loc);
+    assert_eq!(
+        committed["entries"].as_array().unwrap().last().unwrap()["request"]["documentId"],
+        "5c347cc8-4926-42cf-919c-1e892681c6a8"
+    );
+    let before = f
+        .central
+        .action("central.files.read", json!({"location":f.loc}));
+    let service = EncounterService::new(f.world.home.clone()).unwrap();
+    let replay = service
+        .apply(EncounterRequest::ConversationSend {
+            request: Box::new(pinned_native_request(&f, &request_ref)),
+        })
+        .unwrap();
+    assert_eq!(replay["request"]["entry"], first);
+    let after = f
+        .central
+        .action("central.files.read", json!({"location":f.loc}));
+    assert_eq!(after["data"]["content"], before["data"]["content"]);
+    assert_eq!(after["data"]["revision"], before["data"]["revision"]);
+    assert!(service.residents.lock().unwrap().is_empty());
+}
+
+#[test]
+#[ignore = "requires actual repaired Central ctrl via AIKIT_TEST_CENTRAL_CTRL; no model/provider"]
+fn actual_native_packet_read_refuses_replaced_document_before_context_or_turn() {
+    let binary = ctrl().expect("actual repaired Central ctrl is required");
+    let document_a = "5c347cc8-4926-42cf-919c-1e892681c6a8";
+    let document_b = "b3243d85-2e4b-43fa-9a23-69ad507d3487";
+    let mut doc = flow_doc();
+    doc["meta"]["documentId"] = json!(document_a);
+    let f = Fixture::with_doc(binary, doc);
+    let service = EncounterService::new(f.world.home.clone()).unwrap();
+    let request_ref = r("conversation/actual-native-final-packet-pin");
+    let sent = service
+        .apply(EncounterRequest::ConversationSend {
+            request: Box::new(pinned_native_request(&f, &request_ref)),
+        })
+        .unwrap();
+    assert!(
+        !sent["request"]["entry"].is_null(),
+        "actual repaired Central must commit A's request: {sent}"
+    );
+    let retained = service.store.conversation(&request_ref).unwrap().unwrap();
+    assert_eq!(retained.body["flow"]["document_id"], document_a);
+    let source = retained.source.as_ref().expect("native entry committed");
+    let recipient = &retained.recipients[0];
+    assert!(recipient.delivery.is_none());
+    assert!(recipient.reply.is_none());
+    assert!(service.residents.lock().unwrap().is_empty());
+
+    let read_a = f.central.action(
+        "central.flow.read",
+        json!({"location":f.loc,"participant_key":recipient.participant_key,"max_entries":20}),
+    );
+    assert_eq!(read_a["ok"], true, "{read_a}");
+    assert_eq!(read_a["data"]["document_id"], document_a);
+    assert!(read_a["data"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["id"] == source["entry_id"]));
+    let packet_a = service
+        .conversation_packet_text(&retained, recipient)
+        .expect("native A packet must be readable for the retained request");
+    assert!(packet_a.contains("ASKED [1] Ann (person): Exact native document."));
+
+    // Retain the actual asked entry and every participant in B. Without the
+    // final owner-read UUID guard, those copied facts would produce A's packet.
+    let committed_a = f.central.doc(&f.loc);
+    f.central.edit_doc(&f.loc, |replacement| {
+        replacement["meta"]["documentId"] = json!(document_b);
+    });
+    let committed_b = f.central.doc(&f.loc);
+    assert_eq!(committed_b["entries"], committed_a["entries"]);
+    assert_eq!(
+        committed_b["meta"]["participants"],
+        committed_a["meta"]["participants"]
+    );
+    let before_b = f
+        .central
+        .action("central.files.read", json!({"location":f.loc}));
+    let read_b = f.central.action(
+        "central.flow.read",
+        json!({"location":f.loc,"participant_key":recipient.participant_key,"max_entries":20}),
+    );
+    assert_eq!(read_b["ok"], true, "{read_b}");
+    assert_eq!(read_b["data"]["document_id"], document_b);
+    assert!(read_b["data"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["id"] == source["entry_id"]));
+
+    let refusal = service
+        .conversation_packet_text(&retained, recipient)
+        .unwrap_err();
+    assert!(
+        refusal
+            .detail()
+            .starts_with("conversation.document_mismatch:"),
+        "{refusal:?}"
+    );
+    assert_eq!(
+        refusal.standing(),
+        "refused",
+        "a known replaced document is not a held transport"
+    );
+    let after_b = f
+        .central
+        .action("central.files.read", json!({"location":f.loc}));
+    assert_eq!(after_b["data"]["content"], before_b["data"]["content"]);
+    assert_eq!(after_b["data"]["revision"], before_b["data"]["revision"]);
+    let after = service.store.conversation(&request_ref).unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(&after).unwrap(),
+        serde_json::to_value(&retained).unwrap()
+    );
+    assert!(after.recipients[0].delivery.is_none());
+    assert!(after.recipients[0].reply.is_none());
+    assert!(service.residents.lock().unwrap().is_empty());
+}
+
+#[test]
+#[ignore = "requires actual repaired and legacy Central ctrl; no model/provider or simulated owner"]
+fn actual_native_document_pin_keeps_qualified_owner_after_selector_replacement() {
+    let current = ctrl()
+        .expect("actual repaired Central ctrl is required")
+        .canonicalize()
+        .unwrap();
+    let legacy = PathBuf::from(
+        std::env::var_os("AIKIT_TEST_LEGACY_CENTRAL_CTRL")
+            .expect("actual legacy Central ctrl is required"),
+    )
+    .canonicalize()
+    .unwrap();
+    assert_ne!(current, legacy, "two actual owner executables are required");
+    let document_a = "5c347cc8-4926-42cf-919c-1e892681c6a8";
+    let document_b = "b3243d85-2e4b-43fa-9a23-69ad507d3487";
+    let mut doc = flow_doc();
+    doc["meta"]["documentId"] = json!(document_a);
+    let f = Fixture::with_doc(current.clone(), doc);
+    let selector = f.world._temp.path().join("ctrl-selector");
+    std::os::unix::fs::symlink(&current, &selector).unwrap();
+    std::env::set_var("CENTRAL_CTRL_BIN", &selector);
+    let body = json!({"flow":{"location":f.loc,"document_id":document_a}});
+    let mut input = json!({
+        "location":f.loc,"operation_ref":"conversation/actual-qualified-selector-pin",
+        "author_key":"p-ann","html":"<p>A's request cannot enter B.</p>",
+        "at":"2026-10-01T00:00:00Z","intent":"response",
+        "actor":"human:ann","actor_kind":"human"
+    });
+    // This is the same production crossing used by both initial and late append.
+    // Its real native descriptor read qualifies A's selected executable.
+    let owners = super::conversation::owners_for_append(&body, &mut input).unwrap();
+    assert_eq!(PathBuf::from(&owners.ctrl), current);
+    assert_eq!(input["expected_document_id"], document_a);
+    let read_a = f
+        .central
+        .action("central.flow.read", json!({"location":f.loc}));
+    assert_eq!(read_a["ok"], true, "{read_a}");
+    assert_eq!(read_a["data"]["document_id"], document_a);
+    // Real owner CAS changes the document while preserving the locator.
+    f.central.edit_doc(&f.loc, |replacement| {
+        replacement["meta"]["documentId"] = json!(document_b);
+    });
+    let before_b = f
+        .central
+        .action("central.files.read", json!({"location":f.loc}));
+    std::fs::remove_file(&selector).unwrap();
+    std::os::unix::fs::symlink(&legacy, &selector).unwrap();
+    let now_selected = crate::gateway_owners::ProcessOwners::from_env();
+    let old_descriptor = now_selected
+        .ctrl_action_descriptor("central.flow.append")
+        .unwrap();
+    assert!(
+        !old_descriptor["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field["name"] == "expected_document_id"),
+        "the selector must actually address the incapable native owner"
+    );
+    // The qualified owner, rather than the replacement selector, performs the
+    // effect. The real new owner refuses; no misleading readback can undo a write.
+    let refusal = owners
+        .run_ctrl_action("central.flow.append", &input)
+        .unwrap_err();
+    match refusal {
+        crate::gateway_owners::CtrlActionError::Refused { code, .. } => {
+            assert_eq!(code, "document-mismatch")
+        }
+        other => panic!("required native document refusal, got {other:?}"),
+    }
+    let after_b = f
+        .central
+        .action("central.files.read", json!({"location":f.loc}));
+    assert_eq!(after_b["data"]["content"], before_b["data"]["content"]);
+    assert_eq!(after_b["data"]["revision"], before_b["data"]["revision"]);
+    assert!(f.central.doc(&f.loc)["entries"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    std::env::set_var("CENTRAL_CTRL_BIN", &current);
+}
+
+#[test]
+#[ignore = "requires actual repaired and legacy Central ctrl; real native outage and recovery, no provider"]
+fn actual_native_document_pin_owner_outage_recovers_without_append() {
+    let current = ctrl()
+        .expect("actual repaired Central ctrl is required")
+        .canonicalize()
+        .unwrap();
+    let legacy = PathBuf::from(
+        std::env::var_os("AIKIT_TEST_LEGACY_CENTRAL_CTRL")
+            .expect("actual legacy Central ctrl is required"),
+    )
+    .canonicalize()
+    .unwrap();
+    let document = "5c347cc8-4926-42cf-919c-1e892681c6a8";
+    let mut doc = flow_doc();
+    doc["meta"]["documentId"] = json!(document);
+    let f = Fixture::with_doc(current.clone(), doc);
+    let selector = f.world._temp.path().join("recoverable-ctrl-selector");
+    std::env::set_var("CENTRAL_CTRL_BIN", &selector);
+    let body = json!({"flow":{"location":f.loc,"document_id":document}});
+    let mut input = json!({
+        "location":f.loc,"operation_ref":"conversation/actual-owner-outage-recovery",
+        "author_key":"p-ann","html":"<p>The owner recovered.</p>",
+        "at":"2026-10-01T00:00:00Z","intent":"response",
+        "actor":"human:ann","actor_kind":"human"
+    });
+    let before = f
+        .central
+        .action("central.files.read", json!({"location":f.loc}));
+    match super::conversation::owners_for_append(&body, &mut input) {
+        Err(crate::gateway_owners::CtrlActionError::Unavailable(reason)) => {
+            assert!(reason.contains("executable unavailable"), "{reason}");
+        }
+        Err(other) => panic!("a missing executable is a retryable outage: {other:?}"),
+        Ok(_) => panic!("the missing native owner cannot admit append"),
+    }
+    assert!(input.get("expected_document_id").is_none());
+    std::os::unix::fs::symlink(&legacy, &selector).unwrap();
+    match super::conversation::owners_for_append(&body, &mut input) {
+        Err(crate::gateway_owners::CtrlActionError::Refused { code, .. }) => {
+            assert_eq!(code, "document-pin-capability-absent");
+        }
+        Err(other) => panic!("the observed absent contract is a definite refusal: {other:?}"),
+        Ok(_) => panic!("the incapable real owner cannot admit pinned append"),
+    }
+    let withheld = f
+        .central
+        .action("central.files.read", json!({"location":f.loc}));
+    assert_eq!(withheld["data"]["content"], before["data"]["content"]);
+    assert_eq!(withheld["data"]["revision"], before["data"]["revision"]);
+    std::fs::remove_file(&selector).unwrap();
+    std::os::unix::fs::symlink(&current, &selector).unwrap();
+    let owners = super::conversation::owners_for_append(&body, &mut input).unwrap();
+    let appended = owners
+        .run_ctrl_action("central.flow.append", &input)
+        .unwrap();
+    assert_eq!(appended["document_id"], document);
+    let after = f
+        .central
+        .action("central.flow.read", json!({"location":f.loc}));
+    assert_eq!(after["ok"], true, "{after}");
+    assert_eq!(after["data"]["document_id"], document);
+    let entries = f.central.doc(&f.loc)["entries"].as_array().unwrap().clone();
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry["html"] == "<p>The owner recovered.</p>")
+            .count(),
+        1
+    );
+}
+
+#[test]
+#[ignore = "requires actual repaired Central ctrl; real SQLite inclusion/restart and native Flow, no model/provider"]
+fn actual_native_append_outage_keeps_returned_material_retryable_across_restart() {
+    let current = ctrl()
+        .expect("actual repaired Central ctrl is required")
+        .canonicalize()
+        .unwrap();
+    let document = "5c347cc8-4926-42cf-919c-1e892681c6a8";
+    let session = r("agent-session/controlled-native-material");
+    let agent = "agent:controlled-native-material";
+    let mut doc = flow_doc();
+    doc["meta"]["documentId"] = json!(document);
+    seat(&mut doc, "p-ada")["ref"] = json!(session);
+    seat(&mut doc, "p-ada")["binding"]["ref"] = json!(agent);
+    let f = Fixture::with_doc(current.clone(), doc);
+    let selector = f.world._temp.path().join("temporarily-absent-ctrl");
+    let populate = |service: &EncounterService, request: &ResourceRef, text: &str| {
+        let delivery = r(&format!("delivery/{request}"));
+        let body = json!({"schema":"aikit.conversation-request/v1",
+            "flow":{"location":f.loc,"document_id":document},
+            "sender":"human:ann","actor":"human:ann","actor_kind":"human",
+            "entry":{"author_key":"p-ann","html":"<p>Include the controlled native material.</p>"}});
+        service
+            .store
+            .create_conversation(
+                request,
+                request.as_str(),
+                &body,
+                &[aikit_store::encounter::NewConversationRecipient {
+                    participant_key: "p-ada".into(),
+                    agent_session: session.clone(),
+                    delivery_ref: delivery.clone(),
+                    agent_ref: Some(agent.into()),
+                    route: None,
+                }],
+            )
+            .unwrap();
+        let committed = f.central.action(
+            "central.flow.append",
+            json!({
+                "location":f.loc,"expected_document_id":document,
+                "operation_ref":format!("conv-entry:{request}"),"author_key":"p-ann",
+                "html":"<p>Include the controlled native material.</p>",
+                "at":"2026-10-01T00:00:00Z","intent":"response",
+                "actor":"human:ann","actor_kind":"human"
+            }),
+        );
+        assert_eq!(committed["ok"], true, "{committed}");
+        service
+            .store
+            .conversation_record_source(
+                request,
+                &json!({
+                    "entry_id":committed["data"]["entry"]["id"],
+                    "revision":committed["data"]["revision"],
+                    "document_revision":committed["data"]["document_revision"]
+                }),
+            )
+            .unwrap();
+        // Controlled native journal input exercises the real reducer and owner;
+        // no provider is started and no model inference is claimed by this gate.
+        let generation = format!("controlled-material/{request}");
+        service
+            .store
+            .reserve_delivery(
+                &session,
+                &delivery,
+                &r("human:ann"),
+                &json!({"connection_generation":generation}),
+            )
+            .unwrap();
+        service
+            .store
+            .delivery_ack(&session, &delivery, true, None)
+            .unwrap();
+        service
+            .store
+            .conversation_record_dispatch(request, "p-ada", "sent", None)
+            .unwrap();
+        service
+            .store
+            .append(
+                &session,
+                &json!({"kind":"provider","connection_generation":generation,
+            "event":{"Signal":{"sequence":1,"native_session_id":"controlled-no-inference",
+            "kind":{"kind":"agent-message-chunk","text":text}}}}),
+            )
+            .unwrap();
+        service
+            .store
+            .append(
+                &session,
+                &json!({"kind":"provider","connection_generation":generation,
+            "event":{"TurnEnded":{"stop":{"Completed":"EndTurn"}}}}),
+            )
+            .unwrap();
+        let returned = service.store.conversation(request).unwrap().unwrap();
+        assert!(returned.recipients[0].reply.as_ref().unwrap().complete);
+        assert_eq!(
+            returned.recipients[0].delivery.as_ref().unwrap().phase,
+            "returned"
+        );
+    };
+    let request = r("conversation/native-append-outage-restart");
+    let material = "Controlled material survives the native owner outage.";
+    {
+        let service = EncounterService::new(f.world.home.clone()).unwrap();
+        populate(&service, &request, material);
+        std::env::set_var("CENTRAL_CTRL_BIN", &selector);
+        let reading = service.store.conversation(&request).unwrap().unwrap();
+        let mut input = json!({});
+        let why = match super::conversation::owners_for_append(&reading.body, &mut input) {
+            Err(why @ crate::gateway_owners::CtrlActionError::Unavailable(_)) => why,
+            Err(why) => panic!("actual outage must retain its type: {why:?}"),
+            Ok(_) => panic!("missing native owner admitted append"),
+        };
+        // This is the exact production branch after descriptor/owner resolution;
+        // it records the actual owner error, not a synthetic success receipt.
+        service
+            .conversation_append_unavailable(&request, &reading.recipients[0], why)
+            .unwrap();
+        let retained = service.store.conversation(&request).unwrap().unwrap();
+        assert_eq!(retained.recipients[0].inclusion, "failed");
+        assert_eq!(retained.recipients[0].attempts, 1);
+        assert_eq!(
+            retained.recipients[0].reply.as_ref().unwrap().text,
+            material
+        );
+        assert!(retained.recipients[0].entry_id.is_none());
+    }
+    std::env::set_var("CENTRAL_CTRL_BIN", &current);
+    let service = EncounterService::new(f.world.home.clone()).unwrap();
+    assert_eq!(
+        service
+            .store
+            .conversation(&request)
+            .unwrap()
+            .unwrap()
+            .recipients[0]
+            .inclusion,
+        "failed"
+    );
+    for _ in 0..2 {
+        service
+            .apply(EncounterRequest::ConversationReconcile {
+                request_ref: request.clone(),
+            })
+            .unwrap();
+    }
+    let recovered = service.store.conversation(&request).unwrap().unwrap();
+    assert_eq!(recovered.recipients[0].inclusion, "included");
+    assert!(recovered.recipients[0].entry_id.is_some());
+    let entries = f.central.doc(&f.loc)["entries"].as_array().unwrap().clone();
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|e| e["html"]
+                .as_str()
+                .is_some_and(|html| html.contains(material)))
+            .count(),
+        1
+    );
+    let exhausted = r("conversation/native-append-outage-exhausted");
+    populate(&service, &exhausted, "The bounded outage remains withheld.");
+    std::env::set_var("CENTRAL_CTRL_BIN", &selector);
+    for count in 1..=20 {
+        let reading = service.store.conversation(&exhausted).unwrap().unwrap();
+        let mut input = json!({});
+        let why = match super::conversation::owners_for_append(&reading.body, &mut input) {
+            Err(why @ crate::gateway_owners::CtrlActionError::Unavailable(_)) => why,
+            Err(why) => panic!("actual outage must retain its type: {why:?}"),
+            Ok(_) => panic!("missing native owner admitted append"),
+        };
+        service
+            .conversation_append_unavailable(&exhausted, &reading.recipients[0], why)
+            .unwrap();
+        let retained = service.store.conversation(&exhausted).unwrap().unwrap();
+        assert_eq!(retained.recipients[0].attempts, count);
+        assert_eq!(
+            retained.recipients[0].inclusion,
+            if count == 20 { "refused" } else { "failed" }
+        );
+        assert!(retained.recipients[0].entry_id.is_none());
+    }
+    drop(service);
+    std::env::set_var("CENTRAL_CTRL_BIN", &current);
+    let service = EncounterService::new(f.world.home.clone()).unwrap();
+    service
+        .apply(EncounterRequest::ConversationReconcile {
+            request_ref: exhausted.clone(),
+        })
+        .unwrap();
+    assert_eq!(
+        service
+            .store
+            .conversation(&exhausted)
+            .unwrap()
+            .unwrap()
+            .recipients[0]
+            .inclusion,
+        "refused"
+    );
+    assert!(f.central.doc(&f.loc)["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|e| !e["html"]
+            .as_str()
+            .is_some_and(|html| html.contains("The bounded outage remains withheld."))));
+    assert!(service.residents.lock().unwrap().is_empty());
 }

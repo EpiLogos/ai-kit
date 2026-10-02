@@ -1548,17 +1548,27 @@ fn write_source_pool(dir: &Path, material: &[SourceMaterial]) -> Result<usize> {
 // query — read the semantic index over a Wiki file
 // ---------------------------------------------------------------------------
 
-/// Rebuild the semantic index over exactly what `file` holds. This is the
-/// plain in-memory `SemanticWikiIndex` — the same read path `wiki validate`
-/// already runs — not the materialised SQLite provider `aikit search` reads
-/// from an AIKit home; a query needs only the file it names.
-fn read_index(file: &Path) -> Result<SemanticWikiIndex> {
+/// Query only the named file's objects. Document validation preserves the
+/// writer's federation contract and still refuses broken local reciprocity.
+/// External refs are disclosed, never invented as local objects or persisted.
+fn read_index(file: &Path) -> Result<(SemanticWikiIndex, Vec<String>)> {
     let document = WikiDocument::parse(&read(file)?)?;
-    SemanticWikiIndex::rebuild(document.objects().to_vec())
+    document.validate()?;
+    let (index, repairs) = SemanticWikiIndex::rebuild_with_repairs(document.objects().to_vec())?;
+    let warnings = repairs
+        .into_iter()
+        .map(|repair| {
+            format!(
+                "{} declares {} outside this Wiki file; query covers local objects only ({})",
+                repair.subject, repair.other, repair.code,
+            )
+        })
+        .collect();
+    Ok((index, warnings))
 }
 
 fn query_search(args: &WikiQuerySearchArgs) -> Result<WikiOutcome> {
-    let index = read_index(&args.file)?;
+    let (index, warnings) = read_index(&args.file)?;
     let hits = index.search(&args.query, args.limit);
     Ok(WikiOutcome::reported(
         jval!({
@@ -1567,7 +1577,7 @@ fn query_search(args: &WikiQuerySearchArgs) -> Result<WikiOutcome> {
             "query": args.query,
             "hits": serde_json::to_value(&hits).unwrap_or_default(),
         }),
-        Vec::new(),
+        warnings,
         json::EXIT_OK,
     ))
 }
@@ -1577,7 +1587,7 @@ fn query_search(args: &WikiQuerySearchArgs) -> Result<WikiOutcome> {
 /// nothing about a `tagged` relation or an ingested `references` edge is
 /// special-cased.
 fn query_neighbours(args: &WikiQueryRefArgs) -> Result<WikiOutcome> {
-    let index = read_index(&args.file)?;
+    let (index, mut warnings) = read_index(&args.file)?;
     let resource = ResourceRef::parse(&args.resource_ref)?;
     let mut neighbours: Vec<Value> = index
         .neighbours(&resource, args.limit)
@@ -1587,6 +1597,7 @@ fn query_neighbours(args: &WikiQueryRefArgs) -> Result<WikiOutcome> {
     // The nodes citing an authored source are its neighbourhood, incoming.
     neighbours.extend(citations_of(&index, &resource));
     neighbours.truncate(args.limit);
+    warnings.extend(absent_ref_warnings(&index, &resource));
     Ok(WikiOutcome::reported(
         jval!({
             "command": "query.neighbours",
@@ -1594,7 +1605,7 @@ fn query_neighbours(args: &WikiQueryRefArgs) -> Result<WikiOutcome> {
             "ref": resource.to_string(),
             "neighbours": serde_json::to_value(&neighbours).unwrap_or_default(),
         }),
-        absent_ref_warnings(&index, &resource),
+        warnings,
         json::EXIT_OK,
     ))
 }
@@ -1652,7 +1663,7 @@ fn citations_of(index: &SemanticWikiIndex, resource: &ResourceRef) -> Vec<Value>
 /// an ingested corpus: an argument's authored citations and a tag's members
 /// are both ordinary backlinks here, not a derived view bolted on after.
 fn query_backlinks(args: &WikiQueryRefArgs) -> Result<WikiOutcome> {
-    let index = read_index(&args.file)?;
+    let (index, mut warnings) = read_index(&args.file)?;
     let resource = ResourceRef::parse(&args.resource_ref)?;
     let mut backlinks: Vec<Value> = index
         .backlinks(&resource)
@@ -1663,7 +1674,7 @@ fn query_backlinks(args: &WikiQueryRefArgs) -> Result<WikiOutcome> {
     // here, not a footnote pointing somewhere else.
     backlinks.extend(citations_of(&index, &resource));
     backlinks.truncate(args.limit);
-    let warnings = absent_ref_warnings(&index, &resource);
+    warnings.extend(absent_ref_warnings(&index, &resource));
     Ok(WikiOutcome::reported(
         jval!({
             "command": "query.backlinks",

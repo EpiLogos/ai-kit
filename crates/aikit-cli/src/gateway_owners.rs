@@ -139,6 +139,25 @@ impl ProcessOwners {
         }
     }
 
+    /// Resolve the selected executable once before a capability-bound crossing.
+    /// Managed product targets are immutable; following a mutable selector again
+    /// after its descriptor read could invoke a different owner for the effect.
+    pub(crate) fn resolved_ctrl(mut self) -> std::result::Result<Self, CtrlActionError> {
+        let selected = crate::probe::which(&self.ctrl).ok_or_else(|| {
+            CtrlActionError::Unavailable(format!("Central executable unavailable: {}", self.ctrl))
+        })?;
+        let resolved = selected.canonicalize().map_err(|why| {
+            CtrlActionError::Unavailable(format!(
+                "Central executable cannot be resolved ({}): {why}",
+                selected.display()
+            ))
+        })?;
+        self.ctrl = resolved.into_os_string().into_string().map_err(|_| {
+            CtrlActionError::Unavailable("Central executable path is not UTF-8".into())
+        })?;
+        Ok(self)
+    }
+
     fn ctrl_action(&self, action: &str, input: &Value) -> Result<Value, CtrlFailure> {
         let mut argv = vec![self.ctrl.clone(), "--json".to_owned()];
         if let Some(root) = &self.central_root {
@@ -191,6 +210,42 @@ impl ProcessOwners {
                 message: ctrl_refusal_reason(&envelope),
             }),
         }
+    }
+
+    /// Read the selected native Central Action descriptor through the same
+    /// bounded process owner. No cache, environment credential or write added.
+    pub(crate) fn ctrl_action_descriptor(
+        &self,
+        action: &str,
+    ) -> std::result::Result<Value, CtrlActionError> {
+        let mut argv = vec![self.ctrl.clone(), "--json".to_owned()];
+        if let Some(root) = &self.central_root {
+            argv.extend(["--root".to_owned(), root.display().to_string()]);
+        }
+        argv.extend([
+            "action".to_owned(),
+            "describe".to_owned(),
+            action.to_owned(),
+        ]);
+        let (status, envelope) = self
+            .json_process(argv, None)
+            .map_err(|owner| CtrlActionError::Unavailable(owner.reason))?;
+        if status != 0 || envelope["ok"] != true {
+            return Err(CtrlActionError::Refused {
+                code: envelope
+                    .pointer("/error/code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("refused")
+                    .to_owned(),
+                message: ctrl_refusal_reason(&envelope),
+            });
+        }
+        if envelope["action"] != "action.describe" || envelope["data"]["id"] != action {
+            return Err(CtrlActionError::Unavailable(
+                "Central did not return the requested Action descriptor".into(),
+            ));
+        }
+        Ok(envelope["data"].clone())
     }
 
     fn json_process(
