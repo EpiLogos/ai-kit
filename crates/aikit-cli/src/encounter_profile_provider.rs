@@ -14,9 +14,9 @@
 //!   `derive_provider` at provider-load time, so a profile update flows into
 //!   every open without the owner re-copying JSON. A `from_profile` provider
 //!   that also carries an explicit argv is a contradiction and is refused
-//!   naming both. `required_context` and `model_policy` are owner additions
-//!   that survive resolution untouched — they pin material and policy, they
-//!   do not describe the connection.
+//!   naming both. `required_context`, `model_policy` and `now_context` are
+//!   owner additions that survive resolution untouched — they pin material,
+//!   model policy and operative NOW delivery, not the connection.
 //! * [`ensure_connection_facts_reachable`] is the honesty gate both paths
 //!   share: a declared launch environment or working directory that cannot
 //!   actually reach the provider child is refused, never accepted and
@@ -142,10 +142,11 @@ pub fn resolve_provider(provider: EncounterProvider) -> Result<EncounterProvider
         .with("from_profile", slug.clone())
     })?;
     let mut derived = derive_provider(profile, provider.id.clone(), provider.label.clone())?;
-    // Owner additions pin material and policy; they are not connection facts
-    // and survive the resolution untouched.
+    // Owner additions pin material, model policy and operative NOW delivery;
+    // they are not connection facts and survive the resolution untouched.
     derived.required_context = provider.required_context;
     derived.model_policy = provider.model_policy;
+    derived.now_context = provider.now_context;
     Ok(derived)
 }
 
@@ -399,6 +400,75 @@ cwd = "/opt/rooted"
         assert_eq!(resolved.argv, ["gemini", "--acp"]);
         assert_eq!(resolved.argv_fallback, [["gemini", "--experimental-acp"]]);
         assert_eq!(resolved.from_profile.as_deref(), Some("gemini"));
+    }
+
+    #[test]
+    fn a_from_profile_provider_preserves_explicit_now_configuration_after_owner_json_load() {
+        use crate::encounter_service::EncounterNowContextConfig;
+        use aikit_store::now_context::{RedisNowConfig, NOW_REDIS_CONFIG_SCHEMA};
+
+        let now_context = EncounterNowContextConfig {
+            redis: RedisNowConfig {
+                schema: NOW_REDIS_CONFIG_SCHEMA.to_owned(),
+                address: "127.0.0.1:6381".to_owned(),
+                database: 3,
+                key_prefix: "public-repair-now".to_owned(),
+                username: None,
+                credential_ref: None,
+                allow_remote: false,
+                connect_timeout_ms: 750,
+                io_timeout_ms: 1250,
+                prepared_ttl_seconds: 3600,
+                coordination_retention_seconds: 86400,
+            },
+            prepare_request: Some(std::path::PathBuf::from(
+                "coordination/public-now-prepare.json",
+            )),
+            required: true,
+            external_provider: false,
+        };
+        now_context.redis.validate().unwrap();
+        let configured = EncounterProvider {
+            id: "pi-public-repair".to_owned(),
+            label: "Pi public repair".to_owned(),
+            from_profile: Some("pi".to_owned()),
+            // Connection facts still come from the real embedded profile.
+            protocol: EncounterProtocol::Acp,
+            argv: Vec::new(),
+            argv_fallback: Vec::new(),
+            env: Default::default(),
+            cwd: None,
+            required_context: None,
+            model_policy: None,
+            body_ref: None,
+            body_revision: None,
+            now_context: Some(now_context.clone()),
+        };
+        let owner_json = serde_json::to_vec(&configured).unwrap();
+        let loaded: EncounterProvider = serde_json::from_slice(&owner_json).unwrap();
+        let resolved = resolve_provider(loaded).unwrap();
+        let profile_connection = derive_provider(
+            embedded("pi"),
+            configured.id.clone(),
+            configured.label.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.id, configured.id);
+        assert_eq!(resolved.label, configured.label);
+        assert_eq!(resolved.protocol, EncounterProtocol::PiRpc);
+        assert_eq!(resolved.argv, profile_connection.argv);
+        assert_eq!(resolved.argv_fallback, profile_connection.argv_fallback);
+        assert_eq!(resolved.from_profile, profile_connection.from_profile);
+        assert_eq!(resolved.now_context.as_ref(), Some(&now_context));
+        let roundtrip: EncounterProvider =
+            serde_json::from_slice(&serde_json::to_vec(&resolved).unwrap()).unwrap();
+        assert_eq!(roundtrip.now_context.as_ref(), Some(&now_context));
+
+        // A profile does not supply NOW wiring when the owner selects none.
+        let mut without_now = configured;
+        without_now.now_context = None;
+        assert!(resolve_provider(without_now).unwrap().now_context.is_none());
     }
 
     #[test]

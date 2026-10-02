@@ -5,17 +5,17 @@ use crate::encounter_service::{EncounterProtocol, EncounterProvider, EncounterSe
 use aikit_adapters::central_placement::{
     AllocatedCentralTask, CentralTaskRequest, NativeCentralPlacement,
 };
-use aikit_adapters::runner::{CommandRunner, Output};
+use aikit_adapters::runner::{CommandRunner, Output, SystemRunner};
 use aikit_core::{ResourceRef, Result, SourceRevision};
 use aikit_store::{AikitHome, ContextLock, LockOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::{Read, Write},
+    io::Write,
     path::PathBuf,
-    process::{Command, Stdio},
-    time::{Duration, Instant},
+    process::Command,
+    time::Duration,
 };
 
 #[path = "encounter_task_material.rs"]
@@ -70,47 +70,26 @@ impl CommandRunner for OwnerRunner {
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| error("Missing native operation"))?;
-        let out = tempfile::tempfile().map_err(error)?;
-        let err = tempfile::tempfile().map_err(error)?;
-        let mut child = Command::new(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(out.try_clone().map_err(error)?)
-            .stderr(err.try_clone().map_err(error)?)
-            .spawn()
-            .map_err(error)?;
-        let start = Instant::now();
-        let status = loop {
-            if let Some(status) = child.try_wait().map_err(error)? {
-                break status;
-            }
-            if start.elapsed() > Duration::from_secs(15)
-                || out.metadata().map_err(error)?.len() > 4 * 1024 * 1024
-                || err.metadata().map_err(error)?.len() > 4 * 1024 * 1024
-            {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error("Native owner timeout/output limit; effects may be uncertain; recover the same task request explicitly"));
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        fn text(mut file: fs::File) -> Result<String> {
-            use std::io::{Seek, SeekFrom};
-            file.seek(SeekFrom::Start(0)).map_err(error)?;
-            let mut bytes = Vec::new();
-            file.take(4 * 1024 * 1024 + 1)
-                .read_to_end(&mut bytes)
-                .map_err(error)?;
-            if bytes.len() > 4 * 1024 * 1024 {
-                return Err(error("Native output too large"));
-            }
-            String::from_utf8(bytes).map_err(error)
-        }
-        Ok(Output {
-            status: status.code().unwrap_or(-1),
-            stdout: text(out)?,
-            stderr: text(err)?,
-        })
+        let mut command = Command::new(program);
+        command.args(args);
+        SystemRunner::new()
+            .with_timeout(Duration::from_secs(15))
+            .with_output_limit_bytes(4 * 1024 * 1024)
+            .with_strict_utf8()
+            .capture_command(&mut command)
+            .map_err(|cause| {
+                // Keep the public encounter domain while forwarding the actual
+                // capture, effect and lifecycle basis, including its IO cause.
+                let mut failure = error(cause.message())
+                    .with_io_source_from(&cause)
+                    .with("native_runner_code", cause.code());
+                for (key, value) in cause.details() {
+                    failure = failure.with(key.clone(), value.clone());
+                }
+                failure
+                    .with("automatic_retry", "false")
+                    .with("recovery", "Recover the same durable task request explicitly; do not replace or replay its execution intent")
+            })
     }
 }
 fn path(home: &AikitHome, session: &ResourceRef) -> PathBuf {
@@ -1025,6 +1004,152 @@ impl EncounterService {
                 "Native task protocol boundary unsupported on this platform",
             ))
         }
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod owner_runner_native_tests {
+    use super::*;
+    use std::error::Error;
+
+    #[test]
+    fn completed_native_nonzero_status_and_valid_replacement_character_are_data() {
+        let output = OwnerRunner
+            .run(&[
+                "/bin/sh".into(),
+                "-c".into(),
+                r#"printf '\357\277\275'; printf diagnostic >&2; exit 7"#.into(),
+            ])
+            .unwrap();
+        assert_eq!(output.status, 7);
+        assert_eq!(output.stdout, "\u{fffd}");
+        assert_eq!(output.stderr, "diagnostic");
+    }
+
+    #[test]
+    fn invalid_native_receipt_preserves_actual_effect_exit_lifecycle_and_typed_cause() {
+        let owned = tempfile::tempdir().unwrap();
+        for (stream, script) in [
+            ("stdout", r#"printf effect > "$1"; printf '\377'; exit 7"#),
+            ("stderr", r#"printf effect > "$1"; printf '\377' >&2; exit 7"#),
+        ] {
+            let marker = owned.path().join(stream);
+            let failure = OwnerRunner
+                .run(&[
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    script.into(),
+                    "owned-native-owner".into(),
+                    marker.to_str().unwrap().into(),
+                ])
+                .unwrap_err();
+            assert_eq!(fs::read(marker).unwrap(), b"effect");
+            assert_eq!(failure.code(), "encounter.runtime");
+            assert_eq!(failure.details()["native_runner_code"], "mux.command_utf8_invalid");
+            assert_eq!(failure.details()["stream"], stream);
+            assert_eq!(failure.details()["execution_started"], "true");
+            assert_eq!(failure.details()["known_exit_status"], "7");
+            assert_eq!(failure.details()["direct_child_reaped"], "true");
+            assert_eq!(failure.details()["effects"], "unknown");
+            assert_eq!(failure.details()["automatic_retry"], "false");
+            let actual = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+            assert_eq!(actual.kind(), std::io::ErrorKind::InvalidData);
+            let decoder = actual.get_ref().unwrap().downcast_ref::<std::str::Utf8Error>().unwrap();
+            assert_eq!(decoder.valid_up_to(), 0);
+            assert_eq!(decoder.error_len(), Some(1));
+            let cloned = failure.clone();
+            let retained = cloned.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+            assert!(std::ptr::eq(actual, retained));
+        }
+    }
+
+    #[test]
+    fn missing_actual_native_program_retains_not_started_and_original_io_cause() {
+        let owned = tempfile::tempdir().unwrap();
+        let missing = owned.path().join("missing-native-owner");
+        let failure = OwnerRunner.run(&[missing.to_str().unwrap().into()]).unwrap_err();
+        assert_eq!(failure.code(), "encounter.runtime");
+        assert_eq!(failure.details()["native_runner_code"], "mux.command_spawn_failed");
+        assert_eq!(failure.details()["execution_started"], "false");
+        assert_eq!(failure.details()["automatic_retry"], "false");
+        let actual = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(actual.kind(), std::io::ErrorKind::NotFound);
+        assert!(actual.raw_os_error().is_some());
+    }
+
+    #[test]
+    fn natural_inherited_native_output_retains_the_actual_complete_nonzero_result() {
+        let output = OwnerRunner
+            .run(&[
+                "/bin/sh".into(),
+                "-c".into(),
+                r#"(sleep 0.05; printf late; printf final >&2) & exit 7"#.into(),
+            ])
+            .unwrap();
+        assert_eq!(output.status, 7);
+        assert_eq!(output.stdout, "late");
+        assert_eq!(output.stderr, "final");
+    }
+
+    #[test]
+    fn complete_inherited_invalid_output_keeps_its_actual_decode_cause() {
+        let failure = OwnerRunner
+            .run(&[
+                "/bin/sh".into(),
+                "-c".into(),
+                r#"(sleep 0.05; printf '\377') & exit 0"#.into(),
+            ])
+            .unwrap_err();
+        assert_eq!(failure.code(), "encounter.runtime");
+        assert_eq!(failure.details()["native_runner_code"], "mux.command_utf8_invalid");
+        assert_eq!(failure.details()["known_exit_status"], "0");
+        assert_eq!(failure.details()["direct_child_reaped"], "true");
+        assert_eq!(failure.details()["group_signal"], "not-needed");
+        assert_eq!(failure.details()["capture_cancelled"], "false");
+        assert_eq!(failure.details()["stdout_eof"], "true");
+        assert_eq!(failure.details()["stderr_eof"], "true");
+        assert_eq!(failure.details()["effects"], "unknown");
+        assert_eq!(failure.details()["automatic_retry"], "false");
+        let actual = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(actual.kind(), std::io::ErrorKind::InvalidData);
+        let decoder = actual.get_ref().unwrap().downcast_ref::<std::str::Utf8Error>().unwrap();
+        assert_eq!(decoder.valid_up_to(), 0);
+        assert_eq!(decoder.error_len(), Some(1));
+    }
+
+    #[test]
+    fn unfinished_inherited_capture_refuses_a_receipt_and_keeps_actual_cancellation_facts() {
+        let owned = tempfile::tempdir().unwrap();
+        let marker = owned.path().join("native-descendant-ready");
+        let failure = OwnerRunner
+            .run(&[
+                "/bin/sh".into(),
+                "-c".into(),
+                r#"(printf ready > "$1"; sleep 30; printf unfinished) & while [ ! -s "$1" ]; do sleep 0.005; done; exit 23"#.into(),
+                "owned-native-capture".into(),
+                marker.to_str().unwrap().into(),
+            ])
+            .unwrap_err();
+        assert_eq!(fs::read(marker).unwrap(), b"ready");
+        assert_eq!(failure.code(), "encounter.runtime");
+        match failure.details()["native_runner_code"].as_str() {
+            "mux.command_capture_cancelled" => {
+                assert_eq!(failure.details()["stdout_eof"], "true");
+                assert_eq!(failure.details()["stderr_eof"], "true");
+            }
+            "mux.command_capture_incomplete" => {
+                assert!(failure.details()["stdout_eof"] == "false"
+                    || failure.details()["stderr_eof"] == "false");
+            }
+            other => panic!("actual held native capture had an unrelated failure: {other}"),
+        }
+        assert_eq!(failure.details()["known_exit_status"], "23");
+        assert_eq!(failure.details()["execution_started"], "true");
+        assert_eq!(failure.details()["direct_child_reaped"], "true");
+        assert_eq!(failure.details()["group_signal"], "delivered");
+        assert_eq!(failure.details()["capture_cancelled"], "true");
+        assert_eq!(failure.details()["effects"], "unknown");
+        assert_eq!(failure.details()["automatic_retry"], "false");
     }
 }
 

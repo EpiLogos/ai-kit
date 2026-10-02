@@ -63,9 +63,9 @@ pub enum PositionLookup {
 pub trait ContactOwners {
     /// `central.position.list {project?}` — the listing document.
     fn position_list(&self, project: Option<&str>) -> Result<Value, OwnerUnavailable>;
-    /// `agent-profile.list {scope:"root"}` — the authoritative agent profile
-    /// registry: Central's durable AgentProfile source relations, each naming
-    /// the `agent/<slug>` identity an addressable agency carries.
+    /// `agent-profile.list {scope:"root"}` — Central's durable source relations.
+    /// They name Agent addresses; they neither register semantic Agents nor
+    /// prove native Agency admission or occupancy.
     fn agent_profiles(&self) -> Result<Value, OwnerUnavailable>;
     /// `central.position.read {position_ref}`.
     fn position_read(&self, position_ref: &str) -> Result<PositionLookup, OwnerUnavailable>;

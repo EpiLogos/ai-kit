@@ -967,6 +967,26 @@ fn write_line_to(stdin: &mut ChildStdin, line: &str, argv: &[String]) -> Result<
     })
 }
 
+/// Observe this exclusively owned, unreaped child without releasing its PID.
+/// ECHILD is an actual loss of ownership, never permission to signal its ID.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn peek_owned_child_exit(child: &Child) -> std::io::Result<Option<ExitStatus>> {
+    use rustix::process::{waitid, WaitId, WaitIdOptions};
+    use std::os::unix::process::ExitStatusExt;
+    let pid = rustix::process::Pid::from_raw(child.id() as i32).expect("OS child PID is positive");
+    let observed = waitid(
+        WaitId::Pid(pid),
+        WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+    )?;
+    Ok(observed.map(|status| {
+        if let Some(code) = status.exit_status() {
+            ExitStatus::from_raw(code << 8)
+        } else {
+            ExitStatus::from_raw(status.terminating_signal().unwrap_or(0))
+        }
+    }))
+}
+
 /// Retains an exited group leader until the group has been terminated. Keeping
 /// it unreaped reserves its PID/PGID, so a later Drop cannot signal a reused ID.
 struct OwnedChild {
@@ -986,19 +1006,7 @@ impl OwnedChild {
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            use rustix::process::{waitid, WaitId, WaitIdOptions};
-            use std::os::unix::process::ExitStatusExt;
-            let observed = waitid(
-                WaitId::Pid(self.pid()),
-                WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
-            )?;
-            Ok(observed.map(|status| {
-                if let Some(code) = status.exit_status() {
-                    ExitStatus::from_raw(code << 8)
-                } else {
-                    ExitStatus::from_raw(status.terminating_signal().unwrap_or(0))
-                }
-            }))
+            peek_owned_child_exit(&self.child)
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {

@@ -12,10 +12,14 @@
 //!
 //! ## A non-zero exit is data
 //!
-//! [`CommandRunner::run`] returns `Ok` for a command that ran and failed, and
-//! `Err` only when the command could not be run at all. `tmux has-session`
-//! answers a yes/no question with its exit status; an adapter that could not see
-//! a non-zero status without an error would have to parse English instead.
+//! A nonzero exit remains ordinary status data when bounded capture and the
+//! owned child lifecycle complete. Spawn failures and actual postlaunch
+//! capacity, read, timeout or cleanup failures return `Err`; postlaunch errors
+//! preserve possible effects and original IO causes, never a rollback claim.
+//! `tmux has-session` still answers yes/no through its actual exit status.
+//! Strict semantic capture also requires actual complete pipe EOF: cancelling
+//! unfinished inherited output cannot create a successful semantic receipt.
+//! Ordinary lossy capture keeps its existing idle-pipe cleanup behavior.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -113,6 +117,21 @@ pub trait CommandRunner {
         let _ = timeout;
         self.run(argv)
     }
+
+    /// Narrow one invocation to the remaining time and aggregate output
+    /// allowance. The native capture reserves half the bytes for each stream;
+    /// an unused half is not borrowed. A strict request must reject invalid
+    /// UTF-8 before returning a semantic text receipt. Unknown runners refuse
+    /// before execution rather than silently delegating an unenforced budget.
+    fn run_with_limits(
+        &self, argv: &[String], remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize, strict_utf8: bool,
+    ) -> Result<Output> {
+        let _ = (remaining_timeout, remaining_aggregate_bytes, strict_utf8);
+        Err(AikitError::new("mux.command_limits_unsupported",
+            "This runner cannot enforce per-invocation capture limits")
+            .with("command", argv.join(" ")).with("execution_started", "false"))
+    }
 }
 
 impl<T: CommandRunner + ?Sized> CommandRunner for Box<T> {
@@ -127,6 +146,13 @@ impl<T: CommandRunner + ?Sized> CommandRunner for Box<T> {
     fn configured_timeout(&self) -> Option<std::time::Duration> {
         (**self).configured_timeout()
     }
+
+    fn run_with_limits(
+        &self, argv: &[String], remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize, strict_utf8: bool,
+    ) -> Result<Output> {
+        (**self).run_with_limits(argv, remaining_timeout, remaining_aggregate_bytes, strict_utf8)
+    }
 }
 
 impl<T: CommandRunner + ?Sized> CommandRunner for &T {
@@ -140,6 +166,13 @@ impl<T: CommandRunner + ?Sized> CommandRunner for &T {
 
     fn configured_timeout(&self) -> Option<std::time::Duration> {
         (**self).configured_timeout()
+    }
+
+    fn run_with_limits(
+        &self, argv: &[String], remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize, strict_utf8: bool,
+    ) -> Result<Output> {
+        (**self).run_with_limits(argv, remaining_timeout, remaining_aggregate_bytes, strict_utf8)
     }
 }
 
@@ -158,6 +191,13 @@ impl<T: CommandRunner + ?Sized> CommandRunner for std::sync::Arc<T> {
     fn configured_timeout(&self) -> Option<std::time::Duration> {
         (**self).configured_timeout()
     }
+
+    fn run_with_limits(
+        &self, argv: &[String], remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize, strict_utf8: bool,
+    ) -> Result<Output> {
+        (**self).run_with_limits(argv, remaining_timeout, remaining_aggregate_bytes, strict_utf8)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +214,9 @@ pub struct SystemRunner {
     /// shell happened to carry (e.g. `RIPGREP_CONFIG_PATH`).
     env_removed: Vec<String>,
     timeout: Option<std::time::Duration>,
+    output_limit_bytes: Option<u64>,
+    strict_utf8: bool,
+    aggregate_output_limit_bytes: Option<usize>,
 }
 
 impl SystemRunner {
@@ -227,128 +270,482 @@ impl SystemRunner {
         self
     }
 
+    /// Captured raw bytes per stream. A larger transport is explicit; no output
+    /// is truncated into a successful command result.
+    pub fn output_limit_bytes(&self) -> u64 {
+        self.output_limit_bytes.unwrap_or(DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES)
+    }
+
+    /// Set a positive finite per-stream capacity. Validation precedes spawn.
+    #[must_use]
+    pub fn with_output_limit_bytes(mut self, limit: u64) -> Self {
+        self.output_limit_bytes = Some(limit);
+        self
+    }
+
+    /// Decode actual stdout and stderr strictly after the same native EOF and
+    /// child-retirement checks. The default remains lossy for ordinary tools.
+    #[must_use]
+    pub fn with_strict_utf8(mut self) -> Self {
+        self.strict_utf8 = true;
+        self
+    }
+
+    /// Capture an explicitly configured command through the same native
+    /// lifecycle as run/run_with_timeout. Runner cwd/env overrides still apply.
+    pub fn capture_command(&self, command: &mut std::process::Command) -> Result<Output> {
+        let argv = std::iter::once(command.get_program())
+            .chain(command.get_args()).map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        self.configure_command(command);
+        self.spawn_bounded(command, &argv, self.timeout)
+    }
+
+    fn configure_command(&self, command: &mut std::process::Command) {
+        if let Some(cwd) = &self.cwd { command.current_dir(cwd); }
+        for (key, value) in &self.env { command.env(key, value); }
+        for key in &self.env_removed { command.env_remove(key); }
+    }
+
     fn spawn_bounded(
         &self,
         command: &mut std::process::Command,
         argv: &[String],
         budget: Option<std::time::Duration>,
     ) -> Result<Output> {
-        use std::io::Read;
-        use std::process::Stdio;
-        use std::time::Instant;
-
-        command
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null());
-        // The child becomes the leader of its own process group (Unix only —
-        // `process_group` is a no-op stand-in and never called on Windows):
-        // a timed-out kill below can then signal the whole group, not just
-        // this one PID. Without this, a child that itself forks a worker
-        // (a shell's `cmd &`, a Node CLI spawning subprocess workers) leaves
-        // that worker alive after the direct child is killed; the worker
-        // keeps the inherited stdout/stderr pipe open, and `read_to_end` on
-        // this end blocks until *every* holder of the write side closes it —
-        // so the reader-thread join below would still wait out the full
-        // unbounded runtime the budget exists to cut off. A live gate found
-        // exactly this shape (a shell script's `sleep` outliving its already
-        // SIGKILLed parent) turning a "3s budget" into a 30s wait.
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
+        let limit = self.output_limit_bytes();
+        if limit == 0 || usize::try_from(limit).is_err() {
+            return Err(AikitError::new("mux.command_output_limit_invalid",
+                "Command output capacity must be positive and fit this platform")
+                .with("execution_started", "false").with("output_limit_bytes", limit.to_string()));
         }
-        let mut child = command.spawn().map_err(|e| {
-            AikitError::new(
-                "mux.command_spawn_failed",
-                format!("could not run `{}`: {e}", argv.join(" ")),
-            )
-            .with("command", argv.join(" "))
-            .with("program", argv.first().cloned().unwrap_or_default())
-        })?;
-        let mut stdout_pipe = child.stdout.take();
-        let mut stderr_pipe = child.stderr.take();
-        let stdout_reader = std::thread::spawn(move || {
-            let mut buffer = Vec::new();
-            if let Some(pipe) = stdout_pipe.as_mut() {
-                let _ = pipe.read_to_end(&mut buffer);
-            }
-            buffer
-        });
-        let stderr_reader = std::thread::spawn(move || {
-            let mut buffer = Vec::new();
-            if let Some(pipe) = stderr_pipe.as_mut() {
-                let _ = pipe.read_to_end(&mut buffer);
-            }
-            buffer
-        });
-        let deadline = budget
-            .map(|budget| Instant::now() + budget)
-            .unwrap_or_else(Instant::now);
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) => {
-                    if Instant::now() >= deadline {
-                        kill_tree(&mut child);
-                        let _ = child.wait();
-                        break None;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-                Err(error) => {
-                    return Err(AikitError::new(
-                        "mux.command_spawn_failed",
-                        format!("could not wait on `{}`: {error}", argv.join(" ")),
-                    )
-                    .with("command", argv.join(" ")));
-                }
-            }
-        };
-        let Some(status) = status else {
-            // Drain the readers so the killed child's threads retire cleanly.
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            return Err(AikitError::new(
-                "mux.command_timeout",
-                format!(
-                    "`{}` did not finish within {:?} and was killed",
-                    argv.join(" "),
-                    budget.unwrap_or_default()
-                ),
-            )
-            .with("command", argv.join(" ")));
-        };
-        let stdout = stdout_reader.join().unwrap_or_default();
-        let stderr = stderr_reader.join().unwrap_or_default();
-        Ok(Output {
-            status: status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&stderr).into_owned(),
-        })
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        { capture_native_command(command, argv, budget, limit, self.strict_utf8,
+            self.aggregate_output_limit_bytes) }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (command, budget);
+            Err(AikitError::new("mux.command_capture_unsupported",
+                "Bounded native command capture is unavailable on this platform")
+                .with("command", argv.join(" ")).with("execution_started", "false"))
+        }
+    }
+
+}
+
+/// The observed result of signalling a child group created by this caller.
+/// Neither result establishes that descendants were reaped or have retired.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug)]
+pub enum OwnedChildGroupSignal {
+    Delivered,
+    /// The actual syscall found no such group; retain its original OS error.
+    AlreadyAbsent { cause: std::io::Error },
+}
+
+/// Signal only the group of a child spawned with `process_group(0)` by the
+/// caller, which must exclusively own the still-unreaped Child. The native
+/// non-consuming wait checks that ownership before using its numeric group ID.
+/// Actual ECHILD after reap refuses signalling. Successful signalling is
+/// distinct from confirmed reaping or retirement.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn signal_owned_child_group(child: &std::process::Child) -> std::io::Result<OwnedChildGroupSignal> {
+    crate::connection_process::peek_owned_child_exit(child)?;
+    let pid = rustix::process::Pid::from_raw(child.id() as i32).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "owned child has no valid process group ID")
+    })?;
+    match rustix::process::kill_process_group(pid, rustix::process::Signal::KILL) {
+        Ok(()) => Ok(OwnedChildGroupSignal::Delivered),
+        Err(error) if error == rustix::io::Errno::SRCH => {
+            Ok(OwnedChildGroupSignal::AlreadyAbsent { cause: error.into() })
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
-/// Kill a timed-out child and, on Unix, every process in its group — not
-/// only the single PID `Child::kill` reaches. Paired with `process_group(0)`
-/// on spawn above; a grandchild the direct child forked (and left running)
-/// dies with it instead of surviving to hold the stdout/stderr pipe open.
-fn kill_tree(child: &mut std::process::Child) {
-    // `rustix` (with its `process` feature) is a dependency only on the two
-    // platforms this cfg names — matching its Cargo.toml target selector,
-    // not the wider `cfg(unix)` `process_group(0)` above uses, so this stays
-    // buildable on every Unix `process_group` already covers.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
-            // Best-effort: the group may already be empty (the child exited
-            // between the deadline check and here) or signalling it may
-            // fail for reasons this runner cannot repair. `child.kill()`
-            // below still covers the direct child either way.
-            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+pub const DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct OwnedCommand {
+    child: std::process::Child,
+    cleanup_attempted: bool,
+    reaped_status: Option<std::process::ExitStatus>,
+    ownership_lost: bool,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct CommandCleanup {
+    signal: &'static str,
+    absence: Option<std::io::Error>,
+    error: Option<std::io::Error>,
+    additional_errors: Vec<std::io::Error>,
+    status: Option<std::process::ExitStatus>,
+    reaped: bool,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl OwnedCommand {
+    fn observe_exit(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        let observed = crate::connection_process::peek_owned_child_exit(&self.child);
+        if let Err(error) = &observed {
+            if error.raw_os_error() == Some(rustix::io::Errno::CHILD.raw_os_error()) {
+                self.ownership_lost = true;
+            }
+        }
+        observed
+    }
+
+    fn no_signal(&self) -> CommandCleanup {
+        CommandCleanup {
+            signal: if self.ownership_lost { "ownership-lost" } else { "not-needed" },
+            absence: None, error: None, additional_errors: Vec::new(),
+            status: self.reaped_status, reaped: self.reaped_status.is_some(),
         }
     }
-    let _ = child.kill();
+
+    fn finish_reap(&mut self, result: &mut CommandCleanup, deadline: std::time::Instant) {
+        if self.ownership_lost { return; }
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    // Cache retirement before Drop or any later cleanup can act.
+                    self.reaped_status = Some(status);
+                    result.status = Some(status);
+                    result.reaped = true;
+                    break;
+                }
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline { break; }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(error) => {
+                    if error.raw_os_error() == Some(rustix::io::Errno::CHILD.raw_os_error()) {
+                        self.ownership_lost = true;
+                    }
+                    if result.error.is_none() { result.error = Some(error); }
+                    else { result.additional_errors.push(error); }
+                    // A failed wait never authorises a subsequent numeric kill.
+                    break;
+                }
+            }
+        }
+    }
+
+    fn reap_without_signal(&mut self, deadline: std::time::Instant) -> CommandCleanup {
+        self.cleanup_attempted = true;
+        let mut result = self.no_signal();
+        if self.reaped_status.is_none() { self.finish_reap(&mut result, deadline); }
+        result
+    }
+
+    fn cleanup(&mut self, deadline: std::time::Instant) -> CommandCleanup {
+        self.cleanup_attempted = true;
+        if self.reaped_status.is_some() || self.ownership_lost { return self.no_signal(); }
+        let (signal, absence, error) = match signal_owned_child_group(&self.child) {
+            Ok(OwnedChildGroupSignal::Delivered) => ("delivered", None, None),
+            Ok(OwnedChildGroupSignal::AlreadyAbsent { cause }) => ("already-absent", Some(cause), None),
+            Err(error) => ("failed", None, Some(error)),
+        };
+        let mut result = CommandCleanup {
+            signal, absence, error, additional_errors: Vec::new(), status: None, reaped: false,
+        };
+        if result.error.as_ref().is_some_and(|error|
+            error.raw_os_error() == Some(rustix::io::Errno::CHILD.raw_os_error()))
+        {
+            self.ownership_lost = true;
+            return result;
+        }
+        if result.error.is_some() {
+            // A direct-child fallback is permitted only after the SAME native
+            // ownership check still observes a live, unreaped leader.
+            match self.observe_exit() {
+                Ok(None) => {
+                    if let Err(error) = self.child.kill() { result.additional_errors.push(error); }
+                }
+                Ok(Some(_)) => {},
+                Err(error) => { result.additional_errors.push(error); }
+            }
+        }
+        self.finish_reap(&mut result, deadline);
+        result
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for OwnedCommand {
+    fn drop(&mut self) {
+        if !self.cleanup_attempted && self.reaped_status.is_none() && !self.ownership_lost {
+            let _ = self.cleanup(std::time::Instant::now() + std::time::Duration::from_secs(2));
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+enum CaptureReadFailure { Io(std::io::Error), Limit }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn read_available(
+    pipe: &mut impl std::io::Read, bytes: &mut Vec<u8>, eof: &mut bool, limit: u64,
+) -> std::result::Result<bool, CaptureReadFailure> {
+    if *eof { return Ok(false); }
+    let mut progress = false;
+    // A fixed number of chunks returns control to the deadline/wait checks.
+    let mut chunk = [0u8; 8192];
+    for _ in 0..8 {
+        match pipe.read(&mut chunk) {
+            Ok(0) => { *eof = true; return Ok(progress); }
+            Ok(count) => {
+                let next = bytes.len().checked_add(count).ok_or(CaptureReadFailure::Limit)?;
+                if next as u64 > limit { return Err(CaptureReadFailure::Limit); }
+                bytes.extend_from_slice(&chunk[..count]);
+                progress = true;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(progress),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {},
+            Err(error) => return Err(CaptureReadFailure::Io(error)),
+        }
+    }
+    Ok(progress)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn capture_io(phase: &str, error: std::io::Error) -> AikitError {
+    AikitError::new("mux.command_capture_failed", format!("Command {phase} failed: {error}"))
+        .with("observation_stage", phase).with_io_source(error)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn capture_read_error(stream: &str, failure: CaptureReadFailure, limit: u64) -> AikitError {
+    match failure {
+        CaptureReadFailure::Io(error) => capture_io(stream, error),
+        CaptureReadFailure::Limit => AikitError::new("mux.command_output_limit",
+            "Actual command output exceeded its capacity; no truncated success is returned")
+            .with("stream", stream).with("output_limit_bytes", limit.to_string()),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn io_observation(error: &std::io::Error) -> String {
+    serde_json::json!({"kind":format!("{:?}", error.kind()),
+        "raw_os_error":error.raw_os_error(),"message":error.to_string()}).to_string()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn command_failure(
+    mut failure: AikitError, argv: &[String], mut cleanup: CommandCleanup,
+    stdout: &[u8], stderr: &[u8], known_status: Option<std::process::ExitStatus>,
+) -> AikitError {
+    use std::error::Error;
+    failure = failure.with("command", argv.join(" "))
+        .with("execution_started", "true").with("effects", "unknown")
+        .with("automatic_retry", "false").with("group_signal", cleanup.signal)
+        .with("direct_child_reaped", cleanup.reaped.to_string())
+        .with("captured_stdout", String::from_utf8_lossy(stdout).into_owned())
+        .with("captured_stderr", String::from_utf8_lossy(stderr).into_owned());
+    if let Some(status) = known_status {
+        failure = failure.with("known_exit_status", status.code().unwrap_or(-1).to_string());
+    } else if let Some(status) = cleanup.status {
+        failure = failure.with("cleanup_exit_status", status.code().unwrap_or(-1).to_string());
+    }
+    if let Some(cause) = cleanup.absence.as_ref() {
+        failure = failure.with("group_absence_cause", io_observation(cause));
+    }
+    if !cleanup.additional_errors.is_empty() {
+        let causes: Vec<_> = cleanup.additional_errors.iter().map(|error| serde_json::json!({
+            "kind":format!("{:?}", error.kind()),"raw_os_error":error.raw_os_error(),"message":error.to_string(),
+        })).collect();
+        failure = failure.with("additional_cleanup_causes", serde_json::Value::Array(causes).to_string());
+    }
+    if let Some(cause) = cleanup.error.take() {
+        failure = failure.with("cleanup_cause", io_observation(&cause));
+        if failure.source().is_none() { failure = failure.with_io_source(cause); }
+    }
+    failure
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn capture_native_command(
+    command: &mut std::process::Command, argv: &[String], budget: Option<std::time::Duration>, limit: u64,
+    strict_utf8: bool, aggregate_limit: Option<usize>,
+) -> Result<Output> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
+    let child = command.spawn().map_err(|error| {
+        AikitError::new("mux.command_spawn_failed", format!("could not run `{}`: {error}", argv.join(" ")))
+            .with("command", argv.join(" ")).with("program", argv.first().cloned().unwrap_or_default())
+            .with("execution_started", "false").with_io_source(error)
+    })?;
+    let mut owned = OwnedCommand {
+        child, cleanup_attempted: false, reaped_status: None, ownership_lost: false,
+    };
+    let mut stdout_pipe = owned.child.stdout.take().expect("stdout configured as piped");
+    let mut stderr_pipe = owned.child.stderr.take().expect("stderr configured as piped");
+    let mut stdout = Vec::new(); let mut stderr = Vec::new();
+    let mut stdout_eof = false; let mut stderr_eof = false;
+    let nonblocking = |fd| {
+        rustix::fs::fcntl_getfl(fd).and_then(|flags| {
+            rustix::fs::fcntl_setfl(fd, flags | rustix::fs::OFlags::NONBLOCK)
+        }).map_err(std::io::Error::from)
+    };
+    // Borrow the actual held descriptors; never reopen a pipe by pathname.
+    use std::os::fd::AsFd;
+    if let Err(error) = nonblocking(stdout_pipe.as_fd()).and_then(|_| nonblocking(stderr_pipe.as_fd())) {
+        let cleanup = owned.cleanup(Instant::now() + Duration::from_secs(2));
+        return Err(command_failure(capture_io("nonblocking", error), argv, cleanup, &stdout, &stderr, None));
+    }
+    let deadline = budget.and_then(|duration| Instant::now().checked_add(duration));
+    if budget.is_some() && deadline.is_none() {
+        let cleanup = owned.cleanup(Instant::now() + Duration::from_secs(2));
+        return Err(command_failure(AikitError::new("mux.command_timeout_invalid", "Command deadline overflow"),
+            argv, cleanup, &stdout, &stderr, None));
+    }
+    let status = loop {
+        let stdout_progress = match read_available(&mut stdout_pipe, &mut stdout, &mut stdout_eof, limit) {
+            Ok(progress) => progress,
+            Err(failure) => {
+                let cleanup = owned.cleanup(Instant::now() + Duration::from_secs(2));
+                return Err(command_failure(capture_read_error("stdout", failure, limit), argv, cleanup, &stdout, &stderr, None));
+            }
+        };
+        let stderr_progress = match read_available(&mut stderr_pipe, &mut stderr, &mut stderr_eof, limit) {
+            Ok(progress) => progress,
+            Err(failure) => {
+                let cleanup = owned.cleanup(Instant::now() + Duration::from_secs(2));
+                return Err(command_failure(capture_read_error("stderr", failure, limit), argv, cleanup, &stdout, &stderr, None));
+            }
+        };
+        match owned.observe_exit() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {},
+            Err(error) => {
+                let cleanup = owned.cleanup(Instant::now() + Duration::from_secs(2));
+                return Err(command_failure(capture_io("wait", error), argv, cleanup, &stdout, &stderr, None));
+            }
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            let cleanup = owned.cleanup(Instant::now() + Duration::from_secs(2));
+            return Err(command_failure(AikitError::new("mux.command_timeout",
+                format!("`{}` did not finish within {:?}", argv.join(" "), budget.unwrap_or_default())),
+                argv, cleanup, &stdout, &stderr, None));
+        }
+        if stdout_progress || stderr_progress { std::thread::yield_now(); }
+        else { std::thread::sleep(Duration::from_millis(5)); }
+    };
+    // Keep the exited leader unreaped while deciding whether live inherited
+    // pipes require a group effect. Completed EOF needs only the native reap.
+    let retirement_deadline = Instant::now() + Duration::from_secs(2);
+    let retirement_failure = |failure: AikitError, stdout_eof: bool, stderr_eof: bool, cancelled: bool| {
+        if strict_utf8 {
+            failure.with("stdout_eof", stdout_eof.to_string()).with("stderr_eof", stderr_eof.to_string())
+                .with("capture_cancelled", cancelled.to_string()).with("capture_encoding", "diagnostic-lossy")
+        } else { failure }
+    };
+    let (cleanup, capture_cancelled) = loop {
+        let stdout_progress = match read_available(&mut stdout_pipe, &mut stdout, &mut stdout_eof, limit) {
+            Ok(progress) => progress,
+            Err(failure) => {
+                let cleanup = owned.cleanup(retirement_deadline);
+                return Err(command_failure(retirement_failure(capture_read_error("stdout", failure, limit),
+                    stdout_eof, stderr_eof, true), argv, cleanup, &stdout, &stderr, Some(status)));
+            }
+        };
+        let stderr_progress = match read_available(&mut stderr_pipe, &mut stderr, &mut stderr_eof, limit) {
+            Ok(progress) => progress,
+            Err(failure) => {
+                let cleanup = owned.cleanup(retirement_deadline);
+                return Err(command_failure(retirement_failure(capture_read_error("stderr", failure, limit),
+                    stdout_eof, stderr_eof, true), argv, cleanup, &stdout, &stderr, Some(status)));
+            }
+        };
+        if stdout_eof && stderr_eof { break (owned.reap_without_signal(retirement_deadline), false); }
+        // Strict semantic capture allows actual late bytes and natural EOF
+        // through the SAME finite retirement interval. Generic lossy tools
+        // retain their existing idle-pipe cleanup compatibility.
+        if Instant::now() >= retirement_deadline || (!strict_utf8 && !stdout_progress && !stderr_progress) {
+            break (owned.cleanup(retirement_deadline), true);
+        }
+        if stdout_progress || stderr_progress { std::thread::yield_now(); }
+        else { std::thread::sleep(Duration::from_millis(5)); }
+    };
+    if cleanup.error.is_some() || !cleanup.reaped {
+        return Err(command_failure(retirement_failure(AikitError::new("mux.command_cancellation_failed",
+            "Actual command cleanup was not established"), stdout_eof, stderr_eof, capture_cancelled),
+            argv, cleanup, &stdout, &stderr, Some(status)));
+    }
+    while !stdout_eof || !stderr_eof {
+        let stdout_progress = match read_available(&mut stdout_pipe, &mut stdout, &mut stdout_eof, limit) {
+            Ok(progress) => progress,
+            Err(failure) => return Err(command_failure(retirement_failure(capture_read_error("stdout", failure, limit),
+                stdout_eof, stderr_eof, capture_cancelled), argv, cleanup, &stdout, &stderr, Some(status))),
+        };
+        let stderr_progress = match read_available(&mut stderr_pipe, &mut stderr, &mut stderr_eof, limit) {
+            Ok(progress) => progress,
+            Err(failure) => return Err(command_failure(retirement_failure(capture_read_error("stderr", failure, limit),
+                stdout_eof, stderr_eof, capture_cancelled), argv, cleanup, &stdout, &stderr, Some(status))),
+        };
+        if stdout_eof && stderr_eof { break; }
+        if Instant::now() >= retirement_deadline {
+            return Err(command_failure(retirement_failure(AikitError::new("mux.command_capture_incomplete",
+                "Command inherited pipes did not retire within the finite capture bound"),
+                stdout_eof, stderr_eof, capture_cancelled), argv, cleanup, &stdout, &stderr, Some(status)));
+        }
+        if stdout_progress || stderr_progress { std::thread::yield_now(); }
+        else { std::thread::sleep(Duration::from_millis(5)); }
+    }
+    if strict_utf8 && capture_cancelled {
+        return Err(command_failure(retirement_failure(AikitError::new("mux.command_capture_cancelled",
+            "Unfinished inherited output required cancellation; no complete semantic receipt is returned"),
+            stdout_eof, stderr_eof, true), argv, cleanup, &stdout, &stderr, Some(status)));
+    }
+    if strict_utf8 {
+        for (stream, bytes) in [("stdout", stdout.as_slice()), ("stderr", stderr.as_slice())] {
+            if let Err(cause) = std::str::from_utf8(bytes) {
+                let failure = AikitError::new("mux.command_utf8_invalid",
+                    "Actual command output is not valid UTF-8; no semantic text receipt is returned")
+                    .with("stream", stream).with("observation_stage", format!("{stream}_utf8"))
+                    .with("utf8_valid_up_to", cause.valid_up_to().to_string())
+                    .with("utf8_error_len", cause.error_len().map_or_else(|| "incomplete".into(), |n| n.to_string()))
+                    .with("capture_encoding", "diagnostic-lossy")
+                    .with("stdout_eof", "true").with("stderr_eof", "true").with("capture_cancelled", "false")
+                    .with_io_source(std::io::Error::new(std::io::ErrorKind::InvalidData, cause));
+                return Err(command_failure(failure, argv, cleanup, &stdout, &stderr, Some(status)));
+            }
+        }
+    }
+    // Also bound the returned String representation: default lossy decoding
+    // can expand invalid raw bytes into three-byte replacement characters.
+    let stdout_text = String::from_utf8_lossy(&stdout);
+    let stderr_text = String::from_utf8_lossy(&stderr);
+    if aggregate_limit.is_some_and(|capacity|
+        stdout_text.len().checked_add(stderr_text.len()).is_none_or(|length| length > capacity))
+    {
+        let failure = AikitError::new("mux.command_output_limit",
+            "Decoded command output exceeded the remaining aggregate capacity")
+            .with("observation_stage", "decoded_output")
+            .with("aggregate_output_limit_bytes", aggregate_limit.unwrap_or_default().to_string())
+            .with("capture_encoding", "diagnostic-lossy");
+        return Err(command_failure(failure, argv, cleanup, &stdout, &stderr, Some(status)));
+    }
+    Ok(Output { status: status.code().unwrap_or(-1),
+        stdout: stdout_text.into_owned(), stderr: stderr_text.into_owned() })
+}
+
+fn invocation_stream_limit(timeout: std::time::Duration, aggregate_bytes: usize) -> Result<u64> {
+    if timeout.is_zero() || std::time::Instant::now().checked_add(timeout).is_none()
+        || aggregate_bytes < 2
+    {
+        return Err(AikitError::new("mux.command_limits_invalid",
+            "Invocation time must be positive and finite, with at least two aggregate output bytes")
+            .with("execution_started", "false").with("remaining_timeout", format!("{timeout:?}"))
+            .with("remaining_aggregate_bytes", aggregate_bytes.to_string()));
+    }
+    u64::try_from(aggregate_bytes / 2).map_err(|cause| {
+        AikitError::new("mux.command_limits_invalid", "Invocation stream capacity does not fit this platform")
+            .with("execution_started", "false").with("remaining_aggregate_bytes", aggregate_bytes.to_string())
+            .with_io_source(std::io::Error::new(std::io::ErrorKind::InvalidInput, cause))
+    })
 }
 
 impl CommandRunner for SystemRunner {
@@ -366,36 +763,8 @@ impl CommandRunner for SystemRunner {
 
         let mut command = std::process::Command::new(program);
         command.args(args);
-        if let Some(cwd) = &self.cwd {
-            command.current_dir(cwd);
-        }
-        for (key, value) in &self.env {
-            command.env(key, value);
-        }
-        for key in &self.env_removed {
-            command.env_remove(key);
-        }
-
-        if self.timeout.is_some() {
-            return self.spawn_bounded(&mut command, argv, self.timeout);
-        }
-
-        let output = command.output().map_err(|e| {
-            AikitError::new(
-                "mux.command_spawn_failed",
-                format!("could not run `{}`: {e}", argv.join(" ")),
-            )
-            .with("command", argv.join(" "))
-            .with("program", program.clone())
-        })?;
-
-        Ok(Output {
-            // A signalled child has no exit code. -1 is not a status any shell
-            // produces, so it cannot be confused with a real one.
-            status: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
+        self.configure_command(&mut command);
+        self.spawn_bounded(&mut command, argv, self.timeout)
     }
 
     fn run_with_timeout(&self, argv: &[String], timeout: std::time::Duration) -> Result<Output> {
@@ -408,18 +777,25 @@ impl CommandRunner for SystemRunner {
 
         let mut command = std::process::Command::new(program);
         command.args(args);
-        if let Some(cwd) = &self.cwd {
-            command.current_dir(cwd);
-        }
-        for (key, value) in &self.env {
-            command.env(key, value);
-        }
-        for key in &self.env_removed {
-            command.env_remove(key);
-        }
+        self.configure_command(&mut command);
         // The caller's budget wins over the construction-time one: the request
         // knows how expensive this particular command is expected to be.
         self.spawn_bounded(&mut command, argv, Some(timeout))
+    }
+
+    fn run_with_limits(
+        &self, argv: &[String], remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize, strict_utf8: bool,
+    ) -> Result<Output> {
+        let timeout = self.timeout.map_or(remaining_timeout, |configured| configured.min(remaining_timeout));
+        let stream_limit = invocation_stream_limit(timeout, remaining_aggregate_bytes)?;
+        let mut bounded = self.clone();
+        bounded.timeout = Some(timeout);
+        bounded.output_limit_bytes = Some(self.output_limit_bytes().min(stream_limit));
+        bounded.aggregate_output_limit_bytes = Some(self.aggregate_output_limit_bytes
+            .map_or(remaining_aggregate_bytes, |configured| configured.min(remaining_aggregate_bytes)));
+        bounded.strict_utf8 |= strict_utf8;
+        bounded.run(argv)
     }
 }
 
@@ -478,6 +854,14 @@ impl<R: CommandRunner> CommandRunner for RecordingRunner<R> {
 
     fn configured_timeout(&self) -> Option<std::time::Duration> {
         self.inner.configured_timeout()
+    }
+
+    fn run_with_limits(
+        &self, argv: &[String], remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize, strict_utf8: bool,
+    ) -> Result<Output> {
+        record(&self.calls, argv);
+        self.inner.run_with_limits(argv, remaining_timeout, remaining_aggregate_bytes, strict_utf8)
     }
 }
 
@@ -545,6 +929,24 @@ impl ScriptedRunner {
 }
 
 impl CommandRunner for ScriptedRunner {
+    fn run_with_limits(
+        &self, argv: &[String], remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize, strict_utf8: bool,
+    ) -> Result<Output> {
+        let per_stream = invocation_stream_limit(remaining_timeout, remaining_aggregate_bytes)?;
+        let _ = strict_utf8; // String responses are already valid UTF-8.
+        let output = self.run(argv)?;
+        if output.stdout.len() as u64 > per_stream || output.stderr.len() as u64 > per_stream {
+            return Err(AikitError::new("mux.command_output_limit",
+                "Recorded response exceeded its per-stream invocation capacity")
+                .with("capture_kind", "scripted").with("execution_started", "false")
+                .with("remaining_aggregate_bytes", remaining_aggregate_bytes.to_string()));
+        }
+        // This is explicit in-memory contract compatibility, not proof that a
+        // real process deadline or capture lifecycle has been enforced.
+        Ok(output)
+    }
+
     fn run(&self, argv: &[String]) -> Result<Output> {
         record(&self.calls, argv);
         let line = argv.join(" ");
@@ -600,6 +1002,613 @@ fn recorded(log: &Mutex<Vec<Vec<String>>>) -> Vec<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn native_command_tempdir() -> tempfile::TempDir {
+        let scratch = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../ProjectCentral/now/tmp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        tempfile::Builder::new().prefix("runner-owned-").tempdir_in(&scratch).unwrap()
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn reap_owned_child(child: &mut std::process::Child) -> std::process::ExitStatus {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() { return status; }
+            if std::time::Instant::now() >= deadline {
+                let _ = signal_owned_child_group(child);
+                panic!("owned child did not reap within the actual cancellation bound");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_owned_group_signal_and_direct_child_reap_are_separate_results() {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new("/bin/sleep");
+        command.arg("30").process_group(0)
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = command.spawn().unwrap();
+        let signal = signal_owned_child_group(&child).unwrap();
+        assert!(matches!(signal, OwnedChildGroupSignal::Delivered));
+        let status = reap_owned_child(&mut child);
+        assert!(!status.success(), "actual killed child must not report success");
+        let refusal = signal_owned_child_group(&child).unwrap_err();
+        assert_eq!(refusal.raw_os_error(), Some(rustix::io::Errno::CHILD.raw_os_error()),
+            "reaped ownership cannot authorise a numeric process-group signal");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn an_actual_reaped_child_refuses_group_signalling_with_original_echild() {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "exit 7"]).process_group(0)
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = command.spawn().unwrap();
+        assert_eq!(reap_owned_child(&mut child).code(), Some(7));
+        for _ in 0..2 {
+            let refusal = signal_owned_child_group(&child).unwrap_err();
+            assert_eq!(refusal.raw_os_error(), Some(rustix::io::Errno::CHILD.raw_os_error()));
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_peek_repeatedly_observes_exit_without_reaping_or_reopening_ownership() {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "exit 17"]).process_group(0);
+        let child = command.spawn().unwrap();
+        let mut owned = OwnedCommand {
+            child, cleanup_attempted: false, reaped_status: None, ownership_lost: false,
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let observed = loop {
+            if let Some(status) = owned.observe_exit().unwrap() { break status; }
+            assert!(std::time::Instant::now() < deadline, "actual child did not exit");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(observed.code(), Some(17));
+        assert_eq!(owned.observe_exit().unwrap(), Some(observed));
+        assert_eq!(owned.observe_exit().unwrap(), Some(observed));
+        let reaped = owned.reap_without_signal(deadline);
+        assert_eq!(reaped.status, Some(observed));
+        assert!(reaped.reaped);
+        assert_eq!(reaped.signal, "not-needed");
+        let repeated = owned.cleanup(deadline);
+        assert_eq!(repeated.status, Some(observed));
+        assert_eq!(repeated.signal, "not-needed");
+        let refusal = signal_owned_child_group(&owned.child).unwrap_err();
+        assert_eq!(refusal.raw_os_error(), Some(rustix::io::Errno::CHILD.raw_os_error()));
+        // Drop sees the cached reap and must not signal this released numeric ID.
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn repeated_actual_fast_exit_capture_keeps_real_status_and_both_streams() {
+        for _ in 0..64 {
+            let output = SystemRunner::new().with_timeout(std::time::Duration::from_secs(2))
+                .run(&["/bin/sh".into(), "-c".into(),
+                    "printf out; printf err >&2; exit 19".into()]).unwrap();
+            assert_eq!(output.status, 19);
+            assert_eq!(output.stdout, "out");
+            assert_eq!(output.stderr, "err");
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_completed_eof_preserves_a_background_child_with_closed_streams() {
+        struct StopOnDrop { stop: std::path::PathBuf, stopped: std::path::PathBuf }
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::write(&self.stop, b"stop");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                while !self.stopped.exists() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
+        fn await_file(path: &std::path::Path) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !path.exists() {
+                assert!(std::time::Instant::now() < deadline, "actual background control missing: {}", path.display());
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        let fixture = native_command_tempdir();
+        let stop = fixture.path().join("stop");
+        let ready = fixture.path().join("ready");
+        let request = fixture.path().join("request");
+        let acknowledgment = fixture.path().join("acknowledgment");
+        let stopped = fixture.path().join("stopped");
+        let _control = StopOnDrop { stop: stop.clone(), stopped: stopped.clone() };
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", r#"(
+            exec >/dev/null 2>/dev/null
+            printf ready > "$2"
+            while [ ! -e "$1" ]; do
+                if [ -e "$3" ]; then printf alive > "$4"; fi
+                sleep 0.02
+            done
+            printf stopped > "$5"
+        ) &
+        while [ ! -e "$2" ]; do sleep 0.02; done
+        printf leader
+        exit 9"#, "owned-background-fixture"])
+            .arg(&stop).arg(&ready).arg(&request).arg(&acknowledgment).arg(&stopped);
+        let output = SystemRunner::new().with_timeout(std::time::Duration::from_secs(5))
+            .capture_command(&mut command).unwrap();
+        assert_eq!(output.status, 9);
+        assert_eq!(output.stdout, "leader");
+        assert_eq!(output.stderr, "");
+        await_file(&ready);
+        assert!(!stopped.exists());
+        std::fs::write(&request, b"respond after native capture returned").unwrap();
+        await_file(&acknowledgment);
+        assert_eq!(std::fs::read(&acknowledgment).unwrap(), b"alive");
+        std::fs::write(&stop, b"stop").unwrap();
+        await_file(&stopped);
+        // The descendant acknowledged after capture; no post-reap PGID signal
+        // is used even for fixture cleanup. Its explicit stop control owns exit.
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_external_reap_marks_ownership_lost_and_drop_preserves_live_background_group() {
+        use std::os::unix::process::CommandExt;
+        struct StopOnDrop { stop: std::path::PathBuf, stopped: std::path::PathBuf }
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::write(&self.stop, b"stop");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                while !self.stopped.exists() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
+        fn await_file(path: &std::path::Path) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !path.exists() {
+                assert!(std::time::Instant::now() < deadline, "actual background response missing");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        let fixture = native_command_tempdir();
+        let stop = fixture.path().join("stop");
+        let ready = fixture.path().join("ready");
+        let request = fixture.path().join("request");
+        let acknowledgment = fixture.path().join("acknowledgment");
+        let stopped = fixture.path().join("stopped");
+        let _control = StopOnDrop { stop: stop.clone(), stopped: stopped.clone() };
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", r#"(
+            exec >/dev/null 2>/dev/null
+            printf ready > "$2"
+            while [ ! -e "$1" ]; do
+                if [ -e "$3" ]; then printf alive > "$4"; fi
+                sleep 0.02
+            done
+            printf stopped > "$5"
+        ) &
+        while [ ! -e "$2" ]; do sleep 0.02; done
+        exit 23"#, "owned-lost-ownership-fixture"])
+            .arg(&stop).arg(&ready).arg(&request).arg(&acknowledgment).arg(&stopped)
+            .process_group(0).stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        let mut owned = OwnedCommand {
+            child: command.spawn().unwrap(), cleanup_attempted: false,
+            reaped_status: None, ownership_lost: false,
+        };
+        // Actual OS reap through std Child deliberately bypasses the wrapper's
+        // cached ownership. waitid must return the kernel's ECHILD, not a stub.
+        assert_eq!(reap_owned_child(&mut owned.child).code(), Some(23));
+        assert!(owned.reaped_status.is_none());
+        let original = owned.observe_exit().unwrap_err();
+        assert_eq!(original.raw_os_error(), Some(rustix::io::Errno::CHILD.raw_os_error()));
+        assert!(owned.ownership_lost);
+        let cleanup = owned.cleanup(std::time::Instant::now() + std::time::Duration::from_secs(2));
+        assert_eq!(cleanup.signal, "ownership-lost");
+        assert!(cleanup.error.is_none() && cleanup.additional_errors.is_empty());
+        assert!(!cleanup.reaped, "wrapper must not fabricate its own reap");
+        drop(owned);
+        std::fs::write(&request, b"respond after lost-ownership cleanup and Drop").unwrap();
+        await_file(&acknowledgment);
+        assert_eq!(std::fs::read(&acknowledgment).unwrap(), b"alive");
+        std::fs::write(&stop, b"stop").unwrap();
+        await_file(&stopped);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_leader_exit_does_not_wait_for_descendant_held_pipes() {
+        let started = std::time::Instant::now();
+        let output = SystemRunner::new().with_timeout(std::time::Duration::from_secs(10))
+            .run(&["/bin/sh".into(), "-c".into(),
+                "sleep 30 & printf 'leader-output\n'; printf 'leader-error\n' >&2; exit 3".into()]).unwrap();
+        assert_eq!(output.status, 3);
+        assert_eq!(output.stdout, "leader-output\n");
+        assert_eq!(output.stderr, "leader-error\n");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5),
+            "real descendant pipes cannot extend the command to their natural30s completion");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_output_capacity_failure_retains_possible_execution_effects_for_both_streams() {
+        for (stream, script) in [("stdout", "printf '0123456789abcdef'"),
+            ("stderr", "printf '0123456789abcdef' >&2")]
+        {
+            let error = SystemRunner::new().with_timeout(std::time::Duration::from_secs(2))
+                .with_output_limit_bytes(8)
+                .run(&["/bin/sh".into(), "-c".into(), script.into()]).unwrap_err();
+            assert_eq!(error.code(), "mux.command_output_limit");
+            assert_eq!(error.details().get("stream").map(String::as_str), Some(stream));
+            assert_eq!(error.details().get("execution_started").map(String::as_str), Some("true"));
+            assert_eq!(error.details().get("effects").map(String::as_str), Some("unknown"));
+            assert_eq!(error.details().get("automatic_retry").map(String::as_str), Some("false"));
+            assert_eq!(error.details().get("direct_child_reaped").map(String::as_str), Some("true"));
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn invalid_capture_capacity_refuses_before_actual_command_side_effect() {
+        let owned = native_command_tempdir();
+        let marker = owned.path().join("must-not-be-created");
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", r#"printf effect > "$1""#, "owned-fixture"]).arg(&marker);
+        let error = SystemRunner::new().with_output_limit_bytes(0).capture_command(&mut command).unwrap_err();
+        assert_eq!(error.code(), "mux.command_output_limit_invalid");
+        assert_eq!(error.details().get("execution_started").map(String::as_str), Some("false"));
+        assert!(!marker.exists());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_transport_override_preserves_an_escaped_sixteen_mebibyte_source() {
+        let owned = native_command_tempdir();
+        let body = "\"".repeat(16 * 1024 * 1024);
+        let transport = serde_json::to_string(&serde_json::json!({"body":body})).unwrap();
+        let path = owned.path().join("actual-escaped-body.json");
+        std::fs::write(&path, &transport).unwrap();
+        let argv = ["/bin/cat".to_owned(), path.display().to_string()];
+        let default = SystemRunner::new().with_timeout(std::time::Duration::from_secs(20)).run(&argv).unwrap_err();
+        assert_eq!(default.code(), "mux.command_output_limit");
+        let admitted = SystemRunner::new().with_timeout(std::time::Duration::from_secs(20))
+            .with_output_limit_bytes(128 * 1024 * 1024).run(&argv).unwrap();
+        assert_eq!(admitted.status, 0);
+        assert_eq!(admitted.stdout, transport);
+        assert_eq!(std::fs::read(&path).unwrap(), transport.as_bytes());
+        // This is a real physical command-transport proof, not a native source
+        // owner response or a Team/Public audience grant.
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_spawn_failure_keeps_original_io_and_no_execution() {
+        use std::error::Error;
+        let owned = native_command_tempdir();
+        let missing = owned.path().join("absent-program");
+        let error = SystemRunner::new().run(&[missing.display().to_string()]).unwrap_err();
+        assert_eq!(error.code(), "mux.command_spawn_failed");
+        assert_eq!(error.details().get("execution_started").map(String::as_str), Some("false"));
+        let cause = error.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(cause.kind(), std::io::ErrorKind::NotFound);
+        assert!(cause.raw_os_error().is_some());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_strict_stdout_and_stderr_refusal_keep_decoding_cause_and_completed_lifecycle() {
+        use std::error::Error;
+        for (stream, script) in [("stdout", r#"printf '\377'; exit 17"#),
+            ("stderr", r#"printf '\377' >&2; exit 17"#)]
+        {
+            let failure = SystemRunner::new().run_with_limits(
+                &["/bin/sh".into(), "-c".into(), script.into()],
+                std::time::Duration::from_secs(2), 64, true).unwrap_err();
+            assert_eq!(failure.code(), "mux.command_utf8_invalid");
+            assert_eq!(failure.details().get("stream").map(String::as_str), Some(stream));
+            assert_eq!(failure.details().get("known_exit_status").map(String::as_str), Some("17"));
+            assert_eq!(failure.details().get("direct_child_reaped").map(String::as_str), Some("true"));
+            assert_eq!(failure.details().get("group_signal").map(String::as_str), Some("not-needed"));
+            assert_eq!(failure.details().get("execution_started").map(String::as_str), Some("true"));
+            assert_eq!(failure.details().get("effects").map(String::as_str), Some("unknown"));
+            assert_eq!(failure.details().get("automatic_retry").map(String::as_str), Some("false"));
+            assert_eq!(failure.details().get("capture_encoding").map(String::as_str), Some("diagnostic-lossy"));
+            let cause = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+            assert_eq!(cause.kind(), std::io::ErrorKind::InvalidData);
+            let decoding = cause.get_ref().unwrap().downcast_ref::<std::str::Utf8Error>().unwrap();
+            assert_eq!(decoding.valid_up_to(), 0);
+            assert_eq!(decoding.error_len(), Some(1));
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn strict_capture_builder_and_false_request_preserve_strictness_and_real_replacement_text() {
+        let runner = SystemRunner::new().with_strict_utf8().with_timeout(std::time::Duration::from_secs(2));
+        let valid = runner.run_with_limits(
+            &["/bin/sh".into(), "-c".into(), r#"printf '\357\277\275'; exit 7"#.into()],
+            std::time::Duration::from_secs(3), 16, false).unwrap();
+        assert_eq!(valid.status, 7);
+        assert_eq!(valid.stdout, "\u{fffd}");
+        let invalid = runner.run_with_limits(
+            &["/bin/sh".into(), "-c".into(), r#"printf '\377'"#.into()],
+            std::time::Duration::from_secs(2), 16, false).unwrap_err();
+        assert_eq!(invalid.code(), "mux.command_utf8_invalid");
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", r#"printf '\377'; exit 11"#]);
+        let capture = runner.capture_command(&mut command).unwrap_err();
+        assert_eq!(capture.code(), "mux.command_utf8_invalid");
+        assert_eq!(capture.details().get("known_exit_status").map(String::as_str), Some("11"));
+        let lossy = SystemRunner::new().with_timeout(std::time::Duration::from_secs(2))
+            .run(&["/bin/sh".into(), "-c".into(), r#"printf '\377'"#.into()]).unwrap();
+        assert_eq!(lossy.stdout, "\u{fffd}", "ordinary default capture remains compatible");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_strict_decoding_waits_for_the_same_held_descendant_pipe_retirement() {
+        let failure = SystemRunner::new().run_with_limits(
+            &["/bin/sh".into(), "-c".into(), r#"sleep 30 & printf '\377'; exit 23"#.into()],
+            std::time::Duration::from_secs(2), 64, true).unwrap_err();
+        match failure.code() {
+            "mux.command_capture_cancelled" => {
+                assert_eq!(failure.details().get("stdout_eof").map(String::as_str), Some("true"));
+                assert_eq!(failure.details().get("stderr_eof").map(String::as_str), Some("true"));
+            }
+            "mux.command_capture_incomplete" => {
+                assert!(failure.details().get("stdout_eof").map(String::as_str) == Some("false")
+                    || failure.details().get("stderr_eof").map(String::as_str) == Some("false"),
+                    "incomplete requires actual unclosed output at the same deadline: {failure:?}");
+            }
+            _ => panic!("unfinished strict capture must preserve its exact cancellation/EOF disposition: {failure:?}"),
+        }
+        assert_eq!(failure.details().get("known_exit_status").map(String::as_str), Some("23"));
+        assert_eq!(failure.details().get("direct_child_reaped").map(String::as_str), Some("true"));
+        assert_eq!(failure.details().get("group_signal").map(String::as_str), Some("delivered"));
+        assert_eq!(failure.details().get("capture_cancelled").map(String::as_str), Some("true"));
+        assert_eq!(failure.details().get("effects").map(String::as_str), Some("unknown"));
+        assert_eq!(failure.details().get("automatic_retry").map(String::as_str), Some("false"));
+        // A pre-exit invalid byte is diagnostic only once unfinished output
+        // required cancellation; it cannot become a completed decode receipt.
+        assert_eq!(failure.details().get("captured_stdout").map(String::as_str), Some("\u{fffd}"));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn strict_capture_admits_actual_gated_late_eof_and_refuses_completed_late_invalid_text() {
+        use std::error::Error;
+        use rustix::process::{waitid, WaitId, WaitIdOptions};
+        for invalid in [false, true] {
+            let fixture = native_command_tempdir();
+            let ready = fixture.path().join("ready");
+            let leader = fixture.path().join("leader-pid");
+            let release = fixture.path().join("release-after-real-exit");
+            let payload = fixture.path().join("late-payload");
+            let bytes: &[u8] = if invalid { &[0xff] } else { b"genuine-late-output" };
+            std::fs::write(&payload, bytes).unwrap();
+            let retained_bytes = std::fs::read(&payload).unwrap();
+            let leader_for_observer = leader.clone();
+            let release_for_observer = release.clone();
+            let observer = std::thread::spawn(move || -> std::io::Result<()> {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let raw = loop {
+                    match std::fs::read_to_string(&leader_for_observer) {
+                        Ok(raw) if !raw.is_empty() => break raw,
+                        Ok(_) => {},
+                        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {},
+                        Err(cause) => return Err(cause),
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "actual leader PID not observed"));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                };
+                let raw_pid = raw.parse::<i32>().map_err(|cause|
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, cause))?;
+                let pid = rustix::process::Pid::from_raw(raw_pid).ok_or_else(||
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "fixture leader PID is not positive"))?;
+                loop {
+                    // Test-only non-consuming observation of the real child
+                    // spawned by public capture. It never signals/reaps or
+                    // infers an owner receipt from this numeric fixture fact.
+                    if waitid(WaitId::Pid(pid), WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT)
+                        .map_err(std::io::Error::from)?.is_some()
+                    {
+                        // The delay is an adverse schedule after actual exit,
+                        // not a substitute for the native exit observation.
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        return std::fs::write(release_for_observer, b"release actual retained pipes");
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "actual leader exit not observed"));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            });
+            let mut command = std::process::Command::new("/bin/sh");
+            command.args(["-c", r#"(
+                printf ready > "$1"
+                while [ ! -e "$3" ]; do sleep 0.02; done
+                /bin/cat "$4"
+            ) &
+            while [ ! -e "$1" ]; do sleep 0.02; done
+            printf '%s' "$$" > "$2.tmp"
+            /bin/mv "$2.tmp" "$2"
+            exit 7"#, "actual-late-eof-fixture"])
+                .arg(&ready).arg(&leader).arg(&release).arg(&payload);
+            let actual = SystemRunner::new().with_strict_utf8().with_timeout(std::time::Duration::from_secs(5))
+                .capture_command(&mut command);
+            // Join the finite actual observer even if capture refused, before
+            // the owned fixture can disappear or the result assertion panics.
+            observer.join().unwrap().unwrap();
+            assert_eq!(std::fs::read(&payload).unwrap(), retained_bytes);
+            if invalid {
+                let failure = actual.unwrap_err();
+                assert_eq!(failure.code(), "mux.command_utf8_invalid");
+                assert_eq!(failure.details().get("known_exit_status").map(String::as_str), Some("7"));
+                assert_eq!(failure.details().get("group_signal").map(String::as_str), Some("not-needed"));
+                assert_eq!(failure.details().get("stdout_eof").map(String::as_str), Some("true"));
+                assert_eq!(failure.details().get("stderr_eof").map(String::as_str), Some("true"));
+                assert_eq!(failure.details().get("capture_cancelled").map(String::as_str), Some("false"));
+                let cause = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+                assert_eq!(cause.kind(), std::io::ErrorKind::InvalidData);
+                assert!(cause.get_ref().unwrap().is::<std::str::Utf8Error>());
+            } else {
+                let output = actual.unwrap();
+                assert_eq!(output.status, 7);
+                assert_eq!(output.stdout.as_bytes(), retained_bytes);
+                assert_eq!(output.stderr, "");
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_remaining_output_capacity_reserves_each_half_and_checks_lossy_expansion() {
+        let runner = SystemRunner::new();
+        let exact = runner.run_with_limits(
+            &["/bin/sh".into(), "-c".into(), "printf 1234; printf 5678 >&2; exit 5".into()],
+            std::time::Duration::from_secs(2), 8, true).unwrap();
+        assert_eq!(exact.status, 5);
+        assert_eq!(exact.stdout, "1234");
+        assert_eq!(exact.stderr, "5678");
+        let half = runner.run_with_limits(
+            &["/bin/sh".into(), "-c".into(), "printf 12345".into()],
+            std::time::Duration::from_secs(2), 8, true).unwrap_err();
+        assert_eq!(half.code(), "mux.command_output_limit");
+        assert_eq!(half.details().get("stream").map(String::as_str), Some("stdout"));
+        assert_eq!(half.details().get("output_limit_bytes").map(String::as_str), Some("4"));
+        let expanded = runner.run_with_limits(
+            &["/bin/sh".into(), "-c".into(), r#"printf '\377\377'; exit 13"#.into()],
+            std::time::Duration::from_secs(2), 4, false).unwrap_err();
+        assert_eq!(expanded.code(), "mux.command_output_limit");
+        assert_eq!(expanded.details().get("observation_stage").map(String::as_str), Some("decoded_output"));
+        assert_eq!(expanded.details().get("known_exit_status").map(String::as_str), Some("13"));
+        assert_eq!(expanded.details().get("direct_child_reaped").map(String::as_str), Some("true"));
+        assert_eq!(expanded.details().get("effects").map(String::as_str), Some("unknown"));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_invalid_invocation_limits_refuse_before_child_side_effects() {
+        let fixture = native_command_tempdir();
+        let marker = fixture.path().join("not-executed");
+        let argv = ["/bin/sh".into(), "-c".into(), r#"printf changed > "$1""#.into(),
+            "bounded-fixture".into(), marker.to_str().unwrap().to_owned()];
+        for (timeout, bytes) in [(std::time::Duration::from_secs(2), 0),
+            (std::time::Duration::from_secs(2), 1), (std::time::Duration::ZERO, 64),
+            (std::time::Duration::MAX, 64)]
+        {
+            let refusal = SystemRunner::new().run_with_limits(&argv, timeout, bytes, true).unwrap_err();
+            assert_eq!(refusal.code(), "mux.command_limits_invalid");
+            assert_eq!(refusal.details().get("execution_started").map(String::as_str), Some("false"));
+            assert!(!marker.exists());
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_remaining_limits_preserve_smaller_configuration_and_invocation_coordinates() {
+        let fixture = native_command_tempdir();
+        let runner = SystemRunner::new().with_cwd(fixture.path())
+            .with_env("RUNNER_BOUNDED_KEEP", "retained")
+            .with_env("RUNNER_BOUNDED_REMOVE", "withheld").with_env_removed("RUNNER_BOUNDED_REMOVE")
+            .with_timeout(std::time::Duration::from_secs(2)).with_output_limit_bytes(1024);
+        let output = runner.run_with_limits(
+            &["/bin/sh".into(), "-c".into(),
+                r#"pwd -P; printf '%s|%s' "$RUNNER_BOUNDED_KEEP" "${RUNNER_BOUNDED_REMOVE-unset}""#.into()],
+            std::time::Duration::from_secs(5), 4096, true).unwrap();
+        assert_eq!(output.stdout, format!("{}\nretained|unset", fixture.path().canonicalize().unwrap().display()));
+        let capacity = SystemRunner::new().with_output_limit_bytes(3).run_with_limits(
+            &["/bin/sh".into(), "-c".into(), "printf 1234".into()],
+            std::time::Duration::from_secs(2), 64, true).unwrap_err();
+        assert_eq!(capacity.code(), "mux.command_output_limit");
+        assert_eq!(capacity.details().get("output_limit_bytes").map(String::as_str), Some("3"));
+        for (configured, remaining) in [(std::time::Duration::from_millis(80), std::time::Duration::from_secs(2)),
+            (std::time::Duration::from_secs(2), std::time::Duration::from_millis(80))]
+        {
+            let failure = SystemRunner::new().with_timeout(configured).run_with_limits(
+                &["/bin/sleep".into(), "30".into()], remaining, 64, true).unwrap_err();
+            assert_eq!(failure.code(), "mux.command_timeout");
+            assert_eq!(failure.details().get("direct_child_reaped").map(String::as_str), Some("true"));
+            assert_eq!(failure.details().get("execution_started").map(String::as_str), Some("true"));
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn all_forwarding_layers_preserve_actual_strict_output_and_time_requests() {
+        let boxed: Box<dyn CommandRunner> = Box::new(SystemRunner::new());
+        let shared = std::sync::Arc::new(boxed);
+        let reference = &shared;
+        let recording = RecordingRunner::new(reference);
+        let object: &dyn CommandRunner = &recording;
+        let invalid = ["/bin/sh".into(), "-c".into(), r#"printf '\377'"#.into()];
+        assert_eq!(object.run_with_limits(&invalid, std::time::Duration::from_secs(2), 64, true)
+            .unwrap_err().code(), "mux.command_utf8_invalid");
+        let too_large = ["/bin/sh".into(), "-c".into(), "printf 12345".into()];
+        assert_eq!(object.run_with_limits(&too_large, std::time::Duration::from_secs(2), 8, false)
+            .unwrap_err().code(), "mux.command_output_limit");
+        let runaway = ["/bin/sleep".into(), "30".into()];
+        assert_eq!(object.run_with_limits(&runaway, std::time::Duration::from_millis(80), 64, true)
+            .unwrap_err().code(), "mux.command_timeout");
+        assert_eq!(recording.calls(), vec![invalid.to_vec(), too_large.to_vec(), runaway.to_vec()]);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn unsupported_runner_limits_do_not_delegate_to_an_actual_effectful_run() {
+        struct LegacyNative(SystemRunner);
+        impl CommandRunner for LegacyNative {
+            fn run(&self, argv: &[String]) -> Result<Output> { self.0.run(argv) }
+        }
+        let fixture = native_command_tempdir();
+        let marker = fixture.path().join("must-not-run");
+        let argv = ["/bin/sh".into(), "-c".into(), r#"printf effect > "$1""#.into(),
+            "legacy-native-fixture".into(), marker.to_str().unwrap().to_owned()];
+        let actual = LegacyNative(SystemRunner::new().with_timeout(std::time::Duration::from_secs(2)));
+        let refusal = actual.run_with_limits(&argv, std::time::Duration::from_secs(2), 128, true).unwrap_err();
+        assert_eq!(refusal.code(), "mux.command_limits_unsupported");
+        assert_eq!(refusal.details().get("execution_started").map(String::as_str), Some("false"));
+        assert!(!marker.exists());
+        assert!(actual.run(&argv).unwrap().ok(), "control uses the actual legacy native implementation");
+        assert_eq!(std::fs::read(&marker).unwrap(), b"effect");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_limits_preserve_missing_program_io_cause_before_execution() {
+        use std::error::Error;
+        let fixture = native_command_tempdir();
+        let missing = fixture.path().join("missing-program");
+        let failure = SystemRunner::new().run_with_limits(&[missing.to_str().unwrap().to_owned()],
+            std::time::Duration::from_secs(2), 64, true).unwrap_err();
+        assert_eq!(failure.code(), "mux.command_spawn_failed");
+        assert_eq!(failure.details().get("execution_started").map(String::as_str), Some("false"));
+        let cause = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(cause.kind(), std::io::ErrorKind::NotFound);
+        assert!(cause.raw_os_error().is_some());
+    }
+
+    #[test]
+    fn scripted_limits_are_explicit_string_compatibility_not_native_execution_proof() {
+        let runner = ScriptedRunner::new().on("query", "1234");
+        let output = runner.run_with_limits(&["query".into()], std::time::Duration::from_secs(2), 8, true).unwrap();
+        assert_eq!(output.stdout, "1234");
+        let refused = runner.run_with_limits(&["query".into()], std::time::Duration::from_secs(2), 6, false).unwrap_err();
+        assert_eq!(refused.code(), "mux.command_output_limit");
+        assert_eq!(refused.details().get("capture_kind").map(String::as_str), Some("scripted"));
+    }
 
     #[test]
     fn a_wall_clock_budget_kills_a_runaway_child_as_a_runner_error() {
