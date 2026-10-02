@@ -63,6 +63,10 @@ and the receipt says the drain was **not measured**: what the old process had in
 flight at that moment is *unknown*, not zero. "0 interrupted" is only ever stated
 from a drain that ran and counted. Nothing is replayed either way.
 
+The same holds when a drain *ran* but its reply was lost (the connection closed
+with the process): whatever it counted was never seen, so the receipt says
+unknown. "Nothing was in flight" is stated only when no gateway was running.
+
 Two kinds of work are *uncertain* after a restart, and the receipt names each:
 
 * **An interrupted turn.** What the model or its tools did before the interrupt
@@ -106,6 +110,18 @@ is the visible receipt meanwhile.
 | not running | starts the installed build |
 | already the installed build | `no-change`; nothing is drained |
 
+## A transaction that cannot run, and one that cannot be resumed
+
+A step that cannot run (an unreadable state file, say) is **recorded** in the
+transaction, and one that had changed nothing yet ends `failed-before-change`, so it
+cannot sit in `planned` blocking every later `apply`. A later phase stays
+resumable. A transaction whose worker is gone and which keeps failing is ended by
+`aikit gateway upgrade abandon [ID] --reason "…"`: refused while a worker holds it,
+and it changes nothing on disk or in the running gateway — the receipt says what was
+known. A gateway that holds the socket but does not answer in time is **never
+taken for gone**: it is not drained and not restarted around, and the upgrade says
+so (`needs-operator`), rather than starting a second gateway beside a slow one.
+
 ## Failure and recovery
 
 | What went wrong | What the upgrade does | What is left |
@@ -119,8 +135,9 @@ is the visible receipt meanwhile.
 | a terminal is lost | nothing: the worker is not attached to it | — |
 | a peer is offline | the plan shows it unreachable; relayed Communiques queue and are re-resolved when it returns | — |
 
-`aikit gateway upgrade rollback <id>` restores the previous build of any
-recorded upgrade and verifies it.
+`aikit gateway upgrade rollback <id>` restores the previous build of the **latest**
+upgrade and verifies it (the installer's rollback restores the previous set of the
+latest update; an older id is refused, naming the latest).
 
 **A rollback does not undo effects.** It restores a build. Turns that were
 interrupted, messages that were sent, and state written while the new build ran

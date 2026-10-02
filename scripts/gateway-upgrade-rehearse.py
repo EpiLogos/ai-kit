@@ -12,7 +12,11 @@ usage: AIKIT_BUILD_SOURCE_REVISION=<the revision stamped in the binary> \
        scripts/gateway-upgrade-rehearse.py AIKIT_BINARY [--keep]
 Environment: REHEARSAL_TMP (a SHORT directory: unix socket paths are limited to ~104 bytes).
 Scenarios: install-drain-restart-verify, already-current, installer-fails-unchanged,
-installer-flips-then-fails (rolled back), broken-new-build (rolled back). Prints a JSON evidence
+installer-flips-then-fails (rolled back), broken-new-build (rolled back), and — when a
+`gateway-connector-specimen` binary is found (GATEWAY_SPECIMEN, else next to AIKIT_BINARY) —
+asked-through-the-gateway: `/upgrade apply` typed into a bound conversation, the upgrade worker
+started FROM INSIDE the service under the platform's service manager (not as a child process), the
+restart, and the receipt announced back into that conversation once. Prints a JSON evidence
 document; exit status 1 if any scenario did not end as expected.
 """
 import json, os, shutil, stat, subprocess, sys, tempfile, time, socket
@@ -120,6 +124,17 @@ def service_pid():
     out = sh(["systemctl", "--user", "show", f"aikit-gateway-{instance}.service", "-p", "MainPID", "--value"]).stdout.strip()
     return int(out) if out and out != "0" else None
 
+specimen = os.environ.get("GATEWAY_SPECIMEN") or os.path.join(os.path.dirname(binary), "gateway-connector-specimen")
+if not os.path.exists(specimen):
+    specimen = None
+if specimen:
+    os.makedirs(os.path.join(home, "state"), exist_ok=True)
+    with open(os.path.join(home, "state/gateway-connectors.json"), "w") as f:
+        json.dump({"schema": "aikit.gateway-connectors/v1", "connectors": [{
+            "connector_ref": "gateway-connector/specimen/main", "platform": "specimen", "implementation": "stdio",
+            "program": [specimen, "--connector-ref", "gateway-connector/specimen/main"]}]}, f)
+evidence["specimen_connector"] = bool(specimen)
+
 try:
     # install the controlled service instance (unix socket only; supervised lifecycle)
     data, r = aikit("gateway", "install-service", "--workcell-ref", "workcell:rehearsal", "--gateway-ref", "agency-gateway/rehearsal")
@@ -161,6 +176,62 @@ try:
     flip(os.path.join(managed, "current"), os.path.join(managed, "bin-b/aikit"))
     time.sleep(1)
     scenario("broken-new-build", os.path.join(managed, "bin-bad/aikit"), "bin-b/aikit", ["--install", "--wait", "--verify-timeout-secs", "25"], "rolled-back")
+    # 6. asked through the gateway itself, under the real service manager
+    if specimen:
+        flip(os.path.join(managed, "current"), os.path.join(managed, "bin-a/aikit"))   # the installed build is now A; B runs
+        before = wait_running()
+        t0 = time.time()
+        binding = {"type": "bind", "binding": {
+            "binding_ref": "gateway-binding/specimen", "connector_ref": "gateway-connector/specimen/main",
+            "address": {"platform": "specimen", "conversation_id": "main"},
+            "agent_session_ref": "agent-session/specimen", "agency_ref": "agency/specimen",
+            "actuation_ref": "actuation/specimen", "actuation_stream_ref": "actuation-stream/specimen",
+            "ingress": {"default": "allow", "sender_overrides": {}}}}
+        def try_raw(command):
+            try: return raw(command)
+            except Exception: return None
+        end = time.time() + 180
+        while time.time() < end:
+            r = try_raw(binding)
+            if r and r.get("ok"): break
+            time.sleep(1)
+        asked = try_raw({"type": "ingest", "event": {
+            "event_ref": "gateway-ingress/socket/rehearsal-upgrade", "connector_ref": "gateway-connector/specimen/main",
+            "address": {"platform": "specimen", "conversation_id": "main"},
+            "sender": {"native_sender_id": "owner", "kind": "human"}, "kind": "message",
+            "native_event_id": "rehearsal-upgrade-1", "native_message_id": "rehearsal-upgrade-msg-1", "text": "/upgrade apply"}})
+        worker_seen = None
+        after = None
+        end = time.time() + 300
+        while time.time() < end:
+            if worker_seen is None:
+                if system == "darwin":
+                    out = sh(["launchctl", "list"]).stdout
+                    names = [l.split()[-1] for l in out.splitlines() if "gateway-upgrade." in l]
+                else:
+                    out = sh(["systemctl", "--user", "list-units", "aikit-gateway-upgrade-*", "--no-legend", "--all"]).stdout
+                    names = [l.split()[0] for l in out.splitlines() if l.strip()]
+                if names: worker_seen = names[0]
+            b = running()
+            if b and b["pid"] != before["pid"] and b["revision"] != before["revision"]:
+                after = b; break
+            time.sleep(1)
+        details = []
+        end = time.time() + 180
+        while time.time() < end:
+            snap = try_raw({"type": "snapshot"})
+            details = [r.get("detail", "") for r in ((snap or {}).get("response", {}).get("snapshot", {}).get("delivery_receipts") or [])]
+            if any("gateway upgrade upg-" in d and "completed" in d for d in details): break
+            time.sleep(1)
+        told = [d for d in details if "gateway upgrade upg-" in d and "completed" in d]
+        entry = {"name": "asked-through-the-gateway", "seconds": round(time.time() - t0, 1),
+                 "ask_accepted": bool(asked and asked.get("ok")),
+                 "worker_under_service_manager": worker_seen, "pid_before": before["pid"],
+                 "pid_after": after["pid"] if after else None, "revision_after": after["revision"][:12] if after else None,
+                 "receipt_announced_into_the_conversation": len(told), "receipt": told[0][:200] if told else None,
+                 "expected": "completed, announced once, worker under the service manager",
+                 "ok": bool(after) and len(told) == 1 and bool(worker_seen)}
+        evidence["scenarios"].append(entry)
     status, _ = aikit("gateway", "doctor")
     evidence["doctor_verdict"] = status.get("data", {}).get("verdict") if isinstance(status, dict) else None
     evidence["leftover_worker_definitions"] = []

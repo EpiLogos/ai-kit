@@ -461,7 +461,19 @@ impl ServiceOptions {
 
     /// The service environment: identity only, never material.
     pub fn environment(&self) -> Vec<(&'static str, String)> {
+        self.environment_for_instance(service_instance())
+    }
+
+    /// [`Self::environment`] for a named service instance. The instance is part of
+    /// the definition: a gateway that must find its own definition (to know which
+    /// build a restart will run, or to start an upgrade worker for itself) has
+    /// only its environment to go by, and without the name it would read the
+    /// default service's definition — a different service on the same machine.
+    fn environment_for_instance(&self, instance: Option<String>) -> Vec<(&'static str, String)> {
         let mut environment = Vec::new();
+        if let Some(instance) = instance {
+            environment.push((SERVICE_INSTANCE_ENV, instance));
+        }
         if let Some(workcell_ref) = &self.workcell_ref {
             environment.push((WORKCELL_ENV, workcell_ref.clone()));
         }
@@ -1208,6 +1220,24 @@ mod tests {
         assert!(!bare.contains("--ws"));
         assert!(!bare.contains("AIKIT_WORKCELL_REF"));
         assert!(bare.contains("<key>AIKIT_CENTRAL_ROOT</key>"));
+    }
+
+    #[test]
+    fn a_named_instances_definition_carries_its_own_name_and_the_default_service_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = remote_options(dir.path());
+        let named = options.environment_for_instance(Some("rehearsal-1".into()));
+        assert!(
+            named.contains(&(SERVICE_INSTANCE_ENV, "rehearsal-1".to_owned())),
+            "{named:?}"
+        );
+        let default = options.environment_for_instance(None);
+        assert!(
+            default
+                .iter()
+                .all(|(name, _)| *name != SERVICE_INSTANCE_ENV),
+            "the default service names no instance: {default:?}"
+        );
     }
 
     #[test]

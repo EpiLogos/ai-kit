@@ -193,6 +193,32 @@ each is now:
 | Pending outbound operations stay pending forever; the Communique planes are still three journals; `/upgrade` through a live Telegram/Slack chat; in-flight turn drained through the carrier with a live harness; Serve/ssh-tunnel exercised; owner-scope admin of a remote gateway | **Carried, with owners and closing conditions, in EpiLogos/ai-kit#481** |
 | A real `oi update --rollback` and a real (not scripted) `oi` install-then-restart in one transaction were never exercised | **Exercised on the real Omarchy service** (section below). It also showed that a rollback the operator asked for was reported as "the new build did not come up"; the receipt now says "rolled back at the operator's request" (`rollback_requested`; unit test) |
 
+## Second independent verification (a second session that did not build it)
+
+A second fresh verifier took the tree after #482/#485, re-derived the real
+services' state, ran probes and two deliberate **mutations** (one in `verify()`, one
+in the serve wiring — both made the named real-binary tests fail, so those tests do
+guard the connection), and read the code adversarially. **Verdict: still not a
+usable end-to-end feature as the commission is worded**, for the reasons in the
+last rows. Its findings, and where each is now:
+
+| Finding | State |
+|---|---|
+| **N1** The doctor's firewall reading was wrong, and my #485 fix was vacuous: `socketfilterfw --getappblocked` answers "is permitted" for *any* path (`/bin/ls`, a path that does not exist) | **Repaired** (merged): the finding is an Info that says only what the list can show, and names the real test — a peer running `aikit gateway --at workcell:<this> protocol` |
+| **N2** A drain whose reply was lost (the turn interrupted, the connection gone with the process) was reported as "nothing was in flight to drain; nothing was replayed", `uncertain_effects` null | **Repaired**: the lost reply is stored as an *unmeasured* report with the reason; the receipt says "unknown, not zero"; an old process that ended before a drain with no report says the same; "nothing in flight" is stated only when no gateway was running. Tests: `a_drain_whose_reply_was_lost_is_unknown_not_nothing_in_flight`, `a_process_that_ended_before_the_drain_was_reached_leaves_no_report_and_the_receipt_says_unknown` |
+| **N3** Lenient reads took a slow gateway for an ended one in `drain()` and `restart()` | **Repaired**: both use the strict reading (`read_running_strict`: "nothing listening" is absent; "held the socket and did not answer in time" is `gateway_upgrade.gateway_unresponsive`). A drain that finds one ends `needs-operator`; a restart treats it as still there and never starts a second gateway beside it. Tests: `a_gateway_that_does_not_answer_at_the_drain_is_not_taken_for_gone`, `the_old_process_still_answering_is_never_verified_as_the_new_one` |
+| **N4** A step that could not run (an unreadable state file) left the transaction `planned`, blocking every later `apply`, with no recorded cause and nothing to clear it | **Repaired**: the failure is **recorded** as a step and a transaction that had changed nothing ends `failed-before-change`; `aikit gateway upgrade abandon [ID] --reason …` ends one whose worker is gone (refused while a worker holds it; changes nothing on disk or in the gateway). Tests: `a_step_that_cannot_run_ends_a_transaction_that_changed_nothing_and_a_new_apply_can_start`, `an_operator_can_abandon_a_transaction_nothing_is_driving_and_it_changes_nothing` |
+| **N5** `receipt_delivered` means queued, not delivered; the crash window between announce and save gives at-least-once | **Carried** (ai-kit#481: the durable outbound queue is the closing condition) |
+| **N6** Messages admitted while a drain runs are unserved and not named in the `DrainReport` | **Carried** (ai-kit#481, with N5) |
+| **N7** The "named" ssh downgrade was not named: `Choice::Legacy(_) => {}` discarded the reason | **Repaired**: the owner's log says `encounter route: <why>; using the ssh route` |
+| **N8** `rollback <id>` was documented as restoring *any* recorded upgrade; `oi update --rollback` restores only the installer's latest previous build, while verification expects that transaction's own `installed_before` | **Repaired**: rollback is for the **latest** upgrade only and refuses an older id naming the latest (`gateway_upgrade.rollback_not_latest`; test `only_the_latest_upgrade_can_be_rolled_back`); the documentation says so |
+| **N9** `adopt_orphans` had no test | **Repaired**: `adopt_orphans_with(home, spawn)` is a seam; the adoption rule (a dead worker's nonterminal transaction is adopted once it has been quiet, never while fresh or held) is pinned by `a_dead_workers_transaction_is_adopted_once_it_has_been_quiet_and_never_while_it_is_fresh_or_held` |
+| **N10** The two machines run different `oi` builds and neither the plan nor the doctor shows it | **Carried** (ai-kit#481) |
+| **N11** No new ssh-injection, peer-escalation or replay hole found | none needed |
+| "Asked through the gateway itself" proven only with a process-mode worker and a scripted supervisor | **Exercised under both real service managers**: `scripts/gateway-upgrade-rehearse.py` scenario 6 (`asked-through-the-gateway`) runs a real connector specimen, types `/upgrade apply` into the bound conversation, and the worker the gateway starts is its **own** transient unit (systemd) / one-shot job (launchd), not a child; the restart replaces the process and the receipt is announced into the same conversation **once**. Run on this tree (`origin/main` `12ccb272f46a` + the repair files, release build on the Mac, debug on Omarchy): **all six scenarios ok on launchd (Mac) and on systemd (Omarchy)**. The Mac run's scenario-6 transaction: `upg-01m3ya5r7enb…` pid 5813 → 8202, drain measured (0/0/0), `verified: a different process is running the expected build`, `completed`, `receipt_announced_into_the_conversation: 1`, worker `ai.aikit.gateway-upgrade.01m3ya5r7enb` |
+| **Found by the first launchd run of scenario 6 (it failed twice before this was repaired)**: a controlled instance's service definition never carried its own instance name (`AIKIT_GATEWAY_SERVICE_INSTANCE` was read only from the process environment). A gateway started by launchd therefore resolved "the installed build" from the **default** service definition — on that machine, the real service's — and the asked-for upgrade ended `needs-operator` ("expected revision 8c6c48f03996", the real service's executable) while the instance had in fact restarted onto the right image. The real service was never touched | **Repaired**: `ServiceOptions::environment()` writes the instance into the definition (the default service writes none), so a gateway and the workers it starts act on their own definition; test `a_named_instances_definition_carries_its_own_name_and_the_default_service_does_not`. Instances installed before this repair carry no name and are rehearsal instances only |
+| The Mac had no real-`oi` `apply --install` transaction (only `--restart-only`) | **Open**: the Mac's installed cut has since been replaced by another lane's, and moving it would disturb that lane; see "Not shown" |
+
 ## The real `oi`: install, restart and rollback in one lane (Omarchy, real systemd service)
 
 The commission's lifecycle through the **real managed installer** on a **real
@@ -257,7 +283,9 @@ owner's `sudo` command only for the case where that queues or times out.
   Serve change); Funnel is never configured.
 * An owner-scope administrator token on a *remote* gateway (`--at` uses the
   peer token: relay and read, never stop, drain or restore).
-* A second independent verification of the repaired tree.
+* A third independent verification of the tree repaired after the second.
+* A real-`oi` `apply --install --candidate` transaction on the Mac (only the restart half has been run there).
+* The carried N5, N6 and N10 (ai-kit#481).
 
 ## Owner-only steps this lane will not take
 

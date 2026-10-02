@@ -210,7 +210,11 @@ fn remote_encounter(
                 }
                 Choice::Unavailable(why) => return Err(unavailable(why)),
                 Choice::Legacy(why) if kind == "gateway" => return Err(unavailable(why)),
-                Choice::Legacy(_) => {}
+                Choice::Legacy(why) => {
+                    // Named, not silent: the owner's log says why this request
+                    // went the legacy way.
+                    eprintln!("encounter route: {why}; using the {kind} route");
+                }
             }
         } else if kind == "gateway" {
             return Err((
