@@ -1172,6 +1172,7 @@ fn gateway_route(command: &GatewaySub) -> &'static str {
             GatewayUpgradeSub::Status(_) => "cmd_gateway_upgrade_status",
             GatewayUpgradeSub::Resume(_) => "cmd_gateway_upgrade_resume",
             GatewayUpgradeSub::Rollback(_) => "cmd_gateway_upgrade_rollback",
+            GatewayUpgradeSub::Abandon(_) => "cmd_gateway_upgrade_abandon",
             GatewayUpgradeSub::Worker(_) => "cmd_gateway_upgrade_worker",
         },
         GatewaySub::Doctor => "cmd_gateway_doctor",
@@ -2180,8 +2181,11 @@ pub enum GatewayUpgradeSub {
     /// Finish an upgrade whose worker stopped (another driver takes over at
     /// the durable phase; nothing already done is repeated).
     Resume(GatewayUpgradeResumeArgs),
-    /// Restore the previous build of an upgrade and verify it runs.
+    /// Restore the previous build of the latest upgrade and verify it runs.
     Rollback(GatewayUpgradeRollbackArgs),
+    /// Give up on an upgrade whose worker is gone and cannot be resumed. Changes
+    /// nothing on disk or in the running gateway; the receipt says what was known.
+    Abandon(GatewayUpgradeAbandonArgs),
     /// The detached worker itself. Started by `apply`; not for direct use.
     #[command(hide = true)]
     Worker(GatewayUpgradeWorkerArgs),
@@ -2244,6 +2248,16 @@ pub struct GatewayUpgradeApplyArgs {
     /// Wait for the worker to finish and print the outcome.
     #[arg(long, conflicts_with = "foreground")]
     pub wait: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct GatewayUpgradeAbandonArgs {
+    /// The upgrade id (default: the one in flight).
+    #[arg(value_name = "ID")]
+    pub id: Option<String>,
+    /// Why, for the receipt.
+    #[arg(long, value_name = "TEXT", default_value = "no reason given")]
+    pub reason: String,
 }
 
 #[derive(Debug, Args)]
