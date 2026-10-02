@@ -1611,7 +1611,28 @@ fn connector_pause_and_resume_stop_ingress_and_show_in_health() {
         .lock()
         .unwrap()
         .push_back(Some(fixture_inbound("while paused", "pause-1")));
-    thread::sleep(Duration::from_millis(300));
+    let mut last_paused_health: Option<Option<ConnectorHealth>> = None;
+    poll_until("pump-recorded paused health", Duration::from_secs(10), || {
+        let health = gateway
+            .lock()
+            .unwrap()
+            .status()
+            .connector_health
+            .into_iter()
+            .find(|health| health.connector_ref == r(CONNECTOR_REF));
+        let paused = health.as_ref().is_some_and(|health| {
+            health
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("paused by gateway command")
+        });
+        if last_paused_health.as_ref() != Some(&health) {
+            eprintln!("actual paused connector health observation: {health:?}");
+            last_paused_health = Some(health);
+        }
+        paused
+    });
     let paused_gateway = gateway.lock().unwrap();
     let health = paused_gateway
         .status()
@@ -1627,22 +1648,54 @@ fn connector_pause_and_resume_stop_ingress_and_show_in_health() {
             .contains("paused by gateway command"),
         "health reflects the pause: {health:?}"
     );
+    assert_eq!(
+        paused_gateway
+            .snapshot()
+            .streams
+            .iter()
+            .map(|stream| stream.events.len())
+            .sum::<usize>(),
+        0,
+        "the paused event has not entered any journal"
+    );
     drop(paused_gateway);
+    let pending = recording.events.lock().unwrap();
+    assert_eq!(pending.len(), 1, "the paused event remains pending");
+    assert_eq!(
+        pending.front().and_then(Option::as_ref).unwrap().event_ref,
+        r("gateway-ingress/fixture/pause-1")
+    );
+    drop(pending);
 
     // Resume: the held event is admitted.
     controls.set_paused(&r(CONNECTOR_REF), false);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        let gateway = gateway.lock().unwrap();
-        if gateway.status().stream_count == 1 {
-            break;
-        }
-        drop(gateway);
-        thread::sleep(Duration::from_millis(10));
-    }
+    poll_until("the resumed event's journal append", Duration::from_secs(10), || {
+        gateway
+            .lock()
+            .unwrap()
+            .snapshot()
+            .streams
+            .iter()
+            .any(|stream| !stream.events.is_empty())
+    });
     let gateway = gateway.lock().unwrap();
     assert_eq!(gateway.status().stream_count, 1, "the held event landed");
+    let snapshot = gateway.snapshot();
+    let events = snapshot
+        .streams
+        .iter()
+        .flat_map(|stream| &stream.events)
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 1, "the held event was appended exactly once");
+    assert_eq!(snapshot.streams[0].stream_ref, r(STREAM_REF));
+    assert_eq!(events[0].sequence, 1);
+    assert_eq!(
+        events[0].event["metadata"]["connector_event_ref"],
+        "gateway-ingress/fixture/pause-1"
+    );
+    assert_eq!(events[0].event["content"], "while paused");
     drop(gateway);
+    assert!(recording.events.lock().unwrap().is_empty());
 
     shutdown.store(true, Ordering::SeqCst);
     for worker in workers.drain(..) {
