@@ -345,7 +345,7 @@ fn native_workcell_scrubbed_npm_writes_cache_only_inside_actual_task_t() {
     fs::write(&requirements, prepared["requirements"].to_string()).unwrap();
     let boundary = PathBuf::from(std::env::var_os("AIKIT_CAW_WORKCELL_BOUNDARY_BIN").unwrap());
     for (label, args) in [
-        ("help", vec!["--help"]),
+        ("version", vec!["--version"]),
         ("cache-reading", vec!["config", "get", "cache"]),
         ("cache-write", vec!["cache", "verify"]),
     ] {
