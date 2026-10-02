@@ -352,7 +352,7 @@ fn task_npm_cache(
         || body.protocol != EncounterProtocol::Acp
         || argv
             .first()
-            .and_then(|program| Path::new(program).file_name())
+            .and_then(|program| std::path::Path::new(program).file_name())
             != Some(std::ffi::OsStr::new("npx"))
     {
         return Ok(None);
