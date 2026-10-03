@@ -309,7 +309,7 @@ jobs:
           owner="$RUNNER_TEMP/seat-guard-oi"
           git init -q "$owner"
           git -C "$owner" remote add origin https://github.com/EpiLogos/O-I.git
-          git -C "$owner" fetch --depth=1 origin "$SEAT_GUARD_GATE_PRODUCT_REVISION"
+          git -C "$owner" fetch origin "$SEAT_GUARD_GATE_PRODUCT_REVISION"
           git -C "$owner" checkout --detach FETCH_HEAD
           test "$(git -C "$owner" rev-parse HEAD)" = "$SEAT_GUARD_GATE_PRODUCT_REVISION"
           test -z "$(git -C "$owner" status --porcelain)"
