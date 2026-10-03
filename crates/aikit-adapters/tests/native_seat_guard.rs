@@ -320,7 +320,7 @@ fn real_precommit_qualifies_register_and_refuses_material_or_shape_failure() {
 
     fixture.write_registration(&valid);
     let mode = fs::metadata(fixture.register()).unwrap().permissions();
-    fs::set_permissions(fixture.register(), fs::Permissions::from_mode(0)).unwrap();
+    fs::set_permissions(fixture.register(), fs::Permissions::from_mode(0o0)).unwrap();
     let actual = fs::read(fixture.register()).unwrap_err();
     let permission = fixture.commit(&repo);
     fs::set_permissions(fixture.register(), mode).unwrap();
