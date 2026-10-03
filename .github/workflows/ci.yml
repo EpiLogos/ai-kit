@@ -61,14 +61,118 @@ jobs:
           fi
           exit "$status"
 
+      - name: Qualify actual Core material ownership and adverse cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset AIKIT_CORE_TEST_ROOT
+          mkdir -p ProjectCentral/now/tmp
+          gate_dir="ProjectCentral/now/tmp/core-material-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${RUNNER_OS}"
+          mkdir "$gate_dir"
+          git rev-parse HEAD > "$gate_dir/source-head.txt"
+          git archive --format=tar HEAD > "$gate_dir/source.tar"
+          rustc -Vv > "$gate_dir/rustc.txt"
+          cargo test --locked -p aikit-core --lib --no-run --message-format=json > "$gate_dir/build.jsonl" 2> "$gate_dir/build.stderr.log"
+          cat "$gate_dir/build.stderr.log"
+          cargo test --locked -p aikit-core --lib error::tests:: -- --list > "$gate_dir/list.log" 2> "$gate_dir/list.stderr.log"
+          cat "$gate_dir/list.log" "$gate_dir/list.stderr.log"
+          python3 - "$gate_dir" <<'PYCORE'
+          from pathlib import Path
+          import hashlib,json,os,platform,sys
+          p=Path(sys.argv[1]); sha=lambda q:hashlib.sha256(q.read_bytes()).hexdigest()
+          original=['actual_missing_file_cause_survives_clone_details_and_domain_display','actual_primary_and_secondary_io_objects_survive_wrap_and_clone','native_wrap_and_clone_keep_identical_actual_filesystem_cause','domain_equality_does_not_erase_distinct_actual_filesystem_causes']
+          common=['actual_directory_form_and_reparse_refusal_retains_targets','actual_unexpected_child_refuses_empty_cleanup_and_retains_bytes']
+          platform_cases=['actual_windows_held_fixture_refuses_delete_and_rename_until_legal_close'] if os.name=='nt' else ['actual_unix_fixture_replacement_refuses_cleanup_and_retains_both_objects','actual_unix_ancestor_replacement_refuses_cleanup_and_retains_both_branches']
+          expected=sorted('error::tests::'+x for x in original+common+platform_cases)
+          actual=sorted(x.removesuffix(': test') for x in (p/'list.log').read_text().splitlines() if x.startswith('error::tests::') and x.endswith(': test'))
+          if actual!=expected:raise SystemExit(f'Actual compiled Core roster mismatch: {actual!r} versus {expected!r}')
+          artifacts=[json.loads(x) for x in (p/'build.jsonl').read_text().splitlines() if x.startswith('{')]
+          exe=[Path(x['executable']) for x in artifacts if x.get('reason')=='compiler-artifact' and x.get('target',{}).get('name')=='aikit_core' and x.get('profile',{}).get('test') and x.get('executable')]
+          if len(exe)!=1 or not exe[0].is_file():raise SystemExit('Exactly one actual same-source native Core test executable is required')
+          (p/'expected.txt').write_text('\n'.join(expected)+'\n');(p/'original.txt').write_text('\n'.join('error::tests::'+x for x in original)+'\n')
+          product=Path.cwd().resolve();explicit=p/'explicit-root';explicit.mkdir()
+          alias=p/'native-root-link';os.symlink(explicit.resolve(),alias,target_is_directory=True)
+          def coordinate(path):
+              raw=str(path)
+              if os.name=='nt' and not raw.startswith('\\\\?\\'):
+                  raw=('\\\\?\\UNC\\'+raw[2:]) if raw.startswith('\\\\') else ('\\\\?\\'+raw)
+              return raw
+          (p/'explicit-root.txt').write_text(coordinate(explicit.resolve())+'\n')
+          negative=[('relative','relative-core-root'),('missing',coordinate(product/p/'missing-root')),('outside',coordinate(product)),('symlink',coordinate(product/alias)),('noncanonical',coordinate(product/explicit/'..'/'explicit-root'))]
+          (p/'negative.tsv').write_text(''.join(name+'\t'+root+'\n' for name,root in negative))
+          reasons={'relative':'explicit Core test root must be absolute','missing':'explicit Core test root must already exist','outside':'explicit Core test root must remain in this product Run space','symlink':'explicit Core test root must be physical','noncanonical':'explicit Core test root must be physical'}
+          (p/'negative-reasons.json').write_text(json.dumps(reasons,indent=2)+'\n')
+          files=['crates/aikit-core/src/error.rs','crates/aikit-core/src/lib.rs','crates/aikit-core/Cargo.toml','Cargo.lock','.github/workflows/ci.yml']
+          (p/'source-binary-os.json').write_text(json.dumps({'source_head':(p/'source-head.txt').read_text().strip(),'source_archive_sha256':sha(p/'source.tar'),'source_files':{x:sha(Path(x)) for x in files},'native_executable':str(exe[0]),'native_binary_sha256':sha(exe[0]),'platform':platform.platform(),'python':sys.version,'uid':os.getuid() if hasattr(os,'getuid') else None,'compiled_roster':actual,'required_execution_count':len(expected),'explicit_root':coordinate(explicit.resolve()),'scope':'Actual public Source checkout product scratch; not a fabricated allocated native ProjectRun/World. Windows symlink privilege is required, not skipped.'},indent=2)+'\n')
+          PYCORE
+          run_case() {
+            label="$1"; shift
+            set +e
+            "$@" > "$gate_dir/$label.log" 2>&1
+            status=$?
+            set -e
+            cat "$gate_dir/$label.log"
+            printf '%s\n' "$status" > "$gate_dir/$label.exit"
+            return "$status"
+          }
+          while IFS= read -r case; do
+            label="default-${case##*::}"
+            run_case "$label" cargo test --locked -p aikit-core --lib "$case" -- --exact --nocapture --test-threads=1
+           done < "$gate_dir/expected.txt"
+          explicit_root=$(cat "$gate_dir/explicit-root.txt")
+          while IFS= read -r case; do
+            label="explicit-${case##*::}"
+            run_case "$label" env AIKIT_CORE_TEST_ROOT="$explicit_root" cargo test --locked -p aikit-core --lib "$case" -- --exact --nocapture --test-threads=1
+           done < "$gate_dir/original.txt"
+          while IFS=$'\t' read -r label coordinate; do
+            if run_case "refused-$label" env AIKIT_CORE_TEST_ROOT="$coordinate" cargo test --locked -p aikit-core --lib error::tests::actual_missing_file_cause_survives_clone_details_and_domain_display -- --exact --nocapture --test-threads=1; then
+              echo "Invalid explicit Core root unexpectedly admitted: $label" >&2
+              exit 1
+            fi
+           done < "$gate_dir/negative.tsv"
+          python3 - "$gate_dir" <<'PYCORE'
+          from pathlib import Path
+          import hashlib,json,re,sys
+          p=Path(sys.argv[1]);out=[]
+          for path in sorted(p.glob('*.exit')):
+              status=int(path.read_text());text=path.with_suffix('.log').read_text();matches=re.findall(r'test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;',text)
+              if len(matches)!=1:raise SystemExit(f'Missing/nonunique actual native result: {path}')
+              label=path.stem;expected=('FAILED','0','1','0','0') if label.startswith('refused-') else ('ok','1','0','0','0')
+              if matches[0]!=expected or (status==0)==label.startswith('refused-'):raise SystemExit(f'Actual result mismatch: {label} {status} {matches}')
+              if label.startswith('refused-'):
+                  reason=json.loads((p/'negative-reasons.json').read_text())[label.removeprefix('refused-')]
+                  if reason not in text:raise SystemExit(f'Wrong native admission failure at {label}: expected actual frozen guard assertion {reason!r}')
+              out.append({'case':label,'actual_exit':status,'actual_native_result':matches[0],'log_sha256':hashlib.sha256(path.with_suffix('.log').read_bytes()).hexdigest(),'scope':'negative admission failure' if label.startswith('refused-') else 'actual native passing definition'})
+          expected=(len((p/'expected.txt').read_text().splitlines())+4+5)
+          if len(out)!=expected:raise SystemExit(f'Actual execution count {len(out)} != {expected}')
+          meta=json.loads((p/'source-binary-os.json').read_text());exe=Path(meta['native_executable'])
+          if hashlib.sha256(exe.read_bytes()).hexdigest()!=meta['native_binary_sha256']:raise SystemExit('Native test executable changed during qualification')
+          if (p/'missing-root').exists():raise SystemExit('Refused missing root acquired material')
+          (p/'native-results.json').write_text(json.dumps({'actual_dispatch_count':len(out),'unique_compiled_definitions':len(meta['compiled_roster']),'actual_results':out,'negative_admission_failures_are_not_IO_body_passes':True,'binary_hash_stable':True},indent=2)+'\n')
+          (p/'native-root-link').unlink() if sys.platform!='win32' else __import__('os').rmdir(p/'native-root-link')
+          (p/'explicit-root').rmdir()
+          PYCORE
+      - name: Retain actual Core source, binary, roster and native results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-native-material-${{ runner.os }}-${{ github.sha }}
+          path: ProjectCentral/now/tmp/core-material-*
+          if-no-files-found: error
+          retention-days: 14
+
   v2-crate-tests:
-    name: V2 crate — ${{ matrix.package }}
-    runs-on: ubuntu-latest
+    name: V2 crate — ${{ matrix.package }}${{ matrix.os == 'windows-latest' && ' (Windows)' || '' }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         package: [aikit-core, aikit-store, aikit-adapters, aikit-tui, aikit-cli]
+        include:
+          - os: windows-latest
+            package: aikit-core
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Install Rust 1.98
@@ -81,6 +185,7 @@ jobs:
         with:
           tool: cargo-nextest
       - name: Ensure real ripgrep for Project-scope acceptance
+        if: runner.os != 'Windows'
         run: |
           if ! command -v rg >/dev/null 2>&1; then
             sudo apt-get update -qq
@@ -100,6 +205,112 @@ jobs:
             echo "::error title=${{ matrix.package }} test failure::$message"
           fi
           exit "$status"
+
+      - name: Ensure native metadata Python for Core qualification
+        if: matrix.package == 'aikit-core'
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Qualify actual Core material ownership and adverse cleanup
+        if: matrix.package == 'aikit-core'
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset AIKIT_CORE_TEST_ROOT
+          mkdir -p ProjectCentral/now/tmp
+          gate_dir="ProjectCentral/now/tmp/core-material-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${RUNNER_OS}"
+          mkdir "$gate_dir"
+          git rev-parse HEAD > "$gate_dir/source-head.txt"
+          git archive --format=tar HEAD > "$gate_dir/source.tar"
+          rustc -Vv > "$gate_dir/rustc.txt"
+          cargo test --locked -p aikit-core --lib --no-run --message-format=json > "$gate_dir/build.jsonl" 2> "$gate_dir/build.stderr.log"
+          cat "$gate_dir/build.stderr.log"
+          cargo test --locked -p aikit-core --lib error::tests:: -- --list > "$gate_dir/list.log" 2> "$gate_dir/list.stderr.log"
+          cat "$gate_dir/list.log" "$gate_dir/list.stderr.log"
+          python3 - "$gate_dir" <<'PYCORE'
+          from pathlib import Path
+          import hashlib,json,os,platform,sys
+          p=Path(sys.argv[1]); sha=lambda q:hashlib.sha256(q.read_bytes()).hexdigest()
+          original=['actual_missing_file_cause_survives_clone_details_and_domain_display','actual_primary_and_secondary_io_objects_survive_wrap_and_clone','native_wrap_and_clone_keep_identical_actual_filesystem_cause','domain_equality_does_not_erase_distinct_actual_filesystem_causes']
+          common=['actual_directory_form_and_reparse_refusal_retains_targets','actual_unexpected_child_refuses_empty_cleanup_and_retains_bytes']
+          platform_cases=['actual_windows_held_fixture_refuses_delete_and_rename_until_legal_close'] if os.name=='nt' else ['actual_unix_fixture_replacement_refuses_cleanup_and_retains_both_objects','actual_unix_ancestor_replacement_refuses_cleanup_and_retains_both_branches']
+          expected=sorted('error::tests::'+x for x in original+common+platform_cases)
+          actual=sorted(x.removesuffix(': test') for x in (p/'list.log').read_text().splitlines() if x.startswith('error::tests::') and x.endswith(': test'))
+          if actual!=expected:raise SystemExit(f'Actual compiled Core roster mismatch: {actual!r} versus {expected!r}')
+          artifacts=[json.loads(x) for x in (p/'build.jsonl').read_text().splitlines() if x.startswith('{')]
+          exe=[Path(x['executable']) for x in artifacts if x.get('reason')=='compiler-artifact' and x.get('target',{}).get('name')=='aikit_core' and x.get('profile',{}).get('test') and x.get('executable')]
+          if len(exe)!=1 or not exe[0].is_file():raise SystemExit('Exactly one actual same-source native Core test executable is required')
+          (p/'expected.txt').write_text('\n'.join(expected)+'\n');(p/'original.txt').write_text('\n'.join('error::tests::'+x for x in original)+'\n')
+          product=Path.cwd().resolve();explicit=p/'explicit-root';explicit.mkdir()
+          alias=p/'native-root-link';os.symlink(explicit.resolve(),alias,target_is_directory=True)
+          def coordinate(path):
+              raw=str(path)
+              if os.name=='nt' and not raw.startswith('\\\\?\\'):
+                  raw=('\\\\?\\UNC\\'+raw[2:]) if raw.startswith('\\\\') else ('\\\\?\\'+raw)
+              return raw
+          (p/'explicit-root.txt').write_text(coordinate(explicit.resolve())+'\n')
+          negative=[('relative','relative-core-root'),('missing',coordinate(product/p/'missing-root')),('outside',coordinate(product)),('symlink',coordinate(product/alias)),('noncanonical',coordinate(product/explicit/'..'/'explicit-root'))]
+          (p/'negative.tsv').write_text(''.join(name+'\t'+root+'\n' for name,root in negative))
+          reasons={'relative':'explicit Core test root must be absolute','missing':'explicit Core test root must already exist','outside':'explicit Core test root must remain in this product Run space','symlink':'explicit Core test root must be physical','noncanonical':'explicit Core test root must be physical'}
+          (p/'negative-reasons.json').write_text(json.dumps(reasons,indent=2)+'\n')
+          files=['crates/aikit-core/src/error.rs','crates/aikit-core/src/lib.rs','crates/aikit-core/Cargo.toml','Cargo.lock','.github/workflows/ci.yml']
+          (p/'source-binary-os.json').write_text(json.dumps({'source_head':(p/'source-head.txt').read_text().strip(),'source_archive_sha256':sha(p/'source.tar'),'source_files':{x:sha(Path(x)) for x in files},'native_executable':str(exe[0]),'native_binary_sha256':sha(exe[0]),'platform':platform.platform(),'python':sys.version,'uid':os.getuid() if hasattr(os,'getuid') else None,'compiled_roster':actual,'required_execution_count':len(expected),'explicit_root':coordinate(explicit.resolve()),'scope':'Actual public Source checkout product scratch; not a fabricated allocated native ProjectRun/World. Windows symlink privilege is required, not skipped.'},indent=2)+'\n')
+          PYCORE
+          run_case() {
+            label="$1"; shift
+            set +e
+            "$@" > "$gate_dir/$label.log" 2>&1
+            status=$?
+            set -e
+            cat "$gate_dir/$label.log"
+            printf '%s\n' "$status" > "$gate_dir/$label.exit"
+            return "$status"
+          }
+          while IFS= read -r case; do
+            label="default-${case##*::}"
+            run_case "$label" cargo test --locked -p aikit-core --lib "$case" -- --exact --nocapture --test-threads=1
+           done < "$gate_dir/expected.txt"
+          explicit_root=$(cat "$gate_dir/explicit-root.txt")
+          while IFS= read -r case; do
+            label="explicit-${case##*::}"
+            run_case "$label" env AIKIT_CORE_TEST_ROOT="$explicit_root" cargo test --locked -p aikit-core --lib "$case" -- --exact --nocapture --test-threads=1
+           done < "$gate_dir/original.txt"
+          while IFS=$'\t' read -r label coordinate; do
+            if run_case "refused-$label" env AIKIT_CORE_TEST_ROOT="$coordinate" cargo test --locked -p aikit-core --lib error::tests::actual_missing_file_cause_survives_clone_details_and_domain_display -- --exact --nocapture --test-threads=1; then
+              echo "Invalid explicit Core root unexpectedly admitted: $label" >&2
+              exit 1
+            fi
+           done < "$gate_dir/negative.tsv"
+          python3 - "$gate_dir" <<'PYCORE'
+          from pathlib import Path
+          import hashlib,json,re,sys
+          p=Path(sys.argv[1]);out=[]
+          for path in sorted(p.glob('*.exit')):
+              status=int(path.read_text());text=path.with_suffix('.log').read_text();matches=re.findall(r'test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;',text)
+              if len(matches)!=1:raise SystemExit(f'Missing/nonunique actual native result: {path}')
+              label=path.stem;expected=('FAILED','0','1','0','0') if label.startswith('refused-') else ('ok','1','0','0','0')
+              if matches[0]!=expected or (status==0)==label.startswith('refused-'):raise SystemExit(f'Actual result mismatch: {label} {status} {matches}')
+              if label.startswith('refused-'):
+                  reason=json.loads((p/'negative-reasons.json').read_text())[label.removeprefix('refused-')]
+                  if reason not in text:raise SystemExit(f'Wrong native admission failure at {label}: expected actual frozen guard assertion {reason!r}')
+              out.append({'case':label,'actual_exit':status,'actual_native_result':matches[0],'log_sha256':hashlib.sha256(path.with_suffix('.log').read_bytes()).hexdigest(),'scope':'negative admission failure' if label.startswith('refused-') else 'actual native passing definition'})
+          expected=(len((p/'expected.txt').read_text().splitlines())+4+5)
+          if len(out)!=expected:raise SystemExit(f'Actual execution count {len(out)} != {expected}')
+          meta=json.loads((p/'source-binary-os.json').read_text());exe=Path(meta['native_executable'])
+          if hashlib.sha256(exe.read_bytes()).hexdigest()!=meta['native_binary_sha256']:raise SystemExit('Native test executable changed during qualification')
+          if (p/'missing-root').exists():raise SystemExit('Refused missing root acquired material')
+          (p/'native-results.json').write_text(json.dumps({'actual_dispatch_count':len(out),'unique_compiled_definitions':len(meta['compiled_roster']),'actual_results':out,'negative_admission_failures_are_not_IO_body_passes':True,'binary_hash_stable':True},indent=2)+'\n')
+          (p/'native-root-link').unlink() if sys.platform!='win32' else __import__('os').rmdir(p/'native-root-link')
+          (p/'explicit-root').rmdir()
+          PYCORE
+      - name: Retain actual Core source, binary, roster and native results
+        if: always() && matrix.package == 'aikit-core'
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-native-material-${{ runner.os }}-${{ github.sha }}
+          path: ProjectCentral/now/tmp/core-material-*
+          if-no-files-found: error
+          retention-days: 14
 
   bkmr-real:
     name: Real bkmr 7.6.7 SourcePool conformance
