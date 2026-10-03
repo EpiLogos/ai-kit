@@ -61,7 +61,6 @@ Declare one in .aikit/project.toml:
   db = \"<name>\"
 
 AIKit exports it as AIKIT_BKMR_DB/BKMR_DB_URL when the context is applied." 78
-[ -f "$db" ] || die "the bound database does not exist: $db" 78
 
 run_one() {
   # $1 = database path
@@ -74,15 +73,19 @@ run_one() {
     # When its stdout is a pipe, bkmr sends the formatted listing to stderr and
     # only a comma-separated id list to stdout. A wrapper that captures stdout
     # alone therefore gets "31,37" and looks broken. Merge the streams.
-    bkmr "$@" "$query" 2>&1 || true
+    bkmr "$@" "$query" 2>&1
   else
-    bkmr "$@" "$query" 2>/dev/null || true
+    bkmr "$@" "$query"
   fi
 }
 
 if [ "$all" -eq 0 ]; then
-  run_one "$db"
-  exit 0
+  [ -f "$db" ] || die "the bound database does not exist: $db" 78
+  if run_one "$db"; then
+    exit 0
+  else
+    exit "$?"
+  fi
 fi
 
 [ -n "$dbset" ] || die "--all needs a declared database set.
@@ -96,13 +99,23 @@ AIKit exports the resolved paths as AIKIT_BKMR_DB_SET (colon separated).
 This is deliberately not a directory glob: a glob would silently pick up
 *_backup_YYYYMMDD.db files that bkmr 7.x writes next to the database." 78
 
-printf '%s\n' "$dbset" | tr ':' '\n' | while IFS= read -r one; do
+status=0
+while IFS= read -r one; do
   [ -n "$one" ] || continue
   if [ ! -f "$one" ]; then
     printf '%s: declared database missing, skipped: %s\n' "$me" "$one" >&2
+    [ "$status" -ne 0 ] || status=78
     continue
   fi
   printf '### %s\n' "$one"
-  run_one "$one"
+  if run_one "$one"; then
+    :
+  else
+    one_status=$?
+    [ "$status" -ne 0 ] || status=$one_status
+  fi
   printf '\n'
-done
+done <<EOF
+$(printf '%s\n' "$dbset" | tr ':' '\n')
+EOF
+exit "$status"

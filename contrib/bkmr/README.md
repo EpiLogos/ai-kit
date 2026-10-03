@@ -99,6 +99,15 @@ default.
 | `AIKIT_BKMR_DB_DIR` | Where `project-init` creates databases. Default `~/.config/bkmr/projects`. |
 | `AIKIT_BKMR_SNAPSHOT_DIR` | Where `bkmr-snapshot` writes. Default `<db dir>/.snapshots`. |
 
+Single-store search returns bkmr's actual exit status. JSON stays on stdout and
+native diagnostics stay on stderr; `--raw` keeps bkmr's merged human rendering.
+A missing selected database returns78. `--all` searches only the explicitly
+declared set in order, skips empty entries and continues healthy siblings after
+a failure. Partial results and diagnostics remain visible, and the first
+encountered nonzero status is returned. It never adds an unselected primary or a
+backup database; a missing primary does not block an explicitly selected sibling
+set. The context must still declare its primary binding.
+
 ## Two things not to do
 
 - **Do not run `bkmr show`.** It bumps `access_count` and the update timestamp —
