@@ -170,6 +170,10 @@ jobs:
           set -euo pipefail
           timeout 10m cargo test --locked -p aikit-cli --test caw_task_dispatch npm_runtime::native_workcell_scrubbed_npm_writes_cache_only_inside_actual_task_t -- --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/native-npm-boundary.log"
           timeout 10m cargo test --locked -p aikit-cli --test caw_task_dispatch npm_runtime::native_codex_task_exec_refuses_redirected_runtime_cache_without_task_write -- --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/native-npm-redirection.log"
+          timeout 10m cargo test --locked -p aikit-cli --test caw_task_dispatch npm_runtime::native_codex_task_exec_refuses_redirected_sqlite_before_any_provider_write -- --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/native-sqlite-redirection.log"
+          grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/native-sqlite-redirection.log"
+          timeout 10m cargo test --locked -p aikit-cli --test caw_task_dispatch npm_runtime::native_codex_task_exec_preserves_non_directory_sqlite_material_on_refusal -- --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/native-sqlite-form.log"
+          grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/native-sqlite-form.log"
       - name: Own-login environment scrub regression and negative sensitivity
         shell: bash
         run: |

@@ -558,6 +558,14 @@ fn actual_codex_task_exec_eof_uses_allocated_npm_cache_and_preserves_native_task
             .unwrap(),
     );
     let cache = now.join("runtime/npm-cache");
+    let sqlite_home = now.join("runtime/codex-sqlite");
+    let ambient_sqlite = world.root.join("ungranted-ambient-sqlite");
+    fs::create_dir(&ambient_sqlite).unwrap();
+    fs::write(
+        ambient_sqlite.join("retained.txt"),
+        b"AMBIENT_SQLITE_UNCHANGED",
+    )
+    .unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_aikit-session-space"));
     command
         .env("AIKIT_HOME", world.home.root())
@@ -569,6 +577,9 @@ fn actual_codex_task_exec_eof_uses_allocated_npm_cache_and_preserves_native_task
             "--expected-revision",
             prepared["revision"].as_str().unwrap(),
         ]);
+    // The native Task route must replace an ungranted ambient runtime path
+    // after the model-env scrub. This is a real directory, never an owner reply.
+    command.env("CODEX_SQLITE_HOME", &ambient_sqlite);
     let output = bounded(&mut command, &evidence, "actual-native-task-exec-eof");
     assert!(
         output.status.success(),
@@ -580,10 +591,161 @@ fn actual_codex_task_exec_eof_uses_allocated_npm_cache_and_preserves_native_task
         "production TaskExec must route actual npm writes inside T"
     );
     assert_eq!(cache.canonicalize().unwrap(), cache);
+    assert_eq!(sqlite_home.canonicalize().unwrap(), sqlite_home);
+    let sqlite_entries = fs::read_dir(&sqlite_home)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert!(
+        sqlite_entries.iter().any(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("state_") && name.ends_with(".sqlite"))
+        }),
+        "actual native state DB must exist inside the admitted Task T"
+    );
+    assert_eq!(
+        fs::read(ambient_sqlite.join("retained.txt")).unwrap(),
+        b"AMBIENT_SQLITE_UNCHANGED"
+    );
+    assert_eq!(fs::read_dir(&ambient_sqlite).unwrap().count(), 1);
+    fs::write(
+        evidence.join("actual-native-sqlite-material-paths.json"),
+        serde_json::to_vec_pretty(&json!({"sqlite_home":sqlite_home,
+            "entries":sqlite_entries,"task_revision":prepared["revision"],
+            "standing":"actual SQLite material after no-prompt Task exec; no app-server readiness/session continuity claim"}))
+        .unwrap(),
+    )
+    .unwrap();
+    // This explicit second launch follows a successful first EOF outcome on
+    // the SAME Task. It is not automatic replay after an uncertain failure.
+    let reentered = bounded(&mut command, &evidence, "actual-native-task-reentry-eof");
+    assert!(
+        reentered.status.success(),
+        "same Task re-entry failed: {}",
+        String::from_utf8_lossy(&reentered.stderr)
+    );
     assert_eq!(fs::read(task_path(&world)).unwrap(), before);
     assert_eq!(
         fs::read(world.root.join("Work/demo/src/partial.txt")).unwrap(),
         b"NATIVE_SOURCE_PARTIAL_UNCHANGED"
     );
     assert!(world.child.is_none());
+}
+
+#[test]
+#[ignore = "requires actual native Central/Workcell/Actuation and embedded Codex profile; refuses before provider start"]
+fn native_codex_task_exec_refuses_redirected_sqlite_before_any_provider_write() {
+    use std::os::unix::fs::MetadataExt;
+
+    let evidence = evidence_directory("native-codex-sqlite-redirect");
+    let (world, prepared) = prepare_native_codex_task(&evidence);
+    retain_native_basis(&world, &prepared, &evidence);
+    let before = fs::read(task_path(&world)).unwrap();
+    let now = PathBuf::from(
+        prepared["allocation"]["allocation"]["writable_destination"]
+            .as_str()
+            .unwrap(),
+    );
+    fs::create_dir(now.join("runtime")).unwrap();
+    let outside = world.root.join("ungranted-sqlite-owner");
+    fs::create_dir(&outside).unwrap();
+    let retained = outside.join("retained.txt");
+    fs::write(&retained, b"FOREIGN_SQLITE_UNCHANGED").unwrap();
+    let identity = fs::metadata(&retained).unwrap();
+    std::os::unix::fs::symlink(&outside, now.join("runtime/codex-sqlite")).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_aikit-session-space"));
+    command
+        .env("AIKIT_HOME", world.home.root())
+        .current_dir(world.root.join("Work/demo"))
+        .args([
+            "encounter-task-exec",
+            "--agent-session",
+            "agent-session/task",
+            "--expected-revision",
+            prepared["revision"].as_str().unwrap(),
+        ]);
+    let output = bounded(&mut command, &evidence, "actual-redirected-sqlite-refusal");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("Codex runtime cache ancestors must be real canonical directories"));
+    assert_eq!(fs::read(task_path(&world)).unwrap(), before);
+    assert_eq!(fs::read(&retained).unwrap(), b"FOREIGN_SQLITE_UNCHANGED");
+    let after = fs::metadata(&retained).unwrap();
+    assert_eq!(
+        (after.dev(), after.ino(), after.mtime(), after.mtime_nsec()),
+        (
+            identity.dev(),
+            identity.ino(),
+            identity.mtime(),
+            identity.mtime_nsec()
+        )
+    );
+    assert_eq!(fs::read_dir(outside).unwrap().count(), 1);
+    assert!(!now.join("runtime/npm-cache").exists());
+    assert!(fs::symlink_metadata(now.join("runtime/codex-sqlite"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[test]
+#[ignore = "requires actual native Central/Workcell/Actuation and embedded Codex profile; refuses before provider start"]
+fn native_codex_task_exec_preserves_non_directory_sqlite_material_on_refusal() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let evidence = evidence_directory("native-codex-sqlite-not-directory");
+    let (world, prepared) = prepare_native_codex_task(&evidence);
+    retain_native_basis(&world, &prepared, &evidence);
+    let before = fs::read(task_path(&world)).unwrap();
+    let now = PathBuf::from(
+        prepared["allocation"]["allocation"]["writable_destination"]
+            .as_str()
+            .unwrap(),
+    );
+    fs::create_dir(now.join("runtime")).unwrap();
+    let obstruction = now.join("runtime/codex-sqlite");
+    fs::write(&obstruction, b"EXISTING_SQLITE_MATERIAL_UNCHANGED").unwrap();
+    fs::set_permissions(&obstruction, fs::Permissions::from_mode(0o444)).unwrap();
+    let identity = fs::metadata(&obstruction).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_aikit-session-space"));
+    command
+        .env("AIKIT_HOME", world.home.root())
+        .current_dir(world.root.join("Work/demo"))
+        .args([
+            "encounter-task-exec",
+            "--agent-session",
+            "agent-session/task",
+            "--expected-revision",
+            prepared["revision"].as_str().unwrap(),
+        ]);
+    let output = bounded(&mut command, &evidence, "actual-non-directory-sqlite-refusal");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("Codex runtime cache ancestors must be real canonical directories"));
+    assert_eq!(fs::read(task_path(&world)).unwrap(), before);
+    assert_eq!(
+        fs::read(&obstruction).unwrap(),
+        b"EXISTING_SQLITE_MATERIAL_UNCHANGED"
+    );
+    let after = fs::metadata(&obstruction).unwrap();
+    assert_eq!(
+        (
+            after.dev(),
+            after.ino(),
+            after.mode(),
+            after.mtime(),
+            after.mtime_nsec()
+        ),
+        (
+            identity.dev(),
+            identity.ino(),
+            identity.mode(),
+            identity.mtime(),
+            identity.mtime_nsec()
+        )
+    );
+    assert!(!now.join("runtime/npm-cache").exists());
 }

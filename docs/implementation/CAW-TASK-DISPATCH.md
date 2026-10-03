@@ -129,6 +129,28 @@ runtime/cache directories must be canonical directories rather than symlinks.
 AIKit creates no cache directory before the material boundary applies and
 neither inherits ambient npm cache settings nor widens the Task grant.
 
+The same embedded Codex ACP Task route derives `CODEX_SQLITE_HOME` as
+`<actual Task T>/runtime/codex-sqlite`, checks the real canonical directory
+chain, and sets it after the final model-environment scrub. No unsandboxed
+launcher creates it; native Codex creates absent SQLite material only after
+Workcell applies the existing Task aperture. Existing material that is a
+symlink or not a directory is refused before provider start.
+
+This route preserves `HOME`, `CODEX_HOME`, the native executable/login binding,
+and the Task, Agency and AgentSession identity. Codex's persisted `sqlite_home`
+and managed requirements retain their native precedence over the environment;
+this change is no permission to override those sources. It does not relocate
+Codex's helper aliases, rollout/session history or authentication refresh store.
+Codex 0.154 places aliases under `CODEX_HOME/tmp/arg0` (failure warns and
+continues), and rollout persistence still uses its actual configuration home.
+Its app-server also opens `<CODEX_HOME>/installation_id` with write access
+after SQLite initialization, even when the existing identifier is valid.
+SQLite placement alone therefore does not establish successful server startup.
+A supported no-prompt startup and same-session replay must establish the next
+native material requirement before claiming operative continuation; no
+credential/config copy, synthetic home, ephemeral session or global home grant
+is a fallback.
+
 The CAW delivery gate runs real isolated native Task preparation, actual npm
 cache writes and public Codex ACP `--version`, plus production TaskExec redirection
 refusal. These cases carry no credentials or prompt. Native account opening,

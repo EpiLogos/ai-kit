@@ -319,14 +319,19 @@ fn inspect(request: &TaskRequest, requirements: &Value) -> Result<Value> {
     }
     Ok(value)
 }
+struct TaskCodexRuntime {
+    npm_cache: PathBuf,
+    sqlite_home: PathBuf,
+}
+
 /// The embedded Codex ACP connection uses npx, which writes package/runtime
 /// cache before the protocol opens. Keep those writes in the actual allocated
 /// Task T; neither ambient npm configuration nor another directory is a grant.
-fn task_npm_cache(
+fn task_codex_runtime(
     record: &TaskRecord,
     body: &EncounterProvider,
     argv: &[String],
-) -> Result<Option<PathBuf>> {
+) -> Result<Option<TaskCodexRuntime>> {
     if body.from_profile.as_deref() != Some("codex")
         || body.protocol != EncounterProtocol::Acp
         || argv
@@ -373,15 +378,20 @@ fn task_npm_cache(
             "Codex runtime cache requires the exact protected Task T write aperture",
         ));
     }
-    let cache = now.join("runtime").join("npm-cache");
-    for directory in [&now, &now.join("runtime"), &cache] {
+    let runtime = now.join("runtime");
+    let cache = runtime.join("npm-cache");
+    let sqlite_home = runtime.join("codex-sqlite");
+    for directory in [&now, &runtime, &cache, &sqlite_home] {
         match fs::symlink_metadata(directory) {
             Ok(metadata)
                 if metadata.is_dir()
                     && !metadata.file_type().is_symlink()
-                    && directory.canonicalize().map_err(error)? == *directory => {}
+                    && directory
+                        .canonicalize()
+                        .map_err(|failure| error(&failure).with_io_source(failure))?
+                        == *directory => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && directory != &now => {}
-            Err(failure) => return Err(error(failure)),
+            Err(failure) => return Err(error(&failure).with_io_source(failure)),
             _ => {
                 return Err(error(
                     "Codex runtime cache ancestors must be real canonical directories",
@@ -389,10 +399,13 @@ fn task_npm_cache(
             }
         }
     }
-    // Missing cache directories are created only by npm after Workcell applies
-    // its object-bound Task aperture; the unsandboxed launcher never mkdirs
-    // through a caller-controlled path or changes HOME.
-    Ok(Some(cache))
+    // npm and native Codex create absent runtime directories only after
+    // Workcell applies the object-bound Task aperture. HOME/CODEX_HOME remain
+    // the original auth/config origin; SQLite placement is not a new Session.
+    Ok(Some(TaskCodexRuntime {
+        npm_cache: cache,
+        sqlite_home,
+    }))
 }
 fn validate(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Result<()> {
     if record.schema != "aikit.encounter-task/v1" || !record.ready {
@@ -964,7 +977,7 @@ impl EncounterService {
             let default = crate::model_defaults::for_session(home, session, &resolved_body)?;
             model_argv = crate::model_defaults::launch_argv(&resolved_body, default.as_ref())?;
         }
-        let npm_cache = task_npm_cache(&record, &resolved_body, &model_argv)?;
+        let codex_runtime = task_codex_runtime(&record, &resolved_body, &model_argv)?;
         let mut command = Command::new(&record.request.workcell_boundary_bin);
         command
             .args([
@@ -984,8 +997,12 @@ impl EncounterService {
         if let Some(environment) = model_environment {
             environment.apply(&mut command);
         }
-        if let Some(cache) = npm_cache {
-            command.env("npm_config_cache", cache);
+        if let Some(runtime) = codex_runtime {
+            command.env("npm_config_cache", runtime.npm_cache);
+            // Task-owned native material placement follows the credential
+            // scrub. Codex retains persisted/managed sqlite_home precedence;
+            // this does not override its auth/config home or session storage.
+            command.env("CODEX_SQLITE_HOME", runtime.sqlite_home);
         }
         if let Some(config_dir) = pi_config_dir {
             command.env("PI_CODING_AGENT_DIR", config_dir);
