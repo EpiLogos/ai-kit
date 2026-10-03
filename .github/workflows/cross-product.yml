@@ -324,6 +324,25 @@ jobs:
           cd "$SEAT_GUARD_GATE_PRODUCT_REPOSITORY/desktop/cradle"
           npx playwright install --with-deps chromium webkit
           test -d "$PLAYWRIGHT_BROWSERS_PATH"
+      - name: Build the actual owners required by the declared editor gate
+        if: matrix.full
+        shell: bash
+        run: |
+          set -euo pipefail
+          central="$RUNNER_TEMP/seat-guard-central"
+          central_revision=2a604574774c41921003ed99a2eed73b4c9f4266
+          git init -q "$central"
+          git -C "$central" remote add origin https://github.com/EpiLogos/Central.git
+          git -C "$central" fetch --depth=1 origin "$central_revision"
+          git -C "$central" checkout --detach FETCH_HEAD
+          test "$(git -C "$central" rev-parse HEAD)" = "$central_revision"
+          git -C "$central" rev-parse HEAD > "$RUNNER_TEMP/seat-guard-native-central.revision"
+          cd "$SEAT_GUARD_GATE_PRODUCT_REPOSITORY"
+          python3 desktop/cradle/tests/wiki-native-binaries.py \
+            --target OI_BIN cli/Cargo.toml oi \
+            --target OI_CENTRAL_CTRL_BIN "$central/ctrl/Cargo.toml" ctrl \
+            --target OI_KERNEL_BIN desktop/cradle/kernel/Cargo.toml walk-bridge \
+            --receipt "$RUNNER_TEMP/seat-guard-native-binaries.json"
       - name: Require all three genuine ignored definitions
         shell: bash
         run: |
@@ -435,6 +454,10 @@ jobs:
               paths.extend(producer_root / member for member in [".gitignore", "gates/run.mjs", "gates/manifest.json", "desktop/cradle/package-lock.json"])
           reading = {"schema":"central.seat-guard-hosted-qualification/v1", "scope":os.environ["GUARD_SCOPE"], "platform":platform.platform(), "full_outcome":os.environ["GUARD_FULL_OUTCOME"], "bounded_outcome":os.environ["GUARD_BOUNDED_OUTCOME"], "oi_initial_source":os.environ["SEAT_GUARD_GATE_PRODUCT_REVISION"], "source_files":{str(path):material(path) for path in paths}, "evidence":{str(path.relative_to(evidence)):material(path) for path in sorted(evidence.rglob("*")) if path.is_file()} if evidence.is_dir() else {"absent":True}, "standing":"actual controlled test evidence only; no protected install, private Original or human acceptance", "mac_main_positive":"unqualified", "fresh_receipt_required":"Linux actual producer in controlled clone; no transported predecessor"}
           reading["oi_paired_source"] = os.environ["SEAT_GUARD_GATE_PRODUCT_REVISION"]
+          native_receipt = temp / "seat-guard-native-binaries.json"
+          native_bindings = json.loads(native_receipt.read_text()) if native_receipt.is_file() else {}
+          reading["actual_native_bindings"] = {name:{"path":value,**material(pathlib.Path(value))} for name,value in native_bindings.items()}
+          reading["native_prerequisite_source"] = {"receipt":material(native_receipt),"central_revision":(temp / "seat-guard-native-central.revision").read_text().strip() if (temp / "seat-guard-native-central.revision").is_file() else None,"oi_build_helper":material(producer_root / "desktop/cradle/tests/wiki-native-binaries.py") if producer_root else {"unselected":True},"not_personal_installation":True}
           reading["evidence_roots"] = {"aikit_project":str(root), "oi_producer_project":str(producer_root) if producer_root else None}
           reading["producer_evidence_selected"] = producer_root is not None
           reading["producer_evidence"] = {str(path.relative_to(producer_evidence)):material(path) for path in sorted(producer_evidence.rglob("*")) if path.is_file()} if producer_evidence is not None and producer_evidence.is_dir() else {"absent":True}
@@ -449,6 +472,8 @@ jobs:
             ${{ runner.temp }}/seat-guard-*.log
             ${{ runner.temp }}/seat-guard-case-inventory.json
             ${{ runner.temp }}/seat-guard-hosted-basis.json
+            ${{ runner.temp }}/seat-guard-native-binaries.json
+            ${{ runner.temp }}/seat-guard-native-central.revision
             ProjectCentral/now/tmp/native-seat-guard-evidence/
             ${{ runner.temp }}/seat-guard-oi/ProjectCentral/now/tmp/native-seat-guard-evidence/
           retention-days: 14
