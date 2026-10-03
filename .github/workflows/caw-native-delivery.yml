@@ -23,7 +23,7 @@ jobs:
     env:
       ACTUATION_SHA: 4af495f6509bb0dd779112a225d71a9df8145b6e
       CENTRAL_SHA: 2a604574774c41921003ed99a2eed73b4c9f4266
-      WORKCELL_SHA: bdbae94c99e5657b1309ac7671e4368fc70e5754
+      WORKCELL_SHA: dd74137b426cbcb1dcb2cb2abc53bd52558dba12
     steps:
       - uses: actions/checkout@v4
         with:
@@ -81,7 +81,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: EpiLogos/Workcell
-          ref: bdbae94c99e5657b1309ac7671e4368fc70e5754
+          ref: dd74137b426cbcb1dcb2cb2abc53bd52558dba12
           path: .caw-native/Workcell
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2.9.2
@@ -284,6 +284,8 @@ jobs:
               names=[line[:-6] for line in (out/'roster.stdout').read_text().splitlines() if line.endswith(': test')]
               write('roster.json',{'actual':names,'required_selected':expected,'actual_total':len(names),'required_selected_total':len(expected)})
               if len(names)!=len(set(names)) or not set(expected).issubset(names):raise ValueError('missing/duplicate compiled case')
+              required_roster=json.loads(os.environ['RUNTIME_GATE_EXPECTED_ROSTER'])
+              if len(required_roster)!=len(set(required_roster)) or sorted(names)!=sorted(required_roster):raise ValueError('compiled names differ from the complete Source-backed Task roster')
               if len(names)!=int(os.environ['RUNTIME_GATE_TOTAL']):raise ValueError('compiled case census changed')
           elif mode=='case':
               case=sys.argv[2];prefix=out/case;code=int(prefix.with_suffix('.exit').read_text())
@@ -371,7 +373,8 @@ jobs:
           }
           record_command roster stdout timeout --kill-after=5s 30s "$test_image" --ignored --list --format terse
           export RUNTIME_GATE_CASES='["npm_runtime::native_codex_task_projection_redirect_retains_foreign_material_and_task_revision","npm_runtime::native_codex_task_projection_auth_redirect_refuses_before_any_runtime_material"]'
-          export RUNTIME_GATE_TOTAL=20
+          export RUNTIME_GATE_EXPECTED_ROSTER='["expired_unhosted_ready_is_reprepared_with_same_native_now_and_fresh_lease","first_pending_preparation_remains_bound_to_same_native_request","material::a_healthy_unrelated_process_cannot_satisfy_encounter_hosting","material::absent_attachment_foreign_host_and_dropped_requirement_cannot_start_work","material::hosted_pending_task_cannot_abort_uncertain_native_demand","material::persistent_storage_reentry_and_release_govern_real_turns_without_duplicate_work","material::workcell_really_hosts_the_native_encounter_owner_and_its_protected_response","missing_task_authority_refuses_before_now_allocation","native_prepared_run_preserves_authority_and_existing_worktree","npm_runtime::native_codex_task_exec_preserves_non_directory_sqlite_material_on_refusal","npm_runtime::native_codex_task_exec_refuses_redirected_runtime_cache_without_task_write","npm_runtime::native_codex_task_exec_refuses_redirected_sqlite_before_any_provider_write","npm_runtime::native_codex_task_projection_auth_redirect_refuses_before_any_runtime_material","npm_runtime::native_codex_task_projection_redirect_retains_foreign_material_and_task_revision","npm_runtime::native_workcell_scrubbed_npm_writes_cache_only_inside_actual_task_t","pending_abort_refuses_changed_native_placement_policy_and_remains_recoverable","profile_derived_codex_task_keeps_its_body_inside_the_workcell_launcher","protected_or_sibling_working_directory_refuses_before_provider_start","real_pi_task_refuses_redirected_allocated_config_directory","real_pi_task_startup_uses_allocated_now_instead_of_ambient_config","real_task_dispatch_confines_protocol_and_rechecks_source_without_duplicate_work","refused_central_source_amendment_keeps_ready_task_and_same_now","removed_or_replaced_working_directory_refuses_at_task_continuation","unhosted_pending_abort_revalidates_ready_with_fresh_revision_and_stale_cas_refuses","wrong_actual_cwd_and_removed_now_cannot_launch_a_provider"]'
+          export RUNTIME_GATE_TOTAL=25
           python3 "$RUNTIME_GATE_EVIDENCE/audit.py" roster
           failed=0
           while IFS= read -r case_name; do
@@ -389,9 +392,9 @@ jobs:
           CASES
           if ! python3 "$RUNTIME_GATE_EVIDENCE/audit.py" after; then failed=1; fi
           test "$failed" = 0
-          grep -q '^test result: ok. 5 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/native.log"
-          grep -q '^test result: ok. 9 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/placement.log"
-          grep -q '^test result: ok. 14 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
+          grep -q '^test result: ok. 15 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/native.log"
+          grep -q '^test result: ok. 6 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/placement.log"
+          grep -q '^test result: ok. 19 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
           for raw in native-npm-boundary native-npm-redirection native-sqlite-redirection native-sqlite-form; do
             grep -q '^test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/$raw.log"
           done

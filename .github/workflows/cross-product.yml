@@ -249,7 +249,7 @@ jobs:
            {'name':'aikit','receipt':'compiler-integration.stdout','root':str(workspace),'target':'aikit','kind':'bin','test':False},
            {'name':'compose-native','receipt':'compiler-integration.stdout','root':str(workspace),'target':'compose_native_central','kind':'test','test':True},
            {'name':'wiki-native','receipt':'compiler-integration.stdout','root':str(workspace),'target':'knowledge_wiki_scope_native','kind':'test','test':True},
-           {'name':'project-scope','receipt':'compiler-project-scope.stdout','root':str(workspace),'target':'aikit','kind':'bin','test':True},
+           {'name':'project-scope','receipt':'compiler-project-scope.stdout','root':str(workspace),'target':'aikit_cli','kind':'lib','test':True},
           ]
           actor=[
            'explicit_compose_discloses_authored_basis_and_refuses_broken_source',
@@ -357,6 +357,14 @@ jobs:
            row={'kind':kind,'expected':expected,'actual':actual,'status':int((out/(kind+'-list.exit')).read_text()),'match':len(actual)==len(expected) and sorted(actual)==sorted(expected)}
            write(kind+'-roster.json',row)
            if row['status']!=0 or not row['match']:raise ValueError('compiled ignored census differs from required '+kind+' roster')
+          elif mode=='project-roster':
+           expected=['app::knowledge::project_scope_tests::a_clearing_drops_whole_from_a_project_scope']
+           text=bounded_text(out/'project-scope-list.stdout')
+           actual=[line.removesuffix(': test') for line in text.splitlines() if line.endswith(': test')]
+           status=int((out/'project-scope-list.exit').read_text())
+           row={'kind':'project-scope','expected':expected,'actual':actual,'status':status,'match':status==0 and actual==expected}
+           write('project-scope-roster.json',row)
+           if not row['match']:raise ValueError('actual compiled library Project-scope case is missing or ambiguous')
           elif mode=='results':
            kind=sys.argv[2];expected=actor if kind=='actor' else wiki;rows=[]
            for name in expected:
@@ -423,7 +431,7 @@ jobs:
           set -euo pipefail
           source "$NATIVE_COMPOSITION_EVIDENCE/record-command.sh"
           record_command compiler-integration cargo test --locked -p aikit-cli --test compose_native_central --test knowledge_wiki_scope_native --no-run --message-format=json
-          record_command compiler-project-scope cargo test --locked -p aikit-cli --bin aikit --no-run --message-format=json
+          record_command compiler-project-scope cargo test --locked -p aikit-cli --lib --no-run --message-format=json
           python3 "$NATIVE_COMPOSITION_EVIDENCE/audit.py" prepare
       - name: Run native composition and exact source-byte receipt regression first
         shell: bash
@@ -449,6 +457,8 @@ jobs:
           source "$NATIVE_COMPOSITION_EVIDENCE/record-command.sh"
           image="$(cat "$NATIVE_COMPOSITION_EVIDENCE/project-scope.path")"
           case=app::knowledge::project_scope_tests::a_clearing_drops_whole_from_a_project_scope
+          record_command project-scope-list "$image" --exact "$case" --list --format terse
+          python3 "$NATIVE_COMPOSITION_EVIDENCE/audit.py" project-roster
           record_command project-scope "$image" --exact "$case" --nocapture --test-threads=1
           grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$NATIVE_COMPOSITION_EVIDENCE/project-scope.stdout"
       - name: Require compiled three-case Wiki roster and execute every genuine native case

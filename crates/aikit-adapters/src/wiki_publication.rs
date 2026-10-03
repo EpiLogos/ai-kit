@@ -532,7 +532,36 @@ mod native {
         Ok(file)
     }
 
-    fn lock_at(directory: &File, name: &std::ffi::OsStr, path: &Path) -> Result<File> {
+    /// One admitted native publication lease ends at its original owner.
+    /// A duplicate description may survive, but it cannot extend this lease.
+    #[derive(Debug)]
+    struct PublicationLock {
+        file: File,
+        owner_pid: u32,
+    }
+
+    impl std::ops::Deref for PublicationLock {
+        type Target = File;
+
+        fn deref(&self) -> &File {
+            &self.file
+        }
+    }
+
+    impl Drop for PublicationLock {
+        fn drop(&mut self) {
+            // A fork shares the description; its destructor does not own
+            // releasing the parent's still-live publication lease.
+            if self.owner_pid != std::process::id() {
+                return;
+            }
+            if let Err(cause) = FileExt::unlock(&self.file) {
+                eprintln!("release native publication lock: {cause}");
+            }
+        }
+    }
+
+    fn lock_at(directory: &File, name: &std::ffi::OsStr, path: &Path) -> Result<PublicationLock> {
         #[cfg(test)]
         tests::before_initial_lock_open(path);
         let file = match openat(directory, name,
@@ -556,7 +585,7 @@ mod native {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             match FileExt::try_lock(&file) {
-                Ok(()) => return Ok(file),
+                Ok(()) => return Ok(PublicationLock { file, owner_pid: std::process::id() }),
                 Err(fs4::TryLockError::WouldBlock) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(20))
                 }
@@ -575,7 +604,7 @@ mod native {
     }
 
     #[cfg(test)]
-    fn lock(path: &Path) -> Result<File> {
+    fn lock(path: &Path) -> Result<PublicationLock> {
         let parent = path.parent().unwrap_or(Path::new("."));
         lock_at(&open_directory(parent)?, path.file_name().unwrap(), path)
     }
@@ -2067,10 +2096,18 @@ mod native {
             assert_eq!(fs::read(&path).unwrap(), b"retained peer lock bytes");
             assert_eq!(fs::metadata(&path).unwrap().mode(), before.mode());
             FileExt::try_lock(&recovered).unwrap();
+            let recovered = PublicationLock { file: recovered, owner_pid: std::process::id() };
+            // Real duplication shares the open file description, just as a
+            // concurrent native child can retain it before exec.
+            let duplicate = recovered.file.try_clone().unwrap();
             let other = OpenOptions::new().read(true).write(true).open(&path).unwrap();
             assert!(matches!(FileExt::try_lock(&other), Err(fs4::TryLockError::WouldBlock)));
             drop(recovered);
             FileExt::try_lock(&other).unwrap();
+            drop(duplicate);
+            let contender = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+            assert!(matches!(FileExt::try_lock(&contender), Err(fs4::TryLockError::WouldBlock)));
+            FileExt::unlock(&other).unwrap();
             assert_eq!(identity(&fs::metadata(&path).unwrap()), identity(&before));
             assert_eq!(fs::read(&path).unwrap(), b"retained peer lock bytes");
         }
