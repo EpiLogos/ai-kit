@@ -17,8 +17,13 @@
 //! and tested without spawning anything.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::time::Duration;
+
+use aikit_adapters::runner::{Output, SystemRunner};
 
 use aikit_core::capsule::{Capsule, ExecMode, WorkingDir};
 use aikit_core::{AikitError, Result};
@@ -35,6 +40,8 @@ pub struct ScriptCommand {
     pub cwd: PathBuf,
     pub env: BTreeMap<String, String>,
     pub mode: ExecMode,
+    /// Actual manifest deadline. None preserves the no-declared-deadline policy.
+    pub timeout: Option<Duration>,
 }
 
 impl ScriptCommand {
@@ -106,6 +113,7 @@ pub fn plan_script(
         cwd,
         env: script.env.clone(),
         mode: script.mode,
+        timeout: script.timeout.map(|duration| duration.as_duration()),
     })
 }
 
@@ -116,6 +124,8 @@ pub struct RunReport {
     pub status: i32,
     /// Captured lines, populated only in [`ExecMode::Capture`].
     pub output: Vec<String>,
+    /// Exact completed native streams/status; only real capture populates this.
+    pub captured: Option<Arc<Output>>,
     /// True when the process was left running (background).
     pub detached: bool,
 }
@@ -160,21 +170,80 @@ fn spawn_error(command: &ScriptCommand, e: std::io::Error) -> AikitError {
 }
 
 fn execute_captured(command: &ScriptCommand) -> Result<RunReport> {
-    let output = base_command(command)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| spawn_error(command, e))?;
-    let mut lines: Vec<String> = Vec::new();
-    for stream in [&output.stdout, &output.stderr] {
-        for line in String::from_utf8_lossy(stream).lines() {
-            lines.push(line.to_string());
-        }
-    }
+    // One native owner retains the pipes, deadline, exit identity and effects.
+    // LF admission occurs during that capture, before any line allocation.
+    let mut runner = SystemRunner::new().with_strict_utf8().with_body_free_diagnostics()
+        .with_capture_line_feed_limit(65_536).with_unix_signal_status();
+    if let Some(timeout) = command.timeout { runner = runner.with_timeout(timeout); }
+    let captured = Arc::new(runner.capture_command(&mut base_command(command))?);
+    let row_count = captured.stdout.lines().count() + captured.stderr.lines().count();
+    let mut lines = Vec::with_capacity(row_count);
+    lines.extend(captured.stdout.lines().chain(captured.stderr.lines()).map(str::to_owned));
     Ok(RunReport {
-        status: status_code(output.status),
+        status: captured.status,
         output: lines,
+        captured: Some(captured),
         detached: false,
     })
+}
+
+/// Deliver completed native streams without rejoining lines or inventing a
+/// newline. A delivery failure retains the completed result and actual IO
+/// cause; an already written prefix is possible, so it must not be retried.
+pub fn emit_report_to(
+    report: &RunReport, stdout: &mut dyn Write, stderr: &mut dyn Write,
+) -> Result<()> {
+    let delivery_failure = |stage: &str, cause: std::io::Error| {
+        let kind = format!("{:?}", cause.kind());
+        let errno = cause.raw_os_error().map_or_else(|| "none".into(), |code| code.to_string());
+        let mut failure = AikitError::new("run.output_delivery_failed",
+            format!("Completed script {stage} delivery failed"))
+            .with("observation_stage", stage)
+            .with("execution_started", if report.captured.is_some() { "true" } else { "unknown" })
+            .with("effects", "unknown").with("automatic_retry", "false")
+            .with("capture_complete", report.captured.is_some().to_string())
+            .with("known_exit_status", report.status.to_string())
+            .with("delivery_unconfirmed", "true").with("io_kind", kind).with("raw_os_error", errno)
+            .with_io_source(cause);
+        if let Some(captured) = &report.captured {
+            // Completed bodies remain in the caller's borrowed Arc. Error
+            // printers have a different sink and receive only actual counts.
+            failure = failure.with("captured_stdout_bytes", captured.stdout.len().to_string())
+                .with("captured_stderr_bytes", captured.stderr.len().to_string());
+        }
+        failure
+    };
+    if let Some(captured) = &report.captured {
+        stdout.write_all(captured.stdout.as_bytes()).map_err(|cause| delivery_failure("stdout", cause))?;
+        stdout.flush().map_err(|cause| delivery_failure("stdout_flush", cause))?;
+        stderr.write_all(captured.stderr.as_bytes()).map_err(|cause| delivery_failure("stderr", cause))?;
+        stderr.flush().map_err(|cause| delivery_failure("stderr_flush", cause))?;
+    } else if !report.output.is_empty() {
+        // Existing manually constructed noncapture reports retain their line
+        // projection. This path does not assert a completed native capture.
+        for line in &report.output {
+            writeln!(stdout, "{line}").map_err(|cause| delivery_failure("stdout_lines", cause))?;
+        }
+        stdout.flush().map_err(|cause| delivery_failure("stdout_flush", cause))?;
+    }
+    Ok(())
+}
+
+/// Use the actual CLI output streams, including multicall export delivery.
+pub fn emit_report(report: &RunReport) -> Result<()> {
+    emit_report_to(report, &mut std::io::stdout().lock(), &mut std::io::stderr().lock())
+}
+
+/// The unchanged v1 Method digest basis: stdout lines, then stderr lines,
+/// separated by one LF and without an invented terminal LF. This is a line
+/// view digest, not a claim about the exact native byte streams.
+pub fn method_output_digest(report: &RunReport) -> String {
+    let mut hash = blake3::Hasher::new();
+    for (index, line) in report.output.iter().enumerate() {
+        if index != 0 { hash.update(b"\n"); }
+        hash.update(line.as_bytes());
+    }
+    hash.finalize().to_hex().to_string()
 }
 
 fn execute_foreground(command: &ScriptCommand) -> Result<RunReport> {
@@ -188,6 +257,7 @@ fn execute_foreground(command: &ScriptCommand) -> Result<RunReport> {
     Ok(RunReport {
         status: status_code(status),
         output: Vec::new(),
+        captured: None,
         detached: false,
     })
 }
@@ -202,6 +272,7 @@ fn execute_background(command: &ScriptCommand) -> Result<RunReport> {
     Ok(RunReport {
         status: 0,
         output: Vec::new(),
+        captured: None,
         detached: true,
     })
 }

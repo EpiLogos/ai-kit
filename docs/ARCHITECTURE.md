@@ -439,6 +439,59 @@ unavailable material or resolve later audience withdrawal policy.
 
 ---
 
+### Captured script lifetime and Return
+
+The existing script planner carries the actual manifest `timeout` into the
+same `SystemRunner` used by native adapters. Capture uses strict UTF-8,
+16 MiB per stream and a shared capacity of 65,536 actual LF bytes across both
+streams. Script capture selects body-free failure diagnostics: partial bodies,
+arguments, program/cwd/path values are not copied into public messages/details.
+Actual code, lifecycle, IO kind/errno and captured byte counts remain. Executed
+selected failures move their original bounded raw vectors and actually observed
+status into the existing private Core NativeCapture; this does not certify EOF
+completion or fabricate a completed receipt. Original and independently observed
+cleanup IO remain typed, and clone/wrap retains the same private observation.
+Public JSON, Display and Debug receive no captured body or private path values. Generic adapters retain their existing
+diagnostic contract, including their unresolved audience obligations. The runner admits each chunk before retaining it; overflow returns a
+specific capacity failure with actual execution and cleanup evidence, rather
+than a truncated successful result. A script without a declared deadline
+retains the existing live-leader policy. The separate two-second retirement
+allowance, complete-EOF requirement and original IO causes remain native
+runner responsibilities.
+
+A completed `RunReport` retains the actual runner `Output` in an `Arc` alongside
+its existing line view. Script capture maps an actual Unix signal to
+`128 + signal`; generic adapter capture keeps its current default. CLI and
+multicall consumers deliver the exact completed stdout and stderr separately,
+without reconstructing streams from the line view. Delivery IO failure keeps
+the completed streams in the caller's borrowed `Arc`, while normal error
+diagnostics receive only known status, byte counts, delivery uncertainty and
+the original IO cause. No completed body is rerouted to stderr or error JSON,
+and no automatic retry occurs; an already delivered prefix is possible. Output delivery to
+an external sink has no new finite IO deadline in this change.
+
+The line view remains stdout `.lines()` followed by stderr `.lines()`: at most
+65,538 rows and 32 MiB of logical text, preserving CRLF, empty rows and
+unterminated tails. Requested line headers on a 64-bit host add at most
+1,572,912 bytes; raw plus projection plus headers is at most 68,681,776 logical
+bytes. Allocation and RSS are not certified by that bound. The existing Rust
+infallible allocation policy remains; this change claims no OOM recovery. Cloning retains the
+same raw `Arc`, while each cloned line view remains bounded; arbitrary retained
+clone counts and generic failure-diagnostic copies are separate resource obligations.
+Method and scoped v1 digests keep their existing line basis. Method hashing
+streams that same basis instead of allocating another joined string.
+
+This is an explicit v0.x Rust source API migration in the public CLI library,
+not a claim of source compatibility or an invented release number:
+`ScriptCommand` adds `timeout: Option<Duration>` and `RunReport` adds
+`captured: Option<Arc<runner::Output>>`. External Git/path Rust consumers must
+update struct literals and run their own compile gates. Bare manually planned
+commands use an explicit budget or `None`; manual reports use `captured: None`.
+Only actual native capture populates `Some`. Noncapture modes, semantic capsule
+identity, trust, applied revisions and scoped authority remain unchanged. The
+old `Command.output()` capture route is removed at cutover; no dual launcher is
+retained. Wire receipts and historic Redis/Method/Return records are not rewritten.
+
 ## 13. Performance budgets (experience targets, not correctness assumptions)
 
 | | |

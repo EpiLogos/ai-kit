@@ -144,6 +144,7 @@ where
 
     let plan = run::plan_script(&capsule, args, project_root.as_deref(), cwd)?;
     let report = run::execute(&plan)?;
+    run::emit_report(&report)?;
     Ok(report.status)
 }
 

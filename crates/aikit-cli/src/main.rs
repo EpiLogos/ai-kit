@@ -3036,9 +3036,7 @@ fn cmd_z(cwd: &std::path::Path, a: ZArgs, json_mode: bool) -> Result<Reply> {
                         export: None,
                         confirmed: false,
                     })?;
-                    for line in &handle.report.output {
-                        println!("{line}");
-                    }
+                    run::emit_report(&handle.report)?;
                     Ok(Reply::Status(handle.report.status))
                 }
                 // Showing a capability is reading it, never enabling it.
@@ -3344,9 +3342,7 @@ fn open_surface(
                 return Err(run::exec_replace(&command));
             }
             let report = run::execute(&command)?;
-            for line in &report.output {
-                println!("{line}");
-            }
+            run::emit_report(&report)?;
             Ok(Reply::Status(report.status))
         }
         // The palette left to hand an interactive flow to the restored terminal
@@ -3900,9 +3896,7 @@ fn cmd_act(cwd: &std::path::Path, a: ActGroup, json_mode: bool) -> Result<Reply>
         }
         Some(ActGroupCommand::Invoke(args)) => match aikit_cli::act::invoke(&mut service, args)? {
             aikit_cli::act::ActOutcome::Capability { run, digest } => {
-                for line in &run.report.output {
-                    println!("{line}");
-                }
+                run::emit_report(&run.report)?;
                 if json_mode {
                     eprintln!(
                         "{}",
@@ -4912,9 +4906,7 @@ fn cmd_run(cwd: &std::path::Path, a: RunArgs) -> Result<Reply> {
         // executable is genuinely unreviewed.
         confirmed: a.confirm,
     })?;
-    for line in &handle.report.output {
-        println!("{line}");
-    }
+    run::emit_report(&handle.report)?;
     Ok(Reply::Status(handle.report.status))
 }
 

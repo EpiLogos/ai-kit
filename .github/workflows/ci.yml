@@ -89,7 +89,7 @@ jobs:
           artifacts=[json.loads(x) for x in (p/'build.jsonl').read_text().splitlines() if x.startswith('{')]
           exe=[Path(x['executable']) for x in artifacts if x.get('reason')=='compiler-artifact' and x.get('target',{}).get('name')=='aikit_core' and x.get('profile',{}).get('test') and x.get('executable')]
           if len(exe)!=1 or not exe[0].is_file():raise SystemExit('Exactly one actual same-source native Core test executable is required')
-          (p/'expected.txt').write_text('\n'.join(expected)+'\n');(p/'original.txt').write_text('\n'.join('error::tests::'+x for x in original)+'\n')
+          (p/'expected.txt').write_text('\n'.join(expected)+'\n', encoding='utf-8', newline='\n');(p/'original.txt').write_text('\n'.join('error::tests::'+x for x in original)+'\n', encoding='utf-8', newline='\n')
           product=Path.cwd().resolve();explicit=p/'explicit-root';explicit.mkdir()
           alias=p/'native-root-link';os.symlink(explicit.resolve(),alias,target_is_directory=True)
           def coordinate(path):
@@ -97,9 +97,9 @@ jobs:
               if os.name=='nt' and not raw.startswith('\\\\?\\'):
                   raw=('\\\\?\\UNC\\'+raw[2:]) if raw.startswith('\\\\') else ('\\\\?\\'+raw)
               return raw
-          (p/'explicit-root.txt').write_text(coordinate(explicit.resolve())+'\n')
+          (p/'explicit-root.txt').write_text(coordinate(explicit.resolve())+'\n', encoding='utf-8', newline='\n')
           negative=[('relative','relative-core-root'),('missing',coordinate(product/p/'missing-root')),('outside',coordinate(product)),('symlink',coordinate(product/alias)),('noncanonical',coordinate(product/explicit/'..'/'explicit-root'))]
-          (p/'negative.tsv').write_text(''.join(name+'\t'+root+'\n' for name,root in negative))
+          (p/'negative.tsv').write_text(''.join(name+'\t'+root+'\n' for name,root in negative), encoding='utf-8', newline='\n')
           reasons={'relative':'explicit Core test root must be absolute','missing':'explicit Core test root must already exist','outside':'explicit Core test root must remain in this product Run space','symlink':'explicit Core test root must be physical','noncanonical':'explicit Core test root must be physical'}
           (p/'negative-reasons.json').write_text(json.dumps(reasons,indent=2)+'\n')
           files=['crates/aikit-core/src/error.rs','crates/aikit-core/src/lib.rs','crates/aikit-core/Cargo.toml','Cargo.lock','.github/workflows/ci.yml']
@@ -240,7 +240,7 @@ jobs:
           artifacts=[json.loads(x) for x in (p/'build.jsonl').read_text().splitlines() if x.startswith('{')]
           exe=[Path(x['executable']) for x in artifacts if x.get('reason')=='compiler-artifact' and x.get('target',{}).get('name')=='aikit_core' and x.get('profile',{}).get('test') and x.get('executable')]
           if len(exe)!=1 or not exe[0].is_file():raise SystemExit('Exactly one actual same-source native Core test executable is required')
-          (p/'expected.txt').write_text('\n'.join(expected)+'\n');(p/'original.txt').write_text('\n'.join('error::tests::'+x for x in original)+'\n')
+          (p/'expected.txt').write_text('\n'.join(expected)+'\n', encoding='utf-8', newline='\n');(p/'original.txt').write_text('\n'.join('error::tests::'+x for x in original)+'\n', encoding='utf-8', newline='\n')
           product=Path.cwd().resolve();explicit=p/'explicit-root';explicit.mkdir()
           alias=p/'native-root-link';os.symlink(explicit.resolve(),alias,target_is_directory=True)
           def coordinate(path):
@@ -248,9 +248,9 @@ jobs:
               if os.name=='nt' and not raw.startswith('\\\\?\\'):
                   raw=('\\\\?\\UNC\\'+raw[2:]) if raw.startswith('\\\\') else ('\\\\?\\'+raw)
               return raw
-          (p/'explicit-root.txt').write_text(coordinate(explicit.resolve())+'\n')
+          (p/'explicit-root.txt').write_text(coordinate(explicit.resolve())+'\n', encoding='utf-8', newline='\n')
           negative=[('relative','relative-core-root'),('missing',coordinate(product/p/'missing-root')),('outside',coordinate(product)),('symlink',coordinate(product/alias)),('noncanonical',coordinate(product/explicit/'..'/'explicit-root'))]
-          (p/'negative.tsv').write_text(''.join(name+'\t'+root+'\n' for name,root in negative))
+          (p/'negative.tsv').write_text(''.join(name+'\t'+root+'\n' for name,root in negative), encoding='utf-8', newline='\n')
           reasons={'relative':'explicit Core test root must be absolute','missing':'explicit Core test root must already exist','outside':'explicit Core test root must remain in this product Run space','symlink':'explicit Core test root must be physical','noncanonical':'explicit Core test root must be physical'}
           (p/'negative-reasons.json').write_text(json.dumps(reasons,indent=2)+'\n')
           files=['crates/aikit-core/src/error.rs','crates/aikit-core/src/lib.rs','crates/aikit-core/Cargo.toml','Cargo.lock','.github/workflows/ci.yml']

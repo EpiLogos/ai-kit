@@ -217,6 +217,9 @@ pub struct SystemRunner {
     output_limit_bytes: Option<u64>,
     strict_utf8: bool,
     aggregate_output_limit_bytes: Option<usize>,
+    capture_line_feed_limit: Option<usize>,
+    unix_signal_status: bool,
+    body_free_diagnostics: bool,
 }
 
 impl SystemRunner {
@@ -291,6 +294,33 @@ impl SystemRunner {
         self
     }
 
+    /// Admit at most this many actual LF bytes across both captured streams.
+    /// This opt-in capacity is checked before retaining each observed chunk;
+    /// ordinary adapter capture keeps its existing byte-only defaults.
+    #[must_use]
+    pub fn with_capture_line_feed_limit(mut self, limit: usize) -> Self {
+        self.capture_line_feed_limit = Some(limit);
+        self
+    }
+
+    /// Report an actual Unix signal as 128 + signal before its ExitStatus is
+    /// released. Ordinary adapter capture retains its existing -1 fallback.
+    #[must_use]
+    pub fn with_unix_signal_status(mut self) -> Self {
+        self.unix_signal_status = true;
+        self
+    }
+
+    /// Keep selected command failures body-free: no stream bodies, program,
+    /// arguments, cwd or path values are copied into rendered diagnostics.
+    /// Actual IO causes and lifecycle/status/count evidence remain available.
+    /// Ordinary adapter diagnostics retain their existing default policy.
+    #[must_use]
+    pub fn with_body_free_diagnostics(mut self) -> Self {
+        self.body_free_diagnostics = true;
+        self
+    }
+
     /// Capture an explicitly configured command through the same native
     /// lifecycle as run/run_with_timeout. Runner cwd/env overrides still apply.
     pub fn capture_command(&self, command: &mut std::process::Command) -> Result<Output> {
@@ -319,15 +349,27 @@ impl SystemRunner {
                 "Command output capacity must be positive and fit this platform")
                 .with("execution_started", "false").with("output_limit_bytes", limit.to_string()));
         }
+        if self.capture_line_feed_limit == Some(0) {
+            return Err(AikitError::new("mux.command_output_limit_invalid",
+                "Command LF capacity must be positive")
+                .with("execution_started", "false").with("observation_stage", "line_projection_capacity")
+                .with("line_feed_limit", "0"));
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        { capture_native_command(command, argv, budget, limit, self.strict_utf8,
-            self.aggregate_output_limit_bytes) }
+        { capture_native_command(command, argv, budget, CapturePolicy {
+            limit, strict_utf8: self.strict_utf8, aggregate_limit: self.aggregate_output_limit_bytes,
+            line_feed_limit: self.capture_line_feed_limit, unix_signal_status: self.unix_signal_status,
+            body_free_diagnostics: self.body_free_diagnostics,
+        }) }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = (command, budget);
-            Err(AikitError::new("mux.command_capture_unsupported",
+            let failure = AikitError::new("mux.command_capture_unsupported",
                 "Bounded native command capture is unavailable on this platform")
-                .with("command", argv.join(" ")).with("execution_started", "false"))
+                .with("execution_started", "false");
+            Err(if self.body_free_diagnostics {
+                failure.with("argument_count", argv.len().saturating_sub(1).to_string())
+            } else { failure.with("command", argv.join(" ")) })
         }
     }
 
@@ -481,11 +523,27 @@ impl Drop for OwnedCommand {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-enum CaptureReadFailure { Io(std::io::Error), Limit }
+enum CaptureReadFailure {
+    Io(std::io::Error),
+    Limit,
+    LineFeedLimit { observed: Option<usize>, limit: usize },
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy)]
+struct CapturePolicy {
+    limit: u64,
+    strict_utf8: bool,
+    aggregate_limit: Option<usize>,
+    line_feed_limit: Option<usize>,
+    unix_signal_status: bool,
+    body_free_diagnostics: bool,
+}
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn read_available(
     pipe: &mut impl std::io::Read, bytes: &mut Vec<u8>, eof: &mut bool, limit: u64,
+    line_feeds: &mut usize, line_feed_limit: Option<usize>,
 ) -> std::result::Result<bool, CaptureReadFailure> {
     if *eof { return Ok(false); }
     let mut progress = false;
@@ -497,6 +555,17 @@ fn read_available(
             Ok(count) => {
                 let next = bytes.len().checked_add(count).ok_or(CaptureReadFailure::Limit)?;
                 if next as u64 > limit { return Err(CaptureReadFailure::Limit); }
+                if let Some(capacity) = line_feed_limit {
+                    let observed = line_feeds.checked_add(chunk[..count].iter()
+                        .filter(|byte| **byte == b'\n').count());
+                    let next_line_feeds = observed.ok_or(CaptureReadFailure::LineFeedLimit {
+                        observed, limit: capacity,
+                    })?;
+                    if next_line_feeds > capacity {
+                        return Err(CaptureReadFailure::LineFeedLimit { observed, limit: capacity });
+                    }
+                    *line_feeds = next_line_feeds;
+                }
                 bytes.extend_from_slice(&chunk[..count]);
                 progress = true;
             }
@@ -509,73 +578,129 @@ fn read_available(
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn capture_io(phase: &str, error: std::io::Error) -> AikitError {
-    AikitError::new("mux.command_capture_failed", format!("Command {phase} failed: {error}"))
-        .with("observation_stage", phase).with_io_source(error)
+fn capture_io(phase: &str, error: std::io::Error, body_free: bool) -> AikitError {
+    let message = if body_free { format!("Command {phase} failed") }
+        else { format!("Command {phase} failed: {error}") };
+    let failure = AikitError::new("mux.command_capture_failed", message)
+        .with("observation_stage", phase);
+    let failure = if body_free {
+        failure.with("io_kind", format!("{:?}", error.kind()))
+            .with("raw_os_error", error.raw_os_error().map_or_else(|| "none".into(), |n| n.to_string()))
+    } else { failure };
+    failure.with_io_source(error)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn capture_read_error(stream: &str, failure: CaptureReadFailure, limit: u64) -> AikitError {
+fn capture_read_error(stream: &str, failure: CaptureReadFailure, limit: u64, body_free: bool) -> AikitError {
     match failure {
-        CaptureReadFailure::Io(error) => capture_io(stream, error),
+        CaptureReadFailure::Io(error) => capture_io(stream, error, body_free),
         CaptureReadFailure::Limit => AikitError::new("mux.command_output_limit",
             "Actual command output exceeded its capacity; no truncated success is returned")
             .with("stream", stream).with("output_limit_bytes", limit.to_string()),
+        CaptureReadFailure::LineFeedLimit { observed, limit } => AikitError::new(
+            "mux.command_output_limit",
+            "Actual command LF output exceeded its line-projection capacity; no truncated success is returned")
+            .with("observation_stage", "line_projection_capacity").with("stream", stream)
+            .with("line_feed_limit", limit.to_string())
+            .with("observed_line_feeds", observed.map_or_else(|| "counter_overflow".into(), |n| n.to_string())),
     }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn io_observation(error: &std::io::Error) -> String {
-    serde_json::json!({"kind":format!("{:?}", error.kind()),
-        "raw_os_error":error.raw_os_error(),"message":error.to_string()}).to_string()
+fn io_observation(error: &std::io::Error, body_free: bool) -> String {
+    let mut value = serde_json::json!({"kind":format!("{:?}", error.kind()),
+        "raw_os_error":error.raw_os_error()});
+    if !body_free { value["message"] = error.to_string().into(); }
+    value.to_string()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn captured_exit_status(status: std::process::ExitStatus, unix_signal_status: bool) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    if unix_signal_status {
+        status.code().unwrap_or_else(|| status.signal().map_or(-1, |signal| 128 + signal))
+    } else { status.code().unwrap_or(-1) }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn command_failure(
     mut failure: AikitError, argv: &[String], mut cleanup: CommandCleanup,
-    stdout: &[u8], stderr: &[u8], known_status: Option<std::process::ExitStatus>,
+    stdout: Vec<u8>, stderr: Vec<u8>, known_status: Option<std::process::ExitStatus>, policy: CapturePolicy,
 ) -> AikitError {
     use std::error::Error;
-    failure = failure.with("command", argv.join(" "))
-        .with("execution_started", "true").with("effects", "unknown")
+    let observed_status = known_status.or(cleanup.status)
+        .map(|status| captured_exit_status(status, policy.unix_signal_status));
+    failure = failure.with("execution_started", "true").with("effects", "unknown")
         .with("automatic_retry", "false").with("group_signal", cleanup.signal)
-        .with("direct_child_reaped", cleanup.reaped.to_string())
-        .with("captured_stdout", String::from_utf8_lossy(stdout).into_owned())
-        .with("captured_stderr", String::from_utf8_lossy(stderr).into_owned());
+        .with("direct_child_reaped", cleanup.reaped.to_string());
+    failure = if policy.body_free_diagnostics {
+        failure.with("argument_count", argv.len().saturating_sub(1).to_string())
+            .with("captured_stdout_bytes", stdout.len().to_string())
+            .with("captured_stderr_bytes", stderr.len().to_string())
+    } else {
+        failure.with("command", argv.join(" "))
+            .with("captured_stdout", String::from_utf8_lossy(&stdout).into_owned())
+            .with("captured_stderr", String::from_utf8_lossy(&stderr).into_owned())
+    };
     if let Some(status) = known_status {
-        failure = failure.with("known_exit_status", status.code().unwrap_or(-1).to_string());
+        failure = failure.with("known_exit_status", captured_exit_status(status, policy.unix_signal_status).to_string());
     } else if let Some(status) = cleanup.status {
-        failure = failure.with("cleanup_exit_status", status.code().unwrap_or(-1).to_string());
+        failure = failure.with("cleanup_exit_status", captured_exit_status(status, policy.unix_signal_status).to_string());
     }
     if let Some(cause) = cleanup.absence.as_ref() {
-        failure = failure.with("group_absence_cause", io_observation(cause));
+        failure = failure.with("group_absence_cause", io_observation(cause, policy.body_free_diagnostics));
     }
     if !cleanup.additional_errors.is_empty() {
-        let causes: Vec<_> = cleanup.additional_errors.iter().map(|error| serde_json::json!({
-            "kind":format!("{:?}", error.kind()),"raw_os_error":error.raw_os_error(),"message":error.to_string(),
-        })).collect();
+        let causes: Vec<_> = cleanup.additional_errors.iter().map(|error| {
+            let mut value = serde_json::json!({"kind":format!("{:?}", error.kind()),
+                "raw_os_error":error.raw_os_error()});
+            if !policy.body_free_diagnostics { value["message"] = error.to_string().into(); }
+            value
+        }).collect();
         failure = failure.with("additional_cleanup_causes", serde_json::Value::Array(causes).to_string());
     }
     if let Some(cause) = cleanup.error.take() {
-        failure = failure.with("cleanup_cause", io_observation(&cause));
+        failure = failure.with("cleanup_cause", io_observation(&cause, policy.body_free_diagnostics));
         if failure.source().is_none() { failure = failure.with_io_source(cause); }
+        else if policy.body_free_diagnostics {
+            failure = failure.with_secondary_io_source_from(&capture_io("cleanup", cause, true));
+        }
+    }
+    if policy.body_free_diagnostics {
+        if let Some(cause) = cleanup.absence.take() {
+            failure = failure.with_secondary_io_source_from(&capture_io("group_absence", cause, true));
+        }
+        for cause in cleanup.additional_errors {
+            failure = failure.with_secondary_io_source_from(&capture_io("additional_cleanup", cause, true));
+        }
+        // Retain the actual bounded vectors privately. Their presence does not
+        // certify complete EOF, a successful receipt or remote-effect absence.
+        failure = failure.with_native_capture(observed_status, stdout, stderr);
     }
     failure
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn capture_native_command(
-    command: &mut std::process::Command, argv: &[String], budget: Option<std::time::Duration>, limit: u64,
-    strict_utf8: bool, aggregate_limit: Option<usize>,
+    command: &mut std::process::Command, argv: &[String], budget: Option<std::time::Duration>, policy: CapturePolicy,
 ) -> Result<Output> {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
+    let CapturePolicy { limit, strict_utf8, aggregate_limit, line_feed_limit, unix_signal_status, body_free_diagnostics } = policy;
+    let mut line_feeds = 0usize;
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
     let child = command.spawn().map_err(|error| {
-        AikitError::new("mux.command_spawn_failed", format!("could not run `{}`: {error}", argv.join(" ")))
-            .with("command", argv.join(" ")).with("program", argv.first().cloned().unwrap_or_default())
-            .with("execution_started", "false").with_io_source(error)
+        let failure = if body_free_diagnostics {
+            AikitError::new("mux.command_spawn_failed", "Could not start selected command")
+                .with("argument_count", argv.len().saturating_sub(1).to_string())
+                .with("io_kind", format!("{:?}", error.kind()))
+                .with("raw_os_error", error.raw_os_error().map_or_else(|| "none".into(), |n| n.to_string()))
+        } else {
+            AikitError::new("mux.command_spawn_failed", format!("could not run `{}`: {error}", argv.join(" ")))
+                .with("command", argv.join(" ")).with("program", argv.first().cloned().unwrap_or_default())
+        };
+        failure.with("execution_started", "false").with_io_source(error)
     })?;
     let mut owned = OwnedCommand {
         child, cleanup_attempted: false, reaped_status: None, ownership_lost: false,
@@ -593,27 +718,31 @@ fn capture_native_command(
     use std::os::fd::AsFd;
     if let Err(error) = nonblocking(stdout_pipe.as_fd()).and_then(|_| nonblocking(stderr_pipe.as_fd())) {
         let cleanup = owned.cleanup(Instant::now() + Duration::from_secs(2));
-        return Err(command_failure(capture_io("nonblocking", error), argv, cleanup, &stdout, &stderr, None));
+        return Err(command_failure(capture_io("nonblocking", error, body_free_diagnostics), argv, cleanup, stdout, stderr, None, policy));
     }
     let deadline = budget.and_then(|duration| Instant::now().checked_add(duration));
     if budget.is_some() && deadline.is_none() {
         let cleanup = owned.cleanup(Instant::now() + Duration::from_secs(2));
         return Err(command_failure(AikitError::new("mux.command_timeout_invalid", "Command deadline overflow"),
-            argv, cleanup, &stdout, &stderr, None));
+            argv, cleanup, stdout, stderr, None, policy));
     }
     let status = loop {
-        let stdout_progress = match read_available(&mut stdout_pipe, &mut stdout, &mut stdout_eof, limit) {
+        let stdout_progress = match read_available(&mut stdout_pipe, &mut stdout, &mut stdout_eof, limit, &mut line_feeds, line_feed_limit) {
             Ok(progress) => progress,
             Err(failure) => {
                 let cleanup = owned.cleanup(Instant::now() + Duration::from_secs(2));
-                return Err(command_failure(capture_read_error("stdout", failure, limit), argv, cleanup, &stdout, &stderr, None));
+                return Err(command_failure(capture_read_error("stdout", failure, limit, body_free_diagnostics)
+                    .with("stdout_eof", stdout_eof.to_string()).with("stderr_eof", stderr_eof.to_string()),
+                    argv, cleanup, stdout, stderr, None, policy));
             }
         };
-        let stderr_progress = match read_available(&mut stderr_pipe, &mut stderr, &mut stderr_eof, limit) {
+        let stderr_progress = match read_available(&mut stderr_pipe, &mut stderr, &mut stderr_eof, limit, &mut line_feeds, line_feed_limit) {
             Ok(progress) => progress,
             Err(failure) => {
                 let cleanup = owned.cleanup(Instant::now() + Duration::from_secs(2));
-                return Err(command_failure(capture_read_error("stderr", failure, limit), argv, cleanup, &stdout, &stderr, None));
+                return Err(command_failure(capture_read_error("stderr", failure, limit, body_free_diagnostics)
+                    .with("stdout_eof", stdout_eof.to_string()).with("stderr_eof", stderr_eof.to_string()),
+                    argv, cleanup, stdout, stderr, None, policy));
             }
         };
         match owned.observe_exit() {
@@ -621,14 +750,16 @@ fn capture_native_command(
             Ok(None) => {},
             Err(error) => {
                 let cleanup = owned.cleanup(Instant::now() + Duration::from_secs(2));
-                return Err(command_failure(capture_io("wait", error), argv, cleanup, &stdout, &stderr, None));
+                return Err(command_failure(capture_io("wait", error, body_free_diagnostics), argv, cleanup, stdout, stderr, None, policy));
             }
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             let cleanup = owned.cleanup(Instant::now() + Duration::from_secs(2));
             return Err(command_failure(AikitError::new("mux.command_timeout",
-                format!("`{}` did not finish within {:?}", argv.join(" "), budget.unwrap_or_default())),
-                argv, cleanup, &stdout, &stderr, None));
+                if body_free_diagnostics {
+                    format!("Selected command did not finish within {:?}", budget.unwrap_or_default())
+                } else { format!("`{}` did not finish within {:?}", argv.join(" "), budget.unwrap_or_default()) }),
+                argv, cleanup, stdout, stderr, None, policy));
         }
         if stdout_progress || stderr_progress { std::thread::yield_now(); }
         else { std::thread::sleep(Duration::from_millis(5)); }
@@ -643,20 +774,20 @@ fn capture_native_command(
         } else { failure }
     };
     let (cleanup, capture_cancelled) = loop {
-        let stdout_progress = match read_available(&mut stdout_pipe, &mut stdout, &mut stdout_eof, limit) {
+        let stdout_progress = match read_available(&mut stdout_pipe, &mut stdout, &mut stdout_eof, limit, &mut line_feeds, line_feed_limit) {
             Ok(progress) => progress,
             Err(failure) => {
                 let cleanup = owned.cleanup(retirement_deadline);
-                return Err(command_failure(retirement_failure(capture_read_error("stdout", failure, limit),
-                    stdout_eof, stderr_eof, true), argv, cleanup, &stdout, &stderr, Some(status)));
+                return Err(command_failure(retirement_failure(capture_read_error("stdout", failure, limit, body_free_diagnostics),
+                    stdout_eof, stderr_eof, true), argv, cleanup, stdout, stderr, Some(status), policy));
             }
         };
-        let stderr_progress = match read_available(&mut stderr_pipe, &mut stderr, &mut stderr_eof, limit) {
+        let stderr_progress = match read_available(&mut stderr_pipe, &mut stderr, &mut stderr_eof, limit, &mut line_feeds, line_feed_limit) {
             Ok(progress) => progress,
             Err(failure) => {
                 let cleanup = owned.cleanup(retirement_deadline);
-                return Err(command_failure(retirement_failure(capture_read_error("stderr", failure, limit),
-                    stdout_eof, stderr_eof, true), argv, cleanup, &stdout, &stderr, Some(status)));
+                return Err(command_failure(retirement_failure(capture_read_error("stderr", failure, limit, body_free_diagnostics),
+                    stdout_eof, stderr_eof, true), argv, cleanup, stdout, stderr, Some(status), policy));
             }
         };
         if stdout_eof && stderr_eof { break (owned.reap_without_signal(retirement_deadline), false); }
@@ -672,24 +803,24 @@ fn capture_native_command(
     if cleanup.error.is_some() || !cleanup.reaped {
         return Err(command_failure(retirement_failure(AikitError::new("mux.command_cancellation_failed",
             "Actual command cleanup was not established"), stdout_eof, stderr_eof, capture_cancelled),
-            argv, cleanup, &stdout, &stderr, Some(status)));
+            argv, cleanup, stdout, stderr, Some(status), policy));
     }
     while !stdout_eof || !stderr_eof {
-        let stdout_progress = match read_available(&mut stdout_pipe, &mut stdout, &mut stdout_eof, limit) {
+        let stdout_progress = match read_available(&mut stdout_pipe, &mut stdout, &mut stdout_eof, limit, &mut line_feeds, line_feed_limit) {
             Ok(progress) => progress,
-            Err(failure) => return Err(command_failure(retirement_failure(capture_read_error("stdout", failure, limit),
-                stdout_eof, stderr_eof, capture_cancelled), argv, cleanup, &stdout, &stderr, Some(status))),
+            Err(failure) => return Err(command_failure(retirement_failure(capture_read_error("stdout", failure, limit, body_free_diagnostics),
+                stdout_eof, stderr_eof, capture_cancelled), argv, cleanup, stdout, stderr, Some(status), policy)),
         };
-        let stderr_progress = match read_available(&mut stderr_pipe, &mut stderr, &mut stderr_eof, limit) {
+        let stderr_progress = match read_available(&mut stderr_pipe, &mut stderr, &mut stderr_eof, limit, &mut line_feeds, line_feed_limit) {
             Ok(progress) => progress,
-            Err(failure) => return Err(command_failure(retirement_failure(capture_read_error("stderr", failure, limit),
-                stdout_eof, stderr_eof, capture_cancelled), argv, cleanup, &stdout, &stderr, Some(status))),
+            Err(failure) => return Err(command_failure(retirement_failure(capture_read_error("stderr", failure, limit, body_free_diagnostics),
+                stdout_eof, stderr_eof, capture_cancelled), argv, cleanup, stdout, stderr, Some(status), policy)),
         };
         if stdout_eof && stderr_eof { break; }
         if Instant::now() >= retirement_deadline {
             return Err(command_failure(retirement_failure(AikitError::new("mux.command_capture_incomplete",
                 "Command inherited pipes did not retire within the finite capture bound"),
-                stdout_eof, stderr_eof, capture_cancelled), argv, cleanup, &stdout, &stderr, Some(status)));
+                stdout_eof, stderr_eof, capture_cancelled), argv, cleanup, stdout, stderr, Some(status), policy));
         }
         if stdout_progress || stderr_progress { std::thread::yield_now(); }
         else { std::thread::sleep(Duration::from_millis(5)); }
@@ -697,21 +828,23 @@ fn capture_native_command(
     if strict_utf8 && capture_cancelled {
         return Err(command_failure(retirement_failure(AikitError::new("mux.command_capture_cancelled",
             "Unfinished inherited output required cancellation; no complete semantic receipt is returned"),
-            stdout_eof, stderr_eof, true), argv, cleanup, &stdout, &stderr, Some(status)));
+            stdout_eof, stderr_eof, true), argv, cleanup, stdout, stderr, Some(status), policy));
     }
     if strict_utf8 {
-        for (stream, bytes) in [("stdout", stdout.as_slice()), ("stderr", stderr.as_slice())] {
-            if let Err(cause) = std::str::from_utf8(bytes) {
-                let failure = AikitError::new("mux.command_utf8_invalid",
-                    "Actual command output is not valid UTF-8; no semantic text receipt is returned")
-                    .with("stream", stream).with("observation_stage", format!("{stream}_utf8"))
-                    .with("utf8_valid_up_to", cause.valid_up_to().to_string())
-                    .with("utf8_error_len", cause.error_len().map_or_else(|| "incomplete".into(), |n| n.to_string()))
-                    .with("capture_encoding", "diagnostic-lossy")
-                    .with("stdout_eof", "true").with("stderr_eof", "true").with("capture_cancelled", "false")
-                    .with_io_source(std::io::Error::new(std::io::ErrorKind::InvalidData, cause));
-                return Err(command_failure(failure, argv, cleanup, &stdout, &stderr, Some(status)));
-            }
+        // Utf8Error owns its observation; no stream borrow survives into the
+        // failure path that transfers the original vectors to private evidence.
+        let invalid = std::str::from_utf8(&stdout).err().map(|cause| ("stdout", cause))
+            .or_else(|| std::str::from_utf8(&stderr).err().map(|cause| ("stderr", cause)));
+        if let Some((stream, cause)) = invalid {
+            let failure = AikitError::new("mux.command_utf8_invalid",
+                "Actual command output is not valid UTF-8; no semantic text receipt is returned")
+                .with("stream", stream).with("observation_stage", format!("{stream}_utf8"))
+                .with("utf8_valid_up_to", cause.valid_up_to().to_string())
+                .with("utf8_error_len", cause.error_len().map_or_else(|| "incomplete".into(), |n| n.to_string()))
+                .with("capture_encoding", "diagnostic-lossy")
+                .with("stdout_eof", "true").with("stderr_eof", "true").with("capture_cancelled", "false")
+                .with_io_source(std::io::Error::new(std::io::ErrorKind::InvalidData, cause));
+            return Err(command_failure(failure, argv, cleanup, stdout, stderr, Some(status), policy));
         }
     }
     // Also bound the returned String representation: default lossy decoding
@@ -726,9 +859,12 @@ fn capture_native_command(
             .with("observation_stage", "decoded_output")
             .with("aggregate_output_limit_bytes", aggregate_limit.unwrap_or_default().to_string())
             .with("capture_encoding", "diagnostic-lossy");
-        return Err(command_failure(failure, argv, cleanup, &stdout, &stderr, Some(status)));
+        drop(stdout_text);
+        drop(stderr_text);
+        return Err(command_failure(failure, argv, cleanup, stdout, stderr, Some(status), policy));
     }
-    Ok(Output { status: status.code().unwrap_or(-1),
+    let status = captured_exit_status(status, unix_signal_status);
+    Ok(Output { status,
         stdout: stdout_text.into_owned(), stderr: stderr_text.into_owned() })
 }
 
@@ -1009,6 +1145,172 @@ mod tests {
             .join("../../ProjectCentral/now/tmp");
         std::fs::create_dir_all(&scratch).unwrap();
         tempfile::Builder::new().prefix("runner-owned-").tempdir_in(&scratch).unwrap()
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_script_lf_capacity_refuses_zero_before_spawn_and_keeps_generic_default() {
+        let root = native_command_tempdir();
+        let sentinel = root.path().join("must-not-execute");
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "printf launched > \"$1\"", "script-capacity"])
+            .arg(&sentinel);
+        let failure = SystemRunner::new().with_capture_line_feed_limit(0)
+            .capture_command(&mut command).unwrap_err();
+        assert_eq!(failure.code(), "mux.command_output_limit_invalid");
+        assert_eq!(failure.details()["execution_started"], "false");
+        assert_eq!(failure.details()["observation_stage"], "line_projection_capacity");
+        assert!(!sentinel.exists());
+        let output = SystemRunner::new().with_strict_utf8().run(&[
+            "/bin/sh".into(), "-c".into(),
+            "awk 'BEGIN { for (i=0;i<65537;i++) print \"\" }'".into(),
+        ]).unwrap();
+        assert_eq!(output.status, 0);
+        assert_eq!(output.stdout.bytes().filter(|byte| *byte == b'\n').count(), 65_537,
+            "generic capture has no script LF policy");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_script_policy_survives_limited_runner_clone_and_status_mapping() {
+        let runner = SystemRunner::new().with_capture_line_feed_limit(1)
+            .with_unix_signal_status().with_strict_utf8().with_body_free_diagnostics();
+        let output = runner.run_with_limits(&[
+            "/bin/sh".into(), "-c".into(), "printf 'out'; printf '\\n' >&2; exit 7".into(),
+        ], std::time::Duration::from_secs(5), 1024, true).unwrap();
+        assert_eq!(output.stdout, "out"); assert_eq!(output.stderr, "\n");
+        assert_eq!(output.status, 7);
+        let failure = runner.run_with_limits(&[
+            "/bin/sh".into(), "-c".into(), "printf '\\n'; printf '\\n' >&2".into(),
+        ], std::time::Duration::from_secs(5), 1024, true).unwrap_err();
+        assert_eq!(failure.code(), "mux.command_output_limit", "{failure:?}");
+        assert_eq!(failure.details()["observation_stage"], "line_projection_capacity");
+        assert_eq!(failure.details()["observed_line_feeds"], "2");
+        assert!(!failure.details().contains_key("captured_stdout"));
+        assert!(!failure.details().contains_key("command"));
+        assert!(failure.details().contains_key("captured_stdout_bytes"));
+        let capture = failure.native_capture().expect("actual retained LF capture");
+        assert_eq!(capture.stdout.len() + capture.stderr.len(), 1);
+        assert_eq!(capture.stdout.iter().chain(&capture.stderr).copied().collect::<Vec<_>>().as_slice(), b"\n");
+        assert_eq!(failure.details()["captured_stdout_bytes"], capture.stdout.len().to_string());
+        assert_eq!(failure.details()["captured_stderr_bytes"], capture.stderr.len().to_string());
+        assert_eq!(capture.status.map(|status| status.to_string()),
+            failure.details().get("known_exit_status").or_else(|| failure.details().get("cleanup_exit_status")).cloned());
+        let cloned = failure.clone();
+        let wrapped = AikitError::new("mux.command_capture_failed", "Selected command refused")
+            .with_io_source_from(&failure);
+        assert!(std::ptr::eq(capture, cloned.native_capture().unwrap()));
+        assert!(std::ptr::eq(capture, wrapped.native_capture().unwrap()));
+        let output = runner.run_with_limits(&[
+            "/bin/sh".into(), "-c".into(), "kill -TERM $$".into(),
+        ], std::time::Duration::from_secs(5), 1024, true).unwrap();
+        assert_eq!(output.status, 143);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_body_free_diagnostics_keep_generic_compatibility_and_original_decoder_cause() {
+        use std::error::Error;
+        let argv = vec!["/bin/sh".into(), "-c".into(),
+            "printf '%s' \"$1\"; printf 'private-stderr-canary' >&2; sleep 30".into(),
+            "native-diagnostic-test".into(), "private-native-input-canary".into()];
+        let generic = SystemRunner::new().with_strict_utf8()
+            .with_timeout(std::time::Duration::from_secs(1)).run(&argv).unwrap_err();
+        assert_eq!(generic.code(), "mux.command_timeout");
+        assert_eq!(generic.details()["captured_stdout"], "private-native-input-canary");
+        assert_eq!(generic.details()["captured_stderr"], "private-stderr-canary");
+        assert!(generic.to_string().contains("private-native-input-canary"));
+        let selected = SystemRunner::new().with_strict_utf8().with_body_free_diagnostics()
+            .with_timeout(std::time::Duration::from_secs(1)).run(&argv).unwrap_err();
+        assert_eq!(selected.code(), generic.code());
+        assert_eq!(selected.details()["captured_stdout_bytes"], "private-native-input-canary".len().to_string());
+        assert_eq!(selected.details()["captured_stderr_bytes"], "private-stderr-canary".len().to_string());
+        assert!(!selected.details().contains_key("command"));
+        assert!(!selected.to_string().contains("private-native-input-canary"));
+        assert!(!format!("{selected:?}").contains("private-stderr-canary"));
+        let capture = selected.native_capture().expect("actual timed-out stream observation");
+        assert_eq!(capture.stdout.as_slice(), b"private-native-input-canary");
+        assert_eq!(capture.stderr.as_slice(), b"private-stderr-canary");
+        assert_eq!(capture.status.map(|status| status.to_string()),
+            selected.details().get("known_exit_status").or_else(|| selected.details().get("cleanup_exit_status")).cloned());
+        assert!(!selected.details().contains_key("known_exit_status"),
+            "live-leader timeout must not fabricate a pre-cleanup successful status");
+        let selected_clone = selected.clone();
+        let selected_wrapped = AikitError::new("mux.command_capture_failed", "Selected command refused")
+            .with_io_source_from(&selected);
+        assert!(std::ptr::eq(capture, selected_clone.native_capture().unwrap()));
+        assert!(std::ptr::eq(capture, selected_wrapped.native_capture().unwrap()));
+        for failure in [&selected, &selected_clone, &selected_wrapped] {
+            for diagnostic in [failure.to_string(), format!("{failure:?}"),
+                serde_json::json!({"code":failure.code(),"message":failure.message(),
+                    "details":failure.details()}).to_string()] {
+                assert!(!diagnostic.contains("private-native-input-canary"));
+                assert!(!diagnostic.contains("private-stderr-canary"));
+            }
+        }
+        let invalid = SystemRunner::new().with_strict_utf8().with_body_free_diagnostics().run(&[
+            "/bin/sh".into(), "-c".into(), "printf 'private-body\\377'".into(),
+        ]).unwrap_err();
+        assert_eq!(invalid.code(), "mux.command_utf8_invalid", "{invalid:?}");
+        assert_eq!(invalid.details()["known_exit_status"], "0");
+        assert_eq!(invalid.details()["captured_stdout_bytes"], "13");
+        assert_eq!(invalid.details()["capture_cancelled"], "false");
+        assert_eq!(invalid.source().unwrap().downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::InvalidData);
+        assert!(!invalid.to_string().contains("private-body"));
+        let cloned = invalid.clone();
+        assert!(std::ptr::eq(invalid.source().unwrap(), cloned.source().unwrap()));
+        let raw = invalid.native_capture().expect("actual completed invalid bytes");
+        assert_eq!(raw.stdout.as_slice(), b"private-body\xff");
+        assert!(raw.stderr.is_empty());
+        assert_eq!(raw.status, Some(0));
+        let wrapped = AikitError::new("mux.command_capture_failed", "Selected command refused")
+            .with_io_source_from(&invalid);
+        assert!(std::ptr::eq(raw, cloned.native_capture().unwrap()));
+        assert!(std::ptr::eq(raw, wrapped.native_capture().unwrap()));
+        assert!(std::ptr::eq(invalid.source().unwrap(), wrapped.source().unwrap()));
+        for failure in [&invalid, &cloned, &wrapped] {
+            for diagnostic in [failure.to_string(), format!("{failure:?}"),
+                serde_json::json!({"code":failure.code(),"message":failure.message(),
+                    "details":failure.details()}).to_string()] {
+                assert!(!diagnostic.contains("private-body"));
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_body_free_spawn_diagnostics_omit_private_program_cwd_and_arguments() {
+        use std::error::Error;
+        let root = native_command_tempdir();
+        let missing_program = root.path().join("private-selected-program-canary");
+        let missing_cwd = root.path().join("private-selected-cwd-canary");
+        let cases = [
+            (SystemRunner::new().with_cwd(root.path()),
+                vec![missing_program.to_str().unwrap().to_owned(), "private-argument-canary".into()]),
+            (SystemRunner::new().with_cwd(&missing_cwd),
+                vec!["/bin/sh".into(), "private-argument-canary".into()]),
+        ];
+        for (runner, argv) in cases {
+            let failure = runner.with_body_free_diagnostics().run(&argv).unwrap_err();
+            assert_eq!(failure.code(), "mux.command_spawn_failed", "{failure:?}");
+            assert_eq!(failure.details()["execution_started"], "false");
+            assert!(failure.native_capture().is_none(), "no invented capture before spawn");
+            assert_eq!(failure.details()["argument_count"], "1");
+            let cause = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+            assert_eq!(cause.kind(), std::io::ErrorKind::NotFound);
+            assert!(cause.raw_os_error().is_some());
+            assert_eq!(failure.details()["io_kind"], "NotFound");
+            for diagnostic in [failure.to_string(), format!("{failure:?}"),
+                serde_json::json!({"code":failure.code(),"message":failure.message(),
+                    "details":failure.details()}).to_string()]
+            {
+                assert!(!diagnostic.contains("private-selected-program-canary"));
+                assert!(!diagnostic.contains("private-selected-cwd-canary"));
+                assert!(!diagnostic.contains("private-argument-canary"));
+                assert!(!diagnostic.contains(root.path().to_str().unwrap()));
+            }
+        }
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
