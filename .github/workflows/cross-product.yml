@@ -260,8 +260,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.minutes }}
     env:
-      # Root-declared initial isolated test basis. No latest/installed claim.
-      SEAT_GUARD_GATE_PRODUCT_REVISION: 7220e83dc3dc3cc72a0bceebbf33533f86117c96
+      # Exact Root-admitted paired Source; no latest/installed claim.
+      SEAT_GUARD_GATE_PRODUCT_REVISION: 0b4117930d8c16550ac8409ed663c9c32189fc51
+      SEAT_GUARD_GATE_IGNORE_SHA256: fc51b0e55f8b89452cecc78be45d5db070689e72ed745a39c480c3f7f9729c8f
       SEAT_GUARD_GATE_RUN_SHA256: 36f6061f5cc7a73d34a06b3d98faabffdfbfeb70cd15d6356a036926956bc77a
       SEAT_GUARD_GATE_MANIFEST_SHA256: c5c7cd0560ae11388d95c27e90fa5965daef7b210359cb33022cb15117f51a40
       SEAT_GUARD_PRECOMMIT_CANDIDATE: ${{ github.workspace }}/crates/aikit-adapters/tests/fixtures/central-seat-guard/v2/pre-commit
@@ -401,6 +402,13 @@ jobs:
             rustc -Vv
             cargo --version
             if command -v node >/dev/null 2>&1; then node --version; fi
+            if test -n "${SEAT_GUARD_GATE_PRODUCT_REPOSITORY:-}"; then
+              printf 'actual declared O:I producer root: %s\n' "$SEAT_GUARD_GATE_PRODUCT_REPOSITORY"
+              git -C "$SEAT_GUARD_GATE_PRODUCT_REPOSITORY" rev-parse HEAD
+              git -C "$SEAT_GUARD_GATE_PRODUCT_REPOSITORY" status --porcelain
+            else
+              printf 'O:I full producer: unselected on this bounded host\n'
+            fi
           } > "$RUNNER_TEMP/seat-guard-actual-tools.log" 2>&1
           python3 - <<'PYBASIS'
           import hashlib
@@ -421,9 +429,15 @@ jobs:
               return {"bytes":path.stat().st_size,"sha256":digest.hexdigest()}
           paths = [root / "Cargo.toml", root / "Cargo.lock", root / "crates/aikit-adapters/Cargo.toml", root / "crates/aikit-adapters/src/runner.rs", root / "crates/aikit-adapters/tests/native_seat_guard.rs", pathlib.Path(os.environ["SEAT_GUARD_PRECOMMIT_CANDIDATE"]), pathlib.Path(os.environ["SEAT_GUARD_PREPUSH_CANDIDATE"])]
           producer = os.environ.get("SEAT_GUARD_GATE_PRODUCT_REPOSITORY")
-          if producer:
-              paths.extend(pathlib.Path(producer) / member for member in ["gates/run.mjs", "gates/manifest.json", "desktop/cradle/package-lock.json"])
+          producer_root = pathlib.Path(producer) if producer else None
+          producer_evidence = producer_root / "ProjectCentral/now/tmp/native-seat-guard-evidence" if producer_root else None
+          if producer_root:
+              paths.extend(producer_root / member for member in [".gitignore", "gates/run.mjs", "gates/manifest.json", "desktop/cradle/package-lock.json"])
           reading = {"schema":"central.seat-guard-hosted-qualification/v1", "scope":os.environ["GUARD_SCOPE"], "platform":platform.platform(), "full_outcome":os.environ["GUARD_FULL_OUTCOME"], "bounded_outcome":os.environ["GUARD_BOUNDED_OUTCOME"], "oi_initial_source":os.environ["SEAT_GUARD_GATE_PRODUCT_REVISION"], "source_files":{str(path):material(path) for path in paths}, "evidence":{str(path.relative_to(evidence)):material(path) for path in sorted(evidence.rglob("*")) if path.is_file()} if evidence.is_dir() else {"absent":True}, "standing":"actual controlled test evidence only; no protected install, private Original or human acceptance", "mac_main_positive":"unqualified", "fresh_receipt_required":"Linux actual producer in controlled clone; no transported predecessor"}
+          reading["oi_paired_source"] = os.environ["SEAT_GUARD_GATE_PRODUCT_REVISION"]
+          reading["evidence_roots"] = {"aikit_project":str(root), "oi_producer_project":str(producer_root) if producer_root else None}
+          reading["producer_evidence_selected"] = producer_root is not None
+          reading["producer_evidence"] = {str(path.relative_to(producer_evidence)):material(path) for path in sorted(producer_evidence.rglob("*")) if path.is_file()} if producer_evidence is not None and producer_evidence.is_dir() else {"absent":True}
           (temp / "seat-guard-hosted-basis.json").write_text(json.dumps(reading, indent=2) + "\n")
           PYBASIS
       - name: Retain full actual qualification outputs
@@ -436,5 +450,6 @@ jobs:
             ${{ runner.temp }}/seat-guard-case-inventory.json
             ${{ runner.temp }}/seat-guard-hosted-basis.json
             ProjectCentral/now/tmp/native-seat-guard-evidence/
+            ${{ runner.temp }}/seat-guard-oi/ProjectCentral/now/tmp/native-seat-guard-evidence/
           retention-days: 14
           if-no-files-found: error

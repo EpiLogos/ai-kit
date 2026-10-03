@@ -57,7 +57,62 @@ impl Fixture {
     fn new() -> Self {
         let scratch = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../ProjectCentral/now/tmp");
-        fs::create_dir_all(&scratch).unwrap();
+        Self::new_in_scratch(&scratch)
+    }
+    fn new_in_project(requested: &Path) -> Self {
+        // The full owner clone must not inherit the AIKit Cargo workspace.
+        // All actual source/ignore checks precede full fixture allocation.
+        assert!(requested.is_absolute() && requested.is_dir(),
+            "full fixture requires the actual absolute admitted producer root");
+        let project = fs::canonicalize(requested).unwrap();
+        let aikit = fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")).unwrap();
+        assert!(!project.starts_with(&aikit),
+            "full producer must be outside the enclosing AIKit Cargo workspace");
+        let expected_tip = std::env::var("SEAT_GUARD_GATE_PRODUCT_REVISION")
+            .expect("Root-admitted exact actual product tip is required");
+        let expected_ignore = std::env::var("SEAT_GUARD_GATE_IGNORE_SHA256")
+            .expect("exact admitted native Run-space ignore source is required");
+        let mut runner = SystemRunner::new().with_cwd(&project).with_strict_utf8()
+            .with_timeout(Duration::from_secs(10)).with_output_limit_bytes(1024 * 1024)
+            .with_env("GIT_CONFIG_NOSYSTEM", "1").with_env("GIT_CONFIG_GLOBAL", "/dev/null");
+        for variable in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                         "GIT_CONFIG_COUNT", "LANE", "CENTRAL_ROOT"] {
+            runner = runner.with_env_removed(variable);
+        }
+        let mut observations = Vec::new();
+        let mut check = |arguments: &[&str]| {
+            let argv: Vec<String> = arguments.iter().map(|value| (*value).to_owned()).collect();
+            let output = runner.run_with_limits(&argv, Duration::from_secs(10), 1024 * 1024, true)
+                .unwrap_or_else(|error| panic!("actual producer preflight failed before allocation: {}",
+                    native_error(&error)));
+            assert!(output.ok(), "actual producer preflight {arguments:?} refused before allocation: {output:?}");
+            observations.push(json!({"cwd":project,"argv":argv,"status":output.status,
+                "stdout":output.stdout,"stderr":output.stderr}));
+            output
+        };
+        let top = check(&["git", "rev-parse", "--show-toplevel"]);
+        assert_eq!(fs::canonicalize(top.line()).unwrap(), project, "actual producer top-level");
+        assert_eq!(check(&["git", "rev-parse", "HEAD"]).line(), expected_tip);
+        assert!(check(&["git", "status", "--porcelain", "--untracked-files=all"]).stdout.is_empty(),
+            "actual producer must be clean before native Run-space allocation");
+        assert_eq!(check(&["git", "ls-files", "--error-unmatch", "--", ".gitignore"]).line(), ".gitignore");
+        assert_eq!(digest_file(&project.join(".gitignore")).unwrap(), expected_ignore,
+            "actual tracked owner ignore source, not an external Git exclude");
+        const MEMBER: &str = "ProjectCentral/now/tmp/native-seat-guard-ignore-preflight";
+        let ignored = check(&["git", "check-ignore", "-v", "--no-index", "--", MEMBER]);
+        let (rule, member) = ignored.line().split_once('\t').expect("actual Git ignore rule and member");
+        assert!(rule.starts_with(".gitignore:"), "native scratch must use tracked owner .gitignore: {rule}");
+        assert_eq!(member, MEMBER);
+        let scratch = project.join("ProjectCentral/now/tmp");
+        let fixture = Self::new_in_scratch(&scratch);
+        fixture.save_json("actual-producer-preflight", &json!({"requested_root":requested,
+            "project_root":project,"scratch":scratch,"head":expected_tip,
+            "gitignore_sha256":expected_ignore,"observations":observations,
+            "standing":"actual source prerequisites observed before native full-case material allocation"}));
+        fixture
+    }
+    fn new_in_scratch(scratch: &Path) -> Self {
+        fs::create_dir_all(scratch).unwrap();
         let root = scratch.join(format!("native-seat-guard-{}-{}-{}", std::process::id(),
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(),
             NEXT.fetch_add(1, Ordering::Relaxed)));
@@ -327,13 +382,14 @@ fn real_prepush_uses_third_destination_token_and_actual_full_tip_receipt() {
     let rustup_home = required_directory("RUSTUP_HOME");
     let browser_home = required_directory("PLAYWRIGHT_BROWSERS_PATH");
     assert!(!rustix::process::geteuid().is_root(), "nonroot native qualification prerequisite");
-    let fixture = Fixture::new();
-    fixture.save_json("actual-full-prerequisites", &json!({"cargo_home":cargo_home,
-        "rustup_home":rustup_home,"playwright_browsers_path":browser_home}));
     let source = PathBuf::from(std::env::var_os("SEAT_GUARD_GATE_PRODUCT_REPOSITORY")
         .expect("actual product repository is required; no synthetic full-pass fixture"));
     let expected_tip = std::env::var("SEAT_GUARD_GATE_PRODUCT_REVISION")
         .expect("Root-admitted exact actual product tip is required");
+    let fixture = Fixture::new_in_project(&source);
+    fixture.save_json("actual-full-prerequisites", &json!({"cargo_home":cargo_home,
+        "rustup_home":rustup_home,"playwright_browsers_path":browser_home,
+        "actual_product_root":source}));
     let original_tip = fixture.ok(&source, &["git", "rev-parse", "HEAD"]).line().to_owned();
     assert_eq!(original_tip, expected_tip, "Root admitted exact committed product source");
     let product = fixture.root.join("gate-product-fixture");
@@ -394,6 +450,7 @@ fn real_prepush_uses_third_destination_token_and_actual_full_tip_receipt() {
     assert!(!selected.is_empty());
     let expected: Vec<Value> = manifest["gates"].as_array().unwrap().iter()
         .filter(|gate| gate["tier"] == "landing").map(|gate| gate["name"].clone()).collect();
+    assert_eq!(expected.len(), 19, "exact paired owner manifest has nineteen landing gates");
     assert_eq!(selected, &expected, "all actual selected landing definitions, never a filtered substitute");
     assert_eq!(gates.len(), selected.len());
     let result_names: Vec<Value> = gates.iter().map(|gate| gate["name"].clone()).collect();
