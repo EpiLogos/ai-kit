@@ -46,6 +46,7 @@ jobs:
       - name: Validate installed Prime-QL acceptance runner
         run: python3 -m py_compile scripts/verify-epi-prime-ql.py
       - name: Verify repository
+        id: script_default
         shell: bash
         env:
           AIKIT_REQUIRE_RIPGREP_REAL: "1"
@@ -98,7 +99,16 @@ jobs:
                   raw=('\\\\?\\UNC\\'+raw[2:]) if raw.startswith('\\\\') else ('\\\\?\\'+raw)
               return raw
           (p/'explicit-root.txt').write_text(coordinate(explicit.resolve())+'\n', encoding='utf-8', newline='\n')
-          negative=[('relative','relative-core-root'),('missing',coordinate(product/p/'missing-root')),('outside',coordinate(product)),('symlink',coordinate(product/alias)),('noncanonical',coordinate(product/explicit/'..'/'explicit-root'))]
+          noncanonical=str(product/explicit/'..'/'explicit-root')
+          if os.name=='nt':
+              if noncanonical.startswith('\\\\?\\UNC\\'):noncanonical='\\\\'+noncanonical[8:]
+              elif noncanonical.startswith('\\\\?\\'):noncanonical=noncanonical[4:]
+          candidate=Path(noncanonical);absolute=candidate.is_absolute();exists=candidate.exists()
+          resolved=candidate.resolve(strict=True);fixture=explicit.resolve(strict=True)
+          if not absolute or not exists or resolved!=fixture or '..' not in candidate.parts:
+              raise SystemExit('Noncanonical control must be a legal existing absolute route to the same owned fixture')
+          (p/'noncanonical-coordinate-prerequisite.json').write_text(json.dumps({'candidate':noncanonical,'is_absolute':absolute,'exists':exists,'actual_resolved':str(resolved),'same_owned_explicit_fixture':str(fixture),'native_supplied_parent_component_retained':'..' in candidate.parts},indent=2)+'\n', encoding='utf-8', newline='\n')
+          negative=[('relative','relative-core-root'),('missing',coordinate(product/p/'missing-root')),('outside',coordinate(product)),('symlink',coordinate(product/alias)),('noncanonical',noncanonical)]
           (p/'negative.tsv').write_text(''.join(name+'\t'+root+'\n' for name,root in negative), encoding='utf-8', newline='\n')
           reasons={'relative':'explicit Core test root must be absolute','missing':'explicit Core test root must already exist','outside':'explicit Core test root must remain in this product Run space','symlink':'explicit Core test root must be physical','noncanonical':'explicit Core test root must be physical'}
           (p/'negative-reasons.json').write_text(json.dumps(reasons,indent=2)+'\n')
@@ -161,6 +171,196 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Preserve actual launcher source and existing owner result
+        if: always() && (runner.os == 'macOS')
+        shell: bash
+        env:
+          DEFAULT_OUTCOME: ${{ steps.script_default.outcome }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYADMIT'
+          from pathlib import Path
+          import json,os,platform,shutil,stat,sys
+          product=Path.cwd().resolve();scratch=product/'ProjectCentral/now/tmp'
+          for q in [product/'ProjectCentral',product/'ProjectCentral/now',scratch]:
+              try:m=q.lstat()
+              except FileNotFoundError:
+                  q.mkdir(mode=0o700);m=q.lstat()
+              if not stat.S_ISDIR(m.st_mode) or q.resolve()!=q:raise SystemExit('Hosted public native scratch must be physical')
+          root=scratch/('script-capture-'+os.environ['GITHUB_RUN_ID']+'-'+os.environ['GITHUB_RUN_ATTEMPT']+'-'+os.environ['RUNNER_OS'])
+          root.mkdir(mode=0o700)
+          with open(os.environ['GITHUB_ENV'],'a') as env:env.write('AIKIT_SCRIPT_CHARACTERIZATION_ROOT='+str(root)+'\n')
+          (root/'default-result.json').write_text(json.dumps({'actual_outcome':os.environ['DEFAULT_OUTCOME'],'platform':platform.platform(),'uid':os.getuid(),'python':sys.version,'scope':'Existing owner step outcome; not inferred from launcher count. Scratch is public fixture/evidence material, not semantic World identity.'},indent=2)+'\n')
+          log=Path('/tmp/aikit.log')
+          if log.exists():
+              if not stat.S_ISREG(log.lstat().st_mode):raise SystemExit('Actual existing default log is not an ordinary file')
+              with log.open('rb') as src,(root/'existing-default.log').open('xb') as dst:shutil.copyfileobj(src,dst)
+          print(root)
+          PYADMIT
+          gate_dir="$GITHUB_WORKSPACE/ProjectCentral/now/tmp/script-capture-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${RUNNER_OS}"
+          git rev-parse HEAD > "$gate_dir/current-head.txt"
+          git rev-parse HEAD^{tree} > "$gate_dir/current-tree.txt"
+          git archive --format=tar HEAD > "$gate_dir/current-source.tar"
+          rustc -Vv > "$gate_dir/rustc.txt"
+          cargo -Vv > "$gate_dir/cargo.txt"
+      - name: Qualify actual old and current native captured-script owners
+        if: success() && (runner.os == 'macOS')
+        shell: bash
+        run: |
+          set -euo pipefail
+          old_head=b07ced38f17319305ebbee06502df8ad96f3b0eb
+          gate_dir="$AIKIT_SCRIPT_CHARACTERIZATION_ROOT"
+          trap 'status=$?; printf "%s\n" "$status" > "$gate_dir/qualification-shell.exit"' EXIT
+          if ! git cat-file -e "$old_head^{commit}"; then
+            git fetch --no-tags --depth=1 origin "$old_head" > "$gate_dir/old-fetch.stdout" 2> "$gate_dir/old-fetch.stderr"
+          fi
+          git rev-parse "$old_head^{tree}" > "$gate_dir/old-tree.txt"
+          git archive --format=tar "$old_head" > "$gate_dir/old-source.tar"
+          python3 - "$gate_dir" <<'PYINPUT'
+          from pathlib import Path
+          import hashlib,json,os,stat,sys,tarfile
+          p=Path(sys.argv[1]); product=Path.cwd().resolve()
+          if sys.version_info<(3,12):raise SystemExit('Native Python3.12 tar admission prerequisite unavailable; this is not an expected old semantic failure')
+          if p.resolve()!=p or not p.is_dir():raise SystemExit('Admitted gate coordinate changed')
+          asset=product/'scripts/fixtures/captured-script-old-api-characterization.rs'
+          sha=lambda q:hashlib.sha256(q.read_bytes()).hexdigest()
+          watch=[];links=[]
+          def regular(q):
+              m=q.lstat()
+              if not stat.S_ISREG(m.st_mode) or m.st_nlink!=1:raise SystemExit(f'Nonordinary public input: {q}')
+              watch.append({'path':str(q),'sha256':sha(q),'dev':m.st_dev,'ino':m.st_ino})
+          def source_archive(label,archive):
+              root=p/(label+'-source');root.mkdir(mode=0o700)
+              with tarfile.open(archive,'r:') as tar:
+                  names=tar.getnames()
+                  if any(Path(n).is_absolute() or '..' in Path(n).parts for n in names):raise SystemExit('Invalid Source archive member')
+                  tar.extractall(root,filter='data')
+                  for member in tar.getmembers():
+                      q=root/member.name
+                      if member.isfile():regular(q)
+                      elif member.issym():links.append({'path':str(q),'target':os.readlink(q)})
+                      elif not member.isdir():raise SystemExit('Unsupported public Source archive form')
+              target=root/'crates/aikit-cli/tests/captured_script_old_api_characterization.rs'
+              with target.open('xb') as output:output.write(asset.read_bytes())
+              regular(target)
+              regular(archive)
+              (p/(label+'-augmentation.json')).write_text(json.dumps({'source_archive':str(archive),'source_archive_sha256':sha(archive),'source_root':str(root),'pristine_archive_retained':True,'additional_test_path':str(target),'input_sha256':sha(asset),'input_scope':'Derived actual IO/lifecycle observations and retained-fixture control are new test-only inputs; original ce55 is separately retained/invertible. No production overlay.','inner_refusal_observation_contract':'expected_command_failure_original_and_structured_cleanup/v2','retained_fixture_contract':'retained_before_effect_and_on_unwind/v2'},indent=2)+'\n')
+              return root
+          old=source_archive('old',p/'old-source.tar');new=source_archive('new',p/'current-source.tar')
+          # Current native targets are built from the actual checkout, not this augmentation.
+          with tarfile.open(p/'current-source.tar','r:') as tar:
+              for member in tar.getmembers():
+                  q=product/member.name
+                  if member.isfile():regular(q)
+                  elif member.issym():links.append({'path':str(q),'target':os.readlink(q)})
+          regular(asset)
+          for q in [p/'current-head.txt',p/'current-tree.txt',p/'old-tree.txt',p/'rustc.txt',p/'cargo.txt',p/'default-result.json']:
+              regular(q)
+          (p/'source-watch.json').write_text(json.dumps({'files':watch,'symlinks':links,'checkout_root':str(product),'old_root':str(old),'new_root':str(new),'current_head':(p/'current-head.txt').read_text().strip(),'old_head':'b07ced38f17319305ebbee06502df8ad96f3b0eb','overlay_sha256':sha(asset),'old_lock_sha256':sha(old/'Cargo.lock'),'new_lock_sha256':sha(new/'Cargo.lock')},indent=2)+'\n')
+          PYINPUT
+          old_root="$gate_dir/old-source"
+          new_root="$gate_dir/new-source"
+          # Native owners share the ordinary build cache, sequentially. Each augmentation
+          # binary is retained before a later build can replace a Cargo target address.
+          current_root=$(python3 -c 'from pathlib import Path; print(Path.cwd().resolve())')
+          export CARGO_TARGET_DIR="$current_root/target"
+          run_compile() {
+            label="$1"; shift
+            set +e
+            "$@" > "$gate_dir/$label.build.jsonl" 2> "$gate_dir/$label.build.stderr"
+            status=$?
+            set -e
+            printf '%s\n' "$status" > "$gate_dir/$label.build.exit"
+            cat "$gate_dir/$label.build.stderr"
+            return "$status"
+          }
+          retain_artifact() {
+            label="$1"; role="$2"; target="$3"; cwd="$4"; source="$5"; test_profile="$6"
+            python3 - "$gate_dir" "$label" "$role" "$target" "$cwd" "$source" "$test_profile" <<'PYBIN'
+          from pathlib import Path
+          import hashlib,json,os,shutil,stat,sys
+          p=Path(sys.argv[1]);label,role,target,cwd,head=sys.argv[2:7];test=sys.argv[7]=='true'
+          if (p/(label+'.build.exit')).read_text().strip()!='0':raise SystemExit('Compilation failure is not a semantic comparison')
+          rows=[json.loads(x) for x in (p/(label+'.build.jsonl')).read_text().splitlines() if x.startswith('{')]
+          art=[x for x in rows if x.get('reason')=='compiler-artifact' and x.get('target',{}).get('name')==target and x.get('profile',{}).get('test')==test and x.get('executable')]
+          if len(art)!=1:raise SystemExit(f'One actual CompilerArtifact required: {role} count={len(art)}')
+          a=art[0];exe=Path(a['executable']);m=exe.lstat()
+          if not stat.S_ISREG(m.st_mode) or m.st_nlink!=1 or not Path(a['target']['src_path']).is_relative_to(Path(cwd)):raise SystemExit('Actual artifact Source/form mismatch')
+          digest=hashlib.sha256(exe.read_bytes()).hexdigest();out=p/'binaries'/role
+          out.parent.mkdir(mode=0o700,exist_ok=True)
+          with exe.open('rb') as src,out.open('xb') as dst:shutil.copyfileobj(src,dst)
+          out.chmod(0o700)
+          after=exe.lstat()
+          if (m.st_dev,m.st_ino,m.st_size,m.st_mtime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns) or hashlib.sha256(exe.read_bytes()).hexdigest()!=digest or hashlib.sha256(out.read_bytes()).hexdigest()!=digest:raise SystemExit('Actual artifact changed while retaining binary bytes')
+          (p/(role+'.artifact.json')).write_text(json.dumps({'path':str(out),'sha256':digest,'original_executable':str(exe),'compiler_artifact':a,'cwd':cwd,'source_head':head,'actual_retained_binary_bytes':out.stat().st_size,'scope':'Copied actual CompilerArtifact bytes; augmentation mapping retained separately, not a pristine tree claim.'},indent=2)+'\n')
+          PYBIN
+          }
+          current_head=$(cat "$gate_dir/current-head.txt")
+          # Old/new compile failures remain actual build failures, never expected old red.
+          run_compile old cargo test --locked --manifest-path "$old_root/Cargo.toml" -p aikit-cli --test captured_script_old_api_characterization --no-run --message-format=json
+          retain_artifact old old captured_script_old_api_characterization "$old_root" "$old_head" true
+          run_compile new cargo test --locked --manifest-path "$new_root/Cargo.toml" -p aikit-cli --test captured_script_old_api_characterization --no-run --message-format=json
+          retain_artifact new new captured_script_old_api_characterization "$new_root" "$current_head" true
+          # Refresh normal current bins last: multicall references this actual built aikit.
+          run_compile current-cli cargo test --locked -p aikit-cli --test run_exec --test multicall_symlink --test palette_run_intent --test scoped_praxis_native --no-run --message-format=json
+          for target in run_exec multicall_symlink palette_run_intent scoped_praxis_native; do
+            retain_artifact current-cli "$target" "$target" "$current_root" "$current_head" true
+          done
+          run_compile current-bin cargo build --locked -p aikit-cli --bin aikit --message-format=json
+          retain_artifact current-bin aikit aikit "$current_root" "$current_head" false
+          run_compile current-runner cargo test --locked -p aikit-adapters --lib --no-run --message-format=json
+          retain_artifact current-runner runner aikit_adapters "$current_root" "$current_head" true
+          run_compile current-driver cargo test --locked -p aikit-adapters --test captured_script_characterization --no-run --message-format=json
+          retain_artifact current-driver driver captured_script_characterization "$current_root" "$current_head" true
+          python3 - "$gate_dir" <<'PYGATE'
+          from pathlib import Path
+          import hashlib,json,stat,sys
+          p=Path(sys.argv[1]);meta=json.loads((p/'source-watch.json').read_text())
+          meta['executables']={}
+          roles=['old','new','run_exec','multicall_symlink','palette_run_intent','scoped_praxis_native','aikit','runner','driver']
+          def add(q):
+              m=q.lstat()
+              if not stat.S_ISREG(m.st_mode) or m.st_nlink!=1:raise SystemExit('Nonordinary actual retained artifact')
+              meta['files'].append({'path':str(q),'sha256':hashlib.sha256(q.read_bytes()).hexdigest(),'dev':m.st_dev,'ino':m.st_ino})
+          for role in roles:
+              q=p/(role+'.artifact.json');add(q);entry=json.loads(q.read_text());meta['executables'][role]=entry;add(Path(entry['path']))
+              if role not in ['old','new']:add(Path(entry['original_executable']))
+          for label in ['old','new','current-cli','current-bin','current-runner','current-driver']:
+              for suffix in ['.build.jsonl','.build.stderr','.build.exit']:add(p/(label+suffix))
+          for q in [p/'source-watch.json',p/'old-augmentation.json',p/'new-augmentation.json']:add(q)
+          meta.update({'default_outcome':json.loads((p/'default-result.json').read_text())['actual_outcome'],'platform':sys.platform,'compiled_old_new':2,'compiled_derived_definitions':6,'new_real_failure_unwind_selection':1,'inner_refusal_observation_contract':'expected_command_failure_original_and_structured_cleanup/v2','retained_fixture_contract':'retained_before_effect_and_on_unwind/v2','standing':'Actual compile and bytes only; native results are produced separately by selected ignored driver','live_seconds':20,'aggregate_capture_bytes':1048576,'separate_native_retirement_seconds':2})
+          # Recheck actual source, lock, input and artifact custody before any child effect.
+          for entry in meta['files']:
+              q=Path(entry['path']);m=q.lstat()
+              if (m.st_dev,m.st_ino)!=(entry['dev'],entry['ino']) or hashlib.sha256(q.read_bytes()).hexdigest()!=entry['sha256']:raise SystemExit('Source/build custody changed before native selection')
+          with (p/'gate.json').open('x') as output:output.write(json.dumps(meta,indent=2)+'\n')
+          PYGATE
+          set +e
+          cargo test --locked -p aikit-adapters --test captured_script_characterization actual_old_owner_negative_and_current_owner_positive_use_same_native_capture -- --ignored --exact --nocapture --test-threads=1 > "$gate_dir/driver.stdout" 2> "$gate_dir/driver.stderr"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$gate_dir/driver.exit"
+          cat "$gate_dir/driver.stdout" "$gate_dir/driver.stderr"
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          python3 - "$gate_dir" <<'PYRESULT'
+          from pathlib import Path
+          import hashlib,json,re,sys
+          p=Path(sys.argv[1]);raw=(p/'driver.stdout').read_text()+'\n'+(p/'driver.stderr').read_text()
+          result=re.findall(r'test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;',raw)
+          if result!=[('ok','1','0','0','0')]:raise SystemExit('Actual ignored driver must execute exactly one passing unskipped definition')
+          actual=json.loads((p/'driver-evidence/actual-results.json').read_text())
+          if (actual['old_characterizations'],actual['new_characterizations'],actual['current_unique_required_definitions'],actual['whole_native_targets'],actual['existing_lifecycle_definitions'],actual['genuine_failure_unwind_sensitivity'],len(actual['actual_results']))!=(2,2,17,4,8,1,34):raise SystemExit('Actual native result census mismatch')
+          (p/'qualification-result.json').write_text(json.dumps({'actual_driver_exit':int((p/'driver.exit').read_text()),'actual_driver_libtest_result':result[0],'actual_native_results_sha256':hashlib.sha256((p/'driver-evidence/actual-results.json').read_bytes()).hexdigest(),'scope':'Hosted Source/native Linux-or-Mac; no managed installation, private original, H or other-platform claim'},indent=2)+'\n')
+          PYRESULT
+      - name: Retain launcher source, compiled binaries and real native results
+        if: always() && (runner.os == 'macOS')
+        uses: actions/upload-artifact@v4
+        with:
+          name: launcher-native-${{ runner.os }}-${{ github.sha }}
+          path: ProjectCentral/now/tmp/script-capture-*
+          if-no-files-found: error
+          retention-days: 14
+
   v2-crate-tests:
     name: V2 crate — ${{ matrix.package }}${{ matrix.os == 'windows-latest' && ' (Windows)' || '' }}
     runs-on: ${{ matrix.os }}
@@ -193,6 +393,7 @@ jobs:
           fi
           rg --version
       - name: Test ${{ matrix.package }}
+        id: script_default
         shell: bash
         run: |
           set +e
@@ -249,7 +450,16 @@ jobs:
                   raw=('\\\\?\\UNC\\'+raw[2:]) if raw.startswith('\\\\') else ('\\\\?\\'+raw)
               return raw
           (p/'explicit-root.txt').write_text(coordinate(explicit.resolve())+'\n', encoding='utf-8', newline='\n')
-          negative=[('relative','relative-core-root'),('missing',coordinate(product/p/'missing-root')),('outside',coordinate(product)),('symlink',coordinate(product/alias)),('noncanonical',coordinate(product/explicit/'..'/'explicit-root'))]
+          noncanonical=str(product/explicit/'..'/'explicit-root')
+          if os.name=='nt':
+              if noncanonical.startswith('\\\\?\\UNC\\'):noncanonical='\\\\'+noncanonical[8:]
+              elif noncanonical.startswith('\\\\?\\'):noncanonical=noncanonical[4:]
+          candidate=Path(noncanonical);absolute=candidate.is_absolute();exists=candidate.exists()
+          resolved=candidate.resolve(strict=True);fixture=explicit.resolve(strict=True)
+          if not absolute or not exists or resolved!=fixture or '..' not in candidate.parts:
+              raise SystemExit('Noncanonical control must be a legal existing absolute route to the same owned fixture')
+          (p/'noncanonical-coordinate-prerequisite.json').write_text(json.dumps({'candidate':noncanonical,'is_absolute':absolute,'exists':exists,'actual_resolved':str(resolved),'same_owned_explicit_fixture':str(fixture),'native_supplied_parent_component_retained':'..' in candidate.parts},indent=2)+'\n', encoding='utf-8', newline='\n')
+          negative=[('relative','relative-core-root'),('missing',coordinate(product/p/'missing-root')),('outside',coordinate(product)),('symlink',coordinate(product/alias)),('noncanonical',noncanonical)]
           (p/'negative.tsv').write_text(''.join(name+'\t'+root+'\n' for name,root in negative), encoding='utf-8', newline='\n')
           reasons={'relative':'explicit Core test root must be absolute','missing':'explicit Core test root must already exist','outside':'explicit Core test root must remain in this product Run space','symlink':'explicit Core test root must be physical','noncanonical':'explicit Core test root must be physical'}
           (p/'negative-reasons.json').write_text(json.dumps(reasons,indent=2)+'\n')
@@ -309,6 +519,196 @@ jobs:
         with:
           name: core-native-material-${{ runner.os }}-${{ github.sha }}
           path: ProjectCentral/now/tmp/core-material-*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Preserve actual launcher source and existing owner result
+        if: always() && (matrix.package == 'aikit-cli' && runner.os == 'Linux')
+        shell: bash
+        env:
+          DEFAULT_OUTCOME: ${{ steps.script_default.outcome }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYADMIT'
+          from pathlib import Path
+          import json,os,platform,shutil,stat,sys
+          product=Path.cwd().resolve();scratch=product/'ProjectCentral/now/tmp'
+          for q in [product/'ProjectCentral',product/'ProjectCentral/now',scratch]:
+              try:m=q.lstat()
+              except FileNotFoundError:
+                  q.mkdir(mode=0o700);m=q.lstat()
+              if not stat.S_ISDIR(m.st_mode) or q.resolve()!=q:raise SystemExit('Hosted public native scratch must be physical')
+          root=scratch/('script-capture-'+os.environ['GITHUB_RUN_ID']+'-'+os.environ['GITHUB_RUN_ATTEMPT']+'-'+os.environ['RUNNER_OS'])
+          root.mkdir(mode=0o700)
+          with open(os.environ['GITHUB_ENV'],'a') as env:env.write('AIKIT_SCRIPT_CHARACTERIZATION_ROOT='+str(root)+'\n')
+          (root/'default-result.json').write_text(json.dumps({'actual_outcome':os.environ['DEFAULT_OUTCOME'],'platform':platform.platform(),'uid':os.getuid(),'python':sys.version,'scope':'Existing owner step outcome; not inferred from launcher count. Scratch is public fixture/evidence material, not semantic World identity.'},indent=2)+'\n')
+          log=Path('/tmp/aikit.log')
+          if log.exists():
+              if not stat.S_ISREG(log.lstat().st_mode):raise SystemExit('Actual existing default log is not an ordinary file')
+              with log.open('rb') as src,(root/'existing-default.log').open('xb') as dst:shutil.copyfileobj(src,dst)
+          print(root)
+          PYADMIT
+          gate_dir="$GITHUB_WORKSPACE/ProjectCentral/now/tmp/script-capture-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${RUNNER_OS}"
+          git rev-parse HEAD > "$gate_dir/current-head.txt"
+          git rev-parse HEAD^{tree} > "$gate_dir/current-tree.txt"
+          git archive --format=tar HEAD > "$gate_dir/current-source.tar"
+          rustc -Vv > "$gate_dir/rustc.txt"
+          cargo -Vv > "$gate_dir/cargo.txt"
+      - name: Qualify actual old and current native captured-script owners
+        if: success() && (matrix.package == 'aikit-cli' && runner.os == 'Linux')
+        shell: bash
+        run: |
+          set -euo pipefail
+          old_head=b07ced38f17319305ebbee06502df8ad96f3b0eb
+          gate_dir="$AIKIT_SCRIPT_CHARACTERIZATION_ROOT"
+          trap 'status=$?; printf "%s\n" "$status" > "$gate_dir/qualification-shell.exit"' EXIT
+          if ! git cat-file -e "$old_head^{commit}"; then
+            git fetch --no-tags --depth=1 origin "$old_head" > "$gate_dir/old-fetch.stdout" 2> "$gate_dir/old-fetch.stderr"
+          fi
+          git rev-parse "$old_head^{tree}" > "$gate_dir/old-tree.txt"
+          git archive --format=tar "$old_head" > "$gate_dir/old-source.tar"
+          python3 - "$gate_dir" <<'PYINPUT'
+          from pathlib import Path
+          import hashlib,json,os,stat,sys,tarfile
+          p=Path(sys.argv[1]); product=Path.cwd().resolve()
+          if sys.version_info<(3,12):raise SystemExit('Native Python3.12 tar admission prerequisite unavailable; this is not an expected old semantic failure')
+          if p.resolve()!=p or not p.is_dir():raise SystemExit('Admitted gate coordinate changed')
+          asset=product/'scripts/fixtures/captured-script-old-api-characterization.rs'
+          sha=lambda q:hashlib.sha256(q.read_bytes()).hexdigest()
+          watch=[];links=[]
+          def regular(q):
+              m=q.lstat()
+              if not stat.S_ISREG(m.st_mode) or m.st_nlink!=1:raise SystemExit(f'Nonordinary public input: {q}')
+              watch.append({'path':str(q),'sha256':sha(q),'dev':m.st_dev,'ino':m.st_ino})
+          def source_archive(label,archive):
+              root=p/(label+'-source');root.mkdir(mode=0o700)
+              with tarfile.open(archive,'r:') as tar:
+                  names=tar.getnames()
+                  if any(Path(n).is_absolute() or '..' in Path(n).parts for n in names):raise SystemExit('Invalid Source archive member')
+                  tar.extractall(root,filter='data')
+                  for member in tar.getmembers():
+                      q=root/member.name
+                      if member.isfile():regular(q)
+                      elif member.issym():links.append({'path':str(q),'target':os.readlink(q)})
+                      elif not member.isdir():raise SystemExit('Unsupported public Source archive form')
+              target=root/'crates/aikit-cli/tests/captured_script_old_api_characterization.rs'
+              with target.open('xb') as output:output.write(asset.read_bytes())
+              regular(target)
+              regular(archive)
+              (p/(label+'-augmentation.json')).write_text(json.dumps({'source_archive':str(archive),'source_archive_sha256':sha(archive),'source_root':str(root),'pristine_archive_retained':True,'additional_test_path':str(target),'input_sha256':sha(asset),'input_scope':'Derived actual IO/lifecycle observations and retained-fixture control are new test-only inputs; original ce55 is separately retained/invertible. No production overlay.','inner_refusal_observation_contract':'expected_command_failure_original_and_structured_cleanup/v2','retained_fixture_contract':'retained_before_effect_and_on_unwind/v2'},indent=2)+'\n')
+              return root
+          old=source_archive('old',p/'old-source.tar');new=source_archive('new',p/'current-source.tar')
+          # Current native targets are built from the actual checkout, not this augmentation.
+          with tarfile.open(p/'current-source.tar','r:') as tar:
+              for member in tar.getmembers():
+                  q=product/member.name
+                  if member.isfile():regular(q)
+                  elif member.issym():links.append({'path':str(q),'target':os.readlink(q)})
+          regular(asset)
+          for q in [p/'current-head.txt',p/'current-tree.txt',p/'old-tree.txt',p/'rustc.txt',p/'cargo.txt',p/'default-result.json']:
+              regular(q)
+          (p/'source-watch.json').write_text(json.dumps({'files':watch,'symlinks':links,'checkout_root':str(product),'old_root':str(old),'new_root':str(new),'current_head':(p/'current-head.txt').read_text().strip(),'old_head':'b07ced38f17319305ebbee06502df8ad96f3b0eb','overlay_sha256':sha(asset),'old_lock_sha256':sha(old/'Cargo.lock'),'new_lock_sha256':sha(new/'Cargo.lock')},indent=2)+'\n')
+          PYINPUT
+          old_root="$gate_dir/old-source"
+          new_root="$gate_dir/new-source"
+          # Native owners share the ordinary build cache, sequentially. Each augmentation
+          # binary is retained before a later build can replace a Cargo target address.
+          current_root=$(python3 -c 'from pathlib import Path; print(Path.cwd().resolve())')
+          export CARGO_TARGET_DIR="$current_root/target"
+          run_compile() {
+            label="$1"; shift
+            set +e
+            "$@" > "$gate_dir/$label.build.jsonl" 2> "$gate_dir/$label.build.stderr"
+            status=$?
+            set -e
+            printf '%s\n' "$status" > "$gate_dir/$label.build.exit"
+            cat "$gate_dir/$label.build.stderr"
+            return "$status"
+          }
+          retain_artifact() {
+            label="$1"; role="$2"; target="$3"; cwd="$4"; source="$5"; test_profile="$6"
+            python3 - "$gate_dir" "$label" "$role" "$target" "$cwd" "$source" "$test_profile" <<'PYBIN'
+          from pathlib import Path
+          import hashlib,json,os,shutil,stat,sys
+          p=Path(sys.argv[1]);label,role,target,cwd,head=sys.argv[2:7];test=sys.argv[7]=='true'
+          if (p/(label+'.build.exit')).read_text().strip()!='0':raise SystemExit('Compilation failure is not a semantic comparison')
+          rows=[json.loads(x) for x in (p/(label+'.build.jsonl')).read_text().splitlines() if x.startswith('{')]
+          art=[x for x in rows if x.get('reason')=='compiler-artifact' and x.get('target',{}).get('name')==target and x.get('profile',{}).get('test')==test and x.get('executable')]
+          if len(art)!=1:raise SystemExit(f'One actual CompilerArtifact required: {role} count={len(art)}')
+          a=art[0];exe=Path(a['executable']);m=exe.lstat()
+          if not stat.S_ISREG(m.st_mode) or m.st_nlink!=1 or not Path(a['target']['src_path']).is_relative_to(Path(cwd)):raise SystemExit('Actual artifact Source/form mismatch')
+          digest=hashlib.sha256(exe.read_bytes()).hexdigest();out=p/'binaries'/role
+          out.parent.mkdir(mode=0o700,exist_ok=True)
+          with exe.open('rb') as src,out.open('xb') as dst:shutil.copyfileobj(src,dst)
+          out.chmod(0o700)
+          after=exe.lstat()
+          if (m.st_dev,m.st_ino,m.st_size,m.st_mtime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns) or hashlib.sha256(exe.read_bytes()).hexdigest()!=digest or hashlib.sha256(out.read_bytes()).hexdigest()!=digest:raise SystemExit('Actual artifact changed while retaining binary bytes')
+          (p/(role+'.artifact.json')).write_text(json.dumps({'path':str(out),'sha256':digest,'original_executable':str(exe),'compiler_artifact':a,'cwd':cwd,'source_head':head,'actual_retained_binary_bytes':out.stat().st_size,'scope':'Copied actual CompilerArtifact bytes; augmentation mapping retained separately, not a pristine tree claim.'},indent=2)+'\n')
+          PYBIN
+          }
+          current_head=$(cat "$gate_dir/current-head.txt")
+          # Old/new compile failures remain actual build failures, never expected old red.
+          run_compile old cargo test --locked --manifest-path "$old_root/Cargo.toml" -p aikit-cli --test captured_script_old_api_characterization --no-run --message-format=json
+          retain_artifact old old captured_script_old_api_characterization "$old_root" "$old_head" true
+          run_compile new cargo test --locked --manifest-path "$new_root/Cargo.toml" -p aikit-cli --test captured_script_old_api_characterization --no-run --message-format=json
+          retain_artifact new new captured_script_old_api_characterization "$new_root" "$current_head" true
+          # Refresh normal current bins last: multicall references this actual built aikit.
+          run_compile current-cli cargo test --locked -p aikit-cli --test run_exec --test multicall_symlink --test palette_run_intent --test scoped_praxis_native --no-run --message-format=json
+          for target in run_exec multicall_symlink palette_run_intent scoped_praxis_native; do
+            retain_artifact current-cli "$target" "$target" "$current_root" "$current_head" true
+          done
+          run_compile current-bin cargo build --locked -p aikit-cli --bin aikit --message-format=json
+          retain_artifact current-bin aikit aikit "$current_root" "$current_head" false
+          run_compile current-runner cargo test --locked -p aikit-adapters --lib --no-run --message-format=json
+          retain_artifact current-runner runner aikit_adapters "$current_root" "$current_head" true
+          run_compile current-driver cargo test --locked -p aikit-adapters --test captured_script_characterization --no-run --message-format=json
+          retain_artifact current-driver driver captured_script_characterization "$current_root" "$current_head" true
+          python3 - "$gate_dir" <<'PYGATE'
+          from pathlib import Path
+          import hashlib,json,stat,sys
+          p=Path(sys.argv[1]);meta=json.loads((p/'source-watch.json').read_text())
+          meta['executables']={}
+          roles=['old','new','run_exec','multicall_symlink','palette_run_intent','scoped_praxis_native','aikit','runner','driver']
+          def add(q):
+              m=q.lstat()
+              if not stat.S_ISREG(m.st_mode) or m.st_nlink!=1:raise SystemExit('Nonordinary actual retained artifact')
+              meta['files'].append({'path':str(q),'sha256':hashlib.sha256(q.read_bytes()).hexdigest(),'dev':m.st_dev,'ino':m.st_ino})
+          for role in roles:
+              q=p/(role+'.artifact.json');add(q);entry=json.loads(q.read_text());meta['executables'][role]=entry;add(Path(entry['path']))
+              if role not in ['old','new']:add(Path(entry['original_executable']))
+          for label in ['old','new','current-cli','current-bin','current-runner','current-driver']:
+              for suffix in ['.build.jsonl','.build.stderr','.build.exit']:add(p/(label+suffix))
+          for q in [p/'source-watch.json',p/'old-augmentation.json',p/'new-augmentation.json']:add(q)
+          meta.update({'default_outcome':json.loads((p/'default-result.json').read_text())['actual_outcome'],'platform':sys.platform,'compiled_old_new':2,'compiled_derived_definitions':6,'new_real_failure_unwind_selection':1,'inner_refusal_observation_contract':'expected_command_failure_original_and_structured_cleanup/v2','retained_fixture_contract':'retained_before_effect_and_on_unwind/v2','standing':'Actual compile and bytes only; native results are produced separately by selected ignored driver','live_seconds':20,'aggregate_capture_bytes':1048576,'separate_native_retirement_seconds':2})
+          # Recheck actual source, lock, input and artifact custody before any child effect.
+          for entry in meta['files']:
+              q=Path(entry['path']);m=q.lstat()
+              if (m.st_dev,m.st_ino)!=(entry['dev'],entry['ino']) or hashlib.sha256(q.read_bytes()).hexdigest()!=entry['sha256']:raise SystemExit('Source/build custody changed before native selection')
+          with (p/'gate.json').open('x') as output:output.write(json.dumps(meta,indent=2)+'\n')
+          PYGATE
+          set +e
+          cargo test --locked -p aikit-adapters --test captured_script_characterization actual_old_owner_negative_and_current_owner_positive_use_same_native_capture -- --ignored --exact --nocapture --test-threads=1 > "$gate_dir/driver.stdout" 2> "$gate_dir/driver.stderr"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$gate_dir/driver.exit"
+          cat "$gate_dir/driver.stdout" "$gate_dir/driver.stderr"
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          python3 - "$gate_dir" <<'PYRESULT'
+          from pathlib import Path
+          import hashlib,json,re,sys
+          p=Path(sys.argv[1]);raw=(p/'driver.stdout').read_text()+'\n'+(p/'driver.stderr').read_text()
+          result=re.findall(r'test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;',raw)
+          if result!=[('ok','1','0','0','0')]:raise SystemExit('Actual ignored driver must execute exactly one passing unskipped definition')
+          actual=json.loads((p/'driver-evidence/actual-results.json').read_text())
+          if (actual['old_characterizations'],actual['new_characterizations'],actual['current_unique_required_definitions'],actual['whole_native_targets'],actual['existing_lifecycle_definitions'],actual['genuine_failure_unwind_sensitivity'],len(actual['actual_results']))!=(2,2,17,4,8,1,34):raise SystemExit('Actual native result census mismatch')
+          (p/'qualification-result.json').write_text(json.dumps({'actual_driver_exit':int((p/'driver.exit').read_text()),'actual_driver_libtest_result':result[0],'actual_native_results_sha256':hashlib.sha256((p/'driver-evidence/actual-results.json').read_bytes()).hexdigest(),'scope':'Hosted Source/native Linux-or-Mac; no managed installation, private original, H or other-platform claim'},indent=2)+'\n')
+          PYRESULT
+      - name: Retain launcher source, compiled binaries and real native results
+        if: always() && (matrix.package == 'aikit-cli' && runner.os == 'Linux')
+        uses: actions/upload-artifact@v4
+        with:
+          name: launcher-native-${{ runner.os }}-${{ github.sha }}
+          path: ProjectCentral/now/tmp/script-capture-*
           if-no-files-found: error
           retention-days: 14
 
