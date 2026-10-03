@@ -326,11 +326,44 @@ mod project_text_capsule {
         assert_ne!(native.status, 0, "the control must be a genuine native failure");
         assert_eq!(wrapped.status, native.status, "native status was changed");
         let diagnostic = if raw { &native.stdout } else { &native.stderr };
-        let final_line = diagnostic.lines().filter(|line| !line.is_empty()).next_back()
+        let final_line = diagnostic.lines().rfind(|line| !line.is_empty())
             .expect("the actual native failure must supply a diagnostic");
         let returned = if raw { &wrapped.stdout } else { &wrapped.stderr };
         assert!(returned.contains(final_line), "native diagnostic lost: {wrapped:?}");
         if !raw { assert_eq!(wrapped.stdout, native.stdout); }
+    }
+
+    // Native7.6.7 Bookmark tags are HashSet membership; its JSON view
+    // iterates that set. Only tag order is normalized: store/record order,
+    // duplicate store entries, every other field, status and stderr remain exact.
+    fn normalized_json_sections(stdout: &str) -> Vec<(Option<&str>, serde_json::Value)> {
+        let sections: Vec<_> = if let Some(headed) = stdout.strip_prefix("### ") {
+            headed.split("\n### ").map(|section| {
+                let (header, body) = section.split_once('\n')
+                    .expect("each actual store header must precede its native JSON");
+                assert!(!header.is_empty(), "actual store header must not be empty");
+                (Some(header), body)
+            }).collect()
+        } else {
+            vec![(None, stdout)]
+        };
+        sections.into_iter().map(|(header, body)| {
+            let mut value: serde_json::Value = serde_json::from_str(body)
+                .expect("actual successful native JSON must remain complete");
+            for record in value.as_array_mut().expect("native JSON retains ordered bookmark records") {
+                let tags = record.get_mut("tags").and_then(serde_json::Value::as_array_mut)
+                    .expect("each native bookmark retains its complete tags array");
+                assert!(tags.iter().all(serde_json::Value::is_string), "native tags must remain strings");
+                tags.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+            }
+            (header, value)
+        }).collect()
+    }
+
+    fn assert_json_return_eq(actual: &Output, expected: &Output) {
+        assert_eq!(actual.status, expected.status, "native status was changed");
+        assert_eq!(actual.stderr, expected.stderr, "native stderr was changed");
+        assert_eq!(normalized_json_sections(&actual.stdout), normalized_json_sections(&expected.stdout));
     }
 
     fn database_bytes(path: &Path) -> Vec<Option<Vec<u8>>> {
@@ -351,7 +384,7 @@ mod project_text_capsule {
         let native = direct(dir.path(), &db, "capsulequasar", false);
         let wrapped = capsule(dir.path(), Some(&db), &["capsulequasar"]);
         assert_eq!(native.status, 0);
-        assert_eq!(wrapped, native);
+        assert_json_return_eq(&wrapped, &native);
         assert!(wrapped.stdout.contains("single-native"));
         let native_raw = direct(dir.path(), &db, "capsulequasar", true);
         let wrapped_raw = capsule(dir.path(), Some(&db), &["--raw", "capsulequasar"]);
@@ -395,8 +428,8 @@ mod project_text_capsule {
         let last_header = format!("### {}\n", last.display());
         assert!(output.stdout.find(&first_header).unwrap() < output.stdout.find(&last_header).unwrap());
         assert!(output.stderr.contains(&missing.display().to_string()));
-        let diagnostic = actual_error.stderr.lines().filter(|line| !line.is_empty())
-            .next_back().expect("actual corrupt database diagnostic");
+        let diagnostic = actual_error.stderr.lines().rfind(|line| !line.is_empty())
+            .expect("actual corrupt database diagnostic");
         assert!(output.stderr.contains(diagnostic));
         let reverse = format!("{}:{}:{}", missing.display(), corrupt.display(), last.display());
         let output = capsule(dir.path(), Some(&first), &["--all", "--set", &reverse, "capsulequasar"]);
@@ -437,7 +470,21 @@ mod project_text_capsule {
         assert_eq!(priority.status, 78);
         let environment_set = capsule_environment(dir.path(), Some(&missing_primary), None,
             Some(&set), &["--all", "capsulequasar"]);
-        assert_eq!(environment_set, output);
+        assert_json_return_eq(&environment_set, &output);
+        // Genuine native queries establish that the comparison does not erase
+        // the declared ordering or a repeated selected store.
+        let reordered_set = format!("{}:{}:{}", second.display(), first.display(), first.display());
+        let reordered = capsule(dir.path(), Some(&missing_primary),
+            &["--all", "--set", &reordered_set, "capsulequasar"]);
+        assert_eq!(reordered.status, 0);
+        assert_eq!(reordered.stderr, output.stderr);
+        assert_ne!(normalized_json_sections(&reordered.stdout), normalized_json_sections(&output.stdout));
+        let without_repeat = format!("{}:{}", first.display(), second.display());
+        let without_repeat = capsule(dir.path(), Some(&missing_primary),
+            &["--all", "--set", &without_repeat, "capsulequasar"]);
+        assert_eq!(without_repeat.status, 0);
+        assert_eq!(without_repeat.stderr, output.stderr);
+        assert_ne!(normalized_json_sections(&without_repeat.stdout), normalized_json_sections(&output.stdout));
         let only_second = second.display().to_string();
         let explicit_set = capsule_environment(dir.path(), Some(&missing_primary), None,
             Some(&set), &["--all", "--set", &only_second, "capsulequasar"]);
