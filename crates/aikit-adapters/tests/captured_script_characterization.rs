@@ -630,3 +630,156 @@ fn actual_old_owner_negative_and_current_owner_positive_use_same_native_capture(
     // and source archives remain owned for always-upload and host job disposal.
     Ok(())
 }
+
+// Performance characterization only. The original driver above and both current
+// full Source checkpoints are unchanged. The transported image is hashed, never run.
+#[test]
+#[ignore = "requires exact retained Linux artifact11275095057 material in the existing hosted product Run fixture"]
+fn actual_held_image_sha256_profile_cost() -> Result<(), Box<dyn Error>> {
+    const CASE: &str = "actual_held_image_sha256_profile_cost";
+    const BYTES: u64 = 391_408_864;
+    const SHA: &str = "fb23d25bb905e3b23ca3e9314e2ee1e48c4f5a2288bc955f8e9ccbf381f1b9c6";
+    let root = PathBuf::from(std::env::var_os("AIKIT_SCRIPT_CHARACTERIZATION_ROOT")
+        .ok_or_else(|| invalid("Actual hosted comparison fixture is required"))?);
+    let product = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize()?;
+    let scratch = product.join("ProjectCentral/now/tmp").canonicalize()?;
+    if !normal_absolute(&root) || root.canonicalize()? != root || !root.starts_with(&scratch) || root == scratch {
+        return Err(invalid("Hash comparison requires the actual exclusive product Run fixture").into());
+    }
+    let held_root = OpenOptions::new().read(true)
+        .custom_flags((OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC).bits() as i32).open(&root)?;
+    let root_tuple = identity(&held_root.metadata()?);
+    let check_root = || -> io::Result<()> {
+        let named = fs::symlink_metadata(&root)?;
+        if !named.is_dir() || identity(&named) != root_tuple || identity(&held_root.metadata()?) != root_tuple
+            || root.canonicalize()? != root {
+            return Err(invalid("Hash comparison fixture affiliation changed"));
+        }
+        Ok(())
+    };
+    check_root()?;
+    let profile = std::env::var("AIKIT_SHA2_PROBE_PROFILE")?;
+    if !matches!(profile.as_str(), "baseline" | "optimized") {
+        return Err(invalid("Hash comparison profile must be explicitly selected").into());
+    }
+    let image = root.join("sha2-comparison-old-image");
+    match std::env::var_os("AIKIT_SHA2_PROBE_CHILD") {
+        Some(value) if value == "1" => {
+            let held = open_regular(&image)?;
+            let before = compiler_basis(&held.metadata()?);
+            if before["bytes"].as_u64() != Some(BYTES) {
+                return Err(invalid("Exact retained CompilerArtifact byte input is unavailable").into());
+            }
+            let hardware = if cfg!(target_os = "linux") {
+                let mut bytes = Vec::new();
+                File::open("/proc/cpuinfo")?.take(65_537).read_to_end(&mut bytes)?;
+                if bytes.len() > 65_536 { return Err(invalid("Actual CPU observation exceeds its mechanical bound").into()); }
+                json!({"route":"actual_linux_proc_cpuinfo","stdout":String::from_utf8(bytes)?})
+            } else {
+                let actual = SystemRunner::new().with_strict_utf8().with_body_free_diagnostics()
+                    .run_with_limits(&["sysctl".to_owned(), "-n".to_owned(), "hw.model".to_owned(), "hw.ncpu".to_owned()],
+                        Duration::from_secs(10), 65_536, true)?;
+                if actual.status != 0 {
+                    return Err(Box::new(AikitError::new("test.hash_cost_cpu_observation_failed", "Actual native CPU observation did not succeed")
+                        .with_detail("status", actual.status.to_string())
+                        .with_native_capture(Some(actual.status), actual.stdout.into_bytes(), actual.stderr.into_bytes())));
+                }
+                json!({"route":"actual_mac_sysctl_hw_model_ncpu","status":actual.status,"stdout":actual.stdout,"stderr":actual.stderr})
+            };
+            let mut observations = Vec::with_capacity(3);
+            // A complete unmeasured priming read precedes both timed samples.
+            // This records actual reads; it does not promise a kernel cache state.
+            for _ in 0..3 {
+                check_root()?;
+                if compiler_basis(&held.metadata()?) != before
+                    || compiler_basis(&fs::symlink_metadata(&image)?) != before {
+                    return Err(invalid("Held hash input changed before the current checkpoint").into());
+                }
+                let started = std::time::Instant::now();
+                let actual = digest(&image)?;
+                let elapsed = started.elapsed();
+                if actual != SHA || compiler_basis(&held.metadata()?) != before
+                    || compiler_basis(&fs::symlink_metadata(&image)?) != before {
+                    return Err(invalid("Exact hash input changed during the same-helper observation").into());
+                }
+                check_root()?;
+                observations.push(json!({"sha256":actual,"bytes":BYTES,"elapsed_nanoseconds":elapsed.as_nanos()}));
+            }
+            let warmup = observations.remove(0);
+            println!("AIKIT_SHA2_COST {}", json!({"profile":profile,"input_basis":before,
+                "sha256":SHA,"bytes":BYTES,"warmup":warmup,"observations":observations,
+                "os":std::env::consts::OS,"arch":std::env::consts::ARCH,"actual_hardware":hardware,
+                "scope":"two actual same-helper full reads; not whole Gate.check or native-case qualification"}));
+            Ok(())
+        }
+        Some(_) => Err(invalid("Unknown hash comparison child mode").into()),
+        None => {
+            let exe = std::env::current_exe()?;
+            let output = SystemRunner::new().with_cwd(&product).with_strict_utf8().with_body_free_diagnostics()
+                .with_env("AIKIT_SHA2_PROBE_CHILD", "1").with_env_removed("GH_TOKEN")
+                .with_env_removed("CENTRAL_ROOT").with_env_removed("CENTRAL_NATIVE_TOKEN")
+                .with_env_removed("AIKIT_HOME").with_env_removed("AIKIT_CONTEXT_ID")
+                .run_with_limits(&[exe.to_str().ok_or_else(|| invalid("Native comparison image must be UTF8"))?.to_owned(),
+                    CASE.to_owned(), "--ignored".to_owned(), "--exact".to_owned(), "--nocapture".to_owned(),
+                    "--test-threads=1".to_owned()], Duration::from_secs(90), 1024 * 1024, true);
+            let write = |suffix: &str, bytes: &[u8]| -> io::Result<()> {
+                check_root()?;
+                let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600)
+                    .custom_flags((OFlags::NOFOLLOW | OFlags::CLOEXEC).bits() as i32)
+                    .open(root.join(format!("sha2-{profile}.probe.{suffix}")))?;
+                file.write_all(bytes)?;
+                file.sync_all()?;
+                check_root()
+            };
+            match output {
+                Ok(actual) => {
+                    let retained = (|| -> io::Result<()> {
+                        write("stdout", actual.stdout.as_bytes())?;
+                        write("stderr", actual.stderr.as_bytes())?;
+                        write("receipt.json", &serde_json::to_vec_pretty(&json!({"status":actual.status,
+                            "native_completed_capture":true,"stdout_bytes":actual.stdout.len(),"stderr_bytes":actual.stderr.len(),
+                            "live_seconds":90,"separate_native_retirement_seconds":2})).map_err(io::Error::other)?)?;
+                        summary(&actual, "ok", 1, 0)?;
+                        let rows: Vec<_> = actual.stdout.lines().filter_map(|line| line.strip_prefix("AIKIT_SHA2_COST ")).collect();
+                        if rows.len() != 1 { return Err(invalid("One complete actual cost observation is required")); }
+                        let observed: Value = serde_json::from_str(rows[0]).map_err(io::Error::other)?;
+                        if observed["profile"] != profile || observed["sha256"] != SHA || observed["bytes"] != BYTES
+                            || observed["observations"].as_array().is_none_or(|values| values.len() != 2) {
+                            return Err(invalid("Actual cost observation differs from the selected input"));
+                        }
+                        write("observation.json", &serde_json::to_vec_pretty(&observed).map_err(io::Error::other)?)
+                    })();
+                    if let Err(cause) = retained {
+                        return Err(Box::new(AikitError::new("test.hash_cost_evidence_unavailable", "Actual comparison capture could not be admitted or retained")
+                            .with_io_source(cause).with_native_capture(Some(actual.status), actual.stdout.into_bytes(), actual.stderr.into_bytes())));
+                    }
+                    Ok(())
+                }
+                Err(failure) => {
+                    let retained = (|| -> io::Result<()> {
+                        if let Some(actual) = failure.native_capture() {
+                            write("partial.stdout", &actual.stdout)?;
+                            write("partial.stderr", &actual.stderr)?;
+                        }
+                        let primary = failure.source().and_then(|cause| cause.downcast_ref::<io::Error>())
+                            .map(|cause| json!({"kind":format!("{:?}",cause.kind()),"errno":cause.raw_os_error()}));
+                        let secondary: Vec<_> = failure.secondary_io_sources()
+                            .map(|cause| json!({"kind":format!("{:?}",cause.kind()),"errno":cause.raw_os_error()})).collect();
+                        write("refusal.json", &serde_json::to_vec_pretty(&json!({"code":failure.code(),
+                            "details":failure.details(),"primary_io":primary,"secondary_io":secondary,
+                            "actual_status":failure.native_capture().and_then(|capture| capture.status),
+                            "native_completed_capture":false,"comparison":"unavailable","retry":false})).map_err(io::Error::other)?)
+                    })();
+                    let failure = match retained {
+                        Ok(()) => failure,
+                        Err(cause) => {
+                            let supplemental = AikitError::new("test.hash_cost_evidence_unavailable", "Actual comparison refusal evidence could not be retained").with_io_source(cause);
+                            failure.with_secondary_io_source_from(&supplemental)
+                        },
+                    };
+                    Err(Box::new(failure))
+                }
+            }
+        }
+    }
+}

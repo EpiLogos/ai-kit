@@ -25,6 +25,9 @@ env:
 
 jobs:
   verify:
+    permissions:
+      contents: read
+      actions: read
     name: Real integration suite
     runs-on: macos-15
     timeout-minutes: 60
@@ -206,6 +209,8 @@ jobs:
       - name: Qualify actual old and current native captured-script owners
         if: success() && (runner.os == 'macOS')
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           old_head=b07ced38f17319305ebbee06502df8ad96f3b0eb
@@ -410,8 +415,102 @@ jobs:
           retain_artifact current-bin aikit aikit "$current_root" "$current_head" false
           run_compile current-runner cargo test --locked -p aikit-adapters --lib --no-run --message-format=json
           retain_artifact current-runner runner aikit_adapters "$current_root" "$current_head" true
-          run_compile current-driver cargo test --locked -p aikit-adapters --test captured_script_characterization --no-run --message-format=json
+          # Causal cost comparison only: the exact retained image is never executed.
+          python3 - "$gate_dir" <<'PYHASHINPUT'
+          from pathlib import Path
+          import hashlib,json,os,shutil,stat,sys,time,urllib.error,urllib.parse,urllib.request,zipfile
+          p=Path(sys.argv[1]);expected_size=724802959
+          expected_sha='e9c4abdfa40c6c99cb07acf5690cfe71404833eb658afef1e2b35fa1e72ccaba'
+          if p.resolve()!=p or not p.is_dir():raise SystemExit('Actual product Run fixture changed')
+          held=os.open(p,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+          def check():
+              a=os.fstat(held);b=p.lstat()
+              if not stat.S_ISDIR(b.st_mode) or (a.st_dev,a.st_ino)!=(b.st_dev,b.st_ino) or p.resolve()!=p:raise SystemExit('Hash input fixture affiliation changed')
+          def record(name,value):
+              check()
+              with (p/name).open('x') as out:out.write(json.dumps(value,indent=2)+'\n')
+              check()
+          try:
+              check();free=shutil.disk_usage(p).free
+              record('sha2-input-capacity.json',{'free_bytes':free,'required_bytes':expected_size+5*1024**3,'artifact':11275095057,'input_only':'retained public compiler image, never invoked'})
+              if free<expected_size+5*1024**3:raise SystemExit('Insufficient physical artifact capacity')
+              class NoRedirect(urllib.request.HTTPRedirectHandler):
+                  def redirect_request(self,*args,**kwargs):return None
+              api='https://api.github.com/repos/EpiLogos/ai-kit/actions/artifacts/11275095057/zip'
+              request=urllib.request.Request(api,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+              try:
+                  with urllib.request.build_opener(NoRedirect).open(request,timeout=30):
+                      raise SystemExit('Expected native artifact redirect unavailable')
+              except urllib.error.HTTPError as reply:
+                  if reply.code!=302:raise
+                  location=reply.headers['Location']
+              if urllib.parse.urlparse(location).scheme!='https':raise SystemExit('Native artifact transport is not HTTPS')
+              archive=p/'sha2-comparison-source-artifact.zip';h=hashlib.sha256();count=0;start=time.monotonic()
+              # Redirect transport receives no bearer header; no signed URL is disclosed.
+              with urllib.request.urlopen(location,timeout=30) as src,archive.open('xb') as dst:
+                  while True:
+                      if time.monotonic()-start>300:raise SystemExit('Artifact read exceeded its finite transport budget')
+                      block=src.read(512*1024)
+                      if not block:break
+                      count+=len(block)
+                      if count>expected_size:raise SystemExit('Artifact exceeded exact byte basis')
+                      dst.write(block);h.update(block)
+              record('sha2-input-archive.json',{'artifact':11275095057,'bytes':count,'sha256':h.hexdigest(),'expected_bytes':expected_size,'expected_sha256':expected_sha,'transport_seconds':time.monotonic()-start})
+              if count!=expected_size or h.hexdigest()!=expected_sha:raise SystemExit('Retained artifact byte custody differs')
+              member='script-capture-37121414924-1-Linux/binaries/old'
+              image=p/'sha2-comparison-old-image';h=hashlib.sha256();count=0
+              with zipfile.ZipFile(archive) as z:
+                  row=z.getinfo(member)
+                  if row.file_size!=391408864:raise SystemExit('Exact retained image length differs')
+                  with z.open(member) as src,image.open('xb') as dst:
+                      while block:=src.read(512*1024):dst.write(block);h.update(block);count+=len(block)
+              os.chmod(image,0o600)
+              record('sha2-input-image.json',{'member':member,'bytes':count,'sha256':h.hexdigest(),'executed':False})
+              if count!=391408864 or h.hexdigest()!='fb23d25bb905e3b23ca3e9314e2ee1e48c4f5a2288bc955f8e9ccbf381f1b9c6':raise SystemExit('Exact image bytes differ')
+              record('sha2-host.json',{'uname':list(os.uname()),'scope':'same hosted job; actual CPU observation is captured by the same native SystemRunner probe; runtime SHA backend is not inferred'})
+          finally:os.close(held)
+          PYHASHINPUT
+          run_compile current-driver-baseline cargo test --locked -p aikit-adapters --test captured_script_characterization --no-run --message-format=json
+          retain_artifact current-driver-baseline hash_baseline_driver captured_script_characterization "$current_root" "$current_head" true
+          run_hash_probe() {
+            profile="$1"; shift
+            set +e
+            AIKIT_SHA2_PROBE_PROFILE="$profile" "$@" > "$gate_dir/sha2-$profile.outer.stdout" 2> "$gate_dir/sha2-$profile.outer.stderr"
+            status=$?
+            set -e
+            printf '%s\n' "$status" > "$gate_dir/sha2-$profile.outer.exit"
+            if [ "$status" -ne 0 ]; then return "$status"; fi
+          }
+          run_hash_probe baseline cargo test --locked -p aikit-adapters --test captured_script_characterization actual_held_image_sha256_profile_cost -- --ignored --exact --nocapture --test-threads=1
+          run_compile current-driver cargo test --locked --config 'profile.test.package."sha2:0.10.9".opt-level=3' -p aikit-adapters --test captured_script_characterization --no-run --message-format=json
           retain_artifact current-driver driver captured_script_characterization "$current_root" "$current_head" true
+          run_hash_probe optimized cargo test --locked --config 'profile.test.package."sha2:0.10.9".opt-level=3' -p aikit-adapters --test captured_script_characterization actual_held_image_sha256_profile_cost -- --ignored --exact --nocapture --test-threads=1
+          python3 - "$gate_dir" <<'PYHASHCOST'
+          from pathlib import Path
+          import hashlib,json,re,sys
+          p=Path(sys.argv[1]);observations={}
+          for label,build,opt in [('baseline','current-driver-baseline','0'),('optimized','current-driver','3')]:
+              raw=(p/f'sha2-{label}.outer.stdout').read_text()+'\n'+(p/f'sha2-{label}.outer.stderr').read_text()
+              if (p/f'sha2-{label}.outer.exit').read_text().strip()!='0' or re.findall(r'test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;',raw)!=[('ok','1','0','0','0')]:raise SystemExit('Exactly one actual unskipped cost probe must complete')
+              receipt=json.loads((p/f'sha2-{label}.probe.receipt.json').read_text())
+              if receipt['status']!=0 or receipt['native_completed_capture'] is not True:raise SystemExit('Actual cost capture incomplete')
+              rows=[json.loads(line) for line in (p/(build+'.build.jsonl')).read_text().splitlines() if line.startswith('{')]
+              sha=[r for r in rows if r.get('reason')=='compiler-artifact' and r.get('package_id','').endswith('#sha2@0.10.9')]
+              driver=[r for r in rows if r.get('reason')=='compiler-artifact' and r.get('target',{}).get('name')=='captured_script_characterization' and r.get('executable')]
+              if len(sha)!=1 or sha[0]['profile']['opt_level']!=opt or len(driver)!=1 or driver[0]['profile']!={'opt_level':'0','debuginfo':2,'debug_assertions':True,'overflow_checks':True,'test':True}:raise SystemExit('Actual isolated compiler profiles differ')
+              observed=json.loads((p/f'sha2-{label}.probe.observation.json').read_text())
+              samples=observed['observations']
+              warmup=observed['warmup']
+              if warmup['bytes']!=391408864 or warmup['sha256']!='fb23d25bb905e3b23ca3e9314e2ee1e48c4f5a2288bc955f8e9ccbf381f1b9c6':raise SystemExit('Actual complete priming read differs')
+              if observed['profile']!=label or len(samples)!=2 or any(s['bytes']!=391408864 or s['sha256']!='fb23d25bb905e3b23ca3e9314e2ee1e48c4f5a2288bc955f8e9ccbf381f1b9c6' or not isinstance(s['elapsed_nanoseconds'],int) or s['elapsed_nanoseconds']<=0 for s in samples):raise SystemExit('Actual same-input cost observation differs')
+              observations[label]=observed
+          baseline=observations['baseline'];optimized=observations['optimized']
+          if any(baseline[k]!=optimized[k] for k in ['input_basis','sha256','bytes','os','arch']):raise SystemExit('Actual comparison input/host changed')
+          before=sum(x['elapsed_nanoseconds'] for x in baseline['observations']);after=sum(x['elapsed_nanoseconds'] for x in optimized['observations'])
+          actual={'scope':'same-helper complete image read, not whole Gate.check or native-case qualification','baseline_nanoseconds':before,'optimized_nanoseconds':after,'observations':observations,'required_reduction':'at least half the paired same-input elapsed cost','satisfied':after*2<=before,'source_sha256':hashlib.sha256((Path.cwd()/'crates/aikit-adapters/tests/captured_script_characterization.rs').read_bytes()).hexdigest(),'lock_sha256':hashlib.sha256((Path.cwd()/'Cargo.lock').read_bytes()).hexdigest()}
+          with (p/'sha2-cost-comparison.json').open('x') as out:out.write(json.dumps(actual,indent=2)+'\n')
+          if not actual['satisfied']:raise SystemExit('Native cost repair not quantified; full driver remains held')
+          PYHASHCOST
           python3 - "$gate_dir" <<'PYGATE'
           from pathlib import Path
           import hashlib,json,os,stat,sys
@@ -451,6 +550,12 @@ jobs:
           for label in ['old','new','current']:
               for suffix in ['.clean.cargo.txt','.clean.cargo.stderr','.clean.cargo.exit','.clean.command.json','.clean.stdout','.clean.stderr','.clean.exit']:add(p/(label+suffix))
           for q in [p/'source-watch.json',p/'old-augmentation.json',p/'new-augmentation.json']:add(q)
+          # Cost input/archive/baseline images are historical retained observations,
+          # never invoked by the full driver. Its original current inputs stay exact.
+          for name in ['sha2-cost-comparison.json','sha2-input-archive.json','sha2-input-image.json','sha2-host.json',
+                       'sha2-baseline.probe.observation.json','sha2-optimized.probe.observation.json']:
+              add(p/name)
+          for suffix in ['.build.jsonl','.build.stderr','.build.exit']:add(p/('current-driver-baseline'+suffix))
           meta.update({'default_outcome':json.loads((p/'default-result.json').read_text())['actual_outcome'],'platform':sys.platform,'compiled_old_new':2,'compiled_derived_definitions':6,'new_real_failure_unwind_selection':1,'inner_refusal_observation_contract':'expected_command_failure_original_and_structured_cleanup/v2','retained_fixture_contract':'retained_before_effect_and_on_unwind/v2','compiler_original_contract':'actual_compiler_artifact_held_regular/v3','workspace_clean_phases':['old','new','current'],'standing':'Actual compile and bytes only; native results are produced separately by selected ignored driver','live_seconds':20,'aggregate_capture_bytes':1048576,'separate_native_retirement_seconds':2})
           # Recheck actual source, lock, input and artifact custody before any child effect.
           for entry in meta['files']:
@@ -459,7 +564,7 @@ jobs:
           with (p/'gate.json').open('x') as output:output.write(json.dumps(meta,indent=2)+'\n')
           PYGATE
           set +e
-          cargo test --locked -p aikit-adapters --test captured_script_characterization actual_old_owner_negative_and_current_owner_positive_use_same_native_capture -- --ignored --exact --nocapture --test-threads=1 > "$gate_dir/driver.stdout" 2> "$gate_dir/driver.stderr"
+          cargo test --locked --config 'profile.test.package."sha2:0.10.9".opt-level=3' -p aikit-adapters --test captured_script_characterization actual_old_owner_negative_and_current_owner_positive_use_same_native_capture -- --ignored --exact --nocapture --test-threads=1 > "$gate_dir/driver.stdout" 2> "$gate_dir/driver.stderr"
           status=$?
           set -e
           printf '%s\n' "$status" > "$gate_dir/driver.exit"
@@ -485,6 +590,9 @@ jobs:
           retention-days: 14
 
   v2-crate-tests:
+    permissions:
+      contents: read
+      actions: read
     name: V2 crate — ${{ matrix.package }}${{ matrix.os == 'windows-latest' && ' (Windows)' || '' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.package == 'aikit-cli' && 60 || 20 }}
@@ -680,6 +788,8 @@ jobs:
       - name: Qualify actual old and current native captured-script owners
         if: success() && (matrix.package == 'aikit-cli' && runner.os == 'Linux')
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           old_head=b07ced38f17319305ebbee06502df8ad96f3b0eb
@@ -884,8 +994,102 @@ jobs:
           retain_artifact current-bin aikit aikit "$current_root" "$current_head" false
           run_compile current-runner cargo test --locked -p aikit-adapters --lib --no-run --message-format=json
           retain_artifact current-runner runner aikit_adapters "$current_root" "$current_head" true
-          run_compile current-driver cargo test --locked -p aikit-adapters --test captured_script_characterization --no-run --message-format=json
+          # Causal cost comparison only: the exact retained image is never executed.
+          python3 - "$gate_dir" <<'PYHASHINPUT'
+          from pathlib import Path
+          import hashlib,json,os,shutil,stat,sys,time,urllib.error,urllib.parse,urllib.request,zipfile
+          p=Path(sys.argv[1]);expected_size=724802959
+          expected_sha='e9c4abdfa40c6c99cb07acf5690cfe71404833eb658afef1e2b35fa1e72ccaba'
+          if p.resolve()!=p or not p.is_dir():raise SystemExit('Actual product Run fixture changed')
+          held=os.open(p,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+          def check():
+              a=os.fstat(held);b=p.lstat()
+              if not stat.S_ISDIR(b.st_mode) or (a.st_dev,a.st_ino)!=(b.st_dev,b.st_ino) or p.resolve()!=p:raise SystemExit('Hash input fixture affiliation changed')
+          def record(name,value):
+              check()
+              with (p/name).open('x') as out:out.write(json.dumps(value,indent=2)+'\n')
+              check()
+          try:
+              check();free=shutil.disk_usage(p).free
+              record('sha2-input-capacity.json',{'free_bytes':free,'required_bytes':expected_size+5*1024**3,'artifact':11275095057,'input_only':'retained public compiler image, never invoked'})
+              if free<expected_size+5*1024**3:raise SystemExit('Insufficient physical artifact capacity')
+              class NoRedirect(urllib.request.HTTPRedirectHandler):
+                  def redirect_request(self,*args,**kwargs):return None
+              api='https://api.github.com/repos/EpiLogos/ai-kit/actions/artifacts/11275095057/zip'
+              request=urllib.request.Request(api,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+              try:
+                  with urllib.request.build_opener(NoRedirect).open(request,timeout=30):
+                      raise SystemExit('Expected native artifact redirect unavailable')
+              except urllib.error.HTTPError as reply:
+                  if reply.code!=302:raise
+                  location=reply.headers['Location']
+              if urllib.parse.urlparse(location).scheme!='https':raise SystemExit('Native artifact transport is not HTTPS')
+              archive=p/'sha2-comparison-source-artifact.zip';h=hashlib.sha256();count=0;start=time.monotonic()
+              # Redirect transport receives no bearer header; no signed URL is disclosed.
+              with urllib.request.urlopen(location,timeout=30) as src,archive.open('xb') as dst:
+                  while True:
+                      if time.monotonic()-start>300:raise SystemExit('Artifact read exceeded its finite transport budget')
+                      block=src.read(512*1024)
+                      if not block:break
+                      count+=len(block)
+                      if count>expected_size:raise SystemExit('Artifact exceeded exact byte basis')
+                      dst.write(block);h.update(block)
+              record('sha2-input-archive.json',{'artifact':11275095057,'bytes':count,'sha256':h.hexdigest(),'expected_bytes':expected_size,'expected_sha256':expected_sha,'transport_seconds':time.monotonic()-start})
+              if count!=expected_size or h.hexdigest()!=expected_sha:raise SystemExit('Retained artifact byte custody differs')
+              member='script-capture-37121414924-1-Linux/binaries/old'
+              image=p/'sha2-comparison-old-image';h=hashlib.sha256();count=0
+              with zipfile.ZipFile(archive) as z:
+                  row=z.getinfo(member)
+                  if row.file_size!=391408864:raise SystemExit('Exact retained image length differs')
+                  with z.open(member) as src,image.open('xb') as dst:
+                      while block:=src.read(512*1024):dst.write(block);h.update(block);count+=len(block)
+              os.chmod(image,0o600)
+              record('sha2-input-image.json',{'member':member,'bytes':count,'sha256':h.hexdigest(),'executed':False})
+              if count!=391408864 or h.hexdigest()!='fb23d25bb905e3b23ca3e9314e2ee1e48c4f5a2288bc955f8e9ccbf381f1b9c6':raise SystemExit('Exact image bytes differ')
+              record('sha2-host.json',{'uname':list(os.uname()),'scope':'same hosted job; actual CPU observation is captured by the same native SystemRunner probe; runtime SHA backend is not inferred'})
+          finally:os.close(held)
+          PYHASHINPUT
+          run_compile current-driver-baseline cargo test --locked -p aikit-adapters --test captured_script_characterization --no-run --message-format=json
+          retain_artifact current-driver-baseline hash_baseline_driver captured_script_characterization "$current_root" "$current_head" true
+          run_hash_probe() {
+            profile="$1"; shift
+            set +e
+            AIKIT_SHA2_PROBE_PROFILE="$profile" "$@" > "$gate_dir/sha2-$profile.outer.stdout" 2> "$gate_dir/sha2-$profile.outer.stderr"
+            status=$?
+            set -e
+            printf '%s\n' "$status" > "$gate_dir/sha2-$profile.outer.exit"
+            if [ "$status" -ne 0 ]; then return "$status"; fi
+          }
+          run_hash_probe baseline cargo test --locked -p aikit-adapters --test captured_script_characterization actual_held_image_sha256_profile_cost -- --ignored --exact --nocapture --test-threads=1
+          run_compile current-driver cargo test --locked --config 'profile.test.package."sha2:0.10.9".opt-level=3' -p aikit-adapters --test captured_script_characterization --no-run --message-format=json
           retain_artifact current-driver driver captured_script_characterization "$current_root" "$current_head" true
+          run_hash_probe optimized cargo test --locked --config 'profile.test.package."sha2:0.10.9".opt-level=3' -p aikit-adapters --test captured_script_characterization actual_held_image_sha256_profile_cost -- --ignored --exact --nocapture --test-threads=1
+          python3 - "$gate_dir" <<'PYHASHCOST'
+          from pathlib import Path
+          import hashlib,json,re,sys
+          p=Path(sys.argv[1]);observations={}
+          for label,build,opt in [('baseline','current-driver-baseline','0'),('optimized','current-driver','3')]:
+              raw=(p/f'sha2-{label}.outer.stdout').read_text()+'\n'+(p/f'sha2-{label}.outer.stderr').read_text()
+              if (p/f'sha2-{label}.outer.exit').read_text().strip()!='0' or re.findall(r'test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;',raw)!=[('ok','1','0','0','0')]:raise SystemExit('Exactly one actual unskipped cost probe must complete')
+              receipt=json.loads((p/f'sha2-{label}.probe.receipt.json').read_text())
+              if receipt['status']!=0 or receipt['native_completed_capture'] is not True:raise SystemExit('Actual cost capture incomplete')
+              rows=[json.loads(line) for line in (p/(build+'.build.jsonl')).read_text().splitlines() if line.startswith('{')]
+              sha=[r for r in rows if r.get('reason')=='compiler-artifact' and r.get('package_id','').endswith('#sha2@0.10.9')]
+              driver=[r for r in rows if r.get('reason')=='compiler-artifact' and r.get('target',{}).get('name')=='captured_script_characterization' and r.get('executable')]
+              if len(sha)!=1 or sha[0]['profile']['opt_level']!=opt or len(driver)!=1 or driver[0]['profile']!={'opt_level':'0','debuginfo':2,'debug_assertions':True,'overflow_checks':True,'test':True}:raise SystemExit('Actual isolated compiler profiles differ')
+              observed=json.loads((p/f'sha2-{label}.probe.observation.json').read_text())
+              samples=observed['observations']
+              warmup=observed['warmup']
+              if warmup['bytes']!=391408864 or warmup['sha256']!='fb23d25bb905e3b23ca3e9314e2ee1e48c4f5a2288bc955f8e9ccbf381f1b9c6':raise SystemExit('Actual complete priming read differs')
+              if observed['profile']!=label or len(samples)!=2 or any(s['bytes']!=391408864 or s['sha256']!='fb23d25bb905e3b23ca3e9314e2ee1e48c4f5a2288bc955f8e9ccbf381f1b9c6' or not isinstance(s['elapsed_nanoseconds'],int) or s['elapsed_nanoseconds']<=0 for s in samples):raise SystemExit('Actual same-input cost observation differs')
+              observations[label]=observed
+          baseline=observations['baseline'];optimized=observations['optimized']
+          if any(baseline[k]!=optimized[k] for k in ['input_basis','sha256','bytes','os','arch']):raise SystemExit('Actual comparison input/host changed')
+          before=sum(x['elapsed_nanoseconds'] for x in baseline['observations']);after=sum(x['elapsed_nanoseconds'] for x in optimized['observations'])
+          actual={'scope':'same-helper complete image read, not whole Gate.check or native-case qualification','baseline_nanoseconds':before,'optimized_nanoseconds':after,'observations':observations,'required_reduction':'at least half the paired same-input elapsed cost','satisfied':after*2<=before,'source_sha256':hashlib.sha256((Path.cwd()/'crates/aikit-adapters/tests/captured_script_characterization.rs').read_bytes()).hexdigest(),'lock_sha256':hashlib.sha256((Path.cwd()/'Cargo.lock').read_bytes()).hexdigest()}
+          with (p/'sha2-cost-comparison.json').open('x') as out:out.write(json.dumps(actual,indent=2)+'\n')
+          if not actual['satisfied']:raise SystemExit('Native cost repair not quantified; full driver remains held')
+          PYHASHCOST
           python3 - "$gate_dir" <<'PYGATE'
           from pathlib import Path
           import hashlib,json,os,stat,sys
@@ -925,6 +1129,12 @@ jobs:
           for label in ['old','new','current']:
               for suffix in ['.clean.cargo.txt','.clean.cargo.stderr','.clean.cargo.exit','.clean.command.json','.clean.stdout','.clean.stderr','.clean.exit']:add(p/(label+suffix))
           for q in [p/'source-watch.json',p/'old-augmentation.json',p/'new-augmentation.json']:add(q)
+          # Cost input/archive/baseline images are historical retained observations,
+          # never invoked by the full driver. Its original current inputs stay exact.
+          for name in ['sha2-cost-comparison.json','sha2-input-archive.json','sha2-input-image.json','sha2-host.json',
+                       'sha2-baseline.probe.observation.json','sha2-optimized.probe.observation.json']:
+              add(p/name)
+          for suffix in ['.build.jsonl','.build.stderr','.build.exit']:add(p/('current-driver-baseline'+suffix))
           meta.update({'default_outcome':json.loads((p/'default-result.json').read_text())['actual_outcome'],'platform':sys.platform,'compiled_old_new':2,'compiled_derived_definitions':6,'new_real_failure_unwind_selection':1,'inner_refusal_observation_contract':'expected_command_failure_original_and_structured_cleanup/v2','retained_fixture_contract':'retained_before_effect_and_on_unwind/v2','compiler_original_contract':'actual_compiler_artifact_held_regular/v3','workspace_clean_phases':['old','new','current'],'standing':'Actual compile and bytes only; native results are produced separately by selected ignored driver','live_seconds':20,'aggregate_capture_bytes':1048576,'separate_native_retirement_seconds':2})
           # Recheck actual source, lock, input and artifact custody before any child effect.
           for entry in meta['files']:
@@ -933,7 +1143,7 @@ jobs:
           with (p/'gate.json').open('x') as output:output.write(json.dumps(meta,indent=2)+'\n')
           PYGATE
           set +e
-          cargo test --locked -p aikit-adapters --test captured_script_characterization actual_old_owner_negative_and_current_owner_positive_use_same_native_capture -- --ignored --exact --nocapture --test-threads=1 > "$gate_dir/driver.stdout" 2> "$gate_dir/driver.stderr"
+          cargo test --locked --config 'profile.test.package."sha2:0.10.9".opt-level=3' -p aikit-adapters --test captured_script_characterization actual_old_owner_negative_and_current_owner_positive_use_same_native_capture -- --ignored --exact --nocapture --test-threads=1 > "$gate_dir/driver.stdout" 2> "$gate_dir/driver.stderr"
           status=$?
           set -e
           printf '%s\n' "$status" > "$gate_dir/driver.exit"
