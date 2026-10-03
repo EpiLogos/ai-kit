@@ -10,6 +10,7 @@ use aikit_core::{ResourceRef, Result, SourceRevision};
 use aikit_store::{AikitHome, ContextLock, LockOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::Write,
@@ -322,6 +323,7 @@ fn inspect(request: &TaskRequest, requirements: &Value) -> Result<Value> {
 struct TaskCodexRuntime {
     npm_cache: PathBuf,
     sqlite_home: PathBuf,
+    projection: Value,
 }
 
 /// The embedded Codex ACP connection uses npx, which writes package/runtime
@@ -399,12 +401,43 @@ fn task_codex_runtime(
             }
         }
     }
+    // This is the same original native home route delivered by ModelEnvironment,
+    // not provider.env, another credential home, or a Session identity. Native
+    // Codex canonicalizes nonempty CODEX_HOME. Missing/default input refuses
+    // here rather than granting creation in the ambient home.
+    let supplied_home = std::env::var("CODEX_HOME").ok().filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))
+        .ok_or_else(|| error("Codex Task runtime needs the original native home input"))?;
+    // Qualify only once, preserving the exact lexical route supplied to
+    // the unchanged provider environment. The actual native owner checks
+    // this route against the admitted canonical held origin before body.
+    let requested_input_root = if supplied_home.is_absolute() {
+        supplied_home
+    } else {
+        std::env::current_dir()
+            .map_err(|failure| error(&failure).with_io_source(failure))?
+            .join(supplied_home)
+    };
+    let input_root = fs::canonicalize(&requested_input_root)
+        .map_err(|failure| error(&failure).with_io_source(failure))?;
+    if !fs::symlink_metadata(&input_root).map_err(|failure| error(&failure).with_io_source(failure))?.is_dir()
+        || requested_input_root.to_str().is_none() || input_root.to_str().is_none() || now.to_str().is_none() {
+        return Err(error("Codex Task runtime needs an existing representable native input directory"));
+    }
+    let projection = json!({"schema":"workcell.runtime-projection/v1",
+        "requested_input_root":requested_input_root,"input_root":input_root,"runtime_root":now.join("native-codex-runtime"),
+        "immutable_members":["auth.json",".credentials.json","config.toml","config.d","managed_config.toml","hooks.json"],
+        "mutable_directories":["tmp","log","sessions","archived_sessions","shell_snapshots"],
+        "mutable_files":["installation_id","history.jsonl","models_cache.json"],
+        "boundary_digest":inspection["requirements_digest"]});
     // npm and native Codex create absent runtime directories only after
     // Workcell applies the object-bound Task aperture. HOME/CODEX_HOME remain
     // the original auth/config origin; SQLite placement is not a new Session.
     Ok(Some(TaskCodexRuntime {
         npm_cache: cache,
         sqlite_home,
+        projection,
     }))
 }
 fn validate(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Result<()> {
@@ -978,20 +1011,25 @@ impl EncounterService {
             model_argv = crate::model_defaults::launch_argv(&resolved_body, default.as_ref())?;
         }
         let codex_runtime = task_codex_runtime(&record, &resolved_body, &model_argv)?;
+        // Only nonsecret routing/type facts enter this private immutable launch
+        // source. It lives with the existing requirements owner, outside Task T.
+        let mut projection_file = if let Some(runtime) = codex_runtime.as_ref() {
+            let mut projection = tempfile::NamedTempFile::new_in(path(home, session).parent().expect("task parent"))
+                .map_err(|failure| error(&failure).with_io_source(failure))?;
+            projection.write_all(runtime.projection.to_string().as_bytes())
+                .map_err(|failure| error(&failure).with_io_source(failure))?;
+            projection.as_file().sync_all().map_err(|failure| error(&failure).with_io_source(failure))?;
+            Some(projection)
+        } else { None };
         let mut command = Command::new(&record.request.workcell_boundary_bin);
-        command
-            .args([
-                "exec",
-                &file.path().display().to_string(),
-                requirements["policy_revision"]
-                    .as_str()
-                    .expect("validated revision"),
-                inspection["requirements_digest"]
-                    .as_str()
-                    .expect("validated digest"),
-                "--",
-            ])
-            .args(&model_argv)
+        command.arg(if projection_file.is_some() { "exec-runtime" } else { "exec" })
+            .arg(file.path())
+            .arg(requirements["policy_revision"].as_str().expect("validated revision"))
+            .arg(inspection["requirements_digest"].as_str().expect("validated digest"));
+        if let (Some(projection), Some(runtime)) = (projection_file.as_ref(), codex_runtime.as_ref()) {
+            command.arg(projection.path()).arg(format!("sha256:{:x}", Sha256::digest(runtime.projection.to_string().as_bytes())));
+        }
+        command.arg("--").args(&model_argv)
             .env_remove("CENTRAL_NATIVE_TOKEN")
             .env_remove("WORKCELL_CONTROL_TOKEN");
         if let Some(environment) = model_environment {
@@ -1010,6 +1048,8 @@ impl EncounterService {
         // Retain the immutable requirements path across exec. Its private owner
         // directory is outside every write aperture. History can inspect it.
         let (_file, _retained_path) = file.keep().map_err(error)?;
+        let _retained_projection = projection_file.take().map(|file| file.keep()).transpose()
+            .map_err(|failure| { let cause = failure.error; error(&cause).with_io_source(cause) })?;
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;

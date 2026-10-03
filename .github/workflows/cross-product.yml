@@ -185,14 +185,197 @@ jobs:
           EOF
 
   native-composition:
-    runs-on: ubuntu-24.04
+    name: Native composition and Wiki scope — ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
-      CENTRAL_SHA: 4cd0fe52b10fb0e09a5a9e4486ea3d40d4946c5c
+      CENTRAL_SHA: 2a604574774c41921003ed99a2eed73b4c9f4266
       ACTUATION_SHA: 4af495f6509bb0dd779112a225d71a9df8145b6e
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Admit existing owned product scratch and retain native command facts
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(id -u)" -ne 0
+          command -v python3
+          command -v cargo
+          command -v git
+          umask 077
+          scratch="$GITHUB_WORKSPACE/ProjectCentral/now/tmp"
+          mkdir -p "$scratch"
+          evidence="$scratch/native-composition-${GITHUB_RUN_ID}-${RUNNER_OS}"
+          mkdir "$evidence"
+          mkdir "$evidence/images" "$evidence/source"
+          printf 'NATIVE_COMPOSITION_EVIDENCE=%s\nAIKIT_NATIVE_TEST_ARTIFACT_ROOT=%s\n' "$evidence" "$evidence" >> "$GITHUB_ENV"
+          cp ProjectCentral/project.json "$evidence/product-manifest.json"
+          {
+            id
+            uname -a
+            python3 --version
+            rustc -Vv
+            cargo -Vv
+          } > "$evidence/host-tools.txt" 2>&1
+          cat > "$evidence/record-command.sh" <<'SH'
+          record_command() {
+            label="$1"; shift
+            printf '%s\0' "$@" > "$NATIVE_COMPOSITION_EVIDENCE/$label.argv"
+            pwd > "$NATIVE_COMPOSITION_EVIDENCE/$label.cwd"
+            set +e
+            "$@" > "$NATIVE_COMPOSITION_EVIDENCE/$label.stdout" 2> "$NATIVE_COMPOSITION_EVIDENCE/$label.stderr"
+            command_status=$?
+            set -e
+            printf '%s\n' "$command_status" > "$NATIVE_COMPOSITION_EVIDENCE/$label.exit"
+            cat "$NATIVE_COMPOSITION_EVIDENCE/$label.stdout"
+            cat "$NATIVE_COMPOSITION_EVIDENCE/$label.stderr" >&2
+            return "$command_status"
+          }
+          SH
+          cat > "$evidence/audit.py" <<'PY'
+          import hashlib,json,os,stat,sys
+          from pathlib import Path
+          out=Path(os.environ['NATIVE_COMPOSITION_EVIDENCE'])
+          workspace=Path(os.environ['GITHUB_WORKSPACE'])
+          roles=[
+           {'name':'ctrl','receipt':'compiler-central.stdout','root':str(Path(os.environ['RUNNER_TEMP'])/'Central'),'target':'ctrl','kind':'bin','test':False},
+           {'name':'aikit','receipt':'compiler-integration.stdout','root':str(workspace),'target':'aikit','kind':'bin','test':False},
+           {'name':'compose-native','receipt':'compiler-integration.stdout','root':str(workspace),'target':'compose_native_central','kind':'test','test':True},
+           {'name':'wiki-native','receipt':'compiler-integration.stdout','root':str(workspace),'target':'knowledge_wiki_scope_native','kind':'test','test':True},
+           {'name':'project-scope','receipt':'compiler-project-scope.stdout','root':str(workspace),'target':'aikit','kind':'bin','test':True},
+          ]
+          actor=[
+           'explicit_compose_discloses_authored_basis_and_refuses_broken_source',
+           'unreadable_authored_profile_refuses_context_and_projection_with_actual_owner_error',
+           'ambiguous_native_profiles_refuse_context_and_projection_without_guessing',
+           'invalid_actual_model_bearing_refuses_context_and_projection_but_absence_remains_valid',
+           'explicitly_independent_project_without_actor_sources_remains_useful',
+          ]
+          wiki=[
+           'actual_native_wiki_id_differs_from_folder_and_sibling_label_cannot_grant_scope',
+           'actual_owner_created_external_identity_missing_or_ambiguous_refuses_broad_query',
+           'actual_native_duplicate_id_is_withheld_from_every_internal_project_scope',
+          ]
+          def write(name,value):
+           (out/name).write_text(json.dumps(value,indent=2)+'\n')
+          def facts(s):
+           return dict(device=s.st_dev,inode=s.st_ino,mode=s.st_mode,links=s.st_nlink,uid=s.st_uid,gid=s.st_gid,bytes=s.st_size,mtime_ns=s.st_mtime_ns,ctime_ns=s.st_ctime_ns)
+          def held(path,root,copy=None,limit=1073741824):
+           p=Path(path);root=Path(root)
+           row={'path':str(p),'requested_root':str(root),'sha256':None,'cause':None}
+           try:
+            row['named_before']=facts(os.lstat(p));actual_root=root.resolve(strict=True);physical=p.resolve(strict=True)
+            row['physical_root']=str(actual_root);row['physical_path']=str(physical)
+            if not p.is_absolute() or not p.is_relative_to(root) or not physical.is_relative_to(actual_root):
+             raise ValueError('original coordinate is outside the selected lexical/physical compiler root')
+            fd=os.open(p,os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW|os.O_CLOEXEC)
+            with os.fdopen(fd,'rb') as f:
+             row['held_before']=facts(os.fstat(f.fileno()))
+             first=row['held_before']
+             if not stat.S_ISREG(first['mode']) or first['uid']!=os.geteuid() or first['bytes']>limit:
+              raise ValueError('nonregular/foreign/over-capacity original; no byte read admitted')
+             if first!=row['named_before']:
+              raise ValueError('named original changed before held read; digest unavailable')
+             digest=hashlib.sha256();observed=0;prefix=b'';sink=None
+             try:
+              if copy is not None:
+               sink=os.fdopen(os.open(copy,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o700),'wb')
+              while chunk:=f.read(1048576):
+               if not prefix:prefix=chunk[:64]
+               observed+=len(chunk)
+               if observed>limit:raise ValueError('held original exceeded bounded read capacity')
+               digest.update(chunk)
+               if sink:sink.write(chunk)
+              if sink:sink.flush()
+             finally:
+              if sink:sink.close()
+             row['held_after']=facts(os.fstat(f.fileno()));row['named_after']=facts(os.lstat(p))
+             if first!=row['held_after'] or first!=row['named_after'] or p.resolve(strict=True)!=physical or root.resolve(strict=True)!=actual_root:
+              raise ValueError('held/named original or parent alias affiliation changed; digest unavailable')
+             row['sha256']=digest.hexdigest();row['observed_bytes']=observed;row['header_hex']=prefix.hex()
+             row['standing']='bounded unchanged held regular original; original links observed, not required one; checkpoints are not atomic exclusion of external writers'
+             if copy is not None:
+              row['private_copy']={'path':str(copy),'metadata':facts(os.lstat(copy))}
+              if not stat.S_ISREG(row['private_copy']['metadata']['mode']) or row['private_copy']['metadata']['links']!=1:
+               raise ValueError('private evidence image must be ordinary single-link')
+           except (OSError,ValueError) as e:
+            row['sha256']=None;row['cause']={'type':type(e).__name__,'errno':getattr(e,'errno',None),'message':str(e)}
+           return row
+          def artifacts(file):
+           used=0;result=[]
+           with Path(file).open('rb') as stream:
+            for raw in stream:
+             used+=len(raw)
+             if used>67108864 or len(raw)>1048576:raise ValueError('compiler receipt capacity exceeded')
+             item=json.loads(raw)
+             if item.get('reason')=='compiler-artifact':result.append(item)
+           return result
+          def bounded_text(path):
+           with Path(path).open('rb') as stream:raw=stream.read(1048577)
+           if len(raw)>1048576:raise ValueError('test receipt exceeded one MiB selection capacity')
+           return raw.decode('utf-8',errors='strict')
+          mode=sys.argv[1]
+          if mode=='prepare':
+           records=[];total=0
+           for role in roles:
+            rows=[r for r in artifacts(out/role['receipt']) if r['target']['name']==role['target'] and r.get('executable') and role['kind'] in r['target']['kind'] and r['profile']['test']==role['test']]
+            if len(rows)!=1:raise ValueError('exactly one actual CompilerArtifact required for '+role['name'])
+            artifact=rows[0];root=Path(role['root']);image=Path(artifact['executable'])
+            row={'role':role,'compiler_artifact':artifact,'image':held(image,root/'target'/'debug',out/'images'/role['name'],min(1073741824,3221225472-total))}
+            records.append(row);write('images.before.json',records)
+            if row['image']['cause']:raise ValueError('original image digest/admission failed; actual cause retained')
+            total+=row['image']['observed_bytes']
+            if total>3221225472:raise ValueError('aggregate retained image capacity exceeded')
+            # Original physical digest is recorded before semantic form/profile refusal.
+            header=row['image']['header_hex'][:8]
+            expected={'Linux':['7f454c46'],'Darwin':['cffaedfe','feedfacf','cefaedfe','feedface','cafebabe','bebafeca','cafebabf','bfbafeca']}
+            if header not in expected[os.uname().sysname] or not row['image']['held_before']['mode']&0o111:
+             raise ValueError('actual native platform image form/executable mode mismatch')
+            if 'codex-account-native' in artifact.get('features',[]):raise ValueError('credential-free gate cannot select account feature')
+            row['source']=held(artifact['target']['src_path'],root);row['manifest']=held(artifact['manifest_path'],root)
+            write('images.before.json',records)
+            if row['source']['cause'] or row['manifest']['cause']:raise ValueError('compiled source/manifest basis unavailable')
+            (out/(role['name']+'.path')).write_text(str(image)+'\n')
+           write('images.before.json',records)
+           archive_rows=[]
+           for path in sorted((out/'source').glob('*.tar')):
+            archive_rows.append(held(path,out/'source'));write('source-archives.json',archive_rows)
+            if archive_rows[-1]['cause']:raise ValueError('source archive digest unavailable')
+           if len(archive_rows)!=3:raise ValueError('exact three actual product source archives required')
+           write('environment.json',{'os':os.uname().sysname,'python':sys.version,'values':{key:os.environ.get(key) for key in ['GITHUB_RUN_ID','GITHUB_SHA','GITHUB_REPOSITORY','RUSTFLAGS','RUSTC_WRAPPER','CARGO_TARGET_DIR','CARGO_BUILD_TARGET','AIKIT_NATIVE_TEST_ARTIFACT_ROOT','AIKIT_CENTRAL_REAL_BIN','CENTRAL_CTRL_BIN']},'limits':{'original_image_bytes':1073741824,'aggregate_image_bytes':3221225472,'compiler_bytes':67108864,'compiler_line_bytes':1048576},'standing':'hosted test-owned material; no installed/original/provider/human acceptance'})
+          elif mode=='roster':
+           kind=sys.argv[2];expected=actor if kind=='actor' else wiki
+           text=bounded_text(out/(kind+'-list.stdout'))
+           actual=[line.removesuffix(': test') for line in text.splitlines() if line.endswith(': test')]
+           row={'kind':kind,'expected':expected,'actual':actual,'status':int((out/(kind+'-list.exit')).read_text()),'match':len(actual)==len(expected) and sorted(actual)==sorted(expected)}
+           write(kind+'-roster.json',row)
+           if row['status']!=0 or not row['match']:raise ValueError('compiled ignored census differs from required '+kind+' roster')
+          elif mode=='results':
+           kind=sys.argv[2];expected=actor if kind=='actor' else wiki;rows=[]
+           for name in expected:
+            text=bounded_text(out/(name+'.stdout'));status=int((out/(name+'.exit')).read_text())
+            summary='test result: ok. 1 passed; 0 failed; 0 ignored;'
+            row={'name':name,'status':status,'actual_test_line':('test '+name+' ... ok') in text,'one_pass_zero_fail_zero_ignored':summary in text}
+            rows.append(row);write(kind+'-execution-results.json',{'expected':expected,'actual':rows,'standing':'actual executable raw result assertions, not badge/census inference'})
+           if len(rows)!=len(expected) or not all(r['status']==0 and r['actual_test_line'] and r['one_pass_zero_fail_zero_ignored'] for r in rows):
+            raise ValueError('exact required '+kind+' execution assertions failed')
+          elif mode=='after':
+           before=json.loads((out/'images.before.json').read_text());rows=[];failed=len(before)!=len(roles)
+           for row in before:
+            after=held(row['image']['path'],Path(row['role']['root'])/'target'/'debug')
+            same=not after['cause'] and after['sha256']==row['image']['sha256'] and after['held_before']==row['image'].get('held_after')
+            rows.append({'role':row['role'],'original_before':row['image'],'current_after':after,'same_original':same});failed|=not same
+           write('images.after.json',{'actual':rows,'complete_roles':len(before)==len(roles),'all_unchanged':not failed,'standing':'actual held source-image checkpoints; no universal process cleanup/EOF claim'})
+           if failed:raise ValueError('original native image basis changed or incomplete')
+          else:raise ValueError('unknown evidence operation')
+          PY
       - name: Exact native owner dependencies
         shell: bash
         run: |
@@ -206,8 +389,16 @@ jobs:
             git -C "$root" fetch --depth=1 origin "$revision"
             git -C "$root" checkout --detach FETCH_HEAD
             test "$(git -C "$root" rev-parse HEAD)" = "$revision"
+            test -z "$(git -C "$root" status --porcelain)"
+            git -C "$root" archive --format=tar HEAD > "$NATIVE_COMPOSITION_EVIDENCE/source/$owner.tar"
+            git -C "$root" ls-tree -r HEAD > "$NATIVE_COMPOSITION_EVIDENCE/source/$owner-tree-modes.txt"
+            git -C "$root" rev-parse HEAD 'HEAD^{tree}' > "$NATIVE_COMPOSITION_EVIDENCE/source/$owner-head-tree.txt"
           done
+          git archive --format=tar HEAD > "$NATIVE_COMPOSITION_EVIDENCE/source/AIKit.tar"
+          git ls-tree -r HEAD > "$NATIVE_COMPOSITION_EVIDENCE/source/AIKit-tree-modes.txt"
+          git rev-parse HEAD 'HEAD^{tree}' > "$NATIVE_COMPOSITION_EVIDENCE/source/AIKit-head-tree.txt"
           printf '%s\n' "$RUNNER_TEMP/Central/target/debug" "$RUNNER_TEMP/Actuation/target/release" >> "$GITHUB_PATH"
+          printf 'AIKIT_CENTRAL_REAL_BIN=%s\nCENTRAL_CTRL_BIN=%s\n' "$RUNNER_TEMP/Central/target/debug/ctrl" "$RUNNER_TEMP/Central/target/debug/ctrl" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2.9.2
         with:
           workspaces: |
@@ -215,31 +406,96 @@ jobs:
             ${{ runner.temp }}/Central
             ${{ runner.temp }}/Actuation
       - name: Build native Central
-        run: cargo build --manifest-path "$RUNNER_TEMP/Central/Cargo.toml" --locked --bin ctrl
-      - name: Build native Actuation
-        run: cargo build --manifest-path "$RUNNER_TEMP/Actuation/Cargo.toml" --locked -p actuation-cli
-      - name: Run native composition and exact source-byte receipt regression
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p aikit-cli --test compose_native_central -- --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/composition.log"
-      - name: Retain exact execution context
+          source "$NATIVE_COMPOSITION_EVIDENCE/record-command.sh"
+          record_command compiler-central cargo build --manifest-path "$RUNNER_TEMP/Central/Cargo.toml" --locked --bin ctrl --message-format=json
+      - name: Build native Actuation
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "$NATIVE_COMPOSITION_EVIDENCE/record-command.sh"
+          record_command compiler-actuation cargo build --manifest-path "$RUNNER_TEMP/Actuation/Cargo.toml" --locked -p actuation-cli --message-format=json
+      - name: Compile original composition and required Wiki targets and retain actual images
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "$NATIVE_COMPOSITION_EVIDENCE/record-command.sh"
+          record_command compiler-integration cargo test --locked -p aikit-cli --test compose_native_central --test knowledge_wiki_scope_native --no-run --message-format=json
+          record_command compiler-project-scope cargo test --locked -p aikit-cli --bin aikit --no-run --message-format=json
+          python3 "$NATIVE_COMPOSITION_EVIDENCE/audit.py" prepare
+      - name: Run native composition and exact source-byte receipt regression first
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "$NATIVE_COMPOSITION_EVIDENCE/record-command.sh"
+          image="$(cat "$NATIVE_COMPOSITION_EVIDENCE/compose-native.path")"
+          record_command actor-list "$image" --list --ignored
+          python3 "$NATIVE_COMPOSITION_EVIDENCE/audit.py" roster actor
+          for case in \
+            explicit_compose_discloses_authored_basis_and_refuses_broken_source \
+            unreadable_authored_profile_refuses_context_and_projection_with_actual_owner_error \
+            ambiguous_native_profiles_refuse_context_and_projection_without_guessing \
+            invalid_actual_model_bearing_refuses_context_and_projection_but_absence_remains_valid \
+            explicitly_independent_project_without_actor_sources_remains_useful; do
+            record_command "$case" "$image" --exact "$case" --ignored --nocapture --test-threads=1
+          done
+          python3 "$NATIVE_COMPOSITION_EVIDENCE/audit.py" results actor
+      - name: Run existing exact project scope computations
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "$NATIVE_COMPOSITION_EVIDENCE/record-command.sh"
+          image="$(cat "$NATIVE_COMPOSITION_EVIDENCE/project-scope.path")"
+          case=app::knowledge::project_scope_tests::a_clearing_drops_whole_from_a_project_scope
+          record_command project-scope "$image" --exact "$case" --nocapture --test-threads=1
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$NATIVE_COMPOSITION_EVIDENCE/project-scope.stdout"
+      - name: Require compiled three-case Wiki roster and execute every genuine native case
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "$NATIVE_COMPOSITION_EVIDENCE/record-command.sh"
+          image="$(cat "$NATIVE_COMPOSITION_EVIDENCE/wiki-native.path")"
+          record_command wiki-list "$image" --list --ignored
+          python3 "$NATIVE_COMPOSITION_EVIDENCE/audit.py" roster wiki
+          for case in \
+            actual_native_wiki_id_differs_from_folder_and_sibling_label_cannot_grant_scope \
+            actual_owner_created_external_identity_missing_or_ambiguous_refuses_broad_query \
+            actual_native_duplicate_id_is_withheld_from_every_internal_project_scope; do
+            record_command "$case" "$image" --exact "$case" --ignored --nocapture --test-threads=1
+          done
+          python3 "$NATIVE_COMPOSITION_EVIDENCE/audit.py" results wiki
+      - name: Retain current held image basis and exact execution context on success or failure
         if: always()
         shell: bash
         run: |
+          set -euo pipefail
+          evidence="${NATIVE_COMPOSITION_EVIDENCE:-$GITHUB_WORKSPACE/ProjectCentral/now/tmp/native-composition-${GITHUB_RUN_ID}-${RUNNER_OS}}"
           {
             echo "AIKit=$(git rev-parse HEAD)"
             echo "Central=$CENTRAL_SHA"
             echo "Actuation=$ACTUATION_SHA"
-            echo 'Standing=native deterministic composition; no live provider or human acceptance'
+            echo 'Standing=native deterministic composition/Wiki scope; no live provider or human acceptance'
             rustc -Vv
           } > "$RUNNER_TEMP/composition-basis.txt"
+          if [ -d "$evidence" ]; then
+            cp "$RUNNER_TEMP/composition-basis.txt" "$evidence/composition-basis.txt"
+            git status --porcelain > "$evidence/AIKit-status-after.txt"
+            for owner in Central Actuation; do
+              if [ -d "$RUNNER_TEMP/$owner/.git" ]; then git -C "$RUNNER_TEMP/$owner" status --porcelain > "$evidence/$owner-status-after.txt"; fi
+            done
+            if [ -f "$evidence/audit.py" ]; then python3 "$evidence/audit.py" after; fi
+          else
+            echo 'Native evidence root unavailable; no compilation/case/custody proof' >&2
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: development-field-native-composition
+          name: development-field-native-composition-${{ runner.os }}-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/composition.log
+            ${{ github.workspace }}/ProjectCentral/now/tmp/native-composition-${{ github.run_id }}-${{ runner.os }}/
             ${{ runner.temp }}/composition-basis.txt
           if-no-files-found: error
 

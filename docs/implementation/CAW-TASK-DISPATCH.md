@@ -330,3 +330,63 @@ Workcell processes and a disposable native material run. It is deliberately
 ignored by the generic suite and must be run with the source-built owner paths
 in the maintained CAW environment; a generic green suite is not proof of this
 joined path.
+
+
+### Original input and Task runtime material
+
+For the embedded profile-derived Codex ACP/npx Task, AIKit selects native
+provider material members; Workcell supplies the additive
+`workcell.runtime-projection/v1` / `exec-runtime` operation. Original
+HOME/CODEX_HOME remain unchanged. AIKit preserves the selected original
+invocation route, qualifying a relative route once against the actual cwd,
+alongside the expected canonical input directory. Workcell resolves that
+requested route to the same held origin at initial admission, before
+material setup, before mounting and at the final assembled-view checkpoint.
+An unchanged alias is permitted; retargeting, missing input or actual IO
+failure refuses with its native cause. The final checkpoint checks the
+assembled view while original lower members remain checked through their
+original held fd. These are checkpoints, not atomic exclusion of arbitrary
+external writers. The same original canonical input directory is the
+readonly lower view. Auth/config members are explicitly immutable and
+mechanically disjoint from mutable members. No credentials or config files are
+copied. Missing original roots, redirected/nonordinary present immutable members, and unsupported native
+namespace/overlay enforcement refuse before provider execution.
+
+The exact admitted Task T backs npm cache, SQLite and the durable
+`native-codex-runtime` material. Its selected tmp/log/sessions/archived_sessions/
+shell_snapshots views have readonly original lower history and Task-owned
+copy-on-write continuations. Its installation_id/history.jsonl/models_cache.json file views also retain
+readonly original lower values and Task-owned continuations. These are provider runtime material;
+it does not replace an Agent, Agency, canonical AgentSession or provider thread
+ID. Same-Task re-entry retains those physical uppers and the same runtime file.
+A fresh exclusive readonly skeleton per launch cannot turn retained Task entries
+into auth/config input. The enclosing retained runtime directories must actually
+be owner-private; no retained user material is silently chmodded.
+
+This operation preserves the existing policy revision/digest, Task fencing,
+write aperture and protocol owner. Only privately generated native mounted
+aliases receive Landlock rules. Namespace capabilities retire before the body;
+no alternate HOME, backend, global write or new supervisor is used. Direct native
+projection IO failures retain phase and original kind/errno. Existing Workcell
+boundary errors retain their typed owner error (its string-based ABI cannot
+recover an earlier erased errno). Both retain body `executed:false`,
+possible material setup separately, and `automatic_retry:false`.
+
+This is a Linux-supported provider seam, not kernel/installed readiness proof.
+Unsupported Linux user namespaces/overlay or other platforms refuse. Original
+managed/persisted sqlite_home/log_dir precedence remains native; an incompatible
+explicit path is an actual refusal, not a successful empty startup. External
+keyring/network credential operations remain outside filesystem enforcement;
+no auth-refresh authority is inferred. File-based auth/config writes are denied.
+The actual Original Factory owner must still establish no-prompt startup and
+same canonical Session/thread re-entry with current context/auth/model after the
+exact Workcell and AIKit source bodies are installed. Controlled filesystem and
+EOF cases do not substitute for that replay. All added definitions are UNRUN
+under the current local resource hold.
+
+The closed unpublished projection request now requires `requested_input_root`;
+draft struct/JSON callers must supply that real selected coordinate. The
+runtime filesystem tests use the same existing native bounded capture
+owner and retain its actual raw bytes/typed failure observation before
+refusing qualification. Eight real Linux definitions (the original five
+plus unchanged/retargeted/missing alias controls) are defined, not run.

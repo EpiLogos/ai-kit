@@ -140,9 +140,28 @@ mod project_scope_tests {
 
     #[test]
     fn a_sibling_wiki_space_names_the_sibling_and_the_root_space_passes() {
+        // Explicit declared identity is an algorithm input here. The separate
+        // native gate obtains these mappings from actual ctrl-created Projects.
+        let central = BTreeMap::from([
+            ("central:source:project:editor-walk:".into(), "Work/Editor".into()),
+            ("central:source:project:editor:".into(), "Work/Other".into()),
+            ("central:source:project:team/editor:".into(), "Work/Team".into()),
+        ]);
+        let bound = |resource, display| ref_belongs_to_project_scope(
+            resource, display, &BTreeMap::new(), &central,
+        );
+        assert!(bound("central:wiki:project:editor-walk", "Work/Editor"));
+        assert!(!bound("central:wiki:project:editor-walk", "Work/Other"));
+        assert!(!bound("central:wiki:project:editor", "Work/Editor"));
+        assert!(bound("central:wiki:project:editor", "Work/Other"));
+        assert!(bound("central:wiki:project:team/editor", "Work/Team"));
+        assert!(!bound("central:wiki:project:team/editor", "Work/Editor"));
+        assert!(!bound("central:wiki:project:EDITOR-WALK", "Work/Editor"));
+        assert!(!bound("central:wiki:project:", "Work/Editor"));
+        assert!(!bound("central:wiki:project:unknown/path", "Work/Editor"));
+        // No declaration means no Project attribution, even when ID=folder.
         assert!(!belongs("central:wiki:project:Factory", "Work/O-I"));
-        assert!(belongs("central:wiki:project:O-I", "Work/O-I"));
-        // The root composition space is not a Project space: it passes.
+        assert!(!belongs("central:wiki:project:O-I", "Work/O-I"));
         assert!(belongs("central:wiki:root", "Work/O-I"));
     }
 
@@ -194,8 +213,9 @@ fn attributed_to_other_project(
 /// Whether `resource` may enter a reply scoped to `display` (`Work/<name>`).
 /// Canonical Source refs retain Project ownership regardless of whether the
 /// caller reaches them through SourcePool or ProjectMap; clearings drop
-/// whole; sibling wiki spaces and sibling raw work-tree paths name the
-/// sibling by layout. The root lineage keeps every shape: this predicate is
+/// whole; Wiki spaces require unique native identity attribution, while
+/// sibling raw work-tree paths name the sibling by layout. The root lineage
+/// keeps every shape: this predicate is
 /// consulted only when a reply HAS a Project scope.
 fn ref_belongs_to_project_scope(
     resource: &str,
@@ -227,15 +247,14 @@ fn ref_belongs_to_project_scope(
     if resource.starts_with("central:source:control:root:Control/agents/now/clearings/") {
         return false;
     }
-    // Another Project's wiki space names the sibling outright; the root
-    // composition space (`central:wiki:root`) passes.
-    if let Some(project_id) = resource
-        .strip_prefix(PROJECT_WIKI_SPACE_REF_PREFIX)
-        .filter(|id| !id.is_empty() && !id.contains('/'))
-    {
-        return display
-            .strip_prefix("Work/")
-            .is_some_and(|own| project_id.eq_ignore_ascii_case(own));
+    // A Wiki space retains its native Project ID, which need not spell its
+    // Work folder. Reuse the owner's exact, unique ID-to-display attribution.
+    // Unknown or ambiguous IDs cannot acquire scope from a matching label.
+    // The root composition space (`central:wiki:root`) still passes.
+    if let Some(project_id) = resource.strip_prefix(PROJECT_WIKI_SPACE_REF_PREFIX) {
+        return central_project_source_scopes
+            .get(&format!("central:source:project:{project_id}:"))
+            .is_some_and(|project| project == display);
     }
     // An unattributed raw filesystem path under another Project's work tree
     // names the sibling by machine layout; a ProjectWorld reply discloses
@@ -1717,15 +1736,24 @@ impl Service {
                 )
             })
             .collect();
-        let central_project_source_scopes: BTreeMap<String, String> = work_projects
-            .iter()
-            .map(|project| {
-                (
-                    format!("central:source:project:{}:", project.project_id),
-                    format!("Work/{}", project.name),
-                )
-            })
-            .collect();
+        let mut central_project_source_scopes = BTreeMap::new();
+        let mut ambiguous_project_source_scopes = BTreeSet::new();
+        for project in &work_projects {
+            let prefix = format!("central:source:project:{}:", project.project_id);
+            if ambiguous_project_source_scopes.contains(&prefix) {
+                continue;
+            }
+            if central_project_source_scopes
+                .insert(prefix.clone(), format!("Work/{}", project.name))
+                .is_some()
+            {
+                // A shared ID cannot select the first or last Work folder.
+                // External invocation already refuses this ambiguity; an
+                // internal scoped reply must withhold the same ambiguous ref.
+                central_project_source_scopes.remove(&prefix);
+                ambiguous_project_source_scopes.insert(prefix);
+            }
+        }
         let code_source_scopes: BTreeMap<String, String> = work_projects
             .iter()
             .map(|project| {

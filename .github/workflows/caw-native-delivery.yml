@@ -23,7 +23,7 @@ jobs:
     env:
       ACTUATION_SHA: 4af495f6509bb0dd779112a225d71a9df8145b6e
       CENTRAL_SHA: 2a604574774c41921003ed99a2eed73b4c9f4266
-      WORKCELL_SHA: 282220b59e8554faafcdcad335bf450acc4a9352
+      WORKCELL_SHA: bdbae94c99e5657b1309ac7671e4368fc70e5754
     steps:
       - uses: actions/checkout@v4
         with:
@@ -81,7 +81,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: EpiLogos/Workcell
-          ref: 282220b59e8554faafcdcad335bf450acc4a9352
+          ref: bdbae94c99e5657b1309ac7671e4368fc70e5754
           path: .caw-native/Workcell
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2.9.2
@@ -142,6 +142,181 @@ jobs:
             echo 'Standing=accepted cut revisions pinned per product; actual Pi opens without inference; controlled native providers are not installed or real-model proof.'
             echo 'FIXTURE_REPLY is not a real model response or installed-harness proof.'
           } > "$RUNNER_TEMP/caw-evidence/basis.txt"
+      - name: Bind exact compiled Task and material-owner images
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(id -u)" -ne 0
+          # Parent must bind BOTH existing Workcell pins to its actual normal publication.
+          # The old owner does not implement this Source relation; it cannot qualify it.
+          test "$WORKCELL_SHA" != '282220b59e8554faafcdcad335bf450acc4a9352'
+          test "$(git -C .caw-native/Workcell rev-parse HEAD)" = "$WORKCELL_SHA"
+          test -f .caw-native/Workcell/crates/workcell-runtime/src/runtime_projection.rs
+          test -f .caw-native/Workcell/crates/workcell-runtime/tests/runtime_projection.rs
+          export RUNTIME_GATE_EVIDENCE="$RUNNER_TEMP/caw-evidence/runtime-projection"
+          mkdir -p "$RUNTIME_GATE_EVIDENCE/images"
+          for product in Workcell Central Actuation; do
+            git -C ".caw-native/$product" archive --format=tar.gz HEAD > "$RUNTIME_GATE_EVIDENCE/$product-source.tar.gz"
+            git -C ".caw-native/$product" rev-parse HEAD^{tree} > "$RUNTIME_GATE_EVIDENCE/$product-tree.txt"
+            git -C ".caw-native/$product" ls-files --stage > "$RUNTIME_GATE_EVIDENCE/$product-modes.txt"
+            cp ".caw-native/$product/Cargo.lock" "$RUNTIME_GATE_EVIDENCE/$product-Cargo.lock"
+          done
+          cp Cargo.lock "$RUNTIME_GATE_EVIDENCE/AIKit-Cargo.lock"
+          git rev-parse HEAD^{tree} > "$RUNTIME_GATE_EVIDENCE/AIKit-tree.txt"
+          git ls-files --stage > "$RUNTIME_GATE_EVIDENCE/AIKit-modes.txt"
+          sha256sum Cargo.lock crates/aikit-cli/Cargo.toml crates/aikit-cli/src/encounter_task.rs crates/aikit-cli/tests/caw_task_dispatch.rs crates/aikit-cli/tests/support/caw_task_npm_runtime.rs > "$RUNTIME_GATE_EVIDENCE/AIKit-source-sha256.txt"
+          sha256sum .caw-native/Workcell/crates/workcell-runtime/src/runtime_projection.rs .caw-native/Workcell/crates/workcell-runtime/tests/runtime_projection.rs > "$RUNTIME_GATE_EVIDENCE/Workcell-runtime-source-sha256.txt"
+          record_command() {
+            local label=$1 suffix=$2 status
+            shift 2
+            printf '%q ' "$@" > "$RUNTIME_GATE_EVIDENCE/$label.command.txt"
+            printf '\n' >> "$RUNTIME_GATE_EVIDENCE/$label.command.txt"
+            set +e
+            "$@" > "$RUNTIME_GATE_EVIDENCE/$label.$suffix" 2> "$RUNTIME_GATE_EVIDENCE/$label.stderr"
+            status=$?
+            set -e
+            printf '%s\n' "$status" > "$RUNTIME_GATE_EVIDENCE/$label.exit"
+            return "$status"
+          }
+          record_command compiler-test jsonl timeout --kill-after=5s 10m cargo test --locked -p aikit-cli --test caw_task_dispatch --no-run --message-format=json
+          record_command compiler-workcell jsonl timeout --kill-after=5s 5m cargo build --locked --manifest-path .caw-native/Workcell/Cargo.toml -p epilogos-workcell-cli --bins --message-format=json
+          record_command compiler-central jsonl timeout --kill-after=5s 5m cargo build --locked --manifest-path .caw-native/Central/Cargo.toml -p ctrl --message-format=json
+          record_command compiler-actuation jsonl timeout --kill-after=5s 5m cargo build --locked --release --manifest-path .caw-native/Actuation/Cargo.toml -p actuation-cli --message-format=json
+          cat > "$RUNTIME_GATE_EVIDENCE/audit.py" <<'PY'
+          import hashlib,json,os,stat,sys
+          from pathlib import Path
+          out=Path(os.environ['RUNTIME_GATE_EVIDENCE'])
+          roles=json.loads(os.environ['RUNTIME_GATE_ROLES'])
+          def write(name,value):
+              (out/name).write_text(json.dumps(value,indent=2)+'\n')
+          def facts(s):
+              return dict(device=s.st_dev,inode=s.st_ino,mode=s.st_mode,links=s.st_nlink,
+                          uid=s.st_uid,gid=s.st_gid,bytes=s.st_size,mtime_ns=s.st_mtime_ns,ctime_ns=s.st_ctime_ns)
+          def held(path,root,copy=None,limit=1073741824):
+              p=Path(path); row={'path':str(p),'sha256':None,'cause':None}
+              try:
+                  row['named_before']=facts(os.lstat(p))
+                  if not p.is_absolute() or not p.is_relative_to(root) or p.resolve(strict=True)!=p:
+                      raise ValueError('image/source coordinate is outside the exact admitted physical root')
+                  fd=os.open(p,os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW|os.O_CLOEXEC)
+                  with os.fdopen(fd,'rb') as f:
+                      first=os.fstat(f.fileno());row['held_before']=facts(first)
+                      if not stat.S_ISREG(first.st_mode) or first.st_uid!=os.geteuid() or first.st_size>limit:
+                          raise ValueError('nonregular/foreign-owner/over-capacity original; no byte read admitted')
+                      digest=hashlib.sha256();observed=0;prefix=b''
+                      sink=None
+                      if copy is not None:
+                          sink=os.fdopen(os.open(copy,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o700),'wb')
+                      try:
+                          while chunk:=f.read(1048576):
+                              if not prefix:prefix=chunk[:64]
+                              observed+=len(chunk)
+                              if observed>limit:raise ValueError('held image exceeded admitted capacity')
+                              digest.update(chunk)
+                              if sink:sink.write(chunk)
+                          if sink:sink.flush()
+                      finally:
+                          if sink:sink.close()
+                      row['held_after']=facts(os.fstat(f.fileno()));row['named_after']=facts(os.lstat(p))
+                      if row['held_before']!=row['held_after'] or row['held_before']!=row['named_before'] or row['held_after']!=row['named_after']:
+                          raise ValueError('held/named original basis changed; digest unavailable')
+                      row['sha256']=digest.hexdigest();row['observed_bytes']=observed;row['header_hex']=prefix.hex()
+                      if copy is not None:
+                          s=os.lstat(copy);row['private_copy']=dict(path=str(copy),metadata=facts(s))
+                          if not stat.S_ISREG(s.st_mode) or s.st_nlink!=1:
+                              raise ValueError('private evidence copy must be regular single-link')
+                  row['digest_standing']='bounded unchanged held regular original; native original link count is observed, not presumed one'
+              except (OSError,ValueError) as e:
+                  row['sha256']=None
+                  row['cause']={'type':type(e).__name__,'errno':getattr(e,'errno',None),'message':str(e)}
+              return row
+          def artifacts(file):
+              used=0;result=[]
+              with Path(file).open('rb') as stream:
+                  for raw in stream:
+                      used+=len(raw)
+                      if used>67108864 or len(raw)>1048576:raise ValueError('compiler receipt capacity exceeded')
+                      item=json.loads(raw)
+                      if item.get('reason')=='compiler-artifact':result.append(item)
+              return result
+          mode=sys.argv[1]
+          if mode=='prepare':
+              records=[];total=0
+              for role in roles:
+                  rows=[r for r in artifacts(out/role['receipt']) if r['target']['name']==role['target'] and r.get('executable')]
+                  if len(rows)!=1:raise ValueError('exactly one actual CompilerArtifact is required for '+role['name'])
+                  artifact=rows[0];root=Path(role['root']);image=Path(artifact['executable'])
+                  row={'role':role,'compiler_artifact':artifact,'image':held(image,root/'target'/role.get('profile_dir','debug'),out/'images'/role['name'],min(1073741824,3221225472-total))}
+                  # Safe physical digest precedes semantic role/profile/source checks.
+                  records.append(row);write('images.before.json',records)
+                  if row['image']['cause']:raise ValueError('original image admission failed; native cause retained')
+                  if not row['image']['header_hex'].startswith('7f454c46') or not row['image']['held_before']['mode']&0o111:
+                      raise ValueError('selected Linux native image is not an executable ELF')
+                  total+=row['image']['observed_bytes']
+                  if total>3221225472:raise ValueError('aggregate copied image capacity exceeded')
+                  if role['kind'] not in artifact['target']['kind'] or artifact['profile']['test']!=role['test']:
+                      raise ValueError('actual Cargo target/profile differs from selected native role')
+                  if 'codex-account-native' in artifact.get('features',[]):raise ValueError('credential-free gate cannot select account feature')
+                  src=Path(artifact['target']['src_path']);manifest=Path(artifact['manifest_path'])
+                  row['source']=held(src,root);row['manifest']=held(manifest,root)
+                  write('images.before.json',records)
+                  if row['source']['cause'] or row['manifest']['cause']:raise ValueError('actual compiled source/manifest unavailable')
+                  if role['test']:
+                      (out/'test-image.path').write_text(str(image)+'\n')
+              write('images.before.json',records)
+              archive_rows=[]
+              for path in json.loads(os.environ['RUNTIME_GATE_SOURCE_ARCHIVES']):
+                  archive_rows.append(held(path,Path(path).parent))
+                  write('source-archives.json',archive_rows)
+                  if archive_rows[-1]['cause']:raise ValueError('actual source archive digest unavailable')
+              write('build-environment.json',{name:os.environ.get(name) for name in ['RUSTFLAGS','RUSTC_WRAPPER','CARGO_TARGET_DIR','CARGO_BUILD_TARGET','CI','GITHUB_RUN_ID','GITHUB_REPOSITORY','GITHUB_SHA']})
+          elif mode=='after':
+              before=json.loads((out/'images.before.json').read_text());rows=[];failed=False
+              for row in before:
+                  now=held(row['image']['path'],Path(row['role']['root'])/'target'/row['role'].get('profile_dir','debug'))
+                  same=now['sha256']==row['image']['sha256'] and now.get('held_before')==row['image'].get('held_before')
+                  rows.append({'role':row['role'],'image':now,'same_before_basis':same});failed|=not same
+              write('images.after.json',rows)
+              if failed:raise ValueError('selected original image basis changed across actual cases')
+          elif mode=='roster':
+              expected=json.loads(os.environ['RUNTIME_GATE_CASES'])
+              names=[line[:-6] for line in (out/'roster.stdout').read_text().splitlines() if line.endswith(': test')]
+              write('roster.json',{'actual':names,'required_selected':expected,'actual_total':len(names),'required_selected_total':len(expected)})
+              if len(names)!=len(set(names)) or not set(expected).issubset(names):raise ValueError('missing/duplicate compiled case')
+              if len(names)!=int(os.environ['RUNTIME_GATE_TOTAL']):raise ValueError('compiled case census changed')
+          elif mode=='case':
+              case=sys.argv[2];prefix=out/case;code=int(prefix.with_suffix('.exit').read_text())
+              body=prefix.with_suffix('.stdout').read_text()
+              ok=code==0 and any(line.startswith('test result: ok. 1 passed; 0 failed; 0 ignored;') for line in body.splitlines())
+              row={'case':case,'exit_status':code,'exact_one_pass_zero_failed_ignored':ok,'stdout':str(prefix.with_suffix('.stdout')),'stderr':str(prefix.with_suffix('.stderr')),'test_image':(out/'test-image.path').read_text().strip(),'outer_timeout_seconds':120,'standing':'foreground test-harness status/raw files; inner native EOF and retirement are asserted by the actual case, not inferred from a shell status'}
+              write(case+'.result.json',row)
+              if not ok:raise ValueError('actual selected native case failed; no unsupported-kernel skip')
+          elif mode=='snapshot':
+              base=Path(os.environ['WORKCELL_TEST_ARTIFACT_ROOT']);rows=[];count=0;total=0
+              # Do not feed a retained adverse FIFO/symlink to artifact streaming.
+              pending=[base];dest=out/'fixture-snapshot';dest.mkdir(exist_ok=True)
+              while pending:
+                  directory=pending.pop()
+                  for p in sorted(directory.iterdir()):
+                      count+=1
+                      if count>4096:raise ValueError('fixture snapshot entry capacity exceeded')
+                      s=os.lstat(p);rel=p.relative_to(base);row={'relative':str(rel),'metadata':facts(s),'sha256':None}
+                      if stat.S_ISDIR(s.st_mode):pending.append(p)
+                      elif stat.S_ISREG(s.st_mode):
+                          copy=dest/rel;copy.parent.mkdir(parents=True,exist_ok=True)
+                          row['reading']=held(p,base,copy,min(4194304,67108864-total));row['sha256']=row['reading']['sha256']
+                          total+=row['reading'].get('observed_bytes',0)
+                          if row['reading']['cause'] or total>67108864:raise ValueError('fixture payload snapshot unavailable/over capacity')
+                      else:
+                          row['digest_standing']='not admitted for byte reading; retained type/identity only'
+                          if stat.S_ISLNK(s.st_mode):row['link_target']=os.readlink(p)
+                      rows.append(row);write('fixture-snapshot.json',{'entries':rows,'entry_count':count,'copied_regular_bytes':total,'standing':'owned controlled fixture snapshot; original FIFO/aliases remain on runner, no nonregular byte read or external atomic exclusion claim'})
+          else:raise ValueError('unrecognised evidence operation')
+          PY
+          export RUNTIME_GATE_ROLES="[{\"name\":\"aikit\",\"receipt\":\"compiler-test.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"aikit\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"aikit-session-space\",\"receipt\":\"compiler-test.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"aikit-session-space\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"caw_task_dispatch\",\"receipt\":\"compiler-test.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"caw_task_dispatch\",\"kind\":\"test\",\"test\":true,\"profile_dir\":\"debug\"},{\"name\":\"workcell\",\"receipt\":\"compiler-workcell.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Workcell\",\"target\":\"workcell\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"workcell-control-service\",\"receipt\":\"compiler-workcell.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Workcell\",\"target\":\"workcell-control-service\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"workcell-write-boundary\",\"receipt\":\"compiler-workcell.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Workcell\",\"target\":\"workcell-write-boundary\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"ctrl\",\"receipt\":\"compiler-central.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Central\",\"target\":\"ctrl\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"actuation\",\"receipt\":\"compiler-actuation.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Actuation\",\"target\":\"actuation\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"release\"}]"
+          export RUNTIME_GATE_SOURCE_ARCHIVES="[\"$RUNNER_TEMP/caw-evidence/aikit-source.tar.gz\",\"$RUNTIME_GATE_EVIDENCE/Workcell-source.tar.gz\",\"$RUNTIME_GATE_EVIDENCE/Central-source.tar.gz\",\"$RUNTIME_GATE_EVIDENCE/Actuation-source.tar.gz\"]"
+          python3 "$RUNTIME_GATE_EVIDENCE/audit.py" prepare
       - name: Actual binaries through native Actuation and controlled provider processes
         shell: bash
         run: |
@@ -174,6 +349,54 @@ jobs:
           grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/native-sqlite-redirection.log"
           timeout 10m cargo test --locked -p aikit-cli --test caw_task_dispatch npm_runtime::native_codex_task_exec_preserves_non_directory_sqlite_material_on_refusal -- --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/native-sqlite-form.log"
           grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/native-sqlite-form.log"
+      - name: Actual current Task runtime refusal and unchanged suite census
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RUNTIME_GATE_EVIDENCE="$RUNNER_TEMP/caw-evidence/runtime-projection"
+          export RUNTIME_GATE_ROLES="[{\"name\":\"aikit\",\"receipt\":\"compiler-test.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"aikit\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"aikit-session-space\",\"receipt\":\"compiler-test.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"aikit-session-space\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"caw_task_dispatch\",\"receipt\":\"compiler-test.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"caw_task_dispatch\",\"kind\":\"test\",\"test\":true,\"profile_dir\":\"debug\"},{\"name\":\"workcell\",\"receipt\":\"compiler-workcell.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Workcell\",\"target\":\"workcell\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"workcell-control-service\",\"receipt\":\"compiler-workcell.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Workcell\",\"target\":\"workcell-control-service\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"workcell-write-boundary\",\"receipt\":\"compiler-workcell.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Workcell\",\"target\":\"workcell-write-boundary\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"ctrl\",\"receipt\":\"compiler-central.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Central\",\"target\":\"ctrl\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"actuation\",\"receipt\":\"compiler-actuation.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Actuation\",\"target\":\"actuation\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"release\"}]"
+          test_image=$(cat "$RUNTIME_GATE_EVIDENCE/test-image.path")
+          record_command() {
+            local label=$1 suffix=$2 status
+            shift 2
+            printf '%q ' "$@" > "$RUNTIME_GATE_EVIDENCE/$label.command.txt"
+            printf '\n' >> "$RUNTIME_GATE_EVIDENCE/$label.command.txt"
+            set +e
+            "$@" > "$RUNTIME_GATE_EVIDENCE/$label.$suffix" 2> "$RUNTIME_GATE_EVIDENCE/$label.stderr"
+            status=$?
+            set -e
+            printf '%s\n' "$status" > "$RUNTIME_GATE_EVIDENCE/$label.exit"
+            return "$status"
+          }
+          record_command roster stdout timeout --kill-after=5s 30s "$test_image" --ignored --list --format terse
+          export RUNTIME_GATE_CASES='["npm_runtime::native_codex_task_projection_redirect_retains_foreign_material_and_task_revision","npm_runtime::native_codex_task_projection_auth_redirect_refuses_before_any_runtime_material"]'
+          export RUNTIME_GATE_TOTAL=20
+          python3 "$RUNTIME_GATE_EVIDENCE/audit.py" roster
+          failed=0
+          while IFS= read -r case_name; do
+            set +e
+            timeout --kill-after=5s 120s "$test_image" "$case_name" --ignored --exact --nocapture --test-threads=1 > "$RUNTIME_GATE_EVIDENCE/$case_name.stdout" 2> "$RUNTIME_GATE_EVIDENCE/$case_name.stderr"
+            status=$?
+            set -e
+            printf '%s\n' "$status" > "$RUNTIME_GATE_EVIDENCE/$case_name.exit"
+            cat "$RUNTIME_GATE_EVIDENCE/$case_name.stdout"
+            cat "$RUNTIME_GATE_EVIDENCE/$case_name.stderr" >&2
+            if ! python3 "$RUNTIME_GATE_EVIDENCE/audit.py" case "$case_name"; then failed=1; fi
+          done <<'CASES'
+          npm_runtime::native_codex_task_projection_redirect_retains_foreign_material_and_task_revision
+          npm_runtime::native_codex_task_projection_auth_redirect_refuses_before_any_runtime_material
+          CASES
+          if ! python3 "$RUNTIME_GATE_EVIDENCE/audit.py" after; then failed=1; fi
+          test "$failed" = 0
+          grep -q '^test result: ok. 5 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/native.log"
+          grep -q '^test result: ok. 9 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/placement.log"
+          grep -q '^test result: ok. 14 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
+          for raw in native-npm-boundary native-npm-redirection native-sqlite-redirection native-sqlite-form; do
+            grep -q '^test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/$raw.log"
+          done
+          git diff --exit-code -- Cargo.lock Cargo.toml crates/
+          for product in Workcell Central Actuation; do git -C ".caw-native/$product" diff --exit-code -- Cargo.lock Cargo.toml crates/; done
       - name: Own-login environment scrub regression and negative sensitivity
         shell: bash
         run: |

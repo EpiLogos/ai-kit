@@ -1430,21 +1430,23 @@ impl Service {
 
         let actor_bootstrap = if self.descriptor.project_root.is_some() {
             // Compose the live actor inputs from the Actuation instantiation
-            // receipt and the Central-authored profile. Absent or ambiguous
-            // projections resolve to defaults — never guessed; a fetch failure
-            // is fail-soft (no projection), never a resolution failure.
+            // receipt and the Central-authored profile. The native adapter's
+            // Ok(None) is legitimate absence. A known source failure or
+            // ambiguity must refuse this projection, not become empty context.
             let central_root = self.descriptor.project_root.as_deref().and_then(|root| {
                 self.central_meta_root
                     .clone()
                     .or_else(|| process_central_root(Some(root)))
             });
             let composed = match self.descriptor.project_root.as_deref() {
-                Some(root) => central_root.as_deref().and_then(|central| {
-                    let runner = SystemRunner::probe();
-                    compose_live_actor_inputs(&runner, central, root)
-                        .ok()
-                        .flatten()
-                }),
+                Some(root) => central_root
+                    .as_deref()
+                    .map(|central| {
+                        let runner = SystemRunner::probe();
+                        compose_live_actor_inputs(&runner, central, root)
+                    })
+                    .transpose()?
+                    .flatten(),
                 None => None,
             };
 
@@ -3326,22 +3328,11 @@ impl PaletteBackend for Service {
             .clone()
             .or_else(|| process_central_root(Some(project)));
         let mut records = if let Some(central) = central_root.as_deref() {
-            match compose_live_actor_inputs(&SystemRunner::probe(), central, project) {
-                Ok(composed) => composed
-                    .map(|inputs| inputs.source_resources)
-                    .unwrap_or_default(),
-                Err(error) => {
-                    // The same fail-soft law as projection_context_for: actor
-                    // context decorates a reading, it never gates one. The
-                    // failure is disclosed, not swallowed.
-                    self.context_composition_notes.borrow_mut().push(format!(
-                        "context composition skipped ({}): {}",
-                        error.code(),
-                        error.message()
-                    ));
-                    Vec::new()
-                }
-            }
+            // Share the projection's native absence/error distinction: only
+            // Ok(None) contributes no actor sources. Preserve any source error.
+            compose_live_actor_inputs(&SystemRunner::probe(), central, project)?
+                .map(|inputs| inputs.source_resources)
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
