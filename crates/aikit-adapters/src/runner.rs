@@ -392,16 +392,31 @@ pub enum OwnedChildGroupSignal {
 /// distinct from confirmed reaping or retirement.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn signal_owned_child_group(child: &std::process::Child) -> std::io::Result<OwnedChildGroupSignal> {
-    crate::connection_process::peek_owned_child_exit(child)?;
+    signal_owned_child_group_observed(child).map_err(|failure| failure.cause)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct OwnedGroupSignalFailure {
+    stage: &'static str,
+    cause: std::io::Error,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn signal_owned_child_group_observed(
+    child: &std::process::Child,
+) -> std::result::Result<OwnedChildGroupSignal, OwnedGroupSignalFailure> {
+    crate::connection_process::peek_owned_child_exit(child).map_err(|cause|
+        OwnedGroupSignalFailure { stage: "ownership_peek", cause })?;
     let pid = rustix::process::Pid::from_raw(child.id() as i32).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "owned child has no valid process group ID")
+        OwnedGroupSignalFailure { stage: "group_id", cause:
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "owned child has no valid process group ID") }
     })?;
     match rustix::process::kill_process_group(pid, rustix::process::Signal::KILL) {
         Ok(()) => Ok(OwnedChildGroupSignal::Delivered),
         Err(error) if error == rustix::io::Errno::SRCH => {
             Ok(OwnedChildGroupSignal::AlreadyAbsent { cause: error.into() })
         }
-        Err(error) => Err(error.into()),
+        Err(error) => Err(OwnedGroupSignalFailure { stage: "group_signal", cause: error.into() }),
     }
 }
 
@@ -420,6 +435,7 @@ struct CommandCleanup {
     signal: &'static str,
     absence: Option<std::io::Error>,
     error: Option<std::io::Error>,
+    error_stage: Option<&'static str>,
     additional_errors: Vec<std::io::Error>,
     status: Option<std::process::ExitStatus>,
     reaped: bool,
@@ -441,6 +457,7 @@ impl OwnedCommand {
         CommandCleanup {
             signal: if self.ownership_lost { "ownership-lost" } else { "not-needed" },
             absence: None, error: None, additional_errors: Vec::new(),
+            error_stage: None,
             status: self.reaped_status, reaped: self.reaped_status.is_some(),
         }
     }
@@ -464,7 +481,10 @@ impl OwnedCommand {
                     if error.raw_os_error() == Some(rustix::io::Errno::CHILD.raw_os_error()) {
                         self.ownership_lost = true;
                     }
-                    if result.error.is_none() { result.error = Some(error); }
+                    if result.error.is_none() {
+                        result.error = Some(error);
+                        result.error_stage = Some("direct_child_reap");
+                    }
                     else { result.additional_errors.push(error); }
                     // A failed wait never authorises a subsequent numeric kill.
                     break;
@@ -483,13 +503,13 @@ impl OwnedCommand {
     fn cleanup(&mut self, deadline: std::time::Instant) -> CommandCleanup {
         self.cleanup_attempted = true;
         if self.reaped_status.is_some() || self.ownership_lost { return self.no_signal(); }
-        let (signal, absence, error) = match signal_owned_child_group(&self.child) {
-            Ok(OwnedChildGroupSignal::Delivered) => ("delivered", None, None),
-            Ok(OwnedChildGroupSignal::AlreadyAbsent { cause }) => ("already-absent", Some(cause), None),
-            Err(error) => ("failed", None, Some(error)),
+        let (signal, absence, error, error_stage) = match signal_owned_child_group_observed(&self.child) {
+            Ok(OwnedChildGroupSignal::Delivered) => ("delivered", None, None, None),
+            Ok(OwnedChildGroupSignal::AlreadyAbsent { cause }) => ("already-absent", Some(cause), None, None),
+            Err(failure) => ("failed", None, Some(failure.cause), Some(failure.stage)),
         };
         let mut result = CommandCleanup {
-            signal, absence, error, additional_errors: Vec::new(), status: None, reaped: false,
+            signal, absence, error, error_stage, additional_errors: Vec::new(), status: None, reaped: false,
         };
         if result.error.as_ref().is_some_and(|error|
             error.raw_os_error() == Some(rustix::io::Errno::CHILD.raw_os_error()))
@@ -660,6 +680,9 @@ fn command_failure(
         failure = failure.with("additional_cleanup_causes", serde_json::Value::Array(causes).to_string());
     }
     if let Some(cause) = cleanup.error.take() {
+        if let Some(stage) = cleanup.error_stage {
+            failure = failure.with("cleanup_observation_stage", stage);
+        }
         failure = failure.with("cleanup_cause", io_observation(&cause, policy.body_free_diagnostics));
         if failure.source().is_none() { failure = failure.with_io_source(cause); }
         else if policy.body_free_diagnostics {
@@ -678,6 +701,111 @@ fn command_failure(
         failure = failure.with_native_capture(observed_status, stdout, stderr);
     }
     failure
+}
+
+// The LF refusal has already been decided, before the rejected chunk could be
+// retained or projected into rows. Observe only the remaining physical pipe
+// lifetime; these bytes never become an admitted result or a second capture.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn drain_refused_pipe(
+    pipe: &mut impl std::io::Read, eof: &mut bool, discarded: &mut Option<u64>,
+) -> std::io::Result<bool> {
+    if *eof { return Ok(false); }
+    let mut progress = false;
+    let mut block = [0u8; 8192];
+    for _ in 0..8 {
+        match pipe.read(&mut block) {
+            Ok(0) => { *eof = true; break; }
+            Ok(count) => {
+                *discarded = discarded.and_then(|before| before.checked_add(count as u64));
+                progress = true;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(progress)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct LfRefusalContext<'a> {
+    owned: &'a mut OwnedCommand,
+    stdout_pipe: &'a mut std::process::ChildStdout,
+    stderr_pipe: &'a mut std::process::ChildStderr,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    stdout_eof: bool,
+    stderr_eof: bool,
+    known_status: Option<std::process::ExitStatus>,
+    argv: &'a [String],
+    deadline: std::time::Instant,
+    policy: CapturePolicy,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl LfRefusalContext<'_> {
+    fn finish(mut self, mut failure: AikitError) -> AikitError {
+        use std::time::{Duration, Instant};
+        failure = failure.with("pre_refusal_stdout_eof", self.stdout_eof.to_string())
+            .with("pre_refusal_stderr_eof", self.stderr_eof.to_string());
+        let mut discarded_stdout = Some(0u64);
+        let mut discarded_stderr = Some(0u64);
+        // Reserve part of the SAME allowance for real cancellation and reap;
+        // waiting until its end cannot certify a still-live child's retirement.
+        let now = Instant::now();
+        let natural_deadline = now + self.deadline.saturating_duration_since(now) / 2;
+        let (cleanup, cancelled) = loop {
+            let stdout_progress = match drain_refused_pipe(self.stdout_pipe, &mut self.stdout_eof, &mut discarded_stdout) {
+                Ok(progress) => progress,
+                Err(cause) => {
+                    failure = failure.with("refusal_retirement_observation_stage", "stdout_drain")
+                        .with("refusal_retirement_cause", io_observation(&cause, self.policy.body_free_diagnostics))
+                        .with_io_source(cause);
+                    break (self.owned.cleanup(self.deadline), true);
+                }
+            };
+            let stderr_progress = match drain_refused_pipe(self.stderr_pipe, &mut self.stderr_eof, &mut discarded_stderr) {
+                Ok(progress) => progress,
+                Err(cause) => {
+                    failure = failure.with("refusal_retirement_observation_stage", "stderr_drain")
+                        .with("refusal_retirement_cause", io_observation(&cause, self.policy.body_free_diagnostics))
+                        .with_io_source(cause);
+                    break (self.owned.cleanup(self.deadline), true);
+                }
+            };
+            if self.known_status.is_none() {
+                match self.owned.observe_exit() {
+                    Ok(status) => self.known_status = status,
+                    Err(cause) => {
+                        failure = failure.with("refusal_retirement_observation_stage", "ownership_peek")
+                            .with("refusal_retirement_cause", io_observation(&cause, self.policy.body_free_diagnostics))
+                            .with_io_source(cause);
+                        break (self.owned.cleanup(self.deadline), true);
+                    }
+                }
+            }
+            if self.stdout_eof && self.stderr_eof && self.known_status.is_some() {
+                break (self.owned.reap_without_signal(self.deadline), false);
+            }
+            if Instant::now() >= natural_deadline {
+                break (self.owned.cleanup(self.deadline), true);
+            }
+            if stdout_progress || stderr_progress { std::thread::yield_now(); }
+            else { std::thread::sleep(Duration::from_millis(5)); }
+        };
+        let count = |actual: Option<u64>| actual.map_or_else(|| "counter_overflow".into(), |n| n.to_string());
+        failure = failure.with("stdout_eof", self.stdout_eof.to_string())
+            .with("stderr_eof", self.stderr_eof.to_string())
+            .with("capture_cancelled", cancelled.to_string())
+            .with("lf_refusal_retirement", if cancelled { "cancellation" } else { "natural_eof_reap" })
+            .with("refusal_drain_stdout_bytes", count(discarded_stdout))
+            .with("refusal_drain_stderr_bytes", count(discarded_stderr))
+            .with("process_group_retirement", "unconfirmed");
+        // Natural EOF and direct-child reap do not prove descendant retirement.
+        // The original LF refusal always survives, including every actual IO.
+        command_failure(failure, self.argv, cleanup, self.stdout, self.stderr, self.known_status, self.policy)
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -730,6 +858,12 @@ fn capture_native_command(
         let stdout_progress = match read_available(&mut stdout_pipe, &mut stdout, &mut stdout_eof, limit, &mut line_feeds, line_feed_limit) {
             Ok(progress) => progress,
             Err(failure) => {
+                if matches!(&failure, CaptureReadFailure::LineFeedLimit { .. }) {
+                    return Err(LfRefusalContext { owned: &mut owned, stdout_pipe: &mut stdout_pipe,
+                        stderr_pipe: &mut stderr_pipe, stdout, stderr, stdout_eof, stderr_eof,
+                        known_status: None, argv, deadline: Instant::now() + Duration::from_secs(2), policy,
+                    }.finish(capture_read_error("stdout", failure, limit, body_free_diagnostics)));
+                }
                 let cleanup = owned.cleanup(Instant::now() + Duration::from_secs(2));
                 return Err(command_failure(capture_read_error("stdout", failure, limit, body_free_diagnostics)
                     .with("stdout_eof", stdout_eof.to_string()).with("stderr_eof", stderr_eof.to_string()),
@@ -739,6 +873,12 @@ fn capture_native_command(
         let stderr_progress = match read_available(&mut stderr_pipe, &mut stderr, &mut stderr_eof, limit, &mut line_feeds, line_feed_limit) {
             Ok(progress) => progress,
             Err(failure) => {
+                if matches!(&failure, CaptureReadFailure::LineFeedLimit { .. }) {
+                    return Err(LfRefusalContext { owned: &mut owned, stdout_pipe: &mut stdout_pipe,
+                        stderr_pipe: &mut stderr_pipe, stdout, stderr, stdout_eof, stderr_eof,
+                        known_status: None, argv, deadline: Instant::now() + Duration::from_secs(2), policy,
+                    }.finish(capture_read_error("stderr", failure, limit, body_free_diagnostics)));
+                }
                 let cleanup = owned.cleanup(Instant::now() + Duration::from_secs(2));
                 return Err(command_failure(capture_read_error("stderr", failure, limit, body_free_diagnostics)
                     .with("stdout_eof", stdout_eof.to_string()).with("stderr_eof", stderr_eof.to_string()),
@@ -777,6 +917,12 @@ fn capture_native_command(
         let stdout_progress = match read_available(&mut stdout_pipe, &mut stdout, &mut stdout_eof, limit, &mut line_feeds, line_feed_limit) {
             Ok(progress) => progress,
             Err(failure) => {
+                if matches!(&failure, CaptureReadFailure::LineFeedLimit { .. }) {
+                    return Err(LfRefusalContext { owned: &mut owned, stdout_pipe: &mut stdout_pipe,
+                        stderr_pipe: &mut stderr_pipe, stdout, stderr, stdout_eof, stderr_eof,
+                        known_status: Some(status), argv, deadline: retirement_deadline, policy,
+                    }.finish(capture_read_error("stdout", failure, limit, body_free_diagnostics)));
+                }
                 let cleanup = owned.cleanup(retirement_deadline);
                 return Err(command_failure(retirement_failure(capture_read_error("stdout", failure, limit, body_free_diagnostics),
                     stdout_eof, stderr_eof, true), argv, cleanup, stdout, stderr, Some(status), policy));
@@ -785,6 +931,12 @@ fn capture_native_command(
         let stderr_progress = match read_available(&mut stderr_pipe, &mut stderr, &mut stderr_eof, limit, &mut line_feeds, line_feed_limit) {
             Ok(progress) => progress,
             Err(failure) => {
+                if matches!(&failure, CaptureReadFailure::LineFeedLimit { .. }) {
+                    return Err(LfRefusalContext { owned: &mut owned, stdout_pipe: &mut stdout_pipe,
+                        stderr_pipe: &mut stderr_pipe, stdout, stderr, stdout_eof, stderr_eof,
+                        known_status: Some(status), argv, deadline: retirement_deadline, policy,
+                    }.finish(capture_read_error("stderr", failure, limit, body_free_diagnostics)));
+                }
                 let cleanup = owned.cleanup(retirement_deadline);
                 return Err(command_failure(retirement_failure(capture_read_error("stderr", failure, limit, body_free_diagnostics),
                     stdout_eof, stderr_eof, true), argv, cleanup, stdout, stderr, Some(status), policy));
@@ -1145,6 +1297,231 @@ mod tests {
             .join("../../ProjectCentral/now/tmp");
         std::fs::create_dir_all(&scratch).unwrap();
         tempfile::Builder::new().prefix("runner-owned-").tempdir_in(&scratch).unwrap()
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn assert_natural_lf_refusal(failure: &AikitError, status: i32) {
+        use std::error::Error;
+        assert_eq!(failure.code(), "mux.command_output_limit", "{failure:?}");
+        assert_eq!(failure.details()["observation_stage"], "line_projection_capacity");
+        assert_eq!(failure.details()["group_signal"], "not-needed");
+        assert_eq!(failure.details()["direct_child_reaped"], "true");
+        assert_eq!(failure.details()["known_exit_status"], status.to_string());
+        assert_eq!(failure.details()["stdout_eof"], "true");
+        assert_eq!(failure.details()["stderr_eof"], "true");
+        assert_eq!(failure.details()["capture_cancelled"], "false");
+        assert_eq!(failure.details()["lf_refusal_retirement"], "natural_eof_reap");
+        assert_eq!(failure.details()["process_group_retirement"], "unconfirmed");
+        assert_eq!(failure.details()["effects"], "unknown");
+        assert_eq!(failure.details()["automatic_retry"], "false");
+        assert!(failure.source().is_none(), "unexpected actual IO: {failure:?}");
+        assert!(!failure.details().contains_key("cleanup_cause"));
+        assert_eq!(failure.secondary_io_sources().count(), 0);
+        assert_eq!(failure.native_capture().unwrap().status, Some(status));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_fast_lf_overflow_reaps_natural_eof_without_a_group_signal() {
+        for _ in 0..16 {
+            let failure = SystemRunner::new().with_strict_utf8().with_body_free_diagnostics()
+                .with_capture_line_feed_limit(1).with_unix_signal_status()
+                .run(&["/bin/sh".into(), "-c".into(),
+                    "printf '\\n'; printf '\\n' >&2; exit 19".into()]).unwrap_err();
+            assert_natural_lf_refusal(&failure, 19);
+            assert_eq!(failure.details()["observed_line_feeds"], "2");
+            let actual = failure.native_capture().unwrap();
+            assert_eq!(actual.stdout.len() + actual.stderr.len(), 1,
+                "unadmitted LF chunk must not be appended");
+            assert_eq!(actual.stdout.iter().chain(&actual.stderr).copied().collect::<Vec<_>>(), b"\n");
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_lf_refusal_observes_gated_late_pipe_eof_without_a_semantic_result() {
+        use rustix::process::{waitid, WaitId, WaitIdOptions};
+        // Always retain this actual product fixture: an assertion/observer
+        // failure must not delete inputs while a descendant may still exist.
+        let fixture = native_command_tempdir().keep();
+        let ready = fixture.join("ready");
+        let leader = fixture.join("leader-pid");
+        let release = fixture.join("release-after-actual-exit");
+        let payload = fixture.join("late-body");
+        let bytes = b"lf-refusal-unadmitted-late-body";
+        std::fs::write(&payload, bytes).unwrap();
+        let observed_leader = leader.clone();
+        let observed_release = release.clone();
+        let observer = std::thread::spawn(move || -> std::io::Result<()> {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let raw = loop {
+                match std::fs::read_to_string(&observed_leader) {
+                    Ok(raw) if !raw.is_empty() => break raw,
+                    Ok(_) => {},
+                    Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {},
+                    Err(cause) => return Err(cause),
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "actual LF fixture leader not observed"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            };
+            let raw_pid = raw.parse::<i32>().map_err(|cause|
+                std::io::Error::new(std::io::ErrorKind::InvalidData, cause))?;
+            let pid = rustix::process::Pid::from_raw(raw_pid).ok_or_else(||
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "actual LF fixture PID is not positive"))?;
+            loop {
+                // Observation only: never signal/reap or confer a native grant.
+                if waitid(WaitId::Pid(pid), WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT)
+                    .map_err(std::io::Error::from)?.is_some()
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    return std::fs::write(observed_release, b"release after real exit");
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "actual LF fixture exit not observed"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", r#"(
+            printf ready > "$1"
+            n=0
+            while [ ! -e "$3" ] && [ "$n" -lt 250 ]; do n=$((n+1)); sleep 0.02; done
+            [ -e "$3" ] || exit 71
+            /bin/cat "$4"
+        ) &
+        while [ ! -e "$1" ]; do sleep 0.02; done
+        printf '%s' "$$" > "$2.tmp"
+        /bin/mv "$2.tmp" "$2"
+        printf '\n'
+        printf '\n' >&2
+        exit 19"#, "actual-lf-late-pipe-fixture"])
+            .arg(&ready).arg(&leader).arg(&release).arg(&payload);
+        let actual = SystemRunner::new().with_timeout(std::time::Duration::from_secs(5))
+            .with_strict_utf8().with_body_free_diagnostics().with_capture_line_feed_limit(1)
+            .with_unix_signal_status().capture_command(&mut command);
+        let actual_observer = observer.join().unwrap();
+        actual_observer.unwrap();
+        let failure = actual.unwrap_err();
+        assert_natural_lf_refusal(&failure, 19);
+        assert_eq!(std::fs::read(&payload).unwrap(), bytes);
+        for public in [failure.to_string(), format!("{failure:?}")] {
+            assert!(!public.contains("lf-refusal-unadmitted-late-body"));
+        }
+        // The test proves gated native pipe completion after real leader exit.
+        // Scheduling may admit some late bytes before the LF refusal; neither
+        // those bytes nor the subsequently discarded count is a result/grant.
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_live_lf_overflow_still_requires_finite_native_cancellation_and_reap() {
+        use std::error::Error;
+        let failure = SystemRunner::new().with_strict_utf8().with_body_free_diagnostics()
+            .with_timeout(std::time::Duration::from_secs(5))
+            .with_capture_line_feed_limit(1).with_unix_signal_status()
+            .run(&["/bin/sh".into(), "-c".into(),
+                "printf '\\n'; printf '\\n' >&2; sleep 30".into()]).unwrap_err();
+        assert_eq!(failure.code(), "mux.command_output_limit", "{failure:?}");
+        assert_eq!(failure.details()["observation_stage"], "line_projection_capacity");
+        assert_eq!(failure.details()["group_signal"], "delivered");
+        assert_eq!(failure.details()["direct_child_reaped"], "true");
+        assert_eq!(failure.details()["cleanup_exit_status"], "137");
+        assert!(!failure.details().contains_key("known_exit_status"));
+        assert_eq!(failure.details()["lf_refusal_retirement"], "cancellation");
+        assert_eq!(failure.details()["capture_cancelled"], "true");
+        assert_eq!(failure.details()["process_group_retirement"], "unconfirmed");
+        assert!(failure.source().is_none(), "actual cleanup IO must not be ignored: {failure:?}");
+        assert!(!failure.details().contains_key("cleanup_cause"));
+        assert_eq!(failure.native_capture().unwrap().status, Some(137));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_lf_natural_eof_does_not_claim_retirement_of_a_closed_stream_descendant() {
+        struct StopOnDrop { stop: std::path::PathBuf, stopped: std::path::PathBuf }
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::write(&self.stop, b"stop");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                while !self.stopped.exists() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
+        fn await_file(path: &std::path::Path) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !path.exists() {
+                assert!(std::time::Instant::now() < deadline, "actual LF descendant response missing");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        let fixture = native_command_tempdir().keep();
+        let stop = fixture.join("stop"); let ready = fixture.join("ready");
+        let request = fixture.join("request"); let acknowledgment = fixture.join("acknowledgment");
+        let stopped = fixture.join("stopped");
+        let _control = StopOnDrop { stop: stop.clone(), stopped: stopped.clone() };
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", r#"(
+            exec >/dev/null 2>/dev/null
+            printf ready > "$2"
+            n=0
+            while [ ! -e "$1" ] && [ "$n" -lt 500 ]; do
+                if [ -e "$3" ]; then printf alive > "$4"; fi
+                n=$((n+1)); sleep 0.02
+            done
+            printf stopped > "$5"
+        ) &
+        while [ ! -e "$2" ]; do sleep 0.02; done
+        printf '\n'
+        printf '\n' >&2
+        exit 19"#, "actual-lf-closed-stream-fixture"])
+            .arg(&stop).arg(&ready).arg(&request).arg(&acknowledgment).arg(&stopped);
+        let failure = SystemRunner::new().with_timeout(std::time::Duration::from_secs(5))
+            .with_strict_utf8().with_body_free_diagnostics().with_capture_line_feed_limit(1)
+            .with_unix_signal_status().capture_command(&mut command).unwrap_err();
+        assert_natural_lf_refusal(&failure, 19);
+        assert!(!stopped.exists());
+        std::fs::write(&request, b"new request after refusal returned").unwrap();
+        await_file(&acknowledgment);
+        assert_eq!(std::fs::read(&acknowledgment).unwrap(), b"alive");
+        std::fs::write(&stop, b"stop").unwrap(); await_file(&stopped);
+        // Actual survival disproves a whole-group retirement interpretation.
+        // No released numeric PGID is used for the fixture's explicit stop.
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_group_signal_phase_keeps_the_original_reaped_child_error() {
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 17"]).process_group(0).spawn().unwrap();
+        assert_eq!(child.wait().unwrap().code(), Some(17));
+        let oracle = crate::connection_process::peek_owned_child_exit(&child).unwrap_err();
+        assert_eq!(oracle.raw_os_error(), Some(rustix::io::Errno::CHILD.raw_os_error()));
+        let actual = match signal_owned_child_group_observed(&child) {
+            Err(failure) => failure,
+            Ok(_) => panic!("actual released child ownership must refuse before signalling"),
+        };
+        assert_eq!(actual.stage, "ownership_peek");
+        assert_eq!(actual.cause.kind(), oracle.kind());
+        assert_eq!(actual.cause.raw_os_error(), oracle.raw_os_error());
+        let public = signal_owned_child_group(&child).unwrap_err();
+        assert_eq!(public.kind(), oracle.kind());
+        assert_eq!(public.raw_os_error(), oracle.raw_os_error());
+        // std Child already cached its actual reap; the native owner has not.
+        // Its real waitid ECHILD remains refusal, never a later numeric signal.
+        let mut owned = OwnedCommand { child, cleanup_attempted: false,
+            reaped_status: None, ownership_lost: false };
+        let cleanup = owned.cleanup(std::time::Instant::now() + std::time::Duration::from_secs(2));
+        assert_eq!(cleanup.signal, "failed");
+        assert_eq!(cleanup.error_stage, Some("ownership_peek"));
+        assert_eq!(cleanup.error.unwrap().raw_os_error(), oracle.raw_os_error());
+        assert!(owned.ownership_lost);
+        assert!(!cleanup.reaped);
+        drop(owned);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

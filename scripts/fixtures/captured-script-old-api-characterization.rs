@@ -207,6 +207,7 @@ fn observe_actual_native_outcome(case: &str, outcome: &aikit_core::Result<run::R
                 "direct_child_reaped":failure.details().get("direct_child_reaped"),
                 "observation_stage":failure.details().get("observation_stage"),
                 "group_signal":failure.details().get("group_signal"),
+                "cleanup_observation_stage":failure.details().get("cleanup_observation_stage"),
                 "known_exit_status":observed_status(failure,"known_exit_status"),
                 "cleanup_exit_status":observed_status(failure,"cleanup_exit_status"),
                 "stdout_eof":observed_eof(failure,"stdout_eof"),"stderr_eof":observed_eof(failure,"stderr_eof"),
