@@ -706,7 +706,7 @@ fn actual_held_image_sha256_profile_cost() -> Result<(), Box<dyn Error>> {
                 observations.push(json!({"sha256":actual,"bytes":BYTES,"elapsed_nanoseconds":elapsed.as_nanos()}));
             }
             let warmup = observations.remove(0);
-            println!("AIKIT_SHA2_COST {}", json!({"profile":profile,"input_basis":before,
+            println!("\nAIKIT_SHA2_COST {}", json!({"profile":profile,"input_basis":before,
                 "sha256":SHA,"bytes":BYTES,"warmup":warmup,"observations":observations,
                 "os":std::env::consts::OS,"arch":std::env::consts::ARCH,"actual_hardware":hardware,
                 "scope":"two actual same-helper full reads; not whole Gate.check or native-case qualification"}));
