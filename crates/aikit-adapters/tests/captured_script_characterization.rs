@@ -681,7 +681,7 @@ fn actual_held_image_sha256_profile_cost() -> Result<(), Box<dyn Error>> {
                         Duration::from_secs(10), 65_536, true)?;
                 if actual.status != 0 {
                     return Err(Box::new(AikitError::new("test.hash_cost_cpu_observation_failed", "Actual native CPU observation did not succeed")
-                        .with_detail("status", actual.status.to_string())
+                        .with("status", actual.status.to_string())
                         .with_native_capture(Some(actual.status), actual.stdout.into_bytes(), actual.stderr.into_bytes())));
                 }
                 json!({"route":"actual_mac_sysctl_hw_model_ncpu","status":actual.status,"stdout":actual.stdout,"stderr":actual.stderr})
