@@ -90,6 +90,7 @@ fn actual_old_api_manifest_deadline_requires_native_timeout_not_completed_status
 id = "script/demo/greet"
 kind = "script"
 name = "greet"
+description = "Exercises the declared native capture deadline."
 [script]
 entry = "payload/run.sh"
 mode = "capture"

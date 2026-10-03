@@ -274,34 +274,134 @@ jobs:
             cat "$gate_dir/$label.build.stderr"
             return "$status"
           }
+          run_clean() {
+            label="$1"; manifest="$2"
+            set +e
+            cargo -Vv > "$gate_dir/$label.clean.cargo.txt" 2> "$gate_dir/$label.clean.cargo.stderr"
+            status=$?
+            set -e
+            printf '%s\n' "$status" > "$gate_dir/$label.clean.cargo.exit"
+            if [ "$status" -ne 0 ]; then return "$status"; fi
+            if ! cmp -s "$gate_dir/cargo.txt" "$gate_dir/$label.clean.cargo.txt"; then
+              printf '%s\n' 'Native Cargo version changed before selected workspace retirement; comparison unavailable' >&2
+              return 1
+            fi
+            python3 - "$gate_dir" "$label" "$manifest" "$CARGO_TARGET_DIR" <<'PYCLEAN'
+          from pathlib import Path
+          import json,sys
+          p=Path(sys.argv[1]);label,manifest,target=sys.argv[2:5]
+          with (p/(label+'.clean.command.json')).open('x') as out:out.write(json.dumps({'argv':['cargo','clean','--locked','--manifest-path',manifest,'--workspace'],'cwd':str(Path.cwd().resolve()),'CARGO_TARGET_DIR':target,'native_version_basis':str(p/(label+'.clean.cargo.txt')),'scope':'Native workspace-member artifacts only; same target. Private images retained before the next phase; no manual target/registry removal.'},indent=2)+'\n')
+          PYCLEAN
+            set +e
+            cargo clean --locked --manifest-path "$manifest" --workspace > "$gate_dir/$label.clean.stdout" 2> "$gate_dir/$label.clean.stderr"
+            status=$?
+            set -e
+            printf '%s\n' "$status" > "$gate_dir/$label.clean.exit"
+            cat "$gate_dir/$label.clean.stdout" "$gate_dir/$label.clean.stderr"
+            return "$status"
+          }
           retain_artifact() {
             label="$1"; role="$2"; target="$3"; cwd="$4"; source="$5"; test_profile="$6"
             python3 - "$gate_dir" "$label" "$role" "$target" "$cwd" "$source" "$test_profile" <<'PYBIN'
           from pathlib import Path
-          import hashlib,json,os,shutil,stat,sys
+          import hashlib,json,os,stat,sys
           p=Path(sys.argv[1]);label,role,target,cwd,head=sys.argv[2:7];test=sys.argv[7]=='true'
           if (p/(label+'.build.exit')).read_text().strip()!='0':raise SystemExit('Compilation failure is not a semantic comparison')
           rows=[json.loads(x) for x in (p/(label+'.build.jsonl')).read_text().splitlines() if x.startswith('{')]
           art=[x for x in rows if x.get('reason')=='compiler-artifact' and x.get('target',{}).get('name')==target and x.get('profile',{}).get('test')==test and x.get('executable')]
           if len(art)!=1:raise SystemExit(f'One actual CompilerArtifact required: {role} count={len(art)}')
-          a=art[0];exe=Path(a['executable']);m=exe.lstat()
-          if not stat.S_ISREG(m.st_mode) or m.st_nlink!=1 or not Path(a['target']['src_path']).is_relative_to(Path(cwd)):raise SystemExit('Actual artifact Source/form mismatch')
-          digest=hashlib.sha256(exe.read_bytes()).hexdigest();out=p/'binaries'/role
-          out.parent.mkdir(mode=0o700,exist_ok=True)
-          with exe.open('rb') as src,out.open('xb') as dst:shutil.copyfileobj(src,dst)
-          out.chmod(0o700)
-          after=exe.lstat()
-          if (m.st_dev,m.st_ino,m.st_size,m.st_mtime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns) or hashlib.sha256(exe.read_bytes()).hexdigest()!=digest or hashlib.sha256(out.read_bytes()).hexdigest()!=digest:raise SystemExit('Actual artifact changed while retaining binary bytes')
-          (p/(role+'.artifact.json')).write_text(json.dumps({'path':str(out),'sha256':digest,'original_executable':str(exe),'compiler_artifact':a,'cwd':cwd,'source_head':head,'actual_retained_binary_bytes':out.stat().st_size,'scope':'Copied actual CompilerArtifact bytes; augmentation mapping retained separately, not a pristine tree claim.'},indent=2)+'\n')
+          a=art[0];exe=Path(a['executable']);fd=None
+          def basis(m):
+              mt=divmod(m.st_mtime_ns,1_000_000_000);ct=divmod(m.st_ctime_ns,1_000_000_000)
+              return {'dev':m.st_dev,'ino':m.st_ino,'mode':m.st_mode,'nlink':m.st_nlink,'bytes':m.st_size,'mtime_seconds':mt[0],'mtime_nanoseconds':mt[1],'ctime_seconds':ct[0],'ctime_nanoseconds':ct[1]}
+          def record(name,value):
+              flags=os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC
+              with os.fdopen(os.open(p/name,flags,0o600),'w') as out:out.write(json.dumps(value,indent=2)+'\n')
+          observed={'schema':'aikit.actual-compiler-original-observation/v3','label':label,'role':role,'source_head':head,'source_root':cwd,'original_executable':str(exe),'compiler_artifact':a,'source_affiliated':Path(a['target']['src_path']).is_relative_to(Path(cwd)),'target_affiliated':exe.is_absolute() and exe.is_relative_to(Path(os.environ['CARGO_TARGET_DIR'])),'target_kind':a['target'].get('kind'),'named_before':None,'held_before':None,'held_digest':{'contract':'held_regular_before_semantic_guards/v4','available':False,'sha256':None,'observed_bytes':0,'read_limit_bytes':None,'before':None,'after':None,'named_after':None,'refusal':None,'cause':None}}
+          try:
+              m=exe.lstat();observed['named_before']=basis(m)
+              fd=os.open(exe,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+              held=os.fstat(fd);observed['held_before']=basis(held)
+          except OSError as cause:
+              observed['original_io']={'type':type(cause).__name__,'errno':cause.errno,'message':str(cause)}
+              observed['held_digest']['cause']=observed['original_io']
+              record(role+'.original-before.json',observed)
+              if fd is not None:os.close(fd)
+              raise
+          try:
+              fact=observed['held_digest'];read_error=None
+              # Only safe ordinary originals under the actual declared routing may be read.
+              # Role/freshness rejection must still retain this checked actual byte fact.
+              if not observed['source_affiliated'] or not observed['target_affiliated']:
+                  fact['refusal']='outside_declared_compiler_source_or_target';permitted=False
+              elif not stat.S_ISREG(m.st_mode) or not stat.S_ISREG(held.st_mode) or held.st_nlink<1 or basis(m)!=basis(held):
+                  fact['refusal']='not_same_held_linked_regular_original';permitted=False
+              else:
+                  try:
+                      target_root=Path(os.environ['CARGO_TARGET_DIR']);source_root=Path(cwd);src=Path(a['target']['src_path'])
+                      fact['physical_original']=str(exe.resolve(strict=True));fact['physical_target']=str(target_root.resolve(strict=True))
+                      permitted=(target_root.is_absolute() and target_root.resolve(strict=True)==target_root and exe.resolve(strict=True)==exe
+                          and source_root.is_absolute() and source_root.resolve(strict=True)==source_root and src.is_absolute()
+                          and src.resolve(strict=True).is_relative_to(source_root))
+                      if not permitted:fact['refusal']='redirected_or_unaffiliated_physical_compiler_routing'
+                  except (OSError,RuntimeError) as cause:
+                      fact['cause']={'stage':'physical_routing','type':type(cause).__name__,'errno':getattr(cause,'errno',None),'message':str(cause)};read_error=cause;permitted=False
+              if permitted:
+                  fact['before']=basis(held);fact['read_limit_bytes']=held.st_size+1
+                  try:
+                      os.lseek(fd,0,os.SEEK_SET);remaining=held.st_size;prehash=hashlib.sha256()
+                      while remaining:
+                          block=os.read(fd,min(16_384,remaining))
+                          if not block:break
+                          fact['observed_bytes']+=len(block);remaining-=len(block);prehash.update(block)
+                      extra=os.read(fd,1);fact['observed_bytes']+=len(extra)
+                      final=os.fstat(fd);named_final=exe.lstat();fact['after']=basis(final);fact['named_after']=basis(named_final)
+                      if remaining or extra or basis(held)!=basis(final) or basis(final)!=basis(named_final):
+                          fact['refusal']='original_bytes_or_physical_basis_changed_during_bounded_digest'
+                      else:
+                          os.lseek(fd,0,os.SEEK_SET)
+                          fact.update({'available':True,'sha256':prehash.hexdigest()})
+                  except OSError as cause:
+                      fact['cause']={'stage':'held_digest','type':type(cause).__name__,'errno':cause.errno,'message':str(cause)};read_error=cause
+              record(role+'.original-before.json',observed) # checked digest or explicit unavailability precedes semantic refusal
+              if read_error is not None:raise read_error
+              if not fact['available']:raise SystemExit('Actual original digest unavailable: '+str(fact['refusal']))
+              kind=['lib'] if role=='runner' else (['bin'] if role=='aikit' else ['test'])
+              if not observed['source_affiliated'] or not observed['target_affiliated'] or a['target'].get('kind')!=kind:raise SystemExit('Actual CompilerArtifact Source/role mismatch')
+              if role in ['old','new'] and a.get('fresh') is not False:raise SystemExit('Old/new CompilerArtifact must be actually rebuilt; semantic comparison unavailable')
+              # Cargo originals may have recorded uplift hardlinks. Private copies never inherit that admission.
+              if not stat.S_ISREG(m.st_mode) or not stat.S_ISREG(held.st_mode) or held.st_nlink<1 or basis(m)!=basis(held):raise SystemExit('Actual original CompilerArtifact is not the same held regular file')
+              out=p/'binaries'/role;out.parent.mkdir(mode=0o700,exist_ok=True)
+              flags=os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC
+              h=hashlib.sha256();copied=0
+              with os.fdopen(os.open(out,flags,0o700),'wb') as dst:
+                  while True:
+                      block=os.read(fd,16_384)
+                      if not block:break
+                      h.update(block);dst.write(block);copied+=len(block)
+                  dst.flush();os.fsync(dst.fileno())
+              digest=h.hexdigest();os.lseek(fd,0,os.SEEK_SET);verify=hashlib.sha256()
+              while True:
+                  block=os.read(fd,16_384)
+                  if not block:break
+                  verify.update(block)
+              after=os.fstat(fd);named_after=exe.lstat();private=out.lstat()
+              if basis(held)!=basis(after) or basis(after)!=basis(named_after) or copied!=held.st_size or verify.hexdigest()!=digest or digest!=fact['sha256']:raise SystemExit('Actual held original changed while retaining binary bytes')
+              if not stat.S_ISREG(private.st_mode) or private.st_nlink!=1 or hashlib.sha256(out.read_bytes()).hexdigest()!=digest:raise SystemExit('Actual private copied image lost exclusive ordinary custody')
+              record(role+'.artifact.json',{'path':str(out),'sha256':digest,'original_executable':str(exe),'compiler_artifact':a,'cwd':cwd,'source_head':head,'actual_retained_binary_bytes':copied,'original_image':{'contract':'actual_compiler_artifact_held_regular/v3','before':basis(held),'after':basis(after),'named_after':basis(named_after),'sha256':digest,'complete':True},'scope':'Copied actual CompilerArtifact bytes. Original positive linkcount is observed only for this bound compiler output; private copy remains single-link. Not a pristine tree claim.'})
+          finally:os.close(fd)
           PYBIN
           }
           current_head=$(cat "$gate_dir/current-head.txt")
           # Old/new compile failures remain actual build failures, never expected old red.
+          run_clean old "$old_root/Cargo.toml"
           run_compile old cargo test --locked --manifest-path "$old_root/Cargo.toml" -p aikit-cli --test captured_script_old_api_characterization --no-run --message-format=json
           retain_artifact old old captured_script_old_api_characterization "$old_root" "$old_head" true
+          run_clean new "$new_root/Cargo.toml"
           run_compile new cargo test --locked --manifest-path "$new_root/Cargo.toml" -p aikit-cli --test captured_script_old_api_characterization --no-run --message-format=json
           retain_artifact new new captured_script_old_api_characterization "$new_root" "$current_head" true
           # Refresh normal current bins last: multicall references this actual built aikit.
+          run_clean current "$current_root/Cargo.toml"
           run_compile current-cli cargo test --locked -p aikit-cli --test run_exec --test multicall_symlink --test palette_run_intent --test scoped_praxis_native --no-run --message-format=json
           for target in run_exec multicall_symlink palette_run_intent scoped_praxis_native; do
             retain_artifact current-cli "$target" "$target" "$current_root" "$current_head" true
@@ -314,21 +414,44 @@ jobs:
           retain_artifact current-driver driver captured_script_characterization "$current_root" "$current_head" true
           python3 - "$gate_dir" <<'PYGATE'
           from pathlib import Path
-          import hashlib,json,stat,sys
+          import hashlib,json,os,stat,sys
           p=Path(sys.argv[1]);meta=json.loads((p/'source-watch.json').read_text())
           meta['executables']={}
+          meta['compiler_originals']={}
           roles=['old','new','run_exec','multicall_symlink','palette_run_intent','scoped_praxis_native','aikit','runner','driver']
           def add(q):
               m=q.lstat()
               if not stat.S_ISREG(m.st_mode) or m.st_nlink!=1:raise SystemExit('Nonordinary actual retained artifact')
               meta['files'].append({'path':str(q),'sha256':hashlib.sha256(q.read_bytes()).hexdigest(),'dev':m.st_dev,'ino':m.st_ino})
+          def add_original(role,entry):
+              q=Path(entry['original_executable']);a=entry['compiler_artifact']
+              if a['executable']!=str(q):raise SystemExit('Original image is not the declared actual CompilerArtifact')
+              fd=os.open(q,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+              try:
+                  before=os.fstat(fd);named=q.lstat()
+                  def basis(m):
+                      mt=divmod(m.st_mtime_ns,1_000_000_000);ct=divmod(m.st_ctime_ns,1_000_000_000)
+                      return {'dev':m.st_dev,'ino':m.st_ino,'mode':m.st_mode,'nlink':m.st_nlink,'bytes':m.st_size,'mtime_seconds':mt[0],'mtime_nanoseconds':mt[1],'ctime_seconds':ct[0],'ctime_nanoseconds':ct[1]}
+                  h=hashlib.sha256()
+                  if not stat.S_ISREG(before.st_mode) or before.st_nlink<1 or basis(before)!=basis(named) or basis(before)!=entry['original_image']['after']:raise SystemExit('Current original compiler basis changed before native selection')
+                  while True:
+                      block=os.read(fd,16_384)
+                      if not block:break
+                      h.update(block)
+                  after=os.fstat(fd)
+                  if basis(before)!=basis(after) or basis(after)!=basis(q.lstat()) or h.hexdigest()!=entry['sha256']:raise SystemExit('Current original compiler image changed')
+                  meta['compiler_originals'][role]={'path':str(q),'basis':basis(after),'sha256':h.hexdigest(),'contract':'actual_compiler_artifact_held_regular/v3'}
+              finally:os.close(fd)
           for role in roles:
               q=p/(role+'.artifact.json');add(q);entry=json.loads(q.read_text());meta['executables'][role]=entry;add(Path(entry['path']))
-              if role not in ['old','new']:add(Path(entry['original_executable']))
+              add(p/(role+'.original-before.json'))
+              if role not in ['old','new']:add_original(role,entry)
           for label in ['old','new','current-cli','current-bin','current-runner','current-driver']:
               for suffix in ['.build.jsonl','.build.stderr','.build.exit']:add(p/(label+suffix))
+          for label in ['old','new','current']:
+              for suffix in ['.clean.cargo.txt','.clean.cargo.stderr','.clean.cargo.exit','.clean.command.json','.clean.stdout','.clean.stderr','.clean.exit']:add(p/(label+suffix))
           for q in [p/'source-watch.json',p/'old-augmentation.json',p/'new-augmentation.json']:add(q)
-          meta.update({'default_outcome':json.loads((p/'default-result.json').read_text())['actual_outcome'],'platform':sys.platform,'compiled_old_new':2,'compiled_derived_definitions':6,'new_real_failure_unwind_selection':1,'inner_refusal_observation_contract':'expected_command_failure_original_and_structured_cleanup/v2','retained_fixture_contract':'retained_before_effect_and_on_unwind/v2','standing':'Actual compile and bytes only; native results are produced separately by selected ignored driver','live_seconds':20,'aggregate_capture_bytes':1048576,'separate_native_retirement_seconds':2})
+          meta.update({'default_outcome':json.loads((p/'default-result.json').read_text())['actual_outcome'],'platform':sys.platform,'compiled_old_new':2,'compiled_derived_definitions':6,'new_real_failure_unwind_selection':1,'inner_refusal_observation_contract':'expected_command_failure_original_and_structured_cleanup/v2','retained_fixture_contract':'retained_before_effect_and_on_unwind/v2','compiler_original_contract':'actual_compiler_artifact_held_regular/v3','workspace_clean_phases':['old','new','current'],'standing':'Actual compile and bytes only; native results are produced separately by selected ignored driver','live_seconds':20,'aggregate_capture_bytes':1048576,'separate_native_retirement_seconds':2})
           # Recheck actual source, lock, input and artifact custody before any child effect.
           for entry in meta['files']:
               q=Path(entry['path']);m=q.lstat()
@@ -625,34 +748,134 @@ jobs:
             cat "$gate_dir/$label.build.stderr"
             return "$status"
           }
+          run_clean() {
+            label="$1"; manifest="$2"
+            set +e
+            cargo -Vv > "$gate_dir/$label.clean.cargo.txt" 2> "$gate_dir/$label.clean.cargo.stderr"
+            status=$?
+            set -e
+            printf '%s\n' "$status" > "$gate_dir/$label.clean.cargo.exit"
+            if [ "$status" -ne 0 ]; then return "$status"; fi
+            if ! cmp -s "$gate_dir/cargo.txt" "$gate_dir/$label.clean.cargo.txt"; then
+              printf '%s\n' 'Native Cargo version changed before selected workspace retirement; comparison unavailable' >&2
+              return 1
+            fi
+            python3 - "$gate_dir" "$label" "$manifest" "$CARGO_TARGET_DIR" <<'PYCLEAN'
+          from pathlib import Path
+          import json,sys
+          p=Path(sys.argv[1]);label,manifest,target=sys.argv[2:5]
+          with (p/(label+'.clean.command.json')).open('x') as out:out.write(json.dumps({'argv':['cargo','clean','--locked','--manifest-path',manifest,'--workspace'],'cwd':str(Path.cwd().resolve()),'CARGO_TARGET_DIR':target,'native_version_basis':str(p/(label+'.clean.cargo.txt')),'scope':'Native workspace-member artifacts only; same target. Private images retained before the next phase; no manual target/registry removal.'},indent=2)+'\n')
+          PYCLEAN
+            set +e
+            cargo clean --locked --manifest-path "$manifest" --workspace > "$gate_dir/$label.clean.stdout" 2> "$gate_dir/$label.clean.stderr"
+            status=$?
+            set -e
+            printf '%s\n' "$status" > "$gate_dir/$label.clean.exit"
+            cat "$gate_dir/$label.clean.stdout" "$gate_dir/$label.clean.stderr"
+            return "$status"
+          }
           retain_artifact() {
             label="$1"; role="$2"; target="$3"; cwd="$4"; source="$5"; test_profile="$6"
             python3 - "$gate_dir" "$label" "$role" "$target" "$cwd" "$source" "$test_profile" <<'PYBIN'
           from pathlib import Path
-          import hashlib,json,os,shutil,stat,sys
+          import hashlib,json,os,stat,sys
           p=Path(sys.argv[1]);label,role,target,cwd,head=sys.argv[2:7];test=sys.argv[7]=='true'
           if (p/(label+'.build.exit')).read_text().strip()!='0':raise SystemExit('Compilation failure is not a semantic comparison')
           rows=[json.loads(x) for x in (p/(label+'.build.jsonl')).read_text().splitlines() if x.startswith('{')]
           art=[x for x in rows if x.get('reason')=='compiler-artifact' and x.get('target',{}).get('name')==target and x.get('profile',{}).get('test')==test and x.get('executable')]
           if len(art)!=1:raise SystemExit(f'One actual CompilerArtifact required: {role} count={len(art)}')
-          a=art[0];exe=Path(a['executable']);m=exe.lstat()
-          if not stat.S_ISREG(m.st_mode) or m.st_nlink!=1 or not Path(a['target']['src_path']).is_relative_to(Path(cwd)):raise SystemExit('Actual artifact Source/form mismatch')
-          digest=hashlib.sha256(exe.read_bytes()).hexdigest();out=p/'binaries'/role
-          out.parent.mkdir(mode=0o700,exist_ok=True)
-          with exe.open('rb') as src,out.open('xb') as dst:shutil.copyfileobj(src,dst)
-          out.chmod(0o700)
-          after=exe.lstat()
-          if (m.st_dev,m.st_ino,m.st_size,m.st_mtime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns) or hashlib.sha256(exe.read_bytes()).hexdigest()!=digest or hashlib.sha256(out.read_bytes()).hexdigest()!=digest:raise SystemExit('Actual artifact changed while retaining binary bytes')
-          (p/(role+'.artifact.json')).write_text(json.dumps({'path':str(out),'sha256':digest,'original_executable':str(exe),'compiler_artifact':a,'cwd':cwd,'source_head':head,'actual_retained_binary_bytes':out.stat().st_size,'scope':'Copied actual CompilerArtifact bytes; augmentation mapping retained separately, not a pristine tree claim.'},indent=2)+'\n')
+          a=art[0];exe=Path(a['executable']);fd=None
+          def basis(m):
+              mt=divmod(m.st_mtime_ns,1_000_000_000);ct=divmod(m.st_ctime_ns,1_000_000_000)
+              return {'dev':m.st_dev,'ino':m.st_ino,'mode':m.st_mode,'nlink':m.st_nlink,'bytes':m.st_size,'mtime_seconds':mt[0],'mtime_nanoseconds':mt[1],'ctime_seconds':ct[0],'ctime_nanoseconds':ct[1]}
+          def record(name,value):
+              flags=os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC
+              with os.fdopen(os.open(p/name,flags,0o600),'w') as out:out.write(json.dumps(value,indent=2)+'\n')
+          observed={'schema':'aikit.actual-compiler-original-observation/v3','label':label,'role':role,'source_head':head,'source_root':cwd,'original_executable':str(exe),'compiler_artifact':a,'source_affiliated':Path(a['target']['src_path']).is_relative_to(Path(cwd)),'target_affiliated':exe.is_absolute() and exe.is_relative_to(Path(os.environ['CARGO_TARGET_DIR'])),'target_kind':a['target'].get('kind'),'named_before':None,'held_before':None,'held_digest':{'contract':'held_regular_before_semantic_guards/v4','available':False,'sha256':None,'observed_bytes':0,'read_limit_bytes':None,'before':None,'after':None,'named_after':None,'refusal':None,'cause':None}}
+          try:
+              m=exe.lstat();observed['named_before']=basis(m)
+              fd=os.open(exe,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+              held=os.fstat(fd);observed['held_before']=basis(held)
+          except OSError as cause:
+              observed['original_io']={'type':type(cause).__name__,'errno':cause.errno,'message':str(cause)}
+              observed['held_digest']['cause']=observed['original_io']
+              record(role+'.original-before.json',observed)
+              if fd is not None:os.close(fd)
+              raise
+          try:
+              fact=observed['held_digest'];read_error=None
+              # Only safe ordinary originals under the actual declared routing may be read.
+              # Role/freshness rejection must still retain this checked actual byte fact.
+              if not observed['source_affiliated'] or not observed['target_affiliated']:
+                  fact['refusal']='outside_declared_compiler_source_or_target';permitted=False
+              elif not stat.S_ISREG(m.st_mode) or not stat.S_ISREG(held.st_mode) or held.st_nlink<1 or basis(m)!=basis(held):
+                  fact['refusal']='not_same_held_linked_regular_original';permitted=False
+              else:
+                  try:
+                      target_root=Path(os.environ['CARGO_TARGET_DIR']);source_root=Path(cwd);src=Path(a['target']['src_path'])
+                      fact['physical_original']=str(exe.resolve(strict=True));fact['physical_target']=str(target_root.resolve(strict=True))
+                      permitted=(target_root.is_absolute() and target_root.resolve(strict=True)==target_root and exe.resolve(strict=True)==exe
+                          and source_root.is_absolute() and source_root.resolve(strict=True)==source_root and src.is_absolute()
+                          and src.resolve(strict=True).is_relative_to(source_root))
+                      if not permitted:fact['refusal']='redirected_or_unaffiliated_physical_compiler_routing'
+                  except (OSError,RuntimeError) as cause:
+                      fact['cause']={'stage':'physical_routing','type':type(cause).__name__,'errno':getattr(cause,'errno',None),'message':str(cause)};read_error=cause;permitted=False
+              if permitted:
+                  fact['before']=basis(held);fact['read_limit_bytes']=held.st_size+1
+                  try:
+                      os.lseek(fd,0,os.SEEK_SET);remaining=held.st_size;prehash=hashlib.sha256()
+                      while remaining:
+                          block=os.read(fd,min(16_384,remaining))
+                          if not block:break
+                          fact['observed_bytes']+=len(block);remaining-=len(block);prehash.update(block)
+                      extra=os.read(fd,1);fact['observed_bytes']+=len(extra)
+                      final=os.fstat(fd);named_final=exe.lstat();fact['after']=basis(final);fact['named_after']=basis(named_final)
+                      if remaining or extra or basis(held)!=basis(final) or basis(final)!=basis(named_final):
+                          fact['refusal']='original_bytes_or_physical_basis_changed_during_bounded_digest'
+                      else:
+                          os.lseek(fd,0,os.SEEK_SET)
+                          fact.update({'available':True,'sha256':prehash.hexdigest()})
+                  except OSError as cause:
+                      fact['cause']={'stage':'held_digest','type':type(cause).__name__,'errno':cause.errno,'message':str(cause)};read_error=cause
+              record(role+'.original-before.json',observed) # checked digest or explicit unavailability precedes semantic refusal
+              if read_error is not None:raise read_error
+              if not fact['available']:raise SystemExit('Actual original digest unavailable: '+str(fact['refusal']))
+              kind=['lib'] if role=='runner' else (['bin'] if role=='aikit' else ['test'])
+              if not observed['source_affiliated'] or not observed['target_affiliated'] or a['target'].get('kind')!=kind:raise SystemExit('Actual CompilerArtifact Source/role mismatch')
+              if role in ['old','new'] and a.get('fresh') is not False:raise SystemExit('Old/new CompilerArtifact must be actually rebuilt; semantic comparison unavailable')
+              # Cargo originals may have recorded uplift hardlinks. Private copies never inherit that admission.
+              if not stat.S_ISREG(m.st_mode) or not stat.S_ISREG(held.st_mode) or held.st_nlink<1 or basis(m)!=basis(held):raise SystemExit('Actual original CompilerArtifact is not the same held regular file')
+              out=p/'binaries'/role;out.parent.mkdir(mode=0o700,exist_ok=True)
+              flags=os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC
+              h=hashlib.sha256();copied=0
+              with os.fdopen(os.open(out,flags,0o700),'wb') as dst:
+                  while True:
+                      block=os.read(fd,16_384)
+                      if not block:break
+                      h.update(block);dst.write(block);copied+=len(block)
+                  dst.flush();os.fsync(dst.fileno())
+              digest=h.hexdigest();os.lseek(fd,0,os.SEEK_SET);verify=hashlib.sha256()
+              while True:
+                  block=os.read(fd,16_384)
+                  if not block:break
+                  verify.update(block)
+              after=os.fstat(fd);named_after=exe.lstat();private=out.lstat()
+              if basis(held)!=basis(after) or basis(after)!=basis(named_after) or copied!=held.st_size or verify.hexdigest()!=digest or digest!=fact['sha256']:raise SystemExit('Actual held original changed while retaining binary bytes')
+              if not stat.S_ISREG(private.st_mode) or private.st_nlink!=1 or hashlib.sha256(out.read_bytes()).hexdigest()!=digest:raise SystemExit('Actual private copied image lost exclusive ordinary custody')
+              record(role+'.artifact.json',{'path':str(out),'sha256':digest,'original_executable':str(exe),'compiler_artifact':a,'cwd':cwd,'source_head':head,'actual_retained_binary_bytes':copied,'original_image':{'contract':'actual_compiler_artifact_held_regular/v3','before':basis(held),'after':basis(after),'named_after':basis(named_after),'sha256':digest,'complete':True},'scope':'Copied actual CompilerArtifact bytes. Original positive linkcount is observed only for this bound compiler output; private copy remains single-link. Not a pristine tree claim.'})
+          finally:os.close(fd)
           PYBIN
           }
           current_head=$(cat "$gate_dir/current-head.txt")
           # Old/new compile failures remain actual build failures, never expected old red.
+          run_clean old "$old_root/Cargo.toml"
           run_compile old cargo test --locked --manifest-path "$old_root/Cargo.toml" -p aikit-cli --test captured_script_old_api_characterization --no-run --message-format=json
           retain_artifact old old captured_script_old_api_characterization "$old_root" "$old_head" true
+          run_clean new "$new_root/Cargo.toml"
           run_compile new cargo test --locked --manifest-path "$new_root/Cargo.toml" -p aikit-cli --test captured_script_old_api_characterization --no-run --message-format=json
           retain_artifact new new captured_script_old_api_characterization "$new_root" "$current_head" true
           # Refresh normal current bins last: multicall references this actual built aikit.
+          run_clean current "$current_root/Cargo.toml"
           run_compile current-cli cargo test --locked -p aikit-cli --test run_exec --test multicall_symlink --test palette_run_intent --test scoped_praxis_native --no-run --message-format=json
           for target in run_exec multicall_symlink palette_run_intent scoped_praxis_native; do
             retain_artifact current-cli "$target" "$target" "$current_root" "$current_head" true
@@ -665,21 +888,44 @@ jobs:
           retain_artifact current-driver driver captured_script_characterization "$current_root" "$current_head" true
           python3 - "$gate_dir" <<'PYGATE'
           from pathlib import Path
-          import hashlib,json,stat,sys
+          import hashlib,json,os,stat,sys
           p=Path(sys.argv[1]);meta=json.loads((p/'source-watch.json').read_text())
           meta['executables']={}
+          meta['compiler_originals']={}
           roles=['old','new','run_exec','multicall_symlink','palette_run_intent','scoped_praxis_native','aikit','runner','driver']
           def add(q):
               m=q.lstat()
               if not stat.S_ISREG(m.st_mode) or m.st_nlink!=1:raise SystemExit('Nonordinary actual retained artifact')
               meta['files'].append({'path':str(q),'sha256':hashlib.sha256(q.read_bytes()).hexdigest(),'dev':m.st_dev,'ino':m.st_ino})
+          def add_original(role,entry):
+              q=Path(entry['original_executable']);a=entry['compiler_artifact']
+              if a['executable']!=str(q):raise SystemExit('Original image is not the declared actual CompilerArtifact')
+              fd=os.open(q,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+              try:
+                  before=os.fstat(fd);named=q.lstat()
+                  def basis(m):
+                      mt=divmod(m.st_mtime_ns,1_000_000_000);ct=divmod(m.st_ctime_ns,1_000_000_000)
+                      return {'dev':m.st_dev,'ino':m.st_ino,'mode':m.st_mode,'nlink':m.st_nlink,'bytes':m.st_size,'mtime_seconds':mt[0],'mtime_nanoseconds':mt[1],'ctime_seconds':ct[0],'ctime_nanoseconds':ct[1]}
+                  h=hashlib.sha256()
+                  if not stat.S_ISREG(before.st_mode) or before.st_nlink<1 or basis(before)!=basis(named) or basis(before)!=entry['original_image']['after']:raise SystemExit('Current original compiler basis changed before native selection')
+                  while True:
+                      block=os.read(fd,16_384)
+                      if not block:break
+                      h.update(block)
+                  after=os.fstat(fd)
+                  if basis(before)!=basis(after) or basis(after)!=basis(q.lstat()) or h.hexdigest()!=entry['sha256']:raise SystemExit('Current original compiler image changed')
+                  meta['compiler_originals'][role]={'path':str(q),'basis':basis(after),'sha256':h.hexdigest(),'contract':'actual_compiler_artifact_held_regular/v3'}
+              finally:os.close(fd)
           for role in roles:
               q=p/(role+'.artifact.json');add(q);entry=json.loads(q.read_text());meta['executables'][role]=entry;add(Path(entry['path']))
-              if role not in ['old','new']:add(Path(entry['original_executable']))
+              add(p/(role+'.original-before.json'))
+              if role not in ['old','new']:add_original(role,entry)
           for label in ['old','new','current-cli','current-bin','current-runner','current-driver']:
               for suffix in ['.build.jsonl','.build.stderr','.build.exit']:add(p/(label+suffix))
+          for label in ['old','new','current']:
+              for suffix in ['.clean.cargo.txt','.clean.cargo.stderr','.clean.cargo.exit','.clean.command.json','.clean.stdout','.clean.stderr','.clean.exit']:add(p/(label+suffix))
           for q in [p/'source-watch.json',p/'old-augmentation.json',p/'new-augmentation.json']:add(q)
-          meta.update({'default_outcome':json.loads((p/'default-result.json').read_text())['actual_outcome'],'platform':sys.platform,'compiled_old_new':2,'compiled_derived_definitions':6,'new_real_failure_unwind_selection':1,'inner_refusal_observation_contract':'expected_command_failure_original_and_structured_cleanup/v2','retained_fixture_contract':'retained_before_effect_and_on_unwind/v2','standing':'Actual compile and bytes only; native results are produced separately by selected ignored driver','live_seconds':20,'aggregate_capture_bytes':1048576,'separate_native_retirement_seconds':2})
+          meta.update({'default_outcome':json.loads((p/'default-result.json').read_text())['actual_outcome'],'platform':sys.platform,'compiled_old_new':2,'compiled_derived_definitions':6,'new_real_failure_unwind_selection':1,'inner_refusal_observation_contract':'expected_command_failure_original_and_structured_cleanup/v2','retained_fixture_contract':'retained_before_effect_and_on_unwind/v2','compiler_original_contract':'actual_compiler_artifact_held_regular/v3','workspace_clean_phases':['old','new','current'],'standing':'Actual compile and bytes only; native results are produced separately by selected ignored driver','live_seconds':20,'aggregate_capture_bytes':1048576,'separate_native_retirement_seconds':2})
           # Recheck actual source, lock, input and artifact custody before any child effect.
           for entry in meta['files']:
               q=Path(entry['path']);m=q.lstat()

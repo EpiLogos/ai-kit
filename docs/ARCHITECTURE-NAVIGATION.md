@@ -2,7 +2,7 @@
 role: architecture
 standing: agent-inference
 scope: AIKit native operations and composed O:I consumer boundaries
-updated: 2026-10-02
+updated: 2026-10-03
 ---
 # AIKit architecture navigation
 
@@ -157,3 +157,49 @@ withdrawal of a live origin versus independently accepted retained source.
 No real-model worker Return, personal installed composition, human Recognition
 or QL/domain mapping decision is established by the hosted receipts. The
 original diagram inspection remains at its declared source cut.
+
+## Native command qualification — 3 October 2026
+
+Published Source `88eb816c9af51c9b9ae875ec8cbc97ffa8e4b464` does not inherit a
+passing whole-workflow result from earlier native command controls. Its
+[original full CI](https://github.com/EpiLogos/ai-kit/actions/runs/37108561300)
+failed at two distinct prerequisites. Linux rejected the current executable's
+compiler-artifact admission. Mac's old-image control exited 101 because its
+derived Capsule manifest omitted the required `description`, before the
+intended native deadline behaviour. Equal old/new image digests with different
+Source roots and a fresh artifact flag do not prove an old/new semantic comparison.
+
+The three-path qualification repair supplies a valid derived fixture, native
+workspace-only clean in the same target before selecting old/new/current builds,
+and held actual compiler-artifact basis/alias admission. Independent review of
+V3 found a further missing relation: a safely admitted original image could be
+rejected for its semantic role or freshness without retaining its actual byte
+digest. V4 now records the held regular image digest, bounded by the observed
+size plus one change probe, before those guards. Unsafe, unaffiliated, changed
+or unreadable originals instead retain explicit unavailability and cause;
+they are not credited with fabricated byte evidence. Successful private image
+copies must match that earlier digest and the driver joins its exact count,
+read bound and physical bases to the actual compiler artifact.
+
+The frozen V4 author packet is SHA-256
+`78cf263cd823731ad71a0528168ac748903db6613700362fbcf45e2aaec1510e`.
+It preserves all seventeen original command definitions, four complete target
+selections, eight lifecycle readings and thirty-four required records. The
+complete historical input and its three-case prefix retain separate identities.
+V3's original packet and Parent custody record remain historical; Parent's
+custody review missed the digest omission found by the independent review.
+V4 passed two independent Source reviews and is adopted in this Source cut
+through the existing owner route. Fresh full native qualification remains
+pending; no successor native pass is claimed here.
+These changes qualify command execution; they do not supply new production API,
+live provider, Flow/orchestration, capture privacy, installed or human acceptance.
+Earlier original-17 observations, platform failures and Wiki publication results
+above retain their named Source cuts. Assertions, repeated host observations,
+image metadata and a test definition are not interchangeable evidence.
+
+The current matrix has no exact native-capture capability identity to promote
+from this failed gate. The existing knowledge-command records link this scope
+as a pressure on qualification. Native owner/capture transport, source permission,
+prepared context, subsequent learning and public disclosure require their own
+actual consumer results. No new registry, domain mapping or completed learning
+cycle is inferred from these command controls.

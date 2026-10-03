@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fs::{self, File, Metadata, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -105,6 +105,83 @@ fn read_json(path: &Path) -> io::Result<Value> {
     serde_json::from_slice(&bytes).map_err(io::Error::other)
 }
 
+// This exception belongs only to an actual CompilerArtifact original. Generic
+// private Source, retained images, inputs and evidence still use open_regular.
+fn compiler_basis(meta: &Metadata) -> Value {
+    json!({"dev":meta.dev(),"ino":meta.ino(),"mode":meta.mode(),"nlink":meta.nlink(),
+        "bytes":meta.len(),"mtime_seconds":meta.mtime(),"mtime_nanoseconds":meta.mtime_nsec(),
+        "ctime_seconds":meta.ctime(),"ctime_nanoseconds":meta.ctime_nsec()})
+}
+fn validate_recorded_compiler_basis(value: &Value) -> io::Result<()> {
+    for key in ["dev", "ino", "bytes"] {
+        if value[key].as_u64().is_none() { return Err(invalid("Actual compiler basis is missing an unsigned physical fact")); }
+    }
+    let mode = value["mode"].as_u64().ok_or_else(|| invalid("Actual compiler mode is missing"))?;
+    if mode > u64::from(u32::MAX) || mode & 0o170000 != 0o100000
+        || value["nlink"].as_u64().is_none_or(|count| count == 0) {
+        return Err(invalid("Actual original compiler basis is not a linked regular file"));
+    }
+    for key in ["mtime_seconds", "ctime_seconds"] {
+        if value[key].as_i64().is_none() { return Err(invalid("Actual compiler timestamp is missing")); }
+    }
+    for key in ["mtime_nanoseconds", "ctime_nanoseconds"] {
+        if value[key].as_u64().is_none_or(|nanos| nanos >= 1_000_000_000) {
+            return Err(invalid("Actual compiler timestamp fraction is unavailable"));
+        }
+    }
+    Ok(())
+}
+struct CompilerOriginal {
+    role: String,
+    path: PathBuf,
+    held: File,
+    basis: Value,
+    sha256: String,
+}
+impl CompilerOriginal {
+    fn admit(role: &str, binding: &Value, observation: &Value, product: &Path) -> io::Result<Self> {
+        let path = PathBuf::from(string(observation, "path")?);
+        if observation["contract"] != "actual_compiler_artifact_held_regular/v3"
+            || binding["compiler_artifact"]["executable"] != binding["original_executable"]
+            || path != Path::new(string(binding, "original_executable")?)
+            || !normal_absolute(&path) || !path.starts_with(product.join("target"))
+            || string(observation, "sha256")? != string(binding, "sha256")?
+            || observation["basis"] != binding["original_image"]["after"] {
+            return Err(invalid("Original image lacks the actual same-target CompilerArtifact relation"));
+        }
+        let held = OpenOptions::new().read(true)
+            .custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC).bits() as i32).open(&path)?;
+        let original = Self { role: role.to_owned(), path, held,
+            basis: observation["basis"].clone(), sha256: string(observation, "sha256")?.to_owned() };
+        original.check()?;
+        Ok(original)
+    }
+    fn check(&self) -> io::Result<()> {
+        let before = self.held.metadata()?;
+        let named = fs::symlink_metadata(&self.path)?;
+        if !before.is_file() || before.nlink() == 0 || !named.is_file()
+            || compiler_basis(&before) != self.basis || compiler_basis(&named) != self.basis {
+            return Err(invalid("Actual held original CompilerArtifact basis changed"));
+        }
+        let mut file = &self.held;
+        file.seek(SeekFrom::Start(0))?;
+        let mut hash = Sha256::new();
+        let mut block = [0; 16_384];
+        loop {
+            let n = file.read(&mut block)?;
+            if n == 0 { break; }
+            hash.update(&block[..n]);
+        }
+        let after = self.held.metadata()?;
+        let named_after = fs::symlink_metadata(&self.path)?;
+        if compiler_basis(&after) != self.basis || compiler_basis(&named_after) != self.basis
+            || format!("{:x}", hash.finalize()) != self.sha256 {
+            return Err(invalid("Actual original CompilerArtifact bytes or name changed while held"));
+        }
+        Ok(())
+    }
+}
+
 struct Gate {
     root: PathBuf,
     held: File,
@@ -114,6 +191,7 @@ struct Gate {
     metadata_digest: String,
     evidence: PathBuf,
     held_evidence: File,
+    compiler_originals: Vec<CompilerOriginal>,
 }
 impl Gate {
     fn admit() -> io::Result<Self> {
@@ -138,7 +216,9 @@ impl Gate {
         if string(&metadata, "old_head")? != OLD_HEAD || string(&metadata, "checkout_root")? != product.to_str().ok_or_else(|| invalid("Native source coordinate must be UTF8"))?
             || metadata["default_outcome"] != "success"
             || metadata["inner_refusal_observation_contract"] != "expected_command_failure_original_and_structured_cleanup/v2"
-            || metadata["retained_fixture_contract"] != "retained_before_effect_and_on_unwind/v2" {
+            || metadata["retained_fixture_contract"] != "retained_before_effect_and_on_unwind/v2"
+            || metadata["compiler_original_contract"] != "actual_compiler_artifact_held_regular/v3"
+            || metadata["workspace_clean_phases"] != json!(["old", "new", "current"]) {
             return Err(invalid("Actual source or earlier owner gate does not qualify"));
         }
         let evidence = root.join("driver-evidence");
@@ -146,8 +226,23 @@ impl Gate {
         fs::set_permissions(&evidence, fs::Permissions::from_mode(0o700))?;
         let held_evidence = OpenOptions::new().read(true)
             .custom_flags((OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC).bits() as i32).open(&evidence)?;
-        let gate = Self { root, held, tuple: identity(&meta), product, metadata, metadata_digest, evidence, held_evidence };
+        let mut gate = Self { root, held, tuple: identity(&meta), product, metadata, metadata_digest, evidence, held_evidence, compiler_originals: Vec::new() };
         gate.check()?;
+        for phase in ["old", "new", "current"] {
+            let source_root: &Path = if phase == "current" { &gate.product } else {
+                Path::new(string(&gate.metadata["executables"][phase], "cwd")?)
+            };
+            let manifest = source_root.join("Cargo.toml");
+            let command = read_json(&gate.root.join(format!("{phase}.clean.command.json")))?;
+            if command["argv"] != json!(["cargo", "clean", "--locked", "--manifest-path", manifest, "--workspace"])
+                || command["cwd"] != json!(gate.product)
+                || command["CARGO_TARGET_DIR"] != json!(gate.product.join("target"))
+                || read_json(&gate.root.join(format!("{phase}.clean.exit")))? != 0
+                || read_json(&gate.root.join(format!("{phase}.clean.cargo.exit")))? != 0
+                || digest(&gate.root.join(format!("{phase}.clean.cargo.txt")))? != digest(&gate.root.join("cargo.txt"))? {
+                return Err(invalid("Actual native workspace clean, target, version or status prerequisite differs"));
+            }
+        }
         for (role, target) in [("old", "captured_script_old_api_characterization"),
             ("new", "captured_script_old_api_characterization"), ("runner", "aikit_adapters"),
             ("run_exec", "run_exec"), ("multicall_symlink", "multicall_symlink"),
@@ -160,16 +255,55 @@ impl Gate {
             if artifact["reason"] != "compiler-artifact" || artifact["target"]["name"] != target
                 || artifact["profile"]["test"] != (role != "aikit")
                 || artifact["executable"] != binding["original_executable"]
-                || !src.starts_with(source_root)
+                || !normal_absolute(src) || !src.starts_with(source_root)
+                || ((role == "old" || role == "new") && artifact["fresh"] != false)
+                || binding["original_image"]["contract"] != "actual_compiler_artifact_held_regular/v3"
+                || binding["original_image"]["complete"] != true
+                || binding["original_image"]["before"] != binding["original_image"]["after"]
+                || binding["original_image"]["after"] != binding["original_image"]["named_after"]
+                || string(&binding["original_image"], "sha256")? != string(binding, "sha256")?
                 || digest(Path::new(string(binding, "path")?))? != string(binding, "sha256")? {
                 return Err(invalid("Actual CompilerArtifact/source/binary relation does not match"));
             }
+            validate_recorded_compiler_basis(&binding["original_image"]["before"])?;
+            let observed = read_json(&gate.root.join(format!("{role}.original-before.json")))?;
+            if observed["schema"] != "aikit.actual-compiler-original-observation/v3"
+                || observed["role"] != role || observed["compiler_artifact"] != *artifact
+                || observed["original_executable"] != binding["original_executable"]
+                || observed["source_head"] != binding["source_head"] || observed["source_root"] != binding["cwd"]
+                || observed["source_affiliated"] != true || observed["target_affiliated"] != true
+                || observed["named_before"] != binding["original_image"]["before"]
+                || observed["held_before"] != binding["original_image"]["before"]
+                || observed["held_digest"]["contract"] != "held_regular_before_semantic_guards/v4"
+                || observed["held_digest"]["available"] != true
+                || observed["held_digest"]["sha256"] != binding["sha256"]
+                || observed["held_digest"]["observed_bytes"] != binding["original_image"]["before"]["bytes"]
+                || binding["original_image"]["before"]["bytes"].as_u64().and_then(|bytes| bytes.checked_add(1))
+                    .is_none_or(|limit| observed["held_digest"]["read_limit_bytes"].as_u64() != Some(limit))
+                || observed["held_digest"]["before"] != binding["original_image"]["before"]
+                || observed["held_digest"]["after"] != binding["original_image"]["before"]
+                || observed["held_digest"]["named_after"] != binding["original_image"]["before"]
+                || !observed["held_digest"]["cause"].is_null()
+                || !observed["held_digest"]["refusal"].is_null() {
+                return Err(invalid("Actual pre-admission physical/source facts do not match the retained compiler image"));
+            }
+            let expected_kind = if role == "runner" { "lib" } else if role == "aikit" { "bin" } else { "test" };
+            if artifact["target"]["kind"] != json!([expected_kind]) {
+                return Err(invalid("Actual compiler target kind differs from its declared role"));
+            }
+            if role != "old" && role != "new" {
+                gate.compiler_originals.push(CompilerOriginal::admit(role, binding,
+                    &gate.metadata["compiler_originals"][role], &gate.product)?);
+            }
         }
         let driver = &gate.metadata["executables"]["driver"];
+        let held_driver = gate.compiler_originals.iter().find(|original| original.role == "driver")
+            .ok_or_else(|| invalid("Actual current driver original is not held"))?;
         if std::env::current_exe()?.canonicalize()? != Path::new(string(driver,"original_executable")?).canonicalize()?
-            || digest(&std::env::current_exe()?)? != string(driver,"sha256")? {
+            || compiler_basis(&fs::symlink_metadata(std::env::current_exe()?)?) != held_driver.basis {
             return Err(invalid("Selected driver is not the actual same-source compiled artifact"));
         }
+        gate.check()?;
         Ok(gate)
     }
     fn check_directory(&self) -> io::Result<()> {
@@ -200,6 +334,10 @@ impl Gate {
                 return Err(invalid("Actual Source/lock/input/binary basis changed; comparison is unavailable"));
             }
         }
+        // Current original addresses include CARGO_BIN_EXE_aikit used inside
+        // multicall tests. Their held bases remain watched before/after every
+        // selection; old/new originals were intentionally retired by Cargo.
+        for original in &self.compiler_originals { original.check()?; }
         for entry in array(&self.metadata, "symlinks")? {
             let path = Path::new(string(entry, "path")?);
             if !normal_absolute(path) || !(path.starts_with(&self.root) || path.starts_with(&self.product))
