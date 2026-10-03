@@ -41,6 +41,82 @@ operator attestation and does not claim the owner observed process exit. It
 records cleanup reconciliation without claiming provider success, replaying a
 turn, or launching a replacement process.
 
+## Current native owner census and idle-only closure
+
+The existing `encounter --request-json` transport accepts two additional typed
+operations: `owner-occupancy` and `shutdown-idle`, each with `expected_pid`.
+They use this owner's same lifecycle fence. A different PID refuses. If an
+admitted request or background sweep holds the fence, the operation refuses
+with `encounter.owner_busy`; that is not a complete empty census. Poisoned locks
+and native journal failures remain failures, never absence or permission.
+
+A successful `owner-occupancy` returns `aikit.encounter-owner-occupancy/v1` with
+`complete:true`. It includes every current resident and opening in this owner,
+actual native Session and connection-generation identities, pending permission
+sessions, and unresolved startup generations from the native journal. This
+journal reading includes canonical sessions detached from SessionSpaces. It
+does not require a view attachment or infer occupancy from Health, historical
+bindings, PID liveness, or another UI's session listing. Its scope is this
+owner, not a whole-machine process census. It is an observation, not a reserved
+right to replace the owner later.
+
+`shutdown-idle` acquires the same exclusive fence and obtains that same current
+census before closing. It refuses with `encounter.owner_not_idle` if any current
+resident, opening, pending permission or unresolved native startup remains.
+Its refusal carries only the declared metadata census as `error.details.occupancy`.
+The listener preserves its original code/message error shape for other
+operations; provider startup, cleanup and Store details are not newly exposed
+by these tags. Original native error/cause facts remain held by the owner.
+Refusal does not set `shutdown_requested`, stop a provider, resolve a permission,
+clear a map, reconcile a journal or replay a request. Successful closure sets
+`shutdown_requested` and the closed receipt in this one critical section. The
+receipt states `idle_only:true`, `stopped:[]`, retained canonical sessions and
+no inferred native Session continuity. The existing server sends its response
+before retiring the listener and releasing its home-scoped owner lock. A caller
+must still observe actual closure before starting a successor. No arbitrary
+same-user filesystem or external SQLite writer exclusion is claimed.
+
+The background conversation worker takes the same lifecycle read admission
+through each actual sweep and its queue observation. It stops after owner
+closure. The census discloses worker-selectable and queued durable work through
+the same native SQL selection used by that worker, separately from current
+native occupancy. Known queued, unfinished or human-pending history is not a
+new global prohibition on replacement: idle closure leaves that history whole
+for the existing successor recovery and admission. An uncertain delivery is
+not successful and is not silently replayed. Unresolved native startup and
+unreadable or unrecognised native journal standing still refuse. The existing
+Store timeout, journal enumeration and transport capacities remain in force;
+this operation makes no whole-journal RSS or total scan-time guarantee.
+
+The existing explicit `shutdown` operation retains its original meaning and
+implementation: it waits for admitted operations, stops all current residents,
+records actual cleanup, and refuses an unconfirmed outcome. It is a full-owner
+lifecycle action, not an idle-only migration fallback.
+
+A running older owner with the original request enum cannot acquire these
+operations from a client update. The separate `shutdown-idle` tag is rejected
+by its native decoder without shutdown; an optional idle flag on `shutdown`
+would be unsafe because the old decoder could ignore that flag. The old client
+also cannot parse the new tag. There is no old-protocol atomic idle-only route.
+The running owner must be retained unless its existing explicit full closure
+is authorised for all affected residents, or an owner-supported migration is
+available. Health PID, detached-view checks, a new client or a loose OS process
+list cannot supply that authority or close the admission race. Source
+publication, actual native tests and Original same-Run/same-Task replay remain
+separate from installed runtime acceptance.
+
+The existing hosted CAW delivery gate selects the six new default native owner
+obligations (four library and two integration bodies) and the genuine legacy
+protocol-refusal/closure body. It retains the complete integration census of
+eight definitions: five default and three ignored. The resident/detached refusal
+and original ACP shutdown/history bodies remain exact separately selected
+operational obligations. They require an actual configured native ACP provider,
+not a fixture response, generated key or invented model catalog. Their compiled
+presence, an uncredentialed hosted run, and other passing owner cases supply no
+execution or acceptance credit. When selected on an authorised native host,
+authentication, catalog, startup or cleanup failure is failure; neither provider
+absence nor the older owner's protocol refusal is successful provider proof.
+
 For task-bound and selected-model launchers, credential delivery occurs in the
 owned child and is covered by the startup deadline. Direct profile launches may
 resolve profile-declared credentials synchronously in the service before spawn;

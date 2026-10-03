@@ -16,7 +16,7 @@
 //! dispatch still passes. Foreign participants' words reach a recipient as
 //! attributed material in the prompt, never as that recipient's own earlier
 //! answer or as an instruction.
-use super::super::{error, EncounterService};
+use super::super::{error, EncounterService, Lifecycle};
 use super::{EncounterAddressedTurn, EncounterContextPacket};
 use crate::gateway_owners::{CtrlActionError, ProcessOwners};
 use aikit_core::{AikitError, ResourceRef, Result};
@@ -1543,6 +1543,25 @@ pub(crate) fn spawn_worker(service: &Arc<EncounterService>) {
             }
             first = false;
             let Some(service) = weak.upgrade() else { break };
+            // The SAME owner fence covers background effects. Do not take a
+            // second read lease inside sweep: public requests already hold it.
+            let Ok(lifecycle) = service.lifecycle.read() else { break };
+            if service.shutdown_requested.load(std::sync::atomic::Ordering::SeqCst)
+                || !matches!(*lifecycle, Lifecycle::Running)
+            {
+                break;
+            }
+            #[cfg(test)]
+            {
+                let barrier = service.native_worker_test_barrier.lock().ok().and_then(|slot| slot.clone());
+                if let Some(barrier) = barrier {
+                    if barrier.reached.send(std::time::Instant::now()).is_err()
+                        || barrier.proceed.lock().map_or(true, |release| release.recv_timeout(Duration::from_secs(5)).is_err())
+                    {
+                        break;
+                    }
+                }
+            }
             let _ = service.conversation_sweep();
             // A delivery still waiting on a busy session is looked at again soon:
             // the turn boundary can land just after a wake.

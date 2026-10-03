@@ -184,10 +184,9 @@ jobs:
           record_command compiler-central jsonl timeout --kill-after=5s 5m cargo build --locked --manifest-path .caw-native/Central/Cargo.toml -p ctrl --message-format=json
           record_command compiler-actuation jsonl timeout --kill-after=5s 5m cargo build --locked --release --manifest-path .caw-native/Actuation/Cargo.toml -p actuation-cli --message-format=json
           cat > "$RUNTIME_GATE_EVIDENCE/audit.py" <<'PY'
-          import hashlib,json,os,stat,sys
+          import hashlib,json,os,re,stat,sys
           from pathlib import Path
           out=Path(os.environ['RUNTIME_GATE_EVIDENCE'])
-          roles=json.loads(os.environ['RUNTIME_GATE_ROLES'])
           def write(name,value):
               (out/name).write_text(json.dumps(value,indent=2)+'\n')
           def facts(s):
@@ -231,6 +230,18 @@ jobs:
                   row['sha256']=None
                   row['cause']={'type':type(e).__name__,'errno':getattr(e,'errno',None),'message':str(e)}
               return row
+          def case_prefix(case):
+              expected=json.loads(os.environ['RUNTIME_GATE_CASES'])
+              if case not in expected or not re.fullmatch(r'[A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)*',case):
+                  raise ValueError('unselected or malformed native case label')
+              prefix='case-'+case.replace('::','--')
+              if not re.fullmatch(r'[A-Za-z0-9_-]+',prefix):
+                  raise ValueError('native case evidence prefix is not portable')
+              return prefix
+          def case_paths(case):
+              prefix=case_prefix(case)
+              return {'case':case,'prefix':prefix,'stdout':prefix+'.stdout','stderr':prefix+'.stderr',
+                      'exit':prefix+'.exit','result':prefix+'.result.json'}
           def artifacts(file):
               used=0;result=[]
               with Path(file).open('rb') as stream:
@@ -242,6 +253,7 @@ jobs:
               return result
           mode=sys.argv[1]
           if mode=='prepare':
+              roles=json.loads(os.environ['RUNTIME_GATE_ROLES'])
               records=[];total=0
               for role in roles:
                   rows=[r for r in artifacts(out/role['receipt']) if r['target']['name']==role['target'] and r.get('executable')]
@@ -287,13 +299,38 @@ jobs:
               required_roster=json.loads(os.environ['RUNTIME_GATE_EXPECTED_ROSTER'])
               if len(required_roster)!=len(set(required_roster)) or sorted(names)!=sorted(required_roster):raise ValueError('compiled names differ from the complete Source-backed Task roster')
               if len(names)!=int(os.environ['RUNTIME_GATE_TOTAL']):raise ValueError('compiled case census changed')
+              paths=[case_paths(case) for case in expected]
+              if len({row['prefix'] for row in paths})!=len(paths):raise ValueError('native case evidence prefix collision')
+              write('case-paths.json',{'actual_selected':paths,'labels_unchanged':True,'standing':'portable evidence coordinates only; exact native case identity/argv unchanged'})
+          elif mode=='case-prefix':
+              print(case_prefix(sys.argv[2]))
           elif mode=='case':
-              case=sys.argv[2];prefix=out/case;code=int(prefix.with_suffix('.exit').read_text())
-              body=prefix.with_suffix('.stdout').read_text()
+              case=sys.argv[2];paths=case_paths(case);code=int((out/paths['exit']).read_text())
+              body=(out/paths['stdout']).read_text()
               ok=code==0 and any(line.startswith('test result: ok. 1 passed; 0 failed; 0 ignored;') for line in body.splitlines())
-              row={'case':case,'exit_status':code,'exact_one_pass_zero_failed_ignored':ok,'stdout':str(prefix.with_suffix('.stdout')),'stderr':str(prefix.with_suffix('.stderr')),'test_image':(out/'test-image.path').read_text().strip(),'outer_timeout_seconds':120,'standing':'foreground test-harness status/raw files; inner native EOF and retirement are asserted by the actual case, not inferred from a shell status'}
-              write(case+'.result.json',row)
+              row={'case':case,'exit_status':code,'exact_one_pass_zero_failed_ignored':ok,'evidence_prefix':paths['prefix'],'stdout':str(out/paths['stdout']),'stderr':str(out/paths['stderr']),'exit_file':str(out/paths['exit']),'test_image':(out/'test-image.path').read_text().strip(),'outer_timeout_seconds':120,'standing':'foreground test-harness status/raw files; inner native EOF and retirement are asserted by the actual case, not inferred from a shell status'}
+              write(paths['result'],row)
               if not ok:raise ValueError('actual selected native case failed; no unsupported-kernel skip')
+          elif mode=='upload':
+              base=out.parent;pending=[base];rows=[];count=0
+              while pending:
+                  directory=pending.pop()
+                  for path in sorted(directory.iterdir()):
+                      count+=1
+                      if count>4096:raise ValueError('portable evidence entry capacity exceeded')
+                      relative=path.relative_to(base);name=path.name;s=os.lstat(path)
+                      row={'relative':str(relative),'metadata':facts(s),'admitted':False}
+                      rows.append(row)
+                      if any(ord(c)<32 or c in '\"<>:|?*\\' for c in name) or name.endswith((' ','.')):
+                          write('upload-admission.json',{'entries':rows,'complete':False})
+                          raise ValueError('retained evidence name is not portable: '+str(relative))
+                      if stat.S_ISDIR(s.st_mode):pending.append(path)
+                      elif not stat.S_ISREG(s.st_mode):
+                          write('upload-admission.json',{'entries':rows,'complete':False})
+                          raise ValueError('retained evidence is not an ordinary file/directory: '+str(relative))
+                      row['admitted']=True
+              write('upload-admission.json',{'entries':rows,'entry_count':count,'complete':True,
+                  'standing':'current retained name/form checkpoints, no byte rehash or atomic exclusion of external replacement'})
           elif mode=='snapshot':
               base=Path(os.environ['WORKCELL_TEST_ARTIFACT_ROOT']);rows=[];count=0;total=0
               # Do not feed a retained adverse FIFO/symlink to artifact streaming.
@@ -314,6 +351,56 @@ jobs:
                           row['digest_standing']='not admitted for byte reading; retained type/identity only'
                           if stat.S_ISLNK(s.st_mode):row['link_target']=os.readlink(p)
                       rows.append(row);write('fixture-snapshot.json',{'entries':rows,'entry_count':count,'copied_regular_bytes':total,'standing':'owned controlled fixture snapshot; original FIFO/aliases remain on runner, no nonregular byte read or external atomic exclusion claim'})
+          elif mode=='owner-census':
+              def listed(name):
+                  return [line[:-6] for line in (out/name).read_text().splitlines() if line.endswith(': test')]
+              integration=listed('integration-roster.stdout');ignored=listed('integration-ignored-roster.stdout')
+              library=listed('library-roster.stdout');library_ignored=listed('library-ignored-roster.stdout')
+              required_integration=json.loads(os.environ['OWNER_INTEGRATION_ROSTER'])
+              required_ignored=json.loads(os.environ['OWNER_IGNORED_ROSTER'])
+              required_library=json.loads(os.environ['OWNER_LIBRARY_CASES'])
+              selected=json.loads(os.environ['RUNTIME_GATE_CASES'])
+              legacy='actual_legacy_owner_refuses_new_idle_tag_and_keeps_its_existing_lifecycle'
+              selected_defaults=[name for name in selected if name!=legacy]
+              row={'integration_actual':integration,'integration_total':len(integration),'integration_ignored':ignored,
+                   'integration_default_total':len(integration)-len(ignored),'library_selected_actual':library,
+                   'library_selected_ignored':library_ignored,'required_hosted_selected':selected,
+                   'required_new_default_total':len(selected_defaults),'required_legacy_total':1,
+                   'standing':'actual compiled libtest lists, not body execution; unexecuted provider obligations receive no pass credit'}
+              write('owner-census.json',row)
+              if len(integration)!=8 or len(ignored)!=3 or len(integration)-len(ignored)!=5 or sorted(integration)!=sorted(required_integration) or sorted(ignored)!=sorted(required_ignored):
+                  raise ValueError('actual integration roster must retain exactly eight definitions/five default/three ignored')
+              if len(library)!=4 or library_ignored or sorted(library)!=sorted(required_library):
+                  raise ValueError('actual selected library module must contain exactly four genuine default definitions')
+              if len(selected)!=7 or len(selected_defaults)!=6 or legacy not in ignored or len(set(selected))!=7:
+                  raise ValueError('hosted selected roster must be the six new defaults and genuine ignored legacy case')
+              if any(name not in library+integration for name in selected) or any(name in ignored for name in selected_defaults):
+                  raise ValueError('selected default/legacy standing disagrees with actual compiled lists')
+              for names in [integration,ignored,library,required_integration,required_ignored,required_library]:
+                  if len(names)!=len(set(names)):raise ValueError('duplicate compiled or declared owner case')
+              paths=[case_paths(case) for case in selected]
+              if len({row['prefix'] for row in paths})!=len(paths):raise ValueError('native owner evidence prefix collision')
+              write('case-paths.json',{'actual_selected':paths,'labels_unchanged':True,'standing':'same portable path owner; actual native case identities unchanged'})
+              provider_cases=[name for name in ignored if name!=legacy]
+              write('provider-dependent-scope.json',{'cases':provider_cases,'compiled_total':len(provider_cases),
+                    'executed_total':0,'qualification':'NOT_EXECUTED_UNQUALIFIED','pass_credit':0,
+                    'reason':'no genuine configured account/model-catalog prerequisite is declared by this hosted job',
+                    'operational_selection':'separately required actual configured native-host invocation; missing auth/catalog/startup is FAIL when selected',
+                    'mock_or_demo_provider_permitted':False,'credential_copy_or_generation_permitted':False})
+          elif mode=='owner-select-image':
+              case=sys.argv[2];case_prefix(case)
+              required_library=json.loads(os.environ['OWNER_LIBRARY_CASES'])
+              name='owner-library' if case in required_library else 'encounter_shutdown'
+              rows=json.loads((out/'images.before.json').read_text())
+              selected=[row for row in rows if row['role']['name']==name]
+              if len(selected)!=1 or selected[0]['image']['cause'] or not selected[0]['role']['test']:
+                  raise ValueError('actual selected owner CompilerArtifact unavailable or ambiguous')
+              row=selected[0]
+              (out/'test-image.path').write_text(row['image']['path']+'\n')
+              write(case_paths(case)['prefix']+'.image-role.json',{'case':case,'actual_role':row['role'],
+                    'image':row['image'],'compiler_artifact':row['compiler_artifact'],
+                    'standing':'same previously admitted original CompilerArtifact; final held basis checked after cases'})
+              print(row['image']['path'])
           else:raise ValueError('unrecognised evidence operation')
           PY
           export RUNTIME_GATE_ROLES="[{\"name\":\"aikit\",\"receipt\":\"compiler-test.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"aikit\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"aikit-session-space\",\"receipt\":\"compiler-test.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"aikit-session-space\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"caw_task_dispatch\",\"receipt\":\"compiler-test.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"caw_task_dispatch\",\"kind\":\"test\",\"test\":true,\"profile_dir\":\"debug\"},{\"name\":\"workcell\",\"receipt\":\"compiler-workcell.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Workcell\",\"target\":\"workcell\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"workcell-control-service\",\"receipt\":\"compiler-workcell.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Workcell\",\"target\":\"workcell-control-service\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"workcell-write-boundary\",\"receipt\":\"compiler-workcell.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Workcell\",\"target\":\"workcell-write-boundary\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"ctrl\",\"receipt\":\"compiler-central.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Central\",\"target\":\"ctrl\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"actuation\",\"receipt\":\"compiler-actuation.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Actuation\",\"target\":\"actuation\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"release\"}]"
@@ -378,13 +465,14 @@ jobs:
           python3 "$RUNTIME_GATE_EVIDENCE/audit.py" roster
           failed=0
           while IFS= read -r case_name; do
+            case_path=$(python3 "$RUNTIME_GATE_EVIDENCE/audit.py" case-prefix "$case_name")
             set +e
-            timeout --kill-after=5s 120s "$test_image" "$case_name" --ignored --exact --nocapture --test-threads=1 > "$RUNTIME_GATE_EVIDENCE/$case_name.stdout" 2> "$RUNTIME_GATE_EVIDENCE/$case_name.stderr"
+            timeout --kill-after=5s 120s "$test_image" "$case_name" --ignored --exact --nocapture --test-threads=1 > "$RUNTIME_GATE_EVIDENCE/$case_path.stdout" 2> "$RUNTIME_GATE_EVIDENCE/$case_path.stderr"
             status=$?
             set -e
-            printf '%s\n' "$status" > "$RUNTIME_GATE_EVIDENCE/$case_name.exit"
-            cat "$RUNTIME_GATE_EVIDENCE/$case_name.stdout"
-            cat "$RUNTIME_GATE_EVIDENCE/$case_name.stderr" >&2
+            printf '%s\n' "$status" > "$RUNTIME_GATE_EVIDENCE/$case_path.exit"
+            cat "$RUNTIME_GATE_EVIDENCE/$case_path.stdout"
+            cat "$RUNTIME_GATE_EVIDENCE/$case_path.stderr" >&2
             if ! python3 "$RUNTIME_GATE_EVIDENCE/audit.py" case "$case_name"; then failed=1; fi
           done <<'CASES'
           npm_runtime::native_codex_task_projection_redirect_retains_foreign_material_and_task_revision
@@ -446,8 +534,151 @@ jobs:
           cargo build --locked -p aikit-cli --bins
           cp target/debug/aikit target/debug/aikit-session-space "$RUNNER_TEMP/caw-evidence/"
           sha256sum "$RUNNER_TEMP/caw-evidence/aikit" "$RUNNER_TEMP/caw-evidence/aikit-session-space" > "$RUNNER_TEMP/caw-evidence/binary-sha256.txt"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: EpiLogos/ai-kit
+          ref: e6ab7d9f8c80b2aeb00f39518a53e18515499805
+          path: .caw-native/AIKit-legacy
+          persist-credentials: false
+      - name: Execute six native owner defaults and genuine legacy protocol refusal
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(id -u)" -ne 0
+          export RUNTIME_GATE_EVIDENCE="$RUNNER_TEMP/caw-evidence/idle-owner"
+          mkdir -p "$RUNTIME_GATE_EVIDENCE/images"
+          cp "$RUNNER_TEMP/caw-evidence/runtime-projection/audit.py" "$RUNTIME_GATE_EVIDENCE/audit.py"
+          record_command() {
+            local label=$1 suffix=$2 status
+            shift 2
+            printf '%q ' "$@" > "$RUNTIME_GATE_EVIDENCE/$label.command.txt"
+            printf '\n' >> "$RUNTIME_GATE_EVIDENCE/$label.command.txt"
+            set +e
+            "$@" > "$RUNTIME_GATE_EVIDENCE/$label.$suffix" 2> "$RUNTIME_GATE_EVIDENCE/$label.stderr"
+            status=$?
+            set -e
+            printf '%s\n' "$status" > "$RUNTIME_GATE_EVIDENCE/$label.exit"
+            return "$status"
+          }
+          finish_owner_gate() {
+            local primary=$? observed post=0
+            trap - EXIT
+            set +e
+            if test -f "$RUNTIME_GATE_EVIDENCE/images.before.json"; then
+              record_command image-after stdout python3 "$RUNTIME_GATE_EVIDENCE/audit.py" after
+              observed=$?; if test "$observed" -ne 0; then post=1; fi
+            else
+              printf '%s\n' 'Current/legacy image admission did not complete; no image qualification.' > "$RUNTIME_GATE_EVIDENCE/image-after-unavailable.txt"
+            fi
+            if test -f "$RUNTIME_GATE_EVIDENCE/compiled-source-before.sha256"; then
+              record_command source-after stdout sha256sum -c "$RUNTIME_GATE_EVIDENCE/compiled-source-before.sha256"
+              observed=$?; if test "$observed" -ne 0; then post=1; fi
+            fi
+            record_command retained-fixture-snapshot stdout python3 "$RUNTIME_GATE_EVIDENCE/audit.py" snapshot
+            observed=$?; if test "$observed" -ne 0; then post=1; fi
+            printf '%s\n' "$primary" > "$RUNTIME_GATE_EVIDENCE/primary.exit"
+            printf '%s\n' "$post" > "$RUNTIME_GATE_EVIDENCE/post-custody.exit"
+            if test "$primary" -ne 0; then exit "$primary"; fi
+            exit "$post"
+          }
+          export WORKCELL_TEST_ARTIFACT_ROOT="$GITHUB_WORKSPACE/ProjectCentral/now/tmp"
+          mkdir -p "$WORKCELL_TEST_ARTIFACT_ROOT"
+          trap finish_owner_gate EXIT
+          legacy_root="$GITHUB_WORKSPACE/.caw-native/AIKit-legacy"
+          test "$(git -C "$legacy_root" rev-parse HEAD)" = 'e6ab7d9f8c80b2aeb00f39518a53e18515499805'
+          test "$(sha256sum "$legacy_root/crates/aikit-cli/src/encounter_service.rs" | cut -d ' ' -f1)" = 'cdc8ee27143ef30b8ff03dcce8ee1a368cfa212e1dda369c599077d08d02bed6'
+          git -C "$legacy_root" diff --exit-code
+          test -z "$(git -C "$legacy_root" ls-files --others --exclude-standard)"
+          git -C "$legacy_root" archive --format=tar.gz HEAD > "$RUNTIME_GATE_EVIDENCE/legacy-source.tar.gz"
+          git -C "$legacy_root" rev-parse HEAD > "$RUNTIME_GATE_EVIDENCE/legacy-revision.txt"
+          git -C "$legacy_root" rev-parse HEAD^{tree} > "$RUNTIME_GATE_EVIDENCE/legacy-tree.txt"
+          git -C "$legacy_root" ls-files --stage > "$RUNTIME_GATE_EVIDENCE/legacy-modes.txt"
+          cp "$legacy_root/Cargo.lock" "$RUNTIME_GATE_EVIDENCE/legacy-Cargo.lock"
+          cp Cargo.lock "$RUNTIME_GATE_EVIDENCE/current-Cargo.lock"
+          git archive --format=tar.gz HEAD > "$RUNTIME_GATE_EVIDENCE/current-source.tar.gz"
+          git rev-parse HEAD^{tree} > "$RUNTIME_GATE_EVIDENCE/current-tree.txt"
+          git ls-files --stage > "$RUNTIME_GATE_EVIDENCE/current-modes.txt"
+          sha256sum Cargo.lock crates/aikit-cli/Cargo.toml crates/aikit-cli/src/lib.rs crates/aikit-cli/src/encounter_service.rs crates/aikit-cli/src/native_owner_idle_tests.rs crates/aikit-cli/tests/encounter_shutdown.rs "$legacy_root/Cargo.lock" "$legacy_root/Cargo.toml" "$legacy_root/crates/aikit-cli/Cargo.toml" "$legacy_root/crates/aikit-cli/src/encounter_service.rs" > "$RUNTIME_GATE_EVIDENCE/compiled-source-before.sha256"
+          record_command compiler-current jsonl timeout --kill-after=5s 10m cargo test --locked -p aikit-cli --test encounter_shutdown --no-run --message-format=json
+          record_command compiler-library jsonl timeout --kill-after=5s 10m cargo test --locked -p aikit-cli --lib --no-run --message-format=json
+          record_command compiler-legacy jsonl timeout --kill-after=5s 10m cargo build --locked --manifest-path "$legacy_root/Cargo.toml" -p aikit-cli --bin aikit --message-format=json
+          export RUNTIME_GATE_ROLES="[{\"name\":\"current-aikit\",\"receipt\":\"compiler-current.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"aikit\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"encounter_shutdown\",\"receipt\":\"compiler-current.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"encounter_shutdown\",\"kind\":\"test\",\"test\":true,\"profile_dir\":\"debug\"},{\"name\":\"owner-library\",\"receipt\":\"compiler-library.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"aikit_cli\",\"kind\":\"lib\",\"test\":true,\"profile_dir\":\"debug\"},{\"name\":\"legacy-aikit\",\"receipt\":\"compiler-legacy.jsonl\",\"root\":\"$legacy_root\",\"target\":\"aikit\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"}]"
+          export RUNTIME_GATE_SOURCE_ARCHIVES="[\"$RUNTIME_GATE_EVIDENCE/current-source.tar.gz\",\"$RUNTIME_GATE_EVIDENCE/legacy-source.tar.gz\"]"
+          record_command image-before stdout python3 "$RUNTIME_GATE_EVIDENCE/audit.py" prepare
+          read_image_role() {
+            IMAGE_ROLE="$1" python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          rows=json.loads((Path(os.environ['RUNTIME_GATE_EVIDENCE'])/'images.before.json').read_text())
+          selected=[row for row in rows if row['role']['name']==os.environ['IMAGE_ROLE']]
+          assert len(selected)==1 and selected[0]['image']['cause'] is None
+          print(selected[0]['image']['path'])
+          PY
+          }
+          integration_image="$(read_image_role encounter_shutdown)"
+          library_image="$(read_image_role owner-library)"
+          export AIKIT_IDLE_LEGACY_BIN
+          AIKIT_IDLE_LEGACY_BIN="$(read_image_role legacy-aikit)"
+          export OWNER_INTEGRATION_ROSTER='["explicit_owner_shutdown_acknowledges_then_releases_socket_and_lock","direct_service_shutdown_is_idempotent_and_denies_later_effects","fragmented_request_and_large_response_cross_real_unix_socket_intact","native_acp_owner_shutdown_reaps_provider_and_preserves_history","actual_idle_ipc_ack_releases_the_same_owner_socket_and_lock","actual_owner_interruption_retains_unresolved_startup_and_refuses_idle","actual_resident_and_detached_resident_refuse_idle_without_stopping_provider","actual_legacy_owner_refuses_new_idle_tag_and_keeps_its_existing_lifecycle"]'
+          export OWNER_IGNORED_ROSTER='["actual_resident_and_detached_resident_refuse_idle_without_stopping_provider","actual_legacy_owner_refuses_new_idle_tag_and_keeps_its_existing_lifecycle","native_acp_owner_shutdown_reaps_provider_and_preserves_history"]'
+          export OWNER_LIBRARY_CASES='["encounter_service::native_owner_idle_tests::actual_prejournal_opening_refuses_idle_without_cancelling_the_open","encounter_service::native_owner_idle_tests::actual_background_worker_uses_the_same_idle_shutdown_fence","encounter_service::native_owner_idle_tests::actual_queued_delivery_history_is_disclosed_and_retained_without_replay","encounter_service::native_owner_idle_tests::actual_sqlite_census_failure_is_not_empty_idleness_or_shutdown"]'
+          export RUNTIME_GATE_CASES='["encounter_service::native_owner_idle_tests::actual_prejournal_opening_refuses_idle_without_cancelling_the_open","encounter_service::native_owner_idle_tests::actual_background_worker_uses_the_same_idle_shutdown_fence","encounter_service::native_owner_idle_tests::actual_queued_delivery_history_is_disclosed_and_retained_without_replay","encounter_service::native_owner_idle_tests::actual_sqlite_census_failure_is_not_empty_idleness_or_shutdown","actual_idle_ipc_ack_releases_the_same_owner_socket_and_lock","actual_owner_interruption_retains_unresolved_startup_and_refuses_idle","actual_legacy_owner_refuses_new_idle_tag_and_keeps_its_existing_lifecycle"]'
+          record_command integration-roster stdout timeout --kill-after=5s 30s "$integration_image" --list
+          record_command integration-ignored-roster stdout timeout --kill-after=5s 30s "$integration_image" --list --ignored
+          record_command library-roster stdout timeout --kill-after=5s 30s "$library_image" 'encounter_service::native_owner_idle_tests::' --list
+          record_command library-ignored-roster stdout timeout --kill-after=5s 30s "$library_image" 'encounter_service::native_owner_idle_tests::' --list --ignored
+          record_command owner-census stdout python3 "$RUNTIME_GATE_EVIDENCE/audit.py" owner-census
+          cat "$RUNTIME_GATE_EVIDENCE/owner-census.json"
+          cat "$RUNTIME_GATE_EVIDENCE/provider-dependent-scope.json"
+          # Six genuine default bodies plus one actual legacy-owner body. The
+          # two native ACP positives are compiled operational obligations, not
+          # executed/qualified/pass-counted without a genuine configured owner.
+          gate_status=0
+          while IFS= read -r case; do
+            prefix="$(python3 "$RUNTIME_GATE_EVIDENCE/audit.py" case-prefix "$case")"
+            test_image="$(python3 "$RUNTIME_GATE_EVIDENCE/audit.py" owner-select-image "$case")"
+            if test "$case" = 'actual_legacy_owner_refuses_new_idle_tag_and_keeps_its_existing_lifecycle'; then
+              if record_command "$prefix" stdout timeout --kill-after=5s 120s "$test_image" "$case" --ignored --exact --nocapture --test-threads=1; then :; else gate_status=1; fi
+            else
+              if record_command "$prefix" stdout timeout --kill-after=5s 120s "$test_image" "$case" --exact --nocapture --test-threads=1; then :; else gate_status=1; fi
+            fi
+            if python3 "$RUNTIME_GATE_EVIDENCE/audit.py" case "$case"; then :; else gate_status=1; fi
+            cat "$RUNTIME_GATE_EVIDENCE/$prefix.stdout"
+            cat "$RUNTIME_GATE_EVIDENCE/$prefix.stderr" >&2
+            if CASE_NAME="$case" CASE_PREFIX="$prefix" python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          out=Path(os.environ['RUNTIME_GATE_EVIDENCE']);case=os.environ['CASE_NAME'];prefix=os.environ['CASE_PREFIX']
+          body=(out/(prefix+'.stdout')).read_text()
+          named=sum(line.strip()==('test '+case+' ... ok') for line in body.splitlines())
+          row={'case':case,'actual_exact_named_pass_count':named,'required':1,'standing':'actual selected line and strict one-pass/status oracle; no absence skip'}
+          (out/(prefix+'.named-result.json')).write_text(json.dumps(row,indent=2)+'\n')
+          if named!=1:raise SystemExit(1)
+          PY
+            then :; else gate_status=1; fi
+          done <<'OWNER_CASES'
+          encounter_service::native_owner_idle_tests::actual_prejournal_opening_refuses_idle_without_cancelling_the_open
+          encounter_service::native_owner_idle_tests::actual_background_worker_uses_the_same_idle_shutdown_fence
+          encounter_service::native_owner_idle_tests::actual_queued_delivery_history_is_disclosed_and_retained_without_replay
+          encounter_service::native_owner_idle_tests::actual_sqlite_census_failure_is_not_empty_idleness_or_shutdown
+          actual_idle_ipc_ack_releases_the_same_owner_socket_and_lock
+          actual_owner_interruption_retains_unresolved_startup_and_refuses_idle
+          actual_legacy_owner_refuses_new_idle_tag_and_keeps_its_existing_lifecycle
+          OWNER_CASES
+          printf '%s\n' "$gate_status" > "$RUNTIME_GATE_EVIDENCE/native-case-cumulative.exit"
+          exit "$gate_status"
+      - name: Admit portable retained native evidence before upload
+        id: portable-native-evidence
         if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RUNTIME_GATE_EVIDENCE="$RUNNER_TEMP/caw-evidence/runtime-projection"
+          test -f "$RUNTIME_GATE_EVIDENCE/audit.py"
+          python3 "$RUNTIME_GATE_EVIDENCE/audit.py" upload
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.portable-native-evidence.outcome == 'success'
         with:
           name: caw-native-delivery-${{ github.sha }}
           path: ${{ runner.temp }}/caw-evidence

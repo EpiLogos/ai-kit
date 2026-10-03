@@ -21,6 +21,25 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+// The worker and owner census consume the same native selection relation.
+const OWNER_CONVERSATION_WORK_SQL: &str = "SELECT r.request, r.participant,
+                   CASE
+                     WHEN r.dispatch IN ('unsent','held') THEN 'dispatch'
+                     WHEN r.route IS NULL AND r.inclusion IN ('pending','failed','conflict') AND d.phase='returned' THEN 'incorporate'
+                     WHEN r.route IS NOT NULL AND r.dispatch='sent' AND r.inclusion IN ('pending','failed','conflict')
+                          AND json_extract(r.remote,'$.delivery.phase')='returned' THEN 'incorporate'
+                     WHEN r.route IS NOT NULL AND r.dispatch='sent' AND r.inclusion IN ('pending','failed','conflict')
+                          AND (r.remote IS NULL OR json_extract(r.remote,'$.delivery.phase') NOT IN ('returned','failed','cancelled','reconciled-no-replay')) THEN 'poll'
+                   END AS work
+                 FROM conversation_recipients r
+                 LEFT JOIN encounter_deliveries d ON d.session=r.session AND d.delivery=r.delivery AND r.route IS NULL
+                 ORDER BY r.rowid";
+
+// The worker and owner census consume the same native selection relation.
+const OWNER_CONVERSATION_QUEUED_SQL: &str = "SELECT DISTINCT d.session FROM encounter_deliveries d
+                 JOIN conversation_recipients r ON r.session=d.session AND r.delivery=d.delivery AND r.route IS NULL
+                 WHERE d.phase='queued' AND r.dispatch='sent' AND r.inclusion NOT IN ('included','refused') ORDER BY d.session";
+
 /// A reply is retained whole up to this bound; beyond it the reading discloses
 /// the continuation instead of truncating silently.
 pub const REPLY_LIMIT_BYTES: usize = 512 * 1024;
@@ -581,18 +600,7 @@ impl EncounterStore {
         let connection = self.connection.lock().map_err(failure)?;
         let mut query = connection
             .prepare(
-                "SELECT r.request, r.participant,
-                   CASE
-                     WHEN r.dispatch IN ('unsent','held') THEN 'dispatch'
-                     WHEN r.route IS NULL AND r.inclusion IN ('pending','failed','conflict') AND d.phase='returned' THEN 'incorporate'
-                     WHEN r.route IS NOT NULL AND r.dispatch='sent' AND r.inclusion IN ('pending','failed','conflict')
-                          AND json_extract(r.remote,'$.delivery.phase')='returned' THEN 'incorporate'
-                     WHEN r.route IS NOT NULL AND r.dispatch='sent' AND r.inclusion IN ('pending','failed','conflict')
-                          AND (r.remote IS NULL OR json_extract(r.remote,'$.delivery.phase') NOT IN ('returned','failed','cancelled','reconciled-no-replay')) THEN 'poll'
-                   END AS work
-                 FROM conversation_recipients r
-                 LEFT JOIN encounter_deliveries d ON d.session=r.session AND d.delivery=r.delivery AND r.route IS NULL
-                 ORDER BY r.rowid",
+                OWNER_CONVERSATION_WORK_SQL,
             )
             .map_err(failure)?;
         let rows = query
@@ -629,6 +637,39 @@ impl EncounterStore {
             .map(Ok)
             .collect()
     }
+    /// Metadata only: current durable work remains in this journal across an
+    /// idle owner replacement. These counts do not create native occupancy or
+    /// claim that an uncertain delivery succeeded or may be replayed.
+    pub fn owner_work_standing(&self) -> Result<Value> {
+        let connection = self.connection.lock().map_err(failure)?;
+        let selectable: u64 = connection.query_row(
+            &format!("SELECT COUNT(*) FROM ({OWNER_CONVERSATION_WORK_SQL}) WHERE work IS NOT NULL"),
+            [], |row| row.get(0),
+        ).map_err(failure)?;
+        let queued: u64 = connection.query_row(
+            &format!("SELECT COUNT(*) FROM ({OWNER_CONVERSATION_QUEUED_SQL})"),
+            [], |row| row.get(0),
+        ).map_err(failure)?;
+        let (nonterminal, uncertain, unknown): (u64, u64, u64) = connection.query_row(
+            "SELECT COUNT(CASE WHEN phase IN ('dispatching','submitted','uncertain','queued') THEN 1 END),
+                    COUNT(CASE WHEN phase IN ('uncertain','reconciled-no-replay') THEN 1 END),
+                    COUNT(CASE WHEN phase NOT IN ('dispatching','submitted','uncertain','queued','returned','failed','cancelled','reconciled-no-replay') THEN 1 END)
+             FROM encounter_deliveries",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).map_err(failure)?;
+        if unknown != 0 {
+            return Err(AikitError::new("encounter.owner_census_invalid",
+                "The native delivery journal contains unrecognised standing; owner idleness is unknown"));
+        }
+        Ok(json!({
+            "worker_selectable_recipients":selectable,
+            "queued_conversation_sessions":queued,
+            "nonterminal_delivery_rows":nonterminal,
+            "uncertain_delivery_rows":uncertain,
+            "replacement_policy":"retained-for-successor; no implicit replay or native session continuity"
+        }))
+    }
+
     /// The conversation recipient a local delivery belongs to, if it belongs to
     /// one: the request and participant it was made for.
     pub fn conversation_recipient_for_delivery(
@@ -656,9 +697,7 @@ impl EncounterStore {
         let connection = self.connection.lock().map_err(failure)?;
         let mut query = connection
             .prepare(
-                "SELECT DISTINCT d.session FROM encounter_deliveries d
-                 JOIN conversation_recipients r ON r.session=d.session AND r.delivery=d.delivery AND r.route IS NULL
-                 WHERE d.phase='queued' AND r.dispatch='sent' AND r.inclusion NOT IN ('included','refused') ORDER BY d.session",
+                OWNER_CONVERSATION_QUEUED_SQL,
             )
             .map_err(failure)?;
         let rows = query

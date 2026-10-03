@@ -271,6 +271,12 @@ pub enum EncounterRequest {
         request: Box<EncounterModelOpen>,
     },
     Health,
+    /// Current native owner census under the exclusive lifecycle fence.
+    /// A busy admitted operation is an error, never an empty complete census.
+    OwnerOccupancy { expected_pid: u32 },
+    /// Close this owner only when the SAME fenced census proves native idle.
+    /// A refusal never drains residents or changes shutdown_requested.
+    ShutdownIdle { expected_pid: u32 },
     /// Stop only this explicitly identified owner after its provider processes
     /// have been shut down. This is never an ordinary view-detach operation.
     Shutdown {
@@ -545,6 +551,10 @@ pub struct EncounterService {
     // it never supplies a provider answer or alters production admission.
     #[cfg(test)]
     native_publication_test_barrier: Mutex<Option<Arc<NativePublicationTestCheckpoint>>>,
+    #[cfg(test)]
+    native_validation_test_barrier: Mutex<Option<Arc<NativePublicationTestCheckpoint>>>,
+    #[cfg(test)]
+    native_worker_test_barrier: Mutex<Option<Arc<NativePublicationTestCheckpoint>>>,
     permissions: PendingPermissions,
 }
 /// How a provider's harness is launched, reduced to what may be shown: the
@@ -803,6 +813,10 @@ impl EncounterService {
             openings: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
             native_publication_test_barrier: Mutex::new(None),
+            #[cfg(test)]
+            native_validation_test_barrier: Mutex::new(None),
+            #[cfg(test)]
+            native_worker_test_barrier: Mutex::new(None),
             permissions: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
@@ -1155,6 +1169,81 @@ impl EncounterService {
         Ok(())
     }
 
+    fn owner_exclusive(&self, expected_pid: u32) -> Result<std::sync::RwLockWriteGuard<'_, Lifecycle>> {
+        if expected_pid != std::process::id() {
+            return Err(AikitError::new("encounter.owner_changed",
+                "The requested PID does not identify this encounter owner"));
+        }
+        match self.lifecycle.try_write() {
+            Ok(lease) => Ok(lease),
+            Err(std::sync::TryLockError::WouldBlock) => Err(AikitError::new(
+                "encounter.owner_busy", "A current owner operation holds lifecycle admission; no complete idle census was obtained")),
+            Err(std::sync::TryLockError::Poisoned(failure)) => Err(error(failure)),
+        }
+    }
+
+    fn owner_occupancy_fenced(&self, lifecycle: &std::sync::RwLockWriteGuard<'_, Lifecycle>) -> Result<Value> {
+        if !matches!(**lifecycle, Lifecycle::Running)
+            || self.shutdown_requested.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(AikitError::new("encounter.owner_stopped",
+                "The owner is stopping, stopped or failed; native idleness is not inferred"));
+        }
+        let residents: Vec<Value> = self.residents.lock().map_err(error)?.iter().map(|(session, resident)| {
+            json!({"agent_session":session,"native_session_id":resident.lane.binding().native_session_id,
+                "connection_generation":resident.generation})
+        }).collect();
+        let openings: Vec<Value> = self.openings.lock().map_err(error)?.iter().map(|(session, opening)| {
+            json!({"agent_session":session,"connection_generation":opening["connection_generation"],
+                "phase":opening["kind"]})
+        }).collect();
+        let pending_permissions: Vec<ResourceRef> = self.permissions.lock().map_err(error)?.iter().filter(|(_, pending)| !pending.is_empty()).map(|(session, _)| session.clone()).collect();
+        // This native reducer includes detached canonical sessions. No view,
+        // attachment list, PID liveness heuristic or copied journal substitutes.
+        let recoveries: Vec<Value> = self.store.native_open_recoveries()?.into_iter().map(|(session, recovery)| {
+            json!({"agent_session":session,"state":recovery["state"],
+                "connection_generation":recovery["opening"]["connection_generation"]})
+        }).collect();
+        let durable_work = self.store.owner_work_standing()?;
+        let native_idle = residents.is_empty() && openings.is_empty()
+            && pending_permissions.is_empty() && recoveries.is_empty();
+        Ok(json!({"schema":"aikit.encounter-owner-occupancy/v1","protocol":"aikit-encounter-v1",
+            "pid":std::process::id(),"complete":true,"native_idle":native_idle,
+            "residents":residents,"openings":openings,"pending_permission_sessions":pending_permissions,
+            "unresolved_native_startups":recoveries,"durable_work":durable_work,
+            "scope":"current native owner and retained startup recovery; not whole-machine process discovery",
+            "session_space_attachment_required":false,"automatic_retry":false}))
+    }
+
+    fn owner_occupancy(&self, expected_pid: u32) -> Result<Value> {
+        let lifecycle = self.owner_exclusive(expected_pid)?;
+        self.owner_occupancy_fenced(&lifecycle)
+    }
+
+    fn shutdown_idle(&self, expected_pid: u32) -> Result<Value> {
+        let mut lifecycle = self.owner_exclusive(expected_pid)?;
+        if let Lifecycle::Closed(receipt) = &*lifecycle {
+            if receipt["idle_only"] == true {
+                return Ok(receipt.clone());
+            }
+        }
+        let occupancy = self.owner_occupancy_fenced(&lifecycle)?;
+        if occupancy["native_idle"] != true {
+            return Err(AikitError::new("encounter.owner_not_idle",
+                "Current native occupancy or unresolved startup prevents idle-only owner replacement")
+                .with("occupancy", serde_json::to_string(&occupancy).map_err(error)?));
+        }
+        // Admission and closure are one native critical section. No resident
+        // is stopped, journal reconciled, permission resolved or request replayed.
+        self.shutdown_requested.store(true, std::sync::atomic::Ordering::SeqCst);
+        let receipt = json!({"protocol":"aikit-encounter-v1","pid":std::process::id(),
+            "shutdown":true,"idle_only":true,"occupancy":occupancy,"stopped":[],
+            "canonical_sessions_retained":true,"durable_work_retained":true,
+            "native_session_continuity_inferred":false,"automatic_retry":false});
+        *lifecycle = Lifecycle::Closed(receipt.clone());
+        Ok(receipt)
+    }
+
     /// Exclusive shutdown waits for already admitted owner operations, then
     /// stops all residents before acknowledging. A failed cleanup is retained
     /// as failure, never converted into a later empty successful shutdown.
@@ -1426,6 +1515,15 @@ impl EncounterService {
         deadline: Instant,
     ) -> Result<Value> {
         let mut opening = self.begin_native_open(&request.agent_session)?;
+        // Actual pre-reservation scheduling only; it supplies no native answer.
+        #[cfg(test)]
+        {
+            let barrier = self.native_validation_test_barrier.lock().map_err(error)?.clone();
+            if let Some(barrier) = barrier {
+                barrier.reached.send(Instant::now()).map_err(error)?;
+                barrier.proceed.lock().map_err(error)?.recv_timeout(Duration::from_secs(5)).map_err(error)?;
+            }
+        }
         let outcome = self.open_native_owned(request, deadline, &mut opening);
         opening.finish(outcome)
     }
@@ -2509,6 +2607,12 @@ impl EncounterService {
         {
             return self.reconnect_native(space, agent_session, provider, cwd);
         }
+        if let EncounterRequest::OwnerOccupancy { expected_pid } = &request {
+            return self.owner_occupancy(*expected_pid);
+        }
+        if let EncounterRequest::ShutdownIdle { expected_pid } = &request {
+            return self.shutdown_idle(*expected_pid);
+        }
         if let EncounterRequest::Shutdown { expected_pid } = &request {
             return self.shutdown(*expected_pid);
         }
@@ -2601,6 +2705,8 @@ impl EncounterService {
             // lifecycle guard always holds for reconnects.
             EncounterRequest::Reconnect { .. }
             | EncounterRequest::Shutdown { .. }
+            | EncounterRequest::OwnerOccupancy { .. }
+            | EncounterRequest::ShutdownIdle { .. }
             | EncounterRequest::ReconcileNativeOpen { .. } => {
                 unreachable!("handled before acquiring read lease")
             }
@@ -3148,6 +3254,7 @@ pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
         let stop = stop.clone();
         workers.push(std::thread::spawn(move || {
             let mut shutdown = false;
+            let mut owner_observation = false;
             let result = (|| -> Result<Value> {
                 stream
                     .set_read_timeout(Some(std::time::Duration::from_secs(10)))
@@ -3162,14 +3269,22 @@ pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
                     return Err(error("encounter request exceeds byte limit"));
                 }
                 let request = serde_json::from_slice(&bytes).map_err(error)?;
-                shutdown = matches!(request, EncounterRequest::Shutdown { .. });
+                shutdown = matches!(request, EncounterRequest::Shutdown { .. } | EncounterRequest::ShutdownIdle { .. });
+                owner_observation = matches!(request, EncounterRequest::OwnerOccupancy { .. } | EncounterRequest::ShutdownIdle { .. });
                 service.apply(request)
             })();
             let shutdown_succeeded = shutdown && result.is_ok();
             let response = match result {
                 Ok(data) => json!({"ok":true,"data":data}),
                 Err(error) => {
-                    json!({"ok":false,"error":{"code":error.code(),"message":error.message()}})
+                    let mut response = json!({"ok":false,"error":{"code":error.code(),"message":error.message()}});
+                    // Only the new owner operations expose their declared
+                    // metadata census. Other native errors keep the original
+                    // response shape and retain their causes inside the owner.
+                    if owner_observation && let Some(occupancy) = error.details().get("occupancy") {
+                        response["error"]["details"] = json!({"occupancy":occupancy});
+                    }
+                    response
                 }
             };
             if let Ok(mut bytes) = serde_json::to_vec(&response) {
@@ -3409,3 +3524,7 @@ mod tests {
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 #[path = "native_startup_owner_tests.rs"]
 mod native_startup_owner_tests;
+
+#[cfg(all(test, unix))]
+#[path = "native_owner_idle_tests.rs"]
+mod native_owner_idle_tests;
