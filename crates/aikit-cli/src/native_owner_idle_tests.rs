@@ -106,7 +106,7 @@ fn actual_prejournal_opening_refuses_idle_without_cancelling_the_open() {
     let pid = std::fs::read_to_string(marker).unwrap();
     let mut command = Command::new("ps");
     command.args(["-p", pid.trim(), "-o", "stat="]);
-    let observed = aikit_adapters::SystemRunner::new().with_timeout(Duration::from_secs(2))
+    let observed = aikit_adapters::runner::SystemRunner::new().with_timeout(Duration::from_secs(2))
         .with_output_limit_bytes(4096).with_strict_utf8().capture_command(&mut command).unwrap();
     assert!(observed.stdout.trim().is_empty(), "the actual owned direct child was not reaped: {observed:?}");
     assert_eq!(idle(&service).unwrap()["idle_only"], true);
@@ -190,7 +190,7 @@ fn actual_sqlite_census_failure_is_not_empty_idleness_or_shutdown() {
     let mut command = Command::new("python3");
     command.args(["-c", "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('DROP TABLE encounter_events'); c.commit(); c.close()"])
         .arg(home.state().join("encounters.sqlite3"));
-    let result = aikit_adapters::SystemRunner::new().with_timeout(Duration::from_secs(3))
+    let result = aikit_adapters::runner::SystemRunner::new().with_timeout(Duration::from_secs(3))
         .with_output_limit_bytes(4096).with_strict_utf8().capture_command(&mut command).unwrap();
     assert_eq!(result.status, 0, "actual owned SQLite prerequisite failed: {result:?}");
     let oracle = service.store.native_open_recoveries().unwrap_err();

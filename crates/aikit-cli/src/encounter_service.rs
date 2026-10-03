@@ -3281,8 +3281,10 @@ pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
                     // Only the new owner operations expose their declared
                     // metadata census. Other native errors keep the original
                     // response shape and retain their causes inside the owner.
-                    if owner_observation && let Some(occupancy) = error.details().get("occupancy") {
-                        response["error"]["details"] = json!({"occupancy":occupancy});
+                    if owner_observation {
+                        if let Some(occupancy) = error.details().get("occupancy") {
+                            response["error"]["details"] = json!({"occupancy":occupancy});
+                        }
                     }
                     response
                 }

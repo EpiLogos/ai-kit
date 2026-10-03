@@ -489,7 +489,7 @@ fn cli_owner(binary: &Path, home: &AikitHome, directory: &Path, socket: &Path) -
 
 #[test]
 fn actual_owner_interruption_retains_unresolved_startup_and_refuses_idle() {
-    use aikit_adapters::SystemRunner;
+    use aikit_adapters::runner::SystemRunner;
     let directory = idle_fixture();
     let home = AikitHome::at(directory.path().join("owner"));
     let (space, session) = attach(&home);
