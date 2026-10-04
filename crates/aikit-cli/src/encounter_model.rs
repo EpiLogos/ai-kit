@@ -982,9 +982,13 @@ impl EncounterService {
         let provider = candidates.remove(0);
         let mut result = self.open_native_before(
             crate::encounter_service::NativeOpenRequest {
-                space: request.space.clone(), agent_session: request.agent_session.clone(),
-                provider: provider.id, cwd: request.cwd.clone(), reconnect: false,
-                model_target: Some(&request), released_predecessor,
+                space: request.space.clone(),
+                agent_session: request.agent_session.clone(),
+                provider: provider.id,
+                cwd: request.cwd.clone(),
+                reconnect: false,
+                model_target: Some(&request),
+                released_predecessor,
             },
             std::time::Instant::now() + crate::encounter_service::NATIVE_STARTUP_TIMEOUT,
         )?;

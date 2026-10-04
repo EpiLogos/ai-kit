@@ -144,8 +144,10 @@ impl EncounterStore {
             });
         }
         if release_recovery(&tx, session)?.is_some() {
-            return Err(AikitError::new("encounter.native_release_uncertain",
-                "Selected body cleanup is unresolved; no new machine-delivery admission"));
+            return Err(AikitError::new(
+                "encounter.native_release_uncertain",
+                "Selected body cleanup is unresolved; no new machine-delivery admission",
+            ));
         }
         let pending: bool = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM encounter_deliveries WHERE session=?1 AND phase IN {ACTIVE_PHASES})"), [session.as_str()], |r|r.get(0)).map_err(failure)?;
         if pending {
@@ -400,7 +402,6 @@ impl EncounterStore {
         )
     }
 
-
     /// Correlate a selected predecessor with actual owner cleanup and its exact
     /// generation-bound startup basis. Old records are read, never rewritten.
     pub fn released_predecessor_basis(
@@ -417,19 +418,35 @@ impl EncounterStore {
             [session.as_str()], |row| row.get(0),
         ).map_err(failure)?;
         if pending {
-            return Err(AikitError::new("encounter.delivery_pending", "Selected queued, active or uncertain delivery must settle before replacement"));
+            return Err(AikitError::new(
+                "encounter.delivery_pending",
+                "Selected queued, active or uncertain delivery must settle before replacement",
+            ));
         }
         let (binding_cursor, binding): (u64, String) = connection.query_row(
             "SELECT cursor,event FROM encounter_events WHERE session=?1 AND json_extract(event,'$.kind')='binding' AND json_extract(event,'$.native_session_id')=?2 AND json_extract(event,'$.connection_generation')=?3 ORDER BY cursor DESC LIMIT 1",
             params![session.as_str(),native,generation], |row| Ok((row.get(0)?,row.get(1)?)),
         ).optional().map_err(failure)?.ok_or_else(|| AikitError::new("encounter.released_predecessor_absent", "Exact prior native binding is absent"))?;
         if cleanup_cursor <= binding_cursor {
-            return Err(AikitError::new("encounter.released_predecessor_changed", "Cleanup must follow the exact prior binding"));
+            return Err(AikitError::new(
+                "encounter.released_predecessor_changed",
+                "Cleanup must follow the exact prior binding",
+            ));
         }
-        let cleanup: String = connection.query_row(
-            "SELECT event FROM encounter_events WHERE session=?1 AND cursor=?2",
-            params![session.as_str(),cleanup_cursor], |row| row.get(0),
-        ).optional().map_err(failure)?.ok_or_else(|| AikitError::new("encounter.released_predecessor_absent", "Selected cleanup event is absent"))?;
+        let cleanup: String = connection
+            .query_row(
+                "SELECT event FROM encounter_events WHERE session=?1 AND cursor=?2",
+                params![session.as_str(), cleanup_cursor],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(failure)?
+            .ok_or_else(|| {
+                AikitError::new(
+                    "encounter.released_predecessor_absent",
+                    "Selected cleanup event is absent",
+                )
+            })?;
         let binding: Value = serde_json::from_str(&binding).map_err(failure)?;
         let cleanup: Value = serde_json::from_str(&cleanup).map_err(failure)?;
         let released = cleanup["kind"] == "native-release-completed"
@@ -448,14 +465,20 @@ impl EncounterStore {
             params![session.as_str(),binding_cursor,cleanup_cursor], |row| row.get(0),
         ).map_err(failure)?;
         if (!released && !shutdown) || intervening {
-            return Err(AikitError::new("encounter.released_predecessor_changed", "Actual cleanup is unconfirmed or another binding intervened"));
+            return Err(AikitError::new(
+                "encounter.released_predecessor_changed",
+                "Actual cleanup is unconfirmed or another binding intervened",
+            ));
         }
         let count: u64 = connection.query_row(
             "SELECT count(*) FROM encounter_events WHERE session=?1 AND cursor<?2 AND json_extract(event,'$.kind')='native-open-reserved' AND json_extract(event,'$.connection_generation')=?3",
             params![session.as_str(),binding_cursor,generation], |row| row.get(0),
         ).map_err(failure)?;
         if count != 1 {
-            return Err(AikitError::new("encounter.released_predecessor_changed", "Exact startup reservation is missing or ambiguous"));
+            return Err(AikitError::new(
+                "encounter.released_predecessor_changed",
+                "Exact startup reservation is missing or ambiguous",
+            ));
         }
         let opening: String = connection.query_row(
             "SELECT event FROM encounter_events WHERE session=?1 AND cursor<?2 AND json_extract(event,'$.kind')='native-open-reserved' AND json_extract(event,'$.connection_generation')=?3",

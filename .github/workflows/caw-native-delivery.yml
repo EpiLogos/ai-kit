@@ -167,6 +167,15 @@ jobs:
           git ls-files --stage > "$RUNTIME_GATE_EVIDENCE/AIKit-modes.txt"
           sha256sum Cargo.lock crates/aikit-cli/Cargo.toml crates/aikit-cli/src/encounter_task.rs crates/aikit-cli/tests/caw_task_dispatch.rs crates/aikit-cli/tests/support/caw_task_npm_runtime.rs > "$RUNTIME_GATE_EVIDENCE/AIKit-source-sha256.txt"
           sha256sum .caw-native/Workcell/crates/workcell-runtime/src/runtime_projection.rs .caw-native/Workcell/crates/workcell-runtime/tests/runtime_projection.rs > "$RUNTIME_GATE_EVIDENCE/Workcell-runtime-source-sha256.txt"
+          # Compiler failure precedes audit.py and image admission. Capture only
+          # the same fixed build-environment fields before the first command.
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          names = ['RUSTFLAGS','RUSTC_WRAPPER','CARGO_TARGET_DIR','CARGO_BUILD_TARGET','CI','GITHUB_RUN_ID','GITHUB_REPOSITORY','GITHUB_SHA']
+          (Path(os.environ['RUNTIME_GATE_EVIDENCE'])/'build-environment.json').write_text(
+              json.dumps({name:os.environ.get(name) for name in names},indent=2)+'\n')
+          PY
           record_command() {
             local label=$1 suffix=$2 status
             shift 2
@@ -177,6 +186,10 @@ jobs:
             status=$?
             set -e
             printf '%s\n' "$status" > "$RUNTIME_GATE_EVIDENCE/$label.exit"
+            if test "$status" -ne 0; then
+              printf 'Actual compiler command %s failed with exit %s; raw receipts remain unqualified.\n' "$label" "$status" >&2 || :
+              head -c 65536 "$RUNTIME_GATE_EVIDENCE/$label.stderr" >&2 || :
+            fi
             return "$status"
           }
           # Retain the genuine account regression image without running an
@@ -748,6 +761,26 @@ jobs:
           export RUNTIME_GATE_EVIDENCE="$RUNNER_TEMP/caw-evidence/runtime-projection"
           test -f "$RUNTIME_GATE_EVIDENCE/audit.py"
           python3 "$RUNTIME_GATE_EVIDENCE/audit.py" upload
+      # A failed compiler cannot satisfy portable image admission. Preserve its
+      # exact raw receipts separately so the first failure remains diagnosable.
+      - name: Retain failed compiler receipts without native admission
+        uses: actions/upload-artifact@v4
+        if: failure() && !cancelled()
+        with:
+          name: caw-native-failed-compiler-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/caw-evidence/basis.txt
+            ${{ runner.temp }}/caw-evidence/runtime-projection/build-environment.json
+            ${{ runner.temp }}/caw-evidence/runtime-projection/AIKit-Cargo.lock
+            ${{ runner.temp }}/caw-evidence/runtime-projection/AIKit-tree.txt
+            ${{ runner.temp }}/caw-evidence/runtime-projection/AIKit-modes.txt
+            ${{ runner.temp }}/caw-evidence/runtime-projection/AIKit-source-sha256.txt
+            ${{ runner.temp }}/caw-evidence/runtime-projection/compiler-*.command.txt
+            ${{ runner.temp }}/caw-evidence/runtime-projection/compiler-*.exit
+            ${{ runner.temp }}/caw-evidence/runtime-projection/compiler-*.stderr
+            ${{ runner.temp }}/caw-evidence/runtime-projection/compiler-*.jsonl
+          if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always() && steps.portable-native-evidence.outcome == 'success'
         with:

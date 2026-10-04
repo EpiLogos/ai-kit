@@ -38,7 +38,6 @@ pub use agency::model::EncounterModelOpen;
 pub(crate) use agency::model::PreparedModel;
 #[path = "encounter_native_release.rs"]
 mod native_release;
-pub use native_release::NativeReleasedPredecessor;
 pub use agency::speech::{
     configure as configure_local_speech, disclose as disclose_local_speech, LocalSpeechConfig,
 };
@@ -47,6 +46,7 @@ pub use agency::{
     EncounterA2aFraming, EncounterAddressedTurn, EncounterAgencyBinding, EncounterContextPacket,
     EncounterGroupRecipient,
 };
+pub use native_release::NativeReleasedPredecessor;
 
 #[path = "encounter_prime_launch.rs"]
 pub(crate) mod prime_launch;
@@ -1679,11 +1679,17 @@ impl EncounterService {
         let successor_basis = if let Some(predecessor) = &released_predecessor {
             ensure_native_startup_deadline(deadline)?;
             let basis = native_release::validate_predecessor(
-                self, &agent_session, previous.as_ref(), predecessor, held.is_some(),
+                self,
+                &agent_session,
+                previous.as_ref(),
+                predecessor,
+                held.is_some(),
             )?;
             ensure_native_startup_deadline(deadline)?;
             Some(basis)
-        } else { None };
+        } else {
+            None
+        };
         let mut failed_resident = None;
         if let Some(held) = held {
             if held.space != space || held.provider != provider || held.cwd != cwd {
@@ -1710,11 +1716,16 @@ impl EncounterService {
                     Some(deadline),
                 )?;
                 let current_binding = held.host.identity(&agent_session)?.binding;
-                if released_predecessor.is_some() && previous.as_ref().is_none_or(|binding| {
-                    binding["connection_generation"].as_str() != Some(held.generation.as_str())
-                        || binding["native_session_id"] != json!(current_binding.native_session_id)
-                }) {
-                    return Err(error("Owned successor does not match the exact current journal generation"));
+                if released_predecessor.is_some()
+                    && previous.as_ref().is_none_or(|binding| {
+                        binding["connection_generation"].as_str() != Some(held.generation.as_str())
+                            || binding["native_session_id"]
+                                != json!(current_binding.native_session_id)
+                    })
+                {
+                    return Err(error(
+                        "Owned successor does not match the exact current journal generation",
+                    ));
                 }
                 let mut receipt = json!({"agent_session":agent_session,"native_session_id":current_binding.native_session_id,"model_observation":current_binding.model_observation,"provider":held.provider,"protocol":held.protocol,"body_basis":held.body_basis,"model_selection":held.model,"resident":true,"inference_observed":false});
                 if released_predecessor.is_some() {
@@ -1958,9 +1969,19 @@ impl EncounterService {
         });
         if let Some(basis) = &successor_basis {
             let previous_body = &basis["predecessor"]["binding"]["body_basis"];
-            for key in ["provider_id", "protocol", "provider_argv_digest", "harness_profile", "task_bound", "cwd", "required_context"] {
+            for key in [
+                "provider_id",
+                "protocol",
+                "provider_argv_digest",
+                "harness_profile",
+                "task_bound",
+                "cwd",
+                "required_context",
+            ] {
                 if previous_body[key] != body_basis[key] {
-                    return Err(error("Explicit Task successor changed the actual underlying provider body"));
+                    return Err(error(
+                        "Explicit Task successor changed the actual underlying provider body",
+                    ));
                 }
             }
         }
@@ -2485,11 +2506,18 @@ impl EncounterService {
         if let Some(predecessor) = &released_predecessor {
             ensure_native_startup_deadline(deadline)?;
             let fresh = native_release::validate_predecessor(
-                self, &agent_session, self.store.last_native_binding(&agent_session)?.as_ref(), predecessor, false,
+                self,
+                &agent_session,
+                self.store.last_native_binding(&agent_session)?.as_ref(),
+                predecessor,
+                false,
             )?;
             ensure_native_startup_deadline(deadline)?;
             if Some(&fresh) != successor_basis.as_ref() {
-                return Err(AikitError::new("encounter.native_open_basis_changed", "Task predecessor/current authority changed before successor binding"));
+                return Err(AikitError::new(
+                    "encounter.native_open_basis_changed",
+                    "Task predecessor/current authority changed before successor binding",
+                ));
             }
         }
         let opened_mode_observation = lane.binding().mode_observation.clone();
@@ -2873,10 +2901,20 @@ impl EncounterService {
                 )
             }
             EncounterRequest::OpenModel { request } => self.open_model(*request),
-            EncounterRequest::OpenModelWithPredecessor { request, released_predecessor } =>
-                self.open_model_with_predecessor(*request, Some(released_predecessor)),
-            EncounterRequest::ReleaseNative { agent_session, expected_native_session_id, expected_generation } =>
-                self.release_native(agent_session, expected_native_session_id, expected_generation, native_control_deadline),
+            EncounterRequest::OpenModelWithPredecessor {
+                request,
+                released_predecessor,
+            } => self.open_model_with_predecessor(*request, Some(released_predecessor)),
+            EncounterRequest::ReleaseNative {
+                agent_session,
+                expected_native_session_id,
+                expected_generation,
+            } => self.release_native(
+                agent_session,
+                expected_native_session_id,
+                expected_generation,
+                native_control_deadline,
+            ),
             request @ (EncounterRequest::Send { .. }
             | EncounterRequest::SendGroup { .. }
             | EncounterRequest::Delivery { .. }

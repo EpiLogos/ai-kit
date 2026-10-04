@@ -19,28 +19,43 @@ pub(super) fn validate_predecessor(
     owned_successor: bool,
 ) -> Result<Value> {
     let Some(binding) = current_binding else {
-        return Err(AikitError::new("encounter.released_predecessor_absent", "Exact prior native binding is absent"));
+        return Err(AikitError::new(
+            "encounter.released_predecessor_absent",
+            "Exact prior native binding is absent",
+        ));
     };
-    let original = binding["native_session_id"].as_str() == Some(expected.expected_native_session_id.as_str())
+    let original = binding["native_session_id"].as_str()
+        == Some(expected.expected_native_session_id.as_str())
         && binding["connection_generation"].as_str() == Some(expected.expected_generation.as_str());
-    let successor = owned_successor && binding["continuation"] == "fresh-native-successor"
+    let successor = owned_successor
+        && binding["continuation"] == "fresh-native-successor"
         && binding["released_predecessor"] == serde_json::to_value(expected).map_err(error)?;
     if !original && !successor {
-        return Err(AikitError::new("encounter.released_predecessor_changed", "Another native generation owns this session; no replacement effect"));
+        return Err(AikitError::new(
+            "encounter.released_predecessor_changed",
+            "Another native generation owns this session; no replacement effect",
+        ));
     }
     let basis = service.store.released_predecessor_basis(
-        session, &expected.expected_native_session_id, &expected.expected_generation, expected.release_cursor,
+        session,
+        &expected.expected_native_session_id,
+        &expected.expected_generation,
+        expected.release_cursor,
     )?;
-    let current_agency = service.check_agency(session)?.map(|(binding, _)| binding)
+    let current_agency = service
+        .check_agency(session)?
+        .map(|(binding, _)| binding)
         .ok_or_else(|| error("Task successor requires the current native Agency"))?;
     let current_agency = serde_json::to_value(current_agency).map_err(error)?;
     let previous_agency = &basis["opening"]["basis"]["agency_basis"];
     for key in ["agent_ref", "agency_ref", "world_ref", "world_binding_ref"] {
         if previous_agency[key].is_null() || previous_agency[key] != current_agency[key] {
-            return Err(error("Task successor changed canonical Agent, Agency or World"));
+            return Err(error(
+                "Task successor changed canonical Agent, Agency or World",
+            ));
         }
     }
-    let task = task::validate_successor_task(&service.home, session, &expected.expected_task_revision, &basis)?;
+    let task = service.validate_successor_task(session, &expected.expected_task_revision, &basis)?;
     Ok(json!({"predecessor":basis,"task":task,"native_resume":false}))
 }
 
@@ -95,8 +110,7 @@ impl EncounterService {
         }
         // Reuse the existing startup lease so cleanup and startup cannot race.
         // There is no new ownership registry and no map lock during native IO.
-        let mut lease =
-            self.begin_native_open(&session)?;
+        let mut lease = self.begin_native_open(&session)?;
         lease.terminal_recorded = true;
         let removed = {
             let mut residents = self.residents.lock().map_err(error)?;
@@ -138,27 +152,48 @@ impl EncounterService {
         let cleanup = resident.host.shutdown();
         let cleanup_confirmed = cleanup.is_ok();
         let cleanup_error = cleanup.as_ref().err().map(ToString::to_string);
-        let receipt = self.store.finish_native_release(
-            &session, &native, &generation, cleanup_confirmed,
-            cleanup.as_ref().ok().and_then(|status|status.as_ref().map(ToString::to_string)),
-            cleanup_error,
-        ).map_err(|failure| {
-            let cause = cleanup.as_ref().err().unwrap_or(&failure);
-            AikitError::new("encounter.native_release_outcome_uncertain",
-                "Owned cleanup was attempted but its outcome could not be retained")
+        let receipt = self
+            .store
+            .finish_native_release(
+                &session,
+                &native,
+                &generation,
+                cleanup_confirmed,
+                cleanup
+                    .as_ref()
+                    .ok()
+                    .and_then(|status| status.as_ref().map(ToString::to_string)),
+                cleanup_error,
+            )
+            .map_err(|failure| {
+                let cause = cleanup.as_ref().err().unwrap_or(&failure);
+                AikitError::new(
+                    "encounter.native_release_outcome_uncertain",
+                    "Owned cleanup was attempted but its outcome could not be retained",
+                )
                 .with_io_source_from(cause)
                 .with("cleanup_confirmed", cleanup_confirmed.to_string())
-                .with("cleanup_error", cleanup.as_ref().err().map(ToString::to_string).unwrap_or_default())
+                .with(
+                    "cleanup_error",
+                    cleanup
+                        .as_ref()
+                        .err()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                )
                 .with("journal_error", failure.to_string())
                 .with("journal_error_code", failure.code())
-        })?;
+            })?;
         self.permissions.lock().map_err(error)?.remove(&session);
         if !cleanup_confirmed {
-            let cause = cleanup.err().expect("unconfirmed native cleanup has an actual error");
+            let cause = cleanup
+                .err()
+                .expect("unconfirmed native cleanup has an actual error");
             return Err(AikitError::new(
                 "encounter.native_release_uncertain",
                 "Exact owned cleanup is not fully confirmed; replacement remains fenced",
-            ).with_io_source_from(&cause)
+            )
+            .with_io_source_from(&cause)
             .with("native_cleanup_code", cause.code())
             .with("native_release", receipt.to_string()));
         }

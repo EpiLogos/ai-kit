@@ -43,6 +43,17 @@ pub(crate) mod speech;
 
 #[path = "encounter_task.rs"]
 mod task;
+
+impl EncounterService {
+    pub(super) fn validate_successor_task(
+        &self,
+        session: &ResourceRef,
+        expected: &SourceRevision,
+        basis: &Value,
+    ) -> Result<Value> {
+        task::validate_successor_task(&self.home, session, expected, basis)
+    }
+}
 #[path = "encounter_task_expectation.rs"]
 mod task_expectation;
 pub use task_expectation::EncounterTaskExpectation;
