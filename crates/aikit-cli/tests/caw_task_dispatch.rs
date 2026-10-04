@@ -33,12 +33,20 @@ struct World {
     home: AikitHome,
     socket: PathBuf,
     child: Option<Child>,
+    selected_native_driver: Option<PathBuf>,
 }
 impl World {
     fn new(allowed: bool) -> Self {
         Self::with_model_action(allowed, false)
     }
     fn with_model_action(allowed: bool, model_action: bool) -> Self {
+        Self::with_model_action_and_driver(allowed, model_action, None)
+    }
+    fn with_model_action_and_driver(
+        allowed: bool,
+        model_action: bool,
+        selected_native_driver: Option<PathBuf>,
+    ) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let home = AikitHome::at(root.join("home"));
@@ -49,6 +57,7 @@ impl World {
             home,
             socket,
             child: None,
+            selected_native_driver,
         };
         for p in [
             "Control/user",
@@ -162,8 +171,13 @@ impl World {
         ]);
         world
     }
+    fn native_driver(&self) -> &Path {
+        self.selected_native_driver
+            .as_deref()
+            .unwrap_or_else(|| Path::new(env!("CARGO_BIN_EXE_aikit-session-space")))
+    }
     fn command(&self, args: &[String]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
+        Command::new(self.native_driver())
             .env("AIKIT_HOME", self.home.root())
             .env("WORKCELL_CONTROL_TOKEN", "controlled-caw-material-token")
             .arg("-C")

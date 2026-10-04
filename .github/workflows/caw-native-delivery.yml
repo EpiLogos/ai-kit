@@ -179,6 +179,10 @@ jobs:
             printf '%s\n' "$status" > "$RUNTIME_GATE_EVIDENCE/$label.exit"
             return "$status"
           }
+          # Retain the genuine account regression image without running an
+          # account body. The following default compile remains final so its
+          # normal aikit/aikit-session-space binaries stay credential-free.
+          record_command compiler-account-test jsonl timeout --kill-after=5s 10m cargo test --locked -p aikit-cli --features codex-account-native --test caw_task_dispatch --no-run --message-format=json
           record_command compiler-test jsonl timeout --kill-after=5s 10m cargo test --locked -p aikit-cli --test caw_task_dispatch --no-run --message-format=json
           record_command compiler-workcell jsonl timeout --kill-after=5s 5m cargo build --locked --manifest-path .caw-native/Workcell/Cargo.toml -p epilogos-workcell-cli --bins --message-format=json
           record_command compiler-central jsonl timeout --kill-after=5s 5m cargo build --locked --manifest-path .caw-native/Central/Cargo.toml -p ctrl --message-format=json
@@ -269,12 +273,22 @@ jobs:
                   if total>3221225472:raise ValueError('aggregate copied image capacity exceeded')
                   if role['kind'] not in artifact['target']['kind'] or artifact['profile']['test']!=role['test']:
                       raise ValueError('actual Cargo target/profile differs from selected native role')
-                  if 'codex-account-native' in artifact.get('features',[]):raise ValueError('credential-free gate cannot select account feature')
+                  account_role=role['name']=='caw-account-test'
+                  if account_role:
+                      if role.get('compile_only') is not True or role['receipt']!='compiler-account-test.jsonl' or role['target']!='caw_task_dispatch' or role['kind']!='test' or role['test'] is not True or role.get('profile_dir')!='debug':
+                          raise ValueError('account feature is admitted only for the exact compile-only regression role')
+                      if 'codex-account-native' not in artifact.get('features',[]):
+                          raise ValueError('actual account regression CompilerArtifact lacks required feature')
+                  else:
+                      if role.get('compile_only'):raise ValueError('only the exact account regression role is compile-only')
+                      if 'codex-account-native' in artifact.get('features',[]):raise ValueError('credential-free gate cannot select account feature')
                   src=Path(artifact['target']['src_path']);manifest=Path(artifact['manifest_path'])
                   row['source']=held(src,root);row['manifest']=held(manifest,root)
                   write('images.before.json',records)
                   if row['source']['cause'] or row['manifest']['cause']:raise ValueError('actual compiled source/manifest unavailable')
-                  if role['test']:
+                  if account_role:
+                      (out/'account-test-image.path').write_text(str(image)+'\n')
+                  elif role['test']:
                       (out/'test-image.path').write_text(str(image)+'\n')
               write('images.before.json',records)
               archive_rows=[]
@@ -291,6 +305,27 @@ jobs:
                   rows.append({'role':row['role'],'image':now,'same_before_basis':same});failed|=not same
               write('images.after.json',rows)
               if failed:raise ValueError('selected original image basis changed across actual cases')
+          elif mode=='account-census':
+              case='npm_runtime::actual_codex_task_acp_session_creation_and_reentry_keep_thread_locks_in_task_t'
+              rows=json.loads((out/'images.before.json').read_text())
+              selected=[row for row in rows if row['role']['name']=='caw-account-test']
+              if len(selected)!=1 or selected[0]['image']['cause'] or selected[0]['role'].get('compile_only') is not True:
+                  raise ValueError('actual compile-only account image custody is unavailable or ambiguous')
+              with (out/'account-regression-list.stdout').open('rb') as stream:
+                  raw=stream.read(1048577)
+              if len(raw)>1048576:raise ValueError('account list receipt exceeds one MiB')
+              names=[line[:-6] for line in raw.decode('utf-8').splitlines() if line.endswith(': test')]
+              status=int((out/'account-regression-list.exit').read_text())
+              row={'case':case,'actual_listed':names,'compiled_selected_total':len(names),
+                   'required_exact_selected_total':1,'actual_list_status':status,
+                   'role':selected[0]['role'],'compiler_receipt':'compiler-account-test.jsonl',
+                   'image':selected[0]['image'],'list_command_receipt':'account-regression-list.command.txt',
+                   'list_stdout':'account-regression-list.stdout','list_stderr':'account-regression-list.stderr',
+                   'outer_timeout_seconds':30,'executed_total':0,'pass_credit':0,
+                   'qualification':'NOT_EXECUTED_UNQUALIFIED',
+                   'reason':'ignored list-only census does not run the real account body; no hosted auth/cloud/model qualification'}
+              write('account-regression-census.json',row)
+              if status!=0 or names!=[case]:raise ValueError('exact genuine ignored account definition is missing or duplicated; no zero-case success')
           elif mode=='roster':
               expected=json.loads(os.environ['RUNTIME_GATE_CASES'])
               names=[line[:-6] for line in (out/'roster.stdout').read_text().splitlines() if line.endswith(': test')]
@@ -403,9 +438,19 @@ jobs:
               print(row['image']['path'])
           else:raise ValueError('unrecognised evidence operation')
           PY
-          export RUNTIME_GATE_ROLES="[{\"name\":\"aikit\",\"receipt\":\"compiler-test.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"aikit\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"aikit-session-space\",\"receipt\":\"compiler-test.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"aikit-session-space\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"caw_task_dispatch\",\"receipt\":\"compiler-test.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"caw_task_dispatch\",\"kind\":\"test\",\"test\":true,\"profile_dir\":\"debug\"},{\"name\":\"workcell\",\"receipt\":\"compiler-workcell.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Workcell\",\"target\":\"workcell\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"workcell-control-service\",\"receipt\":\"compiler-workcell.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Workcell\",\"target\":\"workcell-control-service\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"workcell-write-boundary\",\"receipt\":\"compiler-workcell.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Workcell\",\"target\":\"workcell-write-boundary\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"ctrl\",\"receipt\":\"compiler-central.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Central\",\"target\":\"ctrl\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"actuation\",\"receipt\":\"compiler-actuation.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Actuation\",\"target\":\"actuation\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"release\"}]"
+          export RUNTIME_GATE_ROLES="[{\"name\":\"aikit\",\"receipt\":\"compiler-test.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"aikit\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"aikit-session-space\",\"receipt\":\"compiler-test.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"aikit-session-space\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"caw_task_dispatch\",\"receipt\":\"compiler-test.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"caw_task_dispatch\",\"kind\":\"test\",\"test\":true,\"profile_dir\":\"debug\"},{\"name\":\"workcell\",\"receipt\":\"compiler-workcell.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Workcell\",\"target\":\"workcell\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"workcell-control-service\",\"receipt\":\"compiler-workcell.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Workcell\",\"target\":\"workcell-control-service\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"workcell-write-boundary\",\"receipt\":\"compiler-workcell.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Workcell\",\"target\":\"workcell-write-boundary\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"ctrl\",\"receipt\":\"compiler-central.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Central\",\"target\":\"ctrl\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"debug\"},{\"name\":\"actuation\",\"receipt\":\"compiler-actuation.jsonl\",\"root\":\"$GITHUB_WORKSPACE/.caw-native/Actuation\",\"target\":\"actuation\",\"kind\":\"bin\",\"test\":false,\"profile_dir\":\"release\"},{\"name\":\"caw-account-test\",\"receipt\":\"compiler-account-test.jsonl\",\"root\":\"$GITHUB_WORKSPACE\",\"target\":\"caw_task_dispatch\",\"kind\":\"test\",\"test\":true,\"profile_dir\":\"debug\",\"compile_only\":true}]"
           export RUNTIME_GATE_SOURCE_ARCHIVES="[\"$RUNNER_TEMP/caw-evidence/aikit-source.tar.gz\",\"$RUNTIME_GATE_EVIDENCE/Workcell-source.tar.gz\",\"$RUNTIME_GATE_EVIDENCE/Central-source.tar.gz\",\"$RUNTIME_GATE_EVIDENCE/Actuation-source.tar.gz\"]"
           python3 "$RUNTIME_GATE_EVIDENCE/audit.py" prepare
+          account_test_image=$(cat "$RUNTIME_GATE_EVIDENCE/account-test-image.path")
+          account_case=npm_runtime::actual_codex_task_acp_session_creation_and_reentry_keep_thread_locks_in_task_t
+          # --list is mandatory: retain the exact ignored definition and actual
+          # compiled image only, never auth/account/body execution in this job.
+          account_list_status=0
+          if record_command account-regression-list stdout timeout --kill-after=5s 30s "$account_test_image" --ignored --list --exact "$account_case"; then :; else account_list_status=$?; fi
+          account_census_status=0
+          if record_command account-regression-census stdout python3 "$RUNTIME_GATE_EVIDENCE/audit.py" account-census; then :; else account_census_status=$?; fi
+          if test "$account_list_status" -ne 0; then exit "$account_list_status"; fi
+          test "$account_census_status" = 0
       - name: Actual binaries through native Actuation and controlled provider processes
         shell: bash
         run: |
