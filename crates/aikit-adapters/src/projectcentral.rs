@@ -7,6 +7,10 @@
 //! Eager text and Wiki reads admit at most 16 MiB per source. Larger material
 //! needs a separately bounded reading through its owning native source/tool
 //! route; this adapter reports the budget refusal without truncating material.
+//! Manifest and optional relation metadata reuse the same held 16 MiB material
+//! reader. Current corpus entry supplies its original deadline and remaining
+//! logical payload allowance; ordinary inspect admits at most 32 MiB metadata.
+//! Deadline checks are cooperative and do not interrupt a filesystem syscall.
 //! A retained binding also checks its admitted physical root on Linux/macOS.
 //! Retargeted or replaced roots require a fresh native inspect; other platforms
 //! disclose unevidenced physical affiliation as unavailable. Device/inode
@@ -15,7 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Instant, UNIX_EPOCH};
 
 use aikit_core::{
     parse_wiki_objects, AbsenceKind, AgentWikiMaintenancePlan, AikitError, ContextSourceOperation,
@@ -39,6 +43,140 @@ use sha2::Digest;
 pub mod publication;
 
 const EAGER_SOURCE_BUDGET: u64 = 16 * 1024 * 1024;
+
+// This is the existing eager material profile, not a native domain limit.
+// Corpus callers pass their original operation deadline and logical allowance.
+struct MetadataReadBudget<'a> {
+    deadline: Option<Instant>,
+    remaining_payload_bytes: &'a mut usize,
+}
+
+impl MetadataReadBudget<'_> {
+    fn check(&self) -> Result<()> {
+        if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(AikitError::new(
+                "projectcentral.metadata_read_incomplete",
+                "The current native metadata read exhausted its operation budget",
+            ));
+        }
+        Ok(())
+    }
+
+    fn read(
+        &mut self,
+        root: &Path,
+        affiliation: Option<RootAffiliation>,
+        member: &Path,
+        enclosing: &Option<(PathBuf, Option<RootAffiliation>)>,
+    ) -> Result<Vec<u8>> {
+        self.check()?;
+        metadata_read_admission(root, affiliation, member, enclosing)?;
+        let limit = (*self.remaining_payload_bytes).min(EAGER_SOURCE_BUDGET as usize);
+        if limit == 0 {
+            return Err(AikitError::new(
+                "projectcentral.metadata_read_capacity",
+                "No logical payload allowance remains before native metadata observation",
+            ).with("next_material", "unobserved"));
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let expected = affiliation.map(|value| (value.device, value.inode));
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let expected: Option<(u64, u64)> = None;
+        let expected = expected.ok_or_else(|| AikitError::new(
+            "projectcentral.source_unavailable",
+            "Native metadata physical root affiliation is unavailable on this platform",
+        ).with("observation_stage", "owner_root"))?;
+        // SAME held/nonblocking reader, including native form/cause/refusal.
+        // Its physical consistency reread is not a logical payload receipt.
+        let bytes = publication::material_bytes_affiliated(root, expected, member, limit as u64)?;
+        *self.remaining_payload_bytes -= bytes.len();
+        metadata_read_admission(root, affiliation, member, enclosing)?;
+        self.check()?;
+        Ok(bytes)
+    }
+}
+
+fn metadata_read_admission(
+    root: &Path,
+    affiliation: Option<RootAffiliation>,
+    member: &Path,
+    enclosing: &Option<(PathBuf, Option<RootAffiliation>)>,
+) -> Result<()> {
+    require_root_affiliation(root, affiliation)?;
+    let path = root.join(member);
+    let physical_root = fs::canonicalize(root).map_err(|cause|
+        source_read_error("projectcentral.source_unavailable", root, cause)
+            .with("observation_stage", "owner_root"))?;
+    let physical_path = physical_root.join(member);
+    // Marker ancestry only: final form belongs to the SAME actual held reader.
+    for (floor, selected) in [(root, path.as_path()),
+        (physical_root.as_path(), physical_path.as_path())]
+    {
+        if !agent_readable_ancestors(floor, selected, false).map_err(|cause|
+            source_read_error("projectcentral.source_unavailable", selected, cause)
+                .with("observation_stage", "read_admission"))?
+        {
+            return Err(AikitError::new("projectcentral.source_withheld",
+                "The current native marker floor withholds Project metadata")
+                .with("observation_stage", "read_admission"));
+        }
+    }
+    if let Some((enclosing_root, expected)) = enclosing {
+        require_root_affiliation(enclosing_root, *expected)?;
+        let physical_enclosing = fs::canonicalize(enclosing_root).map_err(|cause|
+            source_read_error("projectcentral.source_unavailable", enclosing_root, cause)
+                .with("observation_stage", "owner_root"))?;
+        if !physical_path.starts_with(&physical_enclosing) {
+            return Err(AikitError::new("projectcentral.source_escape",
+                "Project metadata no longer belongs to its admitted enclosing root"));
+        }
+        if path.starts_with(enclosing_root)
+            && !agent_readable_ancestors(enclosing_root, &path, false).map_err(|cause|
+                source_read_error("projectcentral.source_unavailable", &path, cause)
+                    .with("observation_stage", "read_admission"))?
+        {
+            return Err(AikitError::new("projectcentral.source_withheld",
+                "The enclosing native marker floor withholds Project metadata"));
+        }
+        if !agent_readable_ancestors(&physical_enclosing, &physical_path, false).map_err(|cause|
+            source_read_error("projectcentral.source_unavailable", &physical_path, cause)
+                .with("observation_stage", "read_admission"))?
+        {
+            return Err(AikitError::new("projectcentral.source_withheld",
+                "The enclosing physical marker floor withholds Project metadata"));
+        }
+        require_root_affiliation(enclosing_root, *expected)?;
+    }
+    require_root_affiliation(root, affiliation)
+}
+
+// A present symlink/wrong parent form reaches the held reader's real refusal;
+// it cannot disappear as is_file()==false or dangling-link NotFound.
+fn optional_metadata_member_present(root: &Path, member: &Path) -> Result<bool> {
+    let mut current = root.to_path_buf();
+    let components = member.components().collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            return Err(AikitError::new("projectcentral.source_escape",
+                "Native metadata requires a normal relative member"));
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if index + 1 == components.len()
+                    || metadata.file_type().is_symlink() || !metadata.is_dir()
+                {
+                    return Ok(true);
+                }
+            }
+            Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(cause) => return Err(source_read_error(
+                "projectcentral.ground_relations_read", &current, cause,
+            ).with("observation_stage", "owner_parent")),
+        }
+    }
+    Ok(false)
+}
 
 #[derive(Debug, Deserialize)]
 struct Manifest {
@@ -387,7 +525,34 @@ impl ProjectCentralFilesystemBinding {
     }
 
     pub fn inspect(project_root: impl AsRef<Path>, central_root: Option<&Path>) -> Result<Self> {
-        let project_root = project_root.as_ref().to_path_buf();
+        let mut remaining = (2 * EAGER_SOURCE_BUDGET) as usize;
+        Self::inspect_metadata(project_root.as_ref(), central_root, &mut MetadataReadBudget {
+            deadline: None,
+            remaining_payload_bytes: &mut remaining,
+        })
+    }
+
+    /// Same native binding/grammar with the caller's original read allowance.
+    /// Cooperative checks do not promise to interrupt a filesystem syscall.
+    pub fn inspect_before(
+        project_root: impl AsRef<Path>,
+        central_root: Option<&Path>,
+        deadline: Instant,
+        remaining_payload_bytes: &mut usize,
+    ) -> Result<Self> {
+        Self::inspect_metadata(project_root.as_ref(), central_root, &mut MetadataReadBudget {
+            deadline: Some(deadline),
+            remaining_payload_bytes,
+        })
+    }
+
+    fn inspect_metadata(
+        requested_project: &Path,
+        central_root: Option<&Path>,
+        budget: &mut MetadataReadBudget<'_>,
+    ) -> Result<Self> {
+        budget.check()?;
+        let project_root = requested_project.to_path_buf();
         let project_affiliation = root_affiliation(&project_root).map_err(|error| {
             source_read_error("projectcentral.source_unavailable", &project_root, error)
                 .with("observation_stage", "owner_root")
@@ -419,24 +584,21 @@ impl ProjectCentralFilesystemBinding {
             } else {
                 None
             };
+        #[cfg(test)]
         let manifest_path = project_root.join("ProjectCentral/project.json");
-        let manifest_text = fs::read_to_string(&manifest_path)
-            .map_err(|error| io_error("projectcentral.manifest_read", &manifest_path, error))?;
+        let manifest_bytes = budget.read(&project_root, project_affiliation,
+            Path::new("ProjectCentral/project.json"), &enclosing_root)?;
         #[cfg(test)]
         tests::after_manifest_read(&manifest_path);
         require_root_affiliation(&project_root, project_affiliation)?;
         if let (Some(root), Some(expected)) = (central_root, central_affiliation) {
             require_root_affiliation(root, expected)?;
         }
-        let manifest: Manifest = serde_json::from_str(&manifest_text).map_err(|error| {
-            AikitError::new(
-                "projectcentral.manifest_invalid",
-                format!("invalid ProjectCentral/project.json: {error}"),
-            )
-        })?;
-        validate_manifest(&manifest)?;
+        let manifest = parsed_manifest(&manifest_bytes)?;
 
-        let ground_relations_file = read_ground_relations(&project_root, &manifest.project_id)?;
+        let ground_relations_file = read_ground_relations(
+            &project_root, project_affiliation, &enclosing_root, &manifest.project_id, budget,
+        )?;
         let mut relations_by_path = BTreeMap::<PathBuf, GroundRelation>::new();
         if let Some(relations) = &ground_relations_file {
             for relation in &relations.relations {
@@ -741,6 +903,9 @@ impl ProjectCentralFilesystemBinding {
         if let (Some(root), Some(expected)) = (central_root, central_affiliation) {
             require_root_affiliation(root, expected)?;
         }
+        budget.check()?;
+        metadata_read_admission(&project_root, project_affiliation,
+            Path::new("ProjectCentral/project.json"), &enclosing_root)?;
         Ok(Self {
             semantic: ProjectCentralBinding {
                 version: PROJECTCENTRAL_BINDING_VERSION.into(),
@@ -1060,6 +1225,28 @@ impl ContextSourceProvider for ProjectCentralFileProvider {
     }
 }
 
+/// Parse the existing native declaration without IO or a substitute identity.
+/// A caller must independently retain and reobserve its actual material basis.
+pub(crate) fn project_ref_from_manifest_bytes(bytes: &[u8]) -> Result<aikit_core::ProjectRef> {
+    let manifest = parsed_manifest(bytes)?;
+    aikit_core::ProjectRef::parse(&manifest.project_id).map_err(|error| {
+        if manifest.project_id.contains('\0') {
+            AikitError::new("projectcentral.project_transport_unsupported",
+                "The declared native Project ID cannot be represented by the existing AIKit ProjectRef profile")
+                .with("profile_error", error.code())
+        } else { error }
+    })
+}
+
+fn parsed_manifest(bytes: &[u8]) -> Result<Manifest> {
+    let manifest: Manifest = serde_json::from_slice(bytes).map_err(|error| {
+        AikitError::new("projectcentral.manifest_invalid",
+            format!("invalid ProjectCentral/project.json: {error}"))
+    })?;
+    validate_manifest(&manifest)?;
+    Ok(manifest)
+}
+
 fn validate_manifest(manifest: &Manifest) -> Result<()> {
     if manifest.schema != CENTRAL_PROJECT_SCHEMA {
         return Err(AikitError::new(
@@ -1092,15 +1279,22 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
 
 fn read_ground_relations(
     project_root: &Path,
+    project_affiliation: Option<RootAffiliation>,
+    enclosing_root: &Option<(PathBuf, Option<RootAffiliation>)>,
     project_id: &str,
+    budget: &mut MetadataReadBudget<'_>,
 ) -> Result<Option<GroundRelationsFile>> {
-    let path = project_root.join(PROJECTCENTRAL_GROUND_RELATIONS_SOURCE);
-    if !path.is_file() {
+    let member = Path::new(PROJECTCENTRAL_GROUND_RELATIONS_SOURCE);
+    let path = project_root.join(member);
+    budget.check()?;
+    metadata_read_admission(project_root, project_affiliation, member, enclosing_root)?;
+    if !optional_metadata_member_present(project_root, member)? {
+        metadata_read_admission(project_root, project_affiliation, member, enclosing_root)?;
+        budget.check()?;
         return Ok(None);
     }
-    let input = fs::read_to_string(&path)
-        .map_err(|error| io_error("projectcentral.ground_relations_read", &path, error))?;
-    let relations: GroundRelationsFile = serde_json::from_str(&input).map_err(|error| {
+    let input = budget.read(project_root, project_affiliation, member, enclosing_root)?;
+    let relations: GroundRelationsFile = serde_json::from_slice(&input).map_err(|error| {
         AikitError::new(
             "projectcentral.ground_relations_invalid",
             format!(
@@ -4169,5 +4363,257 @@ mod tests {
         fs::create_dir_all(&central).unwrap();
         let records = root_governance_context_source_records(&central).unwrap();
         assert!(records.is_empty());
+    }
+}
+
+
+#[cfg(test)]
+mod work_manifest_profile_tests {
+    use super::project_ref_from_manifest_bytes;
+    use serde_json::json;
+
+    fn declaration(id:&str)->serde_json::Value {
+        json!({"schema":"central.project/v1","project_id":id,"human_source":"ProjectCentral/user",
+            "wiki":{"profile":"okf-wiki/v1","source":"ProjectCentral/agents/wiki/wiki.json","adopted_sources":[]}})
+    }
+
+    #[test]
+    fn pure_work_parser_reuses_complete_native_contract_without_reinterpreting_ids() {
+        for id in ["a:b","project:delta","native/名","a::b","%41"] {
+            assert_eq!(project_ref_from_manifest_bytes(&serde_json::to_vec(&declaration(id)).unwrap()).unwrap().as_str(),id);
+        }
+        let mut invalid=declaration("a:b");invalid["human_source"]=json!("custom/user");
+        assert_eq!(project_ref_from_manifest_bytes(&serde_json::to_vec(&invalid).unwrap()).unwrap_err().code(),"projectcentral.human_source_contract");
+        let mut invalid=declaration("a:b");invalid["wiki"]["source"]=json!("elsewhere/wiki.json");
+        assert_eq!(project_ref_from_manifest_bytes(&serde_json::to_vec(&invalid).unwrap()).unwrap_err().code(),"projectcentral.wiki_contract");
+        for id in [" native", "native "] {
+            let invalid=declaration(id);
+            assert_eq!(project_ref_from_manifest_bytes(&serde_json::to_vec(&invalid).unwrap()).unwrap_err().code(),"project.invalid_ref");
+            assert_eq!(invalid["project_id"],id,"invalid native whitespace is refused without normalization");
+        }
+        let invalid=declaration("native\0id");
+        assert_eq!(project_ref_from_manifest_bytes(&serde_json::to_vec(&invalid).unwrap()).unwrap_err().code(),"projectcentral.project_transport_unsupported");
+    }
+}
+
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod metadata_read_tests {
+    use super::*;
+    use std::error::Error;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink};
+    use std::time::Duration;
+
+    struct Fixture(Option<tempfile::TempDir>);
+    impl Fixture {
+        fn new() -> Self {
+            let scratch = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent().unwrap().parent().unwrap().join("ProjectCentral/now/tmp");
+            fs::create_dir_all(&scratch).unwrap();
+            Self(Some(tempfile::Builder::new().prefix("r4-metadata-")
+                .tempdir_in(scratch).unwrap()))
+        }
+        fn root(&self) -> &Path { self.0.as_ref().unwrap().path() }
+        fn project(&self) -> PathBuf {
+            let root = self.root().join("project");
+            fs::create_dir_all(root.join("ProjectCentral")).unwrap();
+            fs::write(root.join("ProjectCentral/project.json"), declaration()).unwrap();
+            root
+        }
+        fn finish(mut self) {
+            let path = self.0.take().unwrap().keep();
+            fs::remove_dir_all(&path).unwrap_or_else(|cause|
+                panic!("Owned metadata fixture cleanup failed at {}: {cause:?}", path.display()));
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if let Some(directory) = self.0.take() {
+                eprintln!("Retained actual metadata failure fixture: {}", directory.keep().display());
+            }
+        }
+    }
+    struct RestoreMode(PathBuf, fs::Permissions);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            if let Err(cause) = fs::set_permissions(&self.0, self.1.clone()) {
+                if std::thread::panicking() {
+                    eprintln!("Metadata fixture permission restoration failed at {}: {cause:?}", self.0.display());
+                } else {
+                    panic!("Metadata fixture permission restoration failed at {}: {cause:?}", self.0.display());
+                }
+            }
+        }
+    }
+    fn declaration() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "schema": CENTRAL_PROJECT_SCHEMA, "project_id": "native-r4-project",
+            "human_source": PROJECTCENTRAL_HUMAN_ROOT,
+            "wiki": {"profile": CENTRAL_WIKI_PROFILE, "source": PROJECTCENTRAL_WIKI_SOURCE},
+            "native_extension": {"retained": true}
+        })).unwrap()
+    }
+    fn fifo(path: &Path) {
+        use crate::runner::SystemRunner;
+        let mut command = std::process::Command::new("/usr/bin/mkfifo");
+        command.arg(path);
+        let output = SystemRunner::new().with_timeout(Duration::from_secs(2))
+            .with_output_limit_bytes(4096).with_strict_utf8()
+            .capture_command(&mut command).unwrap();
+        assert_eq!(output.status, 0, "actual FIFO prerequisite: {output:?}");
+        assert!(fs::symlink_metadata(path).unwrap().file_type().is_fifo());
+    }
+    fn relations(root: &Path, id: &str) -> (PathBuf, Vec<u8>) {
+        let path = root.join(PROJECTCENTRAL_GROUND_RELATIONS_SOURCE);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "schema": CENTRAL_GROUND_RELATIONS_SCHEMA, "project_id": id,
+            "relations": [], "native_extension": {"retained": true}
+        })).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        (path, bytes)
+    }
+
+    #[test]
+    fn fifo_manifest_without_writer_reaches_same_native_held_form_refusal() {
+        let fixture = Fixture::new(); let root = fixture.project();
+        let path = root.join("ProjectCentral/project.json");
+        let bytes = fs::read(&path).unwrap();
+        let retained = root.join("retained-manifest.json"); fs::rename(&path, &retained).unwrap();
+        fifo(&path);
+        let begun = Instant::now();
+        let failure = ProjectCentralFilesystemBinding::inspect(&root, None).unwrap_err();
+        let metadata = fs::metadata(&root).unwrap();
+        let oracle = publication::material_bytes_affiliated(&root, (metadata.dev(), metadata.ino()),
+            Path::new("ProjectCentral/project.json"), EAGER_SOURCE_BUDGET).unwrap_err();
+        assert_eq!(failure.code(), oracle.code());
+        assert!(begun.elapsed() < Duration::from_secs(2));
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_fifo());
+        assert_eq!(fs::read(&retained).unwrap(), bytes);
+        fixture.finish();
+    }
+
+    #[test]
+    fn optional_relation_absence_is_distinct_from_fifo_directory_and_dangling_alias() {
+        let fixture = Fixture::new(); let root = fixture.project();
+        assert!(ProjectCentralFilesystemBinding::inspect(&root, None).unwrap()
+            .semantic.ground_relations.is_none());
+        let (path, bytes) = relations(&root, "native-r4-project");
+        let retained = root.join("retained-relations.json"); fs::rename(&path, &retained).unwrap();
+        for form in ["fifo", "directory", "dangling-alias"] {
+            match form {
+                "fifo" => fifo(&path),
+                "directory" => fs::create_dir(&path).unwrap(),
+                "dangling-alias" => symlink(root.join("genuinely-missing-target"), &path).unwrap(),
+                _ => unreachable!(),
+            }
+            let failure = ProjectCentralFilesystemBinding::inspect(&root, None).unwrap_err();
+            let metadata = fs::metadata(&root).unwrap();
+            let oracle = publication::material_bytes_affiliated(&root,
+                (metadata.dev(), metadata.ino()), Path::new(PROJECTCENTRAL_GROUND_RELATIONS_SOURCE),
+                EAGER_SOURCE_BUDGET).unwrap_err();
+            assert_eq!(failure.code(), oracle.code(), "actual {form} must retain the held reader refusal");
+            assert_eq!(fs::read(&retained).unwrap(), bytes);
+            if form == "directory" { fs::remove_dir(&path).unwrap(); }
+            else { fs::remove_file(&path).unwrap(); }
+        }
+        fs::rename(&retained, &path).unwrap();
+        assert!(ProjectCentralFilesystemBinding::inspect(&root, None).unwrap()
+            .semantic.ground_relations.is_some());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fixture.finish();
+    }
+
+    #[test]
+    fn oversized_metadata_and_expired_budget_refuse_without_truncation_or_reset() {
+        let fixture = Fixture::new(); let root = fixture.project();
+        let path = root.join("ProjectCentral/project.json");
+        let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(EAGER_SOURCE_BUDGET + 1).unwrap(); drop(file);
+        let before = fs::metadata(&path).unwrap();
+        let failure = ProjectCentralFilesystemBinding::inspect(&root, None).unwrap_err();
+        assert_eq!(failure.code(), "knowledge.wiki_publication_budget");
+        let mut remaining = 77usize;
+        let expired = ProjectCentralFilesystemBinding::inspect_before(
+            &root, None, Instant::now(), &mut remaining).unwrap_err();
+        assert_eq!(expired.code(), "projectcentral.metadata_read_incomplete");
+        assert_eq!(remaining, 77);
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!((after.dev(), after.ino(), after.len()), (before.dev(), before.ino(), before.len()));
+        fixture.finish();
+    }
+
+    #[test]
+    fn actual_manifest_eacces_preserves_same_original_io_and_restored_bytes() {
+        assert!(!rustix::process::getuid().is_root(), "real EACCES requires nonroot");
+        let fixture = Fixture::new(); let root = fixture.project();
+        let path = root.join("ProjectCentral/project.json");
+        let bytes = fs::read(&path).unwrap(); let before = fs::metadata(&path).unwrap();
+        let restore = RestoreMode(path.clone(), before.permissions());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        let oracle = fs::File::open(&path).unwrap_err();
+        assert_eq!(oracle.kind(), std::io::ErrorKind::PermissionDenied);
+        let failure = ProjectCentralFilesystemBinding::inspect(&root, None).unwrap_err();
+        let cause = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!((cause.kind(), cause.raw_os_error()), (oracle.kind(), oracle.raw_os_error()));
+        drop(restore);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(fs::metadata(&path).unwrap().ino(), before.ino());
+        assert!(ProjectCentralFilesystemBinding::inspect(&root, None).is_ok());
+        fixture.finish();
+    }
+
+    #[test]
+    fn project_and_enclosing_markers_refuse_before_invalid_metadata_parse() {
+        let fixture = Fixture::new(); let root = fixture.project();
+        let path = root.join("ProjectCentral/project.json"); fs::write(&path, b"actual-invalid-json").unwrap();
+        let enclosing = fixture.root().to_path_buf();
+        for floor in [&root, &enclosing] {
+            let marker = floor.join(NO_AGENT_RETRIEVAL_MARKER); fs::write(&marker, b"withheld").unwrap();
+            let failure = ProjectCentralFilesystemBinding::inspect(&root, Some(fixture.root())).unwrap_err();
+            assert_eq!(failure.code(), "projectcentral.source_withheld");
+            assert_eq!(fs::read(&path).unwrap(), b"actual-invalid-json");
+            fs::remove_file(marker).unwrap();
+        }
+        assert_eq!(ProjectCentralFilesystemBinding::inspect(&root, None).unwrap_err().code(),
+            "projectcentral.manifest_invalid");
+        fixture.finish();
+    }
+
+    #[test]
+    fn actual_relation_project_mismatch_and_same_metadata_payload_charge_are_retained() {
+        let fixture = Fixture::new(); let root = fixture.project();
+        let (path, wrong) = relations(&root, "different-native-project");
+        assert_eq!(ProjectCentralFilesystemBinding::inspect(&root, None).unwrap_err().code(),
+            "projectcentral.ground_relations_project");
+        assert_eq!(fs::read(&path).unwrap(), wrong);
+        let (_, bytes) = relations(&root, "native-r4-project");
+        let manifest = fs::read(root.join("ProjectCentral/project.json")).unwrap();
+        let mut remaining = 4096usize;
+        let binding = ProjectCentralFilesystemBinding::inspect_before(&root, None,
+            Instant::now() + Duration::from_secs(2), &mut remaining).unwrap();
+        assert_eq!(binding.semantic.project_id, "native-r4-project");
+        assert_eq!(4096 - remaining, manifest.len() + bytes.len());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fixture.finish();
+    }
+
+    #[test]
+    fn unchanged_root_alias_remains_useful_and_original_affiliation_rejects_retarget() {
+        let fixture = Fixture::new(); let root = fixture.project();
+        let alias = fixture.root().join("accepted-alias"); symlink(&root, &alias).unwrap();
+        let binding = ProjectCentralFilesystemBinding::inspect(&alias, None).unwrap();
+        assert_eq!(binding.semantic.project_id, "native-r4-project");
+        let expected = root_affiliation(&alias).unwrap();
+        let other = fixture.root().join("other"); fs::create_dir_all(&other).unwrap();
+        fs::remove_file(&alias).unwrap(); symlink(&other, &alias).unwrap();
+        let mut remaining = 4096usize;
+        let mut budget = MetadataReadBudget { deadline: Some(Instant::now() + Duration::from_secs(2)),
+            remaining_payload_bytes: &mut remaining };
+        let failure = budget.read(&alias, expected, Path::new("ProjectCentral/project.json"), &None).unwrap_err();
+        assert_eq!(failure.code(), "projectcentral.source_binding_changed");
+        assert_eq!(remaining, 4096);
+        assert_eq!(fs::read(root.join("ProjectCentral/project.json")).unwrap(), declaration());
+        fixture.finish();
     }
 }

@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
-use aikit_cli::app::Service;
+use aikit_cli::app::{CurrentCorpusSelection, Service};
 use aikit_core::flow::{
     FlowContemplateExecutor, FlowContemplateGenerated, FlowContemplatePreflight,
     FlowMutationIntent, FLOW_CONTEXT_VERSION, FLOW_METHOD_REF,
@@ -38,8 +38,9 @@ use aikit_store::replay_familiarity;
 use tempfile::TempDir;
 
 const FLOW_REF: &str = "wiki:node:staged/test-flow";
-const FLOW_SOURCE: &str = "source:file:test-flow-note";
-const FLOW_REVISION: &str = "owner-r1";
+const FLOW_SOURCE: &str = "central:source:corpus:test-flow-note";
+const FLOW_REVISION: &str = "f9a000c0cff0c39c";
+const FLOW_BODY: &str = "---\nsource_id: test-flow-note\nrecord_type: book\ntitle_full: Owner flow note\ntags: [flow, owner]\n---\nCurrent Flow body, disclosed at the owner in this context.";
 const PROJECT_ID: &str = "project/test-flow-cognition";
 
 fn write(path: &std::path::Path, contents: &str) {
@@ -59,7 +60,7 @@ fn revision(value: &str) -> SourceRevision {
 
 /// Private AIKIT_HOME under /tmp (never a live user store) plus a project
 /// carrying a ProjectCentral manifest, a Semantic Wiki Flow node with exact
-/// source-revision provenance, and SourcePool material at that exact revision.
+/// source-revision provenance, and positively selected compiler input at its exact observed content revision.
 fn open_service(temp: &TempDir) -> Service {
     let home = AikitHome::at(temp.path().join("aikit-home"));
     let project = temp.path().join("project");
@@ -100,32 +101,29 @@ fn open_service(temp: &TempDir) -> Service {
               "object": "node",
               "ref": "wiki:node:staged/test-flow",
               "revision": 3,
-              "provenance": [{"source_ref":"source:file:test-flow-note","source_revision":"owner-r1"}],
+              "provenance": [{"source_ref":"central:source:corpus:test-flow-note","source_revision":"f9a000c0cff0c39c"}],
               "type": "flow",
               "title": "Owner flow thread",
               "space_refs": [],
-              "source_refs": ["source:file:test-flow-note"]
+              "source_refs": ["central:source:corpus:test-flow-note"]
             }
           ]
         }"#,
     );
-    write(
-        &project.join("source-material.json"),
-        r#"{
-          "binding": {
-            "source": "source:file:test-flow-note",
-            "revision": "owner-r1",
-            "title": "Owner flow note",
-            "tags": ["flow", "owner"],
-            "visibility": "public",
-            "owners": [],
-            "media_type": "text/markdown",
-            "metadata": {"origin":"w4-c-fixture"}
-          },
-          "body": "Current Flow body, disclosed at the owner in this context."
-        }"#,
+    assert_eq!(
+        aikit_core::knowledge_ingest::corpus_content_revision(FLOW_BODY.as_bytes()),
+        FLOW_REVISION,
+        "the horizon witness matches the actual complete compiler input",
     );
-    Service::open(home, &project, |_| None).expect("open production application service")
+    write(&project.join("current-corpus/flow-note.md"), FLOW_BODY);
+    Service::open(home, &project, |_| None)
+        .expect("open production application service")
+        .with_current_corpus_selection(CurrentCorpusSelection {
+            corpus: project.join("current-corpus"),
+            extension: "md".into(),
+            room_depth: 1,
+        })
+        .expect("select the actual compiler input")
 }
 
 fn runtime(session: &str) -> ModelRuntimeReadModel {
@@ -349,7 +347,7 @@ fn preflight_discloses_exact_reads_and_never_auto_invokes() {
     );
     assert_eq!(
         preflight.standing.disclosed_body(),
-        Some("Current Flow body, disclosed at the owner in this context.")
+        Some(FLOW_BODY)
     );
     // Explain disclosure follows the repo's ExplainEvidence shape and
     // includes the exact-reads facts plus the execution invariant.

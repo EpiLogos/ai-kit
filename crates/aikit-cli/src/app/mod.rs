@@ -89,7 +89,7 @@ use crate::temporal::process_central_root;
 mod development_field;
 mod flow_cognition;
 mod knowledge;
-mod knowledge_cache;
+pub use knowledge::CurrentCorpusSelection;
 mod model_resident;
 mod root_context;
 
@@ -269,12 +269,12 @@ pub struct Service {
     /// An explicitly configured Central World remains the Knowledge owner for
     /// a real Project worktree even when that checkout lives outside Work/.
     knowledge_central_root: Option<PathBuf>,
+    current_corpus_selection: Option<CurrentCorpusSelection>,
     layers: Vec<ScopeLayer>,
     trust: TrustSnapshot,
     policy: ManagedPolicy,
     view: ResolvedView,
     invocation_cwd: PathBuf,
-    knowledge_runtime: std::cell::RefCell<Option<knowledge::KnowledgeRuntime>>,
     factory_executable: PathBuf,
     factory_state: Option<PathBuf>,
     factory_project_ref: Option<String>,
@@ -429,11 +429,8 @@ impl Service {
         let additional_stores: Vec<&Path> = default_store.as_deref().into_iter().collect();
         let project =
             discover::discover_project_with_home_excluding(&home, cwd, &additional_stores)?;
-        let (project, central_meta_root) = root_context::discover(cwd, &env, project)?;
-        let knowledge_central_root = env("CENTRAL_ROOT")
-            .filter(|value| !value.is_empty())
-            .and_then(|value| PathBuf::from(value).canonicalize().ok())
-            .filter(|root| root.join("Control").is_dir() && root.join("Work").is_dir());
+        let (project, central_meta_root, knowledge_central_root) =
+            root_context::discover(cwd, &env, project)?;
         let project_root = project.as_ref().map(|p| p.root.clone());
 
         let descriptor = match &project_root {
@@ -468,12 +465,12 @@ impl Service {
             project,
             central_meta_root,
             knowledge_central_root,
+            current_corpus_selection: None,
             layers,
             trust,
             policy,
             view,
             invocation_cwd: cwd.to_path_buf(),
-            knowledge_runtime: std::cell::RefCell::new(None),
             factory_executable,
             factory_state,
             factory_project_ref,
@@ -780,7 +777,6 @@ impl Service {
             &self.layers,
             &self.policy,
         )?;
-        self.invalidate_knowledge_runtime();
         Ok(())
     }
 
@@ -2428,8 +2424,11 @@ impl Service {
                     let (domains, mut load_warnings) =
                         crate::domain_activation::load_domains(project_root);
                     decision.warnings.append(&mut load_warnings);
+                    let native_world = self.knowledge_central_root.clone()
+                        .or_else(|| self.central_meta_root.clone())
+                        .or_else(|| process_central_root(Some(project_root)));
                     let (objects, mut wiki_warnings) =
-                        crate::file_context::load_project_wiki(project_root);
+                        crate::file_context::load_project_wiki_in_world(project_root, native_world.as_deref());
                     decision.warnings.append(&mut wiki_warnings);
                     let scope = crate::domain_activation::dedup_scope(event, Some(project_root));
                     let Some(scope) = scope else {
@@ -3072,7 +3071,6 @@ impl AikitApplication for Service {
             &self.layers,
             &self.policy,
         )?;
-        self.invalidate_knowledge_runtime();
 
         // 3. Build and commit a generation. A failed build never replaces the
         //    live one — that guarantee lives in the store; here we honour the

@@ -7,7 +7,7 @@
 
 use std::fs;
 
-use aikit_cli::app::Service;
+use aikit_cli::app::{CurrentCorpusSelection, Service};
 use aikit_core::resource::{parse_or_search_expression, ResourceRef};
 use aikit_core::trust::{TrustKey, TrustState};
 use aikit_core::{CapsuleId, Catalog, RegistrySource};
@@ -18,7 +18,7 @@ use aikit_store::replay_familiarity;
 use aikit_store::trust::TrustStore;
 use tempfile::TempDir;
 
-const FILE_REF: &str = "source:file:test-onboarding";
+const FILE_REF: &str = "central:source:corpus:test-onboarding";
 const FLOW_REF: &str = "wiki:node:staged/test-flow";
 const SKILL_REF: &str = "skill/test/wayfinder";
 
@@ -66,20 +66,8 @@ fn open_service(temp: &TempDir) -> Service {
         }"#,
     );
     write(
-        &project.join("source-material.json"),
-        r#"{
-          "binding": {
-            "source": "source:file:test-onboarding",
-            "revision": "rev-1",
-            "title": "Test onboarding file",
-            "tags": ["test", "onboarding"],
-            "visibility": "public",
-            "owners": [],
-            "media_type": "text/markdown",
-            "metadata": {"origin":"test-fixture"}
-          },
-          "body": "The test onboarding file keeps source evidence distinct from compiled knowledge."
-        }"#,
+        &project.join("current-corpus/onboarding.md"),
+        "---\nsource_id: test-onboarding\nrecord_type: book\ntitle_full: Test onboarding file\ntags: [test, onboarding]\n---\nThe test onboarding file keeps source evidence distinct from compiled knowledge.",
     );
     write(
         &temp
@@ -126,7 +114,14 @@ root = "payload"
             Some("test-fixture review"),
         )
         .unwrap();
-    Service::open(home, &project, |_| None).expect("open production application service")
+    Service::open(home, &project, |_| None)
+        .expect("open production application service")
+        .with_current_corpus_selection(CurrentCorpusSelection {
+            corpus: project.join("current-corpus"),
+            extension: "md".into(),
+            room_depth: 1,
+        })
+        .expect("select the actual compiler input")
 }
 
 fn observation_events(service: &Service) -> usize {

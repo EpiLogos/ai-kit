@@ -1,13 +1,13 @@
 //! W10 V5 — root→project contextualisation: project contexts bind the same
 //! entity refs through Central's effective world sources; declared
 //! exclusions withhold in-context; a project never mints a second subject;
-//! unavailable world relations degrade fail-open.
+//! unavailable World relations withhold owner-dependent material.
 
 use aikit_adapters::central_world_sources::{
-    bind_project_context, project_world_ref, read_project_binding, EffectiveSource, WorldBinding,
+    bind_project_context, project_world_ref, read_project_binding, read_world_binding, EffectiveSource, WorldBinding,
     BINDING_EXTENSION,
 };
-use aikit_adapters::runner::{CommandRunner, Output};
+use aikit_adapters::runner::{CommandRunner, Output, SystemRunner};
 use aikit_core::{
     ResourceRef, SemanticRevision, SourceRef, WikiNode, WikiObject, WikiProvenanceRef,
 };
@@ -16,6 +16,8 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Mutex,
+    time::Duration,
+    fs,
 };
 
 fn resource_ref(value: &str) -> ResourceRef {
@@ -59,155 +61,6 @@ fn materialised(mut node: WikiNode) -> WikiNode {
     node
 }
 
-/// Answers each call by looking up the invoked world_ref in a scripted map;
-/// records every argv so the Action contract is pinned.
-struct WorldRunner {
-    answers: BTreeMap<String, Value>,
-    fail_on: BTreeMap<String, ()>,
-    unreadable_on: BTreeMap<String, String>,
-    coded_absent: BTreeMap<String, ()>,
-    manifest_less: BTreeMap<String, ()>,
-    seen: Mutex<Vec<Vec<String>>>,
-}
-
-/// Central's real answer for a world ref with no authored record. The result
-/// status IS the code (`ctrl/src/result.rs:81`) and the absence is named only
-/// in the message (`missing World <ref>`, `ctrl/src/world.rs:583`).
-fn absent_envelope(world_ref: &str) -> String {
-    json!({
-        "ok": false,
-        "status": "invalid_input",
-        "error": {
-            "code": "invalid_input",
-            "message": format!("missing World {world_ref}"),
-        }
-    })
-    .to_string()
-}
-
-/// A declaration that exists but cannot be read or validated. Same status and
-/// code as the absent case — deliberately, so this pins that the consumer
-/// separates them by the message and not by the code alone.
-fn unreadable_envelope(message: &str) -> String {
-    json!({
-        "ok": false,
-        "status": "invalid_input",
-        "error": {"code": "invalid_input", "message": message}
-    })
-    .to_string()
-}
-
-/// Central naming absence in the error code. The message is deliberately not
-/// the legacy prose, so nothing but the code can carry the distinction.
-fn coded_absent_envelope(world_ref: &str) -> String {
-    json!({
-        "ok": false,
-        "status": "invalid_input",
-        "error": {
-            "code": "central.world_declaration_absent",
-            "message": format!("no authored record for {world_ref}"),
-        }
-    })
-    .to_string()
-}
-
-/// Central's real answer (captured live 2026-09-18) for a Work member with
-/// **no ProjectCentral manifest at all**: the io not-found error for the
-/// absent `ProjectCentral/project.json` (ctrl/src/projectcentral.rs
-/// `read_project_manifest`), wrapped by ctrl/src/agent_set_actions.rs, code
-/// `invalid_input`, exit 2. Structural non-existence — there is no project
-/// record, so the declaration is absent, not unreadable.
-fn manifest_less_envelope() -> String {
-    json!({
-        "ok": false,
-        "status": "invalid_input",
-        "error": {
-            "code": "invalid_input",
-            "message": "Project does not expose a valid ProjectCentral source: No such file or directory (os error 2)",
-        }
-    })
-    .to_string()
-}
-
-impl WorldRunner {
-    fn with_answer(world_ref: &str, sources: Value) -> Self {
-        Self {
-            answers: BTreeMap::from([(world_ref.to_owned(), sources)]),
-            fail_on: BTreeMap::new(),
-            unreadable_on: BTreeMap::new(),
-            coded_absent: BTreeMap::new(),
-            manifest_less: BTreeMap::new(),
-            seen: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn failing_on(mut self, world_ref: &str) -> Self {
-        self.fail_on.insert(world_ref.to_owned(), ());
-        self
-    }
-
-    /// The world declares relations, but the declaration cannot be read.
-    fn unreadable_on(mut self, world_ref: &str, message: &str) -> Self {
-        self.unreadable_on
-            .insert(world_ref.to_owned(), message.to_owned());
-        self
-    }
-
-    /// Central answers that the world ref has no authored record, naming it in
-    /// the error code rather than only in the message.
-    fn coded_absent_on(mut self, world_ref: &str) -> Self {
-        self.coded_absent.insert(world_ref.to_owned(), ());
-        self
-    }
-
-    /// Central answers that the member has no ProjectCentral manifest at all —
-    /// structural non-existence, modelled from the live envelope.
-    fn manifest_less_on(mut self, world_ref: &str) -> Self {
-        self.manifest_less.insert(world_ref.to_owned(), ());
-        self
-    }
-
-    fn envelope(&self, world_ref: &str, sources: Value) -> String {
-        json!({"ok": true, "data": {"world_ref": world_ref, "sources": sources}}).to_string()
-    }
-}
-
-impl CommandRunner for WorldRunner {
-    fn run(&self, argv: &[String]) -> aikit_core::Result<Output> {
-        self.seen.lock().unwrap().push(argv.to_vec());
-        let world_ref: String = argv
-            .last()
-            .and_then(|input| serde_json::from_str::<Value>(input).ok())
-            .and_then(|input| input["world_ref"].as_str().map(str::to_owned))
-            .unwrap_or_default();
-        let (stdout, failure) = if self.manifest_less.contains_key(&world_ref) {
-            (manifest_less_envelope(), true)
-        } else if let Some(message) = self.unreadable_on.get(&world_ref) {
-            (unreadable_envelope(message), true)
-        } else if self.coded_absent.contains_key(&world_ref) {
-            (coded_absent_envelope(&world_ref), true)
-        } else if self.fail_on.contains_key(&world_ref) {
-            (absent_envelope(&world_ref), true)
-        } else {
-            match self.answers.get(&world_ref) {
-                Some(sources) => (self.envelope(&world_ref, sources.clone()), false),
-                None => (absent_envelope(&world_ref), true),
-            }
-        };
-        // Central's real contract (ctrl/src/cli.rs `exit_code`): a structured
-        // envelope rides stdout even on failure, and `invalid_input` exits 2.
-        // The mock models that contract; an adapter that demanded exit 0
-        // before reading the envelope would misread every absence below as an
-        // unavailability and withhold the inherited root lineage.
-        let status = if failure { 2 } else { 0 };
-        Ok(Output {
-            status,
-            stdout,
-            stderr: String::new(),
-        })
-    }
-}
-
 fn binding() -> WorldBinding {
     WorldBinding {
         world_ref: "project:alpha".into(),
@@ -217,6 +70,7 @@ fn binding() -> WorldBinding {
             state: "available".into(),
             effective_revision: "1".into(),
             propagation_path: vec!["project:alpha".into(), "control:root".into()],
+            native_relation: None,
         }],
     }
 }
@@ -338,351 +192,396 @@ fn empty_binding_leaves_objects_untouched() {
     assert!(absences.is_empty());
 }
 
-#[test]
-fn effective_sources_action_contract_is_pinned_and_parsed() {
-    let runner = WorldRunner::with_answer(
-        "project:alpha",
-        json!([{"ref": "central:source:control:root:Control/user/identity",
-                "state": "available", "effective_revision": "2",
-                "propagation_path": ["project:alpha", "control:root"]}]),
-    );
-    let root = PathBuf::from("/tmp/central");
-    let executable = Path::new("ctrl");
-    let world = read_project_binding(&runner, executable, &root, "alpha", &mut Vec::new())
-        .expect("project world relations resolve");
-    assert_eq!(world.world_ref, "project:alpha");
-    assert!(!world.inherited_root_lineage);
-    assert_eq!(world.sources[0].effective_revision, "2");
-    let seen = runner.seen.lock().unwrap();
-    let argv = &seen[0];
-    assert_eq!(argv[0], "ctrl");
-    assert!(argv
-        .windows(2)
-        .any(|pair| pair[0] == "--root" && pair[1] == "/tmp/central"));
-    assert!(argv.windows(3).any(|pair| pair[0] == "action"
-        && pair[1] == "run"
-        && pair[2] == "central.world.effective-sources"));
-    let input: Value = serde_json::from_str(argv.last().unwrap()).unwrap();
-    assert_eq!(input["scope"], "project");
-    assert_eq!(input["project"], "alpha");
-    assert_eq!(input["world_ref"], "project:alpha");
+// These gates require the composed Central source cut, including typed World
+// facets and requested-absence/broken-ancestry distinction. Ignored discovery
+// is not acceptance; qualification must run this suite with --ignored.
+struct NativeWorld {
+    owned: tempfile::TempDir,
+    root: PathBuf,
+    executable: PathBuf,
+    runner: SystemRunner,
 }
 
-#[test]
-fn project_without_world_relations_falls_back_to_the_root_lineage() {
-    let runner = WorldRunner::with_answer(
-        "control:root",
-        json!([{"ref": "central:source:control:root:Control/user/identity",
-                "state": "available", "effective_revision": "1",
-                "propagation_path": ["control:root"]}]),
-    )
-    .failing_on("project:beta");
-    let mut absences = Vec::new();
-    let world = read_project_binding(
-        &runner,
-        Path::new("ctrl"),
-        &PathBuf::from("/tmp/central"),
-        "Beta",
-        &mut absences,
-    )
-    .expect("root lineage applies when the project declares no world");
-    assert!(
-        world.inherited_root_lineage,
-        "the convention is disclosed, never silent"
-    );
-    assert_eq!(world.sources[0].effective_revision, "1");
-    assert!(
-        absences.iter().any(|a| a.contains("root lineage applies")),
-        "{absences:?}"
-    );
+impl NativeWorld {
+    fn new() -> Self {
+        let executable = std::env::var_os("CENTRAL_CTRL_BIN").map(PathBuf::from)
+            .expect("Real native World qualification requires CENTRAL_CTRL_BIN for the composed owner cut");
+        assert!(executable.is_absolute(), "Native owner executable must be an explicit absolute path");
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
+        fs::create_dir_all(&scratch).unwrap();
+        let owned = tempfile::Builder::new().prefix("aikit-native-world-").tempdir_in(&scratch).unwrap();
+        let root = owned.path().join("Central");
+        fs::create_dir(&root).unwrap();
+        let world = Self { owned, root: fs::canonicalize(root).unwrap(), executable,
+            runner: SystemRunner::new().with_env_removed("CENTRAL_NATIVE_TOKEN") };
+        world.success("central.init", json!({}));
+        world.save("root", None, "control:root", None, json!([
+            {"ref":"central:source:control:root:identity", "revision":"identity-v1",
+                "authority":"controlled-test-fixture-not-personal-adoption", "treatment":"canonical"},
+            {"ref":"central:source:control:root:sealed", "revision":"sealed-v1",
+                "authority":"controlled-test-fixture-not-personal-adoption", "treatment":"canonical"}
+        ]), json!([]));
+        world
+    }
+
+    fn invoke(&self, action: &str, input: Value) -> Value {
+        let argv = vec![self.executable.to_str().unwrap().to_owned(), "--json".into(),
+            "--root".into(), self.root.to_str().unwrap().to_owned(), "action".into(),
+            "run".into(), action.into(), input.to_string()];
+        let output = self.runner.run_with_limits(&argv, Duration::from_secs(10), 1024 * 1024, true)
+            .unwrap_or_else(|error| panic!("Actual native {action} transport: {}: {error}", error.code()));
+        serde_json::from_str(&output.stdout).unwrap_or_else(|error| {
+            panic!("Actual native {action}: {error}; status={} stdout={} stderr={}",
+                output.status, output.stdout, output.stderr)
+        })
+    }
+
+    fn success(&self, action: &str, input: Value) -> Value {
+        let result = self.invoke(action, input);
+        assert_eq!(result["ok"], true, "Actual native {action}: {result}");
+        result["data"].clone()
+    }
+
+    fn project(&self, member: &str, id: &str) -> String {
+        fs::create_dir(self.root.join("Work").join(member)).unwrap();
+        self.success("projectcentral.init", json!({"project":member,"project_id":id}));
+        let here = self.success("central.world.here", json!({"project":member}));
+        assert_eq!(here["schema"], "central.world-here/v1", "{here}");
+        assert_eq!(here["project_world"]["state"], "present", "{here}");
+        here["project_world"]["ref"].as_str().unwrap().to_owned()
+    }
+
+    fn save(&self, scope: &str, project: Option<&str>, reference: &str, parent: Option<&str>,
+        sources: Value, excluded: Value) {
+        let mut input = json!({"scope":scope, "record":{
+            "schema":"central.world-relations/v1","ref":reference,"revision":"world-v1",
+            "parent":parent,"sources":sources,"excluded_sources":excluded}});
+        if let Some(project) = project { input["project"] = json!(project); }
+        self.success("central.world-relations.save", input);
+    }
+
+    fn binding(&self, member: &str) -> (Option<WorldBinding>, Vec<String>) {
+        let mut absences = Vec::new();
+        let result = read_project_binding(&self.runner, &self.executable, &self.root, member, &mut absences);
+        (result, absences)
+    }
 }
 
-#[test]
-fn world_relations_unavailable_degrades_to_uncontextualised() {
-    let runner = WorldRunner::with_answer("nothing", json!([]))
-        .unreadable_on("project:gamma", "world relation record is malformed");
-    let mut absences = Vec::new();
-    let world = read_project_binding(
-        &runner,
-        Path::new("ctrl"),
-        &PathBuf::from("/tmp/central"),
-        "Gamma",
-        &mut absences,
-    );
-    assert!(
-        world.is_none(),
-        "fail-open: no binding, composition proceeds"
-    );
-    assert!(
-        absences.iter().any(|a| a.contains("uncontextualised")),
-        "{absences:?}"
-    );
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceBasis {
+    bytes: Vec<u8>,
+    #[cfg(unix)]
+    physical: (u64, u64, i64, i64),
 }
 
-/// The distinction the failure policy turns on: a declaration that exists but
-/// cannot be read is NOT an undeclared world. It must not inherit the root
-/// lineage, and the root must not even be consulted — an unreadable exclusion
-/// must never broaden what a turn receives.
-#[test]
-fn an_unreadable_declaration_does_not_inherit_the_root_lineage() {
-    let runner = WorldRunner::with_answer(
-        "control:root",
-        json!([{"ref": "central:source:control:root:Control/user/identity",
-                "state": "available", "effective_revision": "1",
-                "propagation_path": ["control:root"]}]),
-    )
-    .unreadable_on("project:Delta", "world relation record is malformed");
-    let mut absences = Vec::new();
-    let world = read_project_binding(
-        &runner,
-        Path::new("ctrl"),
-        &PathBuf::from("/tmp/central"),
-        "Delta",
-        &mut absences,
-    );
-    assert!(world.is_none(), "no binding rather than a widened one");
-    assert!(
-        absences
-            .iter()
-            .any(|a| a.contains("could not be read or validated")),
-        "{absences:?}"
-    );
-    assert!(
-        !absences.iter().any(|a| a.contains("root lineage applies")),
-        "the root lineage is not assumed: {absences:?}"
-    );
-    // The root was never asked — the inheritance path was not entered at all.
-    assert_eq!(
-        runner.seen.lock().unwrap().len(),
-        1,
-        "only the project declaration was read"
-    );
-}
-
-#[test]
-fn absence_is_read_from_the_error_code_when_central_names_it() {
-    let runner = WorldRunner::with_answer(
-        "control:root",
-        json!([{"ref": "central:source:control:root:Control/user/identity",
-                "state": "available", "effective_revision": "1",
-                "propagation_path": ["control:root"]}]),
-    )
-    .coded_absent_on("project:Epsilon");
-    let mut absences = Vec::new();
-    let world = read_project_binding(
-        &runner,
-        Path::new("ctrl"),
-        &PathBuf::from("/tmp/central"),
-        "Epsilon",
-        &mut absences,
-    )
-    .expect("the code alone establishes absence");
-    assert!(world.inherited_root_lineage);
-    assert_eq!(world.sources[0].effective_revision, "1");
-}
-
-/// Regression (2026-09-18, owner-acknowledged): a Work member with NO
-/// ProjectCentral manifest (e.g. `~/Central/Work/epi`) is not an unreadable
-/// declaration — it is structural non-existence. Central answers the shared
-/// `invalid_input` code with "Project does not expose a valid ProjectCentral
-/// source: No such file or directory (os error 2)" and exit 2. Classified as
-/// an unavailability, the binding came back None and the inherited root
-/// graph was withheld from exactly the members that have no project record.
-/// By the one-world convention those members inherit the root lineage, and
-/// the inheritance is disclosed.
-#[test]
-fn a_member_with_no_projectcentral_manifest_inherits_the_root_lineage() {
-    let runner = WorldRunner::with_answer(
-        "control:root",
-        json!([{"ref": "central:source:control:root:Control/user/identity",
-                "state": "available", "effective_revision": "1",
-                "propagation_path": ["control:root"]}]),
-    )
-    .manifest_less_on("project:epi");
-    let mut absences = Vec::new();
-    let world = read_project_binding(
-        &runner,
-        Path::new("ctrl"),
-        &PathBuf::from("/tmp/central"),
-        "epi",
-        &mut absences,
-    )
-    .expect("a manifest-less member has no project record; the root lineage applies");
-    assert!(world.inherited_root_lineage);
-    assert_eq!(world.world_ref, "control:root");
-    assert_eq!(world.sources[0].effective_revision, "1");
-    assert!(
-        absences.iter().any(|a| a.contains("root lineage applies")),
-        "{absences:?}"
-    );
-}
-
-/// The distinction that keeps the widening honest: a manifest that EXISTS but
-/// cannot be parsed answers with the same "Project does not expose a valid
-/// ProjectCentral source" prefix and a different cause (the manifest path and
-/// the parse error). That is an unreadable declaration, not structural
-/// non-existence: no binding, no root lineage, and the root is never even
-/// consulted.
-#[test]
-fn a_malformed_manifest_is_unreadable_not_absent() {
-    let runner = WorldRunner::with_answer(
-        "control:root",
-        json!([{"ref": "central:source:control:root:Control/user/identity",
-                "state": "available", "effective_revision": "1",
-                "propagation_path": ["control:root"]}]),
-    )
-    .unreadable_on(
-        "project:Malformed",
-        "Project does not expose a valid ProjectCentral source: /central/Work/Malformed/ProjectCentral/project.json is not a valid ProjectCentral manifest: expected ident at line 1 column 2",
-    );
-    let mut absences = Vec::new();
-    let world = read_project_binding(
-        &runner,
-        Path::new("ctrl"),
-        &PathBuf::from("/tmp/central"),
-        "Malformed",
-        &mut absences,
-    );
-    assert!(
-        world.is_none(),
-        "an unreadable manifest must still withhold, not inherit"
-    );
-    assert!(
-        absences
-            .iter()
-            .any(|a| a.contains("could not be read or validated")),
-        "{absences:?}"
-    );
-    assert!(
-        !absences.iter().any(|a| a.contains("root lineage applies")),
-        "the root lineage is not assumed: {absences:?}"
-    );
-    assert_eq!(
-        runner.seen.lock().unwrap().len(),
-        1,
-        "only the project declaration was read"
-    );
-}
-
-/// Same prefix, different cause: an io failure other than not-found
-/// (permission denied) also means the manifest exists but cannot be read —
-/// an unavailable declaration, never absence.
-#[test]
-fn an_unreadable_manifest_io_error_is_unavailable_not_absent() {
-    let runner = WorldRunner::with_answer(
-        "control:root",
-        json!([{"ref": "central:source:control:root:Control/user/identity",
-                "state": "available", "effective_revision": "1",
-                "propagation_path": ["control:root"]}]),
-    )
-    .unreadable_on(
-        "project:Locked",
-        "Project does not expose a valid ProjectCentral source: Permission denied (os error 13)",
-    );
-    let mut absences = Vec::new();
-    let world = read_project_binding(
-        &runner,
-        Path::new("ctrl"),
-        &PathBuf::from("/tmp/central"),
-        "Locked",
-        &mut absences,
-    );
-    assert!(world.is_none(), "unreadable withholds");
-    assert!(
-        absences
-            .iter()
-            .any(|a| a.contains("could not be read or validated")),
-        "{absences:?}"
-    );
-    assert!(
-        !absences.iter().any(|a| a.contains("root lineage applies")),
-        "the root lineage is not assumed: {absences:?}"
-    );
-}
-
-/// Regression (2026-09-17 knowledge-fitness round): the real ctrl answers
-/// "no authored record for this world" with a structured `ok:false` envelope
-/// AND exit status 2 (`invalid_input`, ctrl/src/cli.rs `exit_code`). The
-/// adapter used to `require` exit 0 before reading the envelope, so every
-/// real absence was misread as `world_sources_unavailable` — the binding came
-/// back None, the inherited Central graph was withheld, and the whole
-/// SemanticWiki faculty went dark for any project that declares no world.
-/// The envelope, not the exit status, is the answer.
-#[test]
-fn a_nonzero_exit_never_hides_a_structured_absence() {
-    let runner = WorldRunner::with_answer(
-        "control:root",
-        json!([{"ref": "central:source:control:root:Control/user/identity",
-                "state": "available", "effective_revision": "1",
-                "propagation_path": ["control:root"]}]),
-    )
-    .coded_absent_on("project:Zeta");
-    let mut absences = Vec::new();
-    let world = read_project_binding(
-        &runner,
-        Path::new("ctrl"),
-        &PathBuf::from("/tmp/central"),
-        "Zeta",
-        &mut absences,
-    )
-    .expect("a structured absence with a non-zero exit is still an absence");
-    assert!(
-        world.inherited_root_lineage,
-        "the convention discloses the inherited lineage"
-    );
-    assert_eq!(world.sources[0].effective_revision, "1");
-    assert!(
-        absences.iter().any(|a| a.contains("root lineage applies")),
-        "{absences:?}"
-    );
-}
-
-/// The other half of the contract: a non-zero exit with NO readable envelope
-/// is a genuine unavailability — it must not inherit the root lineage and
-/// must not be mistaken for absence.
-#[test]
-fn a_nonzero_exit_without_an_envelope_is_unavailable_not_absent() {
-    struct Garbled;
-    impl CommandRunner for Garbled {
-        fn run(&self, _argv: &[String]) -> aikit_core::Result<Output> {
-            Ok(Output {
-                status: 2,
-                stdout: "panic: not an envelope".into(),
-                stderr: String::new(),
-            })
+fn tree_basis(root: &Path) -> BTreeMap<PathBuf, SourceBasis> {
+    fn walk(root: &Path, path: &Path, out: &mut BTreeMap<PathBuf, SourceBasis>) {
+        for item in fs::read_dir(path).unwrap() {
+            let path = item.unwrap().path();
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            assert!(!metadata.is_symlink(), "Unexpected fixture alias {}", path.display());
+            if metadata.is_dir() { walk(root, &path, out); }
+            else if metadata.is_file() {
+                #[cfg(unix)]
+                use std::os::unix::fs::MetadataExt;
+                out.insert(path.strip_prefix(root).unwrap().to_path_buf(), SourceBasis {
+                    bytes: fs::read(&path).unwrap(),
+                    #[cfg(unix)]
+                    physical: (metadata.dev(), metadata.ino(), metadata.mtime(), metadata.mtime_nsec()),
+                });
+            }
         }
     }
-    let mut absences = Vec::new();
-    let world = read_project_binding(
-        &Garbled,
-        Path::new("ctrl"),
-        &PathBuf::from("/tmp/central"),
-        "Eta",
-        &mut absences,
-    );
-    assert!(world.is_none(), "unavailable degrades to uncontextualised");
-    assert!(
-        absences
-            .iter()
-            .any(|a| a.contains("could not be read or validated")),
-        "no root lineage is assumed: {absences:?}"
-    );
+    let mut basis = BTreeMap::new(); walk(root, root, &mut basis); basis
+}
+
+// This is a forwarding observer of real owner execution, not a native answer.
+// It changes only a disposable source after the actual command has returned.
+type NativeCheckpoint = Box<dyn FnOnce() + Send>;
+struct ObservedNative {
+    runner: SystemRunner,
+    seen: Mutex<Vec<(String, Duration, usize, bool)>>,
+    after_effective: Mutex<Option<NativeCheckpoint>>,
+}
+
+impl ObservedNative {
+    fn new(after_effective: Option<NativeCheckpoint>) -> Self {
+        Self { runner: SystemRunner::new().with_env_removed("CENTRAL_NATIVE_TOKEN"),
+            seen: Mutex::new(Vec::new()), after_effective: Mutex::new(after_effective) }
+    }
+}
+
+impl CommandRunner for ObservedNative {
+    fn run(&self, argv: &[String]) -> aikit_core::Result<Output> { self.runner.run(argv) }
+    fn run_with_limits(&self, argv: &[String], timeout: Duration, bytes: usize, strict: bool)
+        -> aikit_core::Result<Output> {
+        let action = argv.get(6).expect("Actual native Action argv").clone();
+        self.seen.lock().unwrap().push((action.clone(), timeout, bytes, strict));
+        let output = self.runner.run_with_limits(argv, timeout, bytes, strict)?;
+        if action == "central.world.effective-sources" {
+            if let Some(checkpoint) = self.after_effective.lock().unwrap().take() { checkpoint(); }
+        }
+        Ok(output)
+    }
 }
 
 #[test]
-fn project_world_ref_prefers_the_declared_project_id() {
-    let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("Work/Alpha");
-    std::fs::create_dir_all(project.join("ProjectCentral")).unwrap();
-    std::fs::write(
-        project.join("ProjectCentral/project.json"),
-        json!({"schema": "central.project/v1", "project_id": "project:alpha-native"}).to_string(),
-    )
-    .unwrap();
-    assert_eq!(
-        project_world_ref(temp.path(), "Alpha"),
-        "project:alpha-native",
-        "the project's declared stable identity wins over the convention"
-    );
-    assert_eq!(project_world_ref(temp.path(), "Beta"), "project:Beta");
+#[ignore = "requires real composed CENTRAL_CTRL_BIN; run explicitly in native owner qualification"]
+fn native_bare_prefixed_and_slash_ids_use_owner_ref_without_remint() {
+    let world = NativeWorld::new();
+    for (member, id) in [("Bare", "alpha"), ("Prefixed", "project:alpha"), ("Slash", "domain/alpha")] {
+        let native = world.project(member, id);
+        assert_eq!(native, format!("project:{id}"));
+        let before = tree_basis(&world.root);
+        assert_eq!(project_world_ref(&world.root, member).unwrap(), native);
+        let (binding, disclosures) = world.binding(member);
+        let binding = binding.unwrap_or_else(|| panic!("{disclosures:?}"));
+        assert_eq!(binding.world_ref, "control:root");
+        assert!(binding.inherited_root_lineage);
+        assert!(disclosures.iter().any(|line| line.contains("central.world_declaration_absent")));
+        assert_eq!(tree_basis(&world.root), before, "Read must not declare/adopt a World");
+    }
+}
+
+#[test]
+#[ignore = "requires real composed CENTRAL_CTRL_BIN; run explicitly in native owner qualification"]
+fn native_source_override_exclusion_and_every_provenance_hop_reach_context() {
+    let world = NativeWorld::new();
+    let reference = world.project("Alpha", "alpha");
+    world.save("project", Some("Alpha"), &reference, Some("control:root"), json!([
+        {"ref":"central:source:control:root:identity","revision":"identity-v2",
+            "authority":"controlled-child-fixture-not-personal-adoption","treatment":"retain-native"}
+    ]), json!(["central:source:control:root:sealed"]));
+    let expected = world.success("central.world.effective-sources",
+        json!({"scope":"project","project":"Alpha","world_ref":reference}));
+    let before = tree_basis(&world.root);
+    let (binding, absences) = world.binding("Alpha");
+    assert!(absences.is_empty(), "{absences:?}");
+    let binding = binding.unwrap();
+    assert_eq!(binding.world_ref, reference);
+    assert!(!binding.inherited_root_lineage);
+    for entry in expected["sources"].as_array().unwrap() {
+        let actual = binding.sources.iter().find(|source| source.source_ref == entry["ref"].as_str().unwrap()).unwrap();
+        assert_eq!(actual.native_relation.as_ref(), Some(entry));
+        assert!(!entry["provenance"].as_array().unwrap().is_empty());
+    }
+    let identity = binding.sources.iter().find(|source| source.source_ref.ends_with(":identity")).unwrap();
+    assert_eq!(identity.effective_revision, "identity-v2");
+    assert_eq!(identity.native_relation.as_ref().unwrap()["provenance"].as_array().unwrap().len(), 2);
+    let mut objects = vec![WikiObject::Node(materialised(pasu_node("wiki:node:identity",
+        "central:pasu:nara:fixture", &["central:source:control:root:identity"]))),
+        WikiObject::Node(materialised(pasu_node("wiki:node:sealed", "central:pasu:nara:sealed",
+            &["central:source:control:root:sealed"])) )];
+    let mut output_absences = Vec::new();
+    bind_project_context(&mut objects, &binding, &mut output_absences);
+    assert_eq!(objects.len(), 1);
+    let WikiObject::Node(node) = &objects[0] else { panic!("Expected actual bound entity"); };
+    assert_eq!(node.extensions[BINDING_EXTENSION]["bindings"][0]["native_relation"],
+        identity.native_relation.as_ref().unwrap().clone());
+    assert_eq!(node.ref_id.as_str(), "wiki:node:identity");
+    assert_eq!(tree_basis(&world.root), before);
+}
+
+#[test]
+#[ignore = "requires real composed CENTRAL_CTRL_BIN; run explicitly in native owner qualification"]
+fn native_present_target_with_missing_ancestor_never_uses_root_fallback() {
+    let world = NativeWorld::new();
+    let reference = world.project("Broken", "broken");
+    world.save("project", Some("Broken"), &reference, Some("project:missing-parent"),
+        json!([]), json!(["central:source:control:root:identity"]));
+    let before = tree_basis(&world.root);
+    let observer = ObservedNative::new(None);
+    let mut absences = Vec::new();
+    assert!(read_project_binding(&observer, &world.executable, &world.root, "Broken", &mut absences).is_none());
+    let diagnostic = absences.join("\n");
+    assert!(diagnostic.contains("central.world_ancestry_unavailable"), "{diagnostic}");
+    assert!(diagnostic.contains("requested_declaration_present"), "{diagnostic}");
+    assert!(diagnostic.contains("project:missing-parent"), "{diagnostic}");
+    assert_eq!(observer.seen.lock().unwrap().len(), 2, "here + target only; no root fallback");
+    assert_eq!(tree_basis(&world.root), before);
+}
+
+#[test]
+#[ignore = "requires real composed CENTRAL_CTRL_BIN; run explicitly in native owner qualification"]
+fn native_manifest_less_existing_member_differs_from_nonexistent_member() {
+    let world = NativeWorld::new();
+    fs::create_dir(world.root.join("Work/Bare")).unwrap();
+    let before = tree_basis(&world.root);
+    let (binding, absences) = world.binding("Bare");
+    let binding = binding.unwrap_or_else(|| panic!("{absences:?}"));
+    assert_eq!(binding.world_ref, "control:root");
+    assert!(binding.inherited_root_lineage);
+    assert!(project_world_ref(&world.root, "Bare").is_err(), "No fabricated Project World identity");
+    let (missing, absences) = world.binding("Missing");
+    assert!(missing.is_none());
+    assert!(absences.join("\n").contains("work-member-absent"), "{absences:?}");
+    assert_eq!(tree_basis(&world.root), before);
+}
+
+#[test]
+#[ignore = "requires real composed CENTRAL_CTRL_BIN; run explicitly in native owner qualification"]
+fn native_malformed_wrong_form_and_missing_owner_do_not_become_declaration_absence() {
+    let world = NativeWorld::new();
+    world.project("Alpha", "alpha");
+    let manifest = world.root.join("Work/Alpha/ProjectCentral/project.json");
+    let original = fs::read(&manifest).unwrap();
+    for invalid in [b"{broken".as_slice(), br#"{"schema":"wrong","project_id":"alpha"}"#.as_slice()] {
+        fs::write(&manifest, invalid).unwrap();
+        let before = tree_basis(&world.root);
+        let (binding, absences) = world.binding("Alpha");
+        assert!(binding.is_none());
+        assert!(absences.join("\n").contains("unavailable"), "{absences:?}");
+        assert_eq!(tree_basis(&world.root), before);
+    }
+    fs::write(&manifest, &original).unwrap();
+    let retained = manifest.with_extension("retained");
+    fs::rename(&manifest, &retained).unwrap();
+    fs::create_dir(&manifest).unwrap();
+    let (binding, absences) = world.binding("Alpha");
+    assert!(binding.is_none()); assert!(absences.join("\n").contains("io_error"), "{absences:?}");
+    fs::remove_dir(&manifest).unwrap(); fs::rename(&retained, &manifest).unwrap();
+    let error = read_world_binding(&world.runner, &world.owned.path().join("missing-ctrl"),
+        &world.root, "root", None, "control:root").unwrap_err();
+    use std::error::Error;
+    let cause = error.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+    assert_eq!(cause.kind(), std::io::ErrorKind::NotFound);
+    assert_ne!(error.code(), "central.world_declaration_absent");
+    assert_eq!(fs::read(&manifest).unwrap(), original);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+#[ignore = "requires real composed CENTRAL_CTRL_BIN and nonroot OS user; run explicitly"]
+fn native_manifest_eacces_retains_actual_owner_cause_and_never_assumes_root() {
+    use std::os::unix::fs::PermissionsExt;
+    assert!(!rustix::process::geteuid().is_root(), "Actual EACCES qualification requires a nonroot OS user");
+    let world = NativeWorld::new(); world.project("Locked", "locked");
+    let manifest = world.root.join("Work/Locked/ProjectCentral/project.json");
+    let original = fs::read(&manifest).unwrap();
+    struct Restore(PathBuf, fs::Permissions);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Err(error) = fs::set_permissions(&self.0, self.1.clone()) {
+                if std::thread::panicking() { eprintln!("Owned permission restoration failed: {error}"); }
+                else { panic!("Owned permission restoration failed: {error}"); }
+            }
+        }
+    }
+    let restore = Restore(manifest.clone(), fs::metadata(&manifest).unwrap().permissions());
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o0)).unwrap();
+    let actual = fs::read(&manifest).unwrap_err();
+    let (binding, absences) = world.binding("Locked"); assert!(binding.is_none());
+    let diagnostic = absences.join("\n");
+    assert!(diagnostic.contains("PermissionDenied"), "{diagnostic}");
+    assert!(diagnostic.contains(&actual.raw_os_error().unwrap().to_string()), "{diagnostic}");
+    assert!(!diagnostic.contains("root lineage applies"));
+    drop(restore); assert_eq!(fs::read(&manifest).unwrap(), original);
+}
+
+#[test]
+#[ignore = "requires real composed CENTRAL_CTRL_BIN; run explicitly in native owner qualification"]
+fn native_shared_probe_limits_and_final_identity_reobservation_are_operative() {
+    let world = NativeWorld::new(); world.project("Alpha", "alpha");
+    let observer = ObservedNative::new(None); let before = tree_basis(&world.root);
+    let mut absences = Vec::new();
+    assert!(read_project_binding(&observer, &world.executable, &world.root, "Alpha", &mut absences).is_some(), "{absences:?}");
+    let calls = observer.seen.lock().unwrap(); assert_eq!(calls.len(), 4);
+    for call in calls.iter() { assert!(call.1 <= Duration::from_secs(10)); assert!(call.2 <= 1024*1024); assert!(call.3); }
+    for pair in calls.windows(2) { assert!(pair[1].1 <= pair[0].1); assert!(pair[1].2 < pair[0].2); }
+    drop(calls); assert_eq!(tree_basis(&world.root), before);
+    let manifest = world.root.join("Work/Alpha/ProjectCentral/project.json");
+    let original = fs::read(&manifest).unwrap(); let changed_path = manifest.clone();
+    let change = ObservedNative::new(Some(Box::new(move || {
+        let mut value: Value = serde_json::from_slice(&fs::read(&changed_path).unwrap()).unwrap();
+        value["project_id"] = json!("changed-after-native-return");
+        fs::write(&changed_path, serde_json::to_vec(&value).unwrap()).unwrap();
+    })));
+    let mut absences = Vec::new();
+    assert!(read_project_binding(&change, &world.executable, &world.root, "Alpha", &mut absences).is_none());
+    assert!(absences.join("\n").contains("central.world_binding_changed"), "{absences:?}");
+    fs::write(&manifest, original).unwrap();
+    assert!(world.binding("Alpha").0.is_some(), "Fresh native inspection after fixture restoration");
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires real composed CENTRAL_CTRL_BIN; run explicitly in native owner qualification"]
+fn native_unchanged_root_alias_works_and_retargeted_owner_ref_is_refused() {
+    use std::os::unix::fs::symlink;
+    let first = NativeWorld::new(); first.project("Alpha", "first");
+    let second = NativeWorld::new(); second.project("Alpha", "second");
+    let alias = first.owned.path().join("world-alias"); symlink(&first.root, &alias).unwrap();
+    let mut absences = Vec::new();
+    assert!(read_project_binding(&first.runner, &first.executable, &alias, "Alpha", &mut absences).is_some(), "{absences:?}");
+    let second_root = second.root.clone(); let alias_for_change = alias.clone();
+    let change = ObservedNative::new(Some(Box::new(move || {
+        fs::remove_file(&alias_for_change).unwrap(); symlink(second_root, &alias_for_change).unwrap();
+    })));
+    let mut absences = Vec::new();
+    assert!(read_project_binding(&change, &first.executable, &alias, "Alpha", &mut absences).is_none());
+    assert!(absences.join("\n").contains("central.world_binding_changed"), "{absences:?}");
+    assert!(read_project_binding(&first.runner, &first.executable, &alias, "Alpha", &mut Vec::new()).is_some());
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires real composed CENTRAL_CTRL_BIN; run explicitly in native owner qualification"]
+fn native_non_utf8_coordinate_refuses_before_selecting_lossy_owner() {
+    use std::os::unix::ffi::OsStringExt;
+    let world = NativeWorld::new(); let before = tree_basis(&world.root);
+    let root = PathBuf::from(std::ffi::OsString::from_vec(b"invalid-owner-\xff".to_vec()));
+    let error = read_world_binding(&world.runner, &world.executable, &root, "root", None, "control:root").unwrap_err();
+    assert_eq!(error.code(), "central.world_transport_unsupported");
+    assert_eq!(error.details().get("coordinate").map(String::as_str), Some("root"));
+    assert_eq!(error.details().get("execution_started").map(String::as_str), Some("false"));
+    assert_eq!(tree_basis(&world.root), before);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires real composed CENTRAL_CTRL_BIN and mkfifo; run explicitly"]
+fn native_final_manifest_alias_and_fifo_refuse_without_opening_replacement() {
+    use std::os::unix::fs::symlink;
+    let world = NativeWorld::new(); world.project("Alpha", "alpha");
+    let manifest = world.root.join("Work/Alpha/ProjectCentral/project.json");
+    let retained = manifest.with_extension("original"); fs::rename(&manifest, &retained).unwrap();
+    let original = fs::read(&retained).unwrap();
+    symlink(&retained, &manifest).unwrap();
+    let (binding, absences) = world.binding("Alpha"); assert!(binding.is_none());
+    assert!(absences.join("\n").contains("io_error"), "{absences:?}");
+    fs::remove_file(&manifest).unwrap();
+    let argv = vec!["mkfifo".into(), "-m".into(), "600".into(), manifest.to_str().unwrap().into()];
+    world.runner.run_with_limits(&argv, Duration::from_secs(2), 1024, true).unwrap()
+        .require(&argv, "test.mkfifo_failed").unwrap();
+    let (binding, absences) = world.binding("Alpha"); assert!(binding.is_none());
+    assert!(absences.join("\n").contains("io_error"), "{absences:?}");
+    assert!(!absences.join("\n").contains("root lineage applies"));
+    assert_eq!(fs::read(&retained).unwrap(), original);
+    fs::remove_file(&manifest).unwrap(); fs::rename(retained, manifest).unwrap();
+    assert!(world.binding("Alpha").0.is_some());
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires real composed CENTRAL_CTRL_BIN; run explicitly in native owner qualification"]
+fn native_runner_decode_and_timeout_failures_never_become_absent_owner() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = NativeWorld::new(); world.project("Alpha", "alpha");
+    let before = tree_basis(&world.root);
+    let wrapper = world.owned.path().join("actual-native-wrapper");
+    // Material adversary precedes a genuine native command. No native envelope
+    // is scripted; the same runner owns finite capture and cancellation/reap.
+    fs::write(&wrapper, "#!/bin/sh\nprintf '\\377'\nexec \"$ACTUAL_CTRL\" \"$@\"\n").unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+    let runner = SystemRunner::new().with_env("ACTUAL_CTRL", world.executable.to_str().unwrap())
+        .with_env_removed("CENTRAL_NATIVE_TOKEN");
+    let error = read_world_binding(&runner, &wrapper, &world.root, "root", None, "control:root").unwrap_err();
+    assert_eq!(error.code(), "mux.command_utf8_invalid");
+    fs::write(&wrapper, "#!/bin/sh\nsleep 5\nexec \"$ACTUAL_CTRL\" \"$@\"\n").unwrap();
+    let runner = runner.with_timeout(Duration::from_millis(120));
+    let mut absences = Vec::new();
+    assert!(read_project_binding(&runner, &wrapper, &world.root, "Alpha", &mut absences).is_none());
+    assert!(absences.join("\n").contains("mux.command_timeout"), "{absences:?}");
+    assert!(!absences.join("\n").contains("root lineage applies"));
+    assert_eq!(tree_basis(&world.root), before);
 }

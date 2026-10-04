@@ -3207,6 +3207,13 @@ pub struct SearchArgs {
 
 #[derive(Debug, Args)]
 pub struct KnowledgeCmd {
+    /// Explicit current corpus IO selection, never a retained shard grant.
+    #[arg(long, value_name = "PATH", global = true)]
+    pub source_corpus: Option<std::path::PathBuf>,
+    #[arg(long, value_name = "EXT", requires = "source_corpus", global = true)]
+    pub source_extension: Option<String>,
+    #[arg(long, value_name = "DEPTH", requires = "source_corpus", global = true)]
+    pub source_room_depth: Option<usize>,
     #[command(subcommand)]
     pub command: KnowledgeSub,
 }

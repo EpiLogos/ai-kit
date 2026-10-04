@@ -1,6 +1,6 @@
 use std::fs;
 
-use aikit_cli::app::Service;
+use aikit_cli::app::{CurrentCorpusSelection, Service};
 use aikit_core::resource::ResourceRef;
 use aikit_core::{ForgetScope, KnowledgeAddress, DEFAULT_FAMILIARITY_HALF_LIFE_MS};
 use aikit_store::AikitHome;
@@ -11,10 +11,22 @@ use tempfile::TempDir;
 
 fn open_service(temp: &TempDir) -> Service {
     let home = AikitHome::at(temp.path().join("aikit-home"));
-    Service::open(home, temp.path(), |_| None).expect("open production application service")
+    Service::open(home, temp.path(), |_| None)
+        .expect("open production application service")
+        .with_current_corpus_selection(CurrentCorpusSelection {
+            corpus: temp.path().join("current-corpus"),
+            extension: "md".into(),
+            room_depth: 1,
+        })
+        .expect("select the actual compiler input")
 }
 
 fn write_project_knowledge(temp: &TempDir) {
+    let input = "---\nsource_id: authentication\nrecord_type: book\ntitle_full: Authentication source paper\ntags: [authentication, architecture]\n---\nAuthentication architecture keeps source evidence distinct from compiled semantic knowledge.";
+    let revision = aikit_core::knowledge_ingest::corpus_content_revision(input.as_bytes());
+    let corpus = temp.path().join("current-corpus");
+    fs::create_dir_all(&corpus).unwrap();
+    fs::write(corpus.join("authentication.md"), input).unwrap();
     let wiki = r#"{
       "objects": [
         {
@@ -22,30 +34,19 @@ fn write_project_knowledge(temp: &TempDir) {
           "object": "node",
           "ref": "wiki:node:authentication",
           "revision": 7,
-          "provenance": [{"source_ref":"source:paper:authentication","source_revision":"rev-3"}],
+          "provenance": [{"source_ref":"central:source:corpus:authentication","source_revision":"rev-3"}],
           "type": "Concept",
           "title": "Authentication architecture",
           "space_refs": [],
-          "source_refs": ["source:paper:authentication"]
+          "source_refs": ["central:source:corpus:authentication"]
         }
       ]
     }"#;
-    fs::write(temp.path().join("semantic-wiki.json"), wiki).unwrap();
-
-    let source = r#"{
-      "binding": {
-        "source": "source:paper:authentication",
-        "revision": "rev-3",
-        "title": "Authentication source paper",
-        "tags": ["authentication", "architecture"],
-        "visibility": "public",
-        "owners": [],
-        "media_type": "text/markdown",
-        "metadata": {"origin":"test-fixture"}
-      },
-      "body": "Authentication architecture keeps source evidence distinct from compiled semantic knowledge."
-    }"#;
-    fs::write(temp.path().join("source-material.json"), source).unwrap();
+    fs::write(
+        temp.path().join("semantic-wiki.json"),
+        wiki.replace("rev-3", &revision),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -114,7 +115,7 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
         let learned_source = learned
             .hits
             .iter()
-            .find(|hit| hit.resource.as_str() == "source:paper:authentication")
+            .find(|hit| hit.resource.as_str() == "central:source:corpus:authentication")
             .expect("learned SourcePool destination remains discoverable");
         let ranking = learned_source
             .ranking
@@ -199,7 +200,7 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
         assert!(search
             .resources
             .iter()
-            .any(|item| item.resource.as_str() == "source:paper:authentication"));
+            .any(|item| item.resource.as_str() == "central:source:corpus:authentication"));
 
         let address =
             KnowledgeAddress::Wiki(ResourceRef::parse("wiki:node:authentication").unwrap());
@@ -223,7 +224,7 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
             .iter()
             .find(|edge| {
                 edge["from"] == "wiki:node:authentication"
-                    && edge["to"] == "source:paper:authentication"
+                    && edge["to"] == "central:source:corpus:authentication"
                     && edge["relation"] == "source"
             })
             .expect("SemanticWiki source edge reaches the final TUI relation service");
@@ -247,7 +248,7 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
     let source_after_forget = search_after_forget
         .hits
         .iter()
-        .find(|hit| hit.resource.as_str() == "source:paper:authentication")
+        .find(|hit| hit.resource.as_str() == "central:source:corpus:authentication")
         .unwrap();
     assert!(
         source_after_forget.ranking.is_none(),

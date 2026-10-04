@@ -3740,13 +3740,31 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
     // dispatched before `Service::discover` rather than requiring one.
     let command = match c.command {
         KnowledgeSub::Code(code_cmd) => {
+            if c.source_corpus.is_some() {
+                return Err(aikit_core::AikitError::new("knowledge.corpus_selection_invalid",
+                    "The independent code lens does not consume a corpus selection"));
+            }
             let data = aikit_cli::contemplation_field::knowledge_code(code_cmd.command)?;
             return data_reply(data);
         }
         other => other,
     };
 
+    if c.source_corpus.is_some() && matches!(&command,
+        KnowledgeSub::Flow(_) | KnowledgeSub::Wiki(_) | KnowledgeSub::WikiShape(_)
+            | KnowledgeSub::WikiConstruct(_) | KnowledgeSub::Jev(_) | KnowledgeSub::History(_)
+            | KnowledgeSub::Forget(_))
+    {
+        return Err(aikit_core::AikitError::new("knowledge.corpus_selection_invalid",
+            "This independent operation does not consume the selected current corpus"));
+    }
     let mut service = Service::discover(cwd)?;
+    if let Some(corpus) = c.source_corpus {
+        service = service.with_current_corpus_selection(aikit_cli::app::CurrentCorpusSelection {
+            corpus, extension: c.source_extension.unwrap_or_else(|| "md".into()),
+            room_depth: c.source_room_depth.unwrap_or(1),
+        })?;
+    }
     let mut warnings = diagnostic_warnings(&service);
     let data = match command {
         KnowledgeSub::Search(a) => {

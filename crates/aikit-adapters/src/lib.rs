@@ -281,7 +281,9 @@ pub use tool_sources::{
     ToolsProjectionOutcome, ToolsProjectionPlan, TOOLS_PROJECTION_OWNERSHIP,
 };
 pub use work_repos::{
-    discover_work_projects, WorkProjectEntry, WorkRepoProject, WorkReposSourcePoolProvider,
+    decode_work_file_source_ref, discover_native_work_projects, discover_work_projects,
+    work_file_source_ref, NativeWorkProjectEntry, NativeWorkRepoProject, WorkFileAddress,
+    WorkProjectEntry, WorkRepoProject, WorkReposSourcePoolProvider, WORK_FILE_ADDRESS_MAX_BYTES,
 };
 pub use working_environment::{
     MuxSessionSpaceActivationDriver, MuxWorkingEnvironment, NativeBindingKind,

@@ -19,7 +19,7 @@
 
 use std::fs;
 
-use aikit_cli::app::Service;
+use aikit_cli::app::{CurrentCorpusSelection, Service};
 use aikit_core::resource::{
     parse_or_search_expression, resolve_path_identity, AddressHorizon, RelationOp,
     ResolveExpression,
@@ -31,13 +31,25 @@ use tempfile::TempDir;
 
 fn open_service(temp: &TempDir) -> Service {
     let home = AikitHome::at(temp.path().join("aikit-home"));
-    Service::open(home, temp.path(), |_| None).expect("open production application service")
+    Service::open(home, temp.path(), |_| None)
+        .expect("open production application service")
+        .with_current_corpus_selection(CurrentCorpusSelection {
+            corpus: temp.path().join("current-corpus"),
+            extension: "md".into(),
+            room_depth: 1,
+        })
+        .expect("select the actual compiler input")
 }
 
 /// One curated Wiki node (KnowledgeNode: horizons @0 and @2) and one authored
 /// source (KnowledgeSource: horizon @0). The two kinds differ by exactly one
 /// horizon, which is what lets an address narrow observably.
 fn write_project_knowledge(temp: &TempDir) {
+    let input = "---\nsource_id: authentication\nrecord_type: book\ntitle_full: Authentication source paper\ntags: [authentication, architecture]\n---\nAuthentication architecture keeps source evidence distinct from compiled semantic knowledge.";
+    let revision = aikit_core::knowledge_ingest::corpus_content_revision(input.as_bytes());
+    let corpus = temp.path().join("current-corpus");
+    fs::create_dir_all(&corpus).unwrap();
+    fs::write(corpus.join("authentication.md"), input).unwrap();
     let wiki = r#"{
       "objects": [
         {
@@ -45,30 +57,19 @@ fn write_project_knowledge(temp: &TempDir) {
           "object": "node",
           "ref": "wiki:node:authentication",
           "revision": 7,
-          "provenance": [{"source_ref":"source:paper:authentication","source_revision":"rev-3"}],
+          "provenance": [{"source_ref":"central:source:corpus:authentication","source_revision":"rev-3"}],
           "type": "Concept",
           "title": "Authentication architecture",
           "space_refs": [],
-          "source_refs": ["source:paper:authentication"]
+          "source_refs": ["central:source:corpus:authentication"]
         }
       ]
     }"#;
-    fs::write(temp.path().join("semantic-wiki.json"), wiki).unwrap();
-
-    let source = r#"{
-      "binding": {
-        "source": "source:paper:authentication",
-        "revision": "rev-3",
-        "title": "Authentication source paper",
-        "tags": ["authentication", "architecture"],
-        "visibility": "public",
-        "owners": [],
-        "media_type": "text/markdown",
-        "metadata": {"origin":"test-fixture"}
-      },
-      "body": "Authentication architecture keeps source evidence distinct from compiled semantic knowledge."
-    }"#;
-    fs::write(temp.path().join("source-material.json"), source).unwrap();
+    fs::write(
+        temp.path().join("semantic-wiki.json"),
+        wiki.replace("rev-3", &revision),
+    )
+    .unwrap();
 }
 
 fn resources(result: &aikit_core::KnowledgeSearchResult) -> Vec<String> {
@@ -109,7 +110,7 @@ fn knowledge_retrieval_expresses_through_the_one_resolver_contract() {
         "the curated Wiki node is reachable: {plain_resources:?}"
     );
     assert!(
-        plain_resources.contains(&"source:paper:authentication".to_string()),
+        plain_resources.contains(&"central:source:corpus:authentication".to_string()),
         "the authored source is reachable: {plain_resources:?}"
     );
 
@@ -142,7 +143,7 @@ fn knowledge_retrieval_expresses_through_the_one_resolver_contract() {
     assert_eq!(
         ground_resources,
         vec![
-            "source:paper:authentication".to_string(),
+            "central:source:corpus:authentication".to_string(),
             "wiki:node:authentication".to_string(),
         ],
         "@0 is the ground horizon both kinds participate in: {ground_resources:?}"
@@ -150,7 +151,7 @@ fn knowledge_retrieval_expresses_through_the_one_resolver_contract() {
 
     // 3. A relation combines both sides. A substring scanner cannot union.
     let related = service
-        .knowledge_search("@2 authentication x @0 \"source:paper:authentication\"", 50)
+        .knowledge_search("@2 authentication x @0 \"central:source:corpus:authentication\"", 50)
         .unwrap();
     assert!(
         matches!(
@@ -168,7 +169,7 @@ fn knowledge_retrieval_expresses_through_the_one_resolver_contract() {
     assert_eq!(
         related_resources,
         vec![
-            "source:paper:authentication".to_string(),
+            "central:source:corpus:authentication".to_string(),
             "wiki:node:authentication".to_string(),
         ],
         "both sides of the relation contributed: {related_resources:?}"

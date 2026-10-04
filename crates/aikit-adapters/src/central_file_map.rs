@@ -1,9 +1,11 @@
 //! Query attachment to Central's persistent file map. Reads never rebuild it.
 use crate::runner::CommandRunner;
+use aikit_core::context_source::{ContextSourcePrivacy, RetrievalTarget};
 use aikit_core::knowledge_source_pool::*;
-use aikit_core::resource::{ProviderRef, ResourceLocator, SourceRef, SourceRevision};
+use aikit_core::resource::{ProviderRef, ResourceLocator, ResourceSource, SourceRef, SourceRevision, SourceState};
 use aikit_core::{AikitError, Result};
 use serde_json::{json, Value};
+use std::time::{Duration, Instant};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -23,19 +25,46 @@ pub fn call<R: CommandRunner>(
     operation: &str,
     input: &Value,
 ) -> Result<Value> {
+    call_with_timeout(runner, executable, root, operation, input, None)
+}
+
+fn call_with_timeout<R: CommandRunner>(
+    runner: &R, executable: &Path, root: &Path, operation: &str, input: &Value,
+    timeout: Option<Duration>,
+) -> Result<Value> {
+    // This runner's argv contract is text. A lossy conversion could address
+    // another real executable or World; refuse before any owner effect.
+    let executable = executable.to_str().ok_or_else(||
+        AikitError::new("central.file_map_coordinate_invalid", "Native executable coordinate is not representable by the text transport")
+            .with("coordinate", "executable"))?;
+    let root = root.to_str().ok_or_else(||
+        AikitError::new("central.file_map_coordinate_invalid", "Native World coordinate is not representable by the text transport")
+            .with("coordinate", "root"))?;
     let argv = vec![
-        executable.to_string_lossy().into_owned(),
+        executable.to_owned(),
         "--json".into(),
         "--root".into(),
-        root.to_string_lossy().into_owned(),
+        root.to_owned(),
         "action".into(),
         "run".into(),
         format!("central.file-map.{operation}"),
         input.to_string(),
     ];
-    let output = runner.run(&argv)?;
-    let envelope: Value = serde_json::from_str(&output.stdout)
-        .map_err(|e| invalid(format!("Invalid owner response: {e}")))?;
+    let output = match timeout {
+        Some(timeout) => runner.run_with_timeout(&argv, timeout),
+        None => runner.run(&argv),
+    }.map_err(|error| {
+        AikitError::new("central.file_map_unavailable", error.message())
+            .with("owner_operation", format!("central.file-map.{operation}"))
+            .with("transport_error", json!({"code":error.code(), "message":error.message(), "details":error.details()}).to_string())
+            .with_io_source_from(&error)
+    })?;
+    let envelope: Value = serde_json::from_str(&output.stdout).map_err(|error| {
+        invalid(format!("Invalid owner response: {error}"))
+            .with("owner_operation", format!("central.file-map.{operation}"))
+            .with("execution_status", output.status.to_string())
+            .with("stdout", &output.stdout).with("stderr", &output.stderr)
+    })?;
     if !output.ok() || envelope["ok"] != true {
         return Err(AikitError::new(
             match envelope["error"]["code"].as_str() {
@@ -47,11 +76,21 @@ pub fn call<R: CommandRunner>(
             envelope["error"]["message"]
                 .as_str()
                 .unwrap_or("Central map operation failed"),
-        ));
+        )
+        .with("native_result", envelope.to_string())
+        .with("native_error", envelope["error"].to_string())
+        .with("native_error_code", envelope["error"]["code"].as_str().unwrap_or_default())
+        .with("owner_operation", format!("central.file-map.{operation}"))
+        .with("execution_status", output.status.to_string())
+        .with("stderr", &output.stderr));
     }
     let data = &envelope["data"];
     if data["schema"] != SCHEMA || data["operation"] != operation || !data["result"].is_object() {
-        return Err(invalid("Unsupported Central file-map envelope"));
+        return Err(invalid("Unsupported Central file-map envelope")
+            .with("native_result", envelope.to_string())
+            .with("owner_operation", format!("central.file-map.{operation}"))
+            .with("execution_status", output.status.to_string())
+            .with("stderr", &output.stderr));
     }
     Ok(data["result"].clone())
 }
@@ -64,6 +103,66 @@ fn string<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
         .filter(|s| !s.is_empty())
         .ok_or_else(|| invalid(format!("Missing {key}")))
 }
+// Native participation is an owner verdict, never a SourceRef grammar.
+// This validates only transient metadata; it does not mint a payload revision.
+fn owned_binding(reading: &Value, requested_key: &str, requested: &str) -> Result<bool> {
+    let failure = |message| invalid(message).with("native_reading", reading.to_string());
+    if reading["binding_only"] != true {
+        return Err(failure("Owner did not return the selected binding-only contract"));
+    }
+    match reading["ownership"].as_str() {
+        Some("unregistered") => {
+            if reading[requested_key] != requested
+                || ["source", "world_ref", "project", "path", "kind", "revision", "content",
+                    "content_encoding", "relation_revision", "material_metadata_basis"]
+                    .iter().any(|key| reading.get(*key).is_some())
+            {
+                return Err(failure("Owner returned a contradictory unregistered Source disposition"));
+            }
+            Ok(false)
+        }
+        Some("owned") => {
+            let source = &reading["source"];
+            let reference = string(source, "ref").map_err(|_| failure("Owner binding has no SourceRef"))?;
+            SourceRef::parse(reference).map_err(|_| failure("Owner binding has an invalid SourceRef"))?;
+            if requested_key == "source_ref" && reference != requested {
+                return Err(failure("Owner returned another SourceRef"));
+            }
+            for key in ["path", "provenance", "standing", "treatment"] {
+                string(source, key).map_err(|_| failure("Owner returned an incomplete SourceBinding"))?;
+            }
+            if source["agent_retrieval_allowed"] != true
+                || !source["roles"].as_array().is_some_and(|roles| roles.iter().all(Value::is_string))
+                || !matches!(reading["kind"].as_str(), Some("file" | "directory"))
+                || !(reading["project"].is_null() || reading["project"].as_str().is_some_and(|value| !value.is_empty()))
+                || reading.get("project").is_none()
+                || ["revision", "content", "content_encoding"].iter().any(|key| reading.get(*key).is_some())
+            {
+                return Err(failure("Owner returned an unadmitted or unsupported Source descriptor"));
+            }
+            for key in ["world_ref", "path", "relation_revision"] {
+                string(reading, key).map_err(|_| failure("Owner returned incomplete binding metadata"))?;
+            }
+            if !Path::new(string(reading, "path")?).is_absolute() {
+                return Err(failure("Owner returned a non-absolute admitted Source path"));
+            }
+            let physical = &reading["material_metadata_basis"];
+            if !["device", "inode", "byte_len"].iter().all(|key| physical[*key].as_u64().is_some())
+                || !["mtime_seconds", "mtime_nanoseconds"].iter().all(|key| physical[*key].as_i64().is_some())
+            {
+                return Err(failure("Owner returned incomplete material metadata evidence"));
+            }
+            Ok(true)
+        }
+        _ => Err(failure("Owner returned no explicit Source ownership disposition")),
+    }
+}
+
+fn remaining_read(deadline: Instant) -> Result<Duration> {
+    deadline.checked_duration_since(Instant::now()).filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| AikitError::new("central.file_map_operation_timed_out", "The selected native Source read has no remaining operation budget"))
+}
+
 fn provider() -> ProviderRef {
     ProviderRef::parse("provider/source-pool/central-bkmr").expect("static ref")
 }
@@ -74,10 +173,30 @@ fn material(v: &Value, body: String) -> Result<SourceMaterial> {
             "Owner withheld source retrieval",
         ));
     }
+    let source = SourceRef::parse(string(&v["source"], "ref")?)?;
+    let revision = SourceRevision::parse(string(v, "revision")?)?;
+    let origin = SourceOrigin {
+        schema: SOURCE_ORIGIN_METADATA.into(),
+        origin: SourceOriginKind::NativeSource {
+            world_ref: string(v, "world_ref")?.into(),
+            source: ResourceSource {
+                source: source.clone(), revision: Some(revision.clone()),
+                authority: None, locator: None, state: SourceState::Available,
+            },
+            observed_binding: NativeOriginBinding {
+                roles: serde_json::from_value(v["source"]["roles"].clone())
+                    .map_err(|error| invalid(error.to_string()))?,
+                provenance: string(&v["source"], "provenance")?.into(),
+                standing: string(&v["source"], "standing")?.into(),
+                treatment: string(&v["source"], "treatment")?.into(),
+                agent_retrieval_allowed: true,
+            },
+        },
+    };
     Ok(SourceMaterial {
         binding: SourceBinding {
-            source: SourceRef::parse(string(&v["source"], "ref")?)?,
-            revision: SourceRevision::parse(string(v, "revision")?)?,
+            source,
+            revision,
             title: string(v, "title")?.into(),
             tags: serde_json::from_value(v["tags"].clone()).map_err(|e| invalid(e.to_string()))?,
             // This is owner-authorised material, not an actor-independent team grant.
@@ -99,7 +218,7 @@ fn material(v: &Value, body: String) -> Result<SourceMaterial> {
             .into(),
             locator: Some(ResourceLocator::Path(string(v, "path")?.into())),
             metadata: BTreeMap::from([
-                ("central".into(), v.clone()),
+                (SOURCE_ORIGIN_METADATA.into(), origin.disclosure_projection()?),
                 ("owner_read_required".into(), json!(true)),
             ]),
         },
@@ -165,47 +284,199 @@ impl<R: CommandRunner> CentralFileMapProvider<R> {
             capabilities,
         })
     }
+    /// A view borrows the actual attached owner; it neither connects nor
+    /// changes provider identity. Native membership/linkage remains decisive.
+    pub fn for_project(&self, member: &str) -> Result<CentralFileMapView<'_, R>> {
+        if member.is_empty() || Path::new(member).components().count() != 1
+            || !matches!(Path::new(member).components().next(), Some(std::path::Component::Normal(_)))
+        {
+            return Err(invalid("Native Project selection must be one actual Work member"));
+        }
+        let mut input = self.input.clone();
+        input["project"] = json!(member);
+        input["federated"] = json!(false);
+        Ok(CentralFileMapView { owner: self, input })
+    }
+
+    pub(crate) fn view(&self) -> CentralFileMapView<'_, R> {
+        CentralFileMapView { owner: self, input: self.input.clone() }
+    }
+
+    pub fn read_selected_path_for(
+        &self, path: &Path, target: RetrievalTarget, timeout: Duration,
+    ) -> Result<Option<SourcePoolReading>> {
+        self.read_selected_path_with_input(path, target, timeout, &self.input)
+    }
+
+    fn read_selected_path_with_input(
+        &self, path: &Path, target: RetrievalTarget, timeout: Duration, base: &Value,
+    ) -> Result<Option<SourcePoolReading>> {
+        let budget = self.runner.configured_timeout().map_or(timeout, |limit| limit.min(timeout));
+        let deadline = Instant::now().checked_add(budget)
+            .ok_or_else(|| invalid("Native selected-path budget is not representable"))?;
+        let path = path.to_str().ok_or_else(|| invalid("Native selected path is not representable"))?;
+        let mut input = base.clone();
+        input["path"] = json!(path);
+        input["binding_only"] = json!(true);
+        let selected = call_with_timeout(&self.runner, &self.executable, &self.root,
+            "locate", &input, Some(remaining_read(deadline)?))?;
+        if !owned_binding(&selected, "requested_path", path)? { return Ok(None); }
+        let source = SourceRef::parse(string(&selected["source"], "ref")?)?;
+        let (reading, receipt) = self.read_current_receipt(&source, target,
+            Some(remaining_read(deadline)?), base)?.ok_or_else(||
+                AikitError::new("central.file_map_conflict", "Selected native ownership changed before payload"))?;
+        if ["source", "world_ref", "project", "path", "kind"].iter()
+            .any(|key| receipt[*key] != selected[*key])
+        {
+            return Err(AikitError::new("central.file_map_conflict", "Selected native path changed identity before payload")
+                .with("native_binding", selected.to_string())
+                .with("native_reading_unconfirmed", "true")
+                .with("observed_payload_bytes", reading.material.body.len().to_string())
+                .with_native_result(receipt));
+        }
+        remaining_read(deadline)?;
+        Ok(Some(reading))
+    }
+
     pub fn descriptors(&self) -> &[SourceMaterial] {
         &self.material
     }
-}
-impl<R: CommandRunner> SourcePoolProvider for CentralFileMapProvider<R> {
-    fn capabilities(&self) -> SourceProviderCapabilities {
-        self.capabilities.clone()
+
+    /// Operation-local native binding metadata retains kind, World, Project
+    /// and Source member for the selected recipient. It is not a payload
+    /// revision or authority; healthy unregistered remains the owner's verdict.
+    pub(crate) fn source_binding_only_with_timeout(
+        &self, source: &SourceRef, timeout: Duration,
+    ) -> Result<Value> {
+        self.source_binding_only_with_input(source, timeout, &self.input)
     }
-    fn rebuild(&mut self, _: &[SourceMaterial]) -> Result<()> {
-        Err(AikitError::new(
-            "central.map_owner_only",
-            "Central owns persistent refresh; AIKit cannot rebuild it",
-        ))
+
+    fn source_binding_only_with_input(
+        &self, source: &SourceRef, timeout: Duration, base: &Value,
+    ) -> Result<Value> {
+        let mut input = base.clone();
+        input["source_ref"] = json!(source.as_str());
+        input["binding_only"] = json!(true);
+        let reading = call_with_timeout(&self.runner, &self.executable, &self.root,
+            "resolve", &input, Some(timeout))?;
+        owned_binding(&reading, "source_ref", source.as_str())?;
+        Ok(reading)
     }
-    fn read(&self, source: &SourceRef) -> Result<Option<SourceMaterial>> {
-        // A search can discover a newly registered source after attachment. The
-        // owner resolves it live; a stale attachment roster is not an authority.
-        let mut input = self.input.clone();
-        input["source_ref"] = json!(source);
-        input["content"] = json!(true);
-        let reading = call(
-            &self.runner,
-            &self.executable,
-            &self.root,
-            "resolve",
-            &input,
-        )?;
-        if reading["source"]["ref"] != source.as_str() {
-            return Err(invalid("Owner returned another SourceRef"));
+
+    pub(crate) fn locate_binding_only_with_timeout(
+        &self, path: &Path, timeout: Duration,
+    ) -> Result<Value> {
+        self.locate_binding_only_with_input(path, timeout, &self.input)
+    }
+
+    fn locate_binding_only_with_input(
+        &self, path: &Path, timeout: Duration, base: &Value,
+    ) -> Result<Value> {
+        let path = path.to_str().ok_or_else(||
+            AikitError::new("central.file_map_coordinate_invalid", "Native Source path is not representable by the owner text contract")
+                .with("coordinate", "path"))?;
+        let mut input = base.clone();
+        input["path"] = json!(path);
+        input["binding_only"] = json!(true);
+        let reading = call_with_timeout(&self.runner, &self.executable, &self.root,
+            "locate", &input, Some(timeout))?;
+        owned_binding(&reading, "requested_path", path)?;
+        Ok(reading)
+    }
+
+    pub(crate) fn configured_timeout(&self) -> Option<Duration> { self.runner.configured_timeout() }
+
+    pub fn operation_timeout(&self) -> Option<Duration> { self.runner.configured_timeout() }
+
+    /// Current allowed descriptor metadata only. Inspect's metadata revision
+    /// is not a payload SourceRevision and is never forwarded as one.
+    pub(crate) fn visit_source_roster(
+        &self, timeout: Duration, visit: impl FnMut(&str, &Path) -> Result<()>,
+    ) -> Result<()> {
+        self.visit_source_roster_with_input(timeout, visit, &self.input)
+    }
+
+    fn visit_source_roster_with_input(
+        &self, timeout: Duration, mut visit: impl FnMut(&str, &Path) -> Result<()>, base: &Value,
+    ) -> Result<()> {
+        let mut input = base.clone();
+        input["resources"] = json!(true);
+        let reading = call_with_timeout(&self.runner, &self.executable, &self.root, "inspect", &input, Some(timeout))?;
+        let resources = reading["resources"].as_array()
+            .ok_or_else(|| invalid("Owner returned no Source descriptor roster").with("native_reading", reading.to_string()))?;
+        // The native capture/JSON has its own finite transport capacity. Do
+        // not clone the whole World into another roster before a consumer
+        // can charge its selected identities and paths.
+        for entry in resources {
+            if entry["source"]["agent_retrieval_allowed"] != true {
+                return Err(invalid("Owner roster contains an unadmitted Source").with("native_reading", reading.to_string()));
+            }
+            let reference = string(&entry["source"], "ref")?;
+            // Preserve the former roster's native identity validation without
+            // retaining another collection of unselected World identities.
+            let _ = SourceRef::parse(reference)?;
+            visit(reference, Path::new(string(entry, "path")?))?;
         }
-        let body = reading["content"]
-            .as_str()
-            .ok_or_else(|| invalid("Owner returned no text payload"))?;
-        Ok(Some(material(&reading, body.into())?))
+        Ok(())
     }
-    fn search(
-        &self,
-        query: &str,
-        mode: SourceSearchMode,
-        tags: &[String],
-        limit: usize,
+
+    pub(crate) fn read_for_with_timeout(&self, source: &SourceRef, target: RetrievalTarget, timeout: Duration) -> Result<Option<SourcePoolReading>> {
+        self.read_current_for(source, target, Some(timeout))
+    }
+
+    fn read_current_for(&self, source: &SourceRef, target: RetrievalTarget, timeout: Option<Duration>) -> Result<Option<SourcePoolReading>> {
+        Ok(self.read_current_receipt(source, target, timeout, &self.input)?
+            .map(|(reading, _receipt)| reading))
+    }
+
+    fn read_current_receipt(
+        &self, source: &SourceRef, target: RetrievalTarget, timeout: Option<Duration>, base: &Value,
+    ) -> Result<Option<(SourcePoolReading, Value)>> {
+        // Both native requests borrow one deadline. Unconfigured attachments
+        // have a finite transport ceiling; explicit/configured smaller budgets win.
+        let budget = match (timeout, self.runner.configured_timeout()) {
+            (Some(requested), Some(configured)) => requested.min(configured),
+            (Some(requested), None) => requested,
+            (None, Some(configured)) => configured,
+            (None, None) => Duration::from_secs(60),
+        };
+        let deadline = Instant::now().checked_add(budget)
+            .ok_or_else(|| invalid("Native Source read budget is not representable"))?;
+        let mut input = base.clone();
+        input["source_ref"] = json!(source);
+        input["binding_only"] = json!(true);
+        let binding = call_with_timeout(&self.runner, &self.executable, &self.root, "resolve", &input, Some(remaining_read(deadline)?))?;
+        let owned = owned_binding(&binding, "source_ref", source.as_str())?;
+        remaining_read(deadline).map_err(|error| error.with("native_binding", binding.to_string()))?;
+        if !owned { return Ok(None); }
+        let privacy = ContextSourcePrivacy::default();
+        SourcePoolReading::check_target(privacy, target)?;
+        input.as_object_mut().expect("attachment input is an object").remove("binding_only");
+        input["content"] = json!(true);
+        let remaining = remaining_read(deadline)
+            .map_err(|error| error.with("native_binding", binding.to_string()))?;
+        let reading = call_with_timeout(&self.runner, &self.executable, &self.root, "resolve", &input, Some(remaining))?;
+        remaining_read(deadline).map_err(|error| error
+            .with("native_binding", binding.to_string()).with("native_reading", reading.to_string()))?;
+        // The latest payload remains its owner's reading. A changed identity,
+        // scope or selected binding cannot be returned under earlier routing.
+        if ["source", "world_ref", "project", "path", "kind"].iter()
+            .any(|key| reading[*key] != binding[*key])
+        {
+            return Err(AikitError::new("central.file_map_conflict", "Native Source binding changed between metadata admission and payload read")
+                .with("native_binding", binding.to_string()).with("native_reading", reading.to_string()));
+        }
+        let body = reading["content"].as_str().ok_or_else(|| invalid("Owner returned no text payload")
+            .with("native_reading", reading.to_string()))?;
+        let material = material(&reading, body.into()).map_err(|error| error
+            .with("native_binding", binding.to_string()).with("native_reading", reading.to_string()))?;
+        remaining_read(deadline).map_err(|error| error
+            .with("native_binding", binding.to_string()).with("native_reading", reading.to_string()))?;
+        Ok(Some((SourcePoolReading { material, privacy }, reading)))
+    }
+
+    fn search_with_input(
+        &self, query: &str, mode: SourceSearchMode, tags: &[String], limit: usize, base: &Value,
     ) -> Result<Vec<SourceHit>> {
         if limit == 0 {
             return Ok(vec![]);
@@ -213,7 +484,7 @@ impl<R: CommandRunner> SourcePoolProvider for CentralFileMapProvider<R> {
         if mode == SourceSearchMode::Semantic {
             return Err(invalid("Pure semantic JSON is unsupported"));
         }
-        let mut input = self.input.clone();
+        let mut input = base.clone();
         input["query"] = json!(query);
         input["mode"] = json!(mode.as_str());
         input["tags"] = json!(tags);
@@ -239,6 +510,7 @@ impl<R: CommandRunner> SourcePoolProvider for CentralFileMapProvider<R> {
                 }
                 Ok(SourceHit {
                     source: SourceRef::parse(string(&hit["source"], "ref")?)?,
+                    revision: Some(SourceRevision::parse(string(hit, "revision")?)?),
                     provider: provider(),
                     score: hit["score"].as_f64(),
                     title: string(hit, "title")?.into(),
@@ -255,33 +527,91 @@ impl<R: CommandRunner> SourcePoolProvider for CentralFileMapProvider<R> {
             })
             .collect()
     }
+
+}
+impl<R: CommandRunner> SourcePoolProvider for CentralFileMapProvider<R> {
+    fn capabilities(&self) -> SourceProviderCapabilities {
+        self.capabilities.clone()
+    }
+    fn rebuild(&mut self, _: &[SourceMaterial]) -> Result<()> {
+        Err(AikitError::new(
+            "central.map_owner_only",
+            "Central owns persistent refresh; AIKit cannot rebuild it",
+        ))
+    }
+    fn read(&self, source: &SourceRef) -> Result<Option<SourceMaterial>> {
+        Ok(self.read_for(source, RetrievalTarget::LocalAgent)?.map(|reading| reading.material))
+    }
+    fn read_for(&self, source: &SourceRef, target: RetrievalTarget) -> Result<Option<SourcePoolReading>> {
+        // Nonowners decline before the owning target predicate. Native errors
+        // and denials stay on this exact owner route without replica fallback.
+        self.read_current_for(source, target, None)
+    }
+    fn search(
+        &self, query: &str, mode: SourceSearchMode, tags: &[String], limit: usize,
+    ) -> Result<Vec<SourceHit>> {
+        self.search_with_input(query, mode, tags, limit, &self.input)
+    }
+
 }
 
-#[cfg(test)]
-mod wiki_media_tests {
-    use super::*;
-    #[test]
-    fn declared_markdown_locator_is_readable_but_never_grants_access() {
-        let mut value = json!({"source":{"ref":"source:note","agent_retrieval_allowed":true},"revision":"r1","title":"Note","tags":[],"path":"/world/Note.MD","kind":"file"});
-        assert_eq!(
-            material(&value, "# Note".into())
-                .unwrap()
-                .binding
-                .media_type,
-            "text/markdown"
-        );
-        value["media_type"] = json!("text/plain");
-        assert_eq!(
-            material(&value, "literal".into())
-                .unwrap()
-                .binding
-                .media_type,
-            "text/plain"
-        );
-        value["source"]["agent_retrieval_allowed"] = json!(false);
-        assert_eq!(
-            material(&value, "secret".into()).unwrap_err().code(),
-            "central.file_map_denied"
-        );
+/// Operation-local selection on the same current native owner.
+pub struct CentralFileMapView<'a, R> {
+    owner: &'a CentralFileMapProvider<R>,
+    input: Value,
+}
+
+impl<R: CommandRunner> CentralFileMapView<'_, R> {
+    pub fn read_selected_path_for(&self, path: &Path, target: RetrievalTarget, timeout: Duration) -> Result<Option<SourcePoolReading>> {
+        self.owner.read_selected_path_with_input(path, target, timeout, &self.input)
+    }
+    pub(crate) fn source_binding_only_with_timeout(
+        &self, source: &SourceRef, timeout: Duration,
+    ) -> Result<Value> {
+        if self.input == self.owner.input {
+            self.owner.source_binding_only_with_timeout(source, timeout)
+        } else {
+            self.owner.source_binding_only_with_input(source, timeout, &self.input)
+        }
+    }
+    pub(crate) fn locate_binding_only_with_timeout(
+        &self, path: &Path, timeout: Duration,
+    ) -> Result<Value> {
+        if self.input == self.owner.input {
+            self.owner.locate_binding_only_with_timeout(path, timeout)
+        } else {
+            self.owner.locate_binding_only_with_input(path, timeout, &self.input)
+        }
+    }
+    pub(crate) fn configured_timeout(&self) -> Option<Duration> {
+        self.owner.configured_timeout()
+    }
+    pub(crate) fn visit_source_roster(&self, timeout: Duration, visit: impl FnMut(&str, &Path) -> Result<()>) -> Result<()> {
+        if self.input == self.owner.input { self.owner.visit_source_roster(timeout, visit) }
+        else { self.owner.visit_source_roster_with_input(timeout, visit, &self.input) }
+    }
+    pub(crate) fn read_for_with_timeout(&self, source: &SourceRef, target: RetrievalTarget, timeout: Duration) -> Result<Option<SourcePoolReading>> {
+        if self.input == self.owner.input { self.owner.read_for_with_timeout(source, target, timeout) }
+        else {
+            Ok(self.owner.read_current_receipt(source, target, Some(timeout), &self.input)?
+                .map(|(reading, _receipt)| reading))
+        }
+    }
+}
+
+impl<R: CommandRunner> SourcePoolProvider for CentralFileMapView<'_, R> {
+    fn capabilities(&self) -> SourceProviderCapabilities { self.owner.capabilities() }
+    fn rebuild(&mut self, _: &[SourceMaterial]) -> Result<()> {
+        Err(AikitError::new("central.map_owner_only", "Central owns persistent refresh; AIKit cannot rebuild it"))
+    }
+    fn read(&self, source: &SourceRef) -> Result<Option<SourceMaterial>> {
+        Ok(self.read_for(source, RetrievalTarget::LocalAgent)?.map(|reading| reading.material))
+    }
+    fn read_for(&self, source: &SourceRef, target: RetrievalTarget) -> Result<Option<SourcePoolReading>> {
+        Ok(self.owner.read_current_receipt(source, target, None, &self.input)?
+            .map(|(reading, _receipt)| reading))
+    }
+    fn search(&self, query: &str, mode: SourceSearchMode, tags: &[String], limit: usize) -> Result<Vec<SourceHit>> {
+        self.owner.search_with_input(query, mode, tags, limit, &self.input)
     }
 }

@@ -23,7 +23,7 @@ jobs:
     env:
       ACTUATION_SHA: 4af495f6509bb0dd779112a225d71a9df8145b6e
       CENTRAL_SHA: 2a604574774c41921003ed99a2eed73b4c9f4266
-      WORKCELL_SHA: dd74137b426cbcb1dcb2cb2abc53bd52558dba12
+      WORKCELL_SHA: 31041f90cac3b0874267c10276216c2505b0a29f
     steps:
       - uses: actions/checkout@v4
         with:
@@ -81,7 +81,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: EpiLogos/Workcell
-          ref: dd74137b426cbcb1dcb2cb2abc53bd52558dba12
+          ref: 31041f90cac3b0874267c10276216c2505b0a29f
           path: .caw-native/Workcell
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2.9.2
