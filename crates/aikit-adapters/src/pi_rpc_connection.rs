@@ -701,7 +701,19 @@ fn error(code: &'static str, detail: &str) -> AikitError {
 /// produces: a plain string, or an array of typed blocks carrying the text
 /// ones. Nothing usable means None — never a fabricated segment.
 fn assistant_message_text(message: &Value) -> Option<String> {
-    let text = match &message["content"] {
+    let text = completed_assistant_text(message)?;
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+/// The completed assistant text exactly as the wire closed it. Absent content
+/// means None. Explicit empty content is kept: a wire whose completed message
+/// replaces provisional text (Prime) must be able to close it as empty.
+pub(crate) fn completed_assistant_text(message: &Value) -> Option<String> {
+    match &message["content"] {
         Value::String(text) => Some(text.clone()),
         Value::Array(blocks) => {
             let joined = blocks
@@ -713,10 +725,5 @@ fn assistant_message_text(message: &Value) -> Option<String> {
             Some(joined)
         }
         _ => None,
-    }?;
-    if text.trim().is_empty() {
-        None
-    } else {
-        Some(text)
     }
 }

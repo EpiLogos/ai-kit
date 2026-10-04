@@ -147,6 +147,8 @@ pub fn resolve_provider(provider: EncounterProvider) -> Result<EncounterProvider
     derived.required_context = provider.required_context;
     derived.model_policy = provider.model_policy;
     derived.now_context = provider.now_context;
+    derived.body_ref = provider.body_ref;
+    derived.body_revision = provider.body_revision;
     Ok(derived)
 }
 

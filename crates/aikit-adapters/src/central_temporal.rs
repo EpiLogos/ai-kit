@@ -227,15 +227,67 @@ fn decode_action(output: Output, argv: &[String], id: &str) -> Result<Value> {
 }
 
 fn project_member(central_root: &Path, project_root: &Path) -> Option<String> {
-    let relative = project_root.strip_prefix(central_root.join("Work")).ok()?;
-    if relative.as_os_str().is_empty()
-        || !relative
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
-    {
+    let primary = project_ground_root(central_root, project_root)?;
+    let relative = primary.strip_prefix(central_root.join("Work")).ok()?;
+    Some(relative.to_string_lossy().replace('\\', "/"))
+}
+
+/// The Project a path belongs to in this Central world, as its primary
+/// checkout `Work/<Name>`.
+///
+/// A session stands at any depth inside a Project (`Work/ai-kit/crates` is
+/// Project `ai-kit`, not `ai-kit/crates`), and lane work stands in workcell
+/// seats outside `Work/` (`worktrees/env-2/ai-kit`), which are linked
+/// checkouts of the primary: their `.git` file names the primary's git
+/// directory. Both resolve to the same Project and therefore the same NOW.
+/// Anything else — the Central root itself, a folder beneath `Work/` that is
+/// not a Project root's descendant, a checkout of a repository outside this
+/// world — is no Project.
+pub fn project_ground_root(central_root: &Path, path: &Path) -> Option<std::path::PathBuf> {
+    let work = central_root.join("Work");
+    if let Ok(relative) = path.strip_prefix(&work) {
+        let first = relative.components().next()?;
+        let Component::Normal(name) = first else {
+            return None;
+        };
+        return Some(work.join(name));
+    }
+    if !path.starts_with(central_root) {
         return None;
     }
-    Some(relative.to_string_lossy().replace('\\', "/"))
+    // A linked checkout: walk up to the directory carrying `.git`, read the
+    // `gitdir:` pointer, and accept it only when it points into a primary
+    // checkout's own `.git/worktrees/` beneath `Work/`.
+    let mut dir = Some(path);
+    while let Some(current) = dir {
+        if current == central_root {
+            return None;
+        }
+        let marker = current.join(".git");
+        if marker.is_file() {
+            let text = std::fs::read_to_string(&marker).ok()?;
+            let gitdir = text
+                .lines()
+                .find_map(|line| line.strip_prefix("gitdir:"))?
+                .trim();
+            let gitdir = Path::new(gitdir);
+            let primary = gitdir
+                .ancestors()
+                .find(|ancestor| ancestor.file_name().is_some_and(|name| name == ".git"))?;
+            let primary = primary.parent()?;
+            let relative = primary.strip_prefix(&work).ok()?;
+            let mut parts = relative.components();
+            let (Some(Component::Normal(name)), None) = (parts.next(), parts.next()) else {
+                return None;
+            };
+            return Some(work.join(name));
+        }
+        if marker.is_dir() {
+            return None;
+        }
+        dir = current.parent();
+    }
+    None
 }
 
 fn bounded(text: &str, max_chars: usize) -> String {
@@ -375,5 +427,51 @@ mod tests {
         let rendered = ground.render();
         assert!(rendered.chars().count() <= MAX_RENDERED_CHARS);
         assert!(rendered.contains("does not grant authority"));
+    }
+
+    #[test]
+    fn a_session_below_a_project_root_or_in_its_seat_is_that_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let central = temp.path();
+        std::fs::create_dir_all(central.join("Work/ai-kit/.git/worktrees/ai-kit1")).unwrap();
+        std::fs::create_dir_all(central.join("Work/ai-kit/crates/aikit-cli")).unwrap();
+        let seat = central.join("worktrees/env-2/ai-kit");
+        std::fs::create_dir_all(seat.join("crates")).unwrap();
+        std::fs::write(
+            seat.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                central.join("Work/ai-kit/.git/worktrees/ai-kit1").display()
+            ),
+        )
+        .unwrap();
+        let primary = central.join("Work/ai-kit");
+        assert_eq!(
+            project_ground_root(central, &primary),
+            Some(primary.clone())
+        );
+        assert_eq!(
+            project_ground_root(central, &primary.join("crates/aikit-cli")),
+            Some(primary.clone())
+        );
+        assert_eq!(project_ground_root(central, &seat), Some(primary.clone()));
+        assert_eq!(
+            project_ground_root(central, &seat.join("crates")),
+            Some(primary.clone())
+        );
+        assert_eq!(
+            project_member(central, &seat.join("crates")).as_deref(),
+            Some("ai-kit")
+        );
+        // The Central root itself and an unrelated linked checkout are no Project.
+        assert_eq!(project_ground_root(central, central), None);
+        let stray = central.join("worktrees/env-2/elsewhere");
+        std::fs::create_dir_all(&stray).unwrap();
+        std::fs::write(
+            stray.join(".git"),
+            "gitdir: /somewhere/else/.git/worktrees/x\n",
+        )
+        .unwrap();
+        assert_eq!(project_ground_root(central, &stray), None);
     }
 }

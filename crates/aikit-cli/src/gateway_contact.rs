@@ -70,6 +70,9 @@ use crate::gateway_owners::{
 };
 use crate::secret_location::SecretLocation;
 
+#[path = "gateway_owner_address.rs"]
+pub mod owner_address;
+
 pub const POPULATION_READING_SCHEMA: &str = "aikit.population-reading/v1";
 pub const GATEWAY_REMOTES_SCHEMA: &str = "aikit.gateway-remotes/v1";
 
@@ -349,6 +352,60 @@ pub fn remote_add(
         .sort_by(|a, b| a.workcell_ref.cmp(&b.workcell_ref));
     store_remotes(home, &remotes)?;
     Ok(json!({ "declared": remote, "path": remotes_path(home).display().to_string() }))
+}
+
+/// `remote add`, and then ask the endpoint what it is. A gateway that answers
+/// as a *different* Workcell than the one declared is refused before anything
+/// is written (every claim and relay would be recorded against the wrong
+/// Workcell); one that does not answer is declared and said not to answer —
+/// a peer may simply be down.
+pub fn remote_add_probed(
+    home: &AikitHome,
+    workcell_ref: &str,
+    websocket_bind: &str,
+    websocket_path: &str,
+    token_location: &str,
+    probe: bool,
+) -> Result<Value> {
+    if probe {
+        if let Ok(location) = SecretLocation::parse(token_location) {
+            let candidate = GatewayRemote {
+                workcell_ref: workcell_ref.into(),
+                websocket_bind: websocket_bind.into(),
+                websocket_path: websocket_path.into(),
+                token_location: location.render(),
+            };
+            let reading = crate::gateway_upgrade_system::probe_remote(&candidate);
+            if let Some(answers) = reading["answers_as_workcell"].as_str() {
+                if answers != workcell_ref {
+                    return Err(three_part(
+                        "gateway.remote_identity_mismatch",
+                        format!(
+                            "The gateway at {websocket_bind} says it serves {answers}, not {workcell_ref}."
+                        ),
+                        "Nothing was declared: claims and relays would be recorded against the wrong Workcell.",
+                        format!("Declare it as {answers}, or check the endpoint you meant."),
+                    ));
+                }
+            }
+            let mut declared = remote_add(
+                home,
+                workcell_ref,
+                websocket_bind,
+                websocket_path,
+                token_location,
+            )?;
+            declared["probe"] = reading;
+            return Ok(declared);
+        }
+    }
+    remote_add(
+        home,
+        workcell_ref,
+        websocket_bind,
+        websocket_path,
+        token_location,
+    )
 }
 
 pub fn remote_remove(home: &AikitHome, workcell_ref: &str) -> Result<Value> {
@@ -1166,6 +1223,8 @@ pub struct SendRequest<'a> {
     pub instance: Option<&'a str>,
     /// With `instance`: the Workcell that generation must stand on.
     pub require_workcell: Option<&'a str>,
+    /// What is asked when the recipient is the owner (`@owner`).
+    pub owner: owner_address::OwnerAsk,
 }
 
 /// The Workcell a tenure names, when it names one.
@@ -1570,6 +1629,11 @@ pub fn send(
             "Pass the words with --body TEXT or --body-file PATH.",
         ));
     }
+    // The person occupies no Position: addressing them is a request in
+    // Central's receiving ledger, which their Inbox reads.
+    if owner_address::is_owner_address(request.to) {
+        return owner_address::send_to_owner(owners, &request);
+    }
     if request.require_workcell.is_some() && request.instance.is_none() {
         return Err(three_part(
             "gateway.require_workcell_without_instance",
@@ -1949,7 +2013,7 @@ fn ensure_instance_kept(
         ),
         "Its record there must not be taken as an exact-instance route, and no route is reported over it.",
         format!(
-            "Restart that gateway with this aikit (`aikit gateway protocol` must list `{GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE}`), then read it with `aikit gateway read {}`.",
+            "Upgrade that gateway (`aikit gateway upgrade apply` on its machine; `aikit gateway protocol` must list `{GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE}`), then read its record of {} with `aikit gateway conversation --with <the Position>`.",
             echoed.communique_ref
         ),
     ))
@@ -3558,7 +3622,15 @@ impl CommuniqueRelayTick {
             gateway_ref: String::new(),
         };
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        forward_pass(&self.home, &owners, &gateway, &cwd)
+        let mut report = forward_pass(&self.home, &owners, &gateway, &cwd)?;
+        // The person's decisions travel back on the same tick; a failing
+        // reply pass is reported, never allowed to stop the relay.
+        report["owner_replies"] =
+            match owner_address::owner_reply_pass(&self.home, &owners, &gateway, &cwd) {
+                Ok(replies) => replies["owner_replies"].clone(),
+                Err(error) => json!({ "error": error.to_string() }),
+            };
+        Ok(report)
     }
 }
 
@@ -3574,6 +3646,11 @@ impl aikit_adapters::GatewayTick for GatewayServiceTick {
     fn tick(&self) -> Result<Value> {
         let dispatcher = self.dispatcher.as_ref().map(|tick| tick.tick());
         let relay = self.relay.run();
+        // An upgrade whose worker died (or whose receipt could not be announced
+        // because this gateway was still coming up) is finished by a fresh
+        // worker. The worker is its own process: this tick only starts it.
+        let upgrade = crate::gateway_upgrade_system::adopt_orphans(&self.relay.home)
+            .map_err(|error| error.to_string());
         match (&dispatcher, &relay) {
             (Some(Err(error)), _) | (None, Err(error)) => Err(AikitError::new(
                 "gateway.service_tick_failed",
@@ -3582,6 +3659,11 @@ impl aikit_adapters::GatewayTick for GatewayServiceTick {
             _ => Ok(json!({
                 "dispatcher": dispatcher.and_then(|result| result.ok()),
                 "relay": relay.unwrap_or_else(|error| json!({ "error": error.to_string() })),
+                "upgrade": match upgrade {
+                    Ok(Some(worker)) => json!({ "resumed_by": worker }),
+                    Ok(None) => Value::Null,
+                    Err(error) => json!({ "error": error }),
+                },
             })),
         }
     }
@@ -3659,6 +3741,7 @@ mod exact_instance_binding_tests {
             connector_wire_version: "x".into(),
             actuation_stream_schema: "x".into(),
             features: features.iter().map(|f| (*f).to_owned()).collect(),
+            build: None,
         }
     }
 
@@ -3714,6 +3797,8 @@ mod exact_instance_binding_tests {
                         pending_delivery_count: 0,
                         delivery_receipt_count: 0,
                         connector_health: Vec::new(),
+                        build: None,
+                        listeners: Vec::new(),
                     },
                 }),
                 GatewayCommand::SendCommunique { draft } => {

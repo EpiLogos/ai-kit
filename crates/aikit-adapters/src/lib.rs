@@ -41,6 +41,7 @@ pub mod gateway_connector_specimen;
 pub mod gateway_connector_wire;
 pub mod gateway_conversation_engine;
 #[allow(unused_imports)]
+pub mod gateway_posture;
 pub mod gateway_runtime;
 pub mod gateway_service;
 pub mod gitnexus;
@@ -191,29 +192,36 @@ pub use gateway_conversation_engine::{
     parse_slash, AgentHostTurnSource, ConversationHarnessProtocol, ConversationTurn,
     ConversationTurnOutcome, ConversationTurnRequest, ConversationTurnSource, EnginePolicy,
     FixtureScript, FixtureTurnSource, GatewayAskRequest, GatewayAskRoute, GatewayAskRouter,
-    GatewayConversationEngine, GatewayTurnSourceResolver, SlashParse, StreamTiming, TurnProgress,
-    TurnStreamItem,
+    GatewayConversationEngine, GatewayTurnSourceResolver, GatewayUpgradeLauncher, SlashParse,
+    StreamTiming, TurnProgress, TurnStreamItem, UpgradeOrigin,
+};
+pub use gateway_posture::{
+    sha256_of_file, CarrierScope, GatewayBuildIdentity, GatewayLifecycle, GatewayListenerReading,
+    GatewayProcessRecord, ImageMatch, ListenerClass, ListenerState, GATEWAY_FEATURE_BUILD_IDENTITY,
+    GATEWAY_FEATURE_CARRIER_SCOPE, GATEWAY_FEATURE_CONFIGURED_IDENTITY, GATEWAY_FEATURE_DRAIN,
+    GATEWAY_FEATURE_ENCOUNTER_RELAY, GATEWAY_FEATURE_UNSUPPORTED_COMMAND,
 };
 pub use gateway_runtime::{
-    connector_descriptor, execute_gateway_command, text_send, AgencyGateway,
-    GatewayActuationControlIntent, GatewayActuationControlOperation, GatewayAgentReply,
-    GatewayAgentReplyFailure, GatewayBinding, GatewayCommand, GatewayConversationOperation,
-    GatewayDiscovery, GatewayEcology, GatewayEcologyAgency, GatewayEcologySession,
-    GatewayEcologyStream, GatewayEcologySurface, GatewayErrorEnvelope, GatewayForkOrigin,
-    GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult, GatewayInvocationMode,
-    GatewayOccupancyReading, GatewayOwnerUnavailable, GatewayReplay, GatewayRequestEnvelope,
-    GatewayResponse, GatewayResponseEnvelope, GatewaySnapshot, GatewayStatus, GatewayStreamEvent,
-    GatewayStreamJournal, ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA,
-    AGENCY_GATEWAY_VERSION, GATEWAY_ECOLOGY_AUTHORITY_LAW,
+    connector_descriptor, execute_gateway_command, text_send, AgencyGateway, DrainReport,
+    DrainedTurn, GatewayActuationControlIntent, GatewayActuationControlOperation,
+    GatewayAgentReply, GatewayAgentReplyFailure, GatewayBinding, GatewayCommand,
+    GatewayConversationOperation, GatewayDiscovery, GatewayEcology, GatewayEcologyAgency,
+    GatewayEcologySession, GatewayEcologyStream, GatewayEcologySurface, GatewayErrorEnvelope,
+    GatewayForkOrigin, GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult,
+    GatewayInvocationMode, GatewayOccupancyReading, GatewayOwnerUnavailable, GatewayReplay,
+    GatewayRequestEnvelope, GatewayResponse, GatewayResponseEnvelope, GatewaySnapshot,
+    GatewayStatus, GatewayStreamEvent, GatewayStreamJournal,
+    ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA, AGENCY_GATEWAY_VERSION,
+    ENCOUNTER_RELAY_ACTIONS, GATEWAY_ECOLOGY_AUTHORITY_LAW,
     GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE, GATEWAY_INVOCATION_MODES,
     GATEWAY_OCCUPANCY_READING_SCHEMA, GATEWAY_PROTOCOL_FEATURES,
 };
 pub use gateway_service::{
     acquire_gateway_state_lock, execute_against_state_file, persist_gateway_state,
     restore_gateway_state, run_gateway_service, run_gateway_service_with_hooks,
-    run_gateway_service_with_ticks, GatewayConversationHooks, GatewayOccupancyReader,
-    GatewayServiceConfig, GatewayServiceHooks, GatewayServiceRuntime, GatewayStateLock,
-    GatewayTick, GatewayTickLoop, SubscriptionHub, SubscriptionSink,
+    run_gateway_service_with_ticks, GatewayConversationHooks, GatewayEncounterRelay,
+    GatewayOccupancyReader, GatewayServiceConfig, GatewayServiceHooks, GatewayServiceRuntime,
+    GatewayStateLock, GatewayTick, GatewayTickLoop, SubscriptionHub, SubscriptionSink,
     DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION,
 };
 pub use harness_disclosure::{

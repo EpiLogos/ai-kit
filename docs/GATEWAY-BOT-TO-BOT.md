@@ -13,7 +13,49 @@ agencies — and everything else is a **face** of it.
 | **Communique** | Position→Position attributable contact; journal; cross-Workcell relay by occupancy; held/vacant; delegation into Factory custody | landed (`gateway send/inbox/relay`, 13 contact proofs, live mac⇄omarchy) |
 | **Connector conversation** | A Surface face on an external platform (Telegram, Slack, …) bound to an agent session; per-sender admission | landed (live on `@Ohisysbot`, streaming) |
 | **A2A** | The external interoperability projection — for agencies **outside** the World; bindings, presence, exchange authority, agent cards, messages | primitives landed (`aikit-core/src/a2a.rs`, `a2a_card.rs`); no gateway face yet |
+| **Flow conversation request** | One Flow entry asked of one or several agents (the Encounter owner's request record, per-recipient delivery, reply reducer, `central.flow.append`); a recipient held by another Workcell is asked through that Workcell's gateway | landed locally (O-I#558); cross-Workcell over the gateway's `EncounterRelay` command since `encounter-request-relay`, ssh/exec only for a Workcell with no declared gateway or one that does not advertise the feature |
 | **Shared material environments** | SessionSpace, herdr/tmux, Workcell runs — co-presence and shared action, not messaging | out of the gateway's lane; the gateway may carry invitations, never the work itself |
+
+## One carrier, three journals — what is shared and what is not
+
+A trace of the code at `64d4e1d1` (30 September 2026) found **three planes**
+under these faces, not one queue:
+
+| Plane | Journal | Turn runner | Return |
+|---|---|---|---|
+| Communique | `state/gateway.json` `communiques` | none — injected into the recipient body's next human prompt | a new Communique |
+| Connector conversation | gateway stream journals + in-memory connector queues | the gateway's own agent host, per binding | the connector |
+| Flow request (Encounter) | `encounters.sqlite3` | resident Encounter sessions | `central.flow.append` |
+
+They are **not** merged, and this document does not claim they are. What the
+operational architecture makes *one* is everything around them:
+
+* **One carrier and one authentication.** Every cross-Workcell hop — Communique
+  relay, occupancy, and now the Flow conversation request — travels as a
+  gateway command over the authenticated carrier, under the same peer/owner
+  scope, with the same feature negotiation. The Flow request no longer has its
+  own ssh login, its own route declared inside the request, or its own
+  (absent) handshake.
+* **One running-identity and lifecycle.** One process, one build identity, one
+  drain, one upgrade.
+* **One addressing model** (V0, below): a registered agent is addressable;
+  occupancy decides where it is embodied.
+
+What stays separate on purpose, and what is still open:
+
+* The three journals keep their own state machines. A Communique's sender copy
+  still does not learn that the remote copy was delivered (six such records
+  were observed on the Mac); closing that loop needs a delivery notice back
+  through `RecordCommuniqueStanding`.
+* Durable Position routing is decided in four places in `gateway_contact.rs`
+  (`route_to_occupancy`, `place_instance`, `forward_pass_via`, `relay_attempt`)
+  with slightly different answers for an unknown ledger. The relay pass and the
+  ask path should call one function; they do not yet.
+* The connector plane still has no durable outbound queue: restored
+  `pending_deliveries` are retained and reported at a drain but not re-sent,
+  because a send that might have reached the platform cannot be told from one
+  that did not.
+* Communiques wait for a human prompt; nothing wakes an idle body.
 
 Laws that survive every face: **Position ≠ Agent ≠ AgentSession ≠ bot
 identity**. A bot is a Surface identity of one situated agency; a message

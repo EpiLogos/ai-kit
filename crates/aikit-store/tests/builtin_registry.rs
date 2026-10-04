@@ -54,9 +54,14 @@ fn the_knowledge_route_hook_declares_an_inject_phase_content_step() {
         "steering belongs at session start: {:?}",
         hook.events
     );
+    // Not on every prompt: the line is standing orientation the session
+    // already holds, and harnesses re-fire SessionStart when compaction,
+    // resume or clear discards it. The per-prompt copy repeated the same
+    // bytes on every turn (system-notification turns included) and was
+    // measured as duplicated injection in the O:I #65 hook audit.
     assert!(
-        hook.events.iter().any(|e| e == "UserPromptSubmit"),
-        "and on every prompt, so the steer survives long sessions: {:?}",
+        !hook.events.iter().any(|e| e == "UserPromptSubmit"),
+        "standing steering is not repeated on every prompt: {:?}",
         hook.events
     );
     assert_eq!(

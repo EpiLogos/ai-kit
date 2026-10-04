@@ -498,6 +498,20 @@ impl AgentSessionHost {
                 ));
             }
         }
+        let preparation = self.shared.adapter()?.prepare_open_session(&request)?;
+        if let Some(command) = preparation {
+            let receiver = self.shared.register_control(&command, None)?;
+            self.shared.dispatch(&command)?;
+            if let ControlDelivery::Failed(reason) =
+                self.shared.await_control(receiver, deadline)?
+            {
+                return Err(AikitError::new(
+                    "agent_session_host.open_preparation_failed",
+                    reason,
+                ));
+            }
+            self.shared.ensure_control_deadline(deadline)?;
+        }
         let queue = EventQueue::new()
             .map_err(|e| AikitError::new("agent_session_host.event_storage", e.to_string()))?;
         let lane = Arc::new(LaneCore {

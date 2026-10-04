@@ -247,7 +247,7 @@ pub enum Command {
     /// List bypasses issued and spent.
     Bypasses(BypassesArgs),
     /// Run, inspect and query the Agency Gateway service.
-    Gateway(GatewayCmd),
+    Gateway(Box<GatewayCmd>),
     /// Who and where am I: the joined World inhabitation reading
     /// (`aikit.inhabitation-reading/v1`) over Central, Actuation, Factory and
     /// AIKit's own SessionSpace/Redis projections. (`world whoami` is the same
@@ -506,7 +506,7 @@ pub enum SystemGroupCommand {
     /// Record review decisions for catalogued capsule revisions.
     Trust(TrustCmd),
     /// Run, inspect and query the Agency Gateway service.
-    Gateway(GatewayCmd),
+    Gateway(Box<GatewayCmd>),
     /// Print shell integration to be sourced from an rc file. Never evaluated
     /// automatically.
     Shell(ShellCmd),
@@ -1166,6 +1166,18 @@ fn gateway_route(command: &GatewaySub) -> &'static str {
         GatewaySub::Agent(_) => "cmd_gateway_agent",
         GatewaySub::Coexistence(_) => "cmd_gateway_coexistence",
         GatewaySub::Hoist(_) => "cmd_gateway_hoist",
+        GatewaySub::Upgrade(c) => match &c.command {
+            GatewayUpgradeSub::Plan(_) => "cmd_gateway_upgrade_plan",
+            GatewayUpgradeSub::Apply(_) => "cmd_gateway_upgrade_apply",
+            GatewayUpgradeSub::Status(_) => "cmd_gateway_upgrade_status",
+            GatewayUpgradeSub::Resume(_) => "cmd_gateway_upgrade_resume",
+            GatewayUpgradeSub::Rollback(_) => "cmd_gateway_upgrade_rollback",
+            GatewayUpgradeSub::Worker(_) => "cmd_gateway_upgrade_worker",
+        },
+        GatewaySub::Doctor => "cmd_gateway_doctor",
+        GatewaySub::Modes => "cmd_gateway_modes",
+        GatewaySub::Setup(_) => "cmd_gateway_setup",
+        GatewaySub::Recover(_) => "cmd_gateway_recover",
         GatewaySub::Protocol(_) => "cmd_gateway_protocol",
         GatewaySub::Discover(_) => "cmd_gateway_discover",
         GatewaySub::Status(_) => "cmd_gateway_status",
@@ -1357,6 +1369,18 @@ pub struct GatewayServeArgs {
         conflicts_with = "websocket_token"
     )]
     pub websocket_token_location: Option<String>,
+    /// Where a second bearer token lives (`file:/abs/path`, owner-only) that
+    /// grants a WebSocket client OWNER scope: drain, restart, upgrade,
+    /// restore, bind conversations. The ordinary `--ws-token-location` token
+    /// grants peer scope only (relay, occupancy, contact, reads), so a
+    /// Workcell that can relay cannot also stop or rewrite this gateway. No
+    /// owner token means no network client is an owner.
+    #[arg(
+        long = "ws-owner-token-location",
+        value_name = "LOCATION",
+        requires = "websocket_bind"
+    )]
+    pub websocket_owner_token_location: Option<String>,
     /// Serve the same-host Unix-domain carrier: at PATH, or with no value at
     /// this home's well-known socket. Name it beside --ws so local inbox,
     /// send and turn delivery keep reaching the service.
@@ -1365,7 +1389,8 @@ pub struct GatewayServeArgs {
     /// Persist semantic state across restarts to this file.
     #[arg(long = "state-file", value_name = "PATH")]
     pub state_file: Option<std::path::PathBuf>,
-    /// Semantic gateway ref, or `AIKIT_GATEWAY_REF`.
+    /// Semantic gateway ref, or `AIKIT_GATEWAY_REF`. Naming it replaces the
+    /// ref a saved state was written under.
     #[arg(long = "gateway-ref", value_name = "REF")]
     pub gateway_ref: Option<String>,
 }
@@ -1390,6 +1415,20 @@ pub struct GatewayInstallArgs {
     /// `AIKIT_WORKCELL_REF` for the service (e.g. workcell:omarchy).
     #[arg(long = "workcell-ref", value_name = "REF")]
     pub workcell_ref: Option<String>,
+    /// Where a second bearer token lives (`file:/abs/path`, owner-only) that
+    /// grants a WebSocket client OWNER scope: drain, restart, upgrade. The
+    /// ordinary token grants peer scope only (relay, occupancy, contact,
+    /// reads).
+    #[arg(
+        long = "ws-owner-token-location",
+        value_name = "LOCATION",
+        requires = "websocket_bind"
+    )]
+    pub owner_token_location: Option<String>,
+    /// Allow a WebSocket bind reachable beyond the tailnet (every interface
+    /// or a routable address). Refused by default.
+    #[arg(long = "allow-wide-bind", requires = "websocket_bind")]
+    pub allow_wide_bind: bool,
 }
 
 /// `aikit gateway <query>` — one command against a running gateway.
@@ -2047,6 +2086,193 @@ pub enum GatewaySub {
     /// staged here: plan (the default), `--apply` to stage, `--receive` to
     /// unpack. Token locations move; token files stay the operator's.
     Hoist(GatewayHoistArgs),
+    /// A managed upgrade of the running gateway: read the plan, then drain,
+    /// restart and verify the RUNNING version, with a receipt. It runs in a
+    /// worker the restart cannot kill, so it can be asked for through the
+    /// gateway itself.
+    Upgrade(GatewayUpgradeCmd),
+    /// Every finding about this gateway — the running build against the
+    /// installed one, listeners and their exposure, tokens, declared peers,
+    /// the platform firewall, Tailscale Serve/Funnel, the state file, upgrades
+    /// in flight — each with the command that fixes it. Read-only.
+    Doctor,
+    /// The operating modes as a crosswalk — listener binding, transport,
+    /// workcell placement, connector identity, session continuity, lifecycle —
+    /// and which of them this machine actually runs.
+    Modes,
+    /// Choose an operating mode. Plan-first: with no `--apply` it changes
+    /// nothing and prints every step, including the commands it will not run.
+    Setup(GatewaySetupArgs),
+    /// A gateway whose state file will not load: quarantine the damaged file
+    /// (never delete it) and restore the newest copy that decodes. Plan-first.
+    Recover(GatewayRecoverArgs),
+}
+
+/// `aikit gateway recover`.
+#[derive(Debug, Args)]
+pub struct GatewayRecoverArgs {
+    /// Do it. Without this nothing changes.
+    #[arg(long)]
+    pub apply: bool,
+}
+
+/// `aikit gateway setup`.
+#[derive(Debug, Args)]
+pub struct GatewaySetupArgs {
+    /// `local-ipc`, `loopback-service`, `private-tailnet`, `tailscale-serve` or
+    /// `ssh-tunnel` (`aikit gateway modes` explains each).
+    #[arg(long, value_name = "MODE")]
+    pub mode: String,
+    /// The gateway's WebSocket port (default 7788).
+    #[arg(long, default_value_t = 7788)]
+    pub port: u16,
+    /// Bind `HOST:PORT` instead of the mode's default (tailnet address or 127.0.0.1).
+    #[arg(long, value_name = "HOST:PORT")]
+    pub bind: Option<String>,
+    #[arg(long = "gateway-ref", value_name = "REF")]
+    pub gateway_ref: Option<String>,
+    #[arg(long = "workcell-ref", value_name = "REF")]
+    pub workcell_ref: Option<String>,
+    /// Declare a peer gateway: `WORKCELL=HOST:PORT` (repeatable).
+    #[arg(long = "peer", value_name = "WORKCELL=HOST:PORT")]
+    pub peers: Vec<String>,
+    /// Where this gateway's peer token lives (default: a file under
+    /// `~/.aikit/credentials/`, created owner-only).
+    #[arg(long = "ws-token-location", value_name = "LOCATION")]
+    pub ws_token_location: Option<String>,
+    /// Where this gateway's owner token lives (default likewise).
+    #[arg(long = "ws-owner-token-location", value_name = "LOCATION")]
+    pub ws_owner_token_location: Option<String>,
+    /// Where the token a declared peer expects of us lives.
+    #[arg(long = "peer-token-location", value_name = "LOCATION")]
+    pub peer_token_location: Option<String>,
+    /// Allow a bind reachable beyond the tailnet. Refused by default.
+    #[arg(long)]
+    pub allow_wide_bind: bool,
+    /// Do it: create token files, (re)write the service definition, declare
+    /// the peers. Without this nothing changes.
+    #[arg(long)]
+    pub apply: bool,
+    /// Also run the one private `tailscale serve` mapping (never Funnel). A
+    /// separate consent from --apply.
+    #[arg(long, requires = "apply")]
+    pub apply_tailscale: bool,
+}
+
+/// `aikit gateway upgrade`.
+#[derive(Debug, Args)]
+pub struct GatewayUpgradeCmd {
+    #[command(subcommand)]
+    pub command: GatewayUpgradeSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GatewayUpgradeSub {
+    /// Read what runs, what is installed, whether they differ, what an apply
+    /// would do, and which build each declared peer runs. Changes nothing.
+    Plan(GatewayUpgradePlanArgs),
+    /// Install (optionally), drain the running gateway, restart it on the
+    /// installed build and verify a different process runs it. Detached by
+    /// default; the receipt is `aikit gateway upgrade status`.
+    Apply(GatewayUpgradeApplyArgs),
+    /// The upgrade in flight, or the latest, with its steps and receipt.
+    Status(GatewayUpgradeStatusArgs),
+    /// Finish an upgrade whose worker stopped (another driver takes over at
+    /// the durable phase; nothing already done is repeated).
+    Resume(GatewayUpgradeResumeArgs),
+    /// Restore the previous build of an upgrade and verify it runs.
+    Rollback(GatewayUpgradeRollbackArgs),
+    /// The detached worker itself. Started by `apply`; not for direct use.
+    #[command(hide = true)]
+    Worker(GatewayUpgradeWorkerArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct GatewayUpgradePlanArgs {
+    /// Include the managed install in the plan (`oi update --apply`).
+    #[arg(long)]
+    pub install: bool,
+    /// The managed update channel (`mainline` or `source`).
+    #[arg(long, value_name = "CHANNEL", requires = "install")]
+    pub channel: Option<String>,
+    /// Choose the candidate: the exact revision (a commit) of this product the
+    /// managed installer builds and installs (`oi update --candidate ai-kit=REV`).
+    #[arg(long, value_name = "REV", requires = "install")]
+    pub candidate: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct GatewayUpgradeApplyArgs {
+    /// Run the managed installer first (`oi update --apply`). Without it the
+    /// upgrade restarts the gateway onto the build already installed.
+    #[arg(long)]
+    pub install: bool,
+    /// Restart onto the build already installed and run no installer. This is
+    /// what `apply` does without `--install`; the flag says so explicitly.
+    #[arg(long, conflicts_with_all = ["install", "channel", "candidate"])]
+    pub restart_only: bool,
+    /// The managed update channel for --install (`mainline` or `source`).
+    #[arg(long, value_name = "CHANNEL", requires = "install")]
+    pub channel: Option<String>,
+    /// Choose the candidate: the exact revision (a commit) of this product the
+    /// managed installer builds and installs (`oi update --candidate ai-kit=REV`).
+    #[arg(long, value_name = "REV", requires = "install")]
+    pub candidate: Option<String>,
+    /// Do not restore the previous build automatically when the new one does
+    /// not come up; leave the exact steps in the receipt instead.
+    #[arg(long)]
+    pub no_rollback: bool,
+    /// Seconds an in-flight turn is given to finish before it is interrupted
+    /// and recorded (default 60).
+    #[arg(long, value_name = "SECS")]
+    pub drain_grace_secs: Option<u64>,
+    /// Seconds to wait for the new process to answer as the expected build
+    /// (default 120).
+    #[arg(long, value_name = "SECS")]
+    pub verify_timeout_secs: Option<u64>,
+    /// Seconds to wait for the old process to exit, and then for the service
+    /// manager to start the next one, before the manager is asked to (default
+    /// 90).
+    #[arg(long, value_name = "SECS")]
+    pub exit_wait_secs: Option<u64>,
+    /// The conversation binding the receipt returns to (a chat asked for it).
+    #[arg(long = "origin-binding", value_name = "REF")]
+    pub origin_binding: Option<String>,
+    /// Drive the upgrade in this process instead of a detached worker.
+    #[arg(long)]
+    pub foreground: bool,
+    /// Wait for the worker to finish and print the outcome.
+    #[arg(long, conflicts_with = "foreground")]
+    pub wait: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct GatewayUpgradeStatusArgs {
+    /// The upgrade id (default: the one in flight, else the latest).
+    #[arg(value_name = "ID")]
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct GatewayUpgradeResumeArgs {
+    /// The upgrade id (default: the one in flight).
+    #[arg(value_name = "ID")]
+    pub id: Option<String>,
+    /// Drive it in this process instead of a detached worker.
+    #[arg(long)]
+    pub foreground: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct GatewayUpgradeRollbackArgs {
+    #[arg(value_name = "ID")]
+    pub id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct GatewayUpgradeWorkerArgs {
+    #[arg(long = "txn", value_name = "ID")]
+    pub transaction: String,
 }
 
 /// `aikit gateway agent` — the canonical conversation-control operations,
@@ -2101,8 +2327,9 @@ pub struct GatewayWhoArgs {
 /// `aikit gateway send`.
 #[derive(Debug, Args)]
 pub struct GatewaySendArgs {
-    /// Recipient Position: `central:position:<world>:<slug>` or `@handle`.
-    #[arg(long, value_name = "POSITION|@HANDLE")]
+    /// Recipient Position: `central:position:<world>:<slug>`, `@handle`, an
+    /// agent ref, or `@owner` — the person, reached through their Inbox.
+    #[arg(long, value_name = "POSITION|@HANDLE|@owner")]
     pub to: String,
     /// The words to send.
     #[arg(long, value_name = "TEXT", conflicts_with = "body_file")]
@@ -2134,6 +2361,26 @@ pub struct GatewaySendArgs {
         requires = "instance"
     )]
     pub require_workcell: Option<String>,
+    /// To @owner: the one-line subject (default: the body's first line).
+    #[arg(long, value_name = "TEXT")]
+    pub subject: Option<String>,
+    /// To @owner: ask the person to accept or decline work, not a question.
+    #[arg(long)]
+    pub propose: bool,
+    /// To @owner with --propose: the owner that would carry the work out
+    /// (e.g. `factory`); accepting then commissions it there.
+    #[arg(long = "for", value_name = "OWNER", requires = "propose")]
+    pub proposed_owner: Option<String>,
+    /// To @owner: an answer the person can pick (repeatable, at most 8).
+    #[arg(long = "option", value_name = "TEXT")]
+    pub options: Vec<String>,
+    /// To @owner: the NOW this ask belongs to; it cannot archive while the
+    /// person's decision is outstanding, and its reading carries the answer.
+    #[arg(long = "now", value_name = "NOW_REF")]
+    pub now_ref: Option<String>,
+    /// To @owner: evidence the person can open (repeatable).
+    #[arg(long = "evidence", value_name = "REF")]
+    pub evidence: Vec<String>,
     #[command(flatten)]
     pub carrier: GatewayQueryArgs,
 }
@@ -2212,6 +2459,11 @@ pub enum GatewayRemoteSub {
         /// keychain:// / pass:// / op:// / varlock:// ref. Never the token.
         #[arg(long = "token-location", value_name = "LOCATION")]
         token_location: String,
+        /// Declare it without asking the endpoint what it is. By default the
+        /// endpoint is asked: one that serves a different Workcell than the
+        /// one declared is refused.
+        #[arg(long)]
+        no_probe: bool,
     },
     /// List the declared endpoints (token locations only).
     List,
@@ -5046,6 +5298,16 @@ pub enum SessionSpaceCommand {
     EncounterDeconfigure {
         #[arg(long)]
         provider_id: String,
+    },
+    /// Configure explicit machine-local speech stages; never starts an inference.
+    EncounterSpeechConfigure {
+        #[arg(long)]
+        config_json: String,
+    },
+    /// Disclose local stages around the actual admitted native text body.
+    EncounterSpeechRead {
+        #[arg(long)]
+        agent_session: String,
     },
     /// Provision or withdraw a native Agency binding under an exact revision.
     /// This is an owner-only operation, not gateway/IPC input.

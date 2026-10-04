@@ -1010,6 +1010,9 @@ impl EncounterService {
             let default = crate::model_defaults::for_session(home, session, &resolved_body)?;
             model_argv = crate::model_defaults::launch_argv(&resolved_body, default.as_ref())?;
         }
+        if resolved_body.protocol == EncounterProtocol::PrimeRpc {
+            crate::encounter_service::prime_launch::append_context(home, session, &mut model_argv)?;
+        }
         let codex_runtime = task_codex_runtime(&record, &resolved_body, &model_argv)?;
         // Only nonsecret routing/type facts enter this private immutable launch
         // source. It lives with the existing requirements owner, outside Task T.

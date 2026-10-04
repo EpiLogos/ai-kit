@@ -243,6 +243,7 @@ export default function (pi: {
         tool_call_id: eventObject.toolCallId,
         input: eventObject.input,
         cwd: cwdOf(ctx),
+        session_id: sessionIdOf(ctx),
       }),
     );
     if (!decision) {
@@ -263,6 +264,7 @@ export default function (pi: {
         tool_call_id: eventObject.toolCallId,
         is_error: eventObject.isError,
         cwd: cwdOf(ctx),
+        session_id: sessionIdOf(ctx),
       }),
     );
     // Observed only: this carrier never rewrites results.
@@ -271,7 +273,18 @@ export default function (pi: {
   // --- compaction ---------------------------------------------------------
 
   pi.on("session_before_compact", async (eventObject: any, ctx: any) => {
-    const decision = dispatchAikit("PreCompact", jsonSafe({ ...eventObject, cwd: cwdOf(ctx) }));
+    // The session's own transcript (branchEntries, preparation) is not sent:
+    // the dispatcher needs which session is compacting and why, not its
+    // whole history on stdin.
+    const decision = dispatchAikit(
+      "PreCompact",
+      jsonSafe({
+        reason: eventObject.reason,
+        will_retry: eventObject.willRetry,
+        cwd: cwdOf(ctx),
+        session_id: sessionIdOf(ctx),
+      }),
+    );
     if (decision && !decision.allowed) {
       // The event supports a cancel, so a policy denial cancels; a system
       // failure above already degraded to no-op and the compaction proceeds.

@@ -39,6 +39,11 @@ sha2 = { workspace = true }
 tempfile = { workspace = true }
 crossterm = { workspace = true }
 
+# A stop the OS asks for (SIGTERM from launchctl/systemctl, SIGINT) is a drain
+# of the gateway, not a process killed mid-turn.
+[target.'cfg(unix)'.dependencies]
+signal-hook = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 assert_cmd = { workspace = true }

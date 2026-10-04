@@ -3071,6 +3071,75 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_development_entry_binds_only_to_one_qualified_current_work() {
+        let work_child = "central:now:project:O-I:work-child";
+        let reading = json!({
+            "schema": "factory.inhabitation-reading/v1",
+            "central_project_ref": {"state":"present", "value":"O-I"},
+            "filter": {"run_ref": "run:r1", "position_ref": POSITION},
+            "runs": [{"run_ref": "run:r1", "positions": [{
+                "position_ref": POSITION,
+                "custody": [{"custody_ref": "factory:custody:c1", "work_ref": "work:w1", "state":"in-progress",
+                    "child_now_ref": {"state": "present", "value": work_child,
+                        "source": "factory.sensing-state/v1:signal.work:work:w1:work"}}]
+            }], "occupants": []}]
+        });
+        let child_read = ok(json!({
+            "schema": "central.now-reading/v1",
+            "record": {"schema": "central.now-clearing/v1", "now_ref": work_child, "scope_ref": "project:O-I", "task_ref": "work:w1", "horizon": "child", "lifecycle": "active", "source_refs": ["work:w1"]},
+            "revision": {"revision": "native-revision:child"}
+        }));
+        let runner = owner_fixture()
+            .on("development inhabitation", &reading.to_string())
+            .on("central.now.read", &child_read);
+        let joined = join(
+            &owners(&runner),
+            &env_input(ReadingDepth::Standard),
+            &AikitReads::default(),
+        );
+        let binding = crate::development_entry::WorkBinding::from_joined(&joined)
+            .expect("one current work with a qualified child NOW binds the entry");
+        assert_eq!(binding.run_ref, "run:r1");
+        assert_eq!(binding.workflow_unit_ref, "workflow-unit:u1");
+        assert_eq!(binding.child_now_ref.as_deref(), Some(work_child));
+        assert_eq!(binding.position_ref, POSITION);
+        assert_eq!(
+            crate::development_entry::work_concern(&binding).as_deref(),
+            Some("Wire the joined reading"),
+            "the concern is the unit's authored concern"
+        );
+        // Stale custody: the join refuses the child NOW, and the entry has
+        // nothing to bind to — no guess from the prompt or the Position.
+        let mut stale = reading.clone();
+        stale["runs"][0]["positions"][0]["custody"][0]["state"] = json!("blocked");
+        let runner = owner_fixture()
+            .on("development inhabitation", &stale.to_string())
+            .on("central.now.read", &child_read);
+        let joined = join(
+            &owners(&runner),
+            &env_input(ReadingDepth::Standard),
+            &AikitReads::default(),
+        );
+        assert!(crate::development_entry::WorkBinding::from_joined(&joined).is_none());
+        // Ordinary commissioned work: Factory custody carries no work child
+        // NOW. The work still binds; it simply has no NOW to prepare.
+        let mut ordinary = reading.clone();
+        ordinary["runs"][0]["positions"][0]["custody"][0]["child_now_ref"] =
+            json!({"state": "absent", "reason": "no source-qualified work signal"});
+        let runner = owner_fixture().on("development inhabitation", &ordinary.to_string());
+        let joined = join(
+            &owners(&runner),
+            &env_input(ReadingDepth::Standard),
+            &AikitReads::default(),
+        );
+        assert_eq!(joined.reading.facets.child_now.state, FacetState::Absent);
+        let binding = crate::development_entry::WorkBinding::from_joined(&joined)
+            .expect("ordinary work without a child NOW is still the work");
+        assert_eq!(binding.run_ref, "run:r1");
+        assert!(binding.child_now_ref.is_none());
+    }
+
+    #[test]
     fn exact_run_position_precedes_filter_and_work_child_precedes_attempt_placement() {
         let work_child = "central:now:project:O-I:work-child";
         let reading = json!({

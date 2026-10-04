@@ -732,6 +732,7 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
             hidden: true,
             max_file_bytes: crate::ripgrep::DEFAULT_MAX_FILE_BYTES,
             limit,
+            max_count_per_file: None,
             timeout: Some(std::time::Duration::from_secs(30)),
         };
         let outcome = self.searcher.search(&request)?;

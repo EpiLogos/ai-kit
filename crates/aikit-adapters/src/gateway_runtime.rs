@@ -38,6 +38,11 @@ use crate::gateway_communique::{
     Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForwardOutcome, CommuniqueInstanceHold,
     CommuniqueJournal, CommuniqueRouting, CommuniqueState,
 };
+use crate::gateway_posture::{
+    GatewayBuildIdentity, GatewayListenerReading, GATEWAY_FEATURE_BUILD_IDENTITY,
+    GATEWAY_FEATURE_CARRIER_SCOPE, GATEWAY_FEATURE_CONFIGURED_IDENTITY, GATEWAY_FEATURE_DRAIN,
+    GATEWAY_FEATURE_ENCOUNTER_RELAY, GATEWAY_FEATURE_UNSUPPORTED_COMMAND,
+};
 
 pub const AGENCY_GATEWAY_VERSION: &str = "aikit.agency-gateway/v1";
 pub const ACTUATION_STREAM_SCHEMA: &str = "actuation.stream/v1";
@@ -51,7 +56,25 @@ pub const GATEWAY_OCCUPANCY_READING_SCHEMA: &str = "aikit.gateway-occupancy-read
 pub const GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE: &str = "communique-exact-instance";
 
 /// Every protocol feature this gateway advertises in its `protocol` answer.
-pub const GATEWAY_PROTOCOL_FEATURES: [&str; 1] = [GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE];
+/// A peer asks for the feature it needs before it uses the command that
+/// depends on it, so a gateway built earlier is named and refused for that one
+/// thing instead of failing on an unknown command.
+pub const GATEWAY_PROTOCOL_FEATURES: [&str; 7] = [
+    GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE,
+    GATEWAY_FEATURE_BUILD_IDENTITY,
+    GATEWAY_FEATURE_DRAIN,
+    GATEWAY_FEATURE_CARRIER_SCOPE,
+    GATEWAY_FEATURE_UNSUPPORTED_COMMAND,
+    GATEWAY_FEATURE_CONFIGURED_IDENTITY,
+    GATEWAY_FEATURE_ENCOUNTER_RELAY,
+];
+
+/// The only encounter actions a peer gateway may relay to this Workcell's
+/// owner: look up a recipient's binding, send one turn, read its delivery, read
+/// its reply. Everything else an encounter owner accepts (opening, configuring,
+/// shutting down a session host) is the owner's and never crosses a Workcell.
+pub const ENCOUNTER_RELAY_ACTIONS: [&str; 4] =
+    ["agency-read", "send", "delivery", "delivery-reply"];
 
 /// A serving gateway's answer to "who occupies this Position on your
 /// Workcell" (or, with no Position, the whole listing). The gateway keeps no
@@ -411,6 +434,20 @@ pub enum GatewayConversationOperation {
     /// (`GatewayConversationHooks::ask_router`), and the append is this
     /// kernel's own journal work.
     AskPosition { position: String, message: String },
+    /// Say one line into the binding's own conversation, through its
+    /// connector, from the gateway itself. This is how something that
+    /// outlived a restart (an upgrade's finaliser) reports back to the
+    /// conversation that asked for it: the running gateway journals and
+    /// queues the line exactly as it does any other reply. Owner scope only.
+    Announce { text: String },
+    /// Read the upgrade plan for this gateway (`apply: false`) or start the
+    /// managed upgrade (`apply: true`) on behalf of this conversation. The
+    /// upgrade itself runs in a worker that outlives this process; the
+    /// receipt comes back here when the new build is verified running.
+    Upgrade {
+        #[serde(default)]
+        apply: bool,
+    },
 }
 
 /// One agent reply (or honest turn failure) to be journaled on the same
@@ -472,6 +509,65 @@ pub struct GatewayStatus {
     pub delivery_receipt_count: usize,
     #[serde(default)]
     pub connector_health: Vec<ConnectorHealth>,
+    /// The running process: which build, since when, from which executable.
+    /// Absent in an offline reading (no process is serving) and on a gateway
+    /// built before it was disclosed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<GatewayBuildIdentity>,
+    /// How each carrier is bound and what scope it grants. Empty when no
+    /// service is serving.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub listeners: Vec<GatewayListenerReading>,
+}
+
+/// One conversation turn a drain met.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DrainedTurn {
+    pub binding_ref: String,
+    pub in_reply_to_sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// What a drain found and did, exact rather than counted: work that could not
+/// finish is named so nobody has to guess what a restart cost.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DrainReport {
+    /// Whether a drain actually ran and counted. `false` means the counts below
+    /// are UNKNOWN, not zero: a predecessor that predates the drain was stopped
+    /// with its clean shutdown, and what it had in flight at that moment was
+    /// never read.
+    #[serde(default)]
+    pub measured: bool,
+    pub reason: String,
+    pub started_at_unix_ms: u64,
+    pub finished_at_unix_ms: u64,
+    /// The bounded grace each in-flight turn was given before being
+    /// interrupted.
+    pub grace_ms: u64,
+    /// Turns that finished inside the grace.
+    pub turns_resolved: Vec<DrainedTurn>,
+    /// Turns interrupted because they did not finish. Whatever the model or
+    /// its tools did before the interrupt is an UNCERTAIN effect: it is
+    /// recorded, journaled as an interruption, and never replayed.
+    pub turns_interrupted: Vec<DrainedTurn>,
+    /// Outbound operations prepared and not receipted. They stay in the
+    /// persisted state; a restart does not re-send one it cannot prove was
+    /// not sent.
+    pub pending_operations: Vec<String>,
+    /// Communiques waiting at this gateway, by Position. They are in the
+    /// journal and survive the restart.
+    pub communiques: Vec<CommuniqueCount>,
+}
+
+impl DrainReport {
+    /// Whether a drain actually ran and counted. A report from a gateway that has
+    /// the drain but predates this field carries no `measured` flag; it does carry
+    /// the times the drain started and finished, which a default (never-run) report
+    /// does not. Reading only the flag would call a real drain "not measured".
+    pub fn was_measured(&self) -> bool {
+        self.measured || self.started_at_unix_ms != 0
+    }
 }
 
 /// Qualitatively distinct co-internal relations the gateway ecology can name.
@@ -629,6 +725,21 @@ impl AgencyGateway {
     /// The Communique journal this gateway keeps.
     pub fn communiques(&self) -> &CommuniqueJournal {
         &self.communiques
+    }
+
+    /// Replace this gateway's own ref. Records already journaled keep the
+    /// `origin_gateway_ref` they were written under; only what is written from
+    /// now on carries the new one.
+    pub fn set_gateway_ref(&mut self, gateway_ref: ResourceRef) {
+        self.gateway_ref = gateway_ref;
+    }
+
+    /// The refs of outbound operations prepared and not yet receipted.
+    pub fn pending_operation_refs(&self) -> Vec<String> {
+        self.pending_deliveries
+            .keys()
+            .map(|reference| reference.to_string())
+            .collect()
     }
 
     pub fn gateway_ref(&self) -> &ResourceRef {
@@ -1160,6 +1271,8 @@ impl AgencyGateway {
             pending_delivery_count: self.pending_deliveries.len(),
             delivery_receipt_count: self.delivery_receipts.len(),
             connector_health: self.connector_health.values().cloned().collect(),
+            build: None,
+            listeners: Vec::new(),
         }
     }
 
@@ -1590,6 +1703,29 @@ pub enum GatewayCommand {
     /// Every Position's occupancy on the serving gateway's Workcell, the same
     /// way.
     OccupancyList,
+    /// One Flow-conversation request relayed from another Workcell's gateway
+    /// to this Workcell's encounter owner (`action` is one of
+    /// [`ENCOUNTER_RELAY_ACTIONS`]; `request` is the owner request without its
+    /// action). The owner does its own admission exactly as for a local send;
+    /// this carries the request and the owner's answer, nothing more.
+    EncounterRelay {
+        action: String,
+        request: Value,
+    },
+    /// Stop admitting conversation work, resolve what is in flight under a
+    /// bounded grace, record exactly what could not finish, persist, and
+    /// (with `exit`) stop the service after answering so its supervisor
+    /// starts the next build. The caller names the process it means: a drain
+    /// aimed at one gateway never lands on another. Owner scope only.
+    Drain {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_pid: Option<u32>,
+        reason: String,
+        #[serde(default)]
+        exit: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grace_ms: Option<u64>,
+    },
     Shutdown,
 }
 
@@ -1618,6 +1754,50 @@ impl GatewayCommand {
                 | Self::CommuniqueForwardQueue
                 | Self::OccupancyRead { .. }
                 | Self::OccupancyList
+        )
+    }
+
+    /// The wire name of this command (`"shutdown"`, `"send-communique"`).
+    pub fn wire_name(&self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("type")
+                    .and_then(|t| t.as_str().map(str::to_owned))
+            })
+            .unwrap_or_else(|| "unknown".into())
+    }
+
+    /// Commands a peer carrier may issue: what another gateway or an operator
+    /// reading through `--at` needs — protocol and status reads, contact,
+    /// relay and occupancy. Everything else — binding conversations,
+    /// registering connectors, restoring or snapshotting state, draining,
+    /// stopping — is the owner's, and a command added later is owner-only
+    /// until it is named here.
+    pub fn peer_permitted(&self) -> bool {
+        matches!(
+            self,
+            Self::Protocol
+                | Self::Status
+                | Self::Discover
+                | Self::Ecology
+                | Self::SendCommunique { .. }
+                | Self::IngestCommunique { .. }
+                | Self::CommuniqueInbox { .. }
+                | Self::AcknowledgeCommuniques { .. }
+                | Self::CommuniqueConversation { .. }
+                | Self::ReadCommunique { .. }
+                | Self::EscalateCommunique { .. }
+                | Self::CommuniqueCounts
+                | Self::CommuniqueForwardQueue
+                | Self::RecordCommuniqueForward { .. }
+                | Self::RecordCommuniqueStanding { .. }
+                | Self::OccupancyRead { .. }
+                | Self::OccupancyList
+        ) || matches!(
+            self,
+            Self::EncounterRelay { action, .. } if ENCOUNTER_RELAY_ACTIONS.contains(&action.as_str())
         )
     }
 
@@ -1655,6 +1835,10 @@ pub enum GatewayResponse {
         /// predate feature advertisement: they support none of them.
         #[serde(default)]
         features: Vec<String>,
+        /// The running process. Absent on a gateway that predates
+        /// `gateway-build-identity`, which is itself a fact a caller can use.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        build: Option<GatewayBuildIdentity>,
     },
     Discovery {
         discovery: GatewayDiscovery,
@@ -1730,6 +1914,18 @@ pub enum GatewayResponse {
     Occupancy {
         reading: GatewayOccupancyReading,
     },
+    /// The encounter owner's own answer (`{ok, data | error}`), verbatim.
+    EncounterRelayed {
+        response: Value,
+    },
+    Drained {
+        report: DrainReport,
+        /// The service stops after this answer and its supervisor starts the
+        /// next process.
+        exiting: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        build: Option<GatewayBuildIdentity>,
+    },
     Shutdown,
 }
 
@@ -1747,6 +1943,7 @@ pub fn execute_gateway_command(
                 .iter()
                 .map(|feature| (*feature).to_owned())
                 .collect(),
+            build: None,
         }),
         GatewayCommand::Discover => Ok(GatewayResponse::Discovery {
             discovery: gateway.discovery(),
@@ -1938,6 +2135,14 @@ pub fn execute_gateway_command(
                  queries, from its own Workcell's Actuation",
             ))
         }
+        GatewayCommand::EncounterRelay { .. } => Err(AikitError::new(
+            "agency_gateway.encounter_relay_not_served",
+            "only a running gateway service relays to its Workcell's encounter owner",
+        )),
+        GatewayCommand::Drain { .. } => Err(AikitError::new(
+            "agency_gateway.drain_not_served",
+            "a drain is the running service's: it resolves in-flight turns the kernel does not hold",
+        )),
         GatewayCommand::Shutdown => Ok(GatewayResponse::Shutdown),
     }
 }
@@ -2015,6 +2220,38 @@ pub fn text_send(text: impl Into<String>) -> OutboundOperationKind {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_drain_report_from_a_gateway_that_predates_the_measured_flag_still_reads_as_measured() {
+        // An older gateway that has the drain sends a report with its times and no
+        // `measured` field. It ran; its counts are real.
+        let from_an_older_gateway: DrainReport = serde_json::from_value(serde_json::json!({
+            "reason": "upgrade upg-x",
+            "started_at_unix_ms": 1_000,
+            "finished_at_unix_ms": 1_250,
+            "grace_ms": 60_000,
+            "turns_resolved": [],
+            "turns_interrupted": [],
+            "pending_operations": [],
+            "communiques": []
+        }))
+        .unwrap();
+        assert!(
+            !from_an_older_gateway.measured,
+            "the old report carries no flag"
+        );
+        assert!(
+            from_an_older_gateway.was_measured(),
+            "but it carries the times of a drain that ran"
+        );
+        // The report of a predecessor that has no drain at all is the default one.
+        assert!(!DrainReport::default().was_measured());
+        assert!(DrainReport {
+            measured: true,
+            ..DrainReport::default()
+        }
+        .was_measured());
+    }
+
     use super::*;
     use aikit_adapters::{
         ConnectorCapabilities, ConnectorConnectionState, ConnectorOperation, DeliveryState,

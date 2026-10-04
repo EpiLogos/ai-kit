@@ -2136,6 +2136,41 @@ impl Service {
                 decision.injected.push(commit.text.clone());
             }
         }
+        // Development entry: the work this body carries, prepared from its
+        // Run. It rides the lean entry at fresh occupancy and Refocus's own
+        // triggers (compaction, work transition, sustained work), and exists
+        // only when the body carries exactly one current work. A failure is
+        // named to the body; ordinary operation continues.
+        if let (Some(work), true) = (&inhabitation.work, decision.allowed) {
+            let id = CapsuleId::parse(crate::development_entry::CAPABILITY)?;
+            if let Some(active) = self.view.active.get(&id) {
+                let session = crate::refocus::hook_session(&event.payload).unwrap_or_default();
+                let cwd = event
+                    .cwd
+                    .clone()
+                    .unwrap_or_else(|| self.invocation_cwd.clone());
+                let roots = self.catalog.capsule_roots();
+                let outcome = crate::development_entry::EntryConfig::from_table(&active.config)
+                    .and_then(|config| {
+                        crate::development_entry::deliver(
+                            work,
+                            &cwd,
+                            &event.client,
+                            &session,
+                            &config,
+                            &roots,
+                        )
+                    });
+                decision.injected.push(match outcome {
+                    Ok(text) => text,
+                    Err(error) => format!(
+                        "[Development entry unavailable] {}: {} — the work above stands; nothing was prepared for it this turn.",
+                        error.code(),
+                        error.message()
+                    ),
+                });
+            }
+        }
         Ok((decision, refocus))
     }
 
@@ -2197,12 +2232,19 @@ impl Service {
                         // process, and hook dispatches share no context id —
                         // so the key is the resolved scope root, which is
                         // exactly what the selected sources hang from.
-                        let scope_key = central
+                        let scope = central
                             .as_deref()
                             .or(self.descriptor.project_root.as_deref())
                             .unwrap_or(&self.invocation_cwd)
                             .display()
                             .to_string();
+                        // Per session as well: a changed reading must reach
+                        // every live session in the scope, not only the first
+                        // one to prompt after the change.
+                        let scope_key = match crate::refocus::hook_session(&event.payload) {
+                            Some(session) => format!("{scope}#session:{session}"),
+                            None => scope,
+                        };
                         let deliver = event.kind == aikit_core::hooks::HookEventKind::SessionStart
                             || crate::wiki_projection::load_last_delivered(&self.home, &scope_key)
                                 .as_deref()

@@ -1585,6 +1585,19 @@ pub fn now_revoke(args: NowRevokeArgs) -> Result<Value> {
     )
 }
 
+/// Prepare from an already-built `aikit.now-preparation-request/v1` value —
+/// the same native path the CLI and configured encounters use. The
+/// development entry builds this request from a body's current Run.
+pub(crate) fn prepare_value(cwd: &Path, request: Value) -> Result<Value> {
+    let request: NowPrepareRequest = serde_json::from_value(request).map_err(|e| {
+        fail(
+            "now_context.prepare_invalid",
+            format!("NOW preparation request: {e}"),
+        )
+    })?;
+    now_prepare_request(cwd, request)
+}
+
 pub fn now_prepare(cwd: &Path, args: NowPrepareArgs) -> Result<Value> {
     let request: NowPrepareRequest =
         read_json(&args.request_file, "NOW preparation request", 1024 * 1024)?;

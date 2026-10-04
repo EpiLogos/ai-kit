@@ -230,6 +230,106 @@ fn credential_resolved_with_origin(
     ))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aikit_core::credential::{CredentialBindingState, SecretProviderRef, SecretProviderTier};
+    use std::collections::BTreeMap;
+
+    fn use_() -> ModelCredential {
+        ModelCredential {
+            requirement_ref: SecretRequirementRef::new(
+                "secret-requirement:openrouter-native-dispatch",
+            )
+            .unwrap(),
+            credential_ref: CredentialRef::new("openrouter").unwrap(),
+            target_env: "OPENROUTER_API_KEY".into(),
+            from_env: None,
+        }
+    }
+
+    fn binding(use_: &ModelCredential, provider_ref: SecretProviderRef) -> CredentialBindingState {
+        CredentialBindingState {
+            credential_ref: use_.credential_ref.clone(),
+            provider_ref,
+            provider_tier: SecretProviderTier::OsSecureStore,
+            materialisation: SecretMaterialisationClass::ProviderNativeLease,
+            binding_provenance: "native-store-test-binding".into(),
+            revision_or_lease_class: Some("keyring-test".into()),
+            expires_at: None,
+            revoked: false,
+            metadata: BTreeMap::new(),
+            declared_secret_ref: None,
+            bound_at_unix_seconds: Some(1_700_000_000),
+            last_rotated_at_unix_seconds: None,
+            last_verified_at_unix_seconds: Some(1_700_000_001),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn current_native_binding_is_eligible_without_materialising_keychain_data() {
+        let temporary = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temporary.path());
+        let use_ = use_();
+        let empty = NativeSecureStoreProvider::new();
+        let descriptor = empty.descriptor(&use_.credential_ref);
+        assert!(
+            descriptor.available,
+            "macOS Keychain entry construction is required"
+        );
+        CredentialBindingStore::new(&home)
+            .save(&binding(&use_, descriptor.provider_ref.clone()))
+            .unwrap();
+
+        let (reading, secret) = credential(
+            &home,
+            &ResourceRef::parse("agent-session/native-binding-test").unwrap(),
+            &use_,
+            false,
+        )
+        .unwrap();
+
+        assert!(
+            secret.is_none(),
+            "eligibility must not read credential material"
+        );
+        assert_eq!(
+            reading["resolution"]["selected_provider_ref"],
+            json!(descriptor.provider_ref)
+        );
+        assert_eq!(reading["binding"]["credential_ref"], "openrouter");
+        assert_eq!(reading["secret_persisted"], false);
+        assert!(!reading.to_string().contains("OPENROUTER_API_KEY"));
+    }
+
+    #[test]
+    fn absent_and_revoked_native_bindings_remain_ineligible() {
+        let temporary = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temporary.path());
+        let use_ = use_();
+        let session = ResourceRef::parse("agent-session/native-binding-negative").unwrap();
+
+        assert_eq!(
+            credential(&home, &session, &use_, false)
+                .unwrap_err()
+                .message(),
+            "No eligible current credential provider; an inventory reference is not key material"
+        );
+
+        let descriptor = NativeSecureStoreProvider::new().descriptor(&use_.credential_ref);
+        let mut revoked = binding(&use_, descriptor.provider_ref);
+        revoked.revoked = true;
+        CredentialBindingStore::new(&home).save(&revoked).unwrap();
+        assert_eq!(
+            credential(&home, &session, &use_, false)
+                .unwrap_err()
+                .message(),
+            "Selected credential binding is revoked or expired; no environment bypass"
+        );
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod native_store_tests {
     use super::{credential, ModelCredential};

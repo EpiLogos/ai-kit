@@ -123,6 +123,20 @@ impl Drop for RestorePermissions {
     }
 }
 
+/// Copy an installed tool cache (not index state) into the isolated HOME.
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
 /// Snapshot only the real owner indexes built above. Reads run against private
 /// query copies, so even metadata rewrites on the originals are a regression.
 type OwnerIndexSnapshot =
@@ -235,6 +249,20 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     fs::create_dir_all(cedar_worktree.join(".aikit")).unwrap();
     let isolated_home = temp.path().join("home");
     fs::create_dir_all(&isolated_home).unwrap();
+    // GitNexus's full-text index needs the LadybugDB FTS extension, which
+    // LadybugDB resolves under `$HOME/.lbdb/extension`. In a fresh HOME every
+    // `analyze` downloads it with a 15 s bound and, when that download fails
+    // or times out, still exits 0 with no full-text index — so cedar (indexed
+    // first) intermittently lost its own Code while larch kept its. The
+    // extension is an installed tool, not index or registry state: carry the
+    // real HOME's installation (CI pre-installs it) into the isolated HOME so
+    // indexing never depends on the network.
+    if let Some(extensions) = std::env::var_os("HOME")
+        .map(|home| Path::new(&home).join(".lbdb/extension"))
+        .filter(|path| path.is_dir())
+    {
+        copy_tree(&extensions, &isolated_home.join(".lbdb/extension"));
+    }
     std::env::set_var("HOME", &isolated_home);
     std::env::set_var("XDG_CONFIG_HOME", temp.path().join("xdg-config"));
     std::env::set_var("XDG_CACHE_HOME", temp.path().join("xdg-cache"));
@@ -264,6 +292,17 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         assert!(
             repo.join(".gitnexus/lbug").is_file(),
             "native index missing for {name}"
+        );
+        let meta: serde_json::Value =
+            serde_json::from_slice(&fs::read(repo.join(".gitnexus/gitnexus.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            meta.pointer("/capabilities/fts/status")
+                .and_then(serde_json::Value::as_str),
+            Some("available"),
+            "GitNexus built {name} without its full-text index (LadybugDB FTS extension \
+             not installed under the test HOME); keyword search cannot prove scope:\n{}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
     let indexed_before = owner_indexes(&world);

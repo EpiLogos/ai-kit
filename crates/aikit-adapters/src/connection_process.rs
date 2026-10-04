@@ -987,6 +987,13 @@ pub(crate) fn peek_owned_child_exit(child: &Child) -> std::io::Result<Option<Exi
     }))
 }
 
+/// How long a group refused with EPERM is given for its mid-exit leader to
+/// become waitable. The transition was measured at up to ~10ms on a heavily
+/// loaded Mac; this bound only caps the wait for a leader that is not
+/// actually exiting.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const LEADER_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Retains an exited group leader until the group has been terminated. Keeping
 /// it unreaped reserves its PID/PGID, so a later Drop cannot signal a reused ID.
 struct OwnedChild {
@@ -1014,6 +1021,24 @@ impl OwnedChild {
         }
     }
 
+    /// Observe the leader until its exit is waitable or `grace` elapses.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn await_leader_exit(
+        &mut self,
+        grace: std::time::Duration,
+    ) -> std::io::Result<Option<ExitStatus>> {
+        let deadline = std::time::Instant::now() + grace;
+        loop {
+            if let Some(status) = self.poll_exit()? {
+                return Ok(Some(status));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn pid(&self) -> rustix::process::Pid {
         rustix::process::Pid::from_raw(self.child.id() as i32).expect("OS child PID is positive")
@@ -1027,25 +1052,16 @@ impl OwnedChild {
         {
             // Confirm the leader is still our unreaped child before using its
             // group identity. ECHILD refuses signalling if ownership was lost.
-            #[cfg(target_os = "macos")]
-            let deadline = std::time::Instant::now() + Duration::from_millis(250);
-            loop {
-                let _leader_exit_observed = self.poll_exit()?;
-                match rustix::process::kill_process_group(self.pid(), rustix::process::Signal::KILL)
-                {
-                    Ok(()) | Err(rustix::io::Errno::SRCH) => break,
-                    // macOS can refuse a zombie-only group before waitid has
-                    // made the child's exit observable. Keep its PID reserved
-                    // and bound that observation race; an unobserved exit or
-                    // lost child ownership still refuses cleanup.
-                    #[cfg(target_os = "macos")]
-                    Err(rustix::io::Errno::PERM) if _leader_exit_observed.is_some() => break,
-                    #[cfg(target_os = "macos")]
-                    Err(rustix::io::Errno::PERM) if std::time::Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(error) => return Err(error.into()),
-                }
+            let leader_exit_observed = self.poll_exit()?;
+            match rustix::process::kill_process_group(self.pid(), rustix::process::Signal::KILL) {
+                Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+                // Keep the unreaped leader's identity reserved across the
+                // bounded EOF/mid-exit window. ECHILD from either observation
+                // remains an error and never authorises another signal.
+                Err(rustix::io::Errno::PERM) if leader_exit_observed.is_some() => {}
+                Err(rustix::io::Errno::PERM)
+                    if self.await_leader_exit(LEADER_EXIT_GRACE)?.is_some() => {}
+                Err(error) => return Err(error.into()),
             }
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -1074,6 +1090,26 @@ impl Drop for OwnedChild {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A target that exits on its own closes stdout before the kernel makes
+    /// it a waitable zombie; in that window macOS refuses the group signal
+    /// with EPERM. Teardown right after the reader sees EOF — exactly what a
+    /// host does when a harness dies mid-request — must confirm, not report
+    /// an uncertain cleanup. The window is narrow, so the race is repeated.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn teardown_right_after_a_self_exit_eof_is_confirmed() {
+        let argv = vec!["sh".into(), "-c".into(), "exit 0".into()];
+        for attempt in 0..200 {
+            let (writer, mut reader, control) =
+                ConnectionProcess::spawn_split_with_environment(&argv, None, None).unwrap();
+            assert!(reader.read_line().is_err(), "the target wrote nothing");
+            if let Err(failure) = control.terminate() {
+                panic!("attempt {attempt}: teardown of a self-exited target failed: {failure}");
+            }
+            drop(writer);
+        }
+    }
 
     #[test]
     #[cfg(any(target_os = "linux", target_os = "macos"))]

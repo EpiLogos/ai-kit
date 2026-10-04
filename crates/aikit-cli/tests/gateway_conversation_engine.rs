@@ -2861,6 +2861,237 @@ fn a_denied_or_unpaired_sender_cannot_ask() {
     assert_eq!(gateway.lock().unwrap().status().stream_count, 0);
 }
 
+#[test]
+fn a_drain_needs_no_binding_and_names_each_interrupted_turn_and_never_replays_it() {
+    let harness = Harness::new(aikit_adapters::EnginePolicy {
+        turn_grace: Duration::from_millis(200),
+        interrupt_grace: Duration::from_secs(5),
+        ..aikit_adapters::EnginePolicy::default()
+    });
+    harness.source.script_park();
+    harness.admit(fixture_inbound("still thinking", "d1"));
+    harness.wait_until(
+        "the turn registers in flight",
+        Duration::from_secs(30),
+        |harness| {
+            let execution = harness
+                .engine
+                .execute(
+                    harness.binding_ref.clone(),
+                    aikit_adapters::GatewayConversationOperation::Status,
+                )
+                .unwrap();
+            let GatewayResponse::Conversation { result, .. } = execution.response else {
+                return false;
+            };
+            result["turn_in_flight"] == json!(true)
+        },
+    );
+    assert_eq!(harness.source.parked_turns(), 1);
+
+    // An upgrade, a stop signal or an operator drains the whole gateway: no
+    // binding, a named reason, an explicit grace.
+    let report = harness
+        .engine
+        .drain("upgrade upg-test", Some(Duration::from_millis(150)))
+        .unwrap();
+    assert_eq!(report.reason, "upgrade upg-test");
+    assert_eq!(report.grace_ms, 150);
+    assert_eq!(report.turns_resolved.len(), 0);
+    assert_eq!(report.turns_interrupted.len(), 1, "{report:?}");
+    assert_eq!(report.turns_interrupted[0].binding_ref, BINDING_REF);
+    assert!(
+        report.turns_interrupted[0].detail.is_some(),
+        "the interrupt's own receipt is kept"
+    );
+    assert!(report.finished_at_unix_ms >= report.started_at_unix_ms);
+
+    // The interruption is journaled on the turn's own stream, as an uncertain
+    // effect — not as a failure to retry.
+    harness.wait_until(
+        "the interrupted turn is journalled",
+        Duration::from_secs(90),
+        |harness| harness.stream_events().len() == 2,
+    );
+    assert_eq!(
+        harness.stream_events()[1]["metadata"]["failure"]["kind"],
+        "interrupted"
+    );
+
+    // Nothing is replayed and nothing new starts: the message that arrives
+    // after the drain is journaled, but no second turn is ever prompted.
+    harness.admit(fixture_inbound("after the drain", "d2"));
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        harness.source.prompted_turns(),
+        1,
+        "the interrupted turn was not re-prompted and no new turn started"
+    );
+    assert_eq!(
+        harness.source.parked_turns(),
+        0,
+        "the interrupted turn is finished, not parked"
+    );
+    assert_eq!(harness.stream_events().len(), 3);
+}
+
+#[test]
+fn an_announcement_that_cannot_be_queued_is_an_error_the_caller_sees_not_a_line_lost_on_stderr() {
+    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
+    // A binding the gateway does not hold: the line has nowhere to go.
+    let missing = r("gateway-binding/never-bound");
+    let announced = harness.engine.execute(
+        missing.clone(),
+        aikit_adapters::GatewayConversationOperation::Announce {
+            text: "gateway upgrade upg-x — completed".into(),
+        },
+    );
+    assert!(
+        announced.is_err(),
+        "an announcement that was not queued must say so, so the sender can try again"
+    );
+    // The same announcement to the bound conversation is queued and answered.
+    let delivered = harness.engine.execute(
+        harness.binding_ref.clone(),
+        aikit_adapters::GatewayConversationOperation::Announce {
+            text: "gateway upgrade upg-x — completed".into(),
+        },
+    );
+    assert!(delivered.is_ok());
+}
+
+/// What a conversation's `/upgrade` asks of the machine's upgrade owner.
+struct RecordingUpgrade {
+    plans: Mutex<usize>,
+    starts: Mutex<Vec<aikit_adapters::UpgradeOrigin>>,
+}
+
+impl aikit_adapters::GatewayUpgradeLauncher for RecordingUpgrade {
+    fn plan(&self) -> aikit_core::Result<(Value, String)> {
+        *self.plans.lock().unwrap() += 1;
+        Ok((json!({"action": "restart"}), "the gateway is stale".into()))
+    }
+    fn start(&self, origin: aikit_adapters::UpgradeOrigin) -> aikit_core::Result<(Value, String)> {
+        self.starts.lock().unwrap().push(origin);
+        Ok((json!({"upgrade": "upg-x"}), "upgrade upg-x started".into()))
+    }
+}
+
+#[test]
+fn upgrade_is_planned_on_request_started_only_by_apply_and_never_from_a_group() {
+    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
+    // The edge parses the two spellings and refuses a third.
+    assert!(matches!(
+        parse_slash("/upgrade"),
+        SlashParse::Operation(aikit_adapters::GatewayConversationOperation::Upgrade {
+            apply: false
+        })
+    ));
+    assert!(matches!(
+        parse_slash("/upgrade apply"),
+        SlashParse::Operation(aikit_adapters::GatewayConversationOperation::Upgrade {
+            apply: true
+        })
+    ));
+    assert!(matches!(
+        parse_slash("/upgrade now"),
+        SlashParse::Unknown(_)
+    ));
+
+    // No upgrade owner wired: it says so and names the command.
+    let execution = harness
+        .engine
+        .execute(
+            harness.binding_ref.clone(),
+            aikit_adapters::GatewayConversationOperation::Upgrade { apply: true },
+        )
+        .unwrap();
+    let GatewayResponse::Conversation { result, .. } = execution.response else {
+        panic!()
+    };
+    assert_eq!(result["upgrade"], "unavailable");
+    assert!(!execution.restart_requested);
+
+    let launcher = Arc::new(RecordingUpgrade {
+        plans: Mutex::new(0),
+        starts: Mutex::new(Vec::new()),
+    });
+    harness.engine.attach_upgrade_launcher(
+        launcher.clone() as Arc<dyn aikit_adapters::GatewayUpgradeLauncher>
+    );
+    let ask = |apply: bool, binding: &ResourceRef| {
+        let execution = harness
+            .engine
+            .execute(
+                binding.clone(),
+                aikit_adapters::GatewayConversationOperation::Upgrade { apply },
+            )
+            .unwrap();
+        // The gateway keeps serving: the upgrade runs in a worker that drains
+        // it when the new build is installed.
+        assert!(!execution.restart_requested);
+        let GatewayResponse::Conversation { result, .. } = execution.response else {
+            panic!()
+        };
+        result
+    };
+    // Reading the plan starts nothing.
+    let planned = ask(false, &harness.binding_ref);
+    assert_eq!(planned["upgrade"], "plan");
+    assert_eq!(*launcher.plans.lock().unwrap(), 1);
+    assert!(launcher.starts.lock().unwrap().is_empty());
+    // `apply` starts it, carrying the conversation the receipt returns to.
+    let started = ask(true, &harness.binding_ref);
+    assert_eq!(started["upgrade"], "started");
+    let starts = launcher.starts.lock().unwrap();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].binding_ref, BINDING_REF);
+    assert_eq!(starts[0].connector_ref.as_deref(), Some(CONNECTOR_REF));
+    drop(starts);
+
+    // A group conversation admits several senders and a slash command carries
+    // a message's authority: changing the machine is refused there.
+    let group = r("gateway-binding/fixture-group");
+    {
+        let mut kernel = harness.gateway.lock().unwrap();
+        kernel
+            .bind(GatewayBinding {
+                binding_ref: group.clone(),
+                connector_ref: r(CONNECTOR_REF),
+                address: ConversationAddress {
+                    platform: "fixture".into(),
+                    scope_id: Some("group".into()),
+                    conversation_id: "chat-group".into(),
+                    thread_id: None,
+                },
+                agent_session_ref: r("agent-session/fixture-group"),
+                agency_ref: r("agency/fixture"),
+                actuation_ref: r("actuation/fixture"),
+                actuation_stream_ref: r("actuation-stream/fixture-group"),
+                agent_ref: None,
+                harness_ref: None,
+                surface_ref: None,
+                forked_from: None,
+                context_revision: 1,
+                ingress: GatewayIngressPolicy {
+                    default: GatewayIngressDecision::Allow,
+                    sender_overrides: Default::default(),
+                },
+                provenance: Vec::new(),
+            })
+            .unwrap();
+    }
+    let refused = ask(true, &group);
+    assert_eq!(refused["upgrade"], "refused");
+    assert_eq!(
+        launcher.starts.lock().unwrap().len(),
+        1,
+        "no second upgrade started"
+    );
+    // Reading the plan in a group is harmless and still answers.
+    assert_eq!(ask(false, &group)["upgrade"], "plan");
+}
+
 // ---------------------------------------------------------------------------
 // Restart proof against the real binary
 // ---------------------------------------------------------------------------

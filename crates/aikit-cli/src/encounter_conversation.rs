@@ -20,6 +20,7 @@ use super::super::{error, EncounterService, Lifecycle};
 use super::{EncounterAddressedTurn, EncounterContextPacket};
 use crate::gateway_owners::{CtrlActionError, ProcessOwners};
 use aikit_core::{AikitError, ResourceRef, Result};
+use aikit_store::AikitHome;
 use aikit_store::encounter::{
     ConversationReading, ConversationRecipientReading, ConversationWork, NewConversationRecipient,
 };
@@ -226,13 +227,92 @@ fn clip(text: &str, chars: usize) -> String {
     let cut: String = text.chars().take(chars).collect();
     format!("{cut}… [entry continues in the Flow]")
 }
+/// The longest a legacy route may hold the conversation sweep.
+const LEGACY_ROUTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A string as one single-quoted shell word.
+fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// A path as a shell word: `~` and `~/` stay unquoted so the remote shell
+/// expands them; the rest is quoted.
+fn shell_quote_path(path: &str) -> String {
+    if path == "~" {
+        "~".to_owned()
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        format!("~/{}", shell_quote(rest))
+    } else {
+        shell_quote(path)
+    }
+}
+
+/// Capture the selected legacy command through the existing native process
+/// owner. No second route follows a possibly completed effect. The caller's
+/// existing delivery identity/owner reducer supplies explicit recovery.
+pub(super) fn output_within(
+    mut command: std::process::Command,
+    limit: std::time::Duration,
+) -> aikit_core::Result<aikit_adapters::runner::Output> {
+    aikit_adapters::runner::SystemRunner::new()
+        .with_timeout(limit)
+        .with_strict_utf8()
+        .with_body_free_diagnostics()
+        .capture_command(&mut command)
+}
+
 /// Marks a remote owner that could not be reached (as opposed to one that refused).
 const ROUTE_UNAVAILABLE: &str = "conversation.route_unavailable";
 
-/// One encounter request to an owner on another Workcell, over its declared
-/// route. `Err` carries the owner's own refusal code and message, or
-/// `conversation.route_unavailable` when the owner could not be reached at all.
+/// One encounter request to an owner on another Workcell. `Err` carries the
+/// owner's own refusal code and message, or `conversation.route_unavailable`
+/// when the owner could not be reached at all.
+///
+/// The route is decided once, by negotiation, and never by "try one then the
+/// other" (a request that might have reached the owner must not also be sent
+/// down a second path): see [`crate::gateway_encounter_relay`].
 fn remote_encounter(
+    home: &AikitHome,
+    route: &Value,
+    request: &Value,
+) -> std::result::Result<Value, (String, String)> {
+    use crate::gateway_encounter_relay::{choose, relay_native, Choice, NativeFailure};
+    let unavailable = |why: String| (ROUTE_UNAVAILABLE.to_owned(), why);
+    let kind = route["kind"].as_str().unwrap_or_default();
+    if !matches!(kind, "gateway" | "ssh" | "exec") {
+        return Err(("conversation.route".into(), "unsupported route kind".into()));
+    }
+    // `exec` is an independently owned world on this host; it has no gateway.
+    if kind != "exec" {
+        if let Some(workcell) = route["workcell"].as_str() {
+            match choose(home, workcell) {
+                Choice::Native(remote) => {
+                    let action = request["action"].as_str().unwrap_or_default();
+                    return relay_native(&remote, action, request).map_err(
+                        |failure| match failure {
+                            NativeFailure::Owner(code, message) => (code, message),
+                            NativeFailure::Route(why) => unavailable(why),
+                        },
+                    );
+                }
+                Choice::Unavailable(why) => return Err(unavailable(why)),
+                Choice::Legacy(why) if kind == "gateway" => return Err(unavailable(why)),
+                Choice::Legacy(_) => {}
+            }
+        } else if kind == "gateway" {
+            return Err((
+                "conversation.route".into(),
+                "a gateway route names the Workcell that holds the session".into(),
+            ));
+        }
+    }
+    remote_encounter_legacy(route, request)
+}
+
+/// The ssh / exec route: for a Workcell with no declared gateway endpoint, or
+/// whose gateway is a build that does not advertise the relay feature. Bounded
+/// end to end and never built from unquoted request fields.
+fn remote_encounter_legacy(
     route: &Value,
     request: &Value,
 ) -> std::result::Result<Value, (String, String)> {
@@ -268,13 +348,12 @@ fn remote_encounter(
                 }
             }
         }
-        let output = command
-            .output()
+        let output = output_within(command, LEGACY_ROUTE_TIMEOUT)
             .map_err(|e| unavailable(format!("owner client unavailable: {e}")))?;
-        let value: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+        let value: Value = serde_json::from_str(&output.stdout).map_err(|_| {
             unavailable(format!(
                 "no JSON answer: {}",
-                String::from_utf8_lossy(&output.stderr)
+                output.stderr
                     .lines()
                     .last()
                     .unwrap_or("")
@@ -301,9 +380,22 @@ fn remote_encounter(
     let target = route["target"]
         .as_str()
         .ok_or_else(|| unavailable("route has no target".into()))?;
+    // A target is a host, optionally user@host: never an option, never a
+    // shell fragment.
+    if target.starts_with('-')
+        || target.is_empty()
+        || !target.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | ':' | '-' | '[' | ']')
+        })
+    {
+        return Err((
+            "conversation.route".into(),
+            format!("`{target}` is not an ssh host"),
+        ));
+    }
     let cwd = route["cwd"].as_str().unwrap_or("~");
     let aikit = route["aikit"].as_str().unwrap_or("aikit");
-    let quoted = format!("'{}'", request.to_string().replace('\'', "'\\''"));
+    let quoted = shell_quote(&request.to_string());
     // The remote owner's own environment (its AIKIT_HOME, Central root…) travels
     // in the route's declaration, never in the request.
     let env_prefix: String = route["env"]
@@ -314,28 +406,35 @@ fn remote_encounter(
                 .filter_map(|(name, value)| {
                     value
                         .as_str()
-                        .map(|v| format!("{name}='{}' ", v.replace('\'', "'\\''")))
+                        .map(|v| format!("{name}={} ", shell_quote(v)))
                 })
                 .collect()
         })
         .unwrap_or_default();
-    let command =
-        format!("env {env_prefix}{aikit} session-space -C {cwd} encounter --request-json {quoted}");
-    let output = std::process::Command::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            target,
-            &command,
-        ])
-        .output()
-        .map_err(|e| unavailable(format!("ssh unavailable: {e}")))?;
-    let value: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+    let command = format!(
+        "env {env_prefix}{} session-space -C {} encounter --request-json {quoted}",
+        shell_quote_path(aikit),
+        shell_quote_path(cwd)
+    );
+    let mut ssh = std::process::Command::new("ssh");
+    ssh.args([
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "ServerAliveInterval=5",
+        "-o",
+        "ServerAliveCountMax=3",
+        target,
+        &command,
+    ]);
+    let output =
+        output_within(ssh, LEGACY_ROUTE_TIMEOUT).map_err(|e| unavailable(format!("ssh: {e}")))?;
+    let value: Value = serde_json::from_str(&output.stdout).map_err(|_| {
         unavailable(format!(
             "no JSON answer from {target}: {}",
-            String::from_utf8_lossy(&output.stderr)
+            output.stderr
                 .lines()
                 .last()
                 .unwrap_or("")
@@ -691,14 +790,17 @@ impl EncounterService {
                 let exec = route["kind"] == "exec"
                     && route["aikit"].as_str().is_some_and(|a| a.starts_with('/'))
                     && route["cwd"].as_str().is_some_and(|c| c.starts_with('/'));
-                let usable = (ssh || exec)
+                // The actual declared endpoint belongs to the named Workcell,
+                // never to arbitrary endpoint data carried by this request.
+                let gateway = route["kind"] == "gateway";
+                let usable = (ssh || exec || gateway)
                     && route["workcell"]
                         .as_str()
                         .is_some_and(|w| w.starts_with("workcell:"));
                 if !usable {
                     return Err(AikitError::new(
                         "conversation.route",
-                        "A remote recipient's route needs kind `ssh` (a target) or `exec` (an absolute client path and cwd), and the Workcell that holds the session",
+                        "A remote recipient's route needs kind `gateway` (a declared Workcell endpoint), `ssh` (a target) or `exec` (an absolute client path and cwd), and the Workcell that holds the session",
                     ));
                 }
             }
@@ -1041,6 +1143,7 @@ impl EncounterService {
             Err(reason) => return set(reason.standing(), Some(reason.detail())),
         };
         let binding = match remote_encounter(
+            &self.home,
             route,
             &json!({"action": "agency-read", "agent_session": recipient.agent_session}),
         ) {
@@ -1067,7 +1170,7 @@ impl EncounterService {
                 },
             },
         });
-        match remote_encounter(route, &turn) {
+        match remote_encounter(&self.home, route, &turn) {
             Ok(result) => set(
                 "sent",
                 result
@@ -1109,13 +1212,13 @@ impl EncounterService {
             value["action"] = json!(action);
             value
         };
-        let Ok(delivery) = remote_encounter(route, &with_action("delivery")) else {
+        let Ok(delivery) = remote_encounter(&self.home, route, &with_action("delivery")) else {
             return Ok(());
         };
         if delivery.is_null() {
             return Ok(());
         }
-        let reply = remote_encounter(route, &with_action("delivery-reply")).unwrap_or(Value::Null);
+        let reply = remote_encounter(&self.home, route, &with_action("delivery-reply")).unwrap_or(Value::Null);
         self.store.conversation_record_remote(
             request,
             participant,

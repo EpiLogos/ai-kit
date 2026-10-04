@@ -51,6 +51,93 @@ const MARKER_WALK_DEPTH: usize = 8;
 /// `limit × projects`.
 const PER_REPO_MATCH_BUDGET: usize = 4000;
 
+/// Matching lines retained per file in the match pass. Scoring saturates at
+/// sixteen lines of mass, so more lines from one file only spend the budget
+/// other files need.
+const PER_FILE_MATCH_CAP: u64 = 16;
+
+/// Words that carry no retrieval evidence on their own. They match nearly
+/// every file, so as alternation terms they only spend the match budget.
+const STOP_WORDS: [&str; 48] = [
+    "a", "about", "after", "all", "an", "and", "any", "are", "as", "at", "be", "before", "but",
+    "by", "can", "do", "does", "for", "from", "has", "have", "how", "if", "in", "into", "is", "it",
+    "its", "not", "of", "on", "or", "should", "so", "that", "the", "their", "then", "there",
+    "this", "to", "was", "what", "when", "which", "why", "with", "without",
+];
+
+/// Most distinct terms one query sends to ripgrep.
+const MAX_QUERY_TERMS: usize = 12;
+
+/// The query's evidence-bearing terms: whitespace-split, case-folded for
+/// de-duplication, with stop words and one- or two-character fragments
+/// dropped. A query made only of such words keeps its original terms, so a
+/// deliberate short query still answers.
+pub fn query_terms(query: &str) -> Vec<String> {
+    let raw: Vec<String> = query
+        .split_whitespace()
+        .map(|term| {
+            term.trim_matches(|c: char| {
+                !(c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '#' | ':'))
+            })
+            .trim_end_matches(['.', ':'])
+            .to_owned()
+        })
+        .filter(|term| !term.is_empty())
+        .collect();
+    let mut seen = BTreeSet::new();
+    let specific: Vec<String> = raw
+        .iter()
+        .filter(|term| {
+            term.chars().count() >= 3 && !STOP_WORDS.contains(&term.to_lowercase().as_str())
+        })
+        .filter(|term| seen.insert(term.to_lowercase()))
+        .take(MAX_QUERY_TERMS)
+        .cloned()
+        .collect();
+    if specific.is_empty() {
+        let mut seen = BTreeSet::new();
+        return raw
+            .into_iter()
+            .filter(|term| seen.insert(term.to_lowercase()))
+            .take(MAX_QUERY_TERMS)
+            .collect();
+    }
+    specific
+}
+
+struct FileEvidence {
+    terms: BTreeSet<usize>,
+    lines: usize,
+    snippet: Option<String>,
+    first_line: u64,
+}
+
+/// Rarity weight per term across the files that matched: `ln(1 + N / df)`.
+/// A term no file carried keeps the weight of the rarest observed term, so a
+/// file is never credited for it and a query of unmatched terms scores zero.
+fn term_weights(terms: usize, files: &BTreeMap<PathBuf, FileEvidence>) -> Vec<f64> {
+    let total = files.len().max(1) as f64;
+    let mut frequency = vec![0usize; terms];
+    for evidence in files.values() {
+        for index in &evidence.terms {
+            if let Some(slot) = frequency.get_mut(*index) {
+                *slot += 1;
+            }
+        }
+    }
+    let rarest = (1.0 + total).ln();
+    frequency
+        .into_iter()
+        .map(|df| {
+            if df == 0 {
+                rarest
+            } else {
+                (1.0 + total / df as f64).ln()
+            }
+        })
+        .collect()
+}
+
 /// First-class content types swept per repo (addendum A-7). Per-repo result
 /// limits and the searcher's `--max-filesize` budget keep json-heavy and
 /// noise repos bounded.
@@ -409,9 +496,17 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
     }
 
     /// Search one repo: one ripgrep invocation over an alternation of the
-    /// escaped query terms, grouped per file and scored by how many distinct
-    /// terms the file carries. Files matching every term outrank partial
-    /// matches; within a class, more matching lines is more evidence.
+    /// escaped query terms, capped per file, grouped per file and scored by
+    /// how much *specific* evidence the file carries. Each term is weighted
+    /// by its rarity across the files that matched (a word every file
+    /// carries says little about which file answers), files matching every
+    /// term outrank partial matches, and more matching lines is a small tie
+    /// breaker.
+    ///
+    /// When the match pass still exceeds the retained budget, which files it
+    /// saw would depend on traversal order; the pass is then rescored from an
+    /// exact per-term count over the whole scope, so ranking never depends
+    /// on which files ripgrep's threads happened to reach first.
     ///
     /// The score is mapped into `[0, 0.5)` — strictly below the shared
     /// default the pre-existing pools answer at — so Work coverage ranks
@@ -460,6 +555,7 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
             hidden: false,
             max_file_bytes: crate::ripgrep::DEFAULT_MAX_FILE_BYTES,
             limit: PER_REPO_MATCH_BUDGET,
+            max_count_per_file: Some(PER_FILE_MATCH_CAP),
             timeout: Some(std::time::Duration::from_secs(30)),
         };
         let outcome = self.searcher.search(&request)?;
@@ -467,12 +563,6 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
         // matching line as the snippet. Term membership folds case, matching
         // the searcher's own case-folding.
         let lowered: Vec<String> = terms.iter().map(|term| term.to_lowercase()).collect();
-        struct FileEvidence {
-            terms: BTreeSet<usize>,
-            lines: usize,
-            snippet: Option<String>,
-            first_line: u64,
-        }
         let mut files: BTreeMap<PathBuf, FileEvidence> = BTreeMap::new();
         for matched in &outcome.matches {
             let Some(relative) = matched
@@ -505,10 +595,51 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
                 entry.snippet = Some(snippet.trim_end().to_string());
             }
         }
+        if outcome.truncated {
+            // The retained sample is traversal-ordered; replace its term
+            // evidence with an exact count per term over the whole scope,
+            // keeping the sample's snippets where it has them.
+            let mut exact: BTreeMap<PathBuf, FileEvidence> = BTreeMap::new();
+            for (index, term) in terms.iter().enumerate() {
+                let per_term = SearchRequest {
+                    pattern: term.clone(),
+                    regex: false,
+                    max_count_per_file: None,
+                    ..request.clone()
+                };
+                for (path, count) in self.searcher.count(&per_term)? {
+                    let Some(relative) = path
+                        .strip_prefix(&project.root)
+                        .ok()
+                        .map(|path| path.to_string_lossy().replace('\\', "/"))
+                    else {
+                        continue;
+                    };
+                    let relative = PathBuf::from(relative);
+                    let sampled = files.get(&relative);
+                    let entry = exact.entry(relative).or_insert(FileEvidence {
+                        terms: BTreeSet::new(),
+                        lines: 0,
+                        snippet: sampled.and_then(|evidence| evidence.snippet.clone()),
+                        first_line: sampled.map(|evidence| evidence.first_line).unwrap_or(1),
+                    });
+                    entry.terms.insert(index);
+                    entry.lines += count as usize;
+                }
+            }
+            files = exact;
+        }
+        let weights = term_weights(terms.len(), &files);
+        let total_weight: f64 = weights.iter().sum();
         let mut scored: Vec<(f64, PathBuf, FileEvidence)> = files
             .into_iter()
             .map(|(relative, evidence)| {
-                let coverage = evidence.terms.len() as f64 / terms.len() as f64;
+                let carried: f64 = evidence.terms.iter().map(|index| weights[*index]).sum();
+                let coverage = if total_weight > 0.0 {
+                    carried / total_weight
+                } else {
+                    0.0
+                };
                 let complete = if evidence.terms.len() == terms.len() {
                     1.0
                 } else {
@@ -553,11 +684,7 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
     }
 
     fn run_search(&self, query: &str, tags: &[String], limit: usize) -> Result<Vec<SourceHit>> {
-        let terms: Vec<String> = query
-            .split_whitespace()
-            .map(str::to_owned)
-            .filter(|term| !term.is_empty())
-            .collect();
+        let terms = query_terms(query);
         if terms.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
@@ -848,6 +975,123 @@ mod tests {
         assert_eq!(hits[0].provider.as_str(), WORK_REPOS_PROVIDER_REF);
         assert!(hits[0].tags.contains(&"work-repos".to_string()));
         assert!(hits.iter().all(|hit| hit.title.contains('.')));
+    }
+
+    #[test]
+    fn query_terms_drop_stop_words_and_fragments_but_keep_identifiers() {
+        assert_eq!(
+            query_terms("hook delivery of the prepared NOW context before the first model turn"),
+            vec!["hook", "delivery", "prepared", "NOW", "context", "first", "model", "turn"]
+        );
+        assert_eq!(
+            query_terms("why does prepare_now_context drop cap.aikit.continuity, #388?"),
+            vec![
+                "prepare_now_context",
+                "drop",
+                "cap.aikit.continuity",
+                "#388"
+            ]
+        );
+        // A query made only of weak words still answers on its own terms.
+        assert_eq!(query_terms("to be or"), vec!["to", "be", "or"]);
+        assert_eq!(query_terms("Hook hook HOOK"), vec!["Hook"]);
+    }
+
+    #[test]
+    fn a_rare_term_outweighs_several_common_ones() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        // `context` and `model` appear everywhere; `prepared` only in the
+        // design note. Before rarity weighting, three common terms beat one
+        // specific term.
+        let mut files: Vec<(String, u64, String)> = Vec::new();
+        for index in 0..8 {
+            files.push((
+                format!("src/noise{index}.rs"),
+                1,
+                "context model turn".into(),
+            ));
+        }
+        files.push(("docs/JEV-REDIS-NOW.md".into(), 4, "prepared context".into()));
+        let borrowed: Vec<(&str, u64, &str)> = files
+            .iter()
+            .map(|(path, line, text)| (path.as_str(), *line, text.as_str()))
+            .collect();
+        let provider = WorkReposSourcePoolProvider::connect(
+            scripted_matches(root, &borrowed),
+            "rg",
+            vec![project(root)],
+        );
+        let hits = provider
+            .search(
+                "prepared context model turn",
+                SourceSearchMode::Fulltext,
+                &[],
+                10,
+            )
+            .unwrap();
+        assert_eq!(
+            hits[0].source.as_str(),
+            "source:project:demo:docs/JEV-REDIS-NOW.md",
+            "the only file carrying the rare term ranks first: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn the_match_pass_caps_matches_per_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let recorder = RecordingRunner::new(ScriptedRunner::new());
+        let provider =
+            WorkReposSourcePoolProvider::connect(&recorder, "rg", vec![project(temp.path())]);
+        let _ = provider.search("prepared", SourceSearchMode::Fulltext, &[], 5);
+        let calls = recorder.calls();
+        let search = calls
+            .iter()
+            .find(|argv| argv.iter().any(|arg| arg == "--json"))
+            .expect("a search ran");
+        let cap = search
+            .iter()
+            .position(|arg| arg == "--max-count")
+            .expect("a per-file cap rides the match pass");
+        assert_eq!(search[cap + 1], PER_FILE_MATCH_CAP.to_string());
+    }
+
+    #[test]
+    fn a_truncated_match_pass_is_rescored_from_exact_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        // A traversal-ordered sample that filled the budget with a common
+        // word, never reaching the file that carries the rare one.
+        let mut lines = String::new();
+        for index in 0..(PER_REPO_MATCH_BUDGET + 1) {
+            lines.push_str(&format!(
+                r#"{{"type":"match","data":{{"path":{{"text":"{}"}},"lines":{{"text":"common\n"}},"line_number":1}}}}"#,
+                root.join(format!("src/noise{index}.rs")).display()
+            ));
+            lines.push('\n');
+        }
+        let answer = root.join("docs/answer.md").display().to_string();
+        let noise = root.join("src/noise0.rs").display().to_string();
+        let runner = ScriptedRunner::new()
+            .on("--version", "ripgrep 15.2.0")
+            .on("--json", &lines)
+            .on(
+                &format!("-e rareword {}", root.display()),
+                &format!("{answer}\u{0}3\n"),
+            )
+            .on(
+                &format!("-e common {}", root.display()),
+                &format!("{answer}\u{0}1\n{noise}\u{0}9\n"),
+            );
+        let provider = WorkReposSourcePoolProvider::connect(runner, "rg", vec![project(root)]);
+        let hits = provider
+            .search("rareword common", SourceSearchMode::Fulltext, &[], 5)
+            .unwrap();
+        assert_eq!(
+            hits[0].source.as_str(),
+            "source:project:demo:docs/answer.md",
+            "exact counts reach the file the truncated sample never saw: {hits:?}"
+        );
     }
 
     #[test]

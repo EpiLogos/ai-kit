@@ -1,0 +1,12 @@
+schema = 1
+id = "hook/aikit/development-entry"
+kind = "hook"
+name = "Development entry"
+description = "The prepared operative context of the work a body is carrying. When Refocus delivers (fresh occupancy, compaction, a current-work transition, sustained work) for a body whose Position carries exactly one current work, the native engine prepares that Run through the existing NOW preparation: the work child NOW's exact sources, the WorkflowUnit's authored concern, required difference, praxis, verification and Return, and the unit's capability rows from the Project matrix, published to the participant's Redis NOW. Nothing is inferred from chat text; no current work, no entry. Absent by default; configure redis_config. Delivery is emission on the harness context channel, not observed use."
+tags = ["aikit", "continuity", "now-context", "development", "entry"]
+[hook]
+entry = "payload/development-entry"
+events = ["SessionStart", "UserPromptSubmit", "PreCompact"]
+phase = "inject"
+failure = "open"
+timeout = "5s"
