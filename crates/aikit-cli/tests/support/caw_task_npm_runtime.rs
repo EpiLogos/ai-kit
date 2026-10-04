@@ -2232,7 +2232,7 @@ fn actual_codex_explicit_task_successor(full_owner_handoff: bool) {
         .unwrap()
         .to_owned();
     let session = ResourceRef::parse("agent-session/task").unwrap();
-    let store = aikit_store::EncounterStore::open(&world.home).unwrap();
+    let store = aikit_store::encounter::EncounterStore::open(&world.home).unwrap();
     let prior_binding = store.last_native_binding(&session).unwrap().unwrap();
     assert_eq!(prior_binding["native_session_id"], native);
     let generation = prior_binding["connection_generation"]

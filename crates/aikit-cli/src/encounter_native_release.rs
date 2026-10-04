@@ -55,7 +55,8 @@ pub(super) fn validate_predecessor(
             ));
         }
     }
-    let task = service.validate_successor_task(session, &expected.expected_task_revision, &basis)?;
+    let task =
+        service.validate_successor_task(session, &expected.expected_task_revision, &basis)?;
     Ok(json!({"predecessor":basis,"task":task,"native_resume":false}))
 }
 
