@@ -738,6 +738,41 @@ pub fn run_gateway_service_with_hooks(
     config: GatewayServiceConfig,
     hooks: GatewayServiceHooks,
 ) -> Result<()> {
+    run_gateway_service_with_listener(gateway, config, hooks, None)
+}
+
+/// Serve an already-held WebSocket listener through the same service owner.
+/// The configuration must declare its actual bound address. The caller never
+/// releases the port between allocating it and handing it to the service.
+pub fn run_gateway_service_on_websocket_listener(
+    gateway: AgencyGateway,
+    config: GatewayServiceConfig,
+    hooks: GatewayServiceHooks,
+    listener: TcpListener,
+) -> Result<()> {
+    let address = listener.local_addr().map_err(|error| {
+        AikitError::new(
+            "agency_gateway_service.websocket_address",
+            format!("read held WebSocket listener address: {error}"),
+        )
+        .with_io_source(error)
+    })?;
+    let address = address.to_string();
+    if config.websocket_bind.as_deref() != Some(address.as_str()) {
+        return Err(AikitError::new(
+            "agency_gateway_service.websocket_listener_mismatch",
+            "the configured WebSocket address must name the held listener's actual bound address",
+        ));
+    }
+    run_gateway_service_with_listener(gateway, config, hooks, Some(listener))
+}
+
+fn run_gateway_service_with_listener(
+    gateway: AgencyGateway,
+    config: GatewayServiceConfig,
+    hooks: GatewayServiceHooks,
+    listener: Option<TcpListener>,
+) -> Result<()> {
     let GatewayServiceHooks {
         ticks,
         occupancy,
@@ -964,6 +999,7 @@ pub fn run_gateway_service_with_hooks(
         workers.push(thread::spawn(move || {
             let result = bind_and_serve_websocket(
                 &reading,
+                listener,
                 gateway,
                 Arc::clone(&shutdown),
                 token,
@@ -1844,6 +1880,7 @@ fn refusal_for_unparsed_request(
 #[allow(clippy::too_many_arguments)] // the carrier's facts are distinct; a bundle would only rename them
 fn bind_and_serve_websocket(
     reading: &dyn Fn(ListenerState, Option<String>) -> GatewayListenerReading,
+    held_listener: Option<TcpListener>,
     gateway: Arc<Mutex<AgencyGateway>>,
     shutdown: Arc<AtomicBool>,
     token: String,
@@ -1855,35 +1892,38 @@ fn bind_and_serve_websocket(
 ) -> Result<()> {
     let bind = reading(ListenerState::Bound, None).bind;
     let mut announced = false;
-    let listener = loop {
-        match TcpListener::bind(&bind) {
-            Ok(listener) => break listener,
-            Err(error) if error.kind() == io::ErrorKind::AddrNotAvailable => {
-                let detail = format!(
-                    "{bind} is not an address of this machine yet ({error}); retrying every 2s \
-                     while the other carriers serve"
-                );
-                runtime
-                    .process
-                    .set_listener(reading(ListenerState::Waiting, Some(detail.clone())));
-                if !announced {
-                    eprintln!("gateway WebSocket carrier waiting: {detail}");
-                    announced = true;
-                }
-                for _ in 0..20 {
-                    if shutdown.load(Ordering::SeqCst) {
-                        return Ok(());
+    let listener = match held_listener {
+        Some(listener) => listener,
+        None => loop {
+            match TcpListener::bind(&bind) {
+                Ok(listener) => break listener,
+                Err(error) if error.kind() == io::ErrorKind::AddrNotAvailable => {
+                    let detail = format!(
+                        "{bind} is not an address of this machine yet ({error}); retrying every 2s \
+                         while the other carriers serve"
+                    );
+                    runtime
+                        .process
+                        .set_listener(reading(ListenerState::Waiting, Some(detail.clone())));
+                    if !announced {
+                        eprintln!("gateway WebSocket carrier waiting: {detail}");
+                        announced = true;
                     }
-                    thread::sleep(Duration::from_millis(100));
+                    for _ in 0..20 {
+                        if shutdown.load(Ordering::SeqCst) {
+                            return Ok(());
+                        }
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                }
+                Err(error) => {
+                    return Err(AikitError::new(
+                        "agency_gateway_service.websocket_bind",
+                        format!("bind WebSocket gateway at {bind}: {error}"),
+                    ));
                 }
             }
-            Err(error) => {
-                return Err(AikitError::new(
-                    "agency_gateway_service.websocket_bind",
-                    format!("bind WebSocket gateway at {bind}: {error}"),
-                ));
-            }
-        }
+        },
     };
     listener.set_nonblocking(true).map_err(|error| {
         AikitError::new(
@@ -1891,9 +1931,16 @@ fn bind_and_serve_websocket(
             format!("configure WebSocket listener {bind}: {error}"),
         )
     })?;
-    runtime
-        .process
-        .set_listener(reading(ListenerState::Bound, None));
+    let address = listener.local_addr().map_err(|error| {
+        AikitError::new(
+            "agency_gateway_service.websocket_address",
+            format!("read bound WebSocket listener address: {error}"),
+        )
+        .with_io_source(error)
+    })?;
+    let mut bound = reading(ListenerState::Bound, None);
+    bound.bind = address.to_string();
+    runtime.process.set_bound_listener(&bind, bound);
     serve_websocket_listener(
         listener,
         gateway,
