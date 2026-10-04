@@ -44,12 +44,10 @@ fn native_pi_package_exports_discovers_and_invokes_real_source_tool() {
     let out = temp.path().join("export");
     write_tree(&out, &files).unwrap();
     let map = read_tree(&out).unwrap();
-    assert!(
-        target
-            .structural_validation(&map)
-            .iter()
-            .all(|f| f.severity != Severity::Error)
-    );
+    assert!(target
+        .structural_validation(&map)
+        .iter()
+        .all(|f| f.severity != Severity::Error));
     let (native, discovery) = pi_discover(target.as_ref(), &out, &pkg, &plan);
     assert_eq!(native.status, CheckStatus::Passed, "{}", native.summary);
     assert_eq!(discovery.unwrap().status, CheckStatus::Passed);

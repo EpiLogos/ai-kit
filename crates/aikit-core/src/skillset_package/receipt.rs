@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::model::PortableSkillPackage;
-use super::target::{Finding, GENERATOR, PackagePlan, PlanClass, RenderedFile, Severity};
+use super::target::{Finding, PackagePlan, PlanClass, RenderedFile, Severity, GENERATOR};
 
 pub const RECEIPT_SCHEMA: &str = "aikit.skillset-package-receipt/v1";
 pub const DIFF_SCHEMA: &str = "aikit.skillset-package-diff/v1";

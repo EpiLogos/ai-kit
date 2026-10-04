@@ -14,17 +14,17 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use clap::{Args, Subcommand};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use aikit_adapters::clients::agent_skills;
 use aikit_core::capsule::Payload;
 use aikit_core::catalog::Catalog;
 use aikit_core::skillset::SkillSet;
 use aikit_core::skillset_package::{
-    self as pkgsdk, CheckStatus, Discovery, FileMap, NativeValidation, PROVENANCE_FILE,
-    PackageFile, PackageMember, PackageMetadata, PackagePlan, PackageSource, PackageTarget,
-    PortableSkillPackage, Receipt, RenderedContent, RenderedFile, Severity, TargetId,
-    UnresolvedMember, Validation, diff_provenance, plan_and_render, sha256_hex, target_for,
+    self as pkgsdk, diff_provenance, plan_and_render, sha256_hex, target_for, CheckStatus,
+    Discovery, FileMap, NativeValidation, PackageFile, PackageMember, PackageMetadata, PackagePlan,
+    PackageSource, PackageTarget, PortableSkillPackage, Receipt, RenderedContent, RenderedFile,
+    Severity, TargetId, UnresolvedMember, Validation, PROVENANCE_FILE,
 };
 use aikit_core::{AikitError, Result};
 use aikit_store::home::AikitHome;

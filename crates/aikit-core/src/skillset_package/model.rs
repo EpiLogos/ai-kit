@@ -9,10 +9,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::method::{PraxisForm, praxis_form};
+use crate::method::{praxis_form, PraxisForm};
 use crate::{AikitError, Result};
 
-use super::digest::{Sha256, sha256_hex};
+use super::digest::{sha256_hex, Sha256};
 use super::target::TargetId;
 
 pub const PORTABLE_PACKAGE_SCHEMA: &str = "aikit.portable-skill-package/v1";

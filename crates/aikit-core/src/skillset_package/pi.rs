@@ -10,11 +10,11 @@
 
 use std::path::Path;
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::{AikitError, Result};
 
-use super::model::{HookEvent, PortableSkillPackage, native_tool_module_path};
+use super::model::{native_tool_module_path, HookEvent, PortableSkillPackage};
 use super::target::*;
 
 const MANIFEST: &str = "package.json";

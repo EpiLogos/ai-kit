@@ -54,12 +54,10 @@ fn native_tool_payload_is_preserved_and_registered_as_an_extension() {
         include_bytes!("../../../aikit-cli/tests/fixtures/package-native-read.ts")
     );
     assert!(!map.contains_key("extensions/native-source-tools-aikit.ts"));
-    assert!(
-        pi::PiTarget
-            .structural_validation(&map)
-            .iter()
-            .all(|f| f.severity != Severity::Error)
-    );
+    assert!(pi::PiTarget
+        .structural_validation(&map)
+        .iter()
+        .all(|f| f.severity != Severity::Error));
     assert!(plan.has("native-tool:pi:package_native_read").is_some());
     assert_eq!(
         provenance(&pkg, &plan)["native_tools"][0]["member_id"],
@@ -177,13 +175,11 @@ fn overlay_cannot_remove_native_module_or_generated_hook_extension() {
         .unwrap()
         .targets
         .insert("pi".into(), json!({ "pi": null }));
-    assert!(
-        plan_and_render(
-            &pi::PiTarget,
-            &PortableSkillPackage::build(invalid).unwrap()
-        )
-        .is_err()
-    );
+    assert!(plan_and_render(
+        &pi::PiTarget,
+        &PortableSkillPackage::build(invalid).unwrap()
+    )
+    .is_err());
 }
 
 #[test]
