@@ -133,7 +133,9 @@ fn selected_native_session_space_driver(evidence: &Path) -> PathBuf {
     };
     assert!(metadata.is_file());
     assert_eq!(basis(&metadata), basis(&named_before));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    // The supported debug driver is nearly 600 MiB. Keep full SHA256 and
+    // custody checks finite without making debug hashing a startup failure.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     let mut digest = Sha256::new();
     let mut buffer = [0u8; 65_536];
     let mut bytes = 0u64;
