@@ -148,8 +148,20 @@ impl Fixture {
         .unwrap();
         let after = fs::metadata(binary).unwrap();
         assert_eq!(
-            (before.dev(), before.ino(), before.len(), before.mtime(), before.mtime_nsec()),
-            (after.dev(), after.ino(), after.len(), after.mtime(), after.mtime_nsec()),
+            (
+                before.dev(),
+                before.ino(),
+                before.len(),
+                before.mtime(),
+                before.mtime_nsec()
+            ),
+            (
+                after.dev(),
+                after.ino(),
+                after.len(),
+                after.mtime(),
+                after.mtime_nsec()
+            ),
             "Actual configured/compiled image changed across the invocation"
         );
         self.require_owned();
@@ -165,7 +177,10 @@ impl Fixture {
         let provider: EncounterProvider =
             serde_json::from_slice(&fs::read(self.provider_path()).unwrap()).unwrap();
         assert_eq!(provider.id, "epi-prime-ql");
-        assert_eq!(provider.body_ref.as_deref(), Some("agent-body/epi-prime-ql"));
+        assert_eq!(
+            provider.body_ref.as_deref(),
+            Some("agent-body/epi-prime-ql")
+        );
         assert_eq!(provider.body_revision.as_deref(), Some(BODY_REVISION));
         assert!(provider.now_context.is_none());
         assert!(provider.model_policy.is_none());
@@ -178,7 +193,10 @@ impl Fixture {
     fn finish(mut self) {
         self.require_owned();
         fs::remove_dir_all(&self.root).unwrap_or_else(|error| {
-            panic!("Actual completed fixture cleanup failed at {}: {error:?}", self.root.display())
+            panic!(
+                "Actual completed fixture cleanup failed at {}: {error:?}",
+                self.root.display()
+            )
         });
         self.disposed = true;
     }
@@ -187,15 +205,27 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         if !self.disposed {
-            eprintln!("Retained actual configuration/capture fixture: {}", self.root.display());
+            eprintln!(
+                "Retained actual configuration/capture fixture: {}",
+                self.root.display()
+            );
         }
     }
 }
 
 fn value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
-    let positions: Vec<_> = argv.iter().enumerate().filter(|(_, arg)| arg.as_str() == flag).collect();
-    assert!(positions.len() <= 1, "Duplicate native owner argument: {flag}");
-    positions.first().map(|(index, _)| argv[*index + 1].as_str())
+    let positions: Vec<_> = argv
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| arg.as_str() == flag)
+        .collect();
+    assert!(
+        positions.len() <= 1,
+        "Duplicate native owner argument: {flag}"
+    );
+    positions
+        .first()
+        .map(|(index, _)| argv[*index + 1].as_str())
 }
 
 #[test]
@@ -205,8 +235,14 @@ fn actual_root_configure_preserves_absent_project_and_native_configuration() {
     let root = fixture.central();
     let output = fixture.configure(&[("--central-ctrl-bin", binary), ("--central-root", &root)]);
     let provider = fixture.require_configured(&output);
-    assert_eq!(value(&provider.argv, "--central-ctrl-bin"), binary.canonicalize().unwrap().to_str());
-    assert_eq!(value(&provider.argv, "--central-root"), root.canonicalize().unwrap().to_str());
+    assert_eq!(
+        value(&provider.argv, "--central-ctrl-bin"),
+        binary.canonicalize().unwrap().to_str()
+    );
+    assert_eq!(
+        value(&provider.argv, "--central-root"),
+        root.canonicalize().unwrap().to_str()
+    );
     assert_eq!(value(&provider.argv, "--central-project"), None);
     fixture.finish();
 }
@@ -217,12 +253,19 @@ fn actual_project_configure_preserves_exact_literal_project() {
     let binary = Path::new(env!("CARGO_BIN_EXE_aikit"));
     let root = fixture.central();
     let output = fixture.configure(&[
-        ("--central-ctrl-bin", binary), ("--central-root", &root),
+        ("--central-ctrl-bin", binary),
+        ("--central-root", &root),
         ("--central-project", Path::new("literal-project/key")),
     ]);
     let provider = fixture.require_configured(&output);
-    assert_eq!(value(&provider.argv, "--central-project"), Some("literal-project/key"));
-    assert_eq!(value(&provider.argv, "--central-root"), root.canonicalize().unwrap().to_str());
+    assert_eq!(
+        value(&provider.argv, "--central-project"),
+        Some("literal-project/key")
+    );
+    assert_eq!(
+        value(&provider.argv, "--central-root"),
+        root.canonicalize().unwrap().to_str()
+    );
     fixture.finish();
 }
 
@@ -244,7 +287,11 @@ fn require_refusal_preserves_provider(fixture: &mut Fixture, owner: &[(&str, &Pa
     let output = fixture.configure(owner);
     assert_eq!(output.status, 1);
     assert!(output.stdout.is_empty());
-    assert!(output.stderr.starts_with("encounter.prime_configuration:"), "{}", output.stderr);
+    assert!(
+        output.stderr.starts_with("encounter.prime_configuration:"),
+        "{}",
+        output.stderr
+    );
     assert_eq!(fs::read(&path).unwrap(), before);
     let after = fs::metadata(&path).unwrap();
     assert_eq!((metadata.dev(), metadata.ino()), (after.dev(), after.ino()));
@@ -260,8 +307,14 @@ fn actual_partial_central_owner_refuses_before_provider_replacement() {
         vec![("--central-ctrl-bin", binary)],
         vec![("--central-root", root.as_path())],
         vec![("--central-project", project)],
-        vec![("--central-ctrl-bin", binary), ("--central-project", project)],
-        vec![("--central-root", root.as_path()), ("--central-project", project)],
+        vec![
+            ("--central-ctrl-bin", binary),
+            ("--central-project", project),
+        ],
+        vec![
+            ("--central-root", root.as_path()),
+            ("--central-project", project),
+        ],
     ] {
         require_refusal_preserves_provider(&mut fixture, &owner);
     }
@@ -274,11 +327,23 @@ fn actual_missing_or_wrong_form_central_owner_refuses_before_provider_replacemen
     let binary = Path::new(env!("CARGO_BIN_EXE_aikit"));
     let root = fixture.central();
     let absent = fixture.root.join("actually-absent");
-    assert_eq!(fs::symlink_metadata(&absent).unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(
+        fs::symlink_metadata(&absent).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
     for owner in [
-        vec![("--central-ctrl-bin", absent.as_path()), ("--central-root", root.as_path())],
-        vec![("--central-ctrl-bin", binary), ("--central-root", absent.as_path())],
-        vec![("--central-ctrl-bin", root.as_path()), ("--central-root", root.as_path())],
+        vec![
+            ("--central-ctrl-bin", absent.as_path()),
+            ("--central-root", root.as_path()),
+        ],
+        vec![
+            ("--central-ctrl-bin", binary),
+            ("--central-root", absent.as_path()),
+        ],
+        vec![
+            ("--central-ctrl-bin", root.as_path()),
+            ("--central-root", root.as_path()),
+        ],
         vec![("--central-ctrl-bin", binary), ("--central-root", binary)],
     ] {
         require_refusal_preserves_provider(&mut fixture, &owner);

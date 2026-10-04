@@ -17,9 +17,12 @@ pub struct NativeCapture {
 
 impl fmt::Debug for NativeCapture {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("NativeCapture").field("status", &self.status)
-            .field("stdout_bytes", &self.stdout.len()).field("stderr_bytes", &self.stderr.len())
-            .field("output", &"[private actual native output withheld]").finish()
+        f.debug_struct("NativeCapture")
+            .field("status", &self.status)
+            .field("stdout_bytes", &self.stdout.len())
+            .field("stderr_bytes", &self.stderr.len())
+            .field("output", &"[private actual native output withheld]")
+            .finish()
     }
 }
 
@@ -84,7 +87,8 @@ impl AikitError {
         if let Some(source) = &cause.io_source {
             self.secondary_io_sources.push(source.clone());
         }
-        self.secondary_io_sources.extend(cause.secondary_io_sources.iter().cloned());
+        self.secondary_io_sources
+            .extend(cause.secondary_io_sources.iter().cloned());
         self
     }
 
@@ -95,25 +99,46 @@ impl AikitError {
     /// Existing native error evidence, intentionally absent from public JSON
     /// details and diagnostics. Callers must supply the actual bounded capture.
     #[must_use]
-    pub fn with_native_capture(mut self, status: Option<i32>, stdout: Vec<u8>, stderr: Vec<u8>) -> Self {
-        self.native_capture = Some(Arc::new(NativeCapture { status, stdout, stderr })); self
+    pub fn with_native_capture(
+        mut self,
+        status: Option<i32>,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    ) -> Self {
+        self.native_capture = Some(Arc::new(NativeCapture {
+            status,
+            stdout,
+            stderr,
+        }));
+        self
     }
-    pub fn native_capture(&self) -> Option<&NativeCapture> { self.native_capture.as_deref() }
+    pub fn native_capture(&self) -> Option<&NativeCapture> {
+        self.native_capture.as_deref()
+    }
     #[must_use]
     pub fn with_private_native_cause(mut self, cause: &Self) -> Self {
-        self.private_native_cause = Some(Arc::new(cause.clone())); self
+        self.private_native_cause = Some(Arc::new(cause.clone()));
+        self
     }
-    pub fn private_native_cause(&self) -> Option<&Self> { self.private_native_cause.as_deref() }
+    pub fn private_native_cause(&self) -> Option<&Self> {
+        self.private_native_cause.as_deref()
+    }
 
     /// Actual already-parsed native result, distinct from raw capture/status.
     #[must_use]
     pub fn with_native_result(mut self, actual: serde_json::Value) -> Self {
-        self.native_result = Some(Arc::new(actual)); self
+        self.native_result = Some(Arc::new(actual));
+        self
     }
-    pub fn native_result(&self) -> Option<&serde_json::Value> { self.native_result.as_deref() }
+    pub fn native_result(&self) -> Option<&serde_json::Value> {
+        self.native_result.as_deref()
+    }
     #[must_use]
     pub fn with_native_result_from(self, actual: Option<&serde_json::Value>) -> Self {
-        match actual { Some(actual) => self.with_native_result(actual.clone()), None => self }
+        match actual {
+            Some(actual) => self.with_native_result(actual.clone()),
+            None => self,
+        }
     }
 
     pub fn code(&self) -> &'static str {
@@ -131,12 +156,40 @@ impl AikitError {
 
 impl fmt::Debug for AikitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AikitError").field("code", &self.code).field("message", &self.message)
-            .field("details", &self.details).field("io_source", &self.io_source.as_ref().map(|cause| (cause.kind(), cause.raw_os_error())))
-            .field("secondary_io_sources", &self.secondary_io_sources.iter().map(|cause| (cause.kind(), cause.raw_os_error())).collect::<Vec<_>>())
+        f.debug_struct("AikitError")
+            .field("code", &self.code)
+            .field("message", &self.message)
+            .field("details", &self.details)
+            .field(
+                "io_source",
+                &self
+                    .io_source
+                    .as_ref()
+                    .map(|cause| (cause.kind(), cause.raw_os_error())),
+            )
+            .field(
+                "secondary_io_sources",
+                &self
+                    .secondary_io_sources
+                    .iter()
+                    .map(|cause| (cause.kind(), cause.raw_os_error()))
+                    .collect::<Vec<_>>(),
+            )
             .field("native_capture", &self.native_capture)
-            .field("private_native_cause", &self.private_native_cause.as_ref().map(|_| "[private actual native error withheld]"))
-            .field("native_result", &self.native_result.as_ref().map(|_| "[private actual parsed native result withheld]"))
+            .field(
+                "private_native_cause",
+                &self
+                    .private_native_cause
+                    .as_ref()
+                    .map(|_| "[private actual native error withheld]"),
+            )
+            .field(
+                "native_result",
+                &self
+                    .native_result
+                    .as_ref()
+                    .map(|_| "[private actual parsed native result withheld]"),
+            )
             .finish()
     }
 }
@@ -168,7 +221,9 @@ impl fmt::Display for AikitError {
 
 impl std::error::Error for AikitError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.io_source.as_deref().map(|cause| cause as &dyn std::error::Error)
+        self.io_source
+            .as_deref()
+            .map(|cause| cause as &dyn std::error::Error)
     }
 }
 
@@ -204,7 +259,10 @@ mod tests {
         if !metadata.is_dir() {
             return Err(std::io::Error::other("held test object is not a directory"));
         }
-        Ok(DirectoryCustody::UnixObject { device: metadata.dev(), inode: metadata.ino() })
+        Ok(DirectoryCustody::UnixObject {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
     }
 
     #[cfg(windows)]
@@ -212,7 +270,9 @@ mod tests {
         use std::os::windows::fs::MetadataExt;
         let metadata = file.metadata()?;
         if !metadata.is_dir() || metadata.file_attributes() & 0x400 != 0 {
-            return Err(std::io::Error::other("held test object must be a physical directory"));
+            return Err(std::io::Error::other(
+                "held test object must be a physical directory",
+            ));
         }
         // open_directory owns the native sharing restriction for this handle.
         // This names that custody mechanism, not an object ID or equality proof.
@@ -221,20 +281,26 @@ mod tests {
 
     #[cfg(not(any(unix, windows)))]
     fn directory_custody(_: &std::fs::File) -> std::io::Result<DirectoryCustody> {
-        Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
-            "native test directory custody is unavailable on this platform"))
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "native test directory custody is unavailable on this platform",
+        ))
     }
 
     fn open_directory(path: &std::path::Path) -> std::io::Result<std::fs::File> {
         let named = std::fs::symlink_metadata(path)?;
         if !named.is_dir() || named.file_type().is_symlink() {
-            return Err(std::io::Error::other("test directory must be physical and non-symlink"));
+            return Err(std::io::Error::other(
+                "test directory must be physical and non-symlink",
+            ));
         }
         #[cfg(windows)]
         {
             use std::os::windows::fs::MetadataExt;
             if named.file_attributes() & 0x400 != 0 {
-                return Err(std::io::Error::other("named test directory is a reparse object"));
+                return Err(std::io::Error::other(
+                    "named test directory is a reparse object",
+                ));
             }
         }
         let mut options = std::fs::OpenOptions::new();
@@ -273,18 +339,22 @@ mod tests {
             use std::os::unix::fs::MetadataExt;
             let opened = held.metadata()?;
             if (named.dev(), named.ino()) != (opened.dev(), opened.ino()) {
-                return Err(std::io::Error::other("test directory changed while opening"));
+                return Err(std::io::Error::other(
+                    "test directory changed while opening",
+                ));
             }
         }
         Ok(held)
     }
 
-    fn require_affiliation(path: &std::path::Path, held: &std::fs::File,
-        expected: &DirectoryCustody) -> std::io::Result<()> {
+    fn require_affiliation(
+        path: &std::path::Path,
+        held: &std::fs::File,
+        expected: &DirectoryCustody,
+    ) -> std::io::Result<()> {
         let named = open_directory(path)?;
         #[cfg(unix)]
-        if &directory_custody(held)? != expected
-            || &directory_custody(&named)? != expected {
+        if &directory_custody(held)? != expected || &directory_custody(&named)? != expected {
             return Err(std::io::Error::other("owned test directory object changed"));
         }
         #[cfg(windows)]
@@ -305,7 +375,9 @@ mod tests {
             directory_custody(&named)?;
         }
         if std::fs::canonicalize(path)? != path {
-            return Err(std::io::Error::other("owned test directory canonical affiliation changed"));
+            return Err(std::io::Error::other(
+                "owned test directory canonical affiliation changed",
+            ));
         }
         Ok(())
     }
@@ -321,7 +393,11 @@ mod tests {
             let file = open_directory(&path)?;
             let custody = directory_custody(&file)?;
             require_affiliation(&path, &file, &custody)?;
-            Ok(Self { path, file, custody })
+            Ok(Self {
+                path,
+                file,
+                custody,
+            })
         }
 
         fn check(&self) -> std::io::Result<()> {
@@ -340,34 +416,49 @@ mod tests {
     impl OwnedDirectory {
         fn new() -> Self {
             let product = std::fs::canonicalize(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
-                .expect("actual compiled Core product coordinate");
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            )
+            .expect("actual compiled Core product coordinate");
             let scratch = product.join("ProjectCentral/now/tmp");
             let requested_root = std::env::var_os("AIKIT_CORE_TEST_ROOT").map(|requested| {
                 let requested = PathBuf::from(requested);
-                assert!(requested.is_absolute(), "explicit Core test root must be absolute");
+                assert!(
+                    requested.is_absolute(),
+                    "explicit Core test root must be absolute"
+                );
                 let physical = std::fs::canonicalize(&requested)
                     .expect("explicit Core test root must already exist");
-                assert_eq!(physical, requested, "explicit Core test root must be physical");
-                assert!(physical.starts_with(&scratch),
-                    "explicit Core test root must remain in this product Run space");
+                assert_eq!(
+                    physical, requested,
+                    "explicit Core test root must be physical"
+                );
+                assert!(
+                    physical.starts_with(&scratch),
+                    "explicit Core test root must remain in this product Run space"
+                );
                 physical
             });
             let mut parents = vec![HeldDirectory::open(product.clone())
                 .expect("hold physical compiled Core product directory")];
             let mut current = product;
             for member in ["ProjectCentral", "now", "tmp"] {
-                check_parents(&parents).expect("held product ancestors before Run-space preparation");
+                check_parents(&parents)
+                    .expect("held product ancestors before Run-space preparation");
                 current.push(member);
                 if requested_root.is_none() {
                     match std::fs::create_dir(&current) {
                         Ok(()) => {}
                         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                        Err(error) => panic!("create product test Run space {}: {error}", current.display()),
+                        Err(error) => panic!(
+                            "create product test Run space {}: {error}",
+                            current.display()
+                        ),
                     }
                 }
-                parents.push(HeldDirectory::open(current.clone())
-                    .expect("hold physical product test Run-space ancestor"));
+                parents.push(
+                    HeldDirectory::open(current.clone())
+                        .expect("hold physical product test Run-space ancestor"),
+                );
             }
             let root = match requested_root {
                 Some(root) => {
@@ -375,14 +466,17 @@ mod tests {
                     for member in relative.components() {
                         check_parents(&parents).expect("held explicit test-root ancestors");
                         current.push(member);
-                        parents.push(HeldDirectory::open(current.clone())
-                            .expect("hold physical explicit test-root ancestor"));
+                        parents.push(
+                            HeldDirectory::open(current.clone())
+                                .expect("hold physical explicit test-root ancestor"),
+                        );
                     }
                     root
                 }
                 None => current,
             };
-            check_parents(&parents).expect("actual Core test-root affiliation before fixture creation");
+            check_parents(&parents)
+                .expect("actual Core test-root affiliation before fixture creation");
             let path = root.join(format!("aikit-error-{}", ulid::Ulid::generate()));
             std::fs::create_dir(&path).expect("create a fresh owned Core test directory");
             let held = HeldDirectory::open(path.clone()).expect("hold fresh Core test directory");
@@ -395,20 +489,28 @@ mod tests {
 
     impl Drop for OwnedDirectory {
         fn drop(&mut self) {
-            let cleanup = check_parents(&self.2).and_then(|()| {
-                self.1.as_ref().expect("owned Core fixture handle retained until cleanup").check()
-            }).and_then(|()| {
-                // Windows must close only the fixture's deletion-excluding
-                // handle, while every parent/root remains held. This final
-                // close-to-remove interval is not an atomic conditional delete.
-                #[cfg(windows)]
-                drop(self.1.take());
-                // Unix has a finite check-to-unlink interval too. These tests
-                // leave an empty directory; never recursively remove a child.
-                std::fs::remove_dir(&self.0)
-            });
+            let cleanup = check_parents(&self.2)
+                .and_then(|()| {
+                    self.1
+                        .as_ref()
+                        .expect("owned Core fixture handle retained until cleanup")
+                        .check()
+                })
+                .and_then(|()| {
+                    // Windows must close only the fixture's deletion-excluding
+                    // handle, while every parent/root remains held. This final
+                    // close-to-remove interval is not an atomic conditional delete.
+                    #[cfg(windows)]
+                    drop(self.1.take());
+                    // Unix has a finite check-to-unlink interval too. These tests
+                    // leave an empty directory; never recursively remove a child.
+                    std::fs::remove_dir(&self.0)
+                });
             if let Err(error) = cleanup {
-                eprintln!("Core test cleanup uncertain; retained {}: {error}", self.0.display());
+                eprintln!(
+                    "Core test cleanup uncertain; retained {}: {error}",
+                    self.0.display()
+                );
                 if !std::thread::panicking() {
                     panic!("owned Core test directory cleanup failed: {error}");
                 }
@@ -432,24 +534,57 @@ mod tests {
         assert_eq!(physical.code(), domain.code());
         assert_eq!(physical.message(), domain.message());
         assert_eq!(physical.details(), domain.details());
-        let original = physical.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
-        let retained = cloned.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        let original = physical
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        let retained = cloned
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
         assert_eq!(original.raw_os_error(), errno);
         assert_eq!(retained.kind(), std::io::ErrorKind::NotFound);
-        assert!(std::ptr::eq(original, retained), "clone preserves the original cause object");
+        assert!(
+            std::ptr::eq(original, retained),
+            "clone preserves the original cause object"
+        );
     }
 
     #[test]
     fn actual_primary_and_secondary_io_objects_survive_wrap_and_clone() {
         let owned = OwnedDirectory::new();
-        let first = AikitError::new("source.primary", "primary native failure").with_io_source(std::fs::File::open(owned.0.join("missing-primary")).unwrap_err());
-        let second = AikitError::new("source.secondary", "secondary native readback failure").with_io_source(std::fs::File::open(owned.0.join("missing-secondary")).unwrap_err());
-        let combined = AikitError::new("source.uncertain", "original effect uncertain").with_io_source_from(&first).with_secondary_io_source_from(&second);
+        let first = AikitError::new("source.primary", "primary native failure")
+            .with_io_source(std::fs::File::open(owned.0.join("missing-primary")).unwrap_err());
+        let second = AikitError::new("source.secondary", "secondary native readback failure")
+            .with_io_source(std::fs::File::open(owned.0.join("missing-secondary")).unwrap_err());
+        let combined = AikitError::new("source.uncertain", "original effect uncertain")
+            .with_io_source_from(&first)
+            .with_secondary_io_source_from(&second);
         let retained = combined.clone();
-        let primary = first.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
-        let secondary = second.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
-        assert!(std::ptr::eq(primary, retained.source().unwrap().downcast_ref::<std::io::Error>().unwrap()));
-        assert!(std::ptr::eq(secondary, retained.secondary_io_sources().next().unwrap()));
+        let primary = first
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        let secondary = second
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        assert!(std::ptr::eq(
+            primary,
+            retained
+                .source()
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+        ));
+        assert!(std::ptr::eq(
+            secondary,
+            retained.secondary_io_sources().next().unwrap()
+        ));
         assert_eq!(retained.secondary_io_sources().count(), 1);
     }
 
@@ -461,15 +596,33 @@ mod tests {
         let errno = cause.raw_os_error();
         let inner = AikitError::new("source.unavailable", "original native read failure")
             .with_io_source(cause);
-        let envelope = AikitError::new("source.effect_uncertain", "actual effect readback unavailable")
-            .with("published", "true");
+        let envelope = AikitError::new(
+            "source.effect_uncertain",
+            "actual effect readback unavailable",
+        )
+        .with("published", "true");
         let outer = envelope.clone().with_io_source_from(&inner);
         let cloned = outer.clone().with("published", "true");
-        assert_eq!(outer, envelope, "domain equality does not claim effect or IO equality");
+        assert_eq!(
+            outer, envelope,
+            "domain equality does not claim effect or IO equality"
+        );
         assert_eq!(outer.to_string(), envelope.to_string());
-        let original = inner.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
-        let forwarded = outer.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
-        let retained = cloned.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        let original = inner
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        let forwarded = outer
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        let retained = cloned
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
         assert_eq!(forwarded.kind(), std::io::ErrorKind::NotFound);
         assert_eq!(forwarded.raw_os_error(), errno);
         assert!(std::ptr::eq(original, forwarded));
@@ -482,15 +635,24 @@ mod tests {
         let missing = std::fs::read(owned.0.join("missing-source")).unwrap_err();
         let directory = std::fs::read(&owned.0).unwrap_err();
         assert_ne!(missing.kind(), directory.kind());
-        let first = AikitError::new("source.unavailable", "source read unavailable").with_io_source(missing);
-        let second = AikitError::new("source.unavailable", "source read unavailable").with_io_source(directory);
+        let first = AikitError::new("source.unavailable", "source read unavailable")
+            .with_io_source(missing);
+        let second = AikitError::new("source.unavailable", "source read unavailable")
+            .with_io_source(directory);
         assert_eq!(first, second, "existing domain equality remains compatible");
-        let first_cause = first.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
-        let second_cause = second.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        let first_cause = first
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        let second_cause = second
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
         assert_ne!(first_cause.kind(), second_cause.kind());
         assert!(!std::ptr::eq(first_cause, second_cause));
     }
-
 
     #[test]
     fn actual_directory_form_and_reparse_refusal_retains_targets() {
@@ -499,21 +661,31 @@ mod tests {
         std::fs::write(&ordinary, b"retained ordinary bytes").unwrap();
         let wrong_form = open_directory(&ordinary).unwrap_err();
         eprintln!("actual ordinary-file refusal: {wrong_form}");
-        assert_eq!(std::fs::read(&ordinary).unwrap(), b"retained ordinary bytes");
+        assert_eq!(
+            std::fs::read(&ordinary).unwrap(),
+            b"retained ordinary bytes"
+        );
         let target = owned.0.join("physical-target");
         std::fs::create_dir(&target).unwrap();
         let target_body = target.join("retained-source");
         std::fs::write(&target_body, b"retained target bytes").unwrap();
         let link = owned.0.join("native-directory-link");
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, &link).expect("real native directory symlink prerequisite");
+        std::os::unix::fs::symlink(&target, &link)
+            .expect("real native directory symlink prerequisite");
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir(&target, &link)
             .expect("real Windows directory reparse creation prerequisite; no skip");
         let refusal = open_directory(&link).unwrap_err();
         eprintln!("actual directory-link/reparse refusal: {refusal}");
-        assert_eq!(std::fs::read(&target_body).unwrap(), b"retained target bytes");
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(
+            std::fs::read(&target_body).unwrap(),
+            b"retained target bytes"
+        );
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         #[cfg(unix)]
         std::fs::remove_file(&link).unwrap();
         #[cfg(windows)]
@@ -530,9 +702,15 @@ mod tests {
         let child = path.join("unexpected-retained-material");
         std::fs::write(&child, b"actual child must survive refusal").unwrap();
         let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(owned)));
-        assert!(refusal.is_err(), "actual nonempty cleanup must refuse, never recursively delete");
+        assert!(
+            refusal.is_err(),
+            "actual nonempty cleanup must refuse, never recursively delete"
+        );
         assert!(path.is_dir());
-        assert_eq!(std::fs::read(&child).unwrap(), b"actual child must survive refusal");
+        assert_eq!(
+            std::fs::read(&child).unwrap(),
+            b"actual child must survive refusal"
+        );
         // This test owns the child it created. Only after proving retention does
         // it remove that exact file and the now-empty fixture, never recursively.
         std::fs::remove_file(child).unwrap();
@@ -544,19 +722,38 @@ mod tests {
     fn actual_unix_fixture_replacement_refuses_cleanup_and_retains_both_objects() {
         let owned = OwnedDirectory::new();
         let path = owned.0.clone();
-        let retained = path.with_file_name(format!("{}-retained", path.file_name().unwrap().to_string_lossy()));
+        let retained = path.with_file_name(format!(
+            "{}-retained",
+            path.file_name().unwrap().to_string_lossy()
+        ));
         std::fs::write(path.join("original-material"), b"original owned material").unwrap();
         std::fs::rename(&path, &retained).unwrap();
         std::fs::create_dir(&path).unwrap();
-        std::fs::write(path.join("foreign-material"), b"distinct intervening material").unwrap();
+        std::fs::write(
+            path.join("foreign-material"),
+            b"distinct intervening material",
+        )
+        .unwrap();
         let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(owned)));
-        assert!(refusal.is_err(), "same held-inode affiliation must reject a different named directory");
-        assert_eq!(std::fs::read(retained.join("original-material")).unwrap(), b"original owned material");
-        assert_eq!(std::fs::read(path.join("foreign-material")).unwrap(), b"distinct intervening material");
+        assert!(
+            refusal.is_err(),
+            "same held-inode affiliation must reject a different named directory"
+        );
+        assert_eq!(
+            std::fs::read(retained.join("original-material")).unwrap(),
+            b"original owned material"
+        );
+        assert_eq!(
+            std::fs::read(path.join("foreign-material")).unwrap(),
+            b"distinct intervening material"
+        );
         use std::os::unix::fs::MetadataExt;
         let original = std::fs::metadata(&retained).unwrap();
         let intervening = std::fs::metadata(&path).unwrap();
-        assert_ne!((original.dev(), original.ino()), (intervening.dev(), intervening.ino()));
+        assert_ne!(
+            (original.dev(), original.ino()),
+            (intervening.dev(), intervening.ino())
+        );
         // Both branches are exclusively created by this adverse test. The
         // helper's refusal has already preserved them; empty-only test cleanup
         // does not assert an atomic check/remove guarantee against other writers.
@@ -576,16 +773,35 @@ mod tests {
         std::fs::create_dir(&ancestor).unwrap();
         std::fs::create_dir(&child).unwrap();
         std::fs::write(child.join("original-material"), b"original ancestor branch").unwrap();
-        let owned = OwnedDirectory(child.clone(), Some(HeldDirectory::open(child.clone()).unwrap()),
-            vec![HeldDirectory::open(outer.0.clone()).unwrap(), HeldDirectory::open(ancestor.clone()).unwrap()]);
+        let owned = OwnedDirectory(
+            child.clone(),
+            Some(HeldDirectory::open(child.clone()).unwrap()),
+            vec![
+                HeldDirectory::open(outer.0.clone()).unwrap(),
+                HeldDirectory::open(ancestor.clone()).unwrap(),
+            ],
+        );
         std::fs::rename(&ancestor, &retained).unwrap();
         std::fs::create_dir(&ancestor).unwrap();
         std::fs::create_dir(&child).unwrap();
-        std::fs::write(child.join("foreign-material"), b"intervening ancestor branch").unwrap();
+        std::fs::write(
+            child.join("foreign-material"),
+            b"intervening ancestor branch",
+        )
+        .unwrap();
         let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(owned)));
-        assert!(refusal.is_err(), "actual retained parent must reject named ancestor replacement");
-        assert_eq!(std::fs::read(retained.join("owned-child/original-material")).unwrap(), b"original ancestor branch");
-        assert_eq!(std::fs::read(child.join("foreign-material")).unwrap(), b"intervening ancestor branch");
+        assert!(
+            refusal.is_err(),
+            "actual retained parent must reject named ancestor replacement"
+        );
+        assert_eq!(
+            std::fs::read(retained.join("owned-child/original-material")).unwrap(),
+            b"original ancestor branch"
+        );
+        assert_eq!(
+            std::fs::read(child.join("foreign-material")).unwrap(),
+            b"intervening ancestor branch"
+        );
         std::fs::remove_file(retained.join("owned-child/original-material")).unwrap();
         std::fs::remove_dir(retained.join("owned-child")).unwrap();
         std::fs::remove_dir(retained).unwrap();
@@ -599,7 +815,10 @@ mod tests {
     fn actual_windows_held_fixture_refuses_delete_and_rename_until_legal_close() {
         let mut owned = OwnedDirectory::new();
         let original = owned.0.clone();
-        let renamed = original.with_file_name(format!("{}-renamed", original.file_name().unwrap().to_string_lossy()));
+        let renamed = original.with_file_name(format!(
+            "{}-renamed",
+            original.file_name().unwrap().to_string_lossy()
+        ));
         let rename_refusal = std::fs::rename(&original, &renamed).unwrap_err();
         let delete_refusal = std::fs::remove_dir(&original).unwrap_err();
         eprintln!("actual live Windows rename refusal: kind={:?} errno={:?}; delete refusal: kind={:?} errno={:?}",
@@ -621,7 +840,10 @@ mod tests {
         owned.1 = Some(HeldDirectory::open(original.clone()).unwrap());
         check_parents(&owned.2).unwrap();
         drop(owned);
-        assert!(!original.exists(), "same empty-only owner cleanup must finish after its legal close");
+        assert!(
+            !original.exists(),
+            "same empty-only owner cleanup must finish after its legal close"
+        );
         assert!(!renamed.exists());
     }
 }

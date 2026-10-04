@@ -2022,7 +2022,10 @@ fn actual_legacy_route_capture_preserves_completed_nonzero_json_and_stderr() {
 #[test]
 fn actual_legacy_route_capture_deadline_preserves_private_observation_and_native_retirement() {
     let mut command = Command::new("/bin/sh");
-    command.args(["-c", "printf route-private-output-canary; printf route-private-error-canary >&2; sleep 30"]);
+    command.args([
+        "-c",
+        "printf route-private-output-canary; printf route-private-error-canary >&2; sleep 30",
+    ]);
     let started = Instant::now();
     let failure = super::conversation::output_within(command, Duration::from_secs(1)).unwrap_err();
     assert_eq!(failure.code(), "mux.command_timeout", "{failure:?}");
@@ -2033,10 +2036,15 @@ fn actual_legacy_route_capture_deadline_preserves_private_observation_and_native
     assert!(!failure.details().contains_key("additional_cleanup_causes"));
     assert!(std::error::Error::source(&failure).is_none());
     assert_eq!(failure.secondary_io_sources().count(), 0);
-    let capture = failure.native_capture().expect("actual retained partial native capture");
+    let capture = failure
+        .native_capture()
+        .expect("actual retained partial native capture");
     assert_eq!(capture.stdout, b"route-private-output-canary");
     assert_eq!(capture.stderr, b"route-private-error-canary");
-    assert_eq!(capture.status.map(|status| status.to_string()), failure.details().get("cleanup_exit_status").cloned());
+    assert_eq!(
+        capture.status.map(|status| status.to_string()),
+        failure.details().get("cleanup_exit_status").cloned()
+    );
     assert!(!failure.to_string().contains("route-private-output-canary"));
     assert!(!format!("{failure:?}").contains("route-private-error-canary"));
     // The metadata does not claim post-cleanup EOF when only the native

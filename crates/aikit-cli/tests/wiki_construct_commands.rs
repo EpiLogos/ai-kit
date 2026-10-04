@@ -48,8 +48,10 @@ fn initial() -> Value {
 fn fixture() -> (TempDir, PathBuf) {
     let temporary = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
     fs::create_dir_all(&temporary).unwrap();
-    let temp = tempfile::Builder::new().prefix("native-wiki-construction-")
-        .tempdir_in(&temporary).unwrap();
+    let temp = tempfile::Builder::new()
+        .prefix("native-wiki-construction-")
+        .tempdir_in(&temporary)
+        .unwrap();
     let path = temp.path().join("wiki.json");
     fs::write(&path, initial().to_string()).unwrap();
     (temp, path)
@@ -496,11 +498,17 @@ fn symlink_file_and_symlink_lock_are_refused_without_touching_target() {
     symlink(&path, &canonical_lock).unwrap();
     let (code, lock_refusal) = save(temp.path(), &path, &create());
     assert_ne!(code, 0, "{lock_refusal}");
-    assert_eq!(lock_refusal["error"]["code"], "knowledge.wiki_publication_identity");
+    assert_eq!(
+        lock_refusal["error"]["code"],
+        "knowledge.wiki_publication_identity"
+    );
     assert_eq!(fs::read(&path).unwrap(), before);
     assert_eq!(fs::read_link(&canonical_lock).unwrap(), path);
     assert_eq!(fs::read_link(&retired_lock).unwrap(), legacy_target);
-    assert_eq!(fs::read(&legacy_target).unwrap(), b"retained legacy source\n");
+    assert_eq!(
+        fs::read(&legacy_target).unwrap(),
+        b"retained legacy source\n"
+    );
 
     // Remove only this fixture's rejected canonical lock. Actual native save
     // succeeds without adopting, following or deleting the retired lock.
@@ -511,5 +519,8 @@ fn symlink_file_and_symlink_lock_are_refused_without_touching_target() {
     assert_ne!(fs::read(&path).unwrap(), before);
     assert!(fs::symlink_metadata(&canonical_lock).unwrap().is_file());
     assert_eq!(fs::read_link(&retired_lock).unwrap(), legacy_target);
-    assert_eq!(fs::read(&legacy_target).unwrap(), b"retained legacy source\n");
+    assert_eq!(
+        fs::read(&legacy_target).unwrap(),
+        b"retained legacy source\n"
+    );
 }

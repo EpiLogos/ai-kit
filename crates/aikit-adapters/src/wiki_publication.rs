@@ -19,9 +19,11 @@ pub fn material_basis(path: &Path) -> Result<String> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     return native::material_basis(path);
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    Err(AikitError::new("knowledge.wiki_publication_metadata_unsupported",
-        "native ordinary material basis is unavailable on this platform")
-        .with("path", path.display().to_string()))
+    Err(AikitError::new(
+        "knowledge.wiki_publication_metadata_unsupported",
+        "native ordinary material basis is unavailable on this platform",
+    )
+    .with("path", path.display().to_string()))
 }
 
 /// Read an ordinary source through the same held physical observation used
@@ -34,9 +36,11 @@ pub fn material_bytes(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = max_bytes;
-        Err(AikitError::new("knowledge.wiki_publication_metadata_unsupported",
-            "native ordinary material observation is unavailable on this platform")
-            .with("path", path.display().to_string()))
+        Err(AikitError::new(
+            "knowledge.wiki_publication_metadata_unsupported",
+            "native ordinary material observation is unavailable on this platform",
+        )
+        .with("path", path.display().to_string()))
     }
 }
 
@@ -44,16 +48,26 @@ pub fn material_bytes(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
 /// The admitted device/inode is continuity evidence, never source identity or
 /// admission. The caller checks its original member mapping and native policy.
 pub fn material_bytes_affiliated(
-    requested_root: &Path, expected_root_identity: (u64, u64), member: &Path, max_bytes: u64,
+    requested_root: &Path,
+    expected_root_identity: (u64, u64),
+    member: &Path,
+    max_bytes: u64,
 ) -> Result<Vec<u8>> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    return native::material_bytes_affiliated(requested_root, expected_root_identity, member, max_bytes);
+    return native::material_bytes_affiliated(
+        requested_root,
+        expected_root_identity,
+        member,
+        max_bytes,
+    );
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (expected_root_identity, member, max_bytes);
-        Err(AikitError::new("knowledge.wiki_publication_metadata_unsupported",
-            "retained native physical material observation is unavailable on this platform")
-            .with("path", requested_root.display().to_string()))
+        Err(AikitError::new(
+            "knowledge.wiki_publication_metadata_unsupported",
+            "retained native physical material observation is unavailable on this platform",
+        )
+        .with("path", requested_root.display().to_string()))
     }
 }
 
@@ -61,17 +75,28 @@ pub fn material_bytes_affiliated(
 /// Target opens and replacement derive from its held directory, never from a
 /// newly selected root alias. This preserves the ordinary publication API.
 pub fn publish_wiki_affiliated(
-    requested_root: &Path, expected_root_identity: (u64, u64), member: &Path,
-    rendered: &str, expected_basis: &str,
+    requested_root: &Path,
+    expected_root_identity: (u64, u64),
+    member: &Path,
+    rendered: &str,
+    expected_basis: &str,
 ) -> Result<bool> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    return native::publish_affiliated(requested_root, expected_root_identity, member, rendered, expected_basis);
+    return native::publish_affiliated(
+        requested_root,
+        expected_root_identity,
+        member,
+        rendered,
+        expected_basis,
+    );
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (expected_root_identity, member, rendered, expected_basis);
-        Err(AikitError::new("knowledge.wiki_publication_metadata_unsupported",
-            "retained native metadata-preserving publication is unavailable on this platform")
-            .with("path", requested_root.display().to_string()))
+        Err(AikitError::new(
+            "knowledge.wiki_publication_metadata_unsupported",
+            "retained native metadata-preserving publication is unavailable on this platform",
+        )
+        .with("path", requested_root.display().to_string()))
     }
 }
 
@@ -101,9 +126,11 @@ pub fn publish_absent_material(path: &Path, rendered: &str) -> Result<bool> {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = rendered;
-        Err(AikitError::new("knowledge.wiki_publication_metadata_unsupported",
-            "atomic native absent-source publication is unavailable on this platform")
-            .with("path", path.display().to_string()))
+        Err(AikitError::new(
+            "knowledge.wiki_publication_metadata_unsupported",
+            "atomic native absent-source publication is unavailable on this platform",
+        )
+        .with("path", path.display().to_string()))
     }
 }
 
@@ -116,9 +143,11 @@ pub fn remove_material(path: &Path, expected_basis: &str) -> Result<()> {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = expected_basis;
-        Err(AikitError::new("knowledge.wiki_publication_metadata_unsupported",
-            "native exact-basis material removal is unavailable on this platform")
-            .with("path", path.display().to_string()))
+        Err(AikitError::new(
+            "knowledge.wiki_publication_metadata_unsupported",
+            "native exact-basis material removal is unavailable on this platform",
+        )
+        .with("path", path.display().to_string()))
     }
 }
 
@@ -136,9 +165,12 @@ mod native {
     use std::time::{Duration, Instant};
 
     use fs4::FileExt;
-    use rustix::fs::{AtFlags, Gid, Mode, OFlags, RenameFlags, Uid, fchown, fgetxattr, flistxattr, openat, renameat, renameat_with, unlinkat};
+    use rustix::fs::{
+        fchown, fgetxattr, flistxattr, openat, renameat, renameat_with, unlinkat, AtFlags, Gid,
+        Mode, OFlags, RenameFlags, Uid,
+    };
     #[cfg(target_os = "linux")]
-    use rustix::fs::{XattrFlags, fsetxattr};
+    use rustix::fs::{fsetxattr, XattrFlags};
 
     const METADATA_BUDGET: usize = 256 * 1024;
     const SOURCE_BUDGET: u64 = 16 * 1024 * 1024;
@@ -161,7 +193,10 @@ mod native {
         let error = error.into();
         failure(code, path, &error)
             .with("cause_kind", format!("{:?}", error.kind()))
-            .with("cause_raw_os_error", serde_json::json!(error.raw_os_error()).to_string())
+            .with(
+                "cause_raw_os_error",
+                serde_json::json!(error.raw_os_error()).to_string(),
+            )
             .with_io_source(error)
     }
 
@@ -198,7 +233,9 @@ mod native {
     }
 
     fn publication_parents(path: &Path) -> Result<(PathBuf, PathBuf)> {
-        let parent = path.parent().filter(|p| !p.as_os_str().is_empty())
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         let requested = if parent.is_absolute() {
             parent.to_path_buf()
@@ -212,19 +249,39 @@ mod native {
         Ok((requested, physical))
     }
 
-    fn directory_affiliation(parent: &Path, requested_parent: &Path, directory: &File) -> Result<()> {
+    fn directory_affiliation(
+        parent: &Path,
+        requested_parent: &Path,
+        directory: &File,
+    ) -> Result<()> {
         directory_at_path(parent, directory)?;
-        let opened = directory.metadata()
-            .map_err(|error| io_failure("knowledge.wiki_publication_identity", requested_parent, error))?;
+        let opened = directory.metadata().map_err(|error| {
+            io_failure(
+                "knowledge.wiki_publication_identity",
+                requested_parent,
+                error,
+            )
+        })?;
         // Follow only the originally admitted parent relation, so an unchanged
         // directory alias remains useful. Source, lock and stage opens retain
         // their existing NOFOLLOW and ordinary single-link admission.
-        let named = fs::metadata(requested_parent)
-            .map_err(|error| io_failure("knowledge.wiki_publication_identity", requested_parent, error))?;
+        let named = fs::metadata(requested_parent).map_err(|error| {
+            io_failure(
+                "knowledge.wiki_publication_identity",
+                requested_parent,
+                error,
+            )
+        })?;
         if !opened.is_dir() || !named.is_dir() || identity(&opened) != identity(&named) {
-            return Err(failure("knowledge.wiki_publication_identity", requested_parent,
-                "requested native parent no longer resolves to the held physical directory")
-                .with("held_directory_identity", format!("{}:{}", opened.dev(), opened.ino())));
+            return Err(failure(
+                "knowledge.wiki_publication_identity",
+                requested_parent,
+                "requested native parent no longer resolves to the held physical directory",
+            )
+            .with(
+                "held_directory_identity",
+                format!("{}:{}", opened.dev(), opened.ino()),
+            ));
         }
         directory_at_path(parent, directory)
     }
@@ -270,83 +327,161 @@ mod native {
     impl PhysicalContext {
         fn independent(path: &Path, filename_failure: &str) -> Result<Self> {
             let (requested_parent, parent) = publication_parents(path)?;
-            let name = path.file_name().and_then(|name| name.to_str())
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
                 .ok_or_else(|| metadata_failure(path, filename_failure))?;
             let source_path = parent.join(name);
             let directory = open_directory(&parent)?;
             directory_affiliation(&parent, &requested_parent, &directory)?;
-            Ok(Self { requested_parent, parent, source_path, directory, owner: None })
+            Ok(Self {
+                requested_parent,
+                parent,
+                source_path,
+                directory,
+                owner: None,
+            })
         }
 
         fn affiliated(requested_root: &Path, expected: (u64, u64), member: &Path) -> Result<Self> {
             use std::path::Component;
             if member.as_os_str().is_empty()
-                || !member.components().all(|component| matches!(component, Component::Normal(_)))
+                || !member
+                    .components()
+                    .all(|component| matches!(component, Component::Normal(_)))
             {
-                return Err(failure("knowledge.wiki_publication_identity", member,
-                    "retained native member must be a nonempty normal relative path")
-                    .with("observation_stage", "owner_parent"));
+                return Err(failure(
+                    "knowledge.wiki_publication_identity",
+                    member,
+                    "retained native member must be a nonempty normal relative path",
+                )
+                .with("observation_stage", "owner_parent"));
             }
-            let name = member.file_name().and_then(|name| name.to_str())
-                .ok_or_else(|| metadata_failure(member, "publication requires a UTF-8 native filename")
-                    .with("observation_stage", "owner_parent"))?;
-            let requested_root = if requested_root.is_absolute() { requested_root.to_path_buf() }
-                else { std::env::current_dir()
-                    .map_err(|error| io_failure("knowledge.wiki_write_failed", requested_root, error)
-                        .with("observation_stage", "owner_root"))?
-                    .join(requested_root) };
-            let physical_root = fs::canonicalize(&requested_root)
-                .map_err(|error| io_failure("knowledge.wiki_publication_identity", &requested_root, error)
-                    .with("observation_stage", "owner_root"))?;
+            let name = member
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    metadata_failure(member, "publication requires a UTF-8 native filename")
+                        .with("observation_stage", "owner_parent")
+                })?;
+            let requested_root = if requested_root.is_absolute() {
+                requested_root.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .map_err(|error| {
+                        io_failure("knowledge.wiki_write_failed", requested_root, error)
+                            .with("observation_stage", "owner_root")
+                    })?
+                    .join(requested_root)
+            };
+            let physical_root = fs::canonicalize(&requested_root).map_err(|error| {
+                io_failure(
+                    "knowledge.wiki_publication_identity",
+                    &requested_root,
+                    error,
+                )
+                .with("observation_stage", "owner_root")
+            })?;
             let root = open_directory(&physical_root)
                 .map_err(|error| error.with("observation_stage", "owner_root"))?;
-            let opened = root.metadata()
-                .map_err(|error| io_failure("knowledge.wiki_publication_identity", &requested_root, error)
-                    .with("observation_stage", "owner_root"))?;
+            let opened = root.metadata().map_err(|error| {
+                io_failure(
+                    "knowledge.wiki_publication_identity",
+                    &requested_root,
+                    error,
+                )
+                .with("observation_stage", "owner_root")
+            })?;
             if identity(&opened) != expected {
-                return Err(failure("knowledge.wiki_publication_identity", &requested_root,
-                    "requested root does not retain the native owner's admitted physical directory")
-                    .with("observation_stage", "owner_root")
-                    .with("expected_directory_identity", format!("{}:{}", expected.0, expected.1))
-                    .with("held_directory_identity", format!("{}:{}", opened.dev(), opened.ino())));
+                return Err(failure(
+                    "knowledge.wiki_publication_identity",
+                    &requested_root,
+                    "requested root does not retain the native owner's admitted physical directory",
+                )
+                .with("observation_stage", "owner_root")
+                .with(
+                    "expected_directory_identity",
+                    format!("{}:{}", expected.0, expected.1),
+                )
+                .with(
+                    "held_directory_identity",
+                    format!("{}:{}", opened.dev(), opened.ino()),
+                ));
             }
-            let mut owner = OwnerAffiliation { requested_root, physical_root, root, parents: Vec::new() };
+            let mut owner = OwnerAffiliation {
+                requested_root,
+                physical_root,
+                root,
+                parents: Vec::new(),
+            };
             #[cfg(test)]
             tests::after_affiliated_root_open(&owner.requested_root);
             owner.check()?;
             let mut parent = owner.physical_root.clone();
-            let mut directory = owner.root.try_clone()
-                .map_err(|error| io_failure("knowledge.wiki_publication_identity", &parent, error)
-                    .with("observation_stage", "owner_parent"))?;
+            let mut directory = owner.root.try_clone().map_err(|error| {
+                io_failure("knowledge.wiki_publication_identity", &parent, error)
+                    .with("observation_stage", "owner_parent")
+            })?;
             for component in member.parent().unwrap_or(Path::new("")).components() {
-                let Component::Normal(component) = component else { unreachable!("member validated above") };
+                let Component::Normal(component) = component else {
+                    unreachable!("member validated above")
+                };
                 owner.check()?;
                 parent.push(component);
-                directory = openat(&directory, component,
-                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-                    Mode::empty()).map(File::from)
-                    .map_err(|error| io_failure("knowledge.wiki_publication_identity", &parent, error)
-                    .with("observation_stage", "owner_parent"))?;
+                directory = openat(
+                    &directory,
+                    component,
+                    OFlags::RDONLY
+                        | OFlags::DIRECTORY
+                        | OFlags::NOFOLLOW
+                        | OFlags::NONBLOCK
+                        | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map(File::from)
+                .map_err(|error| {
+                    io_failure("knowledge.wiki_publication_identity", &parent, error)
+                        .with("observation_stage", "owner_parent")
+                })?;
                 directory_at_path(&parent, &directory)
                     .map_err(|error| error.with("observation_stage", "owner_parent"))?;
-                let held = directory.try_clone()
-                    .map_err(|error| io_failure("knowledge.wiki_publication_identity", &parent, error)
-                    .with("observation_stage", "owner_parent"))?;
+                let held = directory.try_clone().map_err(|error| {
+                    io_failure("knowledge.wiki_publication_identity", &parent, error)
+                        .with("observation_stage", "owner_parent")
+                })?;
                 owner.parents.push((parent.clone(), held));
             }
             owner.check()?;
             let source_path = parent.join(name);
-            Ok(Self { requested_parent: parent.clone(), parent, source_path, directory, owner: Some(owner) })
+            Ok(Self {
+                requested_parent: parent.clone(),
+                parent,
+                source_path,
+                directory,
+                owner: Some(owner),
+            })
         }
     }
 
     fn physical_affiliation(
-        parent: &Path, requested_parent: &Path, directory: &File, owner: Option<&OwnerAffiliation>,
+        parent: &Path,
+        requested_parent: &Path,
+        directory: &File,
+        owner: Option<&OwnerAffiliation>,
     ) -> Result<()> {
-        if let Some(owner) = owner { owner.check()?; }
-        directory_affiliation(parent, requested_parent, directory)
-            .map_err(|error| if owner.is_some() { error.with("observation_stage", "owner_parent") } else { error })?;
-        if let Some(owner) = owner { owner.check()?; }
+        if let Some(owner) = owner {
+            owner.check()?;
+        }
+        directory_affiliation(parent, requested_parent, directory).map_err(|error| {
+            if owner.is_some() {
+                error.with("observation_stage", "owner_parent")
+            } else {
+                error
+            }
+        })?;
+        if let Some(owner) = owner {
+            owner.check()?;
+        }
         Ok(())
     }
 
@@ -374,14 +509,22 @@ mod native {
         let named = fs::symlink_metadata(path)
             .map_err(|e| io_failure("knowledge.wiki_concurrent_write", path, e))?;
         if !named.is_file() || named.file_type().is_symlink() || named.nlink() != 1 {
-            return Err(failure("knowledge.wiki_publication_identity", path,
-                "publication requires an ordinary single-link source"));
+            return Err(failure(
+                "knowledge.wiki_publication_identity",
+                path,
+                "publication requires an ordinary single-link source",
+            ));
         }
         #[cfg(test)]
         tests::before_source_open(path);
-        openat(directory, name, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC, Mode::empty())
-            .map(File::from)
-            .map_err(|e| io_failure("knowledge.wiki_concurrent_write", path, e))
+        openat(
+            directory,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(File::from)
+        .map_err(|e| io_failure("knowledge.wiki_concurrent_write", path, e))
     }
 
     #[cfg(test)]
@@ -390,7 +533,11 @@ mod native {
         open_existing_at(&open_directory(parent)?, path.file_name().unwrap(), path)
     }
 
-    fn create_stage(directory: &File, parent: &Path, name: &str) -> Result<tempfile::NamedTempFile> {
+    fn create_stage(
+        directory: &File,
+        parent: &Path,
+        name: &str,
+    ) -> Result<tempfile::NamedTempFile> {
         // TempPath's normal Drop removes a pathname without checking its inode.
         // A refused or interrupted stage is retained instead: conditional
         // check-then-unlink is itself racy. Only publication removes the stage
@@ -400,11 +547,19 @@ mod native {
             .suffix(".tmp")
             .disable_cleanup(true)
             .make_in(parent, |path| {
-                openat(directory, path.file_name().unwrap(),
-                    OFlags::CREATE | OFlags::EXCL | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-                    Mode::RUSR | Mode::WUSR)
-                    .map(File::from)
-                    .map_err(std::io::Error::from)
+                openat(
+                    directory,
+                    path.file_name().unwrap(),
+                    OFlags::CREATE
+                        | OFlags::EXCL
+                        | OFlags::RDWR
+                        | OFlags::NOFOLLOW
+                        | OFlags::NONBLOCK
+                        | OFlags::CLOEXEC,
+                    Mode::RUSR | Mode::WUSR,
+                )
+                .map(File::from)
+                .map_err(std::io::Error::from)
             })
             .map_err(|e| io_failure("knowledge.wiki_write_failed", parent, e))
     }
@@ -424,8 +579,13 @@ mod native {
             return Err(failure(
                 "knowledge.wiki_publication_budget",
                 path,
-                if max_bytes == SOURCE_BUDGET { "source exceeds 16 MiB".to_owned() }
-                    else { format!("source exceeds the declared {max_bytes}-byte material observation limit") },
+                if max_bytes == SOURCE_BUDGET {
+                    "source exceeds 16 MiB".to_owned()
+                } else {
+                    format!(
+                        "source exceeds the declared {max_bytes}-byte material observation limit"
+                    )
+                },
             ));
         }
         Ok(bytes)
@@ -433,15 +593,16 @@ mod native {
 
     fn attributes(file: &File, path: &Path) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
         let mut names = vec![0_u8; METADATA_BUDGET];
-        let count =
-            flistxattr(file, names.as_mut_slice()).map_err(|e| io_failure("knowledge.wiki_publication_metadata_unsupported", path, e))?;
+        let count = flistxattr(file, names.as_mut_slice())
+            .map_err(|e| io_failure("knowledge.wiki_publication_metadata_unsupported", path, e))?;
         let mut attributes = BTreeMap::new();
         let mut total = count;
         for name in names[..count].split(|b| *b == 0).filter(|s| !s.is_empty()) {
             let key = CString::new(name).map_err(|e| metadata_failure(path, e))?;
             let mut value = vec![0_u8; METADATA_BUDGET];
-            let length = fgetxattr(file, key.as_c_str(), value.as_mut_slice())
-                .map_err(|e| io_failure("knowledge.wiki_publication_metadata_unsupported", path, e))?;
+            let length = fgetxattr(file, key.as_c_str(), value.as_mut_slice()).map_err(|e| {
+                io_failure("knowledge.wiki_publication_metadata_unsupported", path, e)
+            })?;
             total += length;
             if total > METADATA_BUDGET || attributes.len() >= 128 {
                 return Err(metadata_failure(
@@ -505,7 +666,8 @@ mod native {
         // substituted stage path cannot redirect this material copy elsewhere.
         let from = PathBuf::from(format!("/dev/fd/{}", source.as_raw_fd()));
         let to = PathBuf::from(format!("/dev/fd/{}", stage.as_raw_fd()));
-        fs::copy(&from, &to).map_err(|e| io_failure("knowledge.wiki_publication_metadata_unsupported", path, e))?;
+        fs::copy(&from, &to)
+            .map_err(|e| io_failure("knowledge.wiki_publication_metadata_unsupported", path, e))?;
         Ok(())
     }
 
@@ -515,18 +677,28 @@ mod native {
         let peer = fs::symlink_metadata(path)
             .map_err(|error| io_failure("knowledge.wiki_publication_identity", path, error))?;
         if !peer.is_file() || peer.file_type().is_symlink() || peer.nlink() != 1 {
-            return Err(failure("knowledge.wiki_publication_identity", path,
-                "bootstrap recovery requires an existing ordinary single-link peer lock"));
+            return Err(failure(
+                "knowledge.wiki_publication_identity",
+                path,
+                "bootstrap recovery requires an existing ordinary single-link peer lock",
+            ));
         }
         #[cfg(test)]
         tests::after_peer_lock_observation(path);
-        let file = openat(directory, name,
-            OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC, Mode::empty())
-            .map(File::from)
-            .map_err(|error| io_failure("knowledge.wiki_publication_identity", path, error))?;
+        let file = openat(
+            directory,
+            name,
+            OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(File::from)
+        .map_err(|error| io_failure("knowledge.wiki_publication_identity", path, error))?;
         if identity(&ordinary(path, &file)?) != identity(&peer) {
-            return Err(failure("knowledge.wiki_publication_identity", path,
-                "peer lock changed between bootstrap observation and reopening"));
+            return Err(failure(
+                "knowledge.wiki_publication_identity",
+                path,
+                "peer lock changed between bootstrap observation and reopening",
+            ));
         }
         directory_at_path(parent, directory)?;
         Ok(file)
@@ -564,10 +736,12 @@ mod native {
     fn lock_at(directory: &File, name: &std::ffi::OsStr, path: &Path) -> Result<PublicationLock> {
         #[cfg(test)]
         tests::before_initial_lock_open(path);
-        let file = match openat(directory, name,
+        let file = match openat(
+            directory,
+            name,
             OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::RUSR | Mode::WUSR)
-        {
+            Mode::RUSR | Mode::WUSR,
+        ) {
             Ok(file) => File::from(file),
             Err(error) if error == rustix::io::Errno::NOENT => {
                 // The initial CREATE returned actual ENOENT. Recover only
@@ -575,17 +749,30 @@ mod native {
                 // creation or a whole-publication retry. The actual original
                 // open error remains the cause if this bounded recovery fails.
                 let initial = io_failure("knowledge.wiki_publication_identity", path, error);
-                recover_peer_lock_at(directory, name, path).map_err(|recovery| initial
-                    .with("lock_bootstrap_recovery", "refused")
-                    .with("lock_bootstrap_recovery_cause", cause_detail(&recovery)))?
+                recover_peer_lock_at(directory, name, path).map_err(|recovery| {
+                    initial
+                        .with("lock_bootstrap_recovery", "refused")
+                        .with("lock_bootstrap_recovery_cause", cause_detail(&recovery))
+                })?
             }
-            Err(error) => return Err(io_failure("knowledge.wiki_publication_identity", path, error)),
+            Err(error) => {
+                return Err(io_failure(
+                    "knowledge.wiki_publication_identity",
+                    path,
+                    error,
+                ))
+            }
         };
         ordinary(path, &file)?;
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             match FileExt::try_lock(&file) {
-                Ok(()) => return Ok(PublicationLock { file, owner_pid: std::process::id() }),
+                Ok(()) => {
+                    return Ok(PublicationLock {
+                        file,
+                        owner_pid: std::process::id(),
+                    })
+                }
                 Err(fs4::TryLockError::WouldBlock) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(20))
                 }
@@ -615,46 +802,68 @@ mod native {
 
     fn material_limit(path: &Path, max_bytes: u64) -> Result<()> {
         if max_bytes == 0 || max_bytes > SOURCE_BUDGET {
-            return Err(failure("knowledge.wiki_publication_budget", path,
-                "material observation limit must be 1..=16 MiB"));
+            return Err(failure(
+                "knowledge.wiki_publication_budget",
+                path,
+                "material observation limit must be 1..=16 MiB",
+            ));
         }
         Ok(())
     }
 
     pub(super) fn material_bytes(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
         material_limit(path, max_bytes)?;
-        material_bytes_in_context(PhysicalContext::independent(path, "material basis requires a UTF-8 native filename")?, max_bytes)
+        material_bytes_in_context(
+            PhysicalContext::independent(path, "material basis requires a UTF-8 native filename")?,
+            max_bytes,
+        )
     }
 
     pub(super) fn material_bytes_affiliated(
-        requested_root: &Path, expected: (u64, u64), member: &Path, max_bytes: u64,
+        requested_root: &Path,
+        expected: (u64, u64),
+        member: &Path,
+        max_bytes: u64,
     ) -> Result<Vec<u8>> {
         material_limit(&requested_root.join(member), max_bytes)?;
-        material_bytes_in_context(PhysicalContext::affiliated(requested_root, expected, member)?, max_bytes)
+        material_bytes_in_context(
+            PhysicalContext::affiliated(requested_root, expected, member)?,
+            max_bytes,
+        )
     }
 
     fn material_bytes_in_context(context: PhysicalContext, max_bytes: u64) -> Result<Vec<u8>> {
-        let PhysicalContext { requested_parent, parent, source_path, directory, owner } = context;
+        let PhysicalContext {
+            requested_parent,
+            parent,
+            source_path,
+            directory,
+            owner,
+        } = context;
         let observation: Result<Vec<u8>> = (|| {
-        physical_affiliation(&parent, &requested_parent, &directory, owner.as_ref())?;
-        let mut source = open_existing_at(&directory, source_path.file_name().unwrap(), &source_path)?;
-        let source_identity = identity(&ordinary(&source_path, &source)?);
-        let bytes = read_source_bounded(&mut source, &source_path, max_bytes)?;
-        #[cfg(test)]
-        tests::after_material_read(&source_path);
-        physical_affiliation(&parent, &requested_parent, &directory, owner.as_ref())?;
-        if identity(&ordinary(&source_path, &source)?) != source_identity
-            || read_source_bounded(&mut source, &source_path, max_bytes)? != bytes
-        {
-            return Err(failure("knowledge.wiki_concurrent_write", &source_path,
-                "material source changed during its preliminary basis observation"));
-        }
-        #[cfg(test)]
-        tests::after_material_final_read(&source_path);
-        physical_affiliation(&parent, &requested_parent, &directory, owner.as_ref())?;
-        ordinary(&source_path, &source)?;
-        physical_affiliation(&parent, &requested_parent, &directory, owner.as_ref())?;
-        Ok(bytes)
+            physical_affiliation(&parent, &requested_parent, &directory, owner.as_ref())?;
+            let mut source =
+                open_existing_at(&directory, source_path.file_name().unwrap(), &source_path)?;
+            let source_identity = identity(&ordinary(&source_path, &source)?);
+            let bytes = read_source_bounded(&mut source, &source_path, max_bytes)?;
+            #[cfg(test)]
+            tests::after_material_read(&source_path);
+            physical_affiliation(&parent, &requested_parent, &directory, owner.as_ref())?;
+            if identity(&ordinary(&source_path, &source)?) != source_identity
+                || read_source_bounded(&mut source, &source_path, max_bytes)? != bytes
+            {
+                return Err(failure(
+                    "knowledge.wiki_concurrent_write",
+                    &source_path,
+                    "material source changed during its preliminary basis observation",
+                ));
+            }
+            #[cfg(test)]
+            tests::after_material_final_read(&source_path);
+            physical_affiliation(&parent, &requested_parent, &directory, owner.as_ref())?;
+            ordinary(&source_path, &source)?;
+            physical_affiliation(&parent, &requested_parent, &directory, owner.as_ref())?;
+            Ok(bytes)
         })();
         observation.map_err(|error| {
             // A final-source NotFound does not establish source absence when
@@ -662,12 +871,16 @@ mod native {
             // Preserve the first actual cause; report the separate observed
             // affiliation failure without rereading a body or guessing paths.
             if owner.is_some() {
-                if let Err(affiliation) = physical_affiliation(
-                    &parent, &requested_parent, &directory, owner.as_ref(),
-                ) {
-                    let stage = affiliation.details().get("observation_stage")
-                        .map(String::as_str).unwrap_or("owner_parent");
-                    return error.with("observation_stage", stage)
+                if let Err(affiliation) =
+                    physical_affiliation(&parent, &requested_parent, &directory, owner.as_ref())
+                {
+                    let stage = affiliation
+                        .details()
+                        .get("observation_stage")
+                        .map(String::as_str)
+                        .unwrap_or("owner_parent");
+                    return error
+                        .with("observation_stage", stage)
                         .with("owner_affiliation_cause", cause_detail(&affiliation));
                 }
             }
@@ -676,12 +889,26 @@ mod native {
     }
 
     fn publication_readback(
-        directory: &File, parent: &Path, requested_parent: &Path, source_path: &Path,
-        stage_identity: (u64, u64), rendered_hash: &str, metadata: &RetainedMetadata,
+        directory: &File,
+        parent: &Path,
+        requested_parent: &Path,
+        source_path: &Path,
+        stage_identity: (u64, u64),
+        rendered_hash: &str,
+        metadata: &RetainedMetadata,
     ) -> Result<()> {
         publication_readback_in_context(
-            ReadbackContext { directory, parent, requested_parent, owner: None },
-            source_path, stage_identity, rendered_hash, metadata)
+            ReadbackContext {
+                directory,
+                parent,
+                requested_parent,
+                owner: None,
+            },
+            source_path,
+            stage_identity,
+            rendered_hash,
+            metadata,
+        )
     }
 
     struct ReadbackContext<'a> {
@@ -692,29 +919,40 @@ mod native {
     }
 
     fn publication_readback_in_context(
-        context: ReadbackContext<'_>, source_path: &Path, stage_identity: (u64, u64),
-        rendered_hash: &str, metadata: &RetainedMetadata,
+        context: ReadbackContext<'_>,
+        source_path: &Path,
+        stage_identity: (u64, u64),
+        rendered_hash: &str,
+        metadata: &RetainedMetadata,
     ) -> Result<()> {
-        let ReadbackContext { directory, parent, requested_parent, owner } = context;
+        let ReadbackContext {
+            directory,
+            parent,
+            requested_parent,
+            owner,
+        } = context;
         // Once rename succeeded, any failure is an uncertain Return of an
         // actual effect. Sync the held directory, never a reopened pathname.
-        let checked: Result<()> = (|| {
-            directory.sync_all()
-                .map_err(|e| io_failure("knowledge.wiki_write_failed", parent, e))?;
-            physical_affiliation(parent, requested_parent, directory, owner)?;
-            let mut published = open_existing_at(directory, source_path.file_name().unwrap(), source_path)?;
-            if identity(&ordinary(source_path, &published)?) != stage_identity
-                || content_hash(&read_source(&mut published, source_path)?) != rendered_hash
-                || retained(&published, source_path)? != *metadata
-            {
-                return Err(failure("knowledge.wiki_publication_identity", source_path,
+        let checked: Result<()> =
+            (|| {
+                directory
+                    .sync_all()
+                    .map_err(|e| io_failure("knowledge.wiki_write_failed", parent, e))?;
+                physical_affiliation(parent, requested_parent, directory, owner)?;
+                let mut published =
+                    open_existing_at(directory, source_path.file_name().unwrap(), source_path)?;
+                if identity(&ordinary(source_path, &published)?) != stage_identity
+                    || content_hash(&read_source(&mut published, source_path)?) != rendered_hash
+                    || retained(&published, source_path)? != *metadata
+                {
+                    return Err(failure("knowledge.wiki_publication_identity", source_path,
                     "published source inode, bytes or retained metadata changed before readback"));
-            }
-            physical_affiliation(parent, requested_parent, directory, owner)?;
-            ordinary(source_path, &published)?;
-            physical_affiliation(parent, requested_parent, directory, owner)?;
-            Ok(())
-        })();
+                }
+                physical_affiliation(parent, requested_parent, directory, owner)?;
+                ordinary(source_path, &published)?;
+                physical_affiliation(parent, requested_parent, directory, owner)?;
+                Ok(())
+            })();
         checked.map_err(|cause| {
             failure("knowledge.wiki_publication_uncertain", source_path,
                 format!("publication committed but its durable source readback was not confirmed: {cause}"))
@@ -730,32 +968,63 @@ mod native {
 
     pub(super) fn publish(path: &Path, rendered: &str, expected_basis: &str) -> Result<bool> {
         publication_limit(path, rendered)?;
-        publish_in_context(PhysicalContext::independent(path, "publication requires a UTF-8 native filename")?, rendered, expected_basis)
+        publish_in_context(
+            PhysicalContext::independent(path, "publication requires a UTF-8 native filename")?,
+            rendered,
+            expected_basis,
+        )
     }
 
     pub(super) fn publish_affiliated(
-        requested_root: &Path, expected: (u64, u64), member: &Path, rendered: &str, expected_basis: &str,
+        requested_root: &Path,
+        expected: (u64, u64),
+        member: &Path,
+        rendered: &str,
+        expected_basis: &str,
     ) -> Result<bool> {
         publication_limit(&requested_root.join(member), rendered)?;
-        publish_in_context(PhysicalContext::affiliated(requested_root, expected, member)?, rendered, expected_basis)
+        publish_in_context(
+            PhysicalContext::affiliated(requested_root, expected, member)?,
+            rendered,
+            expected_basis,
+        )
     }
 
     fn publication_limit(path: &Path, rendered: &str) -> Result<()> {
         if rendered.len() as u64 > SOURCE_BUDGET {
-            return Err(failure("knowledge.wiki_publication_budget", path, "result exceeds 16 MiB"));
+            return Err(failure(
+                "knowledge.wiki_publication_budget",
+                path,
+                "result exceeds 16 MiB",
+            ));
         }
         Ok(())
     }
 
-    fn publish_in_context(context: PhysicalContext, rendered: &str, expected_basis: &str) -> Result<bool> {
-        let PhysicalContext { requested_parent, parent, source_path, directory, owner } = context;
-        let name = source_path.file_name().and_then(|name| name.to_str())
-            .ok_or_else(|| metadata_failure(&source_path, "publication requires a UTF-8 native filename"))?;
+    fn publish_in_context(
+        context: PhysicalContext,
+        rendered: &str,
+        expected_basis: &str,
+    ) -> Result<bool> {
+        let PhysicalContext {
+            requested_parent,
+            parent,
+            source_path,
+            directory,
+            owner,
+        } = context;
+        let name = source_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                metadata_failure(&source_path, "publication requires a UTF-8 native filename")
+            })?;
         let lock_path = parent.join(format!(".{name}.publication.lock"));
         physical_affiliation(&parent, &requested_parent, &directory, owner.as_ref())?;
         let lock = lock_at(&directory, lock_path.file_name().unwrap(), &lock_path)?;
         physical_affiliation(&parent, &requested_parent, &directory, owner.as_ref())?;
-        let mut source = open_existing_at(&directory, source_path.file_name().unwrap(), &source_path)?;
+        let mut source =
+            open_existing_at(&directory, source_path.file_name().unwrap(), &source_path)?;
         let source_identity = identity(&ordinary(&source_path, &source)?);
         let before = read_source(&mut source, &source_path)?;
         if content_hash(&before) != expected_basis {
@@ -772,8 +1041,11 @@ mod native {
             if identity(&ordinary(&source_path, &source)?) != source_identity
                 || read_source(&mut source, &source_path)? != before
             {
-                return Err(failure("knowledge.wiki_concurrent_write", &source_path,
-                    "source basis changed before exact-byte no-op acknowledgement"));
+                return Err(failure(
+                    "knowledge.wiki_concurrent_write",
+                    &source_path,
+                    "source basis changed before exact-byte no-op acknowledgement",
+                ));
             }
             #[cfg(test)]
             tests::after_noop_read(&source_path);
@@ -782,18 +1054,26 @@ mod native {
                 ordinary(&lock_path, &lock)?;
                 physical_affiliation(&parent, &requested_parent, &directory, owner.as_ref())
             })();
-            acknowledgement.map_err(|error| if owner.is_some() {
-                error.with("changed", "false").with("published", "false")
-            } else { error })?;
+            acknowledgement.map_err(|error| {
+                if owner.is_some() {
+                    error.with("changed", "false").with("published", "false")
+                } else {
+                    error
+                }
+            })?;
             return Ok(false);
         }
         // Replacing through a writable directory must not bypass source ACLs.
         // Opening without truncation establishes actual write access while the
         // held original inode remains the exact source basis.
-        let writable = openat(&directory, source_path.file_name().unwrap(),
-            OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC, Mode::empty())
-            .map(File::from)
-            .map_err(|e| io_failure("knowledge.wiki_publication_write_denied", &source_path, e))?;
+        let writable = openat(
+            &directory,
+            source_path.file_name().unwrap(),
+            OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(File::from)
+        .map_err(|e| io_failure("knowledge.wiki_publication_write_denied", &source_path, e))?;
         if identity(&ordinary(&source_path, &writable)?) != source_identity {
             return Err(failure(
                 "knowledge.wiki_concurrent_write",
@@ -805,10 +1085,14 @@ mod native {
         physical_affiliation(&parent, &requested_parent, &directory, owner.as_ref())?;
         let mut stage = create_stage(&directory, &parent, name)?;
         let stage_path: PathBuf = stage.path().into();
-        let stage_identity = identity(&stage.as_file().metadata()
-            .map_err(|e| io_failure("knowledge.wiki_write_failed", &stage_path, e)
+        let stage_identity = identity(&stage.as_file().metadata().map_err(|e| {
+            io_failure("knowledge.wiki_write_failed", &stage_path, e)
                 .with("stage_path", stage_path.display().to_string())
-                .with("failed_stage_policy", "retain; never unlink a substituted pathname"))?);
+                .with(
+                    "failed_stage_policy",
+                    "retain; never unlink a substituted pathname",
+                )
+        })?);
         let publication: Result<()> = (|| {
             #[cfg(test)]
             tests::before_mutation(&source_path);
@@ -892,18 +1176,39 @@ mod native {
                 ));
             }
             physical_affiliation(&parent, &requested_parent, &directory, owner.as_ref())?;
-            renameat(&directory, stage_path.file_name().unwrap(), &directory, source_path.file_name().unwrap())
-                .map_err(|e| io_failure("knowledge.wiki_write_failed", &source_path, e))?;
+            renameat(
+                &directory,
+                stage_path.file_name().unwrap(),
+                &directory,
+                source_path.file_name().unwrap(),
+            )
+            .map_err(|e| io_failure("knowledge.wiki_write_failed", &source_path, e))?;
             #[cfg(test)]
             tests::after_mutation(&source_path);
             publication_readback_in_context(
-                ReadbackContext { directory: &directory, parent: &parent, requested_parent: &requested_parent, owner: owner.as_ref() },
-                &source_path, stage_identity, &content_hash(rendered.as_bytes()), &metadata)
+                ReadbackContext {
+                    directory: &directory,
+                    parent: &parent,
+                    requested_parent: &requested_parent,
+                    owner: owner.as_ref(),
+                },
+                &source_path,
+                stage_identity,
+                &content_hash(rendered.as_bytes()),
+                &metadata,
+            )
         })();
-        publication.map_err(|e| e
-            .with("stage_path", stage_path.display().to_string())
-            .with("stage_identity", format!("{}:{}", stage_identity.0, stage_identity.1))
-            .with("failed_stage_policy", "retain; never unlink a pathname after its owned inode may have moved"))?;
+        publication.map_err(|e| {
+            e.with("stage_path", stage_path.display().to_string())
+                .with(
+                    "stage_identity",
+                    format!("{}:{}", stage_identity.0, stage_identity.1),
+                )
+                .with(
+                    "failed_stage_policy",
+                    "retain; never unlink a pathname after its owned inode may have moved",
+                )
+        })?;
         Ok(true)
     }
 
@@ -911,28 +1216,53 @@ mod native {
         match fs::symlink_metadata(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(io_failure("knowledge.wiki_concurrent_write", path, error)),
-            Ok(_) => Err(failure("knowledge.wiki_concurrent_write", path,
-                "absent publication basis changed; retained existing destination")),
+            Ok(_) => Err(failure(
+                "knowledge.wiki_concurrent_write",
+                path,
+                "absent publication basis changed; retained existing destination",
+            )),
         }
     }
 
     fn rename_absent(directory: &File, stage: &Path, source: &Path) -> Result<()> {
-        renameat_with(directory, stage.file_name().unwrap(), directory,
-            source.file_name().unwrap(), RenameFlags::NOREPLACE).map_err(|error| {
-                let unsupported = error == rustix::io::Errno::NOSYS
-                    || error == rustix::io::Errno::OPNOTSUPP || error == rustix::io::Errno::INVAL;
-                io_failure(if unsupported { "knowledge.wiki_publication_metadata_unsupported" }
-                    else { "knowledge.wiki_write_failed" }, source, error)
-            })
+        renameat_with(
+            directory,
+            stage.file_name().unwrap(),
+            directory,
+            source.file_name().unwrap(),
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(|error| {
+            let unsupported = error == rustix::io::Errno::NOSYS
+                || error == rustix::io::Errno::OPNOTSUPP
+                || error == rustix::io::Errno::INVAL;
+            io_failure(
+                if unsupported {
+                    "knowledge.wiki_publication_metadata_unsupported"
+                } else {
+                    "knowledge.wiki_write_failed"
+                },
+                source,
+                error,
+            )
+        })
     }
 
     pub(super) fn publish_absent(path: &Path, rendered: &str) -> Result<bool> {
         if rendered.len() as u64 > SOURCE_BUDGET {
-            return Err(failure("knowledge.wiki_publication_budget", path, "result exceeds 16 MiB"));
+            return Err(failure(
+                "knowledge.wiki_publication_budget",
+                path,
+                "result exceeds 16 MiB",
+            ));
         }
         let (requested_parent, parent) = publication_parents(path)?;
-        let name = path.file_name().and_then(|name| name.to_str())
-            .ok_or_else(|| metadata_failure(path, "publication requires a UTF-8 native filename"))?;
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                metadata_failure(path, "publication requires a UTF-8 native filename")
+            })?;
         let source_path = parent.join(name);
         let lock_path = parent.join(format!(".{name}.publication.lock"));
         let directory = open_directory(&parent)?;
@@ -942,29 +1272,49 @@ mod native {
         require_absent(&source_path)?;
         let mut stage = create_stage(&directory, &parent, name)?;
         let stage_path: PathBuf = stage.path().into();
-        let stage_identity = identity(&ordinary(&stage_path, stage.as_file()).map_err(|error| error
-            .with("stage_path", stage_path.display().to_string())
-            .with("failed_stage_policy", "retain; never unlink a substituted pathname"))?);
+        let stage_identity =
+            identity(&ordinary(&stage_path, stage.as_file()).map_err(|error| {
+                error
+                    .with("stage_path", stage_path.display().to_string())
+                    .with(
+                        "failed_stage_policy",
+                        "retain; never unlink a substituted pathname",
+                    )
+            })?);
         // Admit actual create-new defaults before writing a candidate. No
         // later observer/copy can silently redefine the privacy expectation.
-        let metadata = retained(stage.as_file(), &stage_path).map_err(|error| error
-            .with("stage_path", stage_path.display().to_string())
-            .with("failed_stage_policy", "retain; bootstrap metadata admission was not completed"))?;
+        let metadata = retained(stage.as_file(), &stage_path).map_err(|error| {
+            error
+                .with("stage_path", stage_path.display().to_string())
+                .with(
+                    "failed_stage_policy",
+                    "retain; bootstrap metadata admission was not completed",
+                )
+        })?;
         let publication: Result<()> = (|| {
             #[cfg(test)]
             tests::before_mutation(&source_path);
             directory_affiliation(&parent, &requested_parent, &directory)?;
-            if metadata.mode & 0o7077 != 0 || !metadata.acl.is_empty()
-                || metadata.attributes.contains_key(b"system.posix_acl_access".as_slice()) {
+            if metadata.mode & 0o7077 != 0
+                || !metadata.acl.is_empty()
+                || metadata
+                    .attributes
+                    .contains_key(b"system.posix_acl_access".as_slice())
+            {
                 return Err(metadata_failure(&stage_path,
                     "bootstrap source requires private create-new mode with no additional inherited ACL grants"));
             }
-            stage.write_all(rendered.as_bytes())
+            stage
+                .write_all(rendered.as_bytes())
                 .and_then(|_| stage.as_file().sync_all())
                 .map_err(|error| io_failure("knowledge.wiki_write_failed", &stage_path, error))?;
             if identity(&ordinary(&stage_path, stage.as_file())?) != stage_identity
-                || retained(stage.as_file(), &stage_path)? != metadata {
-                return Err(metadata_failure(&stage_path, "bootstrap metadata changed after its privacy admission"));
+                || retained(stage.as_file(), &stage_path)? != metadata
+            {
+                return Err(metadata_failure(
+                    &stage_path,
+                    "bootstrap metadata changed after its privacy admission",
+                ));
             }
             ordinary(&lock_path, &lock)?;
             directory_affiliation(&parent, &requested_parent, &directory)?;
@@ -975,19 +1325,36 @@ mod native {
             rename_absent(&directory, &stage_path, &source_path)?;
             #[cfg(test)]
             tests::after_mutation(&source_path);
-            publication_readback(&directory, &parent, &requested_parent, &source_path, stage_identity,
-                &content_hash(rendered.as_bytes()), &metadata)
+            publication_readback(
+                &directory,
+                &parent,
+                &requested_parent,
+                &source_path,
+                stage_identity,
+                &content_hash(rendered.as_bytes()),
+                &metadata,
+            )
         })();
-        publication.map_err(|error| error
-            .with("stage_path", stage_path.display().to_string())
-            .with("stage_identity", format!("{}:{}", stage_identity.0, stage_identity.1))
-            .with("failed_stage_policy", "retain; never unlink a pathname after its owned inode may have moved"))?;
+        publication.map_err(|error| {
+            error
+                .with("stage_path", stage_path.display().to_string())
+                .with(
+                    "stage_identity",
+                    format!("{}:{}", stage_identity.0, stage_identity.1),
+                )
+                .with(
+                    "failed_stage_policy",
+                    "retain; never unlink a pathname after its owned inode may have moved",
+                )
+        })?;
         Ok(true)
     }
 
     pub(super) fn remove(path: &Path, expected_basis: &str) -> Result<()> {
         let (requested_parent, parent) = publication_parents(path)?;
-        let name = path.file_name().and_then(|name| name.to_str())
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
             .ok_or_else(|| metadata_failure(path, "removal requires a UTF-8 native filename"))?;
         let source_path = parent.join(name);
         let lock_path = parent.join(format!(".{name}.publication.lock"));
@@ -995,17 +1362,36 @@ mod native {
         directory_affiliation(&parent, &requested_parent, &directory)?;
         let lock = lock_at(&directory, lock_path.file_name().unwrap(), &lock_path)?;
         directory_affiliation(&parent, &requested_parent, &directory)?;
-        let mut source = open_existing_at(&directory, source_path.file_name().unwrap(), &source_path)?;
+        let mut source =
+            open_existing_at(&directory, source_path.file_name().unwrap(), &source_path)?;
         let source_identity = identity(&ordinary(&source_path, &source)?);
         if content_hash(&read_source(&mut source, &source_path)?) != expected_basis {
-            return Err(failure("knowledge.wiki_concurrent_write", &source_path,
-                "stale material basis changed; retained the peer's source"));
+            return Err(failure(
+                "knowledge.wiki_concurrent_write",
+                &source_path,
+                "stale material basis changed; retained the peer's source",
+            ));
         }
-        let writable = openat(&directory, source_path.file_name().unwrap(),
-            OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC, Mode::empty())
-            .map(File::from).map_err(|error| io_failure("knowledge.wiki_publication_write_denied", &source_path, error))?;
+        let writable = openat(
+            &directory,
+            source_path.file_name().unwrap(),
+            OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(File::from)
+        .map_err(|error| {
+            io_failure(
+                "knowledge.wiki_publication_write_denied",
+                &source_path,
+                error,
+            )
+        })?;
         if identity(&ordinary(&source_path, &writable)?) != source_identity {
-            return Err(failure("knowledge.wiki_concurrent_write", &source_path, "removal authority opened a different source inode"));
+            return Err(failure(
+                "knowledge.wiki_concurrent_write",
+                &source_path,
+                "removal authority opened a different source inode",
+            ));
         }
         #[cfg(test)]
         tests::before_mutation(&source_path);
@@ -1013,29 +1399,58 @@ mod native {
         directory_affiliation(&parent, &requested_parent, &directory)?;
         ordinary(&source_path, &source)?;
         if content_hash(&read_source(&mut source, &source_path)?) != expected_basis {
-            return Err(failure("knowledge.wiki_concurrent_write", &source_path, "material basis changed during removal admission"));
+            return Err(failure(
+                "knowledge.wiki_concurrent_write",
+                &source_path,
+                "material basis changed during removal admission",
+            ));
         }
         directory_affiliation(&parent, &requested_parent, &directory)?;
-        unlinkat(&directory, source_path.file_name().unwrap(), AtFlags::empty())
-            .map_err(|error| io_failure("knowledge.wiki_write_failed", &source_path, error))?;
+        unlinkat(
+            &directory,
+            source_path.file_name().unwrap(),
+            AtFlags::empty(),
+        )
+        .map_err(|error| io_failure("knowledge.wiki_write_failed", &source_path, error))?;
         #[cfg(test)]
         tests::after_mutation(&source_path);
-        removal_readback(&directory, &parent, &requested_parent, &source_path, expected_basis)
+        removal_readback(
+            &directory,
+            &parent,
+            &requested_parent,
+            &source_path,
+            expected_basis,
+        )
     }
 
-    fn removal_readback(directory: &File, parent: &Path, requested_parent: &Path, source_path: &Path, expected_basis: &str) -> Result<()> {
+    fn removal_readback(
+        directory: &File,
+        parent: &Path,
+        requested_parent: &Path,
+        source_path: &Path,
+        expected_basis: &str,
+    ) -> Result<()> {
         let readback: Result<()> = (|| {
-            directory.sync_all().map_err(|error| io_failure("knowledge.wiki_write_failed", parent, error))?;
+            directory
+                .sync_all()
+                .map_err(|error| io_failure("knowledge.wiki_write_failed", parent, error))?;
             directory_affiliation(parent, requested_parent, directory)?;
             require_absent(source_path)?;
             directory_affiliation(parent, requested_parent, directory)
         })();
-        readback.map_err(|cause| failure("knowledge.source_pool_removal_uncertain", source_path,
-            "material was removed but its durable absence was not confirmed")
+        readback.map_err(|cause| {
+            failure(
+                "knowledge.source_pool_removal_uncertain",
+                source_path,
+                "material was removed but its durable absence was not confirmed",
+            )
             .with_io_source_from(&cause)
-            .with("cause_code", cause.code()).with("cause", cause_detail(&cause))
-            .with("removed", "true").with("removed_basis", expected_basis)
-            .with("automatic_retry", "false"))
+            .with("cause_code", cause.code())
+            .with("cause", cause_detail(&cause))
+            .with("removed", "true")
+            .with("removed_basis", expected_basis)
+            .with("automatic_retry", "false")
+        })
     }
 
     #[cfg(test)]
@@ -1068,17 +1483,23 @@ mod native {
 
         pub(super) fn after_affiliated_root_open(path: &Path) {
             let observer = AFTER_AFFILIATED_ROOT_OPEN.with(|slot| slot.borrow_mut().take());
-            if let Some(observer) = observer { observer(path); }
+            if let Some(observer) = observer {
+                observer(path);
+            }
         }
 
         pub(super) fn before_initial_lock_open(path: &Path) {
             let observer = BEFORE_INITIAL_LOCK_OPEN.with(|slot| slot.borrow_mut().take());
-            if let Some(observer) = observer { observer(path); }
+            if let Some(observer) = observer {
+                observer(path);
+            }
         }
 
         pub(super) fn after_peer_lock_observation(path: &Path) {
             let observer = AFTER_PEER_LOCK_OBSERVATION.with(|slot| slot.borrow_mut().take());
-            if let Some(observer) = observer { observer(path); }
+            if let Some(observer) = observer {
+                observer(path);
+            }
         }
 
         pub(super) fn after_noop_read(path: &Path) {
@@ -1124,11 +1545,13 @@ mod native {
         }
 
         fn material_fixture(bytes: &[u8]) -> (tempfile::TempDir, PathBuf) {
-            let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../ProjectCentral/now/tmp");
+            let scratch =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
             fs::create_dir_all(&scratch).unwrap();
-            let root = tempfile::Builder::new().prefix("material-basis-")
-                .tempdir_in(&scratch).unwrap();
+            let root = tempfile::Builder::new()
+                .prefix("material-basis-")
+                .tempdir_in(&scratch)
+                .unwrap();
             let path = root.path().join("material.json");
             fs::write(&path, bytes).unwrap();
             (root, path)
@@ -1144,11 +1567,28 @@ mod native {
             for request in [&path, &alias.join("material.json")] {
                 let bytes = super::super::material_bytes(request, 4 * 1024 * 1024).unwrap();
                 assert_eq!(bytes, b"ordinary readonly body");
-                assert_eq!(super::super::material_basis(request).unwrap(), content_hash(&bytes));
+                assert_eq!(
+                    super::super::material_basis(request).unwrap(),
+                    content_hash(&bytes)
+                );
             }
             let after = fs::metadata(&path).unwrap();
-            assert_eq!((before.dev(),before.ino(),before.mode(),before.mtime(),before.mtime_nsec()),
-                (after.dev(),after.ino(),after.mode(),after.mtime(),after.mtime_nsec()));
+            assert_eq!(
+                (
+                    before.dev(),
+                    before.ino(),
+                    before.mode(),
+                    before.mtime(),
+                    before.mtime_nsec()
+                ),
+                (
+                    after.dev(),
+                    after.ino(),
+                    after.mode(),
+                    after.mtime(),
+                    after.mtime_nsec()
+                )
+            );
             assert!(!root.path().join(".material.json.publication.lock").exists());
         }
 
@@ -1159,9 +1599,16 @@ mod native {
             fs::remove_file(&path).unwrap();
             let error = super::super::material_bytes(&path, 4 * 1024 * 1024).unwrap_err();
             assert_eq!(error.code(), "knowledge.wiki_concurrent_write");
-            let cause = error.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+            let cause = error
+                .source()
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap();
             assert_eq!(cause.kind(), std::io::ErrorKind::NotFound);
-            assert_eq!(serde_json::json!(cause.raw_os_error()).to_string(), error.details()["cause_raw_os_error"]);
+            assert_eq!(
+                serde_json::json!(cause.raw_os_error()).to_string(),
+                error.details()["cause_raw_os_error"]
+            );
             assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
         }
 
@@ -1173,12 +1620,22 @@ mod native {
                 assert_eq!(error.code(), "knowledge.wiki_publication_budget");
                 assert!(!error.details().contains_key("published"));
             }
-            assert_eq!(super::super::material_bytes(&path, 10).unwrap(), b"0123456789");
+            assert_eq!(
+                super::super::material_bytes(&path, 10).unwrap(),
+                b"0123456789"
+            );
             let expanded = File::options().write(true).open(&path).unwrap();
             expanded.set_len(4 * 1024 * 1024 + 1).unwrap();
-            assert_eq!(super::super::material_bytes(&path, 4 * 1024 * 1024).unwrap_err().code(),
-                "knowledge.wiki_publication_budget");
-            assert!(super::super::material_basis(&path).is_ok(), "existing16MiB basis is preserved");
+            assert_eq!(
+                super::super::material_bytes(&path, 4 * 1024 * 1024)
+                    .unwrap_err()
+                    .code(),
+                "knowledge.wiki_publication_budget"
+            );
+            assert!(
+                super::super::material_basis(&path).is_ok(),
+                "existing16MiB basis is preserved"
+            );
             assert_eq!(fs::metadata(&path).unwrap().len(), 4 * 1024 * 1024 + 1);
         }
 
@@ -1187,7 +1644,9 @@ mod native {
             let (_root, path) = material_fixture(b"initial ordinary body");
             let initial_identity = identity(&fs::metadata(&path).unwrap());
             AFTER_MATERIAL_READ.with(|slot| {
-                *slot.borrow_mut() = Some(Box::new(|path| { fs::write(path, b"changed ordinary body").unwrap(); }));
+                *slot.borrow_mut() = Some(Box::new(|path| {
+                    fs::write(path, b"changed ordinary body").unwrap();
+                }));
             });
             let error = super::super::material_bytes(&path, 4096).unwrap_err();
             assert_eq!(error.code(), "knowledge.wiki_concurrent_write");
@@ -1209,7 +1668,10 @@ mod native {
             });
             let error = super::super::material_bytes(&path, 4096).unwrap_err();
             assert_eq!(error.code(), "knowledge.wiki_publication_identity");
-            assert_eq!(identity(&fs::metadata(&retained).unwrap()), initial_identity);
+            assert_eq!(
+                identity(&fs::metadata(&retained).unwrap()),
+                initial_identity
+            );
             assert_ne!(identity(&fs::metadata(&path).unwrap()), initial_identity);
             assert_eq!(fs::read(&retained).unwrap(), b"same body new identity");
             assert_eq!(fs::read(&path).unwrap(), b"same body new identity");
@@ -1228,14 +1690,25 @@ mod native {
                     *slot.borrow_mut() = Some(Box::new(move |path| {
                         fs::rename(path, &retained_move).unwrap();
                         let output = std::process::Command::new("mkfifo")
-                            .arg("-m").arg("600").arg(path).output().unwrap();
-                        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                            .arg("-m")
+                            .arg("600")
+                            .arg(path)
+                            .output()
+                            .unwrap();
+                        assert!(
+                            output.status.success(),
+                            "{}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
                     }));
                 });
-                sent.send(super::super::material_bytes(&request, 4096)).unwrap();
+                sent.send(super::super::material_bytes(&request, 4096))
+                    .unwrap();
             });
-            let error = received.recv_timeout(Duration::from_secs(3))
-                .expect("actual FIFO observation must not wait for a writer").unwrap_err();
+            let error = received
+                .recv_timeout(Duration::from_secs(3))
+                .expect("actual FIFO observation must not wait for a writer")
+                .unwrap_err();
             worker.join().unwrap();
             assert_eq!(error.code(), "knowledge.wiki_publication_identity");
             assert!(fs::symlink_metadata(&path).unwrap().file_type().is_fifo());
@@ -1252,13 +1725,20 @@ mod native {
                     fs::write(path, b"actual external same-inode rewrite").unwrap();
                 }));
             });
-            let error = publish_wiki(&path, "original admitted bytes",
-                &content_hash(b"original admitted bytes")).unwrap_err();
+            let error = publish_wiki(
+                &path,
+                "original admitted bytes",
+                &content_hash(b"original admitted bytes"),
+            )
+            .unwrap_err();
             assert_eq!(error.code(), "knowledge.wiki_concurrent_write");
             assert!(!error.details().contains_key("published"));
             assert!(!error.details().contains_key("removed"));
             assert_eq!(identity(&fs::metadata(&path).unwrap()), identity(&before));
-            assert_eq!(fs::read(&path).unwrap(), b"actual external same-inode rewrite");
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                b"actual external same-inode rewrite"
+            );
         }
 
         #[test]
@@ -1274,12 +1754,19 @@ mod native {
                     fs::write(path, b"original admitted bytes").unwrap();
                 }));
             });
-            let error = publish_wiki(&path, "original admitted bytes",
-                &content_hash(b"original admitted bytes")).unwrap_err();
+            let error = publish_wiki(
+                &path,
+                "original admitted bytes",
+                &content_hash(b"original admitted bytes"),
+            )
+            .unwrap_err();
             assert_eq!(error.code(), "knowledge.wiki_publication_identity");
             assert!(!error.details().contains_key("published"));
             assert!(!error.details().contains_key("removed"));
-            assert_eq!(identity(&fs::metadata(&retained).unwrap()), identity(&before));
+            assert_eq!(
+                identity(&fs::metadata(&retained).unwrap()),
+                identity(&before)
+            );
             assert_ne!(identity(&fs::metadata(&path).unwrap()), identity(&before));
             assert_eq!(fs::read(&retained).unwrap(), b"original admitted bytes");
             assert_eq!(fs::read(&path).unwrap(), b"original admitted bytes");
@@ -1294,12 +1781,17 @@ mod native {
             std::os::unix::fs::symlink(root.path(), &alias).unwrap();
             let alias_request = alias.join("material.json");
             for request in [&path, &alias_request] {
-                assert_eq!(super::super::material_basis(request).unwrap(), content_hash(b"observed ordinary material"));
+                assert_eq!(
+                    super::super::material_basis(request).unwrap(),
+                    content_hash(b"observed ordinary material")
+                );
             }
             let after = fs::metadata(&path).unwrap();
             assert_eq!(identity(&before), identity(&after));
-            assert_eq!((before.mode(), before.mtime(), before.mtime_nsec()),
-                (after.mode(), after.mtime(), after.mtime_nsec()));
+            assert_eq!(
+                (before.mode(), before.mtime(), before.mtime_nsec()),
+                (after.mode(), after.mtime(), after.mtime_nsec())
+            );
             assert!(!root.path().join(".material.json.publication.lock").exists());
         }
 
@@ -1316,18 +1808,28 @@ mod native {
         }
 
         #[test]
-        fn actual_material_basis_refuses_final_symlink_and_hardlink_without_reading_foreign_identity() {
+        fn actual_material_basis_refuses_final_symlink_and_hardlink_without_reading_foreign_identity(
+        ) {
             let (root, path) = material_fixture(b"retained selected source");
             let foreign = root.path().join("foreign-private-source");
             fs::write(&foreign, b"unselected private bytes").unwrap();
             let addressed = root.path().join("selected-alias.json");
             std::os::unix::fs::symlink(&foreign, &addressed).unwrap();
-            assert_eq!(super::super::material_basis(&addressed).unwrap_err().code(), "knowledge.wiki_publication_identity");
+            assert_eq!(
+                super::super::material_basis(&addressed).unwrap_err().code(),
+                "knowledge.wiki_publication_identity"
+            );
             fs::hard_link(&path, root.path().join("retained-hardlink.json")).unwrap();
-            assert_eq!(super::super::material_basis(&path).unwrap_err().code(), "knowledge.wiki_publication_identity");
+            assert_eq!(
+                super::super::material_basis(&path).unwrap_err().code(),
+                "knowledge.wiki_publication_identity"
+            );
             assert_eq!(fs::read(&foreign).unwrap(), b"unselected private bytes");
             assert_eq!(fs::read(&path).unwrap(), b"retained selected source");
-            assert_eq!(fs::read(root.path().join("retained-hardlink.json")).unwrap(), b"retained selected source");
+            assert_eq!(
+                fs::read(root.path().join("retained-hardlink.json")).unwrap(),
+                b"retained selected source"
+            );
             assert!(!root.path().join(".material.json.publication.lock").exists());
         }
 
@@ -1350,7 +1852,10 @@ mod native {
             assert_ne!(error.details()["cause_raw_os_error"], "null");
             assert_eq!(fs::read(&retained).unwrap(), b"selected original bytes");
             assert_eq!(fs::read(&foreign).unwrap(), b"unselected private bytes");
-            assert!(fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+            assert!(fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink());
             assert!(!root.path().join(".material.json.publication.lock").exists());
         }
 
@@ -1367,14 +1872,24 @@ mod native {
                     *slot.borrow_mut() = Some(Box::new(move |path| {
                         fs::rename(path, &retained_move).unwrap();
                         let created = std::process::Command::new("mkfifo")
-                            .arg("-m").arg("600").arg(path).output().unwrap();
-                        assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+                            .arg("-m")
+                            .arg("600")
+                            .arg(path)
+                            .output()
+                            .unwrap();
+                        assert!(
+                            created.status.success(),
+                            "{}",
+                            String::from_utf8_lossy(&created.stderr)
+                        );
                     }));
                 });
                 sent.send(super::super::material_basis(&request)).unwrap();
             });
-            let error = received.recv_timeout(Duration::from_secs(3))
-                .expect("actual FIFO open must not wait for a writer").unwrap_err();
+            let error = received
+                .recv_timeout(Duration::from_secs(3))
+                .expect("actual FIFO open must not wait for a writer")
+                .unwrap_err();
             worker.join().unwrap();
             assert_eq!(error.code(), "knowledge.wiki_publication_identity");
             assert_eq!(fs::read(&retained).unwrap(), b"selected original bytes");
@@ -1391,7 +1906,10 @@ mod native {
                     fs::write(path, b"later external in-place bytes").unwrap();
                 }));
             });
-            assert_eq!(super::super::material_basis(&path).unwrap_err().code(), "knowledge.wiki_concurrent_write");
+            assert_eq!(
+                super::super::material_basis(&path).unwrap_err().code(),
+                "knowledge.wiki_concurrent_write"
+            );
             assert_eq!(identity(&fs::metadata(&path).unwrap()), identity(&before));
             assert_eq!(fs::read(&path).unwrap(), b"later external in-place bytes");
         }
@@ -1417,13 +1935,19 @@ mod native {
             assert_eq!(error.code(), "knowledge.wiki_publication_identity");
             assert!(!error.details().contains_key("published"));
             assert_eq!(fs::read(&path).unwrap(), b"initial selected source");
-            assert_eq!(fs::read(foreign.join("material.json")).unwrap(), b"unselected foreign source");
+            assert_eq!(
+                fs::read(foreign.join("material.json")).unwrap(),
+                b"unselected foreign source"
+            );
         }
 
         #[test]
         fn actual_material_basis_refuses_source_above_existing_native_budget() {
             let (_root, path) = material_fixture(&vec![b'x'; SOURCE_BUDGET as usize + 1]);
-            assert_eq!(super::super::material_basis(&path).unwrap_err().code(), "knowledge.wiki_publication_budget");
+            assert_eq!(
+                super::super::material_basis(&path).unwrap_err().code(),
+                "knowledge.wiki_publication_budget"
+            );
             assert_eq!(fs::metadata(&path).unwrap().len(), SOURCE_BUDGET + 1);
         }
 
@@ -1436,8 +1960,12 @@ mod native {
         impl MaterialRoute {
             fn invoke(self, path: &Path) -> Result<()> {
                 match self {
-                    Self::Replace => publish_wiki(path, "actual next material", &content_hash(b"actual old material"))
-                        .map(|changed| assert!(changed)),
+                    Self::Replace => publish_wiki(
+                        path,
+                        "actual next material",
+                        &content_hash(b"actual old material"),
+                    )
+                    .map(|changed| assert!(changed)),
                     Self::Create => publish_absent_material(path, "actual next material")
                         .map(|changed| assert!(changed)),
                     Self::Remove => remove_material(path, &content_hash(b"actual old material")),
@@ -1453,11 +1981,13 @@ mod native {
         }
         impl AliasFixture {
             fn new(route: MaterialRoute) -> Self {
-                let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../ProjectCentral/now/tmp");
+                let scratch =
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
                 fs::create_dir_all(&scratch).unwrap();
-                let world = tempfile::Builder::new().prefix("native-parent-affiliation-")
-                    .tempdir_in(&scratch).unwrap();
+                let world = tempfile::Builder::new()
+                    .prefix("native-parent-affiliation-")
+                    .tempdir_in(&scratch)
+                    .unwrap();
                 let physical = world.path().join("physical");
                 let foreign = world.path().join("foreign");
                 let alias = world.path().join("requested-parent");
@@ -1465,12 +1995,20 @@ mod native {
                 fs::create_dir(&foreign).unwrap();
                 if !matches!(route, MaterialRoute::Create) {
                     fs::write(physical.join("wiki.json"), "actual old material").unwrap();
-                    fs::set_permissions(physical.join("wiki.json"), fs::Permissions::from_mode(0o600))
-                        .unwrap();
+                    fs::set_permissions(
+                        physical.join("wiki.json"),
+                        fs::Permissions::from_mode(0o600),
+                    )
+                    .unwrap();
                 }
                 fs::write(foreign.join("wiki.json"), "foreign selected source").unwrap();
                 std::os::unix::fs::symlink(&physical, &alias).unwrap();
-                Self { _world: world, physical, foreign, alias }
+                Self {
+                    _world: world,
+                    physical,
+                    foreign,
+                    alias,
+                }
             }
             fn request(&self) -> PathBuf {
                 self.alias.join("wiki.json")
@@ -1484,8 +2022,10 @@ mod native {
                 })
             }
             fn check_foreign(&self) {
-                assert_eq!(fs::read_to_string(self.foreign.join("wiki.json")).unwrap(),
-                    "foreign selected source");
+                assert_eq!(
+                    fs::read_to_string(self.foreign.join("wiki.json")).unwrap(),
+                    "foreign selected source"
+                );
             }
             fn check_effect(&self, route: MaterialRoute) {
                 let source = self.physical.join("wiki.json");
@@ -1500,32 +2040,55 @@ mod native {
         }
 
         fn assert_uncertain_effect(error: &AikitError, route: MaterialRoute, physical: &Path) {
-            assert_eq!(error.details()["path"], fs::canonicalize(physical).unwrap()
-                .join("wiki.json").display().to_string());
+            assert_eq!(
+                error.details()["path"],
+                fs::canonicalize(physical)
+                    .unwrap()
+                    .join("wiki.json")
+                    .display()
+                    .to_string()
+            );
             assert_eq!(error.details()["automatic_retry"], "false");
-            assert_eq!(error.details()["cause_code"], "knowledge.wiki_publication_identity");
+            assert_eq!(
+                error.details()["cause_code"],
+                "knowledge.wiki_publication_identity"
+            );
             if matches!(route, MaterialRoute::Remove) {
                 assert_eq!(error.code(), "knowledge.source_pool_removal_uncertain");
                 assert_eq!(error.details()["removed"], "true");
-                assert_eq!(error.details()["removed_basis"], content_hash(b"actual old material"));
+                assert_eq!(
+                    error.details()["removed_basis"],
+                    content_hash(b"actual old material")
+                );
                 assert!(!error.details().contains_key("published"));
             } else {
                 assert_eq!(error.code(), "knowledge.wiki_publication_uncertain");
                 assert_eq!(error.details()["published"], "true");
-                assert_eq!(error.details()["published_hash"], content_hash(b"actual next material"));
+                assert_eq!(
+                    error.details()["published_hash"],
+                    content_hash(b"actual next material")
+                );
                 assert!(!error.details().contains_key("removed"));
             }
         }
 
         #[test]
         fn actual_requested_parent_alias_retarget_refuses_all_routes_before_effect() {
-            for route in [MaterialRoute::Replace, MaterialRoute::Create, MaterialRoute::Remove] {
+            for route in [
+                MaterialRoute::Replace,
+                MaterialRoute::Create,
+                MaterialRoute::Remove,
+            ] {
                 let world = AliasFixture::new(route);
                 BEFORE_MUTATION.with(|slot| {
                     *slot.borrow_mut() = Some(world.retarget_observer());
                 });
                 let error = route.invoke(&world.request()).unwrap_err();
-                assert_eq!(error.code(), "knowledge.wiki_publication_identity", "{route:?}: {error}");
+                assert_eq!(
+                    error.code(),
+                    "knowledge.wiki_publication_identity",
+                    "{route:?}: {error}"
+                );
                 assert!(!error.details().contains_key("published"));
                 assert!(!error.details().contains_key("removed"));
                 let original = world.physical.join("wiki.json");
@@ -1535,41 +2098,73 @@ mod native {
                     assert_eq!(fs::read_to_string(original).unwrap(), "actual old material");
                 }
                 world.check_foreign();
-                assert_eq!(fs::read_to_string(world.request()).unwrap(), "foreign selected source");
-                let stages: Vec<_> = fs::read_dir(&world.physical).unwrap()
+                assert_eq!(
+                    fs::read_to_string(world.request()).unwrap(),
+                    "foreign selected source"
+                );
+                let stages: Vec<_> = fs::read_dir(&world.physical)
+                    .unwrap()
                     .map(|entry| entry.unwrap().path())
-                    .filter(|path| path.file_name().unwrap().to_string_lossy()
-                        .starts_with(".wiki.json.publication-")).collect();
-                assert_eq!(stages.len(), if matches!(route, MaterialRoute::Remove) { 0 } else { 1 });
+                    .filter(|path| {
+                        path.file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .starts_with(".wiki.json.publication-")
+                    })
+                    .collect();
+                assert_eq!(
+                    stages.len(),
+                    if matches!(route, MaterialRoute::Remove) {
+                        0
+                    } else {
+                        1
+                    }
+                );
                 for stage in stages {
-                    assert_eq!(fs::read(stage).unwrap(), b"", "refuse before candidate bytes");
+                    assert_eq!(
+                        fs::read(stage).unwrap(),
+                        b"",
+                        "refuse before candidate bytes"
+                    );
                 }
             }
         }
 
         #[test]
         fn actual_requested_parent_alias_retarget_after_effect_retains_all_native_outcomes() {
-            for route in [MaterialRoute::Replace, MaterialRoute::Create, MaterialRoute::Remove] {
+            for route in [
+                MaterialRoute::Replace,
+                MaterialRoute::Create,
+                MaterialRoute::Remove,
+            ] {
                 let world = AliasFixture::new(route);
                 AFTER_MUTATION.with(|slot| {
                     *slot.borrow_mut() = Some(world.retarget_observer());
                 });
                 let error = route.invoke(&world.request()).unwrap_err();
                 assert_uncertain_effect(&error, route, &world.physical);
-                let cause: serde_json::Value = serde_json::from_str(&error.details()["cause"]).unwrap();
+                let cause: serde_json::Value =
+                    serde_json::from_str(&error.details()["cause"]).unwrap();
                 assert_eq!(cause["code"], "knowledge.wiki_publication_identity");
                 assert_eq!(cause["details"]["path"], world.alias.display().to_string());
                 assert!(cause["details"].get("held_directory_identity").is_some());
                 world.check_effect(route);
                 world.check_foreign();
-                assert_eq!(fs::read_to_string(world.request()).unwrap(), "foreign selected source");
+                assert_eq!(
+                    fs::read_to_string(world.request()).unwrap(),
+                    "foreign selected source"
+                );
             }
         }
 
         #[test]
         fn actual_missing_requested_parent_after_effect_retains_original_os_cause_all_routes() {
             use std::error::Error;
-            for route in [MaterialRoute::Replace, MaterialRoute::Create, MaterialRoute::Remove] {
+            for route in [
+                MaterialRoute::Replace,
+                MaterialRoute::Create,
+                MaterialRoute::Remove,
+            ] {
                 let world = AliasFixture::new(route);
                 let alias = world.alias.clone();
                 AFTER_MUTATION.with(|slot| {
@@ -1577,15 +2172,25 @@ mod native {
                 });
                 let error = route.invoke(&world.request()).unwrap_err();
                 assert_uncertain_effect(&error, route, &world.physical);
-                let cause: serde_json::Value = serde_json::from_str(&error.details()["cause"]).unwrap();
+                let cause: serde_json::Value =
+                    serde_json::from_str(&error.details()["cause"]).unwrap();
                 assert_eq!(cause["details"]["path"], world.alias.display().to_string());
                 assert_eq!(cause["details"]["cause_kind"], "NotFound");
                 let original_os_error = fs::metadata(&world.alias).unwrap_err();
-                let retained_cause = error.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+                let retained_cause = error
+                    .source()
+                    .unwrap()
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap();
                 assert_eq!(retained_cause.kind(), std::io::ErrorKind::NotFound);
-                assert_eq!(retained_cause.raw_os_error(), original_os_error.raw_os_error());
-                assert_eq!(cause["details"]["cause_raw_os_error"],
-                    serde_json::json!(original_os_error.raw_os_error()).to_string());
+                assert_eq!(
+                    retained_cause.raw_os_error(),
+                    original_os_error.raw_os_error()
+                );
+                assert_eq!(
+                    cause["details"]["cause_raw_os_error"],
+                    serde_json::json!(original_os_error.raw_os_error()).to_string()
+                );
                 assert!(original_os_error.raw_os_error().is_some());
                 world.check_effect(route);
                 world.check_foreign();
@@ -1595,15 +2200,26 @@ mod native {
 
         #[test]
         fn actual_unchanged_parent_alias_preserves_all_routes_and_exact_noop() {
-            for route in [MaterialRoute::Replace, MaterialRoute::Create, MaterialRoute::Remove] {
+            for route in [
+                MaterialRoute::Replace,
+                MaterialRoute::Create,
+                MaterialRoute::Remove,
+            ] {
                 let world = AliasFixture::new(route);
                 if matches!(route, MaterialRoute::Replace) {
                     let before = fs::metadata(world.physical.join("wiki.json")).unwrap();
-                    assert!(!publish_wiki(&world.request(), "actual old material",
-                        &content_hash(b"actual old material")).unwrap());
+                    assert!(!publish_wiki(
+                        &world.request(),
+                        "actual old material",
+                        &content_hash(b"actual old material")
+                    )
+                    .unwrap());
                     let after = fs::metadata(world.physical.join("wiki.json")).unwrap();
                     assert_eq!(identity(&before), identity(&after));
-                    assert_eq!((before.mtime(), before.mtime_nsec()), (after.mtime(), after.mtime_nsec()));
+                    assert_eq!(
+                        (before.mtime(), before.mtime_nsec()),
+                        (after.mtime(), after.mtime_nsec())
+                    );
                 }
                 route.invoke(&world.request()).unwrap();
                 world.check_effect(route);
@@ -1619,15 +2235,25 @@ mod native {
             BEFORE_MUTATION.with(|slot| {
                 *slot.borrow_mut() = Some(world.retarget_observer());
             });
-            let error = publish_wiki(&world.request(), "actual old material",
-                &content_hash(b"actual old material")).unwrap_err();
+            let error = publish_wiki(
+                &world.request(),
+                "actual old material",
+                &content_hash(b"actual old material"),
+            )
+            .unwrap_err();
             assert_eq!(error.code(), "knowledge.wiki_publication_identity");
             assert!(!error.details().contains_key("published"));
             assert!(!error.details().contains_key("removed"));
             let after = fs::metadata(world.physical.join("wiki.json")).unwrap();
             assert_eq!(identity(&before), identity(&after));
-            assert_eq!((before.mtime(), before.mtime_nsec()), (after.mtime(), after.mtime_nsec()));
-            assert_eq!(fs::read_to_string(world.physical.join("wiki.json")).unwrap(), "actual old material");
+            assert_eq!(
+                (before.mtime(), before.mtime_nsec()),
+                (after.mtime(), after.mtime_nsec())
+            );
+            assert_eq!(
+                fs::read_to_string(world.physical.join("wiki.json")).unwrap(),
+                "actual old material"
+            );
             world.check_foreign();
         }
 
@@ -1636,21 +2262,41 @@ mod native {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("corpus-000.json");
             let barrier = Arc::new(Barrier::new(2));
-            let workers: Vec<_> = ["first actual candidate", "second actual candidate"].into_iter().map(|text| {
-                let path = path.clone();
-                let barrier = barrier.clone();
-                std::thread::spawn(move || { barrier.wait(); (text, publish_absent_material(&path, text)) })
-            }).collect();
-            let results: Vec<_> = workers.into_iter().map(|worker| worker.join().unwrap()).collect();
-            let winners: Vec<_> = results.iter().filter(|(_, result)| result.is_ok()).collect();
+            let workers: Vec<_> = ["first actual candidate", "second actual candidate"]
+                .into_iter()
+                .map(|text| {
+                    let path = path.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        (text, publish_absent_material(&path, text))
+                    })
+                })
+                .collect();
+            let results: Vec<_> = workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect();
+            let winners: Vec<_> = results
+                .iter()
+                .filter(|(_, result)| result.is_ok())
+                .collect();
             assert_eq!(winners.len(), 1);
             assert_eq!(fs::read_to_string(&path).unwrap(), winners[0].0);
             let metadata = fs::metadata(&path).unwrap();
             assert_eq!(metadata.nlink(), 1, "no link/unlink crash interval");
             assert_eq!(metadata.mode() & 0o7777, 0o600);
-            assert_eq!(results.iter().filter(|(_, result)| result.is_err()).count(), 1);
+            assert_eq!(
+                results.iter().filter(|(_, result)| result.is_err()).count(),
+                1
+            );
             let original = fs::read_to_string(&path).unwrap();
-            assert_eq!(publish_absent_material(&path, "must not replace").unwrap_err().code(), "knowledge.wiki_concurrent_write");
+            assert_eq!(
+                publish_absent_material(&path, "must not replace")
+                    .unwrap_err()
+                    .code(),
+                "knowledge.wiki_concurrent_write"
+            );
             assert_eq!(fs::read_to_string(&path).unwrap(), original);
         }
 
@@ -1661,9 +2307,17 @@ mod native {
             fs::write(&target, "private original").unwrap();
             let path = directory.path().join("corpus-000.json");
             std::os::unix::fs::symlink(&target, &path).unwrap();
-            assert_eq!(publish_absent_material(&path, "candidate").unwrap_err().code(), "knowledge.wiki_concurrent_write");
+            assert_eq!(
+                publish_absent_material(&path, "candidate")
+                    .unwrap_err()
+                    .code(),
+                "knowledge.wiki_concurrent_write"
+            );
             assert_eq!(fs::read_to_string(&target).unwrap(), "private original");
-            assert!(fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+            assert!(fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink());
         }
 
         #[test]
@@ -1673,8 +2327,14 @@ mod native {
             publish_absent_material(&path, "old selected material").unwrap();
             let basis = content_hash(b"old selected material");
             publish_wiki(&path, "actual later peer material", &basis).unwrap();
-            assert_eq!(remove_material(&path, &basis).unwrap_err().code(), "knowledge.wiki_concurrent_write");
-            assert_eq!(fs::read_to_string(&path).unwrap(), "actual later peer material");
+            assert_eq!(
+                remove_material(&path, &basis).unwrap_err().code(),
+                "knowledge.wiki_concurrent_write"
+            );
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                "actual later peer material"
+            );
             remove_material(&path, &content_hash(b"actual later peer material")).unwrap();
             assert!(!path.exists());
         }
@@ -1694,14 +2354,26 @@ mod native {
             fs::rename(&parent, &retained_parent).unwrap();
             fs::create_dir(&parent).unwrap();
             fs::write(&path, "foreign source").unwrap();
-            let failure = publication_readback(&held, &parent, &parent, &path, source_identity,
-                &content_hash(b"actual newly published material"), &metadata).unwrap_err();
+            let failure = publication_readback(
+                &held,
+                &parent,
+                &parent,
+                &path,
+                source_identity,
+                &content_hash(b"actual newly published material"),
+                &metadata,
+            )
+            .unwrap_err();
             assert_eq!(failure.code(), "knowledge.wiki_publication_uncertain");
             assert_eq!(failure.details()["published"], "true");
-            let cause: serde_json::Value = serde_json::from_str(&failure.details()["cause"]).unwrap();
+            let cause: serde_json::Value =
+                serde_json::from_str(&failure.details()["cause"]).unwrap();
             assert_eq!(cause["code"], "knowledge.wiki_publication_identity");
             assert!(cause["details"].get("held_directory_identity").is_some());
-            assert_eq!(fs::read_to_string(retained_parent.join("corpus-000.json")).unwrap(), "actual newly published material");
+            assert_eq!(
+                fs::read_to_string(retained_parent.join("corpus-000.json")).unwrap(),
+                "actual newly published material"
+            );
             assert_eq!(fs::read_to_string(&path).unwrap(), "foreign source");
         }
 
@@ -1724,7 +2396,8 @@ mod native {
             assert_eq!(failure.details()["removed"], "true");
             assert_eq!(failure.details()["removed_basis"], basis);
             assert!(!failure.details().contains_key("published"));
-            let cause: serde_json::Value = serde_json::from_str(&failure.details()["cause"]).unwrap();
+            let cause: serde_json::Value =
+                serde_json::from_str(&failure.details()["cause"]).unwrap();
             assert_eq!(cause["code"], "knowledge.wiki_publication_identity");
             assert!(!retained_parent.join("corpus-999.json").exists());
             assert_eq!(fs::read_to_string(&path).unwrap(), "foreign material");
@@ -1740,15 +2413,29 @@ mod native {
             let source_identity = identity(&source.metadata().unwrap());
             let metadata = retained(&source, &path).unwrap();
             fs::remove_file(&path).unwrap();
-            let failure = publication_readback(&held, directory.path(), directory.path(), &path, source_identity,
-                &content_hash(b"actual publication"), &metadata).unwrap_err();
+            let failure = publication_readback(
+                &held,
+                directory.path(),
+                directory.path(),
+                &path,
+                source_identity,
+                &content_hash(b"actual publication"),
+                &metadata,
+            )
+            .unwrap_err();
             assert_eq!(failure.code(), "knowledge.wiki_publication_uncertain");
             assert_eq!(failure.details()["published"], "true");
-            let cause: serde_json::Value = serde_json::from_str(&failure.details()["cause"]).unwrap();
+            let cause: serde_json::Value =
+                serde_json::from_str(&failure.details()["cause"]).unwrap();
             assert_eq!(cause["code"], "knowledge.wiki_concurrent_write");
             assert_eq!(cause["details"]["cause_kind"], "NotFound");
-            let errno: Option<i32> = serde_json::from_str(cause["details"]["cause_raw_os_error"].as_str().unwrap()).unwrap();
-            assert!(errno.is_some(), "retain actual OS errno rather than reconstructing it from prose");
+            let errno: Option<i32> =
+                serde_json::from_str(cause["details"]["cause_raw_os_error"].as_str().unwrap())
+                    .unwrap();
+            assert!(
+                errno.is_some(),
+                "retain actual OS errno rather than reconstructing it from prose"
+            );
         }
 
         #[test]
@@ -1814,7 +2501,14 @@ mod native {
             assert_eq!(identity(&fs::metadata(&lock_path).unwrap()), lock_identity);
         }
 
-        fn affiliated_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf, (u64, u64)) {
+        fn affiliated_fixture() -> (
+            tempfile::TempDir,
+            PathBuf,
+            PathBuf,
+            PathBuf,
+            PathBuf,
+            (u64, u64),
+        ) {
             let owned = tempfile::tempdir().unwrap();
             let old = owned.path().join("original-project");
             let foreign = owned.path().join("foreign-project");
@@ -1843,37 +2537,72 @@ mod native {
             let source = old.join(&member);
             let original = identity(&fs::metadata(&source).unwrap());
             let root_mode = fs::metadata(&old).unwrap().mode();
-            let bytes = material_bytes_affiliated(&alias, expected, &member, SOURCE_BUDGET).unwrap();
+            let bytes =
+                material_bytes_affiliated(&alias, expected, &member, SOURCE_BUDGET).unwrap();
             assert_eq!(bytes, b"same original basis");
-            assert!(!source.parent().unwrap().join(".wiki.json.publication.lock").exists());
-            assert!(publish_wiki_affiliated(&alias, expected, &member, "original owner result",
-                &content_hash(&bytes)).unwrap());
+            assert!(!source
+                .parent()
+                .unwrap()
+                .join(".wiki.json.publication.lock")
+                .exists());
+            assert!(publish_wiki_affiliated(
+                &alias,
+                expected,
+                &member,
+                "original owner result",
+                &content_hash(&bytes)
+            )
+            .unwrap());
             let published = fs::metadata(&source).unwrap();
             assert_ne!(identity(&published), original);
             assert_eq!(published.mode() & 0o7777, 0o600);
             assert_eq!(fs::metadata(&old).unwrap().mode(), root_mode);
-            assert!(!publish_wiki_affiliated(&alias, expected, &member, "original owner result",
-                &content_hash(b"original owner result")).unwrap());
-            assert_eq!(identity(&fs::metadata(&source).unwrap()), identity(&published));
-            assert_eq!(material_bytes_affiliated(&alias, expected, &member, SOURCE_BUDGET).unwrap(),
-                b"original owner result");
-            assert_eq!(fs::read(foreign.join(member)).unwrap(), b"same original basis");
+            assert!(!publish_wiki_affiliated(
+                &alias,
+                expected,
+                &member,
+                "original owner result",
+                &content_hash(b"original owner result")
+            )
+            .unwrap());
+            assert_eq!(
+                identity(&fs::metadata(&source).unwrap()),
+                identity(&published)
+            );
+            assert_eq!(
+                material_bytes_affiliated(&alias, expected, &member, SOURCE_BUDGET).unwrap(),
+                b"original owner result"
+            );
+            assert_eq!(
+                fs::read(foreign.join(member)).unwrap(),
+                b"same original basis"
+            );
         }
 
         #[test]
         fn affiliated_equal_basis_foreign_root_is_not_an_admitted_destination_or_read() {
             let (_owned, old, foreign, alias, member, expected) = affiliated_fixture();
             retarget_root(&alias, &foreign);
-            let read = material_bytes_affiliated(&alias, expected, &member, SOURCE_BUDGET).unwrap_err();
-            let write = publish_wiki_affiliated(&alias, expected, &member, "foreign transfer",
-                &content_hash(b"same original basis")).unwrap_err();
+            let read =
+                material_bytes_affiliated(&alias, expected, &member, SOURCE_BUDGET).unwrap_err();
+            let write = publish_wiki_affiliated(
+                &alias,
+                expected,
+                &member,
+                "foreign transfer",
+                &content_hash(b"same original basis"),
+            )
+            .unwrap_err();
             for error in [read, write] {
                 assert_eq!(error.code(), "knowledge.wiki_publication_identity");
                 assert_eq!(error.details()["observation_stage"], "owner_root");
                 assert!(error.details().get("published").is_none());
             }
             for root in [&old, &foreign] {
-                assert_eq!(fs::read(root.join(&member)).unwrap(), b"same original basis");
+                assert_eq!(
+                    fs::read(root.join(&member)).unwrap(),
+                    b"same original basis"
+                );
                 assert!(!root.join("native/.wiki.json.publication.lock").exists());
             }
         }
@@ -1884,17 +2613,27 @@ mod native {
                 let (_owned, old, foreign, alias, member, expected) = affiliated_fixture();
                 let moved_foreign = foreign.clone();
                 AFTER_AFFILIATED_ROOT_OPEN.with(|slot| {
-                    *slot.borrow_mut() = Some(Box::new(move |alias| retarget_root(alias, &moved_foreign)));
+                    *slot.borrow_mut() =
+                        Some(Box::new(move |alias| retarget_root(alias, &moved_foreign)));
                 });
                 let error = if write {
-                    publish_wiki_affiliated(&alias, expected, &member, "other result",
-                        &content_hash(b"same original basis")).unwrap_err()
+                    publish_wiki_affiliated(
+                        &alias,
+                        expected,
+                        &member,
+                        "other result",
+                        &content_hash(b"same original basis"),
+                    )
+                    .unwrap_err()
                 } else {
                     material_bytes_affiliated(&alias, expected, &member, SOURCE_BUDGET).unwrap_err()
                 };
                 assert_eq!(error.details()["observation_stage"], "owner_root");
                 for root in [&old, &foreign] {
-                    assert_eq!(fs::read(root.join(&member)).unwrap(), b"same original basis");
+                    assert_eq!(
+                        fs::read(root.join(&member)).unwrap(),
+                        b"same original basis"
+                    );
                     assert!(!root.join("native/.wiki.json.publication.lock").exists());
                 }
             }
@@ -1906,17 +2645,28 @@ mod native {
             let moved_alias = alias.clone();
             let moved_foreign = foreign.clone();
             BEFORE_MUTATION.with(|slot| {
-                *slot.borrow_mut() = Some(Box::new(move |_| retarget_root(&moved_alias, &moved_foreign)));
+                *slot.borrow_mut() = Some(Box::new(move |_| {
+                    retarget_root(&moved_alias, &moved_foreign)
+                }));
             });
-            let error = publish_wiki_affiliated(&alias, expected, &member, "candidate",
-                &content_hash(b"same original basis")).unwrap_err();
+            let error = publish_wiki_affiliated(
+                &alias,
+                expected,
+                &member,
+                "candidate",
+                &content_hash(b"same original basis"),
+            )
+            .unwrap_err();
             assert_eq!(error.details()["observation_stage"], "owner_root");
             assert!(error.details().get("published").is_none());
             let stage = PathBuf::from(&error.details()["stage_path"]);
             assert_eq!(stage.parent().unwrap(), old.join("native"));
             assert!(stage.exists());
             assert_eq!(fs::read(old.join(&member)).unwrap(), b"same original basis");
-            assert_eq!(fs::read(foreign.join(member)).unwrap(), b"same original basis");
+            assert_eq!(
+                fs::read(foreign.join(member)).unwrap(),
+                b"same original basis"
+            );
             assert_eq!(fs::read_dir(foreign.join("native")).unwrap().count(), 1);
         }
 
@@ -1926,22 +2676,43 @@ mod native {
             let (_owned, old, foreign, alias, member, expected) = affiliated_fixture();
             let removed_alias = alias.clone();
             AFTER_MUTATION.with(|slot| {
-                *slot.borrow_mut() = Some(Box::new(move |_| fs::remove_file(&removed_alias).unwrap()));
+                *slot.borrow_mut() =
+                    Some(Box::new(move |_| fs::remove_file(&removed_alias).unwrap()));
             });
-            let error = publish_wiki_affiliated(&alias, expected, &member, "committed original result",
-                &content_hash(b"same original basis")).unwrap_err();
+            let error = publish_wiki_affiliated(
+                &alias,
+                expected,
+                &member,
+                "committed original result",
+                &content_hash(b"same original basis"),
+            )
+            .unwrap_err();
             assert_eq!(error.code(), "knowledge.wiki_publication_uncertain");
             assert_eq!(error.details()["published"], "true");
-            assert_eq!(error.details()["published_hash"], content_hash(b"committed original result"));
+            assert_eq!(
+                error.details()["published_hash"],
+                content_hash(b"committed original result")
+            );
             assert_eq!(error.details()["automatic_retry"], "false");
             assert_eq!(PathBuf::from(&error.details()["path"]), old.join(&member));
-            let cause = error.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+            let cause = error
+                .source()
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap();
             assert_eq!(cause.kind(), std::io::ErrorKind::NotFound);
             assert_eq!(cause.raw_os_error(), Some(2));
-            let detail: serde_json::Value = serde_json::from_str(&error.details()["cause"]).unwrap();
+            let detail: serde_json::Value =
+                serde_json::from_str(&error.details()["cause"]).unwrap();
             assert_eq!(detail["details"]["observation_stage"], "owner_root");
-            assert_eq!(fs::read(old.join(&member)).unwrap(), b"committed original result");
-            assert_eq!(fs::read(foreign.join(member)).unwrap(), b"same original basis");
+            assert_eq!(
+                fs::read(old.join(&member)).unwrap(),
+                b"committed original result"
+            );
+            assert_eq!(
+                fs::read(foreign.join(member)).unwrap(),
+                b"same original basis"
+            );
         }
 
         #[test]
@@ -1951,16 +2722,27 @@ mod native {
             let moved_foreign = foreign.clone();
             let before = identity(&fs::metadata(old.join(&member)).unwrap());
             AFTER_NOOP_READ.with(|slot| {
-                *slot.borrow_mut() = Some(Box::new(move |_| retarget_root(&moved_alias, &moved_foreign)));
+                *slot.borrow_mut() = Some(Box::new(move |_| {
+                    retarget_root(&moved_alias, &moved_foreign)
+                }));
             });
-            let error = publish_wiki_affiliated(&alias, expected, &member, "same original basis",
-                &content_hash(b"same original basis")).unwrap_err();
+            let error = publish_wiki_affiliated(
+                &alias,
+                expected,
+                &member,
+                "same original basis",
+                &content_hash(b"same original basis"),
+            )
+            .unwrap_err();
             assert_eq!(error.details()["changed"], "false");
             assert_eq!(error.details()["published"], "false");
             assert_eq!(error.details()["observation_stage"], "owner_root");
             assert_eq!(identity(&fs::metadata(old.join(&member)).unwrap()), before);
             assert_eq!(fs::read(old.join(&member)).unwrap(), b"same original basis");
-            assert_eq!(fs::read(foreign.join(member)).unwrap(), b"same original basis");
+            assert_eq!(
+                fs::read(foreign.join(member)).unwrap(),
+                b"same original basis"
+            );
         }
 
         #[test]
@@ -1970,23 +2752,45 @@ mod native {
             let moved_alias = alias.clone();
             let moved_foreign = foreign.clone();
             AFTER_MATERIAL_FINAL_READ.with(|slot| {
-                *slot.borrow_mut() = Some(Box::new(move |_| retarget_root(&moved_alias, &moved_foreign)));
+                *slot.borrow_mut() = Some(Box::new(move |_| {
+                    retarget_root(&moved_alias, &moved_foreign)
+                }));
             });
-            let error = material_bytes_affiliated(&alias, expected, &member, SOURCE_BUDGET).unwrap_err();
+            let error =
+                material_bytes_affiliated(&alias, expected, &member, SOURCE_BUDGET).unwrap_err();
             assert_eq!(error.details()["observation_stage"], "owner_root");
             retarget_root(&alias, &old);
             fs::remove_file(&alias).unwrap();
-            let root_missing = material_bytes_affiliated(&alias, expected, &member, SOURCE_BUDGET).unwrap_err();
+            let root_missing =
+                material_bytes_affiliated(&alias, expected, &member, SOURCE_BUDGET).unwrap_err();
             assert_eq!(root_missing.details()["observation_stage"], "owner_root");
-            assert_eq!(root_missing.source().unwrap().downcast_ref::<std::io::Error>().unwrap().kind(),
-                std::io::ErrorKind::NotFound);
+            assert_eq!(
+                root_missing
+                    .source()
+                    .unwrap()
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .kind(),
+                std::io::ErrorKind::NotFound
+            );
             std::os::unix::fs::symlink(&old, &alias).unwrap();
             fs::remove_file(old.join(&member)).unwrap();
-            let source_missing = material_bytes_affiliated(&alias, expected, &member, SOURCE_BUDGET).unwrap_err();
+            let source_missing =
+                material_bytes_affiliated(&alias, expected, &member, SOURCE_BUDGET).unwrap_err();
             assert!(source_missing.details().get("observation_stage").is_none());
-            assert_eq!(source_missing.source().unwrap().downcast_ref::<std::io::Error>().unwrap().kind(),
-                std::io::ErrorKind::NotFound);
-            assert_eq!(fs::read(foreign.join(member)).unwrap(), b"same original basis");
+            assert_eq!(
+                source_missing
+                    .source()
+                    .unwrap()
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .kind(),
+                std::io::ErrorKind::NotFound
+            );
+            assert_eq!(
+                fs::read(foreign.join(member)).unwrap(),
+                b"same original basis"
+            );
         }
 
         #[test]
@@ -1994,15 +2798,33 @@ mod native {
             let (_owned, old, foreign, alias, member, expected) = affiliated_fixture();
             std::os::unix::fs::symlink(old.join("native"), old.join("declared-member")).unwrap();
             let declared = Path::new("declared-member/wiki.json");
-            let observed_member = fs::canonicalize(alias.join(declared)).unwrap()
-                .strip_prefix(fs::canonicalize(&alias).unwrap()).unwrap().to_path_buf();
+            let observed_member = fs::canonicalize(alias.join(declared))
+                .unwrap()
+                .strip_prefix(fs::canonicalize(&alias).unwrap())
+                .unwrap()
+                .to_path_buf();
             assert_eq!(observed_member, member);
-            assert!(publish_wiki_affiliated(&alias, expected, &observed_member, "mapped result",
-                &content_hash(b"same original basis")).unwrap());
-            assert_eq!(fs::canonicalize(alias.join(declared)).unwrap(), old.join(&member));
-            assert_eq!(material_bytes_affiliated(&alias, expected, &observed_member, SOURCE_BUDGET).unwrap(),
-                b"mapped result");
-            assert_eq!(fs::read(foreign.join(member)).unwrap(), b"same original basis");
+            assert!(publish_wiki_affiliated(
+                &alias,
+                expected,
+                &observed_member,
+                "mapped result",
+                &content_hash(b"same original basis")
+            )
+            .unwrap());
+            assert_eq!(
+                fs::canonicalize(alias.join(declared)).unwrap(),
+                old.join(&member)
+            );
+            assert_eq!(
+                material_bytes_affiliated(&alias, expected, &observed_member, SOURCE_BUDGET)
+                    .unwrap(),
+                b"mapped result"
+            );
+            assert_eq!(
+                fs::read(foreign.join(member)).unwrap(),
+                b"same original basis"
+            );
         }
 
         #[test]
@@ -2019,17 +2841,33 @@ mod native {
                     fs::write(moved_native.join("wiki.json"), b"replacement parent basis").unwrap();
                 }));
             });
-            let error = publish_wiki_affiliated(&alias, expected, &member, "candidate",
-                &content_hash(b"same original basis")).unwrap_err();
+            let error = publish_wiki_affiliated(
+                &alias,
+                expected,
+                &member,
+                "candidate",
+                &content_hash(b"same original basis"),
+            )
+            .unwrap_err();
             assert_eq!(error.details()["observation_stage"], "owner_parent");
             assert!(error.details().get("published").is_none());
-            assert_eq!(fs::read(retained.join("wiki.json")).unwrap(), b"same original basis");
-            assert_eq!(fs::read(native.join("wiki.json")).unwrap(), b"replacement parent basis");
-            assert_eq!(fs::read(foreign.join(member)).unwrap(), b"same original basis");
+            assert_eq!(
+                fs::read(retained.join("wiki.json")).unwrap(),
+                b"same original basis"
+            );
+            assert_eq!(
+                fs::read(native.join("wiki.json")).unwrap(),
+                b"replacement parent basis"
+            );
+            assert_eq!(
+                fs::read(foreign.join(member)).unwrap(),
+                b"same original basis"
+            );
         }
 
         #[test]
-        fn affiliated_source_notfound_after_directory_substitution_retains_actual_cause_and_phase() {
+        fn affiliated_source_notfound_after_directory_substitution_retains_actual_cause_and_phase()
+        {
             use std::error::Error;
             for root_loss in [false, true] {
                 let (owned, old, _foreign, alias, member, expected) = affiliated_fixture();
@@ -2044,17 +2882,35 @@ mod native {
                     *slot.borrow_mut() = Some(Box::new(move |_| {
                         fs::rename(&moved_copy, &retained_copy).unwrap();
                         fs::create_dir(&moved_copy).unwrap();
-                        if root_loss { fs::create_dir(moved_copy.join("native")).unwrap(); }
+                        if root_loss {
+                            fs::create_dir(moved_copy.join("native")).unwrap();
+                        }
                     }));
                 });
-                let error = material_bytes_affiliated(&alias, expected, &member, SOURCE_BUDGET).unwrap_err();
+                let error = material_bytes_affiliated(&alias, expected, &member, SOURCE_BUDGET)
+                    .unwrap_err();
                 assert_eq!(error.code(), "knowledge.wiki_concurrent_write");
-                assert_eq!(error.details()["observation_stage"], if root_loss { "owner_root" } else { "owner_parent" });
+                assert_eq!(
+                    error.details()["observation_stage"],
+                    if root_loss {
+                        "owner_root"
+                    } else {
+                        "owner_parent"
+                    }
+                );
                 assert!(error.details().get("owner_affiliation_cause").is_some());
-                let first = error.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+                let first = error
+                    .source()
+                    .unwrap()
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap();
                 assert_eq!(first.kind(), std::io::ErrorKind::NotFound);
                 assert_eq!(first.raw_os_error(), Some(2));
-                let retained_source = if root_loss { retained.join(&member) } else { retained.join("wiki.json") };
+                let retained_source = if root_loss {
+                    retained.join(&member)
+                } else {
+                    retained.join("wiki.json")
+                };
                 assert_eq!(fs::read(retained_source).unwrap(), b"same original basis");
                 assert!(!old.join(member).exists());
             }
@@ -2064,15 +2920,30 @@ mod native {
         fn affiliated_member_escape_and_unproven_directory_alias_refuse_without_effects() {
             let (_owned, old, foreign, alias, _member, expected) = affiliated_fixture();
             std::os::unix::fs::symlink(foreign.join("native"), old.join("escape")).unwrap();
-            for member in [Path::new("../foreign-project/native/wiki.json"), Path::new("/wiki.json"),
-                Path::new("escape/wiki.json")] {
-                let error = publish_wiki_affiliated(&alias, expected, member, "transfer",
-                    &content_hash(b"same original basis")).unwrap_err();
+            for member in [
+                Path::new("../foreign-project/native/wiki.json"),
+                Path::new("/wiki.json"),
+                Path::new("escape/wiki.json"),
+            ] {
+                let error = publish_wiki_affiliated(
+                    &alias,
+                    expected,
+                    member,
+                    "transfer",
+                    &content_hash(b"same original basis"),
+                )
+                .unwrap_err();
                 assert_eq!(error.details()["observation_stage"], "owner_parent");
                 assert!(error.details().get("published").is_none());
             }
-            assert_eq!(fs::read(old.join("native/wiki.json")).unwrap(), b"same original basis");
-            assert_eq!(fs::read(foreign.join("native/wiki.json")).unwrap(), b"same original basis");
+            assert_eq!(
+                fs::read(old.join("native/wiki.json")).unwrap(),
+                b"same original basis"
+            );
+            assert_eq!(
+                fs::read(foreign.join("native/wiki.json")).unwrap(),
+                b"same original basis"
+            );
             assert!(!foreign.join("native/.wiki.json.publication.lock").exists());
         }
 
@@ -2080,8 +2951,13 @@ mod native {
             let owned = tempfile::tempdir().unwrap();
             let parent = fs::canonicalize(owned.path()).unwrap();
             let path = parent.join(".wiki.json.publication.lock");
-            let mut peer = OpenOptions::new().create_new(true).read(true).write(true)
-                .mode(0o600).open(&path).unwrap();
+            let mut peer = OpenOptions::new()
+                .create_new(true)
+                .read(true)
+                .write(true)
+                .mode(0o600)
+                .open(&path)
+                .unwrap();
             peer.write_all(b"retained peer lock bytes").unwrap();
             let directory = open_directory(&parent).unwrap();
             (owned, path, directory)
@@ -2091,22 +2967,40 @@ mod native {
         fn actual_peer_lock_recovery_reopens_without_create_or_truncate_and_releases_its_fd() {
             let (_owned, path, directory) = actual_peer_lock_fixture();
             let before = fs::metadata(&path).unwrap();
-            let recovered = recover_peer_lock_at(&directory, path.file_name().unwrap(), &path).unwrap();
+            let recovered =
+                recover_peer_lock_at(&directory, path.file_name().unwrap(), &path).unwrap();
             assert_eq!(identity(&recovered.metadata().unwrap()), identity(&before));
             assert_eq!(fs::read(&path).unwrap(), b"retained peer lock bytes");
             assert_eq!(fs::metadata(&path).unwrap().mode(), before.mode());
             FileExt::try_lock(&recovered).unwrap();
-            let recovered = PublicationLock { file: recovered, owner_pid: std::process::id() };
+            let recovered = PublicationLock {
+                file: recovered,
+                owner_pid: std::process::id(),
+            };
             // Real duplication shares the open file description, just as a
             // concurrent native child can retain it before exec.
             let duplicate = recovered.file.try_clone().unwrap();
-            let other = OpenOptions::new().read(true).write(true).open(&path).unwrap();
-            assert!(matches!(FileExt::try_lock(&other), Err(fs4::TryLockError::WouldBlock)));
+            let other = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            assert!(matches!(
+                FileExt::try_lock(&other),
+                Err(fs4::TryLockError::WouldBlock)
+            ));
             drop(recovered);
             FileExt::try_lock(&other).unwrap();
             drop(duplicate);
-            let contender = OpenOptions::new().read(true).write(true).open(&path).unwrap();
-            assert!(matches!(FileExt::try_lock(&contender), Err(fs4::TryLockError::WouldBlock)));
+            let contender = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            assert!(matches!(
+                FileExt::try_lock(&contender),
+                Err(fs4::TryLockError::WouldBlock)
+            ));
             FileExt::unlock(&other).unwrap();
             assert_eq!(identity(&fs::metadata(&path).unwrap()), identity(&before));
             assert_eq!(fs::read(&path).unwrap(), b"retained peer lock bytes");
@@ -2130,11 +3024,16 @@ mod native {
             });
             let error = lock(&path).unwrap_err();
             assert_eq!(error.code(), "knowledge.wiki_publication_identity");
-            let initial = error.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+            let initial = error
+                .source()
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap();
             assert_eq!(initial.kind(), std::io::ErrorKind::NotFound);
             assert_eq!(initial.raw_os_error(), Some(2));
             assert_eq!(error.details()["lock_bootstrap_recovery"], "refused");
-            let recovery: serde_json::Value = serde_json::from_str(&error.details()["lock_bootstrap_recovery_cause"]).unwrap();
+            let recovery: serde_json::Value =
+                serde_json::from_str(&error.details()["lock_bootstrap_recovery_cause"]).unwrap();
             assert_eq!(recovery["code"], "knowledge.wiki_publication_identity");
             assert!(recovery["details"].get("held_directory_identity").is_some());
             assert_eq!(fs::read(&path).unwrap(), b"foreign peer at replaced parent");
@@ -2147,9 +3046,17 @@ mod native {
             use std::error::Error;
             let (_owned, path, directory) = actual_peer_lock_fixture();
             fs::remove_file(&path).unwrap();
-            let error = recover_peer_lock_at(&directory, path.file_name().unwrap(), &path).unwrap_err();
-            assert_eq!(error.source().unwrap().downcast_ref::<std::io::Error>().unwrap().kind(),
-                std::io::ErrorKind::NotFound);
+            let error =
+                recover_peer_lock_at(&directory, path.file_name().unwrap(), &path).unwrap_err();
+            assert_eq!(
+                error
+                    .source()
+                    .unwrap()
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .kind(),
+                std::io::ErrorKind::NotFound
+            );
             assert!(!path.exists());
             assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 0);
         }
@@ -2165,14 +3072,27 @@ mod native {
                     "hardlink" => fs::hard_link(&retained, &path).unwrap(),
                     "fifo" => {
                         use crate::runner::{CommandRunner, SystemRunner};
-                        SystemRunner::new().with_timeout(Duration::from_secs(1)).run(&[
-                            "mkfifo".into(), "-m".into(), "600".into(), path.display().to_string(),
-                        ]).unwrap().require(&[], "test.mkfifo_failed").unwrap();
+                        SystemRunner::new()
+                            .with_timeout(Duration::from_secs(1))
+                            .run(&[
+                                "mkfifo".into(),
+                                "-m".into(),
+                                "600".into(),
+                                path.display().to_string(),
+                            ])
+                            .unwrap()
+                            .require(&[], "test.mkfifo_failed")
+                            .unwrap();
                     }
                     _ => unreachable!(),
                 }
-                let error = recover_peer_lock_at(&directory, path.file_name().unwrap(), &path).unwrap_err();
-                assert_eq!(error.code(), "knowledge.wiki_publication_identity", "{form}: {error}");
+                let error =
+                    recover_peer_lock_at(&directory, path.file_name().unwrap(), &path).unwrap_err();
+                assert_eq!(
+                    error.code(),
+                    "knowledge.wiki_publication_identity",
+                    "{form}: {error}"
+                );
                 assert_eq!(fs::read(&retained).unwrap(), b"retained peer lock bytes");
                 assert!(fs::symlink_metadata(&path).is_ok());
                 assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 2);
@@ -2191,7 +3111,8 @@ mod native {
                     fs::write(path, b"new foreign peer bytes").unwrap();
                 }));
             });
-            let error = recover_peer_lock_at(&directory, path.file_name().unwrap(), &path).unwrap_err();
+            let error =
+                recover_peer_lock_at(&directory, path.file_name().unwrap(), &path).unwrap_err();
             assert_eq!(error.code(), "knowledge.wiki_publication_identity");
             assert_eq!(identity(&fs::metadata(&retained).unwrap()), before);
             assert_eq!(fs::read(&retained).unwrap(), b"retained peer lock bytes");
@@ -2242,7 +3163,11 @@ mod native {
                 }).collect::<Vec<_>>(),
             });
             eprintln!("native concurrent publisher results: {diagnostic}");
-            assert_eq!(results.iter().filter(|(_, r)| r.is_ok()).count(), 1, "{diagnostic}");
+            assert_eq!(
+                results.iter().filter(|(_, r)| r.is_ok()).count(),
+                1,
+                "{diagnostic}"
+            );
             assert_eq!(
                 results
                     .iter()
@@ -2274,14 +3199,12 @@ mod native {
             fs::write(&legacy, "retained abandoned source").unwrap();
             std::os::unix::fs::symlink(&legacy, &pid_stage).unwrap();
             let before = fs::metadata(&path).unwrap();
-            assert!(
-                !publish_wiki(
-                    &path,
-                    " exact source \n",
-                    &content_hash(b" exact source \n")
-                )
-                .unwrap()
-            );
+            assert!(!publish_wiki(
+                &path,
+                " exact source \n",
+                &content_hash(b" exact source \n")
+            )
+            .unwrap());
             let after = fs::metadata(&path).unwrap();
             assert_eq!(identity(&before), identity(&after));
             assert_eq!(before.modified().unwrap(), after.modified().unwrap());
@@ -2290,12 +3213,10 @@ mod native {
                 fs::read_to_string(&legacy).unwrap(),
                 "retained abandoned source"
             );
-            assert!(
-                fs::symlink_metadata(&pid_stage)
-                    .unwrap()
-                    .file_type()
-                    .is_symlink()
-            );
+            assert!(fs::symlink_metadata(&pid_stage)
+                .unwrap()
+                .file_type()
+                .is_symlink());
         }
 
         #[test]
@@ -2317,7 +3238,10 @@ mod native {
                 assert!(result.unwrap());
                 assert_eq!(fs::read_to_string(&path).unwrap(), "changed");
             } else {
-                assert_eq!(result.unwrap_err().code(), "knowledge.wiki_publication_write_denied");
+                assert_eq!(
+                    result.unwrap_err().code(),
+                    "knowledge.wiki_publication_write_denied"
+                );
                 assert_eq!(fs::read_to_string(&path).unwrap(), "retained");
             }
             assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, 0o444);
@@ -2362,16 +3286,28 @@ mod native {
             let lock_fifo = directory.path().join(".wiki.json.publication.lock");
             for path in [&fifo, &lock_fifo] {
                 let argv = vec!["/usr/bin/mkfifo".into(), path.to_str().unwrap().into()];
-                SystemRunner::new().with_timeout(Duration::from_secs(1)).run(&argv).unwrap()
-                    .require(&argv, "test.fifo_setup").unwrap();
+                SystemRunner::new()
+                    .with_timeout(Duration::from_secs(1))
+                    .run(&argv)
+                    .unwrap()
+                    .require(&argv, "test.fifo_setup")
+                    .unwrap();
             }
             let started = Instant::now();
-            assert_eq!(publish_wiki(&fifo, "effect", &content_hash(b"")).unwrap_err().code(),
-                "knowledge.wiki_publication_identity");
+            assert_eq!(
+                publish_wiki(&fifo, "effect", &content_hash(b""))
+                    .unwrap_err()
+                    .code(),
+                "knowledge.wiki_publication_identity"
+            );
             let source = directory.path().join("wiki.json");
             fs::write(&source, "retained").unwrap();
-            assert_eq!(publish_wiki(&source, "effect", &content_hash(b"retained")).unwrap_err().code(),
-                "knowledge.wiki_publication_identity");
+            assert_eq!(
+                publish_wiki(&source, "effect", &content_hash(b"retained"))
+                    .unwrap_err()
+                    .code(),
+                "knowledge.wiki_publication_identity"
+            );
             assert!(started.elapsed() < Duration::from_secs(1));
             assert_eq!(fs::read_to_string(&source).unwrap(), "retained");
         }
@@ -2401,7 +3337,11 @@ mod native {
                 let mut stage = create_stage(&held, directory.path(), "wiki.json").unwrap();
                 stage.write_all(b"owned failed stage").unwrap();
                 let stage_path = stage.path().to_path_buf();
-                let retained_path = directory.path().join(if symlink { "retained-link.tmp" } else { "retained-file.tmp" });
+                let retained_path = directory.path().join(if symlink {
+                    "retained-link.tmp"
+                } else {
+                    "retained-file.tmp"
+                });
                 fs::rename(&stage_path, &retained_path).unwrap();
                 let foreign = directory.path().join("foreign-source.json");
                 fs::write(&foreign, "unselected retained source").unwrap();
@@ -2410,15 +3350,29 @@ mod native {
                 } else {
                     fs::write(&stage_path, "foreign replacement stage").unwrap();
                 }
-                assert_eq!(ordinary(&stage_path, stage.as_file()).unwrap_err().code(),
-                    "knowledge.wiki_publication_identity");
+                assert_eq!(
+                    ordinary(&stage_path, stage.as_file()).unwrap_err().code(),
+                    "knowledge.wiki_publication_identity"
+                );
                 drop(stage); // Real NamedTempFile/TempPath Drop, not a plain File.
-                assert_eq!(fs::read_to_string(&retained_path).unwrap(), "owned failed stage");
-                assert_eq!(fs::read_to_string(&foreign).unwrap(), "unselected retained source");
+                assert_eq!(
+                    fs::read_to_string(&retained_path).unwrap(),
+                    "owned failed stage"
+                );
+                assert_eq!(
+                    fs::read_to_string(&foreign).unwrap(),
+                    "unselected retained source"
+                );
                 if symlink {
-                    assert!(fs::symlink_metadata(&stage_path).unwrap().file_type().is_symlink());
+                    assert!(fs::symlink_metadata(&stage_path)
+                        .unwrap()
+                        .file_type()
+                        .is_symlink());
                 } else {
-                    assert_eq!(fs::read_to_string(&stage_path).unwrap(), "foreign replacement stage");
+                    assert_eq!(
+                        fs::read_to_string(&stage_path).unwrap(),
+                        "foreign replacement stage"
+                    );
                 }
             }
         }
@@ -2434,16 +3388,24 @@ mod native {
             fs::rename(&parent, &retained).unwrap();
             fs::create_dir(&parent).unwrap();
             fs::write(parent.join("wiki.json"), "foreign source").unwrap();
-            assert_eq!(directory_at_path(&parent, &held).unwrap_err().code(),
-                "knowledge.wiki_publication_identity");
+            assert_eq!(
+                directory_at_path(&parent, &held).unwrap_err().code(),
+                "knowledge.wiki_publication_identity"
+            );
             let stage = create_stage(&held, &parent, "wiki.json").unwrap();
             let name = stage.path().file_name().unwrap().to_owned();
             assert!(retained.join(&name).exists());
             assert!(!parent.join(&name).exists());
             drop(stage);
             assert!(retained.join(&name).exists());
-            assert_eq!(fs::read_to_string(parent.join("wiki.json")).unwrap(), "foreign source");
-            assert_eq!(fs::read_to_string(retained.join("wiki.json")).unwrap(), "retained source");
+            assert_eq!(
+                fs::read_to_string(parent.join("wiki.json")).unwrap(),
+                "foreign source"
+            );
+            assert_eq!(
+                fs::read_to_string(retained.join("wiki.json")).unwrap(),
+                "retained source"
+            );
         }
 
         #[test]
@@ -2462,16 +3424,41 @@ mod native {
             fs::rename(&parent, &moved).unwrap();
             fs::create_dir(&parent).unwrap();
             fs::write(parent.join("wiki.json"), "foreign source").unwrap();
-            let failure = publication_readback(&held, &parent, &parent, &source_path,
-                published_identity, &content_hash(b"committed"), &metadata).unwrap_err();
+            let failure = publication_readback(
+                &held,
+                &parent,
+                &parent,
+                &source_path,
+                published_identity,
+                &content_hash(b"committed"),
+                &metadata,
+            )
+            .unwrap_err();
             assert_eq!(failure.code(), "knowledge.wiki_publication_uncertain");
             assert_eq!(failure.details()["published"], "true");
-            assert_eq!(failure.details()["cause_code"], "knowledge.wiki_publication_identity");
-            let cause: serde_json::Value = serde_json::from_str(&failure.details()["cause"]).unwrap();
+            assert_eq!(
+                failure.details()["cause_code"],
+                "knowledge.wiki_publication_identity"
+            );
+            let cause: serde_json::Value =
+                serde_json::from_str(&failure.details()["cause"]).unwrap();
             assert_eq!(cause["code"], "knowledge.wiki_publication_identity");
-            assert_eq!(cause["details"]["held_directory_identity"], format!("{}:{}", held.metadata().unwrap().dev(), held.metadata().unwrap().ino()));
-            assert_eq!(fs::read_to_string(moved.join("wiki.json")).unwrap(), "committed");
-            assert_eq!(fs::read_to_string(parent.join("wiki.json")).unwrap(), "foreign source");
+            assert_eq!(
+                cause["details"]["held_directory_identity"],
+                format!(
+                    "{}:{}",
+                    held.metadata().unwrap().dev(),
+                    held.metadata().unwrap().ino()
+                )
+            );
+            assert_eq!(
+                fs::read_to_string(moved.join("wiki.json")).unwrap(),
+                "committed"
+            );
+            assert_eq!(
+                fs::read_to_string(parent.join("wiki.json")).unwrap(),
+                "foreign source"
+            );
         }
 
         #[test]
@@ -2486,12 +3473,23 @@ mod native {
             let metadata = retained(&published, &source_path).unwrap();
             fs::rename(&source_path, directory.path().join("retained.json")).unwrap();
             fs::write(&source_path, "foreign source").unwrap();
-            let failure = publication_readback(&held, directory.path(), directory.path(), &source_path,
-                published_identity, &content_hash(b"committed"), &metadata).unwrap_err();
+            let failure = publication_readback(
+                &held,
+                directory.path(),
+                directory.path(),
+                &source_path,
+                published_identity,
+                &content_hash(b"committed"),
+                &metadata,
+            )
+            .unwrap_err();
             assert_eq!(failure.code(), "knowledge.wiki_publication_uncertain");
             assert_eq!(failure.details()["published"], "true");
             assert_eq!(fs::read_to_string(&source_path).unwrap(), "foreign source");
-            assert_eq!(fs::read_to_string(directory.path().join("retained.json")).unwrap(), "committed");
+            assert_eq!(
+                fs::read_to_string(directory.path().join("retained.json")).unwrap(),
+                "committed"
+            );
         }
 
         #[cfg(target_os = "macos")]

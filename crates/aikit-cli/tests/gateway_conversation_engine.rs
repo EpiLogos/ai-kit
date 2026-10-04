@@ -1612,27 +1612,31 @@ fn connector_pause_and_resume_stop_ingress_and_show_in_health() {
         .unwrap()
         .push_back(Some(fixture_inbound("while paused", "pause-1")));
     let mut last_paused_health: Option<Option<ConnectorHealth>> = None;
-    poll_until("pump-recorded paused health", Duration::from_secs(10), || {
-        let health = gateway
-            .lock()
-            .unwrap()
-            .status()
-            .connector_health
-            .into_iter()
-            .find(|health| health.connector_ref == r(CONNECTOR_REF));
-        let paused = health.as_ref().is_some_and(|health| {
-            health
-                .detail
-                .as_deref()
-                .unwrap_or_default()
-                .contains("paused by gateway command")
-        });
-        if last_paused_health.as_ref() != Some(&health) {
-            eprintln!("actual paused connector health observation: {health:?}");
-            last_paused_health = Some(health);
-        }
-        paused
-    });
+    poll_until(
+        "pump-recorded paused health",
+        Duration::from_secs(10),
+        || {
+            let health = gateway
+                .lock()
+                .unwrap()
+                .status()
+                .connector_health
+                .into_iter()
+                .find(|health| health.connector_ref == r(CONNECTOR_REF));
+            let paused = health.as_ref().is_some_and(|health| {
+                health
+                    .detail
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("paused by gateway command")
+            });
+            if last_paused_health.as_ref() != Some(&health) {
+                eprintln!("actual paused connector health observation: {health:?}");
+                last_paused_health = Some(health);
+            }
+            paused
+        },
+    );
     let paused_gateway = gateway.lock().unwrap();
     let health = paused_gateway
         .status()
@@ -1669,15 +1673,19 @@ fn connector_pause_and_resume_stop_ingress_and_show_in_health() {
 
     // Resume: the held event is admitted.
     controls.set_paused(&r(CONNECTOR_REF), false);
-    poll_until("the resumed event's journal append", Duration::from_secs(10), || {
-        gateway
-            .lock()
-            .unwrap()
-            .snapshot()
-            .streams
-            .iter()
-            .any(|stream| !stream.events.is_empty())
-    });
+    poll_until(
+        "the resumed event's journal append",
+        Duration::from_secs(10),
+        || {
+            gateway
+                .lock()
+                .unwrap()
+                .snapshot()
+                .streams
+                .iter()
+                .any(|stream| !stream.events.is_empty())
+        },
+    );
     let gateway = gateway.lock().unwrap();
     assert_eq!(gateway.status().stream_count, 1, "the held event landed");
     let snapshot = gateway.snapshot();
@@ -2626,13 +2634,11 @@ fn an_ask_to_a_registered_profile_without_a_position_holds_at_the_agent_address(
     // The notice reports held mail and the source's lack of Agency proof.
     let sends = harness.executed_sends();
     assert!(
-        sends
-            .iter()
-            .any(|text| {
-                text.contains("held at the same Agent address")
-                    && text.contains("no native Agency or occupancy proof")
-                    && text.contains("nothing has been delivered")
-            }),
+        sends.iter().any(|text| {
+            text.contains("held at the same Agent address")
+                && text.contains("no native Agency or occupancy proof")
+                && text.contains("nothing has been delivered")
+        }),
         "the answer retains the held Agent address without claiming delivery: {sends:?}"
     );
     assert_eq!(harness.source.parked_turns(), 0);

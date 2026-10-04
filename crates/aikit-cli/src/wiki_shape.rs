@@ -426,7 +426,6 @@ fn persist(path: &Path, rendered: &str, base_hash: &str) -> Result<()> {
     Ok(())
 }
 
-
 fn mutation_outcome(outcome: &WikiMutationOutcome) -> Value {
     jval!({
         "changed": outcome.changed,

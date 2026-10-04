@@ -9,8 +9,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use aikit_adapters::runner::{Output, SystemRunner};
-use aikit_core::{KnowledgeAddress, KnowledgeProviderStatus, KnowledgeSearchResult};
 use aikit_core::resource::{ResourceKind, SourceAuthority};
+use aikit_core::{KnowledgeAddress, KnowledgeProviderStatus, KnowledgeSearchResult};
 use aikit_store::knowledge_wiki::SQLITE_WIKI_PROVIDER;
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -74,7 +74,10 @@ impl Ground {
         // context, profile, Redis binding or provider credential is inherited.
         command
             .env_clear()
-            .env("PATH", std::env::var_os("PATH").expect("native host PATH required"))
+            .env(
+                "PATH",
+                std::env::var_os("PATH").expect("native host PATH required"),
+            )
             .env("HOME", private.join("home"))
             .env("TMPDIR", private.join("tmp"))
             .env("TMP", private.join("tmp"))
@@ -87,9 +90,14 @@ impl Ground {
     }
 
     fn capture(&mut self, command: &mut Command) -> Output {
-        assert!(self.commands < 40, "native scenario command budget exceeded");
+        assert!(
+            self.commands < 40,
+            "native scenario command budget exceeded"
+        );
         self.commands += 1;
-        let remaining = self.deadline.checked_duration_since(Instant::now())
+        let remaining = self
+            .deadline
+            .checked_duration_since(Instant::now())
             .expect("native scenario absolute deadline exceeded before another launch");
         let start = Instant::now();
         let result = SystemRunner::new()
@@ -109,18 +117,28 @@ impl Ground {
                 // Preserve private state if it could not produce a complete
                 // lifecycle receipt; deleting it cannot resolve that failure.
                 let retained = self.owned.take().unwrap().keep();
-                panic!("native capture failed; retained {}: {error}", retained.display());
+                panic!(
+                    "native capture failed; retained {}: {error}",
+                    retained.display()
+                );
             }
         }
     }
 
     fn owner(&mut self, root: &Path, operation: &str, input: Value) -> Value {
         let mut command = self.command(&self.ctrl, root);
-        command.args(["--json", "--root"]).arg(root)
-            .args(["action", "run", operation]).arg(input.to_string());
+        command
+            .args(["--json", "--root"])
+            .arg(root)
+            .args(["action", "run", operation])
+            .arg(input.to_string());
         let output = self.capture(&mut command);
         let envelope: Value = serde_json::from_str(&output.stdout).unwrap();
-        assert!(output.ok() && envelope["ok"] == true, "{envelope}; stderr={}", output.stderr);
+        assert!(
+            output.ok() && envelope["ok"] == true,
+            "{envelope}; stderr={}",
+            output.stderr
+        );
         if operation == "central.init" {
             self.native_roots.push(root.to_path_buf());
         }
@@ -130,12 +148,24 @@ impl Ground {
     fn project(&mut self, root: &Path, name: &str, id: &str) -> PathBuf {
         let path = root.join("Work").join(name);
         fs::create_dir_all(&path).unwrap();
-        let result = self.owner(root, "projectcentral.init", json!({"project":name,"project_id":id}));
+        let result = self.owner(
+            root,
+            "projectcentral.init",
+            json!({"project":name,"project_id":id}),
+        );
         assert_eq!(result["project_id"], id);
-        assert_eq!(result["wiki_space_ref"], format!("central:wiki:project:{id}"));
+        assert_eq!(
+            result["wiki_space_ref"],
+            format!("central:wiki:project:{id}")
+        );
         assert_eq!(Path::new(result["project_root"].as_str().unwrap()), path);
-        assert_eq!(result["wiki_source"], "ProjectCentral/agents/wiki/wiki.json");
-        let manifest: Value = serde_json::from_slice(&fs::read(path.join("ProjectCentral/project.json")).unwrap()).unwrap();
+        assert_eq!(
+            result["wiki_source"],
+            "ProjectCentral/agents/wiki/wiki.json"
+        );
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(path.join("ProjectCentral/project.json")).unwrap())
+                .unwrap();
         assert_eq!(manifest["project_id"], id);
         self.native_projects.push(path.clone());
         path
@@ -151,33 +181,51 @@ impl Ground {
 
     fn success(&mut self, cwd: &Path, arguments: &[&str]) -> Value {
         let (output, envelope) = self.cli(cwd, arguments);
-        assert!(output.ok() && envelope["ok"] == true, "{envelope}; stderr={}", output.stderr);
+        assert!(
+            output.ok() && envelope["ok"] == true,
+            "{envelope}; stderr={}",
+            output.stderr
+        );
         envelope["data"].clone()
     }
 
     fn search(&mut self, cwd: &Path, operation: &str, query: &str) -> KnowledgeSearchResult {
-        serde_json::from_value(self.success(cwd, &["knowledge", operation, query, "--limit", "50"])).unwrap()
+        serde_json::from_value(self.success(cwd, &["knowledge", operation, query, "--limit", "50"]))
+            .unwrap()
     }
 
     fn assert_no_use(&mut self, cwd: &Path) {
-        assert_eq!(self.success(cwd, &["knowledge", "history"]), json!([]),
-            "Search/Resolve must not manufacture a successful use or run effects");
+        assert_eq!(
+            self.success(cwd, &["knowledge", "history"]),
+            json!([]),
+            "Search/Resolve must not manufacture a successful use or run effects"
+        );
     }
 
     fn assert_wiki_registers(&mut self) {
         let world = self.world.clone();
-        let status: KnowledgeProviderStatus = serde_json::from_value(
-            self.success(&world, &["knowledge", "status"]),
-        ).unwrap();
-        let wiki = status.wiki.expect("actual canonical Wiki provider required");
+        let status: KnowledgeProviderStatus =
+            serde_json::from_value(self.success(&world, &["knowledge", "status"])).unwrap();
+        let wiki = status
+            .wiki
+            .expect("actual canonical Wiki provider required");
         assert!(wiki.available);
         for (name, reference) in [("Editor", EDITOR), ("Other", OTHER)] {
-            let bytes = fs::read(self.world.join("Work").join(name)
-                .join("ProjectCentral/agents/wiki/wiki.json")).unwrap();
+            let bytes = fs::read(
+                self.world
+                    .join("Work")
+                    .join(name)
+                    .join("ProjectCentral/agents/wiki/wiki.json"),
+            )
+            .unwrap();
             let revision = format!("blake3:{}", blake3::hash(&bytes));
-            assert!(wiki.registers.iter().any(|register|
-                register.register.as_str() == reference && register.revision == revision),
-                "native canonical register/basis absent: {wiki:?}");
+            assert!(
+                wiki.registers
+                    .iter()
+                    .any(|register| register.register.as_str() == reference
+                        && register.revision == revision),
+                "native canonical register/basis absent: {wiki:?}"
+            );
         }
     }
 
@@ -221,21 +269,44 @@ fn actual_native_wiki_id_differs_from_folder_and_sibling_label_cannot_grant_scop
     let other = world.join("Work/Other");
     for operation in ["search", "resolve"] {
         let root = ground.search(&world, operation, "editor");
-        assert!(admitted(&root, EDITOR) && admitted(&root, OTHER),
-            "both genuine native candidates must exist before testing scope: {root:?}");
+        assert!(
+            admitted(&root, EDITOR) && admitted(&root, OTHER),
+            "both genuine native candidates must exist before testing scope: {root:?}"
+        );
         for query in ["editor-walk", "editor"] {
             let selected = ground.search(&editor, operation, query);
-            assert!(admitted(&selected, EDITOR), "own canonical Wiki is missing: {selected:?}");
-            assert!(!selected.hits.iter().any(|hit| hit.resource.as_str() == OTHER),
-                "a sibling canonical ID matching Editor's folder was disclosed: {selected:?}");
+            assert!(
+                admitted(&selected, EDITOR),
+                "own canonical Wiki is missing: {selected:?}"
+            );
+            assert!(
+                !selected
+                    .hits
+                    .iter()
+                    .any(|hit| hit.resource.as_str() == OTHER),
+                "a sibling canonical ID matching Editor's folder was disclosed: {selected:?}"
+            );
         }
         let sibling = ground.search(&other, operation, "editor");
-        assert!(admitted(&sibling, OTHER), "Other remains independently addressable: {sibling:?}");
-        assert!(!sibling.hits.iter().any(|hit| hit.resource.as_str() == EDITOR), "{sibling:?}");
+        assert!(
+            admitted(&sibling, OTHER),
+            "Other remains independently addressable: {sibling:?}"
+        );
+        assert!(
+            !sibling
+                .hits
+                .iter()
+                .any(|hit| hit.resource.as_str() == EDITOR),
+            "{sibling:?}"
+        );
     }
     ground.assert_no_use(&editor);
     ground.assert_no_use(&other);
-    assert_eq!(ground.source_bytes(), before, "read-only native queries changed owner source");
+    assert_eq!(
+        ground.source_bytes(),
+        before,
+        "read-only native queries changed owner source"
+    );
 }
 
 #[test]
@@ -253,22 +324,49 @@ fn actual_owner_created_external_identity_missing_or_ambiguous_refuses_broad_que
     let missing = ground.project(&external, "Missing", "no-native-match");
     for operation in ["search", "resolve"] {
         let original = ground.search(&selected, operation, "editor-walk");
-        assert!(admitted(&original, EDITOR), "native selected identity failed: {original:?}");
-        let (output, refused) = ground.cli(&missing, &["knowledge", operation, "editor-walk", "--limit", "50"]);
+        assert!(
+            admitted(&original, EDITOR),
+            "native selected identity failed: {original:?}"
+        );
+        let (output, refused) = ground.cli(
+            &missing,
+            &["knowledge", operation, "editor-walk", "--limit", "50"],
+        );
         assert!(!output.ok() && refused["ok"] == false, "{refused}");
-        assert_eq!(refused["error"]["code"], "knowledge.project_scope_unresolved");
-        assert!(refused["error"]["message"].as_str().unwrap().contains("matches 0 discovered Work Projects"));
-        assert!(refused.get("data").is_none_or(Value::is_null), "refusal returned a broad reading: {refused}");
+        assert_eq!(
+            refused["error"]["code"],
+            "knowledge.project_scope_unresolved"
+        );
+        assert!(refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("matches 0 discovered Work Projects"));
+        assert!(
+            refused.get("data").is_none_or(Value::is_null),
+            "refusal returned a broad reading: {refused}"
+        );
     }
     let world = ground.world.clone();
     ground.project(&world, "Duplicate", "editor-walk");
     let before = ground.source_bytes();
     for operation in ["search", "resolve"] {
-        let (output, refused) = ground.cli(&selected, &["knowledge", operation, "editor-walk", "--limit", "50"]);
+        let (output, refused) = ground.cli(
+            &selected,
+            &["knowledge", operation, "editor-walk", "--limit", "50"],
+        );
         assert!(!output.ok() && refused["ok"] == false, "{refused}");
-        assert_eq!(refused["error"]["code"], "knowledge.project_scope_unresolved");
-        assert!(refused["error"]["message"].as_str().unwrap().contains("matches 2 discovered Work Projects"));
-        assert!(refused.get("data").is_none_or(Value::is_null), "refusal returned a broad reading: {refused}");
+        assert_eq!(
+            refused["error"]["code"],
+            "knowledge.project_scope_unresolved"
+        );
+        assert!(refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("matches 2 discovered Work Projects"));
+        assert!(
+            refused.get("data").is_none_or(Value::is_null),
+            "refusal returned a broad reading: {refused}"
+        );
     }
     ground.assert_no_use(&selected);
     assert_eq!(ground.source_bytes(), before);
@@ -280,7 +378,10 @@ fn actual_native_duplicate_id_is_withheld_from_every_internal_project_scope() {
     let mut ground = Ground::new();
     let world = ground.world.clone();
     let editor = world.join("Work/Editor");
-    assert!(admitted(&ground.search(&editor, "search", "editor-walk"), EDITOR));
+    assert!(admitted(
+        &ground.search(&editor, "search", "editor-walk"),
+        EDITOR
+    ));
     ground.project(&world, "Duplicate", "editor-walk");
     ground.project(&world, "Third", "editor-walk");
     let before = ground.source_bytes();
@@ -288,8 +389,13 @@ fn actual_native_duplicate_id_is_withheld_from_every_internal_project_scope() {
         let selected = world.join("Work").join(name);
         for operation in ["search", "resolve"] {
             let reading = ground.search(&selected, operation, "editor-walk");
-            assert!(!reading.hits.iter().any(|hit| hit.resource.as_str() == EDITOR),
-                "an ambiguous native ID was assigned to a first/last folder: {reading:?}");
+            assert!(
+                !reading
+                    .hits
+                    .iter()
+                    .any(|hit| hit.resource.as_str() == EDITOR),
+                "an ambiguous native ID was assigned to a first/last folder: {reading:?}"
+            );
         }
     }
     ground.assert_no_use(&editor);

@@ -605,7 +605,11 @@ where
     mutate(&mut document, &mut ledger)?;
     document.validate()?;
     let outcome = ledger.finish();
-    let rendered = if outcome.changed { document.render()? } else { input.to_string() };
+    let rendered = if outcome.changed {
+        document.render()?
+    } else {
+        input.to_string()
+    };
     Ok((rendered, outcome))
 }
 

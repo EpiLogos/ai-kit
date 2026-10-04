@@ -76,8 +76,7 @@ fn read_bounded(path: &Path) -> Result<String> {
             "Wiki file exceeds the 16 MiB transaction budget",
         ));
     }
-    String::from_utf8(bytes)
-        .map_err(|e| error("knowledge.constellation_io", e.to_string()))
+    String::from_utf8(bytes).map_err(|e| error("knowledge.constellation_io", e.to_string()))
 }
 fn input<R: serde::de::DeserializeOwned>() -> Result<Input<R>> {
     let mut data = String::new();
@@ -189,7 +188,8 @@ fn persist_owner(path: &Path, request: &OwnerRequest<'_>, basis: Option<&str>) -
         ));
     }
     let before = read_bounded(path)?;
-    let publication_basis = aikit_adapters::projectcentral::publication::content_hash(before.as_bytes());
+    let publication_basis =
+        aikit_adapters::projectcentral::publication::content_hash(before.as_bytes());
     let applied = request.apply(&before)?;
     if applied.content.len() > MAX_INPUT_BYTES {
         return Err(error(
@@ -210,8 +210,11 @@ fn persist_owner(path: &Path, request: &OwnerRequest<'_>, basis: Option<&str>) -
     // Exact operation replay still admits the current physical source through
     // the common owner. Its exact-byte no-op requires no source write access.
     let published = aikit_adapters::projectcentral::publication::publish_wiki(
-        path, &applied.content, &publication_basis,
-    ).map_err(|cause| cause.with("operation_ref", request.operation_ref().to_string()))?;
+        path,
+        &applied.content,
+        &publication_basis,
+    )
+    .map_err(|cause| cause.with("operation_ref", request.operation_ref().to_string()))?;
     let after = read_bounded(path).map_err(|cause| {
         readback_error(cause, published, request.operation_ref(), applied.revision)
     })?;
@@ -219,9 +222,15 @@ fn persist_owner(path: &Path, request: &OwnerRequest<'_>, basis: Option<&str>) -
         readback_error(cause, published, request.operation_ref(), applied.revision)
     })?;
     if request.read_revision(&reading) != json!(applied.revision) {
-        return Err(readback_error(error("knowledge.constellation_readback",
-            "native readback does not match the applied revision"),
-            published, request.operation_ref(), applied.revision));
+        return Err(readback_error(
+            error(
+                "knowledge.constellation_readback",
+                "native readback does not match the applied revision",
+            ),
+            published,
+            request.operation_ref(),
+            applied.revision,
+        ));
     }
     let mut result = json!({"state":if applied.idempotent{"unchanged"}else{"saved"},"persisted":true,
         "published":published,
@@ -239,7 +248,12 @@ fn persist_owner(path: &Path, request: &OwnerRequest<'_>, basis: Option<&str>) -
     Ok(result)
 }
 
-fn readback_error(cause: AikitError, published: bool, operation_ref: &ResourceRef, revision: u64) -> AikitError {
+fn readback_error(
+    cause: AikitError,
+    published: bool,
+    operation_ref: &ResourceRef,
+    revision: u64,
+) -> AikitError {
     let returned = if published {
         error("knowledge.constellation_readback",
             format!("native publication committed but independent construction readback failed: {cause}"))
@@ -354,15 +368,25 @@ mod tests {
         assert_eq!(replay["operation_ref"], json!(request.operation_ref));
         assert_eq!(fs::read(&path).unwrap(), before);
         let after = fs::metadata(&path).unwrap();
-        assert_eq!((after.dev(), after.ino(), after.mtime(), after.mtime_nsec()),
-            (metadata.dev(), metadata.ino(), metadata.mtime(), metadata.mtime_nsec()));
+        assert_eq!(
+            (after.dev(), after.ino(), after.mtime(), after.mtime_nsec()),
+            (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.mtime(),
+                metadata.mtime_nsec()
+            )
+        );
     }
 
     #[test]
     fn actual_idempotent_replay_requires_single_link_physical_admission() {
         let (_directory, path, request, _) = source_and_request();
         let owner = OwnerRequest::Construction(&request);
-        assert_eq!(persist_owner(&path, &owner, None).unwrap()["published"], true);
+        assert_eq!(
+            persist_owner(&path, &owner, None).unwrap()["published"],
+            true
+        );
         let alias = path.with_extension("actual-hardlink.json");
         fs::hard_link(&path, &alias).unwrap();
         let before = fs::read(&path).unwrap();
@@ -370,13 +394,23 @@ mod tests {
         assert_eq!(metadata.nlink(), 2);
         let failure = persist_owner(&path, &owner, None).unwrap_err();
         assert_eq!(failure.code(), "knowledge.wiki_publication_identity");
-        assert_eq!(failure.details()["operation_ref"], request.operation_ref.as_str());
+        assert_eq!(
+            failure.details()["operation_ref"],
+            request.operation_ref.as_str()
+        );
         assert!(!failure.details().contains_key("published"));
         assert_eq!(fs::read(&path).unwrap(), before);
         assert_eq!(fs::read(&alias).unwrap(), before);
         let after = fs::metadata(&path).unwrap();
-        assert_eq!((after.dev(), after.ino(), after.mtime(), after.mtime_nsec()),
-            (metadata.dev(), metadata.ino(), metadata.mtime(), metadata.mtime_nsec()));
+        assert_eq!(
+            (after.dev(), after.ino(), after.mtime(), after.mtime_nsec()),
+            (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.mtime(),
+                metadata.mtime_nsec()
+            )
+        );
     }
 
     #[test]
@@ -392,31 +426,50 @@ mod tests {
         assert_eq!(actual_os_error.kind(), std::io::ErrorKind::NotFound);
         assert!(actual_os_error.raw_os_error().is_some());
         assert_eq!(cause.details()["cause_kind"], "NotFound");
-        assert_eq!(cause.details()["cause_raw_os_error"],
-            json!(actual_os_error.raw_os_error()).to_string());
+        assert_eq!(
+            cause.details()["cause_raw_os_error"],
+            json!(actual_os_error.raw_os_error()).to_string()
+        );
         let original_error = json!({
             "code":cause.code(), "message":cause.message(), "details":cause.details(),
         });
         let failure = readback_error(cause, true, &request.operation_ref, 1);
         assert_eq!(failure.code(), "knowledge.constellation_readback");
-        assert_eq!(failure.details()["cause_code"], "knowledge.constellation_io");
+        assert_eq!(
+            failure.details()["cause_code"],
+            "knowledge.constellation_io"
+        );
         assert_eq!(failure.details()["published"], "true");
         assert_eq!(failure.details()["automatic_retry"], "false");
-        assert_eq!(failure.details()["operation_ref"], request.operation_ref.as_str());
-        assert_eq!(serde_json::from_str::<Value>(&failure.details()["original_error"]).unwrap(),
-            original_error);
+        assert_eq!(
+            failure.details()["operation_ref"],
+            request.operation_ref.as_str()
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&failure.details()["original_error"]).unwrap(),
+            original_error
+        );
         assert_eq!(original_error["details"]["cause_kind"], "NotFound");
-        assert_eq!(original_error["details"]["cause_raw_os_error"],
-            json!(actual_os_error.raw_os_error()).to_string());
+        assert_eq!(
+            original_error["details"]["cause_raw_os_error"],
+            json!(actual_os_error.raw_os_error()).to_string()
+        );
         assert!(failure.details()["instruction"].contains("do not retry"));
-        assert_eq!(native::inspect(&read_bounded(&retained).unwrap(), &request.frame_ref).unwrap()["frame"]["revision"], 1);
+        assert_eq!(
+            native::inspect(&read_bounded(&retained).unwrap(), &request.frame_ref).unwrap()
+                ["frame"]["revision"],
+            1
+        );
     }
 
     #[test]
     fn replaced_semantic_source_after_commit_preserves_parse_failure_and_replay_distinction() {
         let (_directory, path, request, original) = source_and_request();
         let owner = OwnerRequest::Construction(&request);
-        assert_eq!(persist_owner(&path, &owner, None).unwrap()["published"], true);
+        assert_eq!(
+            persist_owner(&path, &owner, None).unwrap()["published"],
+            true
+        );
         let retained = path.with_extension("retained.json");
         fs::rename(&path, &retained).unwrap();
         fs::write(&path, &original).unwrap();
@@ -429,13 +482,22 @@ mod tests {
         assert_eq!(failure.code(), "knowledge.constellation_readback");
         assert_eq!(failure.details()["cause_code"], code);
         assert_eq!(failure.details()["published"], "true");
-        assert_eq!(serde_json::from_str::<Value>(&failure.details()["original_error"]).unwrap(),
-            original_error);
+        assert_eq!(
+            serde_json::from_str::<Value>(&failure.details()["original_error"]).unwrap(),
+            original_error
+        );
         let unchanged = readback_error(cause, false, &request.operation_ref, 1);
         assert_eq!(unchanged.code(), code);
         assert_eq!(unchanged.details()["published"], "false");
-        assert_eq!(unchanged.details()["operation_ref"], request.operation_ref.as_str());
+        assert_eq!(
+            unchanged.details()["operation_ref"],
+            request.operation_ref.as_str()
+        );
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
-        assert_eq!(native::inspect(&read_bounded(&retained).unwrap(), &request.frame_ref).unwrap()["frame"]["revision"], 1);
+        assert_eq!(
+            native::inspect(&read_bounded(&retained).unwrap(), &request.frame_ref).unwrap()
+                ["frame"]["revision"],
+            1
+        );
     }
 }

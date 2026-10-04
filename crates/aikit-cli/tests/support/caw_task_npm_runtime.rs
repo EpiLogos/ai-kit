@@ -414,7 +414,11 @@ fn native_workcell_scrubbed_npm_writes_cache_only_inside_actual_task_t() {
         .args(["-y", "@agentclientprotocol/codex-acp", "--version"]);
     ModelEnvironment::new().apply(&mut acp_version);
     acp_version.env("npm_config_cache", &cache);
-    let output = bounded(&mut acp_version, &evidence, "actual-public-codex-acp-version");
+    let output = bounded(
+        &mut acp_version,
+        &evidence,
+        "actual-public-codex-acp-version",
+    );
     assert!(
         output.status.success(),
         "actual public ACP version probe failed: {}",
@@ -447,7 +451,11 @@ fn native_workcell_scrubbed_npm_writes_cache_only_inside_actual_task_t() {
     assert!(package["version"].as_str().is_some_and(|v| !v.is_empty()));
     assert_eq!(
         reported_version.trim(),
-        format!("{} {}", package["name"].as_str().unwrap(), package["version"].as_str().unwrap()),
+        format!(
+            "{} {}",
+            package["name"].as_str().unwrap(),
+            package["version"].as_str().unwrap()
+        ),
         "the actual executed public adapter must identify the downloaded package"
     );
     let package_root = package_path.parent().unwrap().canonicalize().unwrap();
@@ -580,19 +588,36 @@ fn actual_codex_task_exec_eof_uses_allocated_npm_cache_and_preserves_native_task
     // The native Task route must replace an ungranted ambient runtime path
     // after the model-env scrub. This is a real directory, never an owner reply.
     command.env("CODEX_SQLITE_HOME", &ambient_sqlite);
-    let input_home = std::env::var("CODEX_HOME").ok().filter(|s|!s.is_empty()).map(PathBuf::from)
-        .or_else(||std::env::var_os("HOME").map(|h|PathBuf::from(h).join(".codex"))).unwrap().canonicalize().unwrap();
+    let input_home = std::env::var("CODEX_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))
+        .unwrap()
+        .canonicalize()
+        .unwrap();
     // Metadata only: no credential or actual private history bytes are copied
     // into this account gate's evidence. Original Factory session replay is a
     // separate owning activity, never inferred from this EOF case.
     use std::os::unix::fs::MetadataExt;
-    let input_basis = ["auth.json","config.toml","installation_id"].into_iter().map(|name| {
-        let basis = match fs::symlink_metadata(input_home.join(name)) {
-            Ok(m)=>Some((m.dev(),m.ino(),m.len(),m.mode(),m.mtime(),m.mtime_nsec())),
-            Err(e) if e.kind()==std::io::ErrorKind::NotFound=>None,
-            Err(e)=>panic!("actual input metadata unavailable: {e}"),
-        };(name,basis)
-    }).collect::<Vec<_>>();
+    let input_basis = ["auth.json", "config.toml", "installation_id"]
+        .into_iter()
+        .map(|name| {
+            let basis = match fs::symlink_metadata(input_home.join(name)) {
+                Ok(m) => Some((
+                    m.dev(),
+                    m.ino(),
+                    m.len(),
+                    m.mode(),
+                    m.mtime(),
+                    m.mtime_nsec(),
+                )),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => panic!("actual input metadata unavailable: {e}"),
+            };
+            (name, basis)
+        })
+        .collect::<Vec<_>>();
     let output = bounded(&mut command, &evidence, "actual-native-task-exec-eof");
     assert!(
         output.status.success(),
@@ -632,11 +657,19 @@ fn actual_codex_task_exec_eof_uses_allocated_npm_cache_and_preserves_native_task
         .unwrap(),
     )
     .unwrap();
-    let runtime_id_path = now.join("native-codex-runtime/files/installation_id/upper/installation_id");
+    let runtime_id_path =
+        now.join("native-codex-runtime/files/installation_id/upper/installation_id");
     let runtime_id = fs::read_to_string(&runtime_id_path).unwrap();
     let id = runtime_id.trim();
     assert_eq!(id.len(),36,"actual native app-server must write its runtime UUID; an empty Workcell placeholder is not startup evidence");
-    assert!(id.bytes().enumerate().all(|(n,b)|if [8,13,18,23].contains(&n){b==b'-'}else{b.is_ascii_hexdigit()}));
+    assert!(id
+        .bytes()
+        .enumerate()
+        .all(|(n, b)| if [8, 13, 18, 23].contains(&n) {
+            b == b'-'
+        } else {
+            b.is_ascii_hexdigit()
+        }));
     // This explicit second launch follows a successful first EOF outcome on
     // the SAME Task. It is not automatic replay after an uncertain failure.
     let reentered = bounded(&mut command, &evidence, "actual-native-task-reentry-eof");
@@ -645,13 +678,28 @@ fn actual_codex_task_exec_eof_uses_allocated_npm_cache_and_preserves_native_task
         "same Task re-entry failed: {}",
         String::from_utf8_lossy(&reentered.stderr)
     );
-    assert_eq!(fs::read_to_string(&runtime_id_path).unwrap(),runtime_id,"same Task keeps its native runtime material, not a replacement semantic Session");
-    for (name,before) in input_basis {
+    assert_eq!(
+        fs::read_to_string(&runtime_id_path).unwrap(),
+        runtime_id,
+        "same Task keeps its native runtime material, not a replacement semantic Session"
+    );
+    for (name, before) in input_basis {
         let after = match fs::symlink_metadata(input_home.join(name)) {
-            Ok(m)=>Some((m.dev(),m.ino(),m.len(),m.mode(),m.mtime(),m.mtime_nsec())),
-            Err(e) if e.kind()==std::io::ErrorKind::NotFound=>None,
-            Err(e)=>panic!("actual retained input metadata unavailable: {e}"),
-        };assert_eq!(after,before,"native original {name} input metadata changed");
+            Ok(m) => Some((
+                m.dev(),
+                m.ino(),
+                m.len(),
+                m.mode(),
+                m.mtime(),
+                m.mtime_nsec(),
+            )),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => panic!("actual retained input metadata unavailable: {e}"),
+        };
+        assert_eq!(
+            after, before,
+            "native original {name} input metadata changed"
+        );
     }
     assert_eq!(fs::read(task_path(&world)).unwrap(), before);
     assert_eq!(
@@ -747,7 +795,11 @@ fn native_codex_task_exec_preserves_non_directory_sqlite_material_on_refusal() {
             "--expected-revision",
             prepared["revision"].as_str().unwrap(),
         ]);
-    let output = bounded(&mut command, &evidence, "actual-non-directory-sqlite-refusal");
+    let output = bounded(
+        &mut command,
+        &evidence,
+        "actual-non-directory-sqlite-refusal",
+    );
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr)
         .contains("Codex runtime cache ancestors must be real canonical directories"));
@@ -776,36 +828,100 @@ fn native_codex_task_exec_preserves_non_directory_sqlite_material_on_refusal() {
     assert!(!now.join("runtime/npm-cache").exists());
 }
 
-
-#[cfg(target_os="linux")]
+#[cfg(target_os = "linux")]
 #[test]
-#[ignore="requires actual current native Task and Workcell runtime projection operation; no provider start"]
+#[ignore = "requires actual current native Task and Workcell runtime projection operation; no provider start"]
 fn native_codex_task_projection_redirect_retains_foreign_material_and_task_revision() {
     use std::os::unix::fs::MetadataExt;
-    let evidence=evidence_directory("native-codex-projection-redirect");let (world,prepared)=prepare_native_codex_task(&evidence);retain_native_basis(&world,&prepared,&evidence);
-    let before=fs::read(task_path(&world)).unwrap();let now=PathBuf::from(prepared["allocation"]["allocation"]["writable_destination"].as_str().unwrap());
-    let input=world.root.join("controlled-codex-input");fs::create_dir(&input).unwrap();
-    let foreign=world.root.join("foreign-native-runtime");fs::create_dir(&foreign).unwrap();fs::write(foreign.join("retained"),b"FOREIGN_RUNTIME_UNCHANGED").unwrap();let basis=fs::metadata(foreign.join("retained")).unwrap();
-    std::os::unix::fs::symlink(&foreign,now.join("native-codex-runtime")).unwrap();
-    let mut command=Command::new(env!("CARGO_BIN_EXE_aikit-session-space"));command.env("AIKIT_HOME",world.home.root()).env("CODEX_HOME",&input).current_dir(world.root.join("Work/demo"))
-        .args(["encounter-task-exec","--agent-session","agent-session/task","--expected-revision",prepared["revision"].as_str().unwrap()]);
-    let output=bounded(&mut command,&evidence,"actual-projection-refusal");assert!(!output.status.success());
-    let native:Value=serde_json::from_slice(&output.stderr).expect("exact current Workcell structured refusal");assert_eq!(native["runtime_projection"]["phase"],"material-setup");assert_eq!(native["runtime_projection"]["executed"],false);
-    assert_eq!(fs::read(foreign.join("retained")).unwrap(),b"FOREIGN_RUNTIME_UNCHANGED");let after=fs::metadata(foreign.join("retained")).unwrap();assert_eq!((basis.dev(),basis.ino(),basis.mtime(),basis.mtime_nsec()),(after.dev(),after.ino(),after.mtime(),after.mtime_nsec()));assert_eq!(fs::read_dir(&foreign).unwrap().count(),1);
-    assert_eq!(fs::read(task_path(&world)).unwrap(),before);assert!(!now.join("runtime/npm-cache").exists());
+    let evidence = evidence_directory("native-codex-projection-redirect");
+    let (world, prepared) = prepare_native_codex_task(&evidence);
+    retain_native_basis(&world, &prepared, &evidence);
+    let before = fs::read(task_path(&world)).unwrap();
+    let now = PathBuf::from(
+        prepared["allocation"]["allocation"]["writable_destination"]
+            .as_str()
+            .unwrap(),
+    );
+    let input = world.root.join("controlled-codex-input");
+    fs::create_dir(&input).unwrap();
+    let foreign = world.root.join("foreign-native-runtime");
+    fs::create_dir(&foreign).unwrap();
+    fs::write(foreign.join("retained"), b"FOREIGN_RUNTIME_UNCHANGED").unwrap();
+    let basis = fs::metadata(foreign.join("retained")).unwrap();
+    std::os::unix::fs::symlink(&foreign, now.join("native-codex-runtime")).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_aikit-session-space"));
+    command
+        .env("AIKIT_HOME", world.home.root())
+        .env("CODEX_HOME", &input)
+        .current_dir(world.root.join("Work/demo"))
+        .args([
+            "encounter-task-exec",
+            "--agent-session",
+            "agent-session/task",
+            "--expected-revision",
+            prepared["revision"].as_str().unwrap(),
+        ]);
+    let output = bounded(&mut command, &evidence, "actual-projection-refusal");
+    assert!(!output.status.success());
+    let native: Value =
+        serde_json::from_slice(&output.stderr).expect("exact current Workcell structured refusal");
+    assert_eq!(native["runtime_projection"]["phase"], "material-setup");
+    assert_eq!(native["runtime_projection"]["executed"], false);
+    assert_eq!(
+        fs::read(foreign.join("retained")).unwrap(),
+        b"FOREIGN_RUNTIME_UNCHANGED"
+    );
+    let after = fs::metadata(foreign.join("retained")).unwrap();
+    assert_eq!(
+        (basis.dev(), basis.ino(), basis.mtime(), basis.mtime_nsec()),
+        (after.dev(), after.ino(), after.mtime(), after.mtime_nsec())
+    );
+    assert_eq!(fs::read_dir(&foreign).unwrap().count(), 1);
+    assert_eq!(fs::read(task_path(&world)).unwrap(), before);
+    assert!(!now.join("runtime/npm-cache").exists());
 }
 
-#[cfg(target_os="linux")]
+#[cfg(target_os = "linux")]
 #[test]
-#[ignore="requires actual current native Task and Workcell input admission; no credentials/model/provider"]
+#[ignore = "requires actual current native Task and Workcell input admission; no credentials/model/provider"]
 fn native_codex_task_projection_auth_redirect_refuses_before_any_runtime_material() {
-    let evidence=evidence_directory("native-codex-auth-input-redirect");let (world,prepared)=prepare_native_codex_task(&evidence);retain_native_basis(&world,&prepared,&evidence);
-    let before=fs::read(task_path(&world)).unwrap();let now=PathBuf::from(prepared["allocation"]["allocation"]["writable_destination"].as_str().unwrap());
-    let input=world.root.join("controlled-codex-input");fs::create_dir(&input).unwrap();let foreign=world.root.join("controlled-input-not-credential");fs::write(&foreign,b"CONTROLLED_FOREIGN_UNCHANGED").unwrap();
-    std::os::unix::fs::symlink(&foreign,input.join("auth.json")).unwrap();
-    let mut command=Command::new(env!("CARGO_BIN_EXE_aikit-session-space"));command.env("AIKIT_HOME",world.home.root()).env("CODEX_HOME",&input).current_dir(world.root.join("Work/demo"))
-        .args(["encounter-task-exec","--agent-session","agent-session/task","--expected-revision",prepared["revision"].as_str().unwrap()]);
-    let output=bounded(&mut command,&evidence,"actual-auth-input-refusal");assert!(!output.status.success());let native:Value=serde_json::from_slice(&output.stderr).expect("exact current Workcell structured refusal");
-    assert_eq!(native["runtime_projection"]["phase"],"origin-admission");assert_eq!(native["runtime_projection"]["material_setup_started"],false);
-    assert_eq!(fs::read(&foreign).unwrap(),b"CONTROLLED_FOREIGN_UNCHANGED");assert_eq!(fs::read(task_path(&world)).unwrap(),before);assert!(!now.join("native-codex-runtime").exists());assert!(!now.join("runtime/npm-cache").exists());
+    let evidence = evidence_directory("native-codex-auth-input-redirect");
+    let (world, prepared) = prepare_native_codex_task(&evidence);
+    retain_native_basis(&world, &prepared, &evidence);
+    let before = fs::read(task_path(&world)).unwrap();
+    let now = PathBuf::from(
+        prepared["allocation"]["allocation"]["writable_destination"]
+            .as_str()
+            .unwrap(),
+    );
+    let input = world.root.join("controlled-codex-input");
+    fs::create_dir(&input).unwrap();
+    let foreign = world.root.join("controlled-input-not-credential");
+    fs::write(&foreign, b"CONTROLLED_FOREIGN_UNCHANGED").unwrap();
+    std::os::unix::fs::symlink(&foreign, input.join("auth.json")).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_aikit-session-space"));
+    command
+        .env("AIKIT_HOME", world.home.root())
+        .env("CODEX_HOME", &input)
+        .current_dir(world.root.join("Work/demo"))
+        .args([
+            "encounter-task-exec",
+            "--agent-session",
+            "agent-session/task",
+            "--expected-revision",
+            prepared["revision"].as_str().unwrap(),
+        ]);
+    let output = bounded(&mut command, &evidence, "actual-auth-input-refusal");
+    assert!(!output.status.success());
+    let native: Value =
+        serde_json::from_slice(&output.stderr).expect("exact current Workcell structured refusal");
+    assert_eq!(native["runtime_projection"]["phase"], "origin-admission");
+    assert_eq!(
+        native["runtime_projection"]["material_setup_started"],
+        false
+    );
+    assert_eq!(fs::read(&foreign).unwrap(), b"CONTROLLED_FOREIGN_UNCHANGED");
+    assert_eq!(fs::read(task_path(&world)).unwrap(), before);
+    assert!(!now.join("native-codex-runtime").exists());
+    assert!(!now.join("runtime/npm-cache").exists());
 }

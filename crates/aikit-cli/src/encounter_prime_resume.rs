@@ -65,9 +65,11 @@ pub(super) fn locate(
         ));
     }
     if cwd.to_str().is_none() {
-        return Err(refused("Native Node locator cannot represent this cwd without replacement")
-            .with("observation_stage", "locator_argument_encoding")
-            .with("execution_started", "false"));
+        return Err(
+            refused("Native Node locator cannot represent this cwd without replacement")
+                .with("observation_stage", "locator_argument_encoding")
+                .with("execution_started", "false"),
+        );
     }
     let executable = std::fs::canonicalize(&entries[0][1]).map_err(refused_io)?;
     let dist = executable
@@ -104,9 +106,11 @@ if(header.type!=='session'||header.id!==id||typeof header.cwd!=='string'||fs.rea
 process.stdout.write(JSON.stringify({file,id,cwd:fs.realpathSync(cwd)}));
 "#;
     if config.to_str().is_none() {
-        return Err(refused("Native Node locator cannot represent this config path without replacement")
-            .with("observation_stage", "locator_argument_encoding")
-            .with("execution_started", "false"));
+        return Err(refused(
+            "Native Node locator cannot represent this config path without replacement",
+        )
+        .with("observation_stage", "locator_argument_encoding")
+        .with("execution_started", "false"));
     }
     let mut command = Command::new("node");
     command
@@ -127,9 +131,15 @@ process.stdout.write(JSON.stringify({file,id,cwd:fs.realpathSync(cwd)}));
 fn selected_file(output: Output, native: &str) -> Result<String> {
     if !output.ok() {
         let status = output.status;
-        return Err(refused("Prime did not confirm the recorded native session header and cwd")
-            .with("locator_status", status.to_string())
-            .with_native_capture(Some(status), output.stdout.into_bytes(), output.stderr.into_bytes()));
+        return Err(
+            refused("Prime did not confirm the recorded native session header and cwd")
+                .with("locator_status", status.to_string())
+                .with_native_capture(
+                    Some(status),
+                    output.stdout.into_bytes(),
+                    output.stderr.into_bytes(),
+                ),
+        );
     }
     let found: Value = serde_json::from_str(&output.stdout).map_err(refused)?;
     if found["id"] != native {
@@ -152,12 +162,20 @@ mod tests {
     fn assert_actual_retirement(failure: &AikitError) {
         assert_eq!(failure.details()["direct_child_reaped"], "true");
         let signal = failure.details()["group_signal"].as_str();
-        assert!(matches!(signal, "delivered" | "already-absent" | "not-needed"));
+        assert!(matches!(
+            signal,
+            "delivered" | "already-absent" | "not-needed"
+        ));
         if signal == "not-needed" {
             assert_eq!(failure.details()["stdout_eof"], "true");
             assert_eq!(failure.details()["stderr_eof"], "true");
             assert_eq!(failure.details()["capture_cancelled"], "false");
-            let actual = failure.native_capture().unwrap().status.unwrap().to_string();
+            let actual = failure
+                .native_capture()
+                .unwrap()
+                .status
+                .unwrap()
+                .to_string();
             assert_eq!(failure.details()["known_exit_status"], actual);
         }
         assert!(!failure.details().contains_key("cleanup_cause"));
@@ -172,15 +190,23 @@ mod tests {
 
     #[test]
     fn actual_prime_resume_bad_material_path_retains_original_os_cause() {
-        assert!(std::fs::metadata("/dev/null").unwrap().file_type().is_char_device());
+        assert!(std::fs::metadata("/dev/null")
+            .unwrap()
+            .file_type()
+            .is_char_device());
         let failure = locate(
             &["--prime-bin".into(), "/dev/null/prime-locator".into()],
             "5c347cc8-4926-42cf-919c-1e892681c6a8",
             Path::new("/"),
             None,
-        ).unwrap_err();
+        )
+        .unwrap_err();
         assert_eq!(failure.code(), "encounter.prime_resume_basis");
-        let cause = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        let cause = failure
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
         assert_eq!(cause.kind(), std::io::ErrorKind::NotADirectory);
         assert_eq!(cause.raw_os_error(), Some(20));
         assert!(failure.native_capture().is_none());
@@ -189,15 +215,29 @@ mod tests {
 
     #[test]
     fn actual_native_locator_spawn_failure_retains_same_original_cause() {
-        assert!(std::fs::metadata("/dev/null").unwrap().file_type().is_char_device());
+        assert!(std::fs::metadata("/dev/null")
+            .unwrap()
+            .file_type()
+            .is_char_device());
         let mut command = Command::new("/dev/null/prime-locator");
         let failure = capture_locator(&mut command).unwrap_err();
         assert_eq!(failure.code(), "encounter.prime_resume_basis");
-        assert_eq!(failure.details()["native_failure_code"], "mux.command_spawn_failed");
+        assert_eq!(
+            failure.details()["native_failure_code"],
+            "mux.command_spawn_failed"
+        );
         assert_eq!(failure.details()["execution_started"], "false");
-        let cause = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        let cause = failure
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
         let original = failure.private_native_cause().unwrap();
-        let original_io = original.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        let original_io = original
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
         assert!(std::ptr::eq(cause, original_io));
         assert_eq!(cause.kind(), std::io::ErrorKind::NotADirectory);
         assert_eq!(cause.raw_os_error(), Some(20));
@@ -209,7 +249,10 @@ mod tests {
     #[test]
     fn actual_native_locator_completed_nonzero_keeps_status_and_bounded_streams() {
         let mut command = Command::new("/bin/sh");
-        command.args(["-c", "printf actual-locator-output; printf actual-locator-diagnostic >&2; exit 11"]);
+        command.args([
+            "-c",
+            "printf actual-locator-output; printf actual-locator-diagnostic >&2; exit 11",
+        ]);
         let output = capture_locator(&mut command).unwrap();
         assert_eq!(output.status, 11);
         assert_eq!(output.stdout, "actual-locator-output");
@@ -231,11 +274,16 @@ mod tests {
         command.args(["-c", "head -c 32769 /dev/zero"]);
         let started = Instant::now();
         let failure = capture_locator(&mut command).unwrap_err();
-        assert_eq!(failure.details()["native_failure_code"], "mux.command_output_limit");
+        assert_eq!(
+            failure.details()["native_failure_code"],
+            "mux.command_output_limit"
+        );
         assert_eq!(failure.details()["output_limit_bytes"], "32768");
         assert_eq!(failure.details()["stream"], "stdout");
         assert_actual_retirement(&failure);
-        let capture = failure.native_capture().expect("actual retained native bytes");
+        let capture = failure
+            .native_capture()
+            .expect("actual retained native bytes");
         assert!(!capture.stdout.is_empty());
         assert!(capture.stdout.len() <= 32768);
         assert!(capture.stdout.iter().all(|byte| *byte == 0));
@@ -249,7 +297,10 @@ mod tests {
         command.args(["-c", "printf locator-private-output-canary; printf locator-private-error-canary >&2; sleep 30"]);
         let started = Instant::now();
         let failure = capture_locator(&mut command).unwrap_err();
-        assert_eq!(failure.details()["native_failure_code"], "mux.command_timeout");
+        assert_eq!(
+            failure.details()["native_failure_code"],
+            "mux.command_timeout"
+        );
         assert_eq!(failure.details()["execution_started"], "true");
         assert_actual_retirement(&failure);
         let capture = failure.native_capture().unwrap();
@@ -271,12 +322,19 @@ mod tests {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "printf '\\377'"]);
         let failure = capture_locator(&mut command).unwrap_err();
-        assert_eq!(failure.details()["native_failure_code"], "mux.command_utf8_invalid");
+        assert_eq!(
+            failure.details()["native_failure_code"],
+            "mux.command_utf8_invalid"
+        );
         assert_eq!(failure.details()["stdout_eof"], "true");
         assert_eq!(failure.details()["stderr_eof"], "true");
         assert_eq!(failure.details()["capture_cancelled"], "false");
         assert_actual_retirement(&failure);
-        let cause = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        let cause = failure
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
         assert_eq!(cause.kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(cause.raw_os_error(), None);
         let capture = failure.native_capture().unwrap();
@@ -288,20 +346,39 @@ mod tests {
     fn material_basis(path: &Path) -> (u64, u64, u64, u32, i64, i64, i64, i64) {
         let metadata = std::fs::symlink_metadata(path).unwrap();
         assert!(metadata.is_file() && !metadata.file_type().is_symlink());
-        (metadata.dev(), metadata.ino(), metadata.len(), metadata.mode(),
-         metadata.mtime(), metadata.mtime_nsec(), metadata.ctime(), metadata.ctime_nsec())
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len(),
+            metadata.mode(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        )
     }
 
     #[test]
     #[ignore = "requires a genuine pinned installed Prime owner-produced, quiescent selected session in admitted Run fixture; no fabricated package/config/header or model prompt"]
     fn actual_installed_prime_locator_reads_same_selected_owner_header_without_transcript_copy() {
         let argv: Vec<String> = serde_json::from_str(
-            &std::env::var("AIKIT_PRIME_RESUME_NATIVE_ARGV").expect("actual admitted Prime argv JSON"),
-        ).unwrap();
-        let native = std::env::var("AIKIT_PRIME_RESUME_NATIVE_ID").expect("actual native owner session UUID");
-        let cwd = std::path::PathBuf::from(std::env::var_os("AIKIT_PRIME_RESUME_NATIVE_CWD").expect("actual native owner cwd"));
-        let expected = std::path::PathBuf::from(std::env::var_os("AIKIT_PRIME_RESUME_NATIVE_FILE").expect("actual owner-returned selected session file"));
-        let root = std::path::PathBuf::from(std::env::var_os("AIKIT_PRIME_RESUME_NATIVE_FIXTURE_ROOT").expect("admitted owned native Run fixture"));
+            &std::env::var("AIKIT_PRIME_RESUME_NATIVE_ARGV")
+                .expect("actual admitted Prime argv JSON"),
+        )
+        .unwrap();
+        let native = std::env::var("AIKIT_PRIME_RESUME_NATIVE_ID")
+            .expect("actual native owner session UUID");
+        let cwd = std::path::PathBuf::from(
+            std::env::var_os("AIKIT_PRIME_RESUME_NATIVE_CWD").expect("actual native owner cwd"),
+        );
+        let expected = std::path::PathBuf::from(
+            std::env::var_os("AIKIT_PRIME_RESUME_NATIVE_FILE")
+                .expect("actual owner-returned selected session file"),
+        );
+        let root = std::path::PathBuf::from(
+            std::env::var_os("AIKIT_PRIME_RESUME_NATIVE_FIXTURE_ROOT")
+                .expect("admitted owned native Run fixture"),
+        );
         assert!(root.is_absolute() && expected.is_absolute() && cwd.is_absolute());
         let root_metadata = std::fs::symlink_metadata(&root).unwrap();
         assert!(root_metadata.is_dir() && !root_metadata.file_type().is_symlink());
@@ -310,7 +387,10 @@ mod tests {
         assert!(cwd.canonicalize().unwrap().starts_with(&root));
         let before = material_basis(&expected);
         let result = locate(&argv, &native, &cwd, None).unwrap();
-        assert_eq!(Path::new(&result).canonicalize().unwrap(), expected.canonicalize().unwrap());
+        assert_eq!(
+            Path::new(&result).canonicalize().unwrap(),
+            expected.canonicalize().unwrap()
+        );
         assert_eq!(material_basis(&expected), before);
         // This case records only metadata and the selected locator result.
         // The unchanged Node script reads a bounded prefix to find the header;

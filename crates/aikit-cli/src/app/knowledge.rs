@@ -143,13 +143,19 @@ mod project_scope_tests {
         // Explicit declared identity is an algorithm input here. The separate
         // native gate obtains these mappings from actual ctrl-created Projects.
         let central = BTreeMap::from([
-            ("central:source:project:editor-walk:".into(), "Work/Editor".into()),
+            (
+                "central:source:project:editor-walk:".into(),
+                "Work/Editor".into(),
+            ),
             ("central:source:project:editor:".into(), "Work/Other".into()),
-            ("central:source:project:team/editor:".into(), "Work/Team".into()),
+            (
+                "central:source:project:team/editor:".into(),
+                "Work/Team".into(),
+            ),
         ]);
-        let bound = |resource, display| ref_belongs_to_project_scope(
-            resource, display, &BTreeMap::new(), &central,
-        );
+        let bound = |resource, display| {
+            ref_belongs_to_project_scope(resource, display, &BTreeMap::new(), &central)
+        };
         assert!(bound("central:wiki:project:editor-walk", "Work/Editor"));
         assert!(!bound("central:wiki:project:editor-walk", "Work/Other"));
         assert!(!bound("central:wiki:project:editor", "Work/Editor"));

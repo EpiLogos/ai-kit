@@ -151,7 +151,10 @@ fn target_for(remote: &GatewayRemote) -> Result<GatewayCarrierTarget> {
 }
 
 /// What the peer advertises: from a recent answer, else by asking it now.
-fn peer_features(home: &AikitHome, remote: &GatewayRemote) -> std::result::Result<Vec<String>, String> {
+fn peer_features(
+    home: &AikitHome,
+    remote: &GatewayRemote,
+) -> std::result::Result<Vec<String>, String> {
     let key = FeatureCacheKey::new(home, remote);
     if let Ok(cache) = feature_cache().lock() {
         if let Some((at, features)) = cache.get(&key) {

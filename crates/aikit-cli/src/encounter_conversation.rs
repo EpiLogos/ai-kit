@@ -20,10 +20,10 @@ use super::super::{error, EncounterService, Lifecycle};
 use super::{EncounterAddressedTurn, EncounterContextPacket};
 use crate::gateway_owners::{CtrlActionError, ProcessOwners};
 use aikit_core::{AikitError, ResourceRef, Result};
-use aikit_store::AikitHome;
 use aikit_store::encounter::{
     ConversationReading, ConversationRecipientReading, ConversationWork, NewConversationRecipient,
 };
+use aikit_store::AikitHome;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -353,7 +353,8 @@ fn remote_encounter_legacy(
         let value: Value = serde_json::from_str(&output.stdout).map_err(|_| {
             unavailable(format!(
                 "no JSON answer: {}",
-                output.stderr
+                output
+                    .stderr
                     .lines()
                     .last()
                     .unwrap_or("")
@@ -434,7 +435,8 @@ fn remote_encounter_legacy(
     let value: Value = serde_json::from_str(&output.stdout).map_err(|_| {
         unavailable(format!(
             "no JSON answer from {target}: {}",
-            output.stderr
+            output
+                .stderr
                 .lines()
                 .last()
                 .unwrap_or("")
@@ -1218,7 +1220,8 @@ impl EncounterService {
         if delivery.is_null() {
             return Ok(());
         }
-        let reply = remote_encounter(&self.home, route, &with_action("delivery-reply")).unwrap_or(Value::Null);
+        let reply = remote_encounter(&self.home, route, &with_action("delivery-reply"))
+            .unwrap_or(Value::Null);
         self.store.conversation_record_remote(
             request,
             participant,
@@ -1648,18 +1651,28 @@ pub(crate) fn spawn_worker(service: &Arc<EncounterService>) {
             let Some(service) = weak.upgrade() else { break };
             // The SAME owner fence covers background effects. Do not take a
             // second read lease inside sweep: public requests already hold it.
-            let Ok(lifecycle) = service.lifecycle.read() else { break };
-            if service.shutdown_requested.load(std::sync::atomic::Ordering::SeqCst)
+            let Ok(lifecycle) = service.lifecycle.read() else {
+                break;
+            };
+            if service
+                .shutdown_requested
+                .load(std::sync::atomic::Ordering::SeqCst)
                 || !matches!(*lifecycle, Lifecycle::Running)
             {
                 break;
             }
             #[cfg(test)]
             {
-                let barrier = service.native_worker_test_barrier.lock().ok().and_then(|slot| slot.clone());
+                let barrier = service
+                    .native_worker_test_barrier
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.clone());
                 if let Some(barrier) = barrier {
                     if barrier.reached.send(std::time::Instant::now()).is_err()
-                        || barrier.proceed.lock().map_or(true, |release| release.recv_timeout(Duration::from_secs(5)).is_err())
+                        || barrier.proceed.lock().map_or(true, |release| {
+                            release.recv_timeout(Duration::from_secs(5)).is_err()
+                        })
                     {
                         break;
                     }

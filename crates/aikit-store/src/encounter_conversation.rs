@@ -599,9 +599,7 @@ impl EncounterStore {
     pub fn conversation_work(&self, limit: usize) -> Result<Vec<ConversationWork>> {
         let connection = self.connection.lock().map_err(failure)?;
         let mut query = connection
-            .prepare(
-                OWNER_CONVERSATION_WORK_SQL,
-            )
+            .prepare(OWNER_CONVERSATION_WORK_SQL)
             .map_err(failure)?;
         let rows = query
             .query_map([], |row| {
@@ -642,14 +640,22 @@ impl EncounterStore {
     /// claim that an uncertain delivery succeeded or may be replayed.
     pub fn owner_work_standing(&self) -> Result<Value> {
         let connection = self.connection.lock().map_err(failure)?;
-        let selectable: u64 = connection.query_row(
-            &format!("SELECT COUNT(*) FROM ({OWNER_CONVERSATION_WORK_SQL}) WHERE work IS NOT NULL"),
-            [], |row| row.get(0),
-        ).map_err(failure)?;
-        let queued: u64 = connection.query_row(
-            &format!("SELECT COUNT(*) FROM ({OWNER_CONVERSATION_QUEUED_SQL})"),
-            [], |row| row.get(0),
-        ).map_err(failure)?;
+        let selectable: u64 = connection
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM ({OWNER_CONVERSATION_WORK_SQL}) WHERE work IS NOT NULL"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(failure)?;
+        let queued: u64 = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM ({OWNER_CONVERSATION_QUEUED_SQL})"),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(failure)?;
         let (nonterminal, uncertain, unknown): (u64, u64, u64) = connection.query_row(
             "SELECT COUNT(CASE WHEN phase IN ('dispatching','submitted','uncertain','queued') THEN 1 END),
                     COUNT(CASE WHEN phase IN ('uncertain','reconciled-no-replay') THEN 1 END),
@@ -696,9 +702,7 @@ impl EncounterStore {
     pub fn conversation_queued_sessions(&self) -> Result<Vec<ResourceRef>> {
         let connection = self.connection.lock().map_err(failure)?;
         let mut query = connection
-            .prepare(
-                OWNER_CONVERSATION_QUEUED_SQL,
-            )
+            .prepare(OWNER_CONVERSATION_QUEUED_SQL)
             .map_err(failure)?;
         let rows = query
             .query_map([], |r| r.get::<_, String>(0))
