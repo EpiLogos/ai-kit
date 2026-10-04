@@ -529,10 +529,7 @@ fn opening_keeps_views_responsive_and_refuses_a_duplicate_process_launch() {
         bindings[0]["event"]["owner_pid"].as_u64(),
         Some(u64::from(std::process::id()))
     );
-    assert!(
-        bindings[0]["cursor"].as_u64().unwrap()
-            > reservation["cursor"].as_u64().unwrap()
-    );
+    assert!(bindings[0]["cursor"].as_u64().unwrap() > reservation["cursor"].as_u64().unwrap());
     rig.stop();
 }
 
@@ -1040,10 +1037,7 @@ fn restart_projects_unfinished_or_uncertain_native_open_from_the_real_journal() 
     assert_eq!(reservation["event"]["connection_generation"], "unfinished");
     assert_eq!(refusal["event"]["connection_generation"], "unfinished");
     assert!(refusal["cursor"].as_u64().unwrap() > reservation["cursor"].as_u64().unwrap());
-    assert!(
-        reconciliations[0]["cursor"].as_u64().unwrap()
-            > refusal["cursor"].as_u64().unwrap()
-    );
+    assert!(reconciliations[0]["cursor"].as_u64().unwrap() > refusal["cursor"].as_u64().unwrap());
     let view = service
         .apply(EncounterRequest::View {
             agent_session: rig.session.clone(),
