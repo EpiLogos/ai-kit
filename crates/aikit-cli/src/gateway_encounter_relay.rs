@@ -460,9 +460,8 @@ mod native_cache_tests {
                 stop_signal: Some(Arc::clone(&stop)),
                 ..Default::default()
             };
-            let gateway = AgencyGateway::new(
-                ResourceRef::parse(format!("gateway:cache-{member}")).unwrap(),
-            );
+            let gateway =
+                AgencyGateway::new(ResourceRef::parse(format!("gateway:cache-{member}")).unwrap());
             let (send, done) = mpsc::channel();
             let worker = thread::spawn(move || {
                 let result = match listener {
