@@ -1987,7 +1987,10 @@ mod tests {
         assert_eq!(failure.details()["process_group_retirement"], "unconfirmed");
         assert!(!failure.details().contains_key("lf_refusal_retirement"));
         assert!(!failure.details().contains_key("line_feed_limit"));
-        assert!(failure.source().is_none(), "actual IO must survive: {failure:?}");
+        assert!(
+            failure.source().is_none(),
+            "actual IO must survive: {failure:?}"
+        );
         assert!(!failure.details().contains_key("cleanup_cause"));
         assert_eq!(failure.secondary_io_sources().count(), 0);
         let actual = failure.native_capture().unwrap();
