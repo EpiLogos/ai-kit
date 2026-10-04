@@ -657,6 +657,17 @@ enum CaptureReadFailure {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+impl CaptureReadFailure {
+    fn refusal_retirement_key(&self) -> Option<&'static str> {
+        match self {
+            Self::Limit => Some("byte_refusal_retirement"),
+            Self::LineFeedLimit { .. } => Some("lf_refusal_retirement"),
+            Self::Io(_) => None,
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy)]
 struct CapturePolicy {
     limit: u64,
@@ -892,8 +903,8 @@ fn command_failure(
     failure
 }
 
-// The LF refusal has already been decided, before the rejected chunk could be
-// retained or projected into rows. Observe only the remaining physical pipe
+// The capacity refusal has already been decided, before the rejected chunk
+// could be retained or projected into rows. Observe only the remaining physical pipe
 // lifetime; these bytes never become an admitted result or a second capture.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn drain_refused_pipe(
@@ -925,7 +936,8 @@ fn drain_refused_pipe(
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-struct LfRefusalContext<'a> {
+struct CapacityRefusalContext<'a> {
+    retirement_key: &'static str,
     owned: &'a mut OwnedCommand,
     stdout_pipe: &'a mut std::process::ChildStdout,
     stderr_pipe: &'a mut std::process::ChildStderr,
@@ -940,7 +952,7 @@ struct LfRefusalContext<'a> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-impl LfRefusalContext<'_> {
+impl CapacityRefusalContext<'_> {
     fn finish(mut self, mut failure: AikitError) -> AikitError {
         use std::time::{Duration, Instant};
         failure = failure
@@ -1022,7 +1034,7 @@ impl LfRefusalContext<'_> {
             .with("stderr_eof", self.stderr_eof.to_string())
             .with("capture_cancelled", cancelled.to_string())
             .with(
-                "lf_refusal_retirement",
+                self.retirement_key,
                 if cancelled {
                     "cancellation"
                 } else {
@@ -1033,7 +1045,7 @@ impl LfRefusalContext<'_> {
             .with("refusal_drain_stderr_bytes", count(discarded_stderr))
             .with("process_group_retirement", "unconfirmed");
         // Natural EOF and direct-child reap do not prove descendant retirement.
-        // The original LF refusal always survives, including every actual IO.
+        // The original capacity refusal survives, including every actual IO.
         command_failure(
             failure,
             self.argv,
@@ -1161,8 +1173,9 @@ fn capture_native_command(
         ) {
             Ok(progress) => progress,
             Err(failure) => {
-                if matches!(&failure, CaptureReadFailure::LineFeedLimit { .. }) {
-                    return Err(LfRefusalContext {
+                if let Some(retirement_key) = failure.refusal_retirement_key() {
+                    return Err(CapacityRefusalContext {
+                        retirement_key,
                         owned: &mut owned,
                         stdout_pipe: &mut stdout_pipe,
                         stderr_pipe: &mut stderr_pipe,
@@ -1206,8 +1219,9 @@ fn capture_native_command(
         ) {
             Ok(progress) => progress,
             Err(failure) => {
-                if matches!(&failure, CaptureReadFailure::LineFeedLimit { .. }) {
-                    return Err(LfRefusalContext {
+                if let Some(retirement_key) = failure.refusal_retirement_key() {
+                    return Err(CapacityRefusalContext {
+                        retirement_key,
                         owned: &mut owned,
                         stdout_pipe: &mut stdout_pipe,
                         stderr_pipe: &mut stderr_pipe,
@@ -1315,8 +1329,9 @@ fn capture_native_command(
         ) {
             Ok(progress) => progress,
             Err(failure) => {
-                if matches!(&failure, CaptureReadFailure::LineFeedLimit { .. }) {
-                    return Err(LfRefusalContext {
+                if let Some(retirement_key) = failure.refusal_retirement_key() {
+                    return Err(CapacityRefusalContext {
+                        retirement_key,
                         owned: &mut owned,
                         stdout_pipe: &mut stdout_pipe,
                         stderr_pipe: &mut stderr_pipe,
@@ -1363,8 +1378,9 @@ fn capture_native_command(
         ) {
             Ok(progress) => progress,
             Err(failure) => {
-                if matches!(&failure, CaptureReadFailure::LineFeedLimit { .. }) {
-                    return Err(LfRefusalContext {
+                if let Some(retirement_key) = failure.refusal_retirement_key() {
+                    return Err(CapacityRefusalContext {
+                        retirement_key,
                         owned: &mut owned,
                         stdout_pipe: &mut stdout_pipe,
                         stderr_pipe: &mut stderr_pipe,
@@ -1918,6 +1934,213 @@ mod tests {
             .prefix("runner-owned-")
             .tempdir_in(&scratch)
             .unwrap()
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn record_byte_refusal_result(actual: &Result<Output>, elapsed: std::time::Duration) {
+        use std::error::Error;
+        let io = |cause: &std::io::Error| {
+            serde_json::json!({
+                "kind": format!("{:?}", cause.kind()),
+                "raw_os_error": cause.raw_os_error()
+            })
+        };
+        let observation = match actual {
+            Ok(output) => serde_json::json!({
+                "result": "ok",
+                "status": output.status,
+                "stdout_bytes": output.stdout.len(),
+                "stderr_bytes": output.stderr.len()
+            }),
+            Err(failure) => serde_json::json!({
+                "result": "err",
+                "code": failure.code(),
+                "details": failure.details(),
+                "primary_io": failure.source()
+                    .and_then(|cause| cause.downcast_ref::<std::io::Error>()).map(io),
+                "secondary_io": failure.secondary_io_sources().map(io).collect::<Vec<_>>(),
+                "capture": failure.native_capture().map(|capture| serde_json::json!({
+                    "status": capture.status,
+                    "stdout_bytes": capture.stdout.len(),
+                    "stderr_bytes": capture.stderr.len()
+                }))
+            }),
+        };
+        // Actual body-free facts precede every retirement assertion, including
+        // a genuine signal/drain/reap failure. No private stream is published.
+        eprintln!(
+            "native byte refusal observation: {}",
+            serde_json::json!({"elapsed_millis": elapsed.as_millis(), "actual": observation})
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn assert_byte_capacity_refusal(failure: &AikitError, stream: &str) {
+        use std::error::Error;
+        assert_eq!(failure.code(), "mux.command_output_limit", "{failure:?}");
+        assert_eq!(failure.details()["output_limit_bytes"], "32768");
+        assert_eq!(failure.details()["stream"], stream);
+        assert_eq!(failure.details()["execution_started"], "true");
+        assert_eq!(failure.details()["effects"], "unknown");
+        assert_eq!(failure.details()["automatic_retry"], "false");
+        assert_eq!(failure.details()["direct_child_reaped"], "true");
+        assert_eq!(failure.details()["process_group_retirement"], "unconfirmed");
+        assert!(!failure.details().contains_key("lf_refusal_retirement"));
+        assert!(!failure.details().contains_key("line_feed_limit"));
+        assert!(failure.source().is_none(), "actual IO must survive: {failure:?}");
+        assert!(!failure.details().contains_key("cleanup_cause"));
+        assert_eq!(failure.secondary_io_sources().count(), 0);
+        let actual = failure.native_capture().unwrap();
+        let (selected, other) = if stream == "stdout" {
+            (&actual.stdout, &actual.stderr)
+        } else {
+            (&actual.stderr, &actual.stdout)
+        };
+        assert!(selected.len() <= 32768);
+        assert!(selected.iter().all(|byte| *byte == 0));
+        assert!(other.is_empty());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_byte_overflow_reaps_natural_stdout_and_stderr_eof_without_signalling() {
+        // Retain material even if a real cleanup assertion fails. This is the
+        // same native product allocator, never the system temporary directory.
+        let fixture = native_command_tempdir().keep();
+        let payload = fixture.join("actual-byte-payload");
+        let bytes = vec![0u8; 65537];
+        std::fs::write(&payload, &bytes).unwrap();
+        for _ in 0..8 {
+            for (stream, script) in [
+                ("stdout", r#"/bin/cat "$1""#),
+                ("stderr", r#"/bin/cat "$1" >&2"#),
+            ] {
+                let mut command = std::process::Command::new("/bin/sh");
+                command
+                    .args(["-c", script, "actual-byte-natural-fixture"])
+                    .arg(&payload);
+                let started = std::time::Instant::now();
+                let actual = SystemRunner::new()
+                    .with_timeout(std::time::Duration::from_secs(5))
+                    .with_output_limit_bytes(32768)
+                    .with_strict_utf8()
+                    .with_body_free_diagnostics()
+                    .with_unix_signal_status()
+                    .capture_command(&mut command);
+                record_byte_refusal_result(&actual, started.elapsed());
+                let failure = actual.unwrap_err();
+                assert_byte_capacity_refusal(&failure, stream);
+                assert_eq!(failure.details()["group_signal"], "not-needed");
+                assert_eq!(failure.details()["known_exit_status"], "0");
+                assert_eq!(failure.details()["stdout_eof"], "true");
+                assert_eq!(failure.details()["stderr_eof"], "true");
+                assert_eq!(failure.details()["capture_cancelled"], "false");
+                assert_eq!(
+                    failure.details()["byte_refusal_retirement"],
+                    "natural_eof_reap"
+                );
+                let retained = failure.native_capture().unwrap();
+                assert_eq!(retained.status, Some(0));
+                let discarded_stdout = failure.details()["refusal_drain_stdout_bytes"]
+                    .parse::<usize>()
+                    .unwrap();
+                let discarded_stderr = failure.details()["refusal_drain_stderr_bytes"]
+                    .parse::<usize>()
+                    .unwrap();
+                let observed_after_refusal = discarded_stdout + discarded_stderr;
+                assert!(observed_after_refusal > 0);
+                if stream == "stdout" {
+                    assert_eq!(discarded_stderr, 0);
+                } else {
+                    assert_eq!(discarded_stdout, 0);
+                }
+                let admitted_and_later =
+                    retained.stdout.len() + retained.stderr.len() + observed_after_refusal;
+                // The already-read rejected chunk is absent from BOTH retained
+                // output and post-refusal counters; no invented byte total.
+                assert!(admitted_and_later < bytes.len());
+                assert!(bytes.len() - admitted_and_later <= 8192);
+                assert!(started.elapsed() < std::time::Duration::from_secs(8));
+            }
+        }
+        assert_eq!(std::fs::read(&payload).unwrap(), bytes);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_live_byte_overflow_still_requires_owned_cancellation_and_reap() {
+        let fixture = native_command_tempdir().keep();
+        let payload = fixture.join("actual-byte-payload");
+        std::fs::write(&payload, vec![0u8; 65537]).unwrap();
+        for (stream, script) in [
+            ("stdout", r#"/bin/cat "$1"; /bin/sleep 5"#),
+            ("stderr", r#"/bin/cat "$1" >&2; /bin/sleep 5"#),
+        ] {
+            let mut command = std::process::Command::new("/bin/sh");
+            command
+                .args(["-c", script, "actual-byte-live-fixture"])
+                .arg(&payload);
+            let started = std::time::Instant::now();
+            let actual = SystemRunner::new()
+                .with_timeout(std::time::Duration::from_secs(5))
+                .with_output_limit_bytes(32768)
+                .with_strict_utf8()
+                .with_body_free_diagnostics()
+                .with_unix_signal_status()
+                .capture_command(&mut command);
+            record_byte_refusal_result(&actual, started.elapsed());
+            let failure = actual.unwrap_err();
+            assert_byte_capacity_refusal(&failure, stream);
+            assert_eq!(failure.details()["group_signal"], "delivered");
+            assert_eq!(failure.details()["cleanup_exit_status"], "137");
+            assert!(!failure.details().contains_key("known_exit_status"));
+            assert_eq!(failure.details()["stdout_eof"], "false");
+            assert_eq!(failure.details()["stderr_eof"], "false");
+            assert_eq!(failure.details()["capture_cancelled"], "true");
+            assert_eq!(failure.details()["byte_refusal_retirement"], "cancellation");
+            assert_eq!(failure.native_capture().unwrap().status, Some(137));
+            assert!(started.elapsed() < std::time::Duration::from_secs(8));
+        }
+        // Descendant retirement is not inferred from group-signal delivery;
+        // the actual fixture remains retained, including on assertion failure.
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_byte_overflow_after_leader_exit_requires_inherited_pipe_cancellation() {
+        let fixture = native_command_tempdir().keep();
+        let payload = fixture.join("actual-byte-payload");
+        std::fs::write(&payload, vec![0u8; 65537]).unwrap();
+        for (stream, script) in [
+            ("stdout", r#"/bin/sleep 5 & /bin/cat "$1"; exit 19"#),
+            ("stderr", r#"/bin/sleep 5 & /bin/cat "$1" >&2; exit 19"#),
+        ] {
+            let mut command = std::process::Command::new("/bin/sh");
+            command
+                .args(["-c", script, "actual-byte-inherited-pipe-fixture"])
+                .arg(&payload);
+            let started = std::time::Instant::now();
+            let actual = SystemRunner::new()
+                .with_timeout(std::time::Duration::from_secs(5))
+                .with_output_limit_bytes(32768)
+                .with_strict_utf8()
+                .with_body_free_diagnostics()
+                .with_unix_signal_status()
+                .capture_command(&mut command);
+            record_byte_refusal_result(&actual, started.elapsed());
+            let failure = actual.unwrap_err();
+            assert_byte_capacity_refusal(&failure, stream);
+            assert_eq!(failure.details()["group_signal"], "delivered");
+            assert_eq!(failure.details()["known_exit_status"], "19");
+            assert_eq!(failure.details()["stdout_eof"], "false");
+            assert_eq!(failure.details()["stderr_eof"], "false");
+            assert_eq!(failure.details()["capture_cancelled"], "true");
+            assert_eq!(failure.details()["byte_refusal_retirement"], "cancellation");
+            assert_eq!(failure.native_capture().unwrap().status, Some(19));
+            assert!(started.elapsed() < std::time::Duration::from_secs(8));
+        }
+        // An exited direct leader is not EOF. The finite inherited writer is
+        // genuine; no late numeric signal or whole-group retirement is claimed.
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
