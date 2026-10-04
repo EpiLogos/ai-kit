@@ -460,7 +460,9 @@ mod native_cache_tests {
                 stop_signal: Some(Arc::clone(&stop)),
                 ..Default::default()
             };
-            let gateway = AgencyGateway::new(ResourceRef::new(format!("gateway:cache-{member}")));
+            let gateway = AgencyGateway::new(
+                ResourceRef::parse(format!("gateway:cache-{member}")).unwrap(),
+            );
             let (send, done) = mpsc::channel();
             let worker = thread::spawn(move || {
                 let result = match listener {
@@ -671,7 +673,7 @@ mod native_cache_tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         assert!(listener.local_addr().unwrap().port() > 0);
         let error = run_gateway_service_on_websocket_listener(
-            AgencyGateway::new(ResourceRef::new("gateway:held-refusal")),
+            AgencyGateway::new(ResourceRef::parse("gateway:held-refusal").unwrap()),
             GatewayServiceConfig {
                 websocket_bind: Some("127.0.0.1:0".into()),
                 websocket_bearer_token: Some("owned-refusal-bearer".into()),
