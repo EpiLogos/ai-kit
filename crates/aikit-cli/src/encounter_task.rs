@@ -431,8 +431,8 @@ fn task_codex_runtime(
     let projection = json!({"schema":"workcell.runtime-projection/v1",
         "requested_input_root":requested_input_root,"input_root":input_root,"runtime_root":now.join("native-codex-runtime"),
         "immutable_members":["auth.json",".credentials.json","config.toml","config.d","managed_config.toml","hooks.json"],
-        "mutable_directories":["tmp","log","sessions","archived_sessions","shell_snapshots"],
-        "mutable_files":["installation_id","history.jsonl","models_cache.json"],
+        "mutable_directories":["tmp","log","sessions","archived_sessions","shell_snapshots","thread-writer-locks"],
+        "mutable_files":["installation_id","history.jsonl","models_cache.json","session_index.jsonl"],
         "boundary_digest":inspection["requirements_digest"]});
     // npm and native Codex create absent runtime directories only after
     // Workcell applies the object-bound Task aperture. HOME/CODEX_HOME remain

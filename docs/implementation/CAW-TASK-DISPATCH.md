@@ -354,8 +354,8 @@ namespace/overlay enforcement refuse before provider execution.
 
 The exact admitted Task T backs npm cache, SQLite and the durable
 `native-codex-runtime` material. Its selected tmp/log/sessions/archived_sessions/
-shell_snapshots views have readonly original lower history and Task-owned
-copy-on-write continuations. Its installation_id/history.jsonl/models_cache.json file views also retain
+shell_snapshots/thread-writer-locks views have readonly original lower history and Task-owned
+copy-on-write continuations. Its installation_id/history.jsonl/models_cache.json/session_index.jsonl file views also retain
 readonly original lower values and Task-owned continuations. These are provider runtime material;
 it does not replace an Agent, Agency, canonical AgentSession or provider thread
 ID. Same-Task re-entry retains those physical uppers and the same runtime file.
