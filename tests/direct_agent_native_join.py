@@ -249,16 +249,25 @@ def exercise(ctrl: Path, aikit: Path, evidence: Path | None = None) -> dict:
             assert refused["error"]["code"]=="agent_session_host.open_failed",refused
             assert refused["error"]["message"]=="ACP load/resume contradicted the requested native identity",refused
             held=events(session)
-            rejection=[row["event"] for row in held if row.get("event",{}).get("kind")=="native-open-refused"][-1]
+            rejection_row=[row for row in held if row.get("event",{}).get("kind")=="native-open-refused"][-1]
+            rejection=rejection_row["event"]
             generation=rejection["connection_generation"]
             assert isinstance(generation,str) and generation,rejection
-            reservation=[row["event"] for row in held if row.get("event",{}).get("kind")=="native-open-reserved" and row["event"].get("connection_generation")==generation]
-            assert len(reservation)==1 and reservation[0]["continuation_requested"] is True,reservation
+            reservation_rows=[row for row in held if row.get("event",{}).get("kind")=="native-open-reserved" and row["event"].get("connection_generation")==generation]
+            assert len(reservation_rows)==1,reservation_rows
+            reservation=reservation_rows[0]["event"]
+            assert reservation["owner_pid"]==pid,reservation
+            basis=reservation["basis"]
+            assert isinstance(basis,dict) and basis["continuation_requested"] is True,reservation
+            assert (basis["agent_session"],basis["space"],basis["provider"])==(session,space,provider["id"]),basis
+            assert basis["prior_native_binding"]["native_session_id"]==native,basis
+            assert reservation_rows[0]["cursor"]<rejection_row["cursor"],held
             # Every journal event carries the owner's observation time (observed_at_ms, ms since epoch).
             assert isinstance(rejection.get("observed_at_ms"),int) and rejection["observed_at_ms"]>0,rejection
-            assert {key:value for key,value in rejection.items() if key!="observed_at_ms"}=={"kind":"native-open-refused","continuation_requested":True,"error_code":"agent_session_host.open_failed","cleanup_confirmed":True,"binding_recorded":False,"turn_replayed":False,"connection_generation":generation,"owner_pid":pid,"phase":"session-open","process_started":True,"inference_observed":False,"reason":"ACP load/resume contradicted the requested native identity"},rejection
+            assert {key:value for key,value in rejection.items() if key!="observed_at_ms"}=={"kind":"native-open-refused","error_code":"agent_session_host.open_failed","cleanup_confirmed":True,"cleanup_error":None,"binding_recorded":False,"turn_replayed":False,"connection_generation":generation,"owner_pid":pid,"process_started":True,"reason":"ACP load/resume contradicted the requested native identity"},rejection
             bindings=[row["event"] for row in held if row.get("event",{}).get("kind")=="binding"]
             assert bindings and all(row["native_session_id"]==native for row in bindings),bindings
+            assert not any(row.get("connection_generation")==generation for row in bindings),bindings
             checks.append("A provider returning a different load identity is refused and never counted as continuation")
             (base/"wrong-load").unlink()
             skill_file.write_text(skill_body+"Changed after preparation\n")

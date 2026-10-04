@@ -480,7 +480,7 @@ jobs:
           CASES
           if ! python3 "$RUNTIME_GATE_EVIDENCE/audit.py" after; then failed=1; fi
           test "$failed" = 0
-          grep -q '^test result: ok. 15 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/native.log"
+          grep -q '^test result: ok. 16 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/native.log"
           grep -q '^test result: ok. 6 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/placement.log"
           grep -q '^test result: ok. 19 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
           for raw in native-npm-boundary native-npm-redirection native-sqlite-redirection native-sqlite-form; do
