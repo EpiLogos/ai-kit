@@ -1594,3 +1594,507 @@ fn actual_codex_task_acp_session_creation_and_reentry_keep_thread_locks_in_task_
     );
     assert!(world.child.is_none(), "no encounter resident was created");
 }
+// Actual Encounter owner regression. This is a distinct controlled native
+// undertaking, with real Codex own-login and no prompt or replacement provider.
+#[cfg(feature = "codex-account-native")]
+fn account_encounter_request(world: &World, evidence: &Path, label: &str, request: Value) -> Value {
+    fs::write(
+        evidence.join(format!("{label}-request.json")),
+        serde_json::to_vec_pretty(&request).unwrap(),
+    )
+    .unwrap();
+    let mut command = Command::new(world.native_driver());
+    command
+        .env("AIKIT_HOME", world.home.root())
+        .env("WORKCELL_CONTROL_TOKEN", "controlled-caw-material-token")
+        .arg("-C")
+        .arg(&world.root)
+        .args(["encounter", "--socket"])
+        .arg(&world.socket)
+        .arg("--request-json")
+        .arg(request.to_string());
+    let output = bounded(&mut command, evidence, label);
+    assert!(
+        output.status.success(),
+        "actual native Encounter call refused; exact raw retained: {label}"
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        response["ok"], true,
+        "actual native Encounter semantic refusal retained: {label}"
+    );
+    response
+}
+
+#[cfg(feature = "codex-account-native")]
+struct AccountEncounterAdmissionRunner<'a> {
+    evidence: &'a Path,
+    label: &'a str,
+}
+#[cfg(feature = "codex-account-native")]
+impl aikit_adapters::runner::CommandRunner for AccountEncounterAdmissionRunner<'_> {
+    fn run(&self, argv: &[String]) -> aikit_core::Result<aikit_adapters::runner::Output> {
+        assert_eq!(argv.len(), 5);
+        assert_eq!(&argv[1..3], &["agency", "actualise"]);
+        assert_eq!(argv[4], "--json");
+        let actual = PathBuf::from(std::env::var_os("AIKIT_CAW_ACTUATION_BIN").unwrap());
+        assert_eq!(Path::new(&argv[0]), actual.as_path());
+        let mut command = Command::new(&argv[0]);
+        command.args(&argv[1..]);
+        let output = bounded(&mut command, self.evidence, self.label);
+        Ok(aikit_adapters::runner::Output {
+            status: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8(output.stdout).unwrap(),
+            stderr: String::from_utf8(output.stderr).unwrap(),
+        })
+    }
+}
+
+#[cfg(feature = "codex-account-native")]
+struct AccountEncounterOwner<'a> {
+    world: &'a World,
+    evidence: &'a Path,
+    process: OwnedSubprocess,
+    stdout: std::os::unix::net::UnixStream,
+    stderr: std::os::unix::net::UnixStream,
+    out: Vec<u8>,
+    err: Vec<u8>,
+    out_observed: usize,
+    err_observed: usize,
+    out_eof: bool,
+    err_eof: bool,
+    finished: bool,
+}
+#[cfg(feature = "codex-account-native")]
+impl<'a> AccountEncounterOwner<'a> {
+    fn start(world: &'a World, evidence: &'a Path) -> Self {
+        use std::{os::fd::OwnedFd, os::unix::net::UnixStream};
+        let (stdout, stdout_child) = UnixStream::pair().unwrap();
+        let (stderr, stderr_child) = UnixStream::pair().unwrap();
+        stdout.set_nonblocking(true).unwrap();
+        stderr.set_nonblocking(true).unwrap();
+        let mut command = Command::new(world.native_driver());
+        command
+            .env("AIKIT_HOME", world.home.root())
+            .env("WORKCELL_CONTROL_TOKEN", "controlled-caw-material-token")
+            .env("CENTRAL_NATIVE_TOKEN", NPM_TOKEN)
+            .arg("-C")
+            .arg(&world.root)
+            .args(["encounter-serve", "--socket"])
+            .arg(&world.socket)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(OwnedFd::from(stdout_child)))
+            .stderr(Stdio::from(OwnedFd::from(stderr_child)));
+        fs::write(
+            evidence.join("actual-encounter-owner-argv.json"),
+            serde_json::to_vec_pretty(&json!({
+                "program":command.get_program().to_string_lossy(),
+                "args":command.get_args().map(|a|a.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+                "selectedDriver":true,"stdio":"owned nonblocking Unix sockets, each retained up to1MiB"
+            })).unwrap(),
+        ).unwrap();
+        let mut owner = Self {
+            world,
+            evidence,
+            process: OwnedSubprocess {
+                child: command.spawn().unwrap(),
+                reaped: false,
+                cleanup_attempted: false,
+            },
+            stdout,
+            stderr,
+            out: Vec::new(),
+            err: Vec::new(),
+            out_observed: 0,
+            err_observed: 0,
+            out_eof: false,
+            err_eof: false,
+            finished: false,
+        };
+        drop(command);
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !world.socket.exists() {
+            owner.drain().unwrap();
+            assert!(owner.process.child.try_wait().unwrap().is_none());
+            assert!(
+                Instant::now() < deadline,
+                "actual Encounter socket startup deadline"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        owner
+    }
+
+    fn drain(&mut self) -> std::io::Result<()> {
+        if !self.out_eof {
+            self.out_eof =
+                drain_available(&mut self.stdout, &mut self.out, &mut self.out_observed)?;
+        }
+        if !self.err_eof {
+            self.err_eof =
+                drain_available(&mut self.stderr, &mut self.err, &mut self.err_observed)?;
+        }
+        if self.out_observed > 1024 * 1024 || self.err_observed > 1024 * 1024 {
+            return Err(std::io::Error::other("actual owner output exceeded1MiB"));
+        }
+        Ok(())
+    }
+
+    fn request(&mut self, label: &str, request: Value) -> Value {
+        self.drain().unwrap();
+        let response = account_encounter_request(self.world, self.evidence, label, request);
+        self.drain().unwrap();
+        response
+    }
+
+    fn finish(&mut self) -> bool {
+        if self.finished {
+            return self.process.reaped && self.out_eof && self.err_eof;
+        }
+        let shutdown = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            account_encounter_request(
+                self.world,
+                self.evidence,
+                "actual-encounter-owned-shutdown",
+                json!({"action":"shutdown","expected_pid":self.process.child.id()}),
+            )
+        }));
+        let native_shutdown_ok = shutdown.is_ok();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut capture_error = None;
+        loop {
+            if let Err(error) = self.drain() {
+                capture_error = Some(error.to_string());
+                break;
+            }
+            if !self.process.reaped {
+                match self.process.child.try_wait() {
+                    Ok(Some(_)) => self.process.reaped = true,
+                    Ok(None) => (),
+                    Err(error) => {
+                        capture_error = Some(error.to_string());
+                        break;
+                    }
+                }
+            }
+            if self.process.reaped && self.out_eof && self.err_eof {
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let forced_stop = !self.process.reaped;
+        let cleanup_error = if forced_stop {
+            self.process
+                .stop_before(Instant::now() + Duration::from_secs(5))
+                .err()
+        } else {
+            None
+        };
+        let _ = self.drain();
+        let clean = native_shutdown_ok
+            && !forced_stop
+            && self.process.reaped
+            && self.out_eof
+            && self.err_eof
+            && capture_error.is_none()
+            && cleanup_error.is_none();
+        let stdout_retained = fs::write(
+            self.evidence.join("actual-encounter-owner.stdout"),
+            &self.out,
+        )
+        .is_ok();
+        let stderr_retained = fs::write(
+            self.evidence.join("actual-encounter-owner.stderr"),
+            &self.err,
+        )
+        .is_ok();
+        let account_retained = fs::write(
+            self.evidence.join("actual-encounter-owner-outcome.json"),
+            serde_json::to_vec_pretty(&json!({
+                "ownedPid":self.process.child.id(),"nativeShutdownOk":native_shutdown_ok,
+                "ownedProcessReaped":self.process.reaped,"forcedStop":forced_stop,
+                "stdoutEof":self.out_eof,"stderrEof":self.err_eof,
+                "stdoutObservedBytes":self.out_observed,"stderrObservedBytes":self.err_observed,
+                "stdoutSha256":format!("{:x}",Sha256::digest(&self.out)),
+                "stderrSha256":format!("{:x}",Sha256::digest(&self.err)),
+                "captureError":capture_error,"cleanupError":cleanup_error,
+                "standing":"actual owned coordinator cleanup; no global descendant-quiescence claim"
+            }))
+            .unwrap(),
+        )
+        .is_ok();
+        self.finished = true;
+        clean && stdout_retained && stderr_retained && account_retained
+    }
+}
+#[cfg(feature = "codex-account-native")]
+impl Drop for AccountEncounterOwner<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.finish();
+        }
+    }
+}
+
+#[cfg(feature = "codex-account-native")]
+fn account_encounter_events(owner: &mut AccountEncounterOwner<'_>, label: &str) -> Vec<Value> {
+    let reading = owner.request(
+        label,
+        json!({
+            "action":"read","agent_session":"agent-session/task","after":0,"limit":256
+        }),
+    );
+    assert_eq!(
+        reading["data"]["more"], false,
+        "finite page must contain complete test history"
+    );
+    reading["data"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|record| record["event"].clone())
+        .collect()
+}
+
+#[cfg(feature = "codex-account-native")]
+#[test]
+#[ignore = "requires actual Codex ChatGPT own-login, a qualified selected native Encounter driver and native Central/Workcell/Actuation; cold model transition, ModelRead and warm Open only, never prompts"]
+fn actual_codex_encounter_selected_model_survives_status_read_and_warm_open() {
+    let evidence = evidence_directory("native-codex-encounter-authoritative-model");
+    let codex = PathBuf::from(
+        std::env::var_os("AIKIT_CAW_CODEX_BIN")
+            .expect("provide the actual installed native Codex; no fabricated login"),
+    );
+    assert!(codex.is_absolute() && codex.is_file());
+    let input_home = std::env::var("CODEX_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let original = native_input_metadata(&input_home);
+    let semantic_home = std::env::var_os("HOME");
+    let semantic_codex_home = std::env::var_os("CODEX_HOME");
+    let semantic_path = std::env::var_os("PATH");
+    let native_program = selected_native_codex_program_basis(&codex);
+    let mut version = Command::new(&codex);
+    version.arg("--version");
+    assert!(
+        bounded(&mut version, &evidence, "actual-encounter-codex-version")
+            .status
+            .success()
+    );
+    let mut login = Command::new(&codex);
+    login.args(["login", "status"]);
+    let output = bounded(&mut login, &evidence, "actual-encounter-codex-own-login");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success()
+            && ((stdout.trim() == "Logged in using ChatGPT" && stderr.trim().is_empty())
+                || (stderr.trim() == "Logged in using ChatGPT" && stdout.trim().is_empty()))
+    );
+    assert_eq!(native_input_metadata(&input_home), original);
+
+    // This existing preparation helper configures a native Agency permitting
+    // model-realise and publishes the actual GPT5.5 own-login catalogue/policy
+    // BEFORE the actual native Task configure. Its fixture provider is replaced
+    // by the embedded Codex profile before any Task preparation or launch.
+    let (world, prepared) = prepare_native_codex_task_with_selection(&evidence, true);
+    retain_native_basis(&world, &prepared, &evidence);
+    assert_ne!(
+        prepared["request"]["central"]["task_ref"],
+        "central:task:control:root:factory-protected-investigator-20261001-4f4e578d"
+    );
+    let task_before = fs::read(task_path(&world)).unwrap();
+    let agency_path = world.home.state().join("encounter-agencies").join(format!(
+        "{}.json",
+        blake3::hash(b"agent-session/task").to_hex()
+    ));
+    let agency_before = fs::read(&agency_path).unwrap();
+    let binding: EncounterAgencyBinding = serde_json::from_slice(&agency_before).unwrap();
+    let source_before = binding.agency_source.read().unwrap();
+    let source: Value = serde_json::from_slice(&source_before).unwrap();
+    assert!(
+        source["determination"]["delegated_autonomy"]["allowed_action_refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action == "action/aikit/model-realise")
+    );
+    let policy_source = prepared["request"]["provider"]["model_policy"].clone();
+    let policy_path = PathBuf::from(policy_source["path"].as_str().unwrap());
+    let policy_before = fs::read(&policy_path).unwrap();
+    assert_eq!(
+        policy_source["content_digest"],
+        format!("blake3:{}", blake3::hash(&policy_before).to_hex())
+    );
+    let policy: Value = serde_json::from_slice(&policy_before).unwrap();
+    assert_eq!(policy["model_ref"], "model:gpt-5.5");
+    assert_eq!(policy["provider_native_id"], "gpt-5.5");
+    assert!(policy["credential"].is_null());
+    let catalogue_path = world
+        .home
+        .root()
+        .join(aikit_store::model_catalogue::MODEL_CATALOGUE_DIR)
+        .join("actual-codex-task.json");
+    let catalogue_before = fs::read(&catalogue_path).unwrap();
+
+    let admit = |label| {
+        aikit_adapters::agency_admission::admit_agency(
+            &AccountEncounterAdmissionRunner {
+                evidence: &evidence,
+                label,
+            },
+            binding.actuation_bin.to_str().unwrap(),
+            &binding.agency_source,
+            &binding.agent_ref,
+            &binding.world_ref,
+        )
+        .unwrap()
+    };
+    let target = |admitted| {
+        json!({"action":"open-model","request":{
+        "space":"session-space/task","agent_session":"agent-session/task",
+        "cwd":prepared["request"]["cwd"],"model_ref":"model:gpt-5.5",
+        "provider_ref":"provider:openai","body":prepared["launcher"]["id"],
+        "expected_agency":admitted}})
+    };
+    let mut owner = AccountEncounterOwner::start(&world, &evidence);
+    let cold = owner.request(
+        "actual-encounter-cold-open",
+        target(admit("actual-cold-native-agency-admission")),
+    );
+    assert_eq!(cold["data"]["selected"], true);
+    assert_eq!(cold["data"]["executed"], false);
+    assert_eq!(cold["data"]["protocol"], "acp");
+    assert_eq!(
+        cold["data"]["model_selection"]["credential_mode"],
+        "codex-chatgpt-own-login"
+    );
+    assert_eq!(
+        cold["data"]["model_selection"]["policy"]["provider_native_id"],
+        "gpt-5.5"
+    );
+    let native_session = cold["data"]["native_session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!native_session.is_empty());
+    let events_before = account_encounter_events(&mut owner, "actual-encounter-cold-events");
+    let transitions = events_before
+        .iter()
+        .filter(|event| event["kind"] == "selected-model-configured")
+        .collect::<Vec<_>>();
+    assert_eq!(transitions.len(), 1);
+    let initial_model = transitions[0]["previous_model_observation"]["current_model_id"]
+        .as_str()
+        .expect("actual native configuration receipt must report its previous model");
+    assert!(!initial_model.is_empty());
+    assert_ne!(initial_model,"gpt-5.5",
+        "the real initial model must differ; an already-selected initial provider cannot qualify this adverse transition");
+    assert_eq!(
+        transitions[0]["model_observation"]["current_model_id"],
+        "gpt-5.5"
+    );
+    assert_eq!(transitions[0]["native_session_id"], native_session);
+    let mut observations = Vec::new();
+    for (label, action) in [
+        ("actual-encounter-cold-status", "status"),
+        ("actual-encounter-model-read", "model-read"),
+    ] {
+        let reading = owner.request(
+            label,
+            json!({"action":action,"agent_session":"agent-session/task"}),
+        );
+        assert_eq!(reading["data"]["native_session_id"], native_session);
+        assert_eq!(
+            reading["data"]["model_observation"]["current_model_id"],
+            "gpt-5.5"
+        );
+        assert!(reading["data"]["error"].is_null());
+        if action == "status" {
+            assert_eq!(reading["data"]["state"], "Resident");
+        } else {
+            assert_eq!(reading["data"]["pinned_model_id"], "gpt-5.5");
+        }
+        observations.push(reading["data"]["model_observation"].clone());
+    }
+    assert_eq!(binding.agency_source.read().unwrap(), source_before);
+    assert_eq!(fs::read(&policy_path).unwrap(), policy_before);
+    let warm = owner.request(
+        "actual-encounter-warm-open",
+        target(admit("actual-warm-native-agency-admission")),
+    );
+    assert_eq!(warm["data"]["native_session_id"], native_session);
+    assert_eq!(
+        warm["data"]["model_observation"]["current_model_id"],
+        "gpt-5.5"
+    );
+    assert_eq!(warm["data"]["selected"], true);
+    assert_eq!(warm["data"]["executed"], false);
+    let status = owner.request(
+        "actual-encounter-warm-status",
+        json!({"action":"status","agent_session":"agent-session/task"}),
+    );
+    assert_eq!(status["data"]["state"], "Resident");
+    assert_eq!(status["data"]["native_session_id"], native_session);
+    assert_eq!(
+        status["data"]["model_observation"]["current_model_id"],
+        "gpt-5.5"
+    );
+    assert!(status["data"]["error"].is_null());
+    observations.push(status["data"]["model_observation"].clone());
+    let events_after = account_encounter_events(&mut owner, "actual-encounter-warm-events");
+    for kind in ["binding", "selected-model-configured"] {
+        assert_eq!(
+            events_before
+                .iter()
+                .filter(|event| event["kind"] == kind)
+                .count(),
+            1
+        );
+        assert_eq!(
+            events_after
+                .iter()
+                .filter(|event| event["kind"] == kind)
+                .count(),
+            1,
+            "ModelRead/warm Open must not open/rebind/configure another native session"
+        );
+    }
+    assert_eq!(fs::read(task_path(&world)).unwrap(), task_before);
+    assert_eq!(fs::read(&agency_path).unwrap(), agency_before);
+    assert_eq!(binding.agency_source.read().unwrap(), source_before);
+    assert_eq!(fs::read(&policy_path).unwrap(), policy_before);
+    assert_eq!(fs::read(&catalogue_path).unwrap(), catalogue_before);
+    assert_eq!(selected_native_codex_program_basis(&codex), native_program);
+    assert_eq!(std::env::var_os("HOME"), semantic_home);
+    assert_eq!(std::env::var_os("CODEX_HOME"), semantic_codex_home);
+    assert_eq!(std::env::var_os("PATH"), semantic_path);
+    fs::write(evidence.join("actual-encounter-authoritative-model-basis.json"),
+        serde_json::to_vec_pretty(&json!({
+            "nativeSessionId":native_session,"selectedModel":"gpt-5.5",
+            "previousNativeModel":transitions[0]["previous_model_observation"],
+            "observations":observations,"policySource":policy_source,
+            "actualAgencySource":binding.agency_source,"sameTaskBytes":true,"sameAgencyBytes":true,
+            "calls":["open-model","status","model-read","open-model","status"],
+            "noPrompt":true,"noDirectAcpClient":true,"noPreparedModelAuthored":true,
+            "initializeStanding":"ModelRead actually succeeds against real Codex (which rejects repeated initialize); no synthetic wire counter",
+            "retainedWorld":world.root,"OriginalRunOrWorkerCredit":false
+        })).unwrap()).unwrap();
+    assert!(
+        owner.finish(),
+        "actual owned coordinator/provider shutdown did not finish cleanly; raw retained"
+    );
+    assert_eq!(
+        native_input_metadata(&input_home),
+        original,
+        "actual auth/config/ambient lock/history inputs changed"
+    );
+}

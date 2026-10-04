@@ -1162,15 +1162,40 @@ impl EncounterService {
                     "Model-selected resident already has a turn in flight; no overlapping model readmission",
                 ));
             }
-            // Pi get_state is a native read. The adapter rejects changed native
-            // provider/model/session before another prompt can be submitted.
-            match deadline {
-                Some(deadline) => {
-                    resident.host.initialize_before(deadline)?;
+            // Pi RPC re-reads provider state through its repeatable get_state
+            // operation. ACP initializes once per transport; re-sending its
+            // handshake here is refused by an already initialized provider.
+            // Preserve other protocols' existing refresh contract.
+            if resident.protocol != EncounterProtocol::Acp {
+                match deadline {
+                    Some(deadline) => {
+                        resident.host.initialize_before(deadline)?;
+                    }
+                    None => {
+                        resident.host.initialize()?;
+                    }
                 }
-                None => {
-                    resident.host.initialize()?;
-                }
+            }
+            let observed = resident.host.identity(session)?;
+            if observed.state != aikit_adapters::SessionLaneState::Resident
+                || observed.binding.native_session_id != resident.lane.binding().native_session_id
+                || observed
+                    .binding
+                    .model_observation
+                    .as_ref()
+                    .map(|value| value.current_model_id.as_str())
+                    != Some(model.policy.provider_native_id.as_str())
+            {
+                return Err(AikitError::new(
+                    "encounter.resident_model_changed",
+                    "The current native session/model no longer matches its admitted model policy",
+                ));
+            }
+            if let Some(reason) = resident.host.transport_error() {
+                return Err(AikitError::new(
+                    "encounter.resident_transport_failed",
+                    reason,
+                ));
             }
             self.store.append(
                 session,
@@ -1660,7 +1685,8 @@ impl EncounterService {
                     "resident-open",
                     Some(deadline),
                 )?;
-                let receipt = json!({"agent_session":agent_session,"native_session_id":held.lane.binding().native_session_id,"model_observation":held.lane.binding().model_observation,"provider":held.provider,"protocol":held.protocol,"body_basis":held.body_basis,"model_selection":held.model,"resident":true,"inference_observed":false});
+                let current_binding = held.host.identity(&agent_session)?.binding;
+                let receipt = json!({"agent_session":agent_session,"native_session_id":current_binding.native_session_id,"model_observation":current_binding.model_observation,"provider":held.provider,"protocol":held.protocol,"body_basis":held.body_basis,"model_selection":held.model,"resident":true,"inference_observed":false});
                 opening.terminal_recorded = true;
                 drop(agency_lock);
                 return self.open_receipt_with_drain(agent_session, receipt);
@@ -3293,9 +3319,8 @@ impl EncounterService {
                 // them null) and the observed model facts. Consumers that must
                 // require an exact body read them from here, never from a
                 // persisted active flag.
-                let binding = resident.lane.binding();
                 Ok(
-                    json!({"agent_session":agent_session,"native_session_id":identity.binding.native_session_id,"state":format!("{:?}",identity.state),"error":resident.host.transport_error(),"provider":resident.provider_view(),"model_observation":binding.model_observation,"permissions":self.permissions.lock().map_err(error)?.get(&agent_session).map(|r|r.values().cloned().collect::<Vec<_>>()).unwrap_or_default(),"permission_authority":"native-provider-consent"}),
+                    json!({"agent_session":agent_session,"native_session_id":identity.binding.native_session_id,"state":format!("{:?}",identity.state),"error":resident.host.transport_error(),"provider":resident.provider_view(),"model_observation":identity.binding.model_observation,"permissions":self.permissions.lock().map_err(error)?.get(&agent_session).map(|r|r.values().cloned().collect::<Vec<_>>()).unwrap_or_default(),"permission_authority":"native-provider-consent"}),
                 )
             }
         }
