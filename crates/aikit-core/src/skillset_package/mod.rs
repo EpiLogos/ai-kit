@@ -25,18 +25,19 @@ pub mod target;
 
 pub use digest::sha256_hex;
 pub use model::{
-    source_revision, Attribution, CommandContribution, EnvironmentRequirement, HookEvent,
-    HookRequirement, McpDependency, PackageFile, PackageIdentity, PackageMember, PackageMetadata,
-    PackageSource, PortableSkillPackage, Presentation, UnresolvedMember, PORTABLE_PACKAGE_SCHEMA,
+    Attribution, CommandContribution, EnvironmentRequirement, HookEvent, HookRequirement,
+    McpDependency, NativeToolContribution, PORTABLE_PACKAGE_SCHEMA, PackageFile, PackageIdentity,
+    PackageMember, PackageMetadata, PackageSource, PortableSkillPackage, Presentation,
+    UnresolvedMember, native_tool_module_path, source_revision,
 };
 pub use receipt::{
-    diff_provenance, CheckStatus, Discovery, NativeValidation, PackageDiff, Receipt, Validation,
-    RECEIPT_SCHEMA,
+    CheckStatus, Discovery, NativeValidation, PackageDiff, RECEIPT_SCHEMA, Receipt, Validation,
+    diff_provenance,
 };
 pub use target::{
-    provenance, target_for, FileMap, Finding, PackagePlan, PackageTarget, PlanClass, PlanEntry,
+    FileMap, Finding, PROVENANCE_FILE, PackagePlan, PackageTarget, PlanClass, PlanEntry,
     RenderedContent, RenderedFile, Severity, TargetCapabilities, TargetId, ValidationCommand,
-    PROVENANCE_FILE,
+    provenance, target_for,
 };
 
 /// Plan and render in one step.
@@ -311,10 +312,12 @@ mod tests {
             "echo ready"
         );
         assert_eq!(hooks["hooks"]["PreToolUse"][0]["matcher"], "Write|Edit");
-        assert!(hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .starts_with("${CLAUDE_PLUGIN_ROOT}/"));
+        assert!(
+            hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .starts_with("${CLAUDE_PLUGIN_ROOT}/")
+        );
 
         let (_, openai) = render(TargetId::Openai, false, &p);
         let manifest = json_of(&openai, "plugin.json");
@@ -323,10 +326,12 @@ mod tests {
             "./hooks/hooks.json"
         );
         let hooks = json_of(&openai, "hooks/hooks.json");
-        assert!(hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .starts_with("${PLUGIN_ROOT}/"));
+        assert!(
+            hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .starts_with("${PLUGIN_ROOT}/")
+        );
 
         let (plan, pi) = render(TargetId::Pi, false, &p);
         let entry = plan.has("hook:session-start").unwrap();
@@ -392,14 +397,18 @@ mod tests {
         let ext = String::from_utf8(pi["extensions/demo-set-aikit.ts"].clone()).unwrap();
         assert!(ext.contains("pi.registerCommand(\"demo-run\""));
         let receipt = Receipt::new(&p, &plan, &[], Validation::from_findings(vec![]));
-        assert!(receipt
-            .unsupported
-            .iter()
-            .any(|u| u.relation == "mcp:demo-server"));
-        assert!(receipt
-            .target_additions
-            .iter()
-            .any(|u| u.relation == "command:demo-run"));
+        assert!(
+            receipt
+                .unsupported
+                .iter()
+                .any(|u| u.relation == "mcp:demo-server")
+        );
+        assert!(
+            receipt
+                .target_additions
+                .iter()
+                .any(|u| u.relation == "command:demo-run")
+        );
     }
 
     #[test]
@@ -571,3 +580,6 @@ defaultEnabled = false
         assert_eq!(model::kebab_case("Demo Set!!"), "demo-set");
     }
 }
+
+#[cfg(test)]
+mod native_tools_tests;

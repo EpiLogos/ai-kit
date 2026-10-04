@@ -1,0 +1,17 @@
+{
+  "recipe": "gliner2.5-decide",
+  "artifact_repo": "fastino/GLiNER2.5-Decide",
+  "artifact_revision": "5a7adf72a23b4d311abae6ce050d7f0012bb3416",
+  "sdk_repo": "https://github.com/fastino-ai/GLiNER2",
+  "sdk_revision": "55656fbfa01d3d4a77485e1a1eeeaf682990ccdf",
+  "model_id": "gliner2.5-decide@5a7adf72a23b4d311abae6ce050d7f0012bb3416",
+  "license": "Apache-2.0",
+  "files": [
+    "config.json",
+    "encoder_config/config.json",
+    "model.safetensors",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json"
+  ]
+}

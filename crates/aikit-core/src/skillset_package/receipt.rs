@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::model::PortableSkillPackage;
-use super::target::{Finding, PackagePlan, PlanClass, RenderedFile, Severity, GENERATOR};
+use super::target::{Finding, GENERATOR, PackagePlan, PlanClass, RenderedFile, Severity};
 
 pub const RECEIPT_SCHEMA: &str = "aikit.skillset-package-receipt/v1";
 pub const DIFF_SCHEMA: &str = "aikit.skillset-package-diff/v1";
@@ -112,6 +112,10 @@ pub struct Discovery {
     /// Exported Skill names the host did NOT report.
     #[serde(default)]
     pub missing_skills: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discovered_native_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_native_tools: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub evidence: String,
 }

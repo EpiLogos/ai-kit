@@ -5,16 +5,16 @@
 //! docs/extensions.md): Skills load from `pi.skills` directories; pi has no
 //! MCP host; behaviour beyond Skills is an extension module
 //! (`export default function (pi: ExtensionAPI)`), loaded by jiti without a
-//! build step. Skills never become extensions: an extension is generated only
-//! for declared hook requirements or commands, and is a target addition.
+//! build step. Declared native tools retain their member-owned module bytes.
+//! A separate extension is generated only for declared hooks or commands.
 
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::Result;
+use crate::{AikitError, Result};
 
-use super::model::{HookEvent, PortableSkillPackage};
+use super::model::{HookEvent, PortableSkillPackage, native_tool_module_path};
 use super::target::*;
 
 const MANIFEST: &str = "package.json";
@@ -45,7 +45,7 @@ fn ts_string(value: &str) -> String {
 }
 
 impl PiTarget {
-    fn manifest(&self, pkg: &PortableSkillPackage) -> Value {
+    fn manifest(&self, pkg: &PortableSkillPackage) -> Result<Value> {
         let mut m = serde_json::Map::new();
         m.insert("name".into(), json!(pkg.identity.name));
         m.insert("version".into(), json!(pkg.version));
@@ -86,7 +86,59 @@ impl PiTarget {
             }
             merge_json(&mut manifest, &overlay);
         }
-        manifest
+        let mut required = std::collections::BTreeSet::new();
+        if needs_extension(pkg) {
+            required.insert(format!("./{}", extension_path(pkg)));
+        }
+        for tool in pkg.native_tools.iter().filter(|t| t.target == TargetId::Pi) {
+            required.insert(format!("./{}", native_tool_module_path(pkg, tool)?));
+        }
+        if !required.is_empty() {
+            let pi = manifest
+                .get_mut("pi")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| {
+                    AikitError::new(
+                        "skillset.package.malformed",
+                        "targets.pi must preserve the pi object",
+                    )
+                })?;
+            let existing = pi.entry("extensions").or_insert_with(|| json!([]));
+            let extensions = existing.as_array_mut().ok_or_else(|| {
+                AikitError::new(
+                    "skillset.package.malformed",
+                    "pi.extensions must be an array",
+                )
+            })?;
+            if extensions.iter().any(|v| !v.is_string()) {
+                return Err(AikitError::new(
+                    "skillset.package.malformed",
+                    "pi.extensions paths must be strings",
+                ));
+            }
+            for path in required {
+                if !extensions.iter().any(|v| {
+                    v.as_str().is_some_and(|p| {
+                        p.trim_start_matches("./") == path.trim_start_matches("./")
+                    })
+                }) {
+                    extensions.push(json!(path));
+                }
+            }
+            let peers = manifest
+                .as_object_mut()
+                .expect("manifest object")
+                .entry("peerDependencies")
+                .or_insert_with(|| json!({}));
+            let peers = peers.as_object_mut().ok_or_else(|| {
+                AikitError::new(
+                    "skillset.package.malformed",
+                    "peerDependencies must be an object",
+                )
+            })?;
+            peers.entry(PI_CORE_PACKAGE).or_insert_with(|| json!("*"));
+        }
+        Ok(manifest)
     }
 
     fn extension(&self, pkg: &PortableSkillPackage) -> String {
@@ -201,7 +253,7 @@ impl PackageTarget for PiTarget {
             package_identity: "package.json `name` + `version`, keyword `pi-package`".into(),
             skills_location: "skills/<name>/SKILL.md via pi.skills [\"./skills\"]".into(),
             mcp: "none — pi has no MCP host".into(),
-            hooks_and_extensions: "TypeScript extension (export default function (pi: ExtensionAPI)) under extensions/, generated only for declared hooks or commands".into(),
+            hooks_and_extensions: "TypeScript extension (export default function (pi: ExtensionAPI)) for declared hooks/commands; member-owned native tool modules through pi.extensions".into(),
             ui_contribution: "none beyond package.json description/keywords".into(),
             install_discovery: "pi install <path|npm:…|git:…> ; pi -e <dir> for a temporary load".into(),
             validation: "pi --mode rpc --no-session --offline --no-approve -e <dir> ← get_commands lists skill:<name> for every member".into(),
@@ -227,6 +279,22 @@ impl PackageTarget for PiTarget {
                 format!("mcp:{}", dep.name),
                 "pi has no MCP host",
             ));
+        }
+        for tool in pkg.native_tools.iter().filter(|t| t.target == TargetId::Pi) {
+            match native_tool_module_path(pkg, tool) {
+                Ok(path) if plan.carried_members().contains(&tool.member_id) => {
+                    plan.push(PlanEntry::new(format!("native-tool:pi:{}", tool.name), PlanClass::Translated)
+                        .at(path).detail("member-owned native Pi module admitted through pi.extensions; no shell translation"));
+                }
+                Ok(_) => plan.push(PlanEntry::unsupported(
+                    format!("native-tool:pi:{}", tool.name),
+                    "the owning member is not carried by this target",
+                )),
+                Err(e) => plan.push(PlanEntry::unsupported(
+                    format!("native-tool:pi:{}", tool.name),
+                    e.to_string(),
+                )),
+            }
         }
         let ext = extension_path(pkg);
         for hook in &pkg.hook_requirements {
@@ -271,7 +339,16 @@ impl PackageTarget for PiTarget {
     }
 
     fn render(&self, pkg: &PortableSkillPackage, plan: &PackagePlan) -> Result<Vec<RenderedFile>> {
-        let mut files = vec![RenderedFile::json(MANIFEST, &self.manifest(pkg))];
+        for tool in pkg.native_tools.iter().filter(|t| t.target == TargetId::Pi) {
+            native_tool_module_path(pkg, tool)?;
+            if !plan.carried_members().contains(&tool.member_id) {
+                return Err(AikitError::new(
+                    "skillset.package.missing_native_tool",
+                    format!("native tool `{}` owner is not exported", tool.name),
+                ));
+            }
+        }
+        let mut files = vec![RenderedFile::json(MANIFEST, &self.manifest(pkg)?)];
         files.extend(render_members(pkg, plan)?);
         if needs_extension(pkg) {
             files.push(RenderedFile::bytes(
