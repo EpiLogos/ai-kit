@@ -105,6 +105,7 @@ time.sleep(60)
                     provider: "owned-unresponsive-startup".into(),
                     cwd: worker_cwd,
                     reconnect: false,
+                    released_predecessor: None,
                     model_target: None,
                 },
                 Instant::now() + Duration::from_secs(3),
