@@ -157,7 +157,63 @@ mod tests {
     use super::*;
     use std::error::Error;
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    use std::os::unix::process::CommandExt;
     use std::time::Instant;
+
+    fn native_failure_observation(failure: &AikitError) -> Value {
+        fn io_observation(cause: &std::io::Error) -> Value {
+            serde_json::json!({
+                "kind": format!("{:?}", cause.kind()),
+                "raw_os_error": cause.raw_os_error()
+            })
+        }
+        let details = [
+            "native_failure_code",
+            "execution_started",
+            "group_signal",
+            "direct_child_reaped",
+            "cleanup_observation_stage",
+            "known_exit_status",
+            "cleanup_exit_status",
+            "stdout_eof",
+            "stderr_eof",
+            "capture_cancelled",
+        ]
+        .into_iter()
+        .filter_map(|key| {
+            failure
+                .details()
+                .get(key)
+                .map(|value| (key.to_owned(), serde_json::json!(value)))
+        })
+        .collect::<serde_json::Map<String, Value>>();
+        serde_json::json!({
+            "code": failure.code(),
+            "details": details,
+            "primary_io": failure.source()
+                .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+                .map(io_observation),
+            "secondary_io": failure.secondary_io_sources()
+                .map(io_observation).collect::<Vec<_>>(),
+            "capture": failure.native_capture().map(|capture| serde_json::json!({
+                "status": capture.status,
+                "stdout_bytes": capture.stdout.len(),
+                "stderr_bytes": capture.stderr.len()
+            }))
+        })
+    }
+
+    fn record_native_failure(failure: &AikitError) {
+        // Retain actual facts before an assertion can fail, without argv,
+        // stream bodies, canaries or reconstructed error messages.
+        eprintln!(
+            "native locator failure observation: {}",
+            serde_json::json!({
+                "outer": native_failure_observation(failure),
+                "native": failure.private_native_cause().map(native_failure_observation)
+            })
+        );
+    }
 
     fn assert_actual_retirement(failure: &AikitError) {
         assert_eq!(failure.details()["direct_child_reaped"], "true");
@@ -201,6 +257,7 @@ mod tests {
             None,
         )
         .unwrap_err();
+        record_native_failure(&failure);
         assert_eq!(failure.code(), "encounter.prime_resume_basis");
         let cause = failure
             .source()
@@ -219,8 +276,23 @@ mod tests {
             .unwrap()
             .file_type()
             .is_char_device());
+        let expected_io = Command::new("/dev/null/prime-locator")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .expect_err("the actual OS refuses a child of a character device");
+        eprintln!(
+            "native spawn oracle: {}",
+            serde_json::json!({
+                "kind": format!("{:?}", expected_io.kind()),
+                "raw_os_error": expected_io.raw_os_error()
+            })
+        );
         let mut command = Command::new("/dev/null/prime-locator");
         let failure = capture_locator(&mut command).unwrap_err();
+        record_native_failure(&failure);
         assert_eq!(failure.code(), "encounter.prime_resume_basis");
         assert_eq!(
             failure.details()["native_failure_code"],
@@ -239,8 +311,8 @@ mod tests {
             .downcast_ref::<std::io::Error>()
             .unwrap();
         assert!(std::ptr::eq(cause, original_io));
-        assert_eq!(cause.kind(), std::io::ErrorKind::NotADirectory);
-        assert_eq!(cause.raw_os_error(), Some(20));
+        assert_eq!(cause.kind(), expected_io.kind());
+        assert_eq!(cause.raw_os_error(), expected_io.raw_os_error());
         assert_eq!(failure.secondary_io_sources().count(), 0);
         assert!(failure.native_capture().is_none());
         assert!(!format!("{failure:?}").contains("/dev/null/prime-locator"));
@@ -259,6 +331,7 @@ mod tests {
         assert_eq!(output.stderr, "actual-locator-diagnostic");
         assert!(!output.ok());
         let failure = selected_file(output, "5c347cc8-4926-42cf-919c-1e892681c6a8").unwrap_err();
+        record_native_failure(&failure);
         assert_eq!(failure.code(), "encounter.prime_resume_basis");
         assert_eq!(failure.details()["locator_status"], "11");
         let capture = failure.native_capture().unwrap();
@@ -274,6 +347,7 @@ mod tests {
         command.args(["-c", "head -c 32769 /dev/zero"]);
         let started = Instant::now();
         let failure = capture_locator(&mut command).unwrap_err();
+        record_native_failure(&failure);
         assert_eq!(
             failure.details()["native_failure_code"],
             "mux.command_output_limit"
@@ -297,6 +371,7 @@ mod tests {
         command.args(["-c", "printf locator-private-output-canary; printf locator-private-error-canary >&2; sleep 30"]);
         let started = Instant::now();
         let failure = capture_locator(&mut command).unwrap_err();
+        record_native_failure(&failure);
         assert_eq!(
             failure.details()["native_failure_code"],
             "mux.command_timeout"
@@ -322,6 +397,7 @@ mod tests {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "printf '\\377'"]);
         let failure = capture_locator(&mut command).unwrap_err();
+        record_native_failure(&failure);
         assert_eq!(
             failure.details()["native_failure_code"],
             "mux.command_utf8_invalid"

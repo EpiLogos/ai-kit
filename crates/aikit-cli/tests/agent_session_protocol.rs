@@ -430,7 +430,7 @@ fn opening_keeps_views_responsive_and_refuses_a_duplicate_process_launch() {
     let request = rig.open(false);
     let opening = thread::spawn(move || service.apply(request));
     let deadline = Instant::now() + Duration::from_secs(4);
-    loop {
+    let reservation = loop {
         let read = rig
             .service
             .apply(EncounterRequest::Read {
@@ -439,27 +439,36 @@ fn opening_keeps_views_responsive_and_refuses_a_duplicate_process_launch() {
                 limit: 100,
             })
             .unwrap();
-        if read["events"]
+        if let Some(row) = read["events"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|row| row["event"]["kind"] == "native-open-attempted")
+            .find(|row| row["event"]["kind"] == "native-open-reserved")
         {
-            break;
+            break row.clone();
         }
         assert!(
             Instant::now() < deadline,
             "opening was not journaled: {read}"
         );
         thread::sleep(Duration::from_millis(5));
-    }
+    };
+    // A reservation precedes effects; it is not a process-start receipt.
+    let generation = reservation["event"]["connection_generation"]
+        .as_str()
+        .expect("the actual reservation retains its generation");
+    assert!(!generation.is_empty());
+    assert_eq!(
+        reservation["event"]["owner_pid"].as_u64(),
+        Some(u64::from(std::process::id()))
+    );
     let observed_at = Instant::now();
     let view = rig.view();
     assert!(observed_at.elapsed() < Duration::from_millis(200));
     assert_eq!(view["connection"]["state"], "Opening");
     assert_eq!(
         rig.service.apply(rig.open(false)).unwrap_err().code(),
-        "encounter.open_in_progress"
+        "encounter.native_open_in_progress"
     );
 
     let other = ResourceRef::parse("agent-session/independent-view").unwrap();
@@ -500,14 +509,29 @@ fn opening_keeps_views_responsive_and_refuses_a_duplicate_process_launch() {
             limit: 100,
         })
         .unwrap();
+    let events = read["events"].as_array().unwrap();
+    let reservations: Vec<_> = events
+        .iter()
+        .filter(|row| row["event"]["kind"] == "native-open-reserved")
+        .collect();
+    let bindings: Vec<_> = events
+        .iter()
+        .filter(|row| row["event"]["kind"] == "binding")
+        .collect();
+    assert_eq!(reservations.len(), 1);
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(reservations[0], &reservation);
     assert_eq!(
-        read["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|row| row["event"]["kind"] == "native-open-attempted")
-            .count(),
-        1
+        bindings[0]["event"]["connection_generation"].as_str(),
+        Some(generation)
+    );
+    assert_eq!(
+        bindings[0]["event"]["owner_pid"].as_u64(),
+        Some(u64::from(std::process::id()))
+    );
+    assert!(
+        bindings[0]["cursor"].as_u64().unwrap()
+            > reservation["cursor"].as_u64().unwrap()
     );
     rig.stop();
 }
@@ -929,7 +953,7 @@ fn restart_projects_unfinished_or_uncertain_native_open_from_the_real_journal() 
     assert_eq!(view["connection"]["state"], "RecoveryRequired");
     assert_eq!(
         service.apply(rig.open(false)).unwrap_err().code(),
-        "encounter.open_recovery_required"
+        "encounter.native_open_recovery_required"
     );
     assert_eq!(
         service
@@ -938,7 +962,7 @@ fn restart_projects_unfinished_or_uncertain_native_open_from_the_real_journal() 
             })
             .unwrap_err()
             .code(),
-        "encounter.cleanup_uncertain"
+        "encounter.shutdown_failed"
     );
     store
         .append(
@@ -956,7 +980,7 @@ fn restart_projects_unfinished_or_uncertain_native_open_from_the_real_journal() 
     assert_eq!(view["connection"]["state"], "CleanupUncertain");
     assert_eq!(
         service.apply(rig.open(false)).unwrap_err().code(),
-        "encounter.cleanup_uncertain"
+        "encounter.native_open_recovery_required"
     );
     let receipt = service
         .apply(EncounterRequest::ReconcileNativeOpen {
@@ -966,7 +990,60 @@ fn restart_projects_unfinished_or_uncertain_native_open_from_the_real_journal() 
             cleanup_confirmed: true,
         })
         .unwrap();
-    assert_eq!(receipt["reconciled"], true);
+    assert_eq!(receipt["kind"], "native-open-reconciled");
+    assert_eq!(receipt["connection_generation"], "unfinished");
+    assert_eq!(receipt["evidence_ref"], "evidence/native-cleanup");
+    assert_eq!(receipt["cleanup_confirmed"], true);
+    assert_eq!(
+        receipt["standing"],
+        "operator-attestation; owner did not observe process exit"
+    );
+    for field in [
+        "provider_success",
+        "turn_replayed",
+        "replacement_launched",
+        "native_quiescence_observed",
+        "verification_passed",
+    ] {
+        assert_eq!(receipt[field], false, "{field}: {receipt}");
+    }
+    let read = service
+        .apply(EncounterRequest::Read {
+            agent_session: rig.session.clone(),
+            after: 0,
+            limit: 100,
+        })
+        .unwrap();
+    let events = read["events"].as_array().unwrap();
+    let reservation = events
+        .iter()
+        .find(|row| row["event"]["kind"] == "native-open-reserved")
+        .unwrap();
+    let refusal = events
+        .iter()
+        .find(|row| row["event"]["kind"] == "native-open-refused")
+        .unwrap();
+    let reconciliations: Vec<_> = events
+        .iter()
+        .filter(|row| row["event"]["kind"] == "native-open-reconciled")
+        .collect();
+    assert_eq!(reconciliations.len(), 1);
+    // Store adds its owner observation timestamp to the retained journal row.
+    let mut retained_receipt = reconciliations[0]["event"].clone();
+    let observed_at = retained_receipt
+        .as_object_mut()
+        .unwrap()
+        .remove("observed_at_ms")
+        .expect("the real journal adds its observation time");
+    assert!(observed_at.as_i64().is_some());
+    assert_eq!(retained_receipt, receipt);
+    assert_eq!(reservation["event"]["connection_generation"], "unfinished");
+    assert_eq!(refusal["event"]["connection_generation"], "unfinished");
+    assert!(refusal["cursor"].as_u64().unwrap() > reservation["cursor"].as_u64().unwrap());
+    assert!(
+        reconciliations[0]["cursor"].as_u64().unwrap()
+            > refusal["cursor"].as_u64().unwrap()
+    );
     let view = service
         .apply(EncounterRequest::View {
             agent_session: rig.session.clone(),
