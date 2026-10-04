@@ -526,6 +526,84 @@ pub(super) fn check(home: &AikitHome, session: &ResourceRef) -> Result<()> {
     }
     Ok(())
 }
+
+/// A fresh successor keeps the semantic Task and retained COW. The prior record
+/// is historical evidence only; validate() authorises only the current record.
+pub(super) fn validate_successor_task(
+    home: &AikitHome,
+    session: &ResourceRef,
+    expected: &SourceRevision,
+    predecessor: &Value,
+) -> Result<Value> {
+    let current = read(home, session)?.ok_or_else(|| error("Task successor requires current native Task"))?;
+    if &current.revision != expected {
+        return Err(error("Task successor revision conflict; no body launched"));
+    }
+    validate(home, session, &current)?;
+    let mut snapshot = predecessor["opening"]["basis"]["task_basis"].clone();
+    if !snapshot.is_object() {
+        return Err(error("Prior native startup has no typed Task basis"));
+    }
+    // These are the existing explicit optional/default fields of TaskRecord.
+    // Preserve every original field of legacy readings; only
+    // an absent declared optional member receives its existing null default.
+    for key in ["material", "prepared_run", "cleanup"] {
+        if snapshot.get(key).is_none() {
+            snapshot[key] = Value::Null;
+        }
+    }
+    let prior: TaskRecord = serde_json::from_value(snapshot.clone()).map_err(error)?;
+    let historical = historical_ready(home, session, &prior.revision)?;
+    if !prior.ready || serde_json::to_value(&historical).map_err(error)? != snapshot {
+        return Err(error("Exact prior ready Task differs from retained native startup/history"));
+    }
+    let binding = &predecessor["binding"];
+    let digest = blake3::hash(serde_json::to_vec(&prior.launcher.argv).map_err(error)?.as_slice()).to_hex().to_string();
+    if !launcher_belongs_to(session, &prior)
+        || binding["provider_argv_digest"] != digest
+        || binding["body_basis"]["owner_launcher_argv_digest"] != digest
+        || binding["body_basis"]["task_bound"] != true
+        || binding["body_basis"].get("task_revision").is_some_and(|revision| revision != &json!(prior.revision))
+    {
+        return Err(error("Historical native launcher does not match its exact Task binding"));
+    }
+    // Preserve the complete underlying provider except the explicitly renewed
+    // policy reading; its source identity/path may not be redirected.
+    let mut old_request = serde_json::to_value(&prior.request).map_err(error)?;
+    let mut new_request = serde_json::to_value(&current.request).map_err(error)?;
+    if old_request["provider"]["model_policy"]["source"] != new_request["provider"]["model_policy"]["source"]
+        || old_request["provider"]["model_policy"]["path"] != new_request["provider"]["model_policy"]["path"]
+    {
+        return Err(error("Task successor changed the original model policy origin"));
+    }
+    old_request["provider"]["model_policy"] = Value::Null;
+    new_request["provider"]["model_policy"] = Value::Null;
+    if old_request != new_request
+        || prior.allocation.as_ref().map(|task| &task.allocation["now_ref"])
+            != current.allocation.as_ref().map(|task| &task.allocation["now_ref"])
+        || prior.allocation.as_ref().map(|task| &task.allocation["writable_destination"])
+            != current.allocation.as_ref().map(|task| &task.allocation["writable_destination"])
+        || prior.cwd_anchor != current.cwd_anchor
+    {
+        return Err(error("Task successor changed canonical undertaking, cwd, grants or retained COW location"));
+    }
+    let mut old_requirements = prior.requirements.clone().ok_or_else(|| error("Prior Task lacks native requirements"))?;
+    let mut new_requirements = current.requirements.clone().ok_or_else(|| error("Current Task lacks native requirements"))?;
+    for value in [&mut old_requirements, &mut new_requirements] {
+        let object = value.as_object_mut().ok_or_else(|| error("Native requirements are not an object"))?;
+        object.remove("expires_at_unix_ms");
+        object.remove("policy_revision");
+    }
+    if old_requirements != new_requirements {
+        return Err(error("Task successor changed material grant/protection/coverage"));
+    }
+    Ok(json!({"prior_revision":prior.revision,"current_revision":current.revision,
+        "prior_launcher":prior.launcher,"current_launcher":current.launcher,
+        "prior_requirements":prior.requirements,"current_requirements":current.requirements,
+        "same_task":true,"same_now":true,"current_authority_revalidated":true,
+        "historical_authority_is_current":false}))
+}
+
 /// Called at the existing prompt boundary for human and addressed turns alike.
 /// A new task configuration cannot bless an older, unconfined resident process.
 pub(super) fn prompt(service: &EncounterService, session: &ResourceRef) -> Result<String> {

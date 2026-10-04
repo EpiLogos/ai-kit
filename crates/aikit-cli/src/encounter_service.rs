@@ -36,6 +36,9 @@ pub use agency::mint::{
 };
 pub use agency::model::EncounterModelOpen;
 pub(crate) use agency::model::PreparedModel;
+#[path = "encounter_native_release.rs"]
+mod native_release;
+pub use native_release::NativeReleasedPredecessor;
 pub use agency::speech::{
     configure as configure_local_speech, disclose as disclose_local_speech, LocalSpeechConfig,
 };
@@ -277,6 +280,16 @@ pub enum EncounterRequest {
     /// Select a catalogue-backed, scoped, already configured native body.
     OpenModel {
         request: Box<EncounterModelOpen>,
+    },
+    /// Explicit new native body for the same current Task after observed closure.
+    OpenModelWithPredecessor {
+        request: Box<EncounterModelOpen>,
+        released_predecessor: NativeReleasedPredecessor,
+    },
+    ReleaseNative {
+        agent_session: ResourceRef,
+        expected_native_session_id: String,
+        expected_generation: String,
     },
     Health,
     /// Current native owner census under the exclusive lifecycle fence.
@@ -530,6 +543,7 @@ struct NativeOpenRequest<'a> {
     cwd: PathBuf,
     reconnect: bool,
     model_target: Option<&'a EncounterModelOpen>,
+    released_predecessor: Option<NativeReleasedPredecessor>,
 }
 
 struct NativeModeRequest<'a> {
@@ -1570,6 +1584,7 @@ impl EncounterService {
                 cwd,
                 reconnect,
                 model_target,
+                released_predecessor: None,
             },
             Instant::now() + NATIVE_STARTUP_TIMEOUT,
         )
@@ -1616,6 +1631,7 @@ impl EncounterService {
             cwd,
             reconnect,
             model_target,
+            released_predecessor,
         } = request;
         let authored = SessionSpaceApplicationStore::new(self.home.clone()).load(&space)?;
         if !authored.agent_sessions.contains_key(&agent_session) {
@@ -1660,6 +1676,14 @@ impl EncounterService {
             .map_err(error)?
             .get(&agent_session)
             .cloned();
+        let successor_basis = if let Some(predecessor) = &released_predecessor {
+            ensure_native_startup_deadline(deadline)?;
+            let basis = native_release::validate_predecessor(
+                self, &agent_session, previous.as_ref(), predecessor, held.is_some(),
+            )?;
+            ensure_native_startup_deadline(deadline)?;
+            Some(basis)
+        } else { None };
         let mut failed_resident = None;
         if let Some(held) = held {
             if held.space != space || held.provider != provider || held.cwd != cwd {
@@ -1686,13 +1710,25 @@ impl EncounterService {
                     Some(deadline),
                 )?;
                 let current_binding = held.host.identity(&agent_session)?.binding;
-                let receipt = json!({"agent_session":agent_session,"native_session_id":current_binding.native_session_id,"model_observation":current_binding.model_observation,"provider":held.provider,"protocol":held.protocol,"body_basis":held.body_basis,"model_selection":held.model,"resident":true,"inference_observed":false});
+                if released_predecessor.is_some() && previous.as_ref().is_none_or(|binding| {
+                    binding["connection_generation"].as_str() != Some(held.generation.as_str())
+                        || binding["native_session_id"] != json!(current_binding.native_session_id)
+                }) {
+                    return Err(error("Owned successor does not match the exact current journal generation"));
+                }
+                let mut receipt = json!({"agent_session":agent_session,"native_session_id":current_binding.native_session_id,"model_observation":current_binding.model_observation,"provider":held.provider,"protocol":held.protocol,"body_basis":held.body_basis,"model_selection":held.model,"resident":true,"inference_observed":false});
+                if released_predecessor.is_some() {
+                    receipt["continuation"] = json!("fresh-native-successor");
+                    receipt["released_predecessor"] = json!(released_predecessor);
+                    receipt["successor_basis"] = json!(successor_basis);
+                    receipt["connection_generation"] = json!(held.generation);
+                }
                 opening.terminal_recorded = true;
                 drop(agency_lock);
                 return self.open_receipt_with_drain(agent_session, receipt);
             }
         }
-        if !reconnect && previous.is_some() {
+        if !reconnect && released_predecessor.is_none() && previous.is_some() {
             return Err(AikitError::new(
                 "encounter.resume_required",
                 "A prior native binding exists; use explicit reconnect, or create a new canonical session for a fresh/forked encounter",
@@ -1920,13 +1956,26 @@ impl EncounterService {
             "required_context":configured.required_context,
             "model_basis_digest":model.as_ref().map(PreparedModel::fingerprint).transpose()?,
         });
-        opening.reserve(json!({
+        if let Some(basis) = &successor_basis {
+            let previous_body = &basis["predecessor"]["binding"]["body_basis"];
+            for key in ["provider_id", "protocol", "provider_argv_digest", "harness_profile", "task_bound", "cwd", "required_context"] {
+                if previous_body[key] != body_basis[key] {
+                    return Err(error("Explicit Task successor changed the actual underlying provider body"));
+                }
+            }
+        }
+        let mut reserve_basis = json!({
             "agent_session":agent_session,"space":space,"provider":provider,
             "cwd":cwd,"continuation_requested":reconnect,"body_basis":body_basis,
             "agency_basis":agency_basis,"task_basis":task_basis,
             "model_selection":model,
             "prior_native_binding":previous
-        }))?;
+        });
+        if released_predecessor.is_some() {
+            reserve_basis["released_predecessor"] = json!(released_predecessor);
+            reserve_basis["successor_basis"] = json!(successor_basis);
+        }
+        opening.reserve(reserve_basis)?;
         if let Some(held) = failed_resident.take() {
             let mut residents = self.residents.lock().map_err(error)?;
             if !residents
@@ -2272,6 +2321,14 @@ impl EncounterService {
                 "The harness returned another native identity to session/resume; no binding or successful continuation was recorded",
             ));
         }
+        if released_predecessor.as_ref().is_some_and(|predecessor| {
+            predecessor.expected_native_session_id.as_str() == native.as_str()
+        }) {
+            return Err(AikitError::new(
+                "encounter.native_successor_identity_reused",
+                "The harness returned the released predecessor identity to an explicit fresh open; no successor binding was recorded",
+            ));
+        }
         // A bound policy is delivered, never assumed. Pi RPC carried its
         // selection into the session open through the adapter; an ACP
         // resident receives it now, through the native session's own model
@@ -2425,8 +2482,24 @@ impl EncounterService {
                     })?;
             }
         }
+        if let Some(predecessor) = &released_predecessor {
+            ensure_native_startup_deadline(deadline)?;
+            let fresh = native_release::validate_predecessor(
+                self, &agent_session, self.store.last_native_binding(&agent_session)?.as_ref(), predecessor, false,
+            )?;
+            ensure_native_startup_deadline(deadline)?;
+            if Some(&fresh) != successor_basis.as_ref() {
+                return Err(AikitError::new("encounter.native_open_basis_changed", "Task predecessor/current authority changed before successor binding"));
+            }
+        }
         let opened_mode_observation = lane.binding().mode_observation.clone();
-        self.store.append(&agent_session,&json!({"kind":"binding","connection_generation":generation,"owner_pid":std::process::id(),"space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":owner_launcher_argv_digest,"body_basis":body_basis,"now_context_config_digest":blake3::hash(serde_json::to_vec(&configured.now_context).expect("NOW config JSON").as_slice()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"mode_observation":opened_mode_observation,"model_selection":model_reading,"launch_model_default":launch_default,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-resume"} else {"new-native-session"},"composed_tools_route":if mcp_native_fallback.is_some() {"harness-native-mcp-config-seam"} else {"session-wire-or-none"},"mcp_native_fallback_reason":mcp_native_fallback.as_ref().map(|(reason, _)| reason.clone())}))?;
+        let mut binding_event = json!({"kind":"binding","connection_generation":generation,"owner_pid":std::process::id(),"space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":owner_launcher_argv_digest,"body_basis":body_basis,"now_context_config_digest":blake3::hash(serde_json::to_vec(&configured.now_context).expect("NOW config JSON").as_slice()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"mode_observation":opened_mode_observation,"model_selection":model_reading,"launch_model_default":launch_default,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-resume"} else {"new-native-session"},"composed_tools_route":if mcp_native_fallback.is_some() {"harness-native-mcp-config-seam"} else {"session-wire-or-none"},"mcp_native_fallback_reason":mcp_native_fallback.as_ref().map(|(reason, _)| reason.clone())});
+        if released_predecessor.is_some() {
+            binding_event["continuation"] = json!("fresh-native-successor");
+            binding_event["released_predecessor"] = json!(released_predecessor);
+            binding_event["successor_basis"] = json!(successor_basis);
+        }
+        self.store.append(&agent_session, &binding_event)?;
         opening.binding_recorded = true;
         let drain = lane.clone();
         let mode_observation = host
@@ -2476,7 +2549,7 @@ impl EncounterService {
                 body_ref: body_ref.clone(),
                 body_revision: body_revision.clone(),
                 protocol: configured.protocol,
-                generation,
+                generation: generation.clone(),
                 cwd,
                 argv: configured.argv,
                 model,
@@ -2561,6 +2634,12 @@ impl EncounterService {
         // The resident just became ready: this is the moment queued durable
         // deliveries wait for. Drain before answering the open.
         let mut receipt = json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"mode_observation":mode_observation,"model_selection":model_reading,"provider":receipt_provider,"protocol":receipt_protocol,"body_basis":body_basis,"body_ref":configured.body_ref,"body_revision":configured.body_revision,"resident":true,"inference_observed":false});
+        if released_predecessor.is_some() {
+            receipt["continuation"] = json!("fresh-native-successor");
+            receipt["released_predecessor"] = json!(released_predecessor);
+            receipt["successor_basis"] = json!(successor_basis);
+            receipt["connection_generation"] = json!(generation);
+        }
         if let Some((reason, projection)) = &mcp_native_fallback {
             // The composed tool surface does not ride this session's wire: the
             // open outcome names the harness's native MCP configuration seam
@@ -2794,6 +2873,10 @@ impl EncounterService {
                 )
             }
             EncounterRequest::OpenModel { request } => self.open_model(*request),
+            EncounterRequest::OpenModelWithPredecessor { request, released_predecessor } =>
+                self.open_model_with_predecessor(*request, Some(released_predecessor)),
+            EncounterRequest::ReleaseNative { agent_session, expected_native_session_id, expected_generation } =>
+                self.release_native(agent_session, expected_native_session_id, expected_generation, native_control_deadline),
             request @ (EncounterRequest::Send { .. }
             | EncounterRequest::SendGroup { .. }
             | EncounterRequest::Delivery { .. }

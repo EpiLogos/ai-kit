@@ -4,6 +4,10 @@ use super::*;
 use aikit_adapters::connection_process::ModelEnvironment;
 use sha2::{Digest, Sha256};
 
+// Whole-image SHA256 in unoptimized native test builds is explicitly bounded
+// for both caller-selected drivers and the unchanged-PATH Codex executable.
+const NATIVE_PROGRAM_DIGEST_TIMEOUT: Duration = Duration::from_secs(120);
+
 const NPM_TOKEN: &str = "controlled-native-npm-task-allocation";
 
 fn prepare_native_codex_task(evidence: &Path) -> (World, Value) {
@@ -135,7 +139,7 @@ fn selected_native_session_space_driver(evidence: &Path) -> PathBuf {
     assert_eq!(basis(&metadata), basis(&named_before));
     // The supported debug driver is nearly 600 MiB. Keep full SHA256 and
     // custody checks finite without making debug hashing a startup failure.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let deadline = std::time::Instant::now() + NATIVE_PROGRAM_DIGEST_TIMEOUT;
     let mut digest = Sha256::new();
     let mut buffer = [0u8; 65_536];
     let mut bytes = 0u64;
@@ -201,12 +205,25 @@ fn native_codex_selection_policy(world: &World) -> Value {
         serde_json::to_vec(&vec![&entry]).unwrap(),
     )
     .unwrap();
-    let (resolved, problems) = aikit_store::model_catalogue::resolved_catalogue(&world.home);
+    // The resolved catalogue returns informational provenance notes as well as
+    // errors. Judge the authored file load and exact selected entry directly.
+    let authored = aikit_store::model_catalogue::load_owner_catalogue(&world.home);
     assert!(
-        problems.is_empty(),
-        "actual controlled catalogue refused: {problems:?}"
+        authored.problems.is_empty(),
+        "actual controlled catalogue refused: {:?}", authored.problems
     );
+    assert_eq!(authored.catalogue.get(&entry.model), Some(&entry));
+    let (provider_documents, provider_problems) = aikit_store::model_catalogue::load_provider_catalogs(&world.home);
+    assert!(provider_problems.is_empty(), "actual Provider Source refused: {provider_problems:?}");
+    assert!(provider_documents.is_empty(), "controlled native Task must use its declared authored catalogue without imported Provider Source");
+    let (resolved, notes) = aikit_store::model_catalogue::resolved_catalogue(&world.home);
     assert_eq!(resolved.get(&entry.model), Some(&entry));
+    fs::write(
+        world.root.join("actual-codex-task-catalogue-notes.json"),
+        serde_json::to_vec_pretty(&json!({"notes": notes,
+            "selected_model": entry.model, "source": entry.source,
+            "standing": "actual resolved catalogue provenance; selected authored entry and typed load errors checked separately"})).unwrap(),
+    ).unwrap();
     let policy = json!({
         "schema":"aikit.model-dispatch-policy/v1",
         "agent_ref":"agent:existing-1", "world_ref":"control:root",
@@ -1270,7 +1287,7 @@ fn selected_native_codex_program_basis(expected: &Path) -> Value {
     };
     let mut held = fs::File::open(&canonical).unwrap();
     assert_eq!(physical(&held.metadata().unwrap()), physical(&named));
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + NATIVE_PROGRAM_DIGEST_TIMEOUT;
     let mut digest = Sha256::new();
     let mut count = 0_u64;
     let mut buffer = [0_u8; 65536];
@@ -2099,4 +2116,222 @@ fn actual_codex_encounter_selected_model_survives_status_read_and_warm_open() {
         original,
         "actual auth/config/ambient lock/history inputs changed"
     );
+}
+
+
+#[cfg(feature = "codex-account-native")]
+fn account_successor_refusal(
+    owner: &mut AccountEncounterOwner<'_>,
+    label: &str,
+    request: Value,
+    expected_code: &str,
+) -> Value {
+    owner.drain().unwrap();
+    fs::write(owner.evidence.join(format!("{label}-request.json")),
+        serde_json::to_vec_pretty(&request).unwrap()).unwrap();
+    let mut command = Command::new(owner.world.native_driver());
+    command.env("AIKIT_HOME", owner.world.home.root())
+        .env("WORKCELL_CONTROL_TOKEN", "controlled-caw-material-token")
+        .arg("-C").arg(&owner.world.root)
+        .args(["encounter", "--socket"]).arg(&owner.world.socket)
+        .arg("--request-json").arg(request.to_string());
+    let output = bounded(&mut command, owner.evidence, label);
+    owner.drain().unwrap();
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(output.status.success(), "native owner transport/JSON delivery must succeed; admission is the actual response ok:false");
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"]["code"], expected_code);
+    response
+}
+
+#[cfg(feature = "codex-account-native")]
+fn actual_codex_explicit_task_successor(full_owner_handoff: bool) {
+    let evidence = evidence_directory(if full_owner_handoff {
+        "native-codex-task-successor-after-full-owner-handoff"
+    } else {
+        "native-codex-task-successor-after-selected-release"
+    });
+    let codex = PathBuf::from(std::env::var_os("AIKIT_CAW_CODEX_BIN")
+        .expect("provide the genuine installed Codex with current ChatGPT own-login"));
+    assert!(codex.is_absolute() && codex.is_file());
+    let input_home = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty())
+        .map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
+        .unwrap().canonicalize().unwrap();
+    let original = native_input_metadata(&input_home);
+    let semantic_home = std::env::var_os("HOME");
+    let semantic_codex_home = std::env::var_os("CODEX_HOME");
+    let semantic_path = std::env::var_os("PATH");
+    let native_program = selected_native_codex_program_basis(&codex);
+    let mut login = Command::new(&codex);
+    login.args(["login", "status"]);
+    let login = bounded(&mut login, &evidence, "successor-actual-own-login");
+    let stdout = String::from_utf8_lossy(&login.stdout);
+    let stderr = String::from_utf8_lossy(&login.stderr);
+    assert!(login.status.success()
+        && ((stdout.trim() == "Logged in using ChatGPT" && stderr.trim().is_empty())
+            || (stderr.trim() == "Logged in using ChatGPT" && stdout.trim().is_empty())));
+    let (world, prepared) = prepare_native_codex_task_with_selection(&evidence, true);
+    retain_native_basis(&world, &prepared, &evidence);
+    let agency_path = world.home.state().join("encounter-agencies").join(format!(
+        "{}.json", blake3::hash(b"agent-session/task").to_hex()));
+    let agency_bytes = fs::read(&agency_path).unwrap();
+    let agency: EncounterAgencyBinding = serde_json::from_slice(&agency_bytes).unwrap();
+    let agency_source = agency.agency_source.read().unwrap();
+    let admit = |label| {
+        aikit_adapters::agency_admission::admit_agency(
+            &AccountEncounterAdmissionRunner { evidence: &evidence, label },
+            agency.actuation_bin.to_str().unwrap(), &agency.agency_source,
+            &agency.agent_ref, &agency.world_ref).unwrap()
+    };
+    let open = |admitted| json!({"space":"session-space/task",
+        "agent_session":"agent-session/task", "cwd":prepared["request"]["cwd"],
+        "model_ref":"model:gpt-5.5", "provider_ref":"provider:openai",
+        "body":prepared["launcher"]["id"], "expected_agency":admitted});
+    let mut owner = AccountEncounterOwner::start(&world, &evidence);
+    let cold = owner.request("successor-cold-open",
+        json!({"action":"open-model", "request":open(admit("successor-cold-agency"))}));
+    assert_eq!(cold["data"]["protocol"], "acp");
+    assert_eq!(cold["data"]["model_observation"]["current_model_id"], "gpt-5.5");
+    let native = cold["data"]["native_session_id"].as_str().unwrap().to_owned();
+    let session = ResourceRef::parse("agent-session/task").unwrap();
+    let store = aikit_store::EncounterStore::open(&world.home).unwrap();
+    let prior_binding = store.last_native_binding(&session).unwrap().unwrap();
+    assert_eq!(prior_binding["native_session_id"], native);
+    let generation = prior_binding["connection_generation"].as_str().unwrap().to_owned();
+    let task_before = fs::read(task_path(&world)).unwrap();
+    let now = PathBuf::from(prepared["allocation"]["allocation"]["writable_destination"].as_str().unwrap());
+    let partial = now.join("explicit-successor-retained.partial");
+    fs::write(&partial, b"ACTUAL_OWNED_TASK_PARTIAL_PRESERVED").unwrap();
+    let runtime_id_path = now.join("native-codex-runtime/files/installation_id/upper/installation_id");
+    let runtime_id = fs::read(&runtime_id_path).unwrap();
+    assert!(!runtime_id.is_empty());
+    let retained_sessions = native_task_session_files(&now.join("native-codex-runtime/directories/sessions/upper"));
+    assert!(!retained_sessions.is_empty(), "real first session must have produced retained Task COW history");
+    let mut bad_release = json!({"action":"release-native", "agent_session":session,
+        "expected_native_session_id":native, "expected_generation":generation});
+    bad_release["expected_generation"] = json!(format!("{generation}-stale"));
+    account_successor_refusal(&mut owner, "successor-stale-release", bad_release,
+        "encounter.native_release_basis");
+    assert_eq!(store.last_native_binding(&session).unwrap().unwrap(), prior_binding);
+    let release_cursor = if full_owner_handoff {
+        assert!(owner.finish(), "actual full native owner shutdown/reap/EOF failed; evidence retained");
+        for name in ["actual-encounter-owner.stdout", "actual-encounter-owner.stderr", "actual-encounter-owner-outcome.json"] {
+            fs::copy(evidence.join(name), evidence.join(format!("first-{name}"))).unwrap();
+        }
+        let events = store.events(&session, 0, 256).unwrap();
+        assert!(!events.more, "full handoff test history must be complete");
+        let cleanup = events.events.iter().find(|record| record.event["kind"] == "owner-shutdown-completed"
+            && record.event["receipt"]["native_session_id"] == native).unwrap();
+        assert_eq!(cleanup.event["receipt"]["process_stopped"], true);
+        cleanup.cursor
+    } else {
+        let release = owner.request("successor-selected-release", json!({"action":"release-native",
+            "agent_session":session,"expected_native_session_id":native,"expected_generation":generation}));
+        assert_eq!(release["data"]["state"], "Released");
+        assert_eq!(release["data"]["receipt"]["cleanup_confirmed"], true);
+        assert_eq!(release["data"]["receipt"]["native_resume"], false);
+        let repeated = owner.request("successor-selected-release-retry", json!({"action":"release-native",
+            "agent_session":session,"expected_native_session_id":native,"expected_generation":generation}));
+        assert_eq!(release, repeated, "same exact receipt, no repeated process effect");
+        release["data"]["terminal_cursor"].as_u64().unwrap()
+    };
+    let old_session_bytes = retained_sessions.iter().map(|path| (path.clone(), fs::read(path).unwrap())).collect::<Vec<_>>();
+    assert_eq!(fs::read(task_path(&world)).unwrap(), task_before);
+    let mut configure = Command::new(world.native_driver());
+    configure.env("AIKIT_HOME", world.home.root())
+        .env("OI_ACTUATION_BIN", std::env::var_os("AIKIT_CAW_ACTUATION_BIN").unwrap())
+        .env("CENTRAL_NATIVE_TOKEN", NPM_TOKEN).arg("-C").arg(&world.root)
+        .args(["encounter-task-configure","--agent-session","agent-session/task",
+            "--expected-revision"]).arg(prepared["revision"].as_str().unwrap())
+        .arg("--request-json").arg(prepared["request"].to_string());
+    let renewed = bounded(&mut configure, &evidence, "successor-current-native-task-prepare");
+    assert!(renewed.status.success(), "real native same-Task reconfigure refused; exact raw retained");
+    let renewed: Value = serde_json::from_slice(&renewed.stdout).unwrap();
+    assert_eq!(renewed["ready"], true);
+    assert_ne!(renewed["revision"], prepared["revision"]);
+    assert_ne!(renewed["launcher"]["argv"], prepared["launcher"]["argv"]);
+    assert_eq!(renewed["request"], prepared["request"]);
+    for key in ["now_ref","writable_destination"] {
+        assert_eq!(renewed["allocation"]["allocation"][key], prepared["allocation"]["allocation"][key]);
+    }
+    let current_task_bytes = fs::read(task_path(&world)).unwrap();
+    let mut owner = if full_owner_handoff {
+        AccountEncounterOwner::start(&world, &evidence)
+    } else { owner };
+    let predecessor = json!({"expected_native_session_id":native,"expected_generation":generation,
+        "release_cursor":release_cursor,"expected_task_revision":renewed["revision"]});
+    let mut stale = predecessor.clone();
+    stale["expected_task_revision"] = prepared["revision"].clone();
+    account_successor_refusal(&mut owner, "successor-stale-current-task", json!({
+        "action":"open-model-with-predecessor", "request":open(admit("successor-stale-task-agency")),
+        "released_predecessor":stale}), "encounter.runtime");
+    let mut stale = predecessor.clone();
+    stale["release_cursor"] = json!(0);
+    account_successor_refusal(&mut owner, "successor-stale-cleanup-cursor", json!({
+        "action":"open-model-with-predecessor", "request":open(admit("successor-stale-cursor-agency")),
+        "released_predecessor":stale}), "encounter.released_predecessor_changed");
+    assert_eq!(store.last_native_binding(&session).unwrap().unwrap(), prior_binding);
+    assert_eq!(fs::read(task_path(&world)).unwrap(), current_task_bytes);
+    let successor_request = json!({"action":"open-model-with-predecessor",
+        "request":open(admit("successor-current-agency")),"released_predecessor":predecessor});
+    let successor = owner.request("successor-fresh-native-open", successor_request.clone());
+    let next_native = successor["data"]["native_session_id"].as_str().unwrap().to_owned();
+    assert!(!next_native.is_empty());
+    assert_ne!(next_native, native, "actual Create returns a visibly new native session; never native resume");
+    assert_eq!(successor["data"]["model_observation"]["current_model_id"], "gpt-5.5");
+    assert_eq!(successor["data"]["successor_basis"]["native_resume"], false);
+    assert_eq!(successor["data"]["successor_basis"]["task"]["current_authority_revalidated"], true);
+    assert_eq!(successor["data"]["released_predecessor"], predecessor);
+    let current_binding = store.last_native_binding(&session).unwrap().unwrap();
+    assert_eq!(current_binding["native_session_id"], next_native);
+    assert_ne!(current_binding["connection_generation"], generation);
+    assert_eq!(current_binding["continuation"], "fresh-native-successor");
+    assert_eq!(current_binding["released_predecessor"], predecessor);
+    let warm = owner.request("successor-warm-retry", successor_request);
+    assert_eq!(warm["data"]["native_session_id"], next_native);
+    assert_eq!(store.last_native_binding(&session).unwrap().unwrap(), current_binding);
+    let status = owner.request("successor-current-status", json!({"action":"status","agent_session":session}));
+    assert_eq!(status["data"]["state"], "Resident");
+    assert_eq!(status["data"]["native_session_id"], next_native);
+    assert_eq!(status["data"]["model_observation"]["current_model_id"], "gpt-5.5");
+    assert_eq!(fs::read(&partial).unwrap(), b"ACTUAL_OWNED_TASK_PARTIAL_PRESERVED");
+    assert_eq!(fs::read(&runtime_id_path).unwrap(), runtime_id);
+    for (path, bytes) in &old_session_bytes {
+        assert_eq!(&fs::read(path).unwrap(), bytes, "old Task COW session history must survive fresh successor");
+    }
+    assert_eq!(fs::read(task_path(&world)).unwrap(), current_task_bytes);
+    assert_eq!(fs::read(&agency_path).unwrap(), agency_bytes);
+    assert_eq!(agency.agency_source.read().unwrap(), agency_source);
+    assert_eq!(selected_native_codex_program_basis(&codex), native_program);
+    assert_eq!(std::env::var_os("HOME"), semantic_home);
+    assert_eq!(std::env::var_os("CODEX_HOME"), semantic_codex_home);
+    assert_eq!(std::env::var_os("PATH"), semantic_path);
+    let events = account_encounter_events(&mut owner, "successor-final-events");
+    assert_eq!(events.iter().filter(|event| event["kind"] == "binding").count(), 2);
+    assert!(!events.iter().any(|event| event["kind"] == "user" || event["kind"] == "agent-message"));
+    fs::write(evidence.join("actual-explicit-successor-basis.json"), serde_json::to_vec_pretty(&json!({
+        "sameCanonicalSession":session,"sameTask":renewed["request"]["central"]["task_ref"],
+        "sameNow":renewed["allocation"]["allocation"]["now_ref"],
+        "priorNativeSessionId":native,"currentNativeSessionId":next_native,
+        "priorGeneration":generation,"currentBinding":current_binding,
+        "releaseCursor":release_cursor,"fullOwnerHandoff":full_owner_handoff,
+        "predecessor":predecessor,"noPrompt":true,"nativeResume":false,
+        "TaskCOWPreserved":true,"OriginalRunOrWorkerCredit":false,
+        "retainedWorld":world.root,"nativeProgram":native_program})).unwrap()).unwrap();
+    assert!(owner.finish(), "actual owned coordinator/provider retirement was not confirmed");
+    assert_eq!(native_input_metadata(&input_home), original);
+}
+
+#[cfg(feature = "codex-account-native")]
+#[test]
+#[ignore = "requires genuine own-login Codex ACP and qualified current native Central/Workcell/Actuation/AIKit; real selected release, same-Task configure and fresh provider session, no prompt"]
+fn actual_codex_task_successor_after_selected_release_preserves_task_cow() {
+    actual_codex_explicit_task_successor(false);
+}
+
+#[cfg(feature = "codex-account-native")]
+#[test]
+#[ignore = "requires genuine own-login Codex ACP and qualified native owner images; actual full Shutdown/EOF/reap then same-Task fresh successor, no prompt"]
+fn actual_codex_task_successor_after_full_owner_handoff_preserves_task_cow() {
+    actual_codex_explicit_task_successor(true);
 }

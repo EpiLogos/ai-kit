@@ -250,3 +250,43 @@ persistent gateway/scheduler lifetime across restart/sleep/reboot; cross-Day
 continuation and late Return; actual second placement; private source preservation
 and human document assessment. No private Control was read or changed by this
 repository implementation.
+
+
+## Task successor qualification scope
+
+Two additional `codex-account-native` ignored definitions use the existing
+qualified selected `AIKIT_SESSION_SPACE_BINARY` driver and native controlled
+World/Task/Agency fixture:
+
+- `npm_runtime::actual_codex_task_successor_after_selected_release_preserves_task_cow`
+- `npm_runtime::actual_codex_task_successor_after_full_owner_handoff_preserves_task_cow`
+
+Each requires actual Codex ChatGPT own-login and the current pinned native
+Central, Workcell and Actuation material; absent credentials, executables or
+capabilities fail the selected test. No hosted fixture provider, fake ACP reply
+or synthetic login qualifies these cases. They open a genuine model-selected
+Encounter without a prompt, observe the actual native ID and generation,
+refuse a stale release, perform observed native cleanup, reconfigure the same
+Task through its owner with CAS, refuse stale Task/cursor requests, create an
+explicit fresh native session, and check warm-request idempotence. Current
+model/status, Task/NOW identity, retained runtime UUID/old rollout bytes/partial
+Task material and read-only original credential/config metadata are checked.
+The full-handoff case retains both owner shutdown/EOF/reap capture phases.
+It exercises the actual current full Shutdown receipt shape, not an executed
+old-EA4 owner migration.
+
+The existing two account definitions and every prior default/ignored body are
+unchanged. These additions require compile-only account-image discovery and
+exact ignored lists in the existing native-delivery custody route before an
+authorized real-account replay. That CI companion is a separate publication
+prerequisite; no account execution or pass is implied by compiling or listing.
+The existing six default owner obligations, legacy image handoff, 25 Task
+labels, pins and provider-dependent operational obligations are preserved.
+
+The support projection retains Root's independently published 30-to-120-second
+held driver digest deadline before appending these definitions. It changes no
+production timeout, native startup budget or existing test assertion.
+All new format/type/compile/native/account cases remain UNRUN. Original
+Factory same-Run/same-Task replay, real old-owner cleanup/handoff and current
+qualified image/source custody remain required. These are Source-defined
+obligations, not Original worker, installed runtime, H or Recognition proof.

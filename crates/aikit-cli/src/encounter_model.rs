@@ -943,6 +943,14 @@ pub(crate) fn validate_target(
 }
 impl EncounterService {
     pub(crate) fn open_model(&self, request: EncounterModelOpen) -> Result<Value> {
+        self.open_model_with_predecessor(request, None)
+    }
+
+    pub(crate) fn open_model_with_predecessor(
+        &self,
+        request: EncounterModelOpen,
+        released_predecessor: Option<crate::encounter_service::NativeReleasedPredecessor>,
+    ) -> Result<Value> {
         self.require_attached(&request.agent_session)?;
         let mut candidates = Vec::new();
         for configured in self.providers()? {
@@ -972,13 +980,13 @@ impl EncounterService {
             }));
         }
         let provider = candidates.remove(0);
-        let mut result = self.open_native(
-            request.space.clone(),
-            request.agent_session.clone(),
-            provider.id,
-            request.cwd.clone(),
-            false,
-            Some(&request),
+        let mut result = self.open_native_before(
+            crate::encounter_service::NativeOpenRequest {
+                space: request.space.clone(), agent_session: request.agent_session.clone(),
+                provider: provider.id, cwd: request.cwd.clone(), reconnect: false,
+                model_target: Some(&request), released_predecessor,
+            },
+            std::time::Instant::now() + crate::encounter_service::NATIVE_STARTUP_TIMEOUT,
         )?;
         result["selected"] = json!(true);
         result["executed"] = json!(false);

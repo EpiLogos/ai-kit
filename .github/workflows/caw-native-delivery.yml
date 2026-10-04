@@ -305,10 +305,12 @@ jobs:
                   rows.append({'role':row['role'],'image':now,'same_before_basis':same});failed|=not same
               write('images.after.json',rows)
               if failed:raise ValueError('selected original image basis changed across actual cases')
-          elif mode in ('account-census','encounter-account-census'):
+          elif mode in ('account-census','encounter-account-census','selected-release-account-census','full-handoff-account-census'):
               case, prefix = {
                   'account-census': ('npm_runtime::actual_codex_task_acp_session_creation_and_reentry_keep_thread_locks_in_task_t','account-regression'),
                   'encounter-account-census': ('npm_runtime::actual_codex_encounter_selected_model_survives_status_read_and_warm_open','encounter-account-regression'),
+                  'selected-release-account-census': ('npm_runtime::actual_codex_task_successor_after_selected_release_preserves_task_cow','selected-release-account-regression'),
+                  'full-handoff-account-census': ('npm_runtime::actual_codex_task_successor_after_full_owner_handoff_preserves_task_cow','full-handoff-account-regression'),
               }[mode]
               rows=json.loads((out/'images.before.json').read_text())
               selected=[row for row in rows if row['role']['name']=='caw-account-test']
@@ -461,6 +463,20 @@ jobs:
           if record_command encounter-account-regression-census stdout python3 "$RUNTIME_GATE_EVIDENCE/audit.py" encounter-account-census; then :; else encounter_account_census_status=$?; fi
           if test "$encounter_account_list_status" -ne 0; then exit "$encounter_account_list_status"; fi
           test "$encounter_account_census_status" = 0
+          selected_release_account_case=npm_runtime::actual_codex_task_successor_after_selected_release_preserves_task_cow
+          selected_release_account_list_status=0
+          if record_command selected-release-account-regression-list stdout timeout --kill-after=5s 30s "$account_test_image" --ignored --list --exact "$selected_release_account_case"; then :; else selected_release_account_list_status=$?; fi
+          selected_release_account_census_status=0
+          if record_command selected-release-account-regression-census stdout python3 "$RUNTIME_GATE_EVIDENCE/audit.py" selected-release-account-census; then :; else selected_release_account_census_status=$?; fi
+          if test "$selected_release_account_list_status" -ne 0; then exit "$selected_release_account_list_status"; fi
+          test "$selected_release_account_census_status" = 0
+          full_handoff_account_case=npm_runtime::actual_codex_task_successor_after_full_owner_handoff_preserves_task_cow
+          full_handoff_account_list_status=0
+          if record_command full-handoff-account-regression-list stdout timeout --kill-after=5s 30s "$account_test_image" --ignored --list --exact "$full_handoff_account_case"; then :; else full_handoff_account_list_status=$?; fi
+          full_handoff_account_census_status=0
+          if record_command full-handoff-account-regression-census stdout python3 "$RUNTIME_GATE_EVIDENCE/audit.py" full-handoff-account-census; then :; else full_handoff_account_census_status=$?; fi
+          if test "$full_handoff_account_list_status" -ne 0; then exit "$full_handoff_account_list_status"; fi
+          test "$full_handoff_account_census_status" = 0
       - name: Actual binaries through native Actuation and controlled provider processes
         shell: bash
         run: |

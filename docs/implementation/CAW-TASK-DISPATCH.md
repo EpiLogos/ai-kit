@@ -390,3 +390,73 @@ runtime filesystem tests use the same existing native bounded capture
 owner and retain its actual raw bytes/typed failure observation before
 refusing qualification. Eight real Linux definitions (the original five
 plus unchanged/retargeted/missing alias controls) are defined, not run.
+
+
+## Explicit Task-bound native successor
+
+The Encounter owner accepts `release-native` for the exact current
+`agent_session`, `expected_native_session_id` and `expected_generation`.
+It uses the existing lifecycle/startup lease and resident operation lease,
+requires the selected lane to be Resident with no pending native consent or
+queued/active/uncertain machine delivery, and journals cleanup intent before
+calling that owned host's existing shutdown. A repeated exact release returns
+its retained receipt. Unknown or failed cleanup remains a refusal; it is not
+permission to infer a departed body from an absent resident.
+
+`open-model-with-predecessor` takes the ordinary selected-model request plus
+`released_predecessor`: exact old native ID and generation, `release_cursor`,
+and `expected_task_revision`. It creates a fresh native provider session for
+the same canonical AgentSession. It never reports native resumption. Ordinary
+`reconnect` retains its full original argv/context/native-session checks.
+
+Before any provider starts, the owner correlates the selected old binding,
+its unique generation-bound `native-open-reserved` Task/Agency basis and the
+actual cleanup event. A per-session `owner-shutdown-completed` receipt from
+the supported full Shutdown path is also usable: its native ID must match and
+no newer binding may have intervened. This accommodates EA4's lack of a
+Task revision in `body_basis` without reconstructing one from argv text: the
+exact startup Task record must match the content-digest-journaled ready
+history and the old launcher digest. No old event or Task file is rewritten.
+
+The caller then explicitly prepares the same Task through
+`encounter-task-configure` with current revision CAS. The successor validates
+only the newly prepared current Task for authority. The expired historical
+reading is evidence, never a current grant. The original Task request, cwd
+anchor, canonical allocation/NOW/COW path, provider body, material grants,
+protection and coverage remain the same. Only the finite placement-policy
+revision/expiry and the same-origin selected-model policy reading can differ.
+The semantic Agent/Agency/World identity must match the old startup basis.
+The selected current model still follows normal catalogue/policy/credential
+and native Agency validation; no guessed provider ID or fallback is added.
+
+The new native body's resolved provider ID/protocol/argv digest/profile/cwd
+must match the prior body, before the durable startup reservation or process
+creation. The actual old launcher and current ready launcher are retained
+without normalising their arrays. A current configuring owner's executable
+path or expected revision may therefore be different: it comes from current
+native preparation, not a caller-supplied argv exception. Changing owner
+images still requires the existing qualified image/source/interface handoff;
+this operation does not turn a pathname into image qualification.
+
+The owner repeats predecessor and current Task admission at the existing
+final binding checkpoint. The new binding records both native identities,
+old/current Task revisions and generation, with continuation
+`fresh-native-successor`. Retrying that exact request while its successor is
+owned returns that body's current binding, without another Create. An
+unowned later body or another generation cannot reuse the old cleanup receipt.
+Provider journal attribution continues to require the selected connection
+generation, so a late old event cannot complete a newer machine delivery.
+
+This operation does not cancel uncertain work automatically, copy credentials,
+change HOME/CODEX_HOME, replace Task material, infer auth refresh permission,
+create a second owner or claim Factory/Unit completion. Full explicit owner
+Shutdown remains supported; it is not made dependent on all-residents-idle.
+Any outstanding work must be retained, reconciled or honestly refused through
+its existing lifecycle. A failed selected cleanup stays fenced; no successful
+replacement is claimed from an operator label or a missing PID.
+
+The T candidate and new genuine account/native definitions are uncompiled and
+UNRUN until normal publication and qualification. The original EA4 endpoint
+cannot deserialize these new request tags. Its supported full Shutdown and
+qualified owner/image handoff must occur first; no new client can make the
+old running owner answer a new operation.
