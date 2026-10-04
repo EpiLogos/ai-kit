@@ -187,9 +187,7 @@ impl EncounterService {
             })?;
         self.permissions.lock().map_err(error)?.remove(&session);
         if !cleanup_confirmed {
-            let cause = cleanup
-                .err()
-                .expect("unconfirmed native cleanup has an actual error");
+            let cause = cleanup.expect_err("unconfirmed native cleanup has an actual error");
             return Err(AikitError::new(
                 "encounter.native_release_uncertain",
                 "Exact owned cleanup is not fully confirmed; replacement remains fenced",
