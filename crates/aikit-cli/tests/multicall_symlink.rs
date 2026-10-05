@@ -16,6 +16,15 @@ use aikit_core::scope::ScopeKind;
 use aikit_store::home::AikitHome;
 use tempfile::TempDir;
 
+fn native_tempdir() -> TempDir {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
+    fs::create_dir_all(&root).unwrap();
+    tempfile::Builder::new()
+        .prefix("native-multicall-")
+        .tempdir_in(root)
+        .unwrap()
+}
+
 const CONTEXT_ID: &str = "ctx_01HZYMULTICALL0000000000";
 
 fn write(path: &Path, contents: &str) {
@@ -49,8 +58,8 @@ exports = ["greet"]
 
 #[test]
 fn a_symlink_named_after_an_export_runs_the_capsule_that_owns_it() {
-    let home_dir = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
+    let home_dir = native_tempdir();
+    let project = native_tempdir();
     let home_path = home_dir.path();
 
     seed_registry(home_path);
@@ -136,8 +145,8 @@ fn an_unreviewed_export_invoked_by_symlink_refuses_with_trust_required() {
     // the capsule unattended. That must be gated by the same trust check the
     // interactive `aikit run` uses: an unreviewed executable REFUSES rather than
     // silently running whatever a `git pull` left in a bin/ shim.
-    let home_dir = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
+    let home_dir = native_tempdir();
+    let project = native_tempdir();
     let home_path = home_dir.path();
     seed_registry(home_path);
     write(
@@ -190,8 +199,8 @@ fn an_unreviewed_export_invoked_by_symlink_refuses_with_trust_required() {
 fn a_reviewed_export_invoked_by_symlink_runs() {
     // The other side of the gate: once the capsule is reviewed, the same symlink
     // invocation runs its real payload.
-    let home_dir = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
+    let home_dir = native_tempdir();
+    let project = native_tempdir();
     let home_path = home_dir.path();
     seed_registry(home_path);
     write(
@@ -235,8 +244,8 @@ fn a_reviewed_export_invoked_by_symlink_runs() {
 
 #[test]
 fn an_unknown_export_name_is_reported_not_silently_ignored() {
-    let home_dir = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
+    let home_dir = native_tempdir();
+    let project = native_tempdir();
     seed_registry(home_dir.path());
     write(
         &project.path().join(".aikit/profile.toml"),
@@ -271,5 +280,197 @@ fn an_unknown_export_name_is_reported_not_silently_ignored() {
     assert!(
         stderr.contains("nonexistent-export"),
         "the error should name the export; got {stderr:?}"
+    );
+}
+
+fn captured_export(body: &str, extra: &str, reviewed: bool) -> (TempDir, TempDir) {
+    let home = native_tempdir();
+    let project = native_tempdir();
+    seed_registry(home.path());
+    let capsule = home
+        .path()
+        .join("registries/personal/capsules/script/demo/greet");
+    let manifest = capsule.join("manifest.toml");
+    let text = fs::read_to_string(&manifest).unwrap();
+    fs::write(&manifest, format!("{text}mode = \"capture\"\n{extra}")).unwrap();
+    fs::write(capsule.join("payload/run.sh"), body).unwrap();
+    write(
+        &project.path().join(".aikit/profile.toml"),
+        "schema = 1\nenable = [\"script/demo/greet\"]\n",
+    );
+    let env = BTreeMap::from([("AIKIT_CONTEXT_ID".to_owned(), CONTEXT_ID.to_owned())]);
+    let mut service = Service::open(AikitHome::at(home.path()), project.path(), |key| {
+        env.get(key).cloned()
+    })
+    .unwrap();
+    service
+        .apply(ApplyRequest {
+            scope: ScopeKind::Project,
+            toggles: vec![],
+            label: None,
+        })
+        .unwrap();
+    if reviewed {
+        review(home.path(), project.path(), "script/demo/greet");
+    }
+    symlink(
+        assert_cmd::cargo::cargo_bin("aikit"),
+        project.path().join("greet"),
+    )
+    .unwrap();
+    (home, project)
+}
+
+fn capture_native_cli(
+    home: &Path,
+    project: &Path,
+    export: bool,
+    args: &[&str],
+) -> aikit_adapters::runner::Output {
+    let binary = if export {
+        project.join("greet")
+    } else {
+        assert_cmd::cargo::cargo_bin("aikit")
+    };
+    let mut command = std::process::Command::new(binary);
+    command
+        .args(args)
+        .env("AIKIT_HOME", home)
+        .env("AIKIT_CONTEXT_ID", CONTEXT_ID)
+        .env_remove("CENTRAL_ROOT")
+        .env_remove("CENTRAL_CTRL_BIN")
+        .current_dir(project);
+    aikit_adapters::runner::SystemRunner::new()
+        .with_strict_utf8()
+        .with_timeout(std::time::Duration::from_secs(20))
+        .with_output_limit_bytes(1024 * 1024)
+        .capture_command(&mut command)
+        .expect("actual CLI must complete bounded native capture")
+}
+
+#[test]
+fn actual_applied_capture_export_and_run_cli_deliver_exact_streams_and_status() {
+    let (home, project) = captured_export(
+        "#!/bin/sh\nprintf '[%s][%s]' \"$1\" \"$RETURN_TOKEN\"\nprintf 'native-error-tail' >&2\nexit 7\n",
+        "env = { RETURN_TOKEN = \"native-token\" }\n", true);
+    for (export, args) in [
+        (true, vec!["arg with spaces"]),
+        (
+            false,
+            vec!["run", "script/demo/greet", "--", "arg with spaces"],
+        ),
+    ] {
+        let output = capture_native_cli(home.path(), project.path(), export, &args);
+        assert_eq!(output.status, 7, "{output:?}");
+        assert_eq!(output.stdout, "[arg with spaces][native-token]");
+        assert_eq!(output.stderr, "native-error-tail");
+    }
+}
+
+#[test]
+fn actual_capture_export_still_refuses_unreviewed_and_changed_applied_revisions() {
+    let (home, project) = captured_export("#!/bin/sh\nprintf 'must-not-run'\n", "", false);
+    let output = capture_native_cli(home.path(), project.path(), true, &[]);
+    assert_ne!(output.status, 0);
+    assert!(!output.stdout.contains("must-not-run"));
+    assert!(
+        output.stderr.contains("review") || output.stderr.contains("--confirm"),
+        "{output:?}"
+    );
+    review(home.path(), project.path(), "script/demo/greet");
+    let output = capture_native_cli(home.path(), project.path(), true, &[]);
+    assert_eq!(output.status, 0, "{output:?}");
+    assert_eq!(output.stdout, "must-not-run");
+    fs::write(
+        home.path()
+            .join("registries/personal/capsules/script/demo/greet/payload/run.sh"),
+        "#!/bin/sh\nprintf 'changed-must-not-run'\n",
+    )
+    .unwrap();
+    let output = capture_native_cli(home.path(), project.path(), true, &[]);
+    assert_ne!(output.status, 0);
+    assert!(!output.stdout.contains("changed-must-not-run"));
+    assert!(
+        output.stderr.contains("changed") && output.stderr.contains("re-apply"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn actual_capture_export_reuses_the_declared_deadline_and_scope() {
+    let (home, project) = captured_export(
+        "#!/bin/sh\nprintf '%s' \"$1\"\nprintf 'private-export-stderr-canary' >&2\nsleep 30\n",
+        "timeout = \"1s\"\n",
+        true,
+    );
+    let argument = "private-export-input-canary";
+    let output = capture_native_cli(home.path(), project.path(), true, &[argument]);
+    assert_eq!(output.status, aikit_cli::json::EXIT_GENERIC, "{output:?}");
+    assert!(
+        output.stdout.is_empty(),
+        "partial stdout cannot become a completed export result"
+    );
+    assert!(
+        output.stderr.contains("did not finish within"),
+        "{output:?}"
+    );
+    assert!(!output.stderr.contains(argument));
+    assert!(!output.stderr.contains("private-export-stderr-canary"));
+    assert!(!output.stderr.contains(home.path().to_str().unwrap()));
+    assert!(!output.stderr.contains(project.path().to_str().unwrap()));
+    let json_output = capture_native_cli(
+        home.path(),
+        project.path(),
+        false,
+        &["--json", "run", "script/demo/greet", "--", argument],
+    );
+    assert_eq!(
+        json_output.status,
+        aikit_cli::json::EXIT_GENERIC,
+        "{json_output:?}"
+    );
+    assert!(json_output.stderr.is_empty());
+    let diagnostic: serde_json::Value = serde_json::from_str(&json_output.stdout).unwrap();
+    assert_eq!(diagnostic["ok"], false);
+    assert_eq!(diagnostic["error"]["code"], "mux.command_timeout");
+    assert_eq!(
+        diagnostic["error"]["details"]["captured_stdout_bytes"],
+        argument.len().to_string()
+    );
+    assert_eq!(
+        diagnostic["error"]["details"]["captured_stderr_bytes"],
+        "private-export-stderr-canary".len().to_string()
+    );
+    assert!(!json_output.stdout.contains(argument));
+    assert!(!json_output.stdout.contains("private-export-stderr-canary"));
+    assert!(!json_output.stdout.contains(home.path().to_str().unwrap()));
+    assert!(!json_output
+        .stdout
+        .contains(project.path().to_str().unwrap()));
+    // The actual selected context still resolves the applied capsule. A foreign
+    // context has no generation and cannot use this export or run its payload.
+    let mut command = std::process::Command::new(project.path().join("greet"));
+    command
+        .env("AIKIT_HOME", home.path())
+        .env("AIKIT_CONTEXT_ID", "ctx_01HZYMULTICALL0000000001")
+        .env_remove("CENTRAL_ROOT")
+        .env_remove("CENTRAL_CTRL_BIN")
+        .current_dir(project.path());
+    let foreign = aikit_adapters::runner::SystemRunner::new()
+        .with_strict_utf8()
+        .with_timeout(std::time::Duration::from_secs(20))
+        .with_output_limit_bytes(1024 * 1024)
+        .capture_command(&mut command)
+        .unwrap();
+    assert_ne!(foreign.status, 0);
+    assert!(
+        foreign.stderr.contains("no applied generation"),
+        "{foreign:?}"
+    );
+    assert!(!foreign.stdout.contains(argument));
+    assert!(!foreign.stderr.contains("private-export-stderr-canary"));
+    assert!(
+        !foreign.stderr.contains("did not finish within"),
+        "{foreign:?}"
     );
 }

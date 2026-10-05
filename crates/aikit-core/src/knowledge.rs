@@ -393,6 +393,76 @@ pub struct KnowledgeReading {
     #[serde(default)]
     pub evidence: Vec<SourceRef>,
     pub why_selected: String,
+    /// Present only on an explicitly selected read: the exact span that was
+    /// asked for, with the continuation that reaches the whole source. A
+    /// span read never silently stands in for the original.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<SpanSelection>,
+}
+
+/// The exact applied selection of a read. Offsets are Unicode scalar (char)
+/// indices into the source body, the same unit the TextSpan selector
+/// declares; `remaining` names the uncovered ranges so a bounded read
+/// continues into the complete material instead of replacing it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpanSelection {
+    pub unit: String,
+    pub start: u64,
+    pub end: u64,
+    pub total: u64,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_ref: Option<String>,
+    #[serde(default)]
+    pub remaining: Vec<SpanRange>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpanRange {
+    pub start: u64,
+    pub end: u64,
+}
+
+/// Slice a UTF-8 body by char offsets. The covered range is refused when it
+/// falls outside the body: silence about the rest of a source is a
+/// completeness failure, not a convenience.
+pub fn apply_text_span(
+    body: &str,
+    start: u64,
+    end: u64,
+    anchor_ref: Option<String>,
+) -> Result<SpanSelection> {
+    let total = body.chars().count() as u64;
+    if end <= start || end > total {
+        return Err(AikitError::new(
+            "knowledge.span_out_of_bounds",
+            format!(
+                "text span {start}..{end} is outside the body of {total} chars; \
+                 read the full source or name a span it actually has"
+            ),
+        ));
+    }
+    let content: String = body
+        .chars()
+        .skip(start as usize)
+        .take((end - start) as usize)
+        .collect();
+    let mut remaining = Vec::new();
+    if start > 0 {
+        remaining.push(SpanRange { start: 0, end: start });
+    }
+    if end < total {
+        remaining.push(SpanRange { start: end, end: total });
+    }
+    Ok(SpanSelection {
+        unit: "text_span".to_owned(),
+        start,
+        end,
+        total,
+        content,
+        anchor_ref,
+        remaining,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

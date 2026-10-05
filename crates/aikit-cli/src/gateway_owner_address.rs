@@ -281,6 +281,8 @@ pub fn owner_reply_pass(
                 .unwrap_or_default()
                 .to_owned();
             let recipient = Recipient {
+                identity_kind: RecipientIdentityKind::Position,
+                agent_ref: None,
                 position_ref: position.clone(),
                 handle: None,
                 label: None,

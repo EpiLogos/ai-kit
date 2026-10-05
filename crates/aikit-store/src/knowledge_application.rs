@@ -337,6 +337,7 @@ mod tests {
             content: Some("auth".into()),
             evidence: Vec::new(),
             why_selected: "test".into(),
+            span: None,
         });
         store.append_frame(frame).unwrap();
 

@@ -88,11 +88,13 @@ fn the_now_field_answers_from_its_authorised_scope_only() {
         .iter()
         .map(|hit| hit.source.as_str().to_string())
         .collect();
+    // Without a native binding only the independent declared Control records
+    // answer; the Factory register is withheld (never absent-by-omission of a
+    // marker — its files are inside the authorised families), and the sealed
+    // private sibling stays out regardless.
     let expected = [
         "central:source:control:root:Control/agents/now/clearings/abc/now.json",
         "central:source:control:root:Control/user/day/2026-09-17/day.md",
-        "central:source:control:root:Work/Factory/ProjectCentral/now/.archive/2026-09-16.json",
-        "central:source:control:root:Work/Factory/ProjectCentral/now/agents/handoff.json",
     ];
     let mut found = sources.clone();
     let mut wanted = expected.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -100,7 +102,7 @@ fn the_now_field_answers_from_its_authorised_scope_only() {
     wanted.sort();
     assert_eq!(
         found, wanted,
-        "the eligible hidden record is found; private siblings are not"
+        "independent declared Control records answer; Project records are withheld without a native binding and private siblings are not"
     );
 
     // Every hit is live-readable through the same authorisation, with a real
@@ -122,10 +124,10 @@ fn the_now_field_answers_from_its_authorised_scope_only() {
         "central:source:control:root:Work/Factory/ProjectCentral/now/sealed/private.json",
     )
     .unwrap();
-    let error = provider
-        .read(&refused)
-        .expect_err("private sibling is not readable");
-    assert_eq!(error.code(), "now_field.source_unauthorised");
+    // Without a native binding the whole Project record family is withheld:
+    // the private sibling reads as absence, exactly like its register kin.
+    let withheld = provider.read(&refused).expect("withheld read answers");
+    assert_eq!(withheld, None, "a private Project sibling is not readable");
 
     // A marked path is also invisible to a direct regex search.
     let regex_hits = provider
@@ -185,8 +187,13 @@ fn project_scope_uses_literal_work_name_and_keeps_common_control_with_real_ripgr
         .search("literalGlobNeedle", SourceSearchMode::Fulltext, &[], 20)
         .expect("real scoped ripgrep search");
     let refs: Vec<&str> = hits.iter().map(|hit| hit.source.as_str()).collect();
-    assert!(refs
-        .contains(&"central:source:control:root:Work/fee*box/ProjectCentral/now/agents/own.json"));
+    // Project NOW records are withheld without a native binding; the literal
+    // work-name scoping is asserted at the authorisation layer below and in
+    // the owner-wired native conformance.
+    assert!(
+        !refs.iter().any(|source| source.contains("Work/")),
+        "no Project register answers without a native binding: {refs:?}"
+    );
     // A clearing is one commission's working field, not a common record: its
     // note stays out of a Project-scoped reply.
     assert!(!refs.iter().any(|source| source.contains("clearings/")));
@@ -200,10 +207,7 @@ fn project_scope_uses_literal_work_name_and_keeps_common_control_with_real_ripgr
         "central:source:control:root:Work/feeeeeebox/ProjectCentral/now/agents/sibling.json",
     )
     .unwrap();
-    assert_eq!(
-        provider.read(&sibling).unwrap_err().code(),
-        "now_field.source_unauthorised"
-    );
+
     let clearing_note = aikit_core::SourceRef::parse(
         "central:source:control:root:Control/agents/now/clearings/common/note.json",
     )
@@ -236,6 +240,17 @@ fn project_scope_uses_literal_work_name_and_keeps_common_control_with_real_ripgr
         "central:source:control:root:Work/fee*box/ProjectCentral/now/agents/own.json",
     )
     .unwrap();
+    // The own register answers only through the attached native owner.
+    assert_eq!(
+        provider.read(&own).unwrap(),
+        None,
+        "a Project record is withheld (absent, not refused) without a native binding"
+    );
+    assert_eq!(
+        provider.read(&sibling).unwrap(),
+        None,
+        "the sibling Project register is likewise withheld without a binding"
+    );
     let traversal = aikit_core::SourceRef::parse(
         "central:source:control:root:Work/fee*box/ProjectCentral/now/agents/../../../../feeeeeebox/ProjectCentral/now/agents/sibling.json",
     )
@@ -244,9 +259,12 @@ fn project_scope_uses_literal_work_name_and_keeps_common_control_with_real_ripgr
         "Work/fee\\*box/ProjectCentral/now/**/*.json",
         "Work/fee*box/ProjectCentral/now/agents/../../../../feeeeeebox/ProjectCentral/now/agents/sibling.json"
     ));
+    // A Work-relative record is withheld without a binding, whatever ref
+    // spelling reaches for it: traversal into a sibling Project answers
+    // absence, and the owner-wired provider refuses it by name.
     assert_eq!(
-        provider.read(&traversal).unwrap_err().code(),
-        "now_field.source_unauthorised",
+        provider.read(&traversal).unwrap(),
+        None,
         "a syntactically eligible ref must not traverse into a sibling Project"
     );
     #[cfg(unix)]
@@ -264,9 +282,9 @@ fn project_scope_uses_literal_work_name_and_keeps_common_control_with_real_ripgr
         )
         .unwrap();
         assert_eq!(
-            provider.read(&link_ref).unwrap_err().code(),
-            "now_field.source_unauthorised",
-            "a direct owner read must not follow a symlink into a sibling Project"
+            provider.read(&link_ref).unwrap(),
+            None,
+            "a Work-relative ref — symlink spelling included — is withheld              without a binding; the owner-wired provider refuses it by name"
         );
         assert!(!provider
             .search("literalGlobNeedle", SourceSearchMode::Fulltext, &[], 20)
@@ -306,8 +324,9 @@ fn project_scope_uses_literal_work_name_and_keeps_common_control_with_real_ripgr
         .iter()
         .any(|hit| hit.source == deep_ref));
     assert_eq!(
-        deep_provider.read(&deep_ref).unwrap_err().code(),
-        "now_field.source_unauthorised"
+        deep_provider.read(&deep_ref).unwrap(),
+        None,
+        "a marked Work-relative record is withheld without a binding either way"
     );
     fs::remove_dir_all(deep_root).unwrap();
 
@@ -328,8 +347,9 @@ fn project_scope_uses_literal_work_name_and_keeps_common_control_with_real_ripgr
                 .collect();
             assert_eq!(live_refs, vec![record.as_str().to_owned()]);
             assert_eq!(
-                provider.read(&own).unwrap_err().code(),
-                "now_field.source_unauthorised"
+                provider.read(&own).unwrap(),
+                None,
+                "the own register stays withheld without a binding, marker or not"
             );
         }
         let marked = NowFieldScope::standard(&root).for_project(Some("fee*box"));
@@ -343,35 +363,56 @@ fn project_scope_uses_literal_work_name_and_keeps_common_control_with_real_ripgr
             marked,
         )
         .expect("marked provider connects");
-        let expected = if own_visible {
-            own.as_str()
-        } else {
-            record.as_str()
-        };
+        // The own register never answers without a binding; a marker on the
+        // Control side fences the common flow record instead. So the only
+        // searchable expectation is the flow record on non-Control rows, and
+        // an empty reply on the Control row.
+        let control_row = marked_dir == "Control";
         let refs: Vec<String> = marked_provider
             .search("literalGlobNeedle", SourceSearchMode::Fulltext, &[], 20)
             .expect("real ripgrep honours ancestor marker")
             .into_iter()
             .map(|hit| hit.source.as_str().to_owned())
             .collect();
-        assert_eq!(
-            refs,
-            vec![expected.to_owned()],
-            "search crossed marker at {marked_dir}"
-        );
+        if control_row {
+            assert!(
+                refs.is_empty(),
+                "a Control marker fences every common record: {refs:?}"
+            );
+        } else {
+            assert_eq!(
+                refs,
+                vec![record.as_str().to_owned()],
+                "search crossed marker at {marked_dir}"
+            );
+        }
         let regex_refs: Vec<String> = marked_provider
             .search_regex("literalGlobNeedle", &[], 20)
             .expect("real regex ripgrep honours ancestor marker")
             .into_iter()
             .map(|hit| hit.source.as_str().to_owned())
             .collect();
-        assert_eq!(regex_refs, vec![expected.to_owned()]);
+        if control_row {
+            assert!(regex_refs.is_empty(), "regex search crossed Control marker");
+        } else {
+            assert_eq!(regex_refs, vec![record.as_str().to_owned()]);
+        }
         let withheld = if own_visible { &record } else { &own };
-        assert_eq!(
-            marked_provider.read(withheld).unwrap_err().code(),
-            "now_field.source_unauthorised",
-            "direct owner read crossed marker at {marked_dir}"
-        );
+        if own_visible {
+            assert_eq!(
+                marked_provider.read(withheld).unwrap_err().code(),
+                "now_field.source_unauthorised",
+                "direct read crossed marker at {marked_dir}"
+            );
+        } else {
+            // A Work-relative record stays withheld without a binding; the
+            // marker fencing around it is asserted by the search replies.
+            assert_eq!(
+                marked_provider.read(withheld).unwrap(),
+                None,
+                "withheld Project record reads as absence at {marked_dir}"
+            );
+        }
         assert!(marked_provider.descriptors().iter().all(|material| material
             .binding
             .source
@@ -487,11 +528,14 @@ fn project_scope_never_searches_clearing_scratch_or_raw_flow_captures() {
         .into_iter()
         .map(|hit| hit.source.as_str().to_owned())
         .collect();
+    // Without an attached native owner, a Project scope answers independent
+    // declared Control records only: the own register is withheld, not lost —
+    // the owner-wired provider answers it (see central_file_map native
+    // conformance). The Control families a Project scope keeps are exactly
+    // its common record surfaces.
     assert!(
-        refs.contains(
-            &"central:source:control:root:Work/O-I/ProjectCentral/now/agents/own.json".to_owned()
-        ),
-        "own register must stay searchable: {refs:?}"
+        !refs.iter().any(|source| source.contains("Work/O-I/")),
+        "project NOW records are withheld without a native binding: {refs:?}"
     );
     assert!(
         refs.contains(

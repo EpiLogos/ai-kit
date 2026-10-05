@@ -815,12 +815,9 @@ mod tests {
             state_file: Some(state),
             max_frame_bytes: crate::gateway_service::DEFAULT_GATEWAY_MAX_FRAME_BYTES,
         };
-        // The ordinary token is a peer's; stopping the gateway is the owner's,
-        // so this service has an owner token too.
-        let hooks = crate::gateway_service::GatewayServiceHooks {
-            owner_token: Some("owner".into()),
-            ..Default::default()
-        };
+        // Bearer tokens authenticate peers; owner authority is not a carrier
+        // scope any more — it lives behind the NativeOwner routes.
+        let hooks = crate::gateway_service::GatewayServiceHooks::default();
         let service = thread::spawn(move || {
             crate::gateway_service::run_gateway_service_with_hooks(
                 AgencyGateway::new(r("agency-gateway/local")),
@@ -829,7 +826,6 @@ mod tests {
             )
         });
         let target = Arc::new(GatewayCarrierTarget::websocket(bind.clone(), "secret"));
-        let owner = GatewayCarrierTarget::websocket(bind.clone(), "owner");
         let reachable = target.clone();
         wait_until(5, || {
             gateway_request(&reachable, GatewayCommand::Protocol, None).is_ok()
@@ -848,14 +844,7 @@ mod tests {
         let error = gateway_request(&refused, GatewayCommand::Protocol, None).unwrap_err();
         assert_eq!(error.code(), "agency_gateway_client.handshake_refused");
 
-        // A peer is refused the owner's commands, as an answer, not a hang-up.
-        let denied = gateway_request(&target, GatewayCommand::Shutdown, None).unwrap();
-        assert!(!denied.ok);
-        assert_eq!(
-            denied.error.unwrap().code,
-            "agency_gateway.carrier_scope_denied"
-        );
-        gateway_request(&owner, GatewayCommand::Shutdown, None).unwrap();
+        gateway_request(&target, GatewayCommand::Shutdown, None).unwrap();
         service.join().unwrap().unwrap();
     }
 
@@ -899,11 +888,7 @@ mod tests {
             })],
             conversation: None,
             coexistence: None,
-            owner_token: None,
-            process: None,
-            configured_gateway_ref: None,
             stop_signal: None,
-            encounter_relay: None,
         };
         let (done_tx, done_rx) = mpsc::channel();
         thread::spawn(move || {

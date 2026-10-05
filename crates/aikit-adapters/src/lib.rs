@@ -40,8 +40,9 @@ pub mod gateway_connector_pump;
 pub mod gateway_connector_specimen;
 pub mod gateway_connector_wire;
 pub mod gateway_conversation_engine;
-#[allow(unused_imports)]
+pub mod gateway_native_owner;
 pub mod gateway_posture;
+#[allow(unused_imports)]
 pub mod gateway_runtime;
 pub mod gateway_service;
 pub mod gitnexus;
@@ -61,6 +62,7 @@ pub mod native_git;
 pub mod now_field;
 pub mod okf;
 pub mod openai_realtime;
+pub mod pi_harness_auth;
 pub mod place_technology;
 pub mod prime_rpc_connection;
 pub mod profiles;
@@ -84,6 +86,7 @@ pub mod telegram_gateway_curl;
 pub mod tool_sources;
 pub mod wiki_document;
 pub mod wiki_graph;
+pub mod wiki_publication;
 pub mod work_repos;
 pub mod workcell_instance_intake;
 pub mod workcell_run_intake;
@@ -189,10 +192,10 @@ pub use gateway_connector_specimen::{
 pub use gateway_connector_wire::StdioWireConnector;
 pub use gateway_conversation_engine::{
     parse_slash, AgentHostTurnSource, ConversationHarnessProtocol, ConversationTurn,
-    ConversationTurnOutcome, ConversationTurnRequest, ConversationTurnSource, EnginePolicy,
-    FixtureScript, FixtureTurnSource, GatewayAskRequest, GatewayAskRoute, GatewayAskRouter,
-    GatewayConversationEngine, GatewayTurnSourceResolver, GatewayUpgradeLauncher, SlashParse,
-    StreamTiming, TurnProgress, TurnStreamItem, UpgradeOrigin,
+    ConversationTurnOutcome, ConversationTurnRequest, ConversationTurnSource, DrainReport,
+    DrainedTurn, EnginePolicy, FixtureScript, FixtureTurnSource, GatewayAskRequest,
+    GatewayAskRoute, GatewayAskRouter, GatewayConversationEngine, GatewayTurnSourceResolver,
+    SlashParse, StreamTiming, TurnProgress, TurnStreamItem,
 };
 pub use gateway_posture::{
     sha256_of_file, CarrierScope, GatewayBuildIdentity, GatewayLifecycle, GatewayListenerReading,
@@ -201,27 +204,26 @@ pub use gateway_posture::{
     GATEWAY_FEATURE_ENCOUNTER_RELAY, GATEWAY_FEATURE_UNSUPPORTED_COMMAND,
 };
 pub use gateway_runtime::{
-    connector_descriptor, execute_gateway_command, text_send, AgencyGateway, DrainReport,
-    DrainedTurn, GatewayActuationControlIntent, GatewayActuationControlOperation,
-    GatewayAgentReply, GatewayAgentReplyFailure, GatewayBinding, GatewayCommand,
-    GatewayConversationOperation, GatewayDiscovery, GatewayEcology, GatewayEcologyAgency,
-    GatewayEcologySession, GatewayEcologyStream, GatewayEcologySurface, GatewayErrorEnvelope,
-    GatewayForkOrigin, GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult,
-    GatewayInvocationMode, GatewayOccupancyReading, GatewayOwnerUnavailable, GatewayReplay,
-    GatewayRequestEnvelope, GatewayResponse, GatewayResponseEnvelope, GatewaySnapshot,
-    GatewayStatus, GatewayStreamEvent, GatewayStreamJournal,
-    ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA, AGENCY_GATEWAY_VERSION,
-    ENCOUNTER_RELAY_ACTIONS, GATEWAY_ECOLOGY_AUTHORITY_LAW,
+    connector_descriptor, execute_gateway_command, text_send, AgencyGateway,
+    GatewayActuationControlIntent, GatewayActuationControlOperation, GatewayAgentReply,
+    GatewayAgentReplyFailure, GatewayBinding, GatewayCommand, GatewayConversationOperation,
+    GatewayDiscovery, GatewayEcology, GatewayEcologyAgency, GatewayEcologySession,
+    GatewayEcologyStream, GatewayEcologySurface, GatewayErrorEnvelope, GatewayForkOrigin,
+    GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult, GatewayInvocationMode,
+    GatewayOccupancyReading, GatewayOwnerUnavailable, GatewayReplay, GatewayRequestEnvelope,
+    GatewayResponse, GatewayResponseEnvelope, GatewaySnapshot, GatewayStatus, GatewayStreamEvent,
+    GatewayStreamJournal, ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA,
+    AGENCY_GATEWAY_VERSION, GATEWAY_ECOLOGY_AUTHORITY_LAW,
     GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE, GATEWAY_INVOCATION_MODES,
     GATEWAY_OCCUPANCY_READING_SCHEMA, GATEWAY_PROTOCOL_FEATURES,
 };
 pub use gateway_service::{
     acquire_gateway_state_lock, execute_against_state_file, persist_gateway_state,
-    restore_gateway_state, run_gateway_service, run_gateway_service_with_hooks,
-    run_gateway_service_with_ticks, GatewayConversationHooks, GatewayEncounterRelay,
-    GatewayOccupancyReader, GatewayServiceConfig, GatewayServiceHooks, GatewayServiceRuntime,
-    GatewayStateLock, GatewayTick, GatewayTickLoop, SubscriptionHub, SubscriptionSink,
-    DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION,
+    restore_gateway_state, run_gateway_service, run_gateway_service_on_websocket_listener,
+    run_gateway_service_with_hooks, run_gateway_service_with_ticks, GatewayConversationHooks,
+    GatewayEncounterRelay, GatewayOccupancyReader, GatewayServiceConfig, GatewayServiceHooks,
+    GatewayServiceRuntime, GatewayStateLock, GatewayTick, GatewayTickLoop, SubscriptionHub,
+    SubscriptionSink, DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION,
 };
 pub use harness_disclosure::{
     disclose, ComposedEntry, DriftEntry, DriftKind, HarnessDisclosure, NativeEntry,
@@ -254,6 +256,7 @@ pub use local_source_discovery::{
 };
 pub use native_git::{NativeGitProvider, NATIVE_GIT_PROVIDER_REF, NATIVE_GIT_PROVIDER_VERSION};
 pub use okf::{parse_authored_markdown_relations, parse_okf_markdown, render_okf_markdown};
+pub use pi_harness_auth::PiHarnessAuthProvider;
 pub use projectcentral::{ProjectCentralFileProvider, ProjectCentralFilesystemBinding};
 pub use projectcentral_authored_wiki::{
     projectcentral_authored_wiki, ProjectCentralAuthoredWiki, ProjectCentralAuthoredWikiStatus,
@@ -279,7 +282,9 @@ pub use tool_sources::{
     ToolsProjectionOutcome, ToolsProjectionPlan, TOOLS_PROJECTION_OWNERSHIP,
 };
 pub use work_repos::{
-    discover_work_projects, WorkProjectEntry, WorkRepoProject, WorkReposSourcePoolProvider,
+    decode_work_file_source_ref, discover_native_work_projects, discover_work_projects,
+    work_file_source_ref, NativeWorkProjectEntry, NativeWorkRepoProject, WorkFileAddress,
+    WorkProjectEntry, WorkRepoProject, WorkReposSourcePoolProvider, WORK_FILE_ADDRESS_MAX_BYTES,
 };
 pub use working_environment::{
     MuxSessionSpaceActivationDriver, MuxWorkingEnvironment, NativeBindingKind,

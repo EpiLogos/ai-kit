@@ -31,10 +31,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::gateway_connector_config::GatewayConnectorFactory;
 use crate::gateway_connector_pump::{spawn_connector_workers, ConnectorQueues};
-use crate::gateway_posture::{
-    CarrierScope, GatewayBuildIdentity, GatewayListenerReading, GatewayProcessRecord,
-    ListenerClass, ListenerState,
-};
 use crate::gateway_runtime::{
     execute_gateway_command, AgencyGateway, GatewayCommand, GatewayIngressResult,
     GatewayOccupancyReading, GatewayRequestEnvelope, GatewayResponse, GatewayResponseEnvelope,
@@ -370,26 +366,10 @@ pub struct GatewayServiceHooks {
     /// identity the foreign gateway is recorded to own is refused with a
     /// named error. `None` gates nothing.
     pub coexistence: Option<Arc<dyn crate::gateway_coexistence::GatewayCoexistenceGate>>,
-    /// The token that grants a WebSocket client [`CarrierScope::Owner`]. The
-    /// configured bearer token grants [`CarrierScope::Peer`] only: relay,
-    /// occupancy, contact and reads. `None` means no WebSocket client is an
-    /// owner; the Unix socket always is (its credential is the file mode).
-    pub owner_token: Option<String>,
-    /// Which build this process is, read by the binary that owns the build
-    /// stamp. `None` leaves `protocol`/`status` without a `build` block.
-    pub process: Option<GatewayBuildIdentity>,
-    /// The gateway ref the operator configured (`--gateway-ref`,
-    /// `AIKIT_GATEWAY_REF`). It replaces the ref a saved state was written
-    /// under: the ref a snapshot carries is history, not configuration, and
-    /// honouring it made a restarted gateway answer as a different gateway
-    /// than the one its service definition names.
-    pub configured_gateway_ref: Option<aikit_core::resource::ResourceRef>,
-    /// Set by the binary when the OS asks the process to stop (SIGTERM from
-    /// `launchctl bootout`, `systemctl stop`). The service then drains and
-    /// exits cleanly, so a stop never tears down an in-flight turn unrecorded.
+    /// An operator's stop switch: when it flips, the service drains its
+    /// conversation turns and shuts down cleanly. `None` and only a shutdown
+    /// command or a carrier failure stops the service.
     pub stop_signal: Option<Arc<AtomicBool>>,
-    /// The encounter owner behind a peer's relayed Flow requests.
-    pub encounter_relay: Option<Arc<dyn GatewayEncounterRelay>>,
 }
 
 /// How the service builds its conversation engine.
@@ -406,9 +386,6 @@ pub struct GatewayConversationHooks {
     /// remotes) and relays what the engine appends. `None` leaves `/ask`
     /// refusing honestly on this gateway.
     pub ask_router: Option<Arc<dyn crate::gateway_conversation_engine::GatewayAskRouter>>,
-    /// The managed-upgrade owner behind a conversation's `/upgrade`.
-    pub upgrade_launcher:
-        Option<Arc<dyn crate::gateway_conversation_engine::GatewayUpgradeLauncher>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -635,26 +612,20 @@ pub fn run_gateway_service_with_ticks(
             connectors: Vec::new(),
             conversation: None,
             coexistence: None,
-            owner_token: None,
-            process: None,
-            configured_gateway_ref: None,
             stop_signal: None,
-            encounter_relay: None,
         },
     )
 }
 
 /// What the carriers and the connector pumps share beside the gateway state.
 pub struct GatewayServiceRuntime {
+    pub native_owners: crate::gateway_native_owner::NativeOwnerRoutes,
     pub hub: Arc<SubscriptionHub>,
     pub queues: Arc<ConnectorQueues>,
     pub controls: Arc<crate::gateway_connector_pump::ConnectorPumpControls>,
     /// The conversation engine, present on every running service.
     pub engine: Option<Arc<crate::gateway_conversation_engine::GatewayConversationEngine>>,
     pub connections: ConnectionRegistry,
-    /// What this process is and how each carrier is bound.
-    pub process: Arc<GatewayProcessRecord>,
-    pub encounter: Option<Arc<dyn GatewayEncounterRelay>>,
 }
 
 /// One live carrier connection, closeable from the service's exit path.
@@ -738,40 +709,57 @@ pub fn run_gateway_service_with_hooks(
     config: GatewayServiceConfig,
     hooks: GatewayServiceHooks,
 ) -> Result<()> {
+    serve_gateway_service(gateway, config, hooks, None)
+}
+
+/// Run the gateway service on a listener the caller already holds: the
+/// service answers on exactly this address, and a config that declares any
+/// other address is a relabelling, refused by name. This is how a port of
+/// `0` can be pre-bound and its actual address read before the service runs.
+pub fn run_gateway_service_on_websocket_listener(
+    gateway: AgencyGateway,
+    mut config: GatewayServiceConfig,
+    hooks: GatewayServiceHooks,
+    listener: TcpListener,
+) -> Result<()> {
+    let actual = listener.local_addr().map_err(|error| {
+        AikitError::new(
+            "agency_gateway_service.websocket_listener_local_addr",
+            format!("read the held listener's address: {error}"),
+        )
+    })?;
+    let declared = config.websocket_bind.as_deref().unwrap_or_default();
+    let declared_port = declared.rsplit(':').next().and_then(|p| p.parse::<u16>().ok());
+    let consistent = declared_port.is_some_and(|port| port != 0 && port == actual.port())
+        || declared == actual.to_string();
+    if !consistent {
+        return Err(AikitError::new(
+            "agency_gateway_service.websocket_listener_mismatch",
+            format!(
+                "the held listener answers at {actual}, but the config declares {declared}; \
+                 a listener cannot be relabelled to another address"
+            ),
+        ));
+    }
+    config.websocket_bind = Some(actual.to_string());
+    serve_gateway_service(gateway, config, hooks, Some(listener))
+}
+
+fn serve_gateway_service(
+    gateway: AgencyGateway,
+    config: GatewayServiceConfig,
+    hooks: GatewayServiceHooks,
+    prebound_websocket_listener: Option<TcpListener>,
+) -> Result<()> {
     let GatewayServiceHooks {
         ticks,
         occupancy,
         connectors,
         conversation,
         coexistence,
-        owner_token,
-        process,
-        configured_gateway_ref,
         stop_signal,
-        encounter_relay,
     } = hooks;
     config.validate()?;
-    if let (Some(owner), Some(peer)) = (
-        owner_token.as_deref(),
-        config.websocket_bearer_token.as_deref(),
-    ) {
-        if owner.trim().is_empty() || constant_time_eq(owner.as_bytes(), peer.as_bytes()) {
-            return Err(AikitError::new(
-                "agency_gateway_service.owner_token_distinct",
-                "the WebSocket owner token must be non-empty and different from the peer token: \
-                 one token cannot grant two scopes",
-            ));
-        }
-    }
-    if owner_token.is_some() && config.websocket_bind.is_none() {
-        return Err(AikitError::new(
-            "agency_gateway_service.owner_token_without_websocket",
-            "an owner token only means something on a WebSocket carrier; pass --ws as well",
-        ));
-    }
-    let process = Arc::new(GatewayProcessRecord::new(process.unwrap_or_else(|| {
-        GatewayBuildIdentity::of_this_process("unknown", false, None)
-    })));
     // Held until this function returns: the service is the only writer of its
     // state file while it runs (see `GatewayStateLock`).
     let _state_lock = match config.state_file.as_deref() {
@@ -782,17 +770,7 @@ pub fn run_gateway_service_with_hooks(
         )?),
         None => None,
     };
-    let mut gateway = restore_gateway_state(gateway, config.state_file.as_deref())?;
-    if let Some(configured) = configured_gateway_ref {
-        if &configured != gateway.gateway_ref() {
-            eprintln!(
-                "gateway identity: the configured ref {configured} replaces {} from the saved \
-                 state; records written earlier keep the ref they were written under",
-                gateway.gateway_ref()
-            );
-            gateway.set_gateway_ref(configured);
-        }
-    }
+    let gateway = restore_gateway_state(gateway, config.state_file.as_deref())?;
     let gateway = Arc::new(Mutex::new(gateway));
     let shutdown = Arc::new(AtomicBool::new(false));
     let hub = Arc::new(SubscriptionHub::default());
@@ -802,7 +780,6 @@ pub fn run_gateway_service_with_hooks(
         turn_sources,
         policy,
         ask_router,
-        upgrade_launcher,
     } = conversation.unwrap_or_default();
     let engine = crate::gateway_conversation_engine::GatewayConversationEngine::new(
         Arc::clone(&gateway),
@@ -816,17 +793,13 @@ pub fn run_gateway_service_with_hooks(
     if let Some(ask_router) = ask_router {
         engine.attach_ask_router(ask_router);
     }
-    if let Some(launcher) = upgrade_launcher {
-        engine.attach_upgrade_launcher(launcher);
-    }
     let runtime = Arc::new(GatewayServiceRuntime {
+        native_owners: crate::gateway_native_owner::NativeOwnerRoutes::from_env(),
         hub,
         queues,
         controls: Arc::clone(&controls),
         engine: Some(engine),
         connections: ConnectionRegistry::default(),
-        process: Arc::clone(&process),
-        encounter: encounter_relay,
     });
 
     // Coexistence gate at serve startup: with the exclusive policy and a
@@ -880,35 +853,6 @@ pub fn run_gateway_service_with_hooks(
 
     let mut workers = Vec::new();
 
-    // A stop the OS asks for is a drain first: in-flight turns are resolved or
-    // interrupted and recorded, state is persisted, and only then do the
-    // carriers close. The watcher ends with the service.
-    let stop_watcher = stop_signal.map(|signal| {
-        let shutdown = Arc::clone(&shutdown);
-        let runtime = Arc::clone(&runtime);
-        thread::spawn(move || {
-            while !shutdown.load(Ordering::SeqCst) {
-                if signal.load(Ordering::SeqCst) {
-                    if let Some(engine) = &runtime.engine {
-                        match engine.drain("stop requested by the operating system", None) {
-                            Ok(report) => eprintln!(
-                                "gateway drained for stop: {} turn(s) resolved, {} interrupted, \
-                                 {} operation(s) pending",
-                                report.turns_resolved.len(),
-                                report.turns_interrupted.len(),
-                                report.pending_operations.len()
-                            ),
-                            Err(error) => eprintln!("gateway drain for stop failed: {error}"),
-                        }
-                    }
-                    shutdown.store(true, Ordering::SeqCst);
-                    return;
-                }
-                thread::sleep(Duration::from_millis(50));
-            }
-        })
-    });
-
     let tick_loop: Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)> =
         ticks.map(|loop_config| {
             let tick_shutdown = Arc::new(AtomicBool::new(false));
@@ -944,30 +888,33 @@ pub fn run_gateway_service_with_hooks(
             .websocket_bearer_token
             .clone()
             .expect("validated WebSocket bearer token");
+        let listener = match prebound_websocket_listener {
+            Some(listener) => listener,
+            None => TcpListener::bind(&bind).map_err(|error| {
+                AikitError::new(
+                    "agency_gateway_service.websocket_bind",
+                    format!("bind WebSocket gateway at {bind}: {error}"),
+                )
+            })?,
+        };
+        listener.set_nonblocking(true).map_err(|error| {
+            AikitError::new(
+                "agency_gateway_service.websocket_nonblocking",
+                format!("configure WebSocket listener {bind}: {error}"),
+            )
+        })?;
         let gateway = Arc::clone(&gateway);
         let shutdown = Arc::clone(&shutdown);
         let state_file = config.state_file.clone();
         let max_frame_bytes = config.max_frame_bytes;
         let occupancy = occupancy.clone();
         let runtime = Arc::clone(&runtime);
-        let owner_token = owner_token.clone();
-        let class = ListenerClass::classify_bind(&bind);
-        let reading = move |state: ListenerState, detail: Option<String>| GatewayListenerReading {
-            carrier: "websocket".into(),
-            bind: bind.clone(),
-            class,
-            // What a client of this carrier gets with the ordinary credential.
-            scope: CarrierScope::Peer,
-            state,
-            detail,
-        };
         workers.push(thread::spawn(move || {
-            let result = bind_and_serve_websocket(
-                &reading,
+            let result = serve_websocket_listener(
+                listener,
                 gateway,
                 Arc::clone(&shutdown),
                 token,
-                owner_token,
                 state_file,
                 max_frame_bytes,
                 occupancy,
@@ -975,8 +922,6 @@ pub fn run_gateway_service_with_hooks(
             );
             // A carrier that fails stops the whole service: a half-alive
             // gateway answering on one carrier only is silent degradation.
-            // (An address that does not exist yet is not a failure: see
-            // `bind_and_serve_websocket`.)
             if result.is_err() {
                 shutdown.store(true, Ordering::SeqCst);
             }
@@ -986,12 +931,6 @@ pub fn run_gateway_service_with_hooks(
 
     #[cfg(unix)]
     if let Some(path) = config.unix_socket.clone() {
-        runtime
-            .process
-            .set_listener(crate::gateway_posture::unix_listener_reading(
-                &path,
-                ListenerState::Waiting,
-            ));
         let gateway = Arc::clone(&gateway);
         let shutdown = Arc::clone(&shutdown);
         let state_file = config.state_file.clone();
@@ -1020,6 +959,33 @@ pub fn run_gateway_service_with_hooks(
             "Unix-domain gateway carrier is unavailable on this platform",
         ));
     }
+
+    // The operator's stop switch: flipping it drains the conversation turns
+    // (named, not counted), then stops the service. The watcher ends with
+    // the service.
+    let stop_watcher = stop_signal.map(|signal| {
+        let shutdown = Arc::clone(&shutdown);
+        let runtime = Arc::clone(&runtime);
+        thread::spawn(move || {
+            while !shutdown.load(Ordering::SeqCst) {
+                if signal.load(Ordering::SeqCst) {
+                    if let Some(engine) = &runtime.engine {
+                        match engine.drain("stop requested by the operating system", None) {
+                            Ok(report) => eprintln!(
+                                "gateway drained for stop: {} turn(s) resolved, {} interrupted",
+                                report.turns_resolved.len(),
+                                report.turns_interrupted.len()
+                            ),
+                            Err(error) => eprintln!("gateway drain for stop failed: {error}"),
+                        }
+                    }
+                    shutdown.store(true, Ordering::SeqCst);
+                    return;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        })
+    });
 
     let mut first_error = None;
     for worker in workers {
@@ -1079,7 +1045,6 @@ fn serve_websocket_listener(
     gateway: Arc<Mutex<AgencyGateway>>,
     shutdown: Arc<AtomicBool>,
     token: String,
-    owner_token: Option<String>,
     state_file: Option<PathBuf>,
     max_frame_bytes: usize,
     occupancy: OccupancyHook,
@@ -1099,7 +1064,6 @@ fn serve_websocket_listener(
                 let gateway = Arc::clone(&gateway);
                 let shutdown = Arc::clone(&shutdown);
                 let token = token.clone();
-                let owner_token = owner_token.clone();
                 let state_file = state_file.clone();
                 let occupancy = occupancy.clone();
                 let runtime = Arc::clone(&runtime);
@@ -1109,7 +1073,6 @@ fn serve_websocket_listener(
                         gateway,
                         shutdown,
                         &token,
-                        owner_token.as_deref(),
                         state_file.as_deref(),
                         max_frame_bytes,
                         occupancy.as_deref(),
@@ -1137,7 +1100,6 @@ fn handle_websocket_connection(
     gateway: Arc<Mutex<AgencyGateway>>,
     shutdown: Arc<AtomicBool>,
     token: &str,
-    owner_token: Option<&str>,
     state_file: Option<&Path>,
     max_frame_bytes: usize,
     occupancy: Option<&dyn GatewayOccupancyReader>,
@@ -1164,12 +1126,7 @@ fn handle_websocket_connection(
     let mut reader = BufReader::new(stream);
     let mut subscriptions = ConnectionSubscriptions::new(Arc::clone(&runtime.hub));
     let push_writer: Option<JoinHandle<()>> = None;
-    let scope = websocket_handshake(
-        &mut reader,
-        &mut *writer.lock().expect("writer"),
-        token,
-        owner_token,
-    )?;
+    websocket_handshake(&mut reader, &mut *writer.lock().expect("writer"), token)?;
     let mut push_writer = push_writer;
 
     loop {
@@ -1204,7 +1161,6 @@ fn handle_websocket_connection(
                     state_file,
                     occupancy,
                     &mut subscriptions,
-                    scope,
                 )?;
                 // The shutdown lands before the answer: a client that shuts
                 // the gateway down may hang up without waiting for it, and a
@@ -1319,12 +1275,6 @@ fn serve_unix_socket(
             format!("configure Unix gateway socket {}: {error}", path.display()),
         )
     })?;
-    runtime
-        .process
-        .set_listener(crate::gateway_posture::unix_listener_reading(
-            &path,
-            ListenerState::Bound,
-        ));
 
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
@@ -1449,8 +1399,6 @@ where
         if line.trim().is_empty() {
             continue;
         }
-        // The Unix socket's credential is the file mode the service set on it
-        // (0600, the owner's): whoever can open it is the owner.
         let (response, should_shutdown, subscribed) = execute_serialized_request(
             &gateway,
             &runtime,
@@ -1458,7 +1406,6 @@ where
             state_file,
             occupancy,
             &mut subscriptions,
-            CarrierScope::Owner,
         )?;
         // The shutdown lands before the answer: a client that shuts the
         // gateway down may hang up without waiting for the answer, and the
@@ -1523,39 +1470,25 @@ fn execute_serialized_request(
     state_file: Option<&Path>,
     occupancy: Option<&dyn GatewayOccupancyReader>,
     subscriptions: &mut ConnectionSubscriptions,
-    scope: CarrierScope,
 ) -> Result<(String, bool, Option<Arc<SubscriptionSink>>)> {
     let request = match serde_json::from_str::<GatewayRequestEnvelope>(input) {
         Ok(request) => request,
         Err(error) => {
-            return Ok((
-                refusal_for_unparsed_request(input, &error.to_string(), &runtime.process),
-                false,
-                None,
-            ));
+            let response = serde_json::json!({
+                "request_id": null,
+                "ok": false,
+                "error": {
+                    "code": "agency_gateway.invalid_request_json",
+                    "message": error.to_string()
+                }
+            });
+            return Ok((response.to_string(), false, None));
         }
     };
-    // A network carrier that got through with the ordinary credential is a
-    // peer: it may relay, ask occupancy and read, never rewrite this
-    // gateway's own state or stop it. The refusal is data the caller can act
-    // on, not a closed connection.
-    if scope == CarrierScope::Peer && !request.command.peer_permitted() {
-        let command = request.command.wire_name();
-        let response = serde_json::json!({
-            "request_id": request.request_id,
-            "ok": false,
-            "error": {
-                "code": "agency_gateway.carrier_scope_denied",
-                "message": format!(
-                    "`{command}` needs owner scope: this connection authenticated as a peer, \
-                     which may relay, ask occupancy, send, read and acknowledge contact. Use \
-                     the owner token (`--ws-owner-token-location`) or the gateway's Unix \
-                     socket on its own machine"
-                ),
-            },
-            "carrier_scope": scope.as_str(),
-        });
-        return Ok((response.to_string(), false, None));
+    if let GatewayCommand::NativeOwner { world_ref, expected_owner_generation, request: owner_request } = &request.command {
+        let result = runtime.native_owners.request(world_ref, expected_owner_generation.as_deref(), owner_request.as_ref()).map(|reading| GatewayResponse::NativeOwner { reading });
+        let response = GatewayResponseEnvelope::from_result(request.request_id, result);
+        return Ok((serde_json::to_string(&response).map_err(|e| AikitError::new("gateway.native_owner.response_encode", e.to_string()))?, false, None));
     }
     // An occupancy query is the Workcell owner's answer, not gateway state:
     // read it outside the state lock so a slow owner never stalls the journal.
@@ -1582,96 +1515,6 @@ fn execute_serialized_request(
             )
         })?;
         return Ok((encoded, false, None));
-    }
-    // A relayed Flow-conversation request is this Workcell's encounter
-    // owner's to answer, at the moment of asking and outside the state lock:
-    // a slow owner never stalls the journal, and nothing is cached.
-    if let GatewayCommand::EncounterRelay {
-        action,
-        request: body,
-    } = request.command.clone()
-    {
-        let result = if !crate::gateway_runtime::ENCOUNTER_RELAY_ACTIONS.contains(&action.as_str())
-        {
-            Err(AikitError::new(
-                "agency_gateway.encounter_relay_action_denied",
-                format!(
-                    "`{action}` is not relayed between Workcells; only {} are",
-                    crate::gateway_runtime::ENCOUNTER_RELAY_ACTIONS.join(", ")
-                ),
-            ))
-        } else if let Some(relay) = &runtime.encounter {
-            relay
-                .relay(&action, body)
-                .map(|response| GatewayResponse::EncounterRelayed { response })
-        } else {
-            Err(AikitError::new(
-                "agency_gateway.encounter_relay_not_served",
-                "this gateway has no encounter owner to relay to",
-            ))
-        };
-        let encoded = serde_json::to_string(&GatewayResponseEnvelope::from_result(
-            request.request_id,
-            result,
-        ))
-        .map_err(|error| {
-            AikitError::new(
-                "agency_gateway_service.response_encode",
-                format!("encode gateway response: {error}"),
-            )
-        })?;
-        return Ok((encoded, false, None));
-    }
-    // A drain is the running service's: it resolves the engine's in-flight
-    // turns, which the kernel does not hold. The caller names the process it
-    // means, so a drain aimed at one gateway never lands on another.
-    if let GatewayCommand::Drain {
-        expected_pid,
-        reason,
-        exit,
-        grace_ms,
-    } = request.command.clone()
-    {
-        let envelope = if expected_pid.is_some_and(|pid| pid != std::process::id()) {
-            GatewayResponseEnvelope::from_result(
-                request.request_id,
-                Err(AikitError::new(
-                    "agency_gateway.drain_wrong_process",
-                    format!(
-                        "this gateway is process {}, not {}: a drain names the process it means",
-                        std::process::id(),
-                        expected_pid.unwrap_or_default()
-                    ),
-                )),
-            )
-        } else if let Some(engine) = &runtime.engine {
-            GatewayResponseEnvelope::from_result(
-                request.request_id,
-                engine
-                    .drain(&reason, grace_ms.map(Duration::from_millis))
-                    .map(|report| GatewayResponse::Drained {
-                        report,
-                        exiting: exit,
-                        build: Some(runtime.process.build()),
-                    }),
-            )
-        } else {
-            GatewayResponseEnvelope::from_result(
-                request.request_id,
-                Err(AikitError::new(
-                    "agency_gateway.drain_not_served",
-                    "no conversation engine stands behind this carrier",
-                )),
-            )
-        };
-        let exiting = envelope.ok && exit;
-        let encoded = serde_json::to_string(&envelope).map_err(|error| {
-            AikitError::new(
-                "agency_gateway_service.response_encode",
-                format!("encode gateway response: {error}"),
-            )
-        })?;
-        return Ok((encoded, exiting, None));
     }
     // A canonical conversation-control command is the running engine's to
     // execute: the kernel holds no turn sources. The engine locks the state
@@ -1723,19 +1566,7 @@ fn execute_serialized_request(
             "gateway state lock was poisoned",
         )
     })?;
-    let mut result = execute_gateway_command(&mut gateway, request.command.clone());
-    // The kernel holds no process: what is running, and how it is bound, is
-    // this service's own fact, added to the two readings that disclose it.
-    match &mut result {
-        Ok(GatewayResponse::Protocol { build, .. }) => {
-            *build = Some(runtime.process.build());
-        }
-        Ok(GatewayResponse::Status { status }) => {
-            status.build = Some(runtime.process.build());
-            status.listeners = runtime.process.listeners();
-        }
-        _ => {}
-    }
+    let result = execute_gateway_command(&mut gateway, request.command.clone());
     let mut subscribed = None;
     match &result {
         // A subscribe is a replay plus a live attachment, made one indivisible
@@ -1787,132 +1618,11 @@ fn execute_serialized_request(
     Ok((encoded, should_shutdown, subscribed))
 }
 
-/// The answer to a request line that is not a valid envelope. A request whose
-/// shape is right but whose command this gateway does not know is a peer built
-/// from a newer source: it is told so, and what this gateway does support, so
-/// it can fall back or name the upgrade — never "invalid JSON".
-fn refusal_for_unparsed_request(
-    input: &str,
-    parse_error: &str,
-    process: &GatewayProcessRecord,
-) -> String {
-    let probe: Option<serde_json::Value> = serde_json::from_str(input).ok();
-    let unknown_command = probe
-        .as_ref()
-        .and_then(|value| value.get("command"))
-        .and_then(|command| command.get("type"))
-        .and_then(|kind| kind.as_str())
-        .map(str::to_owned);
-    let request_id = probe
-        .as_ref()
-        .and_then(|value| value.get("request_id").cloned())
-        .unwrap_or(serde_json::Value::Null);
-    match unknown_command {
-        Some(command) if parse_error.contains("unknown variant") => serde_json::json!({
-            "request_id": request_id,
-            "ok": false,
-            "error": {
-                "code": "agency_gateway.unsupported_command",
-                "message": format!(
-                    "this gateway (build {}) does not know the command `{command}`; it is \
-                     older than the caller. Upgrade it (`aikit gateway upgrade plan`) or use \
-                     a feature it advertises in `protocol`",
-                    process.build().revision
-                ),
-            },
-            "unsupported_command": command,
-            "features": crate::gateway_runtime::GATEWAY_PROTOCOL_FEATURES,
-        })
-        .to_string(),
-        _ => serde_json::json!({
-            "request_id": request_id,
-            "ok": false,
-            "error": {
-                "code": "agency_gateway.invalid_request_json",
-                "message": parse_error,
-            }
-        })
-        .to_string(),
-    }
-}
-
-/// Bind the WebSocket carrier, then serve it. An address that is not on this
-/// machine yet (a tailnet address before Tailscale is up, at login or after
-/// wake) is not a failure: the carrier waits and retries while every other
-/// carrier keeps serving, and the wait is part of the listener reading. Any
-/// other bind failure (port in use, permission) stops the service as before.
-#[allow(clippy::too_many_arguments)] // the carrier's facts are distinct; a bundle would only rename them
-fn bind_and_serve_websocket(
-    reading: &dyn Fn(ListenerState, Option<String>) -> GatewayListenerReading,
-    gateway: Arc<Mutex<AgencyGateway>>,
-    shutdown: Arc<AtomicBool>,
-    token: String,
-    owner_token: Option<String>,
-    state_file: Option<PathBuf>,
-    max_frame_bytes: usize,
-    occupancy: OccupancyHook,
-    runtime: Arc<GatewayServiceRuntime>,
-) -> Result<()> {
-    let bind = reading(ListenerState::Bound, None).bind;
-    let mut announced = false;
-    let listener = loop {
-        match TcpListener::bind(&bind) {
-            Ok(listener) => break listener,
-            Err(error) if error.kind() == io::ErrorKind::AddrNotAvailable => {
-                let detail = format!(
-                    "{bind} is not an address of this machine yet ({error}); retrying every 2s \
-                     while the other carriers serve"
-                );
-                runtime
-                    .process
-                    .set_listener(reading(ListenerState::Waiting, Some(detail.clone())));
-                if !announced {
-                    eprintln!("gateway WebSocket carrier waiting: {detail}");
-                    announced = true;
-                }
-                for _ in 0..20 {
-                    if shutdown.load(Ordering::SeqCst) {
-                        return Ok(());
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                }
-            }
-            Err(error) => {
-                return Err(AikitError::new(
-                    "agency_gateway_service.websocket_bind",
-                    format!("bind WebSocket gateway at {bind}: {error}"),
-                ));
-            }
-        }
-    };
-    listener.set_nonblocking(true).map_err(|error| {
-        AikitError::new(
-            "agency_gateway_service.websocket_nonblocking",
-            format!("configure WebSocket listener {bind}: {error}"),
-        )
-    })?;
-    runtime
-        .process
-        .set_listener(reading(ListenerState::Bound, None));
-    serve_websocket_listener(
-        listener,
-        gateway,
-        shutdown,
-        token,
-        owner_token,
-        state_file,
-        max_frame_bytes,
-        occupancy,
-        runtime,
-    )
-}
-
 fn websocket_handshake<R: BufRead, W: Write>(
     reader: &mut R,
     writer: &mut W,
-    peer_token: &str,
-    owner_token: Option<&str>,
-) -> Result<CarrierScope> {
+    expected_token: &str,
+) -> Result<()> {
     let mut request_line = String::new();
     let mut consumed = reader
         .read_line(&mut request_line)
@@ -1973,17 +1683,11 @@ fn websocket_handshake<R: BufRead, W: Write>(
         }
     }
 
-    let presented = authorization
+    let authorised = authorization
         .as_deref()
-        .and_then(|value| value.strip_prefix("Bearer "));
-    // Both comparisons always run, so which token was wrong is not a timing.
-    let is_owner = match (presented, owner_token) {
-        (Some(presented), Some(owner)) => constant_time_eq(presented.as_bytes(), owner.as_bytes()),
-        _ => false,
-    };
-    let is_peer =
-        presented.is_some_and(|value| constant_time_eq(value.as_bytes(), peer_token.as_bytes()));
-    if !is_owner && !is_peer {
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|value| constant_time_eq(value.as_bytes(), expected_token.as_bytes()));
+    if !authorised {
         write_http_error(writer, 401, "Unauthorized")?;
         return Err(AikitError::new(
             "agency_gateway_service.websocket_unauthorised",
@@ -2021,11 +1725,7 @@ fn websocket_handshake<R: BufRead, W: Write>(
     writer
         .flush()
         .map_err(io_error("flush WebSocket upgrade response"))?;
-    Ok(if is_owner {
-        CarrierScope::Owner
-    } else {
-        CarrierScope::Peer
-    })
+    Ok(())
 }
 
 fn write_http_error<W: Write>(writer: &mut W, status: u16, reason: &str) -> Result<()> {
@@ -2290,22 +1990,12 @@ mod tests {
 
     fn test_runtime() -> Arc<GatewayServiceRuntime> {
         Arc::new(GatewayServiceRuntime {
+            native_owners: crate::gateway_native_owner::NativeOwnerRoutes::default(),
             hub: Arc::new(SubscriptionHub::default()),
             queues: Arc::new(crate::gateway_connector_pump::ConnectorQueues::default()),
             controls: Arc::new(crate::gateway_connector_pump::ConnectorPumpControls::default()),
             engine: None,
             connections: ConnectionRegistry::default(),
-            encounter: None,
-            process: Arc::new(GatewayProcessRecord::new(GatewayBuildIdentity {
-                revision: "test".into(),
-                dirty: false,
-                pid: 1,
-                started_at_unix_ms: 1,
-                executable_path: None,
-                executable_sha256: None,
-                workcell_ref: None,
-                lifecycle: Default::default(),
-            })),
         })
     }
 
@@ -2444,7 +2134,7 @@ mod tests {
         let request = b"GET / HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nAuthorization: Bearer wrong\r\n\r\n";
         let mut reader = BufReader::new(&request[..]);
         let mut response = Vec::new();
-        let error = websocket_handshake(&mut reader, &mut response, "correct", None).unwrap_err();
+        let error = websocket_handshake(&mut reader, &mut response, "correct").unwrap_err();
         assert_eq!(
             error.code(),
             "agency_gateway_service.websocket_unauthorised"
@@ -2459,7 +2149,7 @@ mod tests {
         let request = b"GET /gateway HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nAuthorization: Bearer secret\r\n\r\n";
         let mut reader = BufReader::new(&request[..]);
         let mut response = Vec::new();
-        websocket_handshake(&mut reader, &mut response, "secret", None).unwrap();
+        websocket_handshake(&mut reader, &mut response, "secret").unwrap();
         let response = String::from_utf8(response).unwrap();
         assert!(response.starts_with("HTTP/1.1 101 Switching Protocols"));
         assert!(response.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
@@ -2529,16 +2219,37 @@ mod tests {
         serde_json::from_slice(&payload).unwrap()
     }
 
-    /// Open a WebSocket to the test listener with `token` and return the
-    /// upgraded stream.
-    fn connect_websocket(address: SocketAddr, token: &str) -> TcpStream {
+    #[test]
+    fn websocket_service_executes_protocol_and_shutdown_on_one_shared_gateway() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address: SocketAddr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let gateway = Arc::new(Mutex::new(gateway()));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_gateway = Arc::clone(&gateway);
+        let server_shutdown = Arc::clone(&shutdown);
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result = serve_websocket_listener(
+                listener,
+                server_gateway,
+                server_shutdown,
+                "secret".into(),
+                None,
+                64 * 1024,
+                None,
+                test_runtime(),
+            );
+            done_tx.send(result).unwrap();
+        });
+
         let mut stream = TcpStream::connect(address).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
         write!(
             stream,
-            "GET / HTTP/1.1\r\nHost: {address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nAuthorization: Bearer {token}\r\n\r\n"
+            "GET / HTTP/1.1\r\nHost: {address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nAuthorization: Bearer secret\r\n\r\n"
         )
         .unwrap();
         stream.flush().unwrap();
@@ -2555,121 +2266,27 @@ mod tests {
         assert!(String::from_utf8(handshake)
             .unwrap()
             .starts_with("HTTP/1.1 101"));
-        stream
-    }
 
-    fn ws_request(stream: &mut TcpStream, body: serde_json::Value) -> Value {
-        stream
-            .write_all(&masked_text_frame(&body.to_string()))
-            .unwrap();
-        read_server_text(stream)
-    }
-
-    #[test]
-    fn a_peer_token_relays_and_reads_but_only_the_owner_token_can_stop_the_gateway() {
-        let valid_snapshot = serde_json::to_value(gateway().snapshot()).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address: SocketAddr = listener.local_addr().unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let gateway = Arc::new(Mutex::new(gateway()));
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let server_gateway = Arc::clone(&gateway);
-        let server_shutdown = Arc::clone(&shutdown);
-        let (done_tx, done_rx) = mpsc::channel();
-        thread::spawn(move || {
-            let result = serve_websocket_listener(
-                listener,
-                server_gateway,
-                server_shutdown,
-                "secret".into(),
-                Some("owner-secret".into()),
-                None,
-                64 * 1024,
-                None,
-                test_runtime(),
-            );
-            done_tx.send(result).unwrap();
-        });
-
-        let mut peer = connect_websocket(address, "secret");
-        let response = ws_request(
-            &mut peer,
-            serde_json::json!({"request_id":"p1","command":{"type":"protocol"}}),
-        );
+        let protocol = serde_json::json!({
+            "request_id":"p1",
+            "command":{"type":"protocol"}
+        })
+        .to_string();
+        stream.write_all(&masked_text_frame(&protocol)).unwrap();
+        let response = read_server_text(&mut stream);
         assert_eq!(response["ok"], true);
         assert_eq!(response["request_id"], "p1");
         assert_eq!(response["response"]["type"], "protocol");
-        // The running process is named in the answer, and the features a peer
-        // negotiates on include the new ones.
-        assert_eq!(response["response"]["build"]["revision"], "test");
-        let features: Vec<String> =
-            serde_json::from_value(response["response"]["features"].clone()).unwrap();
-        for wanted in [
-            "communique-exact-instance",
-            "gateway-build-identity",
-            "gateway-drain",
-            "gateway-carrier-scope",
-        ] {
-            assert!(
-                features.iter().any(|f| f == wanted),
-                "{wanted}: {features:?}"
-            );
-        }
-        let status = ws_request(
-            &mut peer,
-            serde_json::json!({"request_id":"s1","command":{"type":"status"}}),
-        );
-        assert_eq!(status["response"]["status"]["build"]["pid"], 1);
 
-        // The peer may not stop the gateway, drain it, restore its state, or read
-        // its snapshot; the refusal is an answer on the same connection. Drain
-        // exits the process: it is as much a stop as a shutdown.
-        for (id, command) in [
-            ("stop", serde_json::json!({"type":"shutdown"})),
-            (
-                "drain",
-                serde_json::json!({"type":"drain","reason":"a peer asked","exit":true}),
-            ),
-            ("snap", serde_json::json!({"type":"snapshot"})),
-            (
-                "restore",
-                serde_json::json!({"type":"restore","snapshot": valid_snapshot}),
-            ),
-        ] {
-            let denied = ws_request(
-                &mut peer,
-                serde_json::json!({"request_id": id, "command": command}),
-            );
-            assert_eq!(denied["ok"], false, "{id}");
-            assert_eq!(
-                denied["error"]["code"], "agency_gateway.carrier_scope_denied",
-                "{id}: {denied}"
-            );
-        }
-        assert!(
-            !shutdown.load(Ordering::SeqCst),
-            "a peer token must not be able to stop the gateway"
-        );
-
-        // A command this gateway does not know is named as unsupported, with
-        // what it does support, not as malformed JSON.
-        let unknown = ws_request(
-            &mut peer,
-            serde_json::json!({"request_id":"u1","command":{"type":"a-future-command"}}),
-        );
-        assert_eq!(
-            unknown["error"]["code"],
-            "agency_gateway.unsupported_command"
-        );
-        assert_eq!(unknown["unsupported_command"], "a-future-command");
-        assert!(unknown["features"].as_array().unwrap().len() >= 5);
-
-        // The owner token may.
-        let mut owner = connect_websocket(address, "owner-secret");
-        let response = ws_request(
-            &mut owner,
-            serde_json::json!({"request_id":"stop","command":{"type":"shutdown"}}),
-        );
+        let shutdown_request = serde_json::json!({
+            "request_id":"stop",
+            "command":{"type":"shutdown"}
+        })
+        .to_string();
+        stream
+            .write_all(&masked_text_frame(&shutdown_request))
+            .unwrap();
+        let response = read_server_text(&mut stream);
         assert_eq!(response["ok"], true);
         assert_eq!(response["response"]["type"], "shutdown");
 
@@ -2851,11 +2468,7 @@ mod tests {
             })],
             conversation: None,
             coexistence: None,
-            owner_token: None,
-            process: None,
-            configured_gateway_ref: None,
             stop_signal: None,
-            encounter_relay: None,
         };
         let (done_tx, done_rx) = mpsc::channel();
         thread::spawn(move || {
@@ -3023,11 +2636,7 @@ mod tests {
             connectors: Vec::new(),
             conversation: None,
             coexistence: None,
-            owner_token: None,
-            process: None,
-            configured_gateway_ref: None,
             stop_signal: None,
-            encounter_relay: None,
         };
         let (done_tx, done_rx) = mpsc::channel();
         thread::spawn(move || {

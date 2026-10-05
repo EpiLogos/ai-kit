@@ -1,0 +1,44 @@
+#!/bin/sh
+# Landing gates guard — the push toward main carries a green receipt.
+#
+# The law: a tip is landable when the repo's own landing-tier gates have
+# passed AT THAT EXACT TIP. Integration is continuous; CI confirms the
+# surfaces only CI can reach — it is not the discovery mechanism.
+#
+# OFF switches (easy, reversible), same pattern as the seat guard:
+#   git config --global central.gates off     # everywhere
+#   git config central.gates off              # this repo only
+#   git push --no-verify ...                  # this push only
+# Turn back on:
+#   git config --global --unset central.gates
+
+[ "$(git config --get central.gates)" = "off" ] && exit 0
+[ "$(git config --global --get central.gates)" = "off" ] && exit 0
+
+while read -r local_ref lsha remote_ref remote_object; do
+  [ "$remote_ref" = "refs/heads/main" ] || continue
+  [ "$lsha" = "0000000000000000000000000000000000000000" ] && continue
+
+  TOP=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+  [ -f "$TOP/gates/run.mjs" ] || exit 0   # this repo carries no gate runner
+
+  RECEIPT="$TOP/gates/receipts/latest-landing.json"
+  if [ ! -f "$RECEIPT" ]; then
+    echo "landing guard: no landing receipt at this tip."
+    echo "  run:  node gates/run.mjs landing   (then push again)"
+    echo "  escape: git push --no-verify (named in the handoff) or central.gates off"
+    exit 1
+  fi
+
+  if ! node -e '
+    const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+    process.exit(r.head===process.argv[2] && r.pass===true && r.tier==="landing" && r.scope==="full" ? 0 : 1);
+  ' "$RECEIPT" "$lsha" 2>/dev/null; then
+    echo "landing guard: the latest landing receipt does not cover this exact tip ($lsha)."
+    echo "  a receipt exists but is stale, failing, or was taken on another tip."
+    echo "  run:  node gates/run.mjs landing   (then push again)"
+    echo "  escape: git push --no-verify (named in the handoff) or central.gates off"
+    exit 1
+  fi
+done
+exit 0

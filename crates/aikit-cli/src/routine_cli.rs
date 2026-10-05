@@ -1106,7 +1106,7 @@ pub fn method_run(
             confirmed: confirm,
         },
     )?;
-    let output_text = run.report.output.join("\n");
+    let output_digest = crate::run::method_output_digest(&run.report);
     Ok(serde_json::json!({
         "schema": "aikit.method-execution/v1",
         "method": reference.to_string(),
@@ -1115,7 +1115,7 @@ pub fn method_run(
         "exit_status": run.report.status,
         "detached": run.report.detached,
         "input_digest": blake3::hash(input_json.as_bytes()).to_hex().to_string(),
-        "output_digest": blake3::hash(output_text.as_bytes()).to_hex().to_string(),
+        "output_digest": output_digest,
         "result_digest": crate::scoped_invocation::run_result_digest(&run).to_string(),
         "postconditions": "not claimed by this route; `aikit method prove` promotes this receipt into a proven basis only when explicit verification passes",
     }))

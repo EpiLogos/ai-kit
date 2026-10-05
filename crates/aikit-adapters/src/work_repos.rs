@@ -1,35 +1,29 @@
-//! Live Work-repos search: ripgrep over every declared project's actual files
-//! at query time, so `aikit knowledge search` reaches repo code and docs the
-//! same way it reaches Control prose.
+//! Live Work-file search/read around exact native Project identities.
 //!
-//! Projects are discovered from the manifests every Work folder already
-//! carries — `Work/<name>/ProjectCentral/project.json` (`central.project/v1`,
-//! field `project_id`) — the same mechanical test ctrl's file map uses. A
-//! missing, unparseable, or invalid manifest is one named absence per project,
-//! never a silent skip; a double-prefixed `project_id` is rejected with a named
-//! absence until the register itself is fixed.
+//! Native discovery observes the maintained ProjectCentral declaration through
+//! the same bounded held-descriptor reader as selected material. An attachment
+//! retains its complete declaration byte basis and physical root affiliation;
+//! each query/read checks them again. Identical-byte atomic declaration
+//! replacement is admitted; changed bytes or root mapping requires a fresh
+//! attachment. Explicit manifest-free roots remain independently useful.
 //!
-//! Search runs at query time over the existing ripgrep searcher. No index is
-//! maintained, so nothing can go stale: hits carry `observed` authority by
-//! construction. Gitignore is respected (`hidden=false` — the searcher's
-//! default), the owner's `.no-agent-retrieval` marker prunes marked subtrees
-//! before any bytes are read, and `.DS_Store` is excluded outright. The file
-//! set is bounded by an explicit type list; a root query runs per-repo with
-//! per-repo limits, so cost is bounded by `limit × projects`, never by repo
-//! size.
+//! Fresh addresses use `source:work-file:v1:<base64url-id>:<base64url-member>`.
+//! Both components retain exact UTF-8 spelling. This adapter language is
+//! separate from the native Project-root Source role. Legacy delimiter-based
+//! file refs are retained history, never guessed live routing from survivors.
 //!
-//! Identity is the project register's own namespace: hits carry
-//! `source:project:<project_id>:<relative>` refs (the convention the
-//! folder-subject compiler uses for a project's native root), and reads go
-//! back to disk through the ProjectCentral binding's own agent-readability
-//! rule, so withholding is enforced in one place.
+//! Search still delegates to ripgrep. Its existing ranking/limits, ignore
+//! behavior and marker-glob snapshot remain; selected material additionally
+//! uses current native aperture/physical admission. The depth-eight marker
+//! snapshot and broad rg traversal do not establish atomic current exclusion
+//! of every file before rg processing, or total memory/horizon completeness.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use aikit_core::knowledge_source_pool::*;
 use aikit_core::resource::{ProviderRef, ResourceLocator, SourceRef, SourceRevision};
-use aikit_core::{AikitError, Result, CENTRAL_PROJECT_SCHEMA, NO_AGENT_RETRIEVAL_MARKER};
+use aikit_core::{AikitError, Result, NO_AGENT_RETRIEVAL_MARKER};
 use serde_json::json;
 
 use crate::now_field::content_revision;
@@ -37,6 +31,83 @@ use crate::ripgrep::{RipgrepSearcher, SearchRequest, RIPGREP_TESTED_VERSION};
 use crate::runner::CommandRunner;
 
 pub const WORK_REPOS_PROVIDER_REF: &str = "provider/source-pool/work-repos";
+
+/// Mechanical address allowance; this does not constrain native Project meaning.
+pub const WORK_FILE_ADDRESS_MAX_BYTES: usize = 16 * 1024;
+const WORK_FILE_ADDRESS_PREFIX: &str = "source:work-file:v1:";
+
+/// The exact adapter transport coordinates around an existing Project/member.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkFileAddress {
+    pub project_id: String,
+    pub member: PathBuf,
+}
+
+fn address_failure(code: &'static str, message: &str) -> AikitError {
+    AikitError::new(code, message)
+}
+
+fn safe_work_member(member: &Path) -> Result<&str> {
+    let text = member.to_str().ok_or_else(|| address_failure(
+        "work_repos.member_transport_unsupported", "The Work member is not representable as exact UTF-8"))?;
+    if text.is_empty() || text.contains('\0') || !member.components().all(|part| matches!(part, Component::Normal(_))) {
+        return Err(address_failure("work_repos.source_escape", "A Work file requires a nonempty safe relative native member"));
+    }
+    Ok(text)
+}
+
+pub fn work_file_source_ref(project_id: &str, member: &Path) -> Result<SourceRef> {
+    use base64::Engine as _;
+    let member = safe_work_member(member)?;
+    let encoded_id = base64::encoded_len(project_id.len(), false);
+    let encoded_member = base64::encoded_len(member.len(), false);
+    let length = encoded_id.zip(encoded_member)
+        .and_then(|(id, member)| WORK_FILE_ADDRESS_PREFIX.len().checked_add(id)?.checked_add(1)?.checked_add(member));
+    if !length.is_some_and(|length| length <= WORK_FILE_ADDRESS_MAX_BYTES) {
+        return Err(address_failure("work_repos.address_budget", "The exact Work-file address exceeds its 16KiB transport allowance"));
+    }
+    aikit_core::ProjectRef::parse(project_id).map_err(|error| {
+        address_failure("work_repos.project_transport_unsupported", "The Project ID cannot be represented by the existing AIKit ProjectRef profile")
+            .with("profile_error", error.code())
+    })?;
+    SourceRef::parse(format!("{WORK_FILE_ADDRESS_PREFIX}{}:{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(project_id.as_bytes()),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(member.as_bytes())))
+}
+
+pub fn decode_work_file_source_ref(source: &SourceRef) -> Result<Option<WorkFileAddress>> {
+    use base64::Engine as _;
+    let raw = source.as_str();
+    let Some(components) = raw.strip_prefix(WORK_FILE_ADDRESS_PREFIX) else { return Ok(None); };
+    if raw.len() > WORK_FILE_ADDRESS_MAX_BYTES {
+        return Err(address_failure("work_repos.address_budget", "The Work-file address exceeds its 16KiB transport allowance"));
+    }
+    let Some((id, member)) = components.split_once(':') else {
+        return Err(address_failure("work_repos.source_address_invalid", "The Work-file address has no member component"));
+    };
+    let decode = |encoded: &str| -> Result<String> {
+        if encoded.is_empty() || encoded.contains(':') {
+            return Err(address_failure("work_repos.source_address_invalid", "The Work-file address requires exactly two nonempty components"));
+        }
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded).map_err(|_| {
+            address_failure("work_repos.source_address_invalid", "The Work-file component is not unpadded URL-safe base64")
+        })?;
+        if base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes) != encoded {
+            return Err(address_failure("work_repos.source_address_invalid", "The Work-file component is not canonically encoded"));
+        }
+        String::from_utf8(bytes).map_err(|_| address_failure(
+            "work_repos.source_address_invalid", "The Work-file component is not exact UTF-8"))
+    };
+    let project_id = decode(id)?;
+    aikit_core::ProjectRef::parse(&project_id).map_err(|error| {
+        address_failure("work_repos.project_transport_unsupported", "The literal Work Project ID is unsupported by the existing consumer profile")
+            .with("profile_error", error.code())
+    })?;
+    let member = PathBuf::from(decode(member)?);
+    safe_work_member(&member)?;
+    Ok(Some(WorkFileAddress { project_id, member }))
+}
+
 
 /// Bound on one project read through this provider, mirroring the NOW-field
 /// read budget.
@@ -110,6 +181,7 @@ struct FileEvidence {
     lines: usize,
     snippet: Option<String>,
     first_line: u64,
+    matched_lines: Vec<(u64, String)>,
 }
 
 /// Rarity weight per term across the files that matched: `ln(1 + N / df)`.
@@ -168,86 +240,261 @@ pub enum WorkProjectEntry {
     Absence { name: String, reason: String },
 }
 
-/// Discover the projects from declarations, not environment: every `Work/*`
-/// folder carrying `ProjectCentral/project.json` is a candidate (the same
-/// mechanical test ctrl's file map uses), and each manifest is parsed and
-/// validated on its own terms. Infallible: a folder that cannot be honoured
-/// yields one [`WorkProjectEntry::Absence`] naming it.
-pub fn discover_work_projects(central_root: &Path) -> Vec<WorkProjectEntry> {
-    let mut entries = Vec::new();
-    let Ok(projects) = std::fs::read_dir(central_root.join("Work")) else {
-        return entries;
-    };
-    let mut candidates: Vec<(String, PathBuf)> = projects
-        .flatten()
-        .filter(|entry| entry.path().is_dir())
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let path = entry.path();
-            path.join("ProjectCentral/project.json")
-                .is_file()
-                .then_some((name, path))
-        })
-        .collect();
-    candidates.sort_by(|left, right| left.0.cmp(&right.0));
-    for (name, root) in candidates {
-        entries.push(read_work_project_entry(&name, &root));
-    }
-    entries
+/// A retained physical reading relation. It carries no semantic identity or grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkRoot {
+    requested: PathBuf,
+    canonical: PathBuf,
+    identity: (u64, u64),
 }
 
-fn read_work_project_entry(name: &str, root: &Path) -> WorkProjectEntry {
-    let manifest_path = root.join("ProjectCentral/project.json");
-    let invalid = |reason: String| WorkProjectEntry::Absence {
-        name: name.to_owned(),
-        reason,
-    };
-    let text = match std::fs::read_to_string(&manifest_path) {
-        Ok(text) => text,
-        Err(error) => {
-            return invalid(format!(
-                "register unreadable: could not read {}: {error}",
-                manifest_path.display()
-            ));
+fn work_io(path: &Path, error: std::io::Error) -> AikitError {
+    AikitError::new("work_repos.source_unavailable", format!("could not observe {}: {error}", path.display()))
+        .with("path", path.display().to_string())
+        .with("cause_kind", format!("{:?}", error.kind()))
+        .with("cause_raw_os_error", error.raw_os_error().map(|value| value.to_string()).unwrap_or_default())
+        .with_io_source(error)
+}
+
+fn work_root_identity(path: &Path) -> Result<(u64, u64)> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = std::fs::metadata(path).map_err(|error| work_io(path, error))?;
+        if !metadata.is_dir() {
+            return Err(AikitError::new("work_repos.source_binding_changed", "The declared Work root is not a directory"));
         }
-    };
-    #[derive(serde::Deserialize)]
-    struct Manifest {
-        schema: String,
-        project_id: String,
+        Ok((metadata.dev(), metadata.ino()))
     }
-    let manifest: Manifest = match serde_json::from_str(&text) {
-        Ok(manifest) => manifest,
-        Err(error) => {
-            return invalid(format!(
-                "register unreadable: {} is not a valid manifest: {error}",
-                manifest_path.display()
-            ));
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = path;
+        Err(AikitError::new("work_repos.physical_unsupported", "Retained Work root observation is unavailable on this platform"))
+    }
+}
+
+impl WorkRoot {
+    fn inspect(path: &Path) -> Result<Self> {
+        if !path.is_absolute() {
+            return Err(AikitError::new("work_repos.root_transport_unsupported", "A Work attachment requires its actual absolute invocation root"));
         }
+        let identity = work_root_identity(path)?;
+        let canonical = std::fs::canonicalize(path).map_err(|error| work_io(path, error))?;
+        let root = Self { requested: path.to_path_buf(), canonical, identity };
+        root.check()?;
+        Ok(root)
+    }
+
+    fn check(&self) -> Result<()> {
+        let current = work_root_identity(&self.requested)?;
+        let canonical = std::fs::canonicalize(&self.requested).map_err(|error| work_io(&self.requested, error))?;
+        if current != self.identity || canonical != self.canonical {
+            return Err(AikitError::new("work_repos.source_binding_changed", "The original Work root no longer names its admitted physical directory; attach afresh")
+                .with("root", self.requested.display().to_string()));
+        }
+        Ok(())
+    }
+
+    fn member(&self, path: &Path) -> Result<PathBuf> {
+        self.check()?;
+        let current = std::fs::canonicalize(path).map_err(|error| work_io(path, error))?;
+        let member = current.strip_prefix(&self.canonical).map_err(|_| AikitError::new(
+            "work_repos.source_escape", "The source's current physical member escapes its admitted Work root"))?;
+        safe_work_member(member)?;
+        self.check()?;
+        Ok(member.to_path_buf())
+    }
+
+    fn readable(&self, member: &Path) -> Result<()> {
+        self.check()?;
+        let readable = crate::projectcentral::path_agent_readability(&self.requested, member)
+            .map_err(|error| work_io(&self.requested.join(member), error))?;
+        self.check()?;
+        if !readable {
+            return Err(AikitError::new("work_repos.source_unauthorised", "The current native source aperture withholds this Work member"));
+        }
+        Ok(())
+    }
+
+    fn read(&self, declared: &Path, admitted_member: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+        self.readable(declared)?;
+        if self.member(&self.requested.join(declared))? != admitted_member {
+            return Err(AikitError::new("work_repos.source_binding_changed", "The declared member no longer maps to its admitted physical member"));
+        }
+        let bytes = crate::projectcentral::publication::material_bytes_affiliated(
+            &self.requested, self.identity, admitted_member, max_bytes).map_err(|error| {
+                let code = if error.code() == "knowledge.wiki_publication_budget" {
+                    "work_repos.source_too_large"
+                } else { "work_repos.source_unreadable" };
+                let mut projected = AikitError::new(code, error.message())
+                    .with("original_code", error.code())
+                    .with("physical_error", json!({"code":error.code(), "message":error.message(), "details":error.details()}).to_string())
+                    .with_io_source_from(&error);
+                for (key, value) in error.details() { projected = projected.with(key, value); }
+                projected
+            })?;
+        self.readable(declared)?;
+        if self.member(&self.requested.join(declared))? != admitted_member {
+            return Err(AikitError::new("work_repos.source_binding_changed", "The member mapping changed during its current source observation"));
+        }
+        Ok(bytes)
+    }
+}
+
+const WORK_MANIFEST_MEMBER: &str = "ProjectCentral/project.json";
+const WORK_MANIFEST_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Absence is only admitted through an observed ordinary parent (or an
+/// actually absent direct ProjectCentral member). A dangling/foreign parent
+/// cannot turn failed native observation into an explicit independent root.
+fn native_manifest_absent(root: &WorkRoot) -> Result<bool> {
+    root.check()?;
+    let parent_path = root.requested.join("ProjectCentral");
+    let parent = match std::fs::symlink_metadata(&parent_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => { root.check()?; return Ok(true); }
+        Err(error) => return Err(work_io(&parent_path,error)),
+        Ok(metadata) if metadata.is_dir() => WorkRoot::inspect(&parent_path)?,
+        Ok(_) => return Err(AikitError::new("work_repos.native_declaration_unavailable",
+            "An unavailable or nonordinary native declaration parent is not independent attachment absence")),
     };
-    if manifest.schema != CENTRAL_PROJECT_SCHEMA {
-        return invalid(format!(
-            "register invalid: expected {CENTRAL_PROJECT_SCHEMA}, found {}",
-            manifest.schema
-        ));
+    let manifest = root.requested.join(WORK_MANIFEST_MEMBER);
+    let absent = match std::fs::symlink_metadata(&manifest) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => return Err(work_io(&manifest,error)),
+        Ok(_) => false,
+    };
+    parent.check()?;
+    root.check()?;
+    Ok(absent)
+}
+
+/// Native discovery retains its actual declaration separately from a checkout.
+/// Fields are private so a plain display/ID/root tuple cannot invent this witness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeWorkRepoProject {
+    project: WorkRepoProject,
+    declaration_root: WorkRoot,
+    material_root: WorkRoot,
+    manifest_member: PathBuf,
+    manifest_basis: String,
+    enclosing_world: Option<WorkRoot>,
+}
+
+impl NativeWorkRepoProject {
+    pub fn project(&self) -> &WorkRepoProject { &self.project }
+
+    pub fn inspect(project_root: &Path, display_name: &str, enclosing_world: Option<&Path>) -> Result<Self> {
+        let declaration_root = WorkRoot::inspect(project_root)?;
+        let enclosing_world = enclosing_world.map(WorkRoot::inspect).transpose()?;
+        if let Some(world) = &enclosing_world {
+            world.readable(project_root.strip_prefix(&world.requested).map_err(|_| {
+                AikitError::new("work_repos.source_escape", "Native Work discovery is outside its supplied lexical World aperture")
+            })?)?;
+        }
+        let declared = Path::new(WORK_MANIFEST_MEMBER);
+        declaration_root.readable(declared)?;
+        let manifest_member = declaration_root.member(&project_root.join(declared))?;
+        let bytes = declaration_root.read(declared, &manifest_member, WORK_MANIFEST_MAX_BYTES)?;
+        let project_id = crate::projectcentral::project_ref_from_manifest_bytes(&bytes)?.to_string();
+        work_file_source_ref(&project_id, Path::new("address-profile"))?;
+        let native = Self {
+            project: WorkRepoProject { name: display_name.to_owned(), project_id, root: project_root.to_path_buf() },
+            material_root: declaration_root.clone(), declaration_root, manifest_member,
+            manifest_basis: crate::projectcentral::publication::content_hash(&bytes), enclosing_world,
+        };
+        native.check()?;
+        Ok(native)
     }
-    let project_id = manifest.project_id.trim().to_owned();
-    if project_id.is_empty() {
-        return invalid("register invalid: project_id is empty".to_owned());
+
+    pub fn with_checkout(&self, checkout: &Path) -> Result<Self> {
+        self.check()?;
+        let mut bound = self.clone();
+        bound.material_root = WorkRoot::inspect(checkout)?;
+        bound.project.root = checkout.to_path_buf();
+        bound.check()?;
+        Ok(bound)
     }
-    // A double-prefixed id (`project:quaternal-logic`) would mint double-
-    // prefixed refs (`source:project:project:…`). Discovery rejects it with
-    // a named absence; the register itself is the place the fix belongs.
-    if project_id.starts_with("project:") || project_id.contains("::") {
-        return invalid(format!(
-            "register invalid: project_id {project_id:?} is already namespaced; expected the bare project id"
-        ));
+
+    fn check(&self) -> Result<()> {
+        self.declaration_root.check()?;
+        self.material_root.check()?;
+        if let Some(world) = &self.enclosing_world {
+            let member = self.declaration_root.requested.strip_prefix(&world.requested).map_err(|_| {
+                AikitError::new("work_repos.source_escape", "The declaration lost its original World-relative route")
+            })?;
+            world.readable(member)?;
+            if let Ok(member) = self.material_root.requested.strip_prefix(&world.requested) {
+                world.readable(member)?;
+            }
+        }
+        let bytes = self.declaration_root.read(Path::new(WORK_MANIFEST_MEMBER), &self.manifest_member, WORK_MANIFEST_MAX_BYTES)?;
+        let current = crate::projectcentral::project_ref_from_manifest_bytes(&bytes)?;
+        if current.as_str() != self.project.project_id
+            || crate::projectcentral::publication::content_hash(&bytes) != self.manifest_basis
+        {
+            return Err(AikitError::new("work_repos.native_declaration_changed", "The retained native Project declaration changed; attach through fresh discovery")
+                .with("project_id", self.project.project_id.clone()));
+        }
+        self.declaration_root.check()?;
+        self.material_root.check()
     }
-    WorkProjectEntry::Project(WorkRepoProject {
-        name: name.to_owned(),
-        project_id,
-        root: root.to_path_buf(),
-    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeWorkProjectEntry {
+    Project(NativeWorkRepoProject),
+    Absence { name: String, error: AikitError },
+}
+
+impl NativeWorkProjectEntry {
+    fn name(&self) -> &str {
+        match self { Self::Project(project) => &project.project.name, Self::Absence { name, .. } => name }
+    }
+}
+
+/// Native discovery uses held ordinary manifest observation; it never mints a
+/// display-name identity on missing, corrupt or unreadable declarations.
+pub fn discover_native_work_projects(central_root: &Path) -> Result<Vec<NativeWorkProjectEntry>> {
+    let work = central_root.join("Work");
+    let entries = std::fs::read_dir(&work).map_err(|error| work_io(&work, error))?;
+    let mut outcomes = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| work_io(&work, error))?;
+        let name = entry.file_name().into_string().map_err(|_| AikitError::new(
+            "work_repos.member_transport_unsupported", "A Work display name is not exact UTF-8"))?;
+        let root = entry.path();
+        let metadata = std::fs::metadata(&root).map_err(|error| work_io(&root, error))?;
+        if !metadata.is_dir() { continue; }
+        let manifest = root.join(WORK_MANIFEST_MEMBER);
+        match std::fs::symlink_metadata(&manifest) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match WorkRoot::inspect(&root).and_then(|root| native_manifest_absent(&root)) {
+                    Ok(true) => continue,
+                    Ok(false) => outcomes.push(NativeWorkProjectEntry::Absence { name, error: AikitError::new(
+                        "work_repos.native_declaration_changed", "The declaration appeared during discovery; discover afresh") }),
+                    Err(error) => outcomes.push(NativeWorkProjectEntry::Absence { name,error }),
+                }
+            }
+            Err(error) => outcomes.push(NativeWorkProjectEntry::Absence { name, error: work_io(&manifest, error) }),
+            Ok(_) => match NativeWorkRepoProject::inspect(&root, &name, Some(central_root)) {
+                Ok(project) => outcomes.push(NativeWorkProjectEntry::Project(project)),
+                Err(error) => outcomes.push(NativeWorkProjectEntry::Absence { name, error }),
+            },
+        }
+    }
+    outcomes.sort_by(|a,b| a.name().cmp(b.name()));
+    Ok(outcomes)
+}
+
+/// Compatibility projection of the same scanner. This cannot retain typed IO.
+pub fn discover_work_projects(central_root: &Path) -> Vec<WorkProjectEntry> {
+    match discover_native_work_projects(central_root) {
+        Ok(entries) => entries.into_iter().map(|entry| match entry {
+            NativeWorkProjectEntry::Project(project) => WorkProjectEntry::Project(project.project),
+            NativeWorkProjectEntry::Absence { name, error } => WorkProjectEntry::Absence { name, reason: error.to_string() },
+        }).collect(),
+        Err(error) => vec![WorkProjectEntry::Absence { name: "(Work)".into(), reason: error.to_string() }],
+    }
 }
 
 fn provider() -> ProviderRef {
@@ -344,90 +591,169 @@ fn marker_exclude_globs(project_root: &Path) -> Vec<String> {
     globs
 }
 
+#[derive(Debug, Clone)]
+enum WorkAttachmentBasis { Native(NativeWorkRepoProject), Explicit }
+
+#[derive(Debug, Clone)]
+struct WorkAttachment {
+    project: WorkRepoProject,
+    root: WorkRoot,
+    basis: WorkAttachmentBasis,
+}
+
+impl WorkAttachment {
+    fn native(project: NativeWorkRepoProject) -> Result<Self> {
+        project.check()?;
+        Ok(Self { project: project.project.clone(), root: project.material_root.clone(), basis: WorkAttachmentBasis::Native(project) })
+    }
+
+    fn explicit(project: WorkRepoProject) -> Result<Self> {
+        work_file_source_ref(&project.project_id, Path::new("address-profile"))?;
+        let root = WorkRoot::inspect(&project.root)?;
+        let manifest = project.root.join(WORK_MANIFEST_MEMBER);
+        match std::fs::symlink_metadata(&manifest) {
+            Ok(_) => {
+                let native = NativeWorkRepoProject::inspect(&project.root, &project.name, None)?;
+                if native.project.project_id != project.project_id {
+                    return Err(AikitError::new("work_repos.native_declaration_changed", "The supplied Project ID differs from its actual native declaration"));
+                }
+                Self::native(native)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !native_manifest_absent(&root)? {
+                    return Err(AikitError::new("work_repos.native_declaration_changed", "A native declaration appeared during attachment; attach afresh"));
+                }
+                Ok(Self { project, root, basis: WorkAttachmentBasis::Explicit })
+            }
+            Err(error) => Err(work_io(&manifest, error)),
+        }
+    }
+
+    fn check(&self) -> Result<()> {
+        self.root.check()?;
+        match &self.basis {
+            WorkAttachmentBasis::Native(native) => native.check(),
+            WorkAttachmentBasis::Explicit => {
+                let manifest = self.project.root.join(WORK_MANIFEST_MEMBER);
+                match std::fs::symlink_metadata(&manifest) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        if native_manifest_absent(&self.root)? { Ok(()) } else {
+                            Err(AikitError::new("work_repos.native_declaration_changed", "The native declaration appeared during current observation; attach afresh"))
+                        }
+                    },
+                    Err(error) => Err(work_io(&manifest, error)),
+                    Ok(_) => {
+                        NativeWorkRepoProject::inspect(&self.project.root, &self.project.name, None)?;
+                        Err(AikitError::new("work_repos.native_declaration_changed", "A native declaration appeared after independent attachment; attach afresh"))
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn unique_work_projects(projects: &[WorkRepoProject]) -> Result<()> {
+    let mut seen = BTreeMap::new();
+    for project in projects {
+        work_file_source_ref(&project.project_id, Path::new("address-profile"))?;
+        if let Some(previous) = seen.insert(project.project_id.as_str(), project) {
+            if previous != project {
+                return Err(AikitError::new("work_repos.project_binding_conflict", "One literal Project ID has conflicting Work root/display attachments")
+                    .with("project_id", project.project_id.clone()));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub struct WorkReposSourcePoolProvider<R> {
     searcher: RipgrepSearcher<R>,
     projects: Vec<WorkRepoProject>,
+    attachments: Vec<WorkAttachment>,
+    attachment_error: Option<AikitError>,
     marker_globs: BTreeMap<String, Vec<String>>,
     version: Option<String>,
 }
 
 impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
-    /// Attach to the projects discovered from the Work/ manifests. The
-    /// ripgrep probe happens here so an unavailable binary is an attachment
-    /// disclosure, not a mid-search surprise.
-    pub fn connect(
-        runner: R,
-        executable: impl Into<PathBuf>,
-        projects: Vec<WorkRepoProject>,
-    ) -> Self {
-        let marker_globs = projects
-            .iter()
-            .map(|project| (project.name.clone(), marker_exclude_globs(&project.root)))
-            .collect();
-        let searcher = RipgrepSearcher::new(runner, executable);
-        let version = searcher.probe().ok();
-        Self {
-            searcher,
-            projects,
-            marker_globs,
-            version,
+    /// Explicit roots remain useful without optional native providers.
+    pub fn connect(runner: R, executable: impl Into<PathBuf>, projects: Vec<WorkRepoProject>) -> Self {
+        let admitted = unique_work_projects(&projects).and_then(|()| {
+            let mut attachments = Vec::new();
+            for project in &projects {
+                if attachments.iter().any(|attached: &WorkAttachment| attached.project == *project) { continue; }
+                attachments.push(WorkAttachment::explicit(project.clone())?);
+            }
+            Ok(attachments)
+        });
+        match admitted {
+            Ok(attachments) => Self::connected(runner, executable, attachments, None),
+            Err(error) => {
+                let mut failed = Self::connected(runner, executable, Vec::new(), Some(error));
+                failed.projects = projects;
+                failed
+            }
         }
     }
 
-    pub fn projects(&self) -> &[WorkRepoProject] {
-        &self.projects
+    pub fn connect_native(runner: R, executable: impl Into<PathBuf>, projects: Vec<NativeWorkRepoProject>) -> Result<Self> {
+        let declared: Vec<_> = projects.iter().map(|project| project.project.clone()).collect();
+        unique_work_projects(&declared)?;
+        let mut attachments = Vec::new();
+        for project in projects {
+            if attachments.iter().any(|attached: &WorkAttachment| attached.project == project.project) { continue; }
+            attachments.push(WorkAttachment::native(project)?);
+        }
+        Ok(Self::connected(runner, executable, attachments, None))
     }
 
-    fn project_for(&self, project_id: &str) -> Option<&WorkRepoProject> {
-        self.projects.iter().find(|p| p.project_id == project_id)
+    fn connected(runner: R, executable: impl Into<PathBuf>, attachments: Vec<WorkAttachment>, attachment_error: Option<AikitError>) -> Self {
+        let projects: Vec<_> = attachments.iter().map(|attached| attached.project.clone()).collect();
+        let marker_globs = projects.iter().map(|project| (project.name.clone(), marker_exclude_globs(&project.root))).collect();
+        let searcher = RipgrepSearcher::new(runner, executable);
+        let version = if attachment_error.is_none() { searcher.probe().ok() } else { None };
+        Self { searcher, projects, attachments, attachment_error, marker_globs, version }
+    }
+
+    pub fn projects(&self) -> &[WorkRepoProject] { &self.projects }
+
+    fn attachment(&self, project_id: &str) -> Result<Option<&WorkAttachment>> {
+        if let Some(error) = &self.attachment_error { return Err(error.clone()); }
+        Ok(self.attachments.iter().find(|attached| attached.project.project_id == project_id))
+    }
+
+    fn require_project(&self, project: &WorkRepoProject) -> Result<&WorkAttachment> {
+        let attachment = self.attachment(&project.project_id)?.ok_or_else(|| {
+            AikitError::new("work_repos.source_out_of_scope", "The literal Project is not attached to this Work provider")
+        })?;
+        if attachment.project != *project {
+            return Err(AikitError::new("work_repos.project_binding_conflict", "The Project differs from its retained Work attachment"));
+        }
+        attachment.check()?;
+        Ok(attachment)
+    }
+
+    pub fn for_project(&self, project_id: &str) -> Result<impl SourcePoolProvider + '_> {
+        let attachment = self.attachment(project_id)?.ok_or_else(|| {
+            AikitError::new("work_repos.source_out_of_scope", "The scoped Project is not attached to this Work provider")
+        })?;
+        attachment.check()?;
+        Ok(WorkProjectView { owner: self, project: &attachment.project })
     }
 
     fn source_ref(project: &WorkRepoProject, relative: &Path) -> Result<SourceRef> {
-        SourceRef::parse(format!(
-            "source:project:{}:{}",
-            project.project_id,
-            relative.to_string_lossy().replace('\\', "/")
-        ))
+        work_file_source_ref(&project.project_id, relative)
     }
 
-    /// Parse `source:project:<project_id>:<relative>` back into its project
-    /// and a safe project-relative path. Anything that escapes the project
-    /// root, or names a project discovery did not find, is refused.
-    fn resolve_ref(&self, source: &SourceRef) -> Result<(&WorkRepoProject, PathBuf)> {
-        let raw = source.as_str();
-        let prefix = "source:project:";
-        let Some(rest) = raw.strip_prefix(prefix) else {
-            return Err(AikitError::new(
-                "work_repos.source_out_of_scope",
-                format!("{raw} is not a project source ref"),
-            ));
-        };
-        let Some((project_id, relative)) = rest.split_once(':') else {
-            return Err(AikitError::new(
-                "work_repos.source_out_of_scope",
-                format!("{raw} carries no project-relative path"),
-            ));
-        };
-        let project = self.project_for(project_id).ok_or_else(|| {
-            AikitError::new(
-                "work_repos.source_out_of_scope",
-                format!(
-                    "{project_id:?} is not a project discovered from this world's Work/ manifests"
-                ),
-            )
+    fn resolve_ref(&self, source: &SourceRef) -> Result<(&WorkAttachment, PathBuf)> {
+        let address = decode_work_file_source_ref(source)?.ok_or_else(|| {
+            AikitError::new("work_repos.source_out_of_scope", "The Source is not a fresh Work-file address")
         })?;
-        let relative = PathBuf::from(relative);
-        let safe = !relative.as_os_str().is_empty()
-            && relative
-                .components()
-                .all(|component| matches!(component, Component::Normal(_)));
-        if !safe {
-            return Err(AikitError::new(
-                "work_repos.source_escape",
-                format!("{relative:?} is not a safe project-relative path"),
-            ));
-        }
-        Ok((project, relative))
+        let attachment = self.attachment(&address.project_id)?.ok_or_else(|| {
+            AikitError::new("work_repos.source_out_of_scope", "The literal Work Project is not attached to this provider")
+        })?;
+        attachment.check()?;
+        Ok((attachment, address.member))
     }
 
     fn media_type(relative: &Path) -> &'static str {
@@ -443,53 +769,47 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
         vec!["work-repos".into(), project.name.to_lowercase()]
     }
 
-    fn material(&self, source: &SourceRef) -> Result<SourceMaterial> {
-        let (project, relative) = self.resolve_ref(source)?;
-        let absolute = project.root.join(&relative);
-        if !crate::projectcentral::path_agent_readable(&project.root, &relative) {
-            return Err(AikitError::new(
-                "work_repos.source_unauthorised",
-                format!(
-                    "{relative:?} is withheld from agent retrieval inside Work/{}",
-                    project.name
-                ),
-            ));
-        }
-        let bytes = std::fs::read(&absolute).map_err(|error| {
-            AikitError::new(
-                "work_repos.source_unreadable",
-                format!("could not read {relative:?}: {error}"),
-            )
+    fn observed_bytes(&self, source: &SourceRef) -> Result<(&WorkAttachment, PathBuf, Vec<u8>)> {
+        let (attachment, relative) = self.resolve_ref(source)?;
+        let absolute = attachment.project.root.join(&relative);
+        attachment.root.readable(&relative)?;
+        let member = attachment.root.member(&absolute).map_err(|error| {
+            if error.code() != "work_repos.source_unavailable" { return error; }
+            let mut projected = AikitError::new("work_repos.source_unreadable", error.message())
+                .with("physical_error", json!({"code":error.code(), "message":error.message(), "details":error.details()}).to_string())
+                .with_io_source_from(&error);
+            for (key, value) in error.details() { projected = projected.with(key, value); }
+            projected
         })?;
-        if bytes.len() as u64 > WORK_REPOS_MAX_READ_BYTES {
-            return Err(AikitError::new(
-                "work_repos.source_too_large",
-                format!("{relative:?} exceeds the Work-repos read budget"),
-            ));
-        }
+        let bytes = attachment.root.read(&relative, &member, WORK_REPOS_MAX_READ_BYTES)?;
+        attachment.check()?;
+        Ok((attachment, relative, bytes))
+    }
+
+    /// Exact admitted material bytes for local consumers with their own
+    /// derived revision scheme. This delegates the SAME observation used by
+    /// material(), with no second capture or copied-body fallback.
+    pub fn read_bytes(&self, source: &SourceRef) -> Result<Option<Vec<u8>>> {
+        let Some(address) = decode_work_file_source_ref(source)? else { return Ok(None); };
+        if self.attachment(&address.project_id)?.is_none() { return Ok(None); }
+        let (_, _, bytes) = self.observed_bytes(source)?;
+        Ok(Some(bytes))
+    }
+
+    fn material(&self, source: &SourceRef) -> Result<SourceMaterial> {
+        let (attachment, relative, bytes) = self.observed_bytes(source)?;
+        let project = &attachment.project;
+        let absolute = project.root.join(&relative);
         Ok(SourceMaterial {
             binding: SourceBinding {
-                source: source.clone(),
-                revision: SourceRevision::parse(content_revision(&bytes))?,
-                title: relative.to_string_lossy().replace('\\', "/"),
-                tags: Self::tags(project),
-                // Owner-authorised ground searched in place, the way the
-                // file-map owner read does it — never an actor-independent
-                // grant.
-                visibility: SourceVisibility::Personal,
-                owners: vec![],
-                media_type: Self::media_type(&relative).into(),
-                locator: Some(ResourceLocator::Path(absolute)),
+                source: source.clone(), revision: SourceRevision::parse(content_revision(&bytes))?,
+                title: safe_work_member(&relative)?.to_owned(), tags: Self::tags(project),
+                visibility: SourceVisibility::Personal, owners: vec![],
+                media_type: Self::media_type(&relative).into(), locator: Some(ResourceLocator::Path(absolute)),
                 metadata: [
-                    (
-                        "work-repos",
-                        json!({"project": project.name, "project_id": project.project_id}),
-                    ),
-                    ("owner_read_required", json!(false)),
-                ]
-                .into_iter()
-                .map(|(key, value)| (key.to_string(), value))
-                .collect(),
+                    ("work-repos", json!({"project": project.name, "project_id": project.project_id})),
+                    ("owner_read_required", json!(true)),
+                ].into_iter().map(|(key,value)| (key.to_owned(),value)).collect(),
             },
             body: String::from_utf8_lossy(&bytes).into_owned(),
         })
@@ -558,7 +878,9 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
             max_count_per_file: Some(PER_FILE_MATCH_CAP),
             timeout: Some(std::time::Duration::from_secs(30)),
         };
+        self.require_project(project)?;
         let outcome = self.searcher.search(&request)?;
+        self.require_project(project)?;
         // Group matches by file; count distinct terms and keep the first
         // matching line as the snippet. Term membership folds case, matching
         // the searcher's own case-folding.
@@ -569,7 +891,7 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
                 .path
                 .strip_prefix(&project.root)
                 .ok()
-                .map(|path| path.to_string_lossy().replace('\\', "/"))
+                .map(Path::to_path_buf)
             else {
                 continue;
             };
@@ -581,15 +903,17 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
                 .map(|(index, _)| index)
                 .collect();
             let entry = files
-                .entry(PathBuf::from(relative))
+                .entry(relative)
                 .or_insert(FileEvidence {
                     terms: BTreeSet::new(),
                     lines: 0,
                     snippet: None,
                     first_line: matched.line_number,
+                    matched_lines: Vec::new(),
                 });
             entry.terms.extend(term_hits);
             entry.lines += 1;
+            entry.matched_lines.push((matched.line_number, matched.line.clone()));
             if entry.snippet.is_none() {
                 let snippet: String = matched.line.chars().take(240).collect();
                 entry.snippet = Some(snippet.trim_end().to_string());
@@ -607,21 +931,24 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
                     max_count_per_file: None,
                     ..request.clone()
                 };
-                for (path, count) in self.searcher.count(&per_term)? {
+                self.require_project(project)?;
+                let counts = self.searcher.count(&per_term)?;
+                self.require_project(project)?;
+                for (path, count) in counts {
                     let Some(relative) = path
                         .strip_prefix(&project.root)
                         .ok()
-                        .map(|path| path.to_string_lossy().replace('\\', "/"))
+                        .map(Path::to_path_buf)
                     else {
                         continue;
                     };
-                    let relative = PathBuf::from(relative);
                     let sampled = files.get(&relative);
                     let entry = exact.entry(relative).or_insert(FileEvidence {
                         terms: BTreeSet::new(),
                         lines: 0,
                         snippet: sampled.and_then(|evidence| evidence.snippet.clone()),
                         first_line: sampled.map(|evidence| evidence.first_line).unwrap_or(1),
+                        matched_lines: sampled.map(|evidence| evidence.matched_lines.clone()).unwrap_or_default(),
                     });
                     entry.terms.insert(index);
                     entry.lines += count as usize;
@@ -664,23 +991,91 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
                 .total_cmp(&left.0)
                 .then_with(|| left.1.cmp(&right.1))
         });
-        Ok(scored
-            .into_iter()
-            .take(limit)
-            .filter_map(|(score, relative, evidence)| {
-                let source = Self::source_ref(project, &relative).ok()?;
-                Some(SourceHit {
+        let mut hits = Vec::new();
+        for (score, relative, evidence) in scored.into_iter().take(limit) {
+            let source = Self::source_ref(project, &relative)?;
+            let before = self.material(&source)?;
+            let absolute = project.root.join(&relative);
+            let selected = SearchRequest {
+                roots: vec![absolute.clone()],
+                ..request.clone()
+            };
+            // The global query carries relevance, not a whole-file revision.
+            // Bracket a finite real selected-file query with current reads and
+            // require its native lines and prior evidence to agree exactly.
+            self.require_project(project)?;
+            let checked = self.searcher.search(&selected)?;
+            self.require_project(project)?;
+            let mut checked_terms = BTreeSet::new();
+            let mut checked_lines = Vec::new();
+            for matched in &checked.matches {
+                let index = matched.line_number.checked_sub(1)
+                    .and_then(|index| usize::try_from(index).ok());
+                let actual = index.and_then(|index| before.body.split('\n').nth(index))
+                    .map(|line| line.trim_end_matches('\r'));
+                if matched.path != absolute || actual != Some(matched.line.as_str()) {
+                    return Err(AikitError::new("work_repos.source_search_basis_conflict",
+                        "Native selected-file match no longer agrees with the current Source")
+                        .with("source", source.to_string()));
+                }
+                let lowered_line = matched.line.to_lowercase();
+                checked_terms.extend(lowered.iter().enumerate()
+                    .filter(|(_, term)| lowered_line.contains(term.as_str()))
+                    .map(|(index, _)| index));
+                checked_lines.push((matched.line_number, matched.line.clone()));
+            }
+            let mut checked_count = checked_lines.len();
+            if outcome.truncated {
+                checked_count = 0;
+                checked_terms.clear();
+                for (index, term) in terms.iter().enumerate() {
+                    let per_term = SearchRequest {
+                        pattern: term.clone(), regex: false, max_count_per_file: None,
+                        ..selected.clone()
+                    };
+                    self.require_project(project)?;
+                    let counts = self.searcher.count(&per_term)?;
+                    self.require_project(project)?;
+                    for (path, count) in counts {
+                        if path != absolute {
+                            return Err(AikitError::new("work_repos.source_search_basis_conflict",
+                                "Native selected-file count returned another Source")
+                                .with("source", source.to_string()));
+                        }
+                        if count > 0 {
+                            checked_terms.insert(index);
+                            checked_count += count as usize;
+                        }
+                    }
+                }
+            }
+            let after = self.material(&source)?;
+            let same_lines = if outcome.truncated {
+                checked_lines.starts_with(&evidence.matched_lines)
+            } else {
+                checked_lines == evidence.matched_lines
+            };
+            if before != after || checked.truncated || checked_lines.is_empty()
+                || !same_lines || checked_terms != evidence.terms || checked_count != evidence.lines
+            {
+                return Err(AikitError::new("work_repos.source_search_basis_conflict",
+                    "Native query evidence and the selected current Source basis changed")
+                    .with("source", source.to_string()));
+            }
+            hits.push(SourceHit {
                     source,
+                    revision: Some(before.binding.revision),
                     provider: provider(),
                     score: Some(score),
-                    title: relative.to_string_lossy().replace('\\', "/"),
+                    title: safe_work_member(&relative)?.to_owned(),
                     snippet: evidence.snippet.clone().unwrap_or_default(),
                     tags: Self::tags(project),
-                    provider_binding: Some(format!("line:{}", evidence.first_line)),
+                    provider_binding: evidence.snippet.as_ref()
+                        .map(|_| format!("line:{}", evidence.first_line)),
                     retrieval_mode: SourceSearchMode::Fulltext,
-                })
-            })
-            .collect())
+                });
+        }
+        Ok(hits)
     }
 
     fn run_search(&self, query: &str, tags: &[String], limit: usize) -> Result<Vec<SourceHit>> {
@@ -704,6 +1099,36 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
         });
         merged.truncate(limit);
         Ok(merged)
+    }
+}
+
+struct WorkProjectView<'a, R> {
+    owner: &'a WorkReposSourcePoolProvider<R>,
+    project: &'a WorkRepoProject,
+}
+
+impl<R: CommandRunner> SourcePoolProvider for WorkProjectView<'_, R> {
+    fn capabilities(&self) -> SourceProviderCapabilities { self.owner.capabilities() }
+    fn rebuild(&mut self, _: &[SourceMaterial]) -> Result<()> {
+        Err(AikitError::new("work_repos.owner_only", "A borrowed Work view cannot rebuild owner source"))
+    }
+    fn read(&self, source: &SourceRef) -> Result<Option<SourceMaterial>> {
+        let Some(address) = decode_work_file_source_ref(source)? else { return Ok(None); };
+        if address.project_id != self.project.project_id { return Ok(None); }
+        self.owner.read(source)
+    }
+    fn read_for(&self, source: &SourceRef, target: aikit_core::context_source::RetrievalTarget) -> Result<Option<SourcePoolReading>> {
+        let Some(address) = decode_work_file_source_ref(source)? else { return Ok(None); };
+        if address.project_id != self.project.project_id { return Ok(None); }
+        self.owner.read_for(source, target)
+    }
+    fn search(&self, query: &str, mode: SourceSearchMode, tags: &[String], limit: usize) -> Result<Vec<SourceHit>> {
+        if mode != SourceSearchMode::Fulltext {
+            return Err(AikitError::new("knowledge.source_provider_capability", "Work source supports fulltext search"));
+        }
+        let terms = query_terms(query);
+        self.owner.require_project(self.project)?;
+        self.owner.search_project(self.project, &terms, tags, limit)
     }
 }
 
@@ -748,9 +1173,18 @@ impl<R: CommandRunner> SourcePoolProvider for WorkReposSourcePoolProvider<R> {
     }
 
     fn read(&self, source: &SourceRef) -> Result<Option<SourceMaterial>> {
-        // resolve_ref refuses refs outside this pool's namespace before any
-        // byte is read, so the live-read fallback can ask this pool safely.
+        let Some(address) = decode_work_file_source_ref(source)? else { return Ok(None); };
+        if self.attachment(&address.project_id)?.is_none() { return Ok(None); }
         Ok(Some(self.material(source)?))
+    }
+
+    fn read_for(&self, source: &SourceRef, target: aikit_core::context_source::RetrievalTarget) -> Result<Option<SourcePoolReading>> {
+        let Some(address) = decode_work_file_source_ref(source)? else { return Ok(None); };
+        let Some(attachment) = self.attachment(&address.project_id)? else { return Ok(None); };
+        attachment.check()?;
+        let privacy = aikit_core::context_source::ContextSourcePrivacy::default();
+        SourcePoolReading::check_target(privacy, target)?;
+        Ok(Some(SourcePoolReading { material: self.material(source)?, privacy }))
     }
 
     fn search(
@@ -760,6 +1194,7 @@ impl<R: CommandRunner> SourcePoolProvider for WorkReposSourcePoolProvider<R> {
         tags: &[String],
         limit: usize,
     ) -> Result<Vec<SourceHit>> {
+        if let Some(error) = &self.attachment_error { return Err(error.clone()); }
         if mode != SourceSearchMode::Fulltext {
             return Err(AikitError::new(
                 "knowledge.source_provider_capability",
@@ -791,14 +1226,12 @@ impl<R: CommandRunner> SourcePoolProvider for WorkReposSourcePoolProvider<R> {
                 .as_deref()
                 .is_some_and(|value| !value.contains(RIPGREP_TESTED_VERSION)),
             capabilities,
-            detail: format!(
+            detail: self.attachment_error.as_ref().map(|error| format!("Work attachment unavailable: {error}")).unwrap_or_else(|| format!(
                 "live ripgrep content search over {} Work repo(s); gitignore respected \
                  (hidden=false); types {}; .no-agent-retrieval prunes {} marked subtree(s); \
                  per-repo limits bound a root query by limit × projects",
-                self.projects.len(),
-                WORK_REPOS_TYPES.join("/"),
-                marked,
-            ),
+                self.projects.len(), WORK_REPOS_TYPES.join("/"), marked,
+            )),
         }
     }
 }
@@ -806,7 +1239,7 @@ impl<R: CommandRunner> SourcePoolProvider for WorkReposSourcePoolProvider<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::{RecordingRunner, ScriptedRunner};
+    use crate::runner::{RecordingRunner, SystemRunner};
 
     fn project(root: &Path) -> WorkRepoProject {
         WorkRepoProject {
@@ -817,9 +1250,9 @@ mod tests {
     }
 
     fn manifest(project_id: &str) -> String {
-        format!(
-            r#"{{"schema":"central.project/v1","project_id":"{project_id}","human_source":"ProjectCentral/user","wiki":{{"profile":"okf-wiki/v1","source":"ProjectCentral/agents/wiki/wiki.json","adopted_sources":[]}}}}"#
-        )
+        json!({"schema":aikit_core::CENTRAL_PROJECT_SCHEMA,"project_id":project_id,
+            "human_source":"ProjectCentral/user","wiki":{"profile":"okf-wiki/v1",
+            "source":"ProjectCentral/agents/wiki/wiki.json","adopted_sources":[]}}).to_string()
     }
 
     fn write(path: &Path, contents: &str) {
@@ -830,78 +1263,34 @@ mod tests {
     }
 
     #[test]
-    fn discovery_reads_declared_manifests_and_names_every_failure() {
-        let temp = tempfile::tempdir().unwrap();
+    fn discovery_reads_complete_native_declarations_without_reinterpreting_ids() {
+        let temp = native_scratch();
         let root = temp.path();
-        write(
-            &root.join("Work/alpha/ProjectCentral/project.json"),
-            &manifest("alpha"),
-        );
-        // Noise folder without a manifest is not a candidate at all.
+        for (name,id) in [("alpha","a:b"),("delta","project:delta"),("slash","native/id") ] {
+            write(&root.join(format!("Work/{name}/ProjectCentral/project.json")), &manifest(id));
+        }
         std::fs::create_dir_all(root.join("Work/plain")).unwrap();
-        // Unparseable manifest.
-        write(
-            &root.join("Work/beta/ProjectCentral/project.json"),
-            "not json",
-        );
-        // Wrong schema.
-        write(
-            &root.join("Work/gamma/ProjectCentral/project.json"),
-            r#"{"schema":"central.project/v0","project_id":"gamma"}"#,
-        );
-        // Double-prefixed id.
-        write(
-            &root.join("Work/delta/ProjectCentral/project.json"),
-            &manifest("project:delta"),
-        );
-
-        let entries = discover_work_projects(root);
+        write(&root.join("Work/beta/ProjectCentral/project.json"), "not json");
+        write(&root.join("Work/gamma/ProjectCentral/project.json"), r#"{"schema":"central.project/v0","project_id":"gamma"}"#);
+        let entries = discover_native_work_projects(root).unwrap();
         let mut projects = Vec::new();
         let mut absences = Vec::new();
         for entry in entries {
             match entry {
-                WorkProjectEntry::Project(project) => projects.push(project),
-                WorkProjectEntry::Absence { name, reason } => absences.push((name, reason)),
+                NativeWorkProjectEntry::Project(project) => projects.push(project.project().clone()),
+                NativeWorkProjectEntry::Absence {name,error} => absences.push((name,error)),
             }
         }
-        assert_eq!(projects.len(), 1, "{absences:?}");
-        assert_eq!(projects[0].name, "alpha");
-        assert_eq!(projects[0].project_id, "alpha");
-        assert_eq!(absences.len(), 3, "{absences:?}");
-        let (beta_reason, gamma_reason, delta_reason) = (
-            absences
-                .iter()
-                .find(|(name, _)| name == "beta")
-                .expect("beta named")
-                .1
-                .clone(),
-            absences
-                .iter()
-                .find(|(name, _)| name == "gamma")
-                .expect("gamma named")
-                .1
-                .clone(),
-            absences
-                .iter()
-                .find(|(name, _)| name == "delta")
-                .expect("delta named")
-                .1
-                .clone(),
-        );
-        assert!(beta_reason.contains("register unreadable"), "{beta_reason}");
-        assert!(
-            gamma_reason.contains("central.project/v1"),
-            "{gamma_reason}"
-        );
-        assert!(
-            delta_reason.contains("already namespaced"),
-            "{delta_reason}"
-        );
+        assert_eq!(projects.iter().map(|project| (&*project.name,&*project.project_id)).collect::<Vec<_>>(),
+            vec![("alpha","a:b"),("delta","project:delta"),("slash","native/id")]);
+        assert_eq!(absences.len(),2);
+        assert_eq!(absences.iter().find(|(name,_)|name=="beta").unwrap().1.code(),"projectcentral.manifest_invalid");
+        assert_eq!(absences.iter().find(|(name,_)|name=="gamma").unwrap().1.code(),"projectcentral.manifest_invalid");
     }
 
     #[test]
     fn discovery_is_stable_and_sorted_by_folder_name() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = native_scratch();
         for name in ["zeta", "Alpha", "beta"] {
             write(
                 &temp
@@ -922,28 +1311,32 @@ mod tests {
         assert_eq!(names, vec!["Alpha", "beta", "zeta"]);
     }
 
-    fn scripted_matches(root: &Path, files: &[(&str, u64, &str)]) -> ScriptedRunner {
-        let mut lines = String::new();
+    fn native_scratch() -> tempfile::TempDir {
+        // The scratch must not sit under a ProjectCentral subtree: the
+        // provider's own fixed exclusions remove every `ProjectCentral/**`
+        // path from a native query, so files there are invisible to the very
+        // search under test.
+        tempfile::Builder::new().prefix("work-native-query-").tempdir().unwrap()
+    }
+
+    fn native_matches(root: &Path, files: &[(&str, u64, &str)]) -> crate::runner::SystemRunner {
         for (path, line_number, text) in files {
-            let absolute = root.join(path);
-            lines.push_str(&format!(
-                r#"{{"type":"match","data":{{"path":{{"text":"{}"}},"lines":{{"text":"{}\n"}},"line_number":{line_number}}}}}"#,
-                absolute.display(),
-                text
-            ));
-            lines.push('\n');
+            let mut body = "\n".repeat(usize::try_from(line_number - 1).unwrap());
+            body.push_str(text);
+            body.push('\n');
+            write(&root.join(path), &body);
         }
-        ScriptedRunner::new()
-            .on("--version", "ripgrep 15.2.0")
-            .on("--json", &lines)
+        crate::runner::SystemRunner::new()
+            .with_env_removed("RIPGREP_CONFIG_PATH")
+            .with_timeout(std::time::Duration::from_secs(30))
     }
 
     #[test]
     fn hits_carry_project_register_refs_and_all_term_files_outrank_partials() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = native_scratch();
         let root = temp.path();
         let provider = WorkReposSourcePoolProvider::connect(
-            scripted_matches(
+            native_matches(
                 root,
                 &[
                     (
@@ -955,7 +1348,7 @@ mod tests {
                     ("docs/other.md", 2, "cron only"),
                 ],
             ),
-            "rg",
+            crate::ripgrep::executable(),
             vec![project(root)],
         );
         let hits = provider
@@ -969,7 +1362,7 @@ mod tests {
         assert_eq!(hits.len(), 3, "{hits:?}");
         assert_eq!(
             hits[0].source.as_str(),
-            "source:project:demo:src/routine.rs",
+            work_file_source_ref("demo", Path::new("src/routine.rs")).unwrap().as_str(),
             "the file carrying every term outranks partials: {hits:?}"
         );
         assert_eq!(hits[0].provider.as_str(), WORK_REPOS_PROVIDER_REF);
@@ -999,7 +1392,7 @@ mod tests {
 
     #[test]
     fn a_rare_term_outweighs_several_common_ones() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = native_scratch();
         let root = temp.path();
         // `context` and `model` appear everywhere; `prepared` only in the
         // design note. Before rarity weighting, three common terms beat one
@@ -1018,8 +1411,8 @@ mod tests {
             .map(|(path, line, text)| (path.as_str(), *line, text.as_str()))
             .collect();
         let provider = WorkReposSourcePoolProvider::connect(
-            scripted_matches(root, &borrowed),
-            "rg",
+            native_matches(root, &borrowed),
+            crate::ripgrep::executable(),
             vec![project(root)],
         );
         let hits = provider
@@ -1032,15 +1425,15 @@ mod tests {
             .unwrap();
         assert_eq!(
             hits[0].source.as_str(),
-            "source:project:demo:docs/JEV-REDIS-NOW.md",
+            work_file_source_ref("demo", Path::new("docs/JEV-REDIS-NOW.md")).unwrap().as_str(),
             "the only file carrying the rare term ranks first: {hits:?}"
         );
     }
 
     #[test]
     fn the_match_pass_caps_matches_per_file() {
-        let temp = tempfile::tempdir().unwrap();
-        let recorder = RecordingRunner::new(ScriptedRunner::new());
+        let temp = native_scratch();
+        let recorder = RecordingRunner::new(SystemRunner::probe());
         let provider =
             WorkReposSourcePoolProvider::connect(&recorder, "rg", vec![project(temp.path())]);
         let _ = provider.search("prepared", SourceSearchMode::Fulltext, &[], 5);
@@ -1058,48 +1451,39 @@ mod tests {
 
     #[test]
     fn a_truncated_match_pass_is_rescored_from_exact_counts() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = native_scratch();
         let root = temp.path();
-        // A traversal-ordered sample that filled the budget with a common
-        // word, never reaching the file that carries the rare one.
-        let mut lines = String::new();
+        // The actual native match count exceeds the production retained limit.
+        // The count fallback must retain its original rarity/ranking semantics.
         for index in 0..(PER_REPO_MATCH_BUDGET + 1) {
-            lines.push_str(&format!(
-                r#"{{"type":"match","data":{{"path":{{"text":"{}"}},"lines":{{"text":"common\n"}},"line_number":1}}}}"#,
-                root.join(format!("src/noise{index}.rs")).display()
-            ));
-            lines.push('\n');
+            write(&root.join(format!("src/noise{index}.rs")), "common\n");
         }
-        let answer = root.join("docs/answer.md").display().to_string();
-        let noise = root.join("src/noise0.rs").display().to_string();
-        let runner = ScriptedRunner::new()
-            .on("--version", "ripgrep 15.2.0")
-            .on("--json", &lines)
-            .on(
-                &format!("-e rareword {}", root.display()),
-                &format!("{answer}\u{0}3\n"),
-            )
-            .on(
-                &format!("-e common {}", root.display()),
-                &format!("{answer}\u{0}1\n{noise}\u{0}9\n"),
-            );
-        let provider = WorkReposSourcePoolProvider::connect(runner, "rg", vec![project(root)]);
-        let hits = provider
-            .search("rareword common", SourceSearchMode::Fulltext, &[], 5)
-            .unwrap();
-        assert_eq!(
-            hits[0].source.as_str(),
-            "source:project:demo:docs/answer.md",
-            "exact counts reach the file the truncated sample never saw: {hits:?}"
-        );
+        write(&root.join("docs/answer.md"), "rareword\nrareword\nrareword\ncommon\n");
+        let runner = RecordingRunner::new(crate::runner::SystemRunner::new()
+            .with_env_removed("RIPGREP_CONFIG_PATH")
+            .with_timeout(std::time::Duration::from_secs(30)));
+        let provider = WorkReposSourcePoolProvider::connect(&runner, crate::ripgrep::executable(), vec![project(root)]);
+        assert!(provider.status().available, "real ripgrep is required for this native query test");
+        let hits = provider.search("rareword common", SourceSearchMode::Fulltext, &[], 5).unwrap();
+        assert_eq!(hits[0].source.as_str(), work_file_source_ref("demo", Path::new("docs/answer.md")).unwrap().as_str(),
+            "native exact counts retain the file carrying both terms: {hits:?}");
+        let reading = provider.read(&hits[0].source).unwrap().unwrap();
+        assert_eq!(hits[0].revision.as_ref(), Some(&reading.binding.revision));
+        assert!(runner.calls().iter().any(|argv| argv.iter().any(|arg| arg == "--count")),
+            "the actual retained limit must exercise native count fallback");
+        for hit in hits {
+            if hit.snippet.is_empty() {
+                assert!(hit.provider_binding.is_none(), "no sampled line means no invented line binding");
+            }
+        }
     }
 
     #[test]
     fn published_scores_stay_under_the_shared_floor_so_control_pools_keep_priority() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = native_scratch();
         let root = temp.path();
         let provider = WorkReposSourcePoolProvider::connect(
-            scripted_matches(
+            native_matches(
                 root,
                 &[
                     (
@@ -1110,7 +1494,7 @@ mod tests {
                     ("docs/plan.md", 9, "automations cron"),
                 ],
             ),
-            "rg",
+            crate::ripgrep::executable(),
             vec![project(root)],
         );
         let hits = provider
@@ -1141,12 +1525,12 @@ mod tests {
 
     #[test]
     fn the_argv_pins_gitignore_respect_and_the_type_list() {
-        let temp = tempfile::tempdir().unwrap();
-        let recorder = RecordingRunner::new(ScriptedRunner::new());
+        let temp = native_scratch();
+        let recorder = RecordingRunner::new(SystemRunner::probe());
         let provider =
             WorkReposSourcePoolProvider::connect(&recorder, "rg", vec![project(temp.path())]);
-        // The scripted inner runner answers nothing, so the search itself
-        // errors — the recorded argv is what this test reads.
+        // The actual native query may find no file; its real argv still
+        // preserves the established ignore/type discipline.
         let _ = provider.search("x", SourceSearchMode::Fulltext, &[], 5);
         let calls = recorder.calls();
         let search = calls
@@ -1170,7 +1554,7 @@ mod tests {
 
     #[test]
     fn marker_carrying_subtrees_are_excluded_before_any_search() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = native_scratch();
         let project_root = temp.path();
         write(
             &project_root.join("ProjectCentral/user/private/.no-agent-retrieval"),
@@ -1191,7 +1575,9 @@ mod tests {
 
     #[test]
     fn read_enforces_agent_readability_and_project_identity() {
-        let temp = tempfile::tempdir().unwrap();
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let temp = tempfile::Builder::new().prefix("work-owner-read-").tempdir_in(scratch).unwrap();
         let root = temp.path();
         write(&root.join("src/routine.rs"), "automations cron\n");
         write(&root.join("sealed/secret.md"), "hidden\n");
@@ -1199,12 +1585,12 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("src/routine.rs"), root.join("linked.md")).unwrap();
         let provider = WorkReposSourcePoolProvider::connect(
-            ScriptedRunner::new().on("--version", "ripgrep 15.2.0"),
-            "rg",
+            crate::runner::SystemRunner::probe(),
+            crate::ripgrep::executable(),
             vec![project(root)],
         );
         let reading = provider
-            .read(&SourceRef::parse("source:project:demo:src/routine.rs").unwrap())
+            .read(&work_file_source_ref("demo", Path::new("src/routine.rs" )).unwrap())
             .unwrap()
             .expect("a disclosed repo file reads back live");
         assert!(reading.body.contains("automations cron"));
@@ -1214,40 +1600,64 @@ mod tests {
         );
 
         let error = provider
-            .read(&SourceRef::parse("source:project:demo:sealed/secret.md").unwrap())
+            .read(&work_file_source_ref("demo", Path::new("sealed/secret.md" )).unwrap())
             .unwrap_err();
         assert_eq!(error.code(), "work_repos.source_unauthorised");
 
         #[cfg(unix)]
         {
             let error = provider
-                .read(&SourceRef::parse("source:project:demo:linked.md").unwrap())
+                .read(&work_file_source_ref("demo", Path::new("linked.md" )).unwrap())
                 .unwrap_err();
             assert_eq!(error.code(), "work_repos.source_unauthorised");
         }
 
-        let error = provider
-            .read(&SourceRef::parse("source:project:other:src/routine.rs").unwrap())
-            .unwrap_err();
-        assert_eq!(error.code(), "work_repos.source_out_of_scope");
+        assert!(provider.read(&work_file_source_ref("other", Path::new("src/routine.rs" )).unwrap()).unwrap().is_none());
 
         let error = provider
-            .read(&SourceRef::parse("source:project:demo:../escape.md").unwrap())
+            .read(&SourceRef::parse("source:work-file:v1:ZGVtbw:Li4vZXNjYXBlLm1k").unwrap())
             .unwrap_err();
         assert_eq!(error.code(), "work_repos.source_escape");
 
-        let error = provider
-            .read(&SourceRef::parse("central:source:control:root:x").unwrap())
-            .unwrap_err();
-        assert_eq!(error.code(), "work_repos.source_out_of_scope");
+        assert!(provider.read(&SourceRef::parse("central:source:control:root:x").unwrap()).unwrap().is_none());
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn actual_work_material_missing_and_fifo_are_failures_not_another_owner() {
+        use crate::runner::{CommandRunner, SystemRunner};
+        use std::os::unix::fs::FileTypeExt;
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let temp = tempfile::Builder::new().prefix("work-material-physical-").tempdir_in(scratch).unwrap();
+        let root = temp.path();
+        let fifo = root.join("held-fifo.md");
+        let argv = vec!["/usr/bin/mkfifo".to_string(), fifo.display().to_string()];
+        SystemRunner::probe().run(&argv).unwrap().require(&argv, "work_repos.test_fifo_creation_failed").unwrap();
+        let provider = WorkReposSourcePoolProvider::connect(
+            SystemRunner::probe(), crate::ripgrep::executable(), vec![project(root)],
+        );
+        let refused = provider.read(&work_file_source_ref("demo", Path::new("held-fifo.md" )).unwrap()).unwrap_err();
+        assert_eq!(refused.code(), "work_repos.source_unauthorised");
+        let missing = provider.read(&work_file_source_ref("demo", Path::new("absent.md" )).unwrap()).unwrap_err();
+        assert_eq!(missing.code(), "work_repos.source_unreadable");
+        let cause = std::error::Error::source(&missing).unwrap().downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(cause.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(cause.raw_os_error(), Some(2));
+        let retained: serde_json::Value = serde_json::from_str(&missing.details()["physical_error"]).unwrap();
+        assert_eq!(retained["details"]["cause_kind"], "NotFound");
+        assert_eq!(retained["details"]["cause_raw_os_error"], "2");
+        assert!(std::fs::symlink_metadata(fifo).unwrap().file_type().is_fifo());
+        assert!(!root.join("absent.md").exists());
     }
 
     #[test]
     fn rebuild_is_refused_because_the_repos_are_live_ground() {
+        let temp = native_scratch();
         let mut provider = WorkReposSourcePoolProvider::connect(
-            ScriptedRunner::new(),
-            "rg",
-            vec![project(Path::new("/ground"))],
+            SystemRunner::probe(),
+            crate::ripgrep::executable(),
+            vec![project(temp.path())],
         );
         let error = provider.rebuild(&[]).unwrap_err();
         assert_eq!(error.code(), "work_repos.owner_only");
@@ -1255,24 +1665,23 @@ mod tests {
 
     #[test]
     fn unavailable_ripgrep_is_a_disclosed_absence_not_a_fake_available() {
-        let runner = ScriptedRunner::new().failing("--version", 127, "command not found");
+        let temp = native_scratch();
+        let runner = SystemRunner::probe();
         let provider =
-            WorkReposSourcePoolProvider::connect(runner, "rg", vec![project(Path::new("/ground"))]);
+            WorkReposSourcePoolProvider::connect(runner, "work-test-deliberately-unavailable-rg", vec![project(temp.path())]);
         assert!(!provider.status().available);
     }
 
     #[test]
-    fn status_discloses_the_projects_and_version_drift() {
-        let runner = ScriptedRunner::new().on("--version", "ripgrep 14.1.0");
+    fn status_discloses_the_projects_and_actual_native_version() {
+        let temp = native_scratch();
+        let runner = SystemRunner::probe();
         let provider =
-            WorkReposSourcePoolProvider::connect(runner, "rg", vec![project(Path::new("/ground"))]);
+            WorkReposSourcePoolProvider::connect(runner, "rg", vec![project(temp.path())]);
         let status = provider.status();
         assert!(status.available);
-        assert_eq!(status.version.as_deref(), Some("ripgrep 14.1.0"));
-        assert!(
-            status.version_drift,
-            "the tested version is disclosed as drifted"
-        );
+        assert!(status.version.as_deref().is_some_and(|value| value.starts_with("ripgrep ")));
+        assert_eq!(status.version_drift, !status.version.as_deref().unwrap().contains(RIPGREP_TESTED_VERSION));
         assert_eq!(
             status.tested_version.as_deref(),
             Some(RIPGREP_TESTED_VERSION)
@@ -1283,14 +1692,251 @@ mod tests {
 
     #[test]
     fn semantic_mode_is_a_capability_refusal_not_a_silent_empty() {
+        let temp = native_scratch();
         let provider = WorkReposSourcePoolProvider::connect(
-            ScriptedRunner::new(),
-            "rg",
-            vec![project(Path::new("/ground"))],
+            SystemRunner::probe(),
+            crate::ripgrep::executable(),
+            vec![project(temp.path())],
         );
         let error = provider
             .search("anything", SourceSearchMode::Semantic, &[], 10)
             .unwrap_err();
         assert_eq!(error.code(), "knowledge.source_provider_capability");
     }
+    #[test]
+    fn exact_work_codec_roundtrips_opaque_ids_and_preserves_literal_members() {
+        for id in ["a:b", "a", "project:delta", "native/名", "a::b", "%41", "a%3Ab"] {
+            for member in ["docs/a:b.md", "docs/literal\\name.md", "docs/space name.md", "README.md"] {
+                let source = work_file_source_ref(id, Path::new(member)).unwrap();
+                let decoded = decode_work_file_source_ref(&source).unwrap().unwrap();
+                assert_eq!(decoded.project_id, id);
+                assert_eq!(decoded.member.as_os_str(), Path::new(member).as_os_str());
+            }
+        }
+        let left = work_file_source_ref("a:b", Path::new("c.md")).unwrap();
+        let right = work_file_source_ref("a", Path::new("b:c.md")).unwrap();
+        assert_ne!(left,right);
+        assert!(decode_work_file_source_ref(&SourceRef::parse("source:project:a:b:root").unwrap()).unwrap().is_none());
+    }
+
+    #[test]
+    fn actual_codec_boundaries_and_malformed_coordinates_refuse_without_shortening() {
+        let member = Path::new("c.md");
+        let member_len = base64::encoded_len(4,false).unwrap();
+        let max_id = (1..WORK_FILE_ADDRESS_MAX_BYTES).rev().find(|n| {
+            WORK_FILE_ADDRESS_PREFIX.len()+base64::encoded_len(*n,false).unwrap()+1+member_len <= WORK_FILE_ADDRESS_MAX_BYTES
+        }).unwrap();
+        let id = "q".repeat(max_id);
+        let source = work_file_source_ref(&id,member).unwrap();
+        assert_eq!(decode_work_file_source_ref(&source).unwrap().unwrap().project_id,id);
+        assert_eq!(work_file_source_ref(&"q".repeat(max_id+1),member).unwrap_err().code(),"work_repos.address_budget");
+        for suffix in ["", "YQ", ":Yg", "YQ:", "YQ:Yg:Zg", "YQ==:Yg", "YQ:/w", "YR:Yg", "YQ:Li4vYg"] {
+            let source = SourceRef::parse(format!("{WORK_FILE_ADDRESS_PREFIX}{suffix}")).unwrap();
+            assert!(decode_work_file_source_ref(&source).is_err(),"{source}");
+        }
+        let oversized = SourceRef::parse(format!("{WORK_FILE_ADDRESS_PREFIX}{}:Yg","q".repeat(WORK_FILE_ADDRESS_MAX_BYTES))).unwrap();
+        assert_eq!(decode_work_file_source_ref(&oversized).unwrap_err().code(),"work_repos.address_budget");
+    }
+
+    fn independent(root: &Path, id: &str, name: &str) -> WorkRepoProject {
+        WorkRepoProject { name:name.into(),project_id:id.into(),root:root.to_path_buf() }
+    }
+
+    fn read_only_native(native: NativeWorkRepoProject) -> WorkReposSourcePoolProvider<crate::runner::SystemRunner> {
+        WorkReposSourcePoolProvider::connect_native(crate::runner::SystemRunner::probe(),
+            "work-test-deliberately-unavailable-rg", vec![native]).unwrap()
+    }
+
+    #[test]
+    fn real_two_project_collision_lone_colon_roundtrip_and_legacy_survivor_never_rehome() {
+        let owned = native_scratch();
+        let world = owned.path();
+        let left = world.join("Work/left");
+        let right = world.join("Work/right");
+        write(&left.join(WORK_MANIFEST_MEMBER), &manifest("a:b"));
+        write(&right.join(WORK_MANIFEST_MEMBER), &manifest("a"));
+        write(&left.join("c.md"),"left bytes\n");
+        write(&right.join("b:c.md"),"right bytes\n");
+        let provider = WorkReposSourcePoolProvider::connect_native(crate::runner::SystemRunner::probe(),
+            "work-test-deliberately-unavailable-rg", vec![
+                NativeWorkRepoProject::inspect(&left,"left",Some(world)).unwrap(),
+                NativeWorkRepoProject::inspect(&right,"right",Some(world)).unwrap(),
+            ]).unwrap();
+        let l = work_file_source_ref("a:b",Path::new("c.md")).unwrap();
+        let r = work_file_source_ref("a",Path::new("b:c.md")).unwrap();
+        assert_ne!(l,r);
+        assert_eq!(provider.read(&l).unwrap().unwrap().body,"left bytes\n");
+        assert_eq!(provider.read(&r).unwrap().unwrap().body,"right bytes\n");
+        write(&left.join("c.md"),"identical body\n");
+        write(&right.join("b:c.md"),"identical body\n");
+        let left_read=provider.read(&l).unwrap().unwrap();
+        let right_read=provider.read(&r).unwrap().unwrap();
+        assert_eq!(left_read.body,right_read.body);
+        assert_ne!(left_read.binding.source,right_read.binding.source,"equal bytes cannot collapse native identity");
+        write(&left.join("c.md"),"left bytes\n");
+        write(&right.join("b:c.md"),"right bytes\n");
+        let legacy = SourceRef::parse("source:project:a:b:c.md").unwrap();
+        assert!(provider.read(&legacy).unwrap().is_none());
+        let lone = read_only_native(NativeWorkRepoProject::inspect(&right,"right",Some(world)).unwrap());
+        assert!(lone.read(&legacy).unwrap().is_none(),"one survivor is not issuance history");
+        assert_eq!(lone.read(&r).unwrap().unwrap().body,"right bytes\n");
+        let restart = read_only_native(NativeWorkRepoProject::inspect(&left,"left",Some(world)).unwrap());
+        assert_eq!(restart.read(&l).unwrap().unwrap().body,"left bytes\n");
+    }
+
+    #[test]
+    fn real_atomic_same_byte_declaration_survives_but_extensions_and_id_change_require_fresh_attachment() {
+        let owned = native_scratch();
+        let root = owned.path();
+        let original = manifest("native:a");
+        write(&root.join(WORK_MANIFEST_MEMBER),&original);
+        write(&root.join("README.md"),"retained bytes\n");
+        let provider = read_only_native(NativeWorkRepoProject::inspect(root,"display",None).unwrap());
+        let reference = work_file_source_ref("native:a",Path::new("README.md")).unwrap();
+        let replacement = root.join("ProjectCentral/replacement.json");
+        write(&replacement,&original);
+        std::fs::rename(&replacement,root.join(WORK_MANIFEST_MEMBER)).unwrap();
+        assert_eq!(provider.read(&reference).unwrap().unwrap().body,"retained bytes\n");
+        let mut changed:serde_json::Value = serde_json::from_str(&original).unwrap();
+        changed["foreign-extension"] = json!({"retained":true});
+        write(&root.join(WORK_MANIFEST_MEMBER),&changed.to_string());
+        assert_eq!(provider.read(&reference).unwrap_err().code(),"work_repos.native_declaration_changed");
+        let fresh = read_only_native(NativeWorkRepoProject::inspect(root,"display",None).unwrap());
+        assert_eq!(fresh.read(&reference).unwrap().unwrap().body,"retained bytes\n");
+        write(&root.join(WORK_MANIFEST_MEMBER),&manifest("native:b"));
+        assert_eq!(fresh.read(&reference).unwrap_err().code(),"work_repos.native_declaration_changed");
+        let new = read_only_native(NativeWorkRepoProject::inspect(root,"display",None).unwrap());
+        assert!(new.read(&reference).unwrap().is_none());
+        assert_eq!(new.read(&work_file_source_ref("native:b",Path::new("README.md")).unwrap()).unwrap().unwrap().body,"retained bytes\n");
+        assert_eq!(std::fs::read_to_string(root.join("README.md")).unwrap(),"retained bytes\n");
+    }
+
+    #[test]
+    fn real_native_declaration_withdrawal_corruption_and_missing_cannot_enable_independent_fallback() {
+        let owned = native_scratch();
+        let root = owned.path();
+        write(&root.join(WORK_MANIFEST_MEMBER),&manifest("native:a"));
+        write(&root.join("README.md"),"retained bytes\n");
+        let provider = read_only_native(NativeWorkRepoProject::inspect(root,"display",None).unwrap());
+        let reference = work_file_source_ref("native:a",Path::new("README.md")).unwrap();
+        write(&root.join("ProjectCentral/.no-agent-retrieval"),"");
+        assert_eq!(provider.read_bytes(&reference).unwrap_err().code(),"work_repos.source_unauthorised");
+        std::fs::remove_file(root.join("ProjectCentral/.no-agent-retrieval")).unwrap();
+        write(&root.join(WORK_MANIFEST_MEMBER),"not json");
+        assert_eq!(provider.read(&reference).unwrap_err().code(),"projectcentral.manifest_invalid");
+        let explicit = WorkReposSourcePoolProvider::connect(crate::runner::SystemRunner::probe(),
+            "work-test-deliberately-unavailable-rg", vec![independent(root,"native:a","display")]);
+        assert_eq!(explicit.read(&reference).unwrap_err().code(),"projectcentral.manifest_invalid");
+        assert!(!explicit.status().available);
+        std::fs::remove_file(root.join(WORK_MANIFEST_MEMBER)).unwrap();
+        let missing = provider.read(&reference).unwrap_err();
+        let cause = std::error::Error::source(&missing).unwrap().downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(cause.kind(),std::io::ErrorKind::NotFound);
+        assert_eq!(std::fs::read_to_string(root.join("README.md")).unwrap(),"retained bytes\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_equal_byte_root_alias_retarget_never_moves_the_old_project_read() {
+        let owned = native_scratch();
+        let original = owned.path().join("original");
+        let foreign = owned.path().join("foreign");
+        for root in [&original,&foreign] { write(&root.join(WORK_MANIFEST_MEMBER),&manifest("same:id")); }
+        write(&original.join("README.md"),"original bytes\n");
+        write(&foreign.join("README.md"),"foreign bytes\n");
+        let alias = owned.path().join("alias");
+        std::os::unix::fs::symlink(&original,&alias).unwrap();
+        let provider = read_only_native(NativeWorkRepoProject::inspect(&alias,"display",None).unwrap());
+        let reference = work_file_source_ref("same:id",Path::new("README.md")).unwrap();
+        assert_eq!(provider.read(&reference).unwrap().unwrap().body,"original bytes\n");
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&foreign,&alias).unwrap();
+        assert_eq!(provider.read(&reference).unwrap_err().code(),"work_repos.source_binding_changed");
+        assert_eq!(std::fs::read_to_string(original.join("README.md")).unwrap(),"original bytes\n");
+        assert_eq!(std::fs::read_to_string(foreign.join("README.md")).unwrap(),"foreign bytes\n");
+    }
+
+    #[test]
+    fn real_scoped_view_reuses_the_native_attachment_and_exact_opaque_identity() {
+        let owned = native_scratch();
+        let root = owned.path();
+        write(&root.join(WORK_MANIFEST_MEMBER),&manifest("a:b"));
+        write(&root.join("README.md"),"same owner\n");
+        let owner = read_only_native(NativeWorkRepoProject::inspect(root,"display",None).unwrap());
+        let view = owner.for_project("a:b").unwrap();
+        let reference = work_file_source_ref("a:b",Path::new("README.md")).unwrap();
+        assert_eq!(view.read(&reference).unwrap().unwrap().body,"same owner\n");
+        assert!(view.read(&work_file_source_ref("a",Path::new("b:README.md")).unwrap()).unwrap().is_none());
+        write(&root.join(WORK_MANIFEST_MEMBER),&manifest("a:c"));
+        assert_eq!(view.read(&reference).unwrap_err().code(),"work_repos.native_declaration_changed");
+    }
+
+    #[test]
+    fn real_explicit_reduced_composition_reads_without_ctrl_or_ripgrep_and_refuses_later_native_rebinding() {
+        let owned = native_scratch();
+        let root = owned.path();
+        write(&root.join("README.md"),"standalone bytes\n");
+        let provider = WorkReposSourcePoolProvider::connect(crate::runner::SystemRunner::probe(),
+            "work-test-deliberately-unavailable-rg", vec![independent(root,"standalone:id","display")]);
+        let reference = work_file_source_ref("standalone:id",Path::new("README.md")).unwrap();
+        assert!(!provider.status().available,"no fake rg availability");
+        assert_eq!(provider.read_bytes(&reference).unwrap().unwrap(),b"standalone bytes\n");
+        assert!(provider.read_for(&reference,aikit_core::context_source::RetrievalTarget::LocalAgent).unwrap().is_some());
+        assert_eq!(provider.read_for(&reference,aikit_core::context_source::RetrievalTarget::ExternalProvider).unwrap_err().code(),"knowledge.source_target_withheld");
+        write(&root.join(".no-agent-retrieval"),"");
+        assert_eq!(provider.read_bytes(&reference).unwrap_err().code(),"work_repos.source_unauthorised");
+        std::fs::remove_file(root.join(".no-agent-retrieval")).unwrap();
+        write(&root.join(WORK_MANIFEST_MEMBER),&manifest("standalone:id"));
+        assert_eq!(provider.read(&reference).unwrap_err().code(),"work_repos.native_declaration_changed");
+    }
+
+    #[test]
+    fn real_exact_byte_read_preserves_non_utf8_for_local_blake3_and_enforces_one_mebibyte() {
+        let owned = native_scratch();
+        let root = owned.path();
+        let bytes = vec![0xff,b'\n',0xfe];
+        std::fs::write(root.join("README.md"),&bytes).unwrap();
+        let provider = WorkReposSourcePoolProvider::connect(crate::runner::SystemRunner::probe(),
+            "work-test-deliberately-unavailable-rg",vec![independent(root,"literal:id","display")]);
+        let reference = work_file_source_ref("literal:id",Path::new("README.md")).unwrap();
+        assert_eq!(provider.read_bytes(&reference).unwrap().unwrap(),bytes);
+        let boundary = vec![b'x';usize::try_from(WORK_REPOS_MAX_READ_BYTES).unwrap()];
+        std::fs::write(root.join("README.md"),&boundary).unwrap();
+        assert_eq!(provider.read_bytes(&reference).unwrap().unwrap().len(),boundary.len());
+        std::fs::write(root.join("README.md"),vec![b'x';boundary.len()+1]).unwrap();
+        assert_eq!(provider.read_bytes(&reference).unwrap_err().code(),"work_repos.source_too_large");
+    }
+
+
+    #[test]
+    fn actual_conflicting_same_id_attachments_refuse_without_first_writer_selection() {
+        let owned=native_scratch();
+        let left=owned.path().join("left");
+        let right=owned.path().join("right");
+        std::fs::create_dir_all(&left).unwrap(); std::fs::create_dir_all(&right).unwrap();
+        write(&left.join("README.md"),"left\n");write(&right.join("README.md"),"right\n");
+        let provider=WorkReposSourcePoolProvider::connect(SystemRunner::probe(),
+            "work-test-deliberately-unavailable-rg",vec![independent(&left,"same:id","left"),independent(&right,"same:id","right")]);
+        let source=work_file_source_ref("same:id",Path::new("README.md")).unwrap();
+        assert_eq!(provider.read(&source).unwrap_err().code(),"work_repos.project_binding_conflict");
+        assert!(provider.status().detail.contains("conflicting"));
+        assert_eq!(std::fs::read_to_string(left.join("README.md")).unwrap(),"left\n");
+        assert_eq!(std::fs::read_to_string(right.join("README.md")).unwrap(),"right\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn actual_dangling_native_parent_is_unavailable_not_explicit_absence() {
+        let owned=native_scratch();
+        let root=owned.path();
+        std::os::unix::fs::symlink(root.join("missing-native-parent"),root.join("ProjectCentral")).unwrap();
+        write(&root.join("README.md"),"retained bytes\n");
+        let provider=WorkReposSourcePoolProvider::connect(SystemRunner::probe(),
+            "work-test-deliberately-unavailable-rg",vec![independent(root,"native:id","display")]);
+        let source=work_file_source_ref("native:id",Path::new("README.md")).unwrap();
+        assert_eq!(provider.read(&source).unwrap_err().code(),"work_repos.native_declaration_unavailable");
+        assert!(std::fs::symlink_metadata(root.join("ProjectCentral")).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(root.join("README.md")).unwrap(),"retained bytes\n");
+    }
+
 }

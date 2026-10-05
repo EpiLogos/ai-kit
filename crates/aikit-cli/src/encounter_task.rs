@@ -5,17 +5,18 @@ use crate::encounter_service::{EncounterProtocol, EncounterProvider, EncounterSe
 use aikit_adapters::central_placement::{
     AllocatedCentralTask, CentralTaskRequest, NativeCentralPlacement,
 };
-use aikit_adapters::runner::{CommandRunner, Output};
+use aikit_adapters::runner::{CommandRunner, Output, SystemRunner};
 use aikit_core::{ResourceRef, Result, SourceRevision};
 use aikit_store::{AikitHome, ContextLock, LockOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::{Read, Write},
-    path::PathBuf,
-    process::{Command, Stdio},
-    time::{Duration, Instant},
+    io::Write,
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
 };
 
 #[path = "encounter_task_material.rs"]
@@ -33,6 +34,10 @@ struct TaskRequest {
     provider: EncounterProvider,
     cwd: PathBuf,
     selected_directories: Vec<PathBuf>,
+    /// Explicit caller-owned exclusions narrow the native grant without
+    /// changing Central's authored policy or the legacy request shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    additional_protected_directories: Vec<PathBuf>,
     #[serde(default)]
     workcell_boundary_bin: PathBuf,
     #[serde(default)]
@@ -70,47 +75,26 @@ impl CommandRunner for OwnerRunner {
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| error("Missing native operation"))?;
-        let out = tempfile::tempfile().map_err(error)?;
-        let err = tempfile::tempfile().map_err(error)?;
-        let mut child = Command::new(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(out.try_clone().map_err(error)?)
-            .stderr(err.try_clone().map_err(error)?)
-            .spawn()
-            .map_err(error)?;
-        let start = Instant::now();
-        let status = loop {
-            if let Some(status) = child.try_wait().map_err(error)? {
-                break status;
-            }
-            if start.elapsed() > Duration::from_secs(15)
-                || out.metadata().map_err(error)?.len() > 4 * 1024 * 1024
-                || err.metadata().map_err(error)?.len() > 4 * 1024 * 1024
-            {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error("Native owner timeout/output limit; effects may be uncertain; recover the same task request explicitly"));
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        fn text(mut file: fs::File) -> Result<String> {
-            use std::io::{Seek, SeekFrom};
-            file.seek(SeekFrom::Start(0)).map_err(error)?;
-            let mut bytes = Vec::new();
-            file.take(4 * 1024 * 1024 + 1)
-                .read_to_end(&mut bytes)
-                .map_err(error)?;
-            if bytes.len() > 4 * 1024 * 1024 {
-                return Err(error("Native output too large"));
-            }
-            String::from_utf8(bytes).map_err(error)
-        }
-        Ok(Output {
-            status: status.code().unwrap_or(-1),
-            stdout: text(out)?,
-            stderr: text(err)?,
-        })
+        let mut command = Command::new(program);
+        command.args(args);
+        SystemRunner::new()
+            .with_timeout(Duration::from_secs(15))
+            .with_output_limit_bytes(4 * 1024 * 1024)
+            .with_strict_utf8()
+            .capture_command(&mut command)
+            .map_err(|cause| {
+                // Keep the public encounter domain while forwarding the actual
+                // capture, effect and lifecycle basis, including its IO cause.
+                let mut failure = error(cause.message())
+                    .with_io_source_from(&cause)
+                    .with("native_runner_code", cause.code());
+                for (key, value) in cause.details() {
+                    failure = failure.with(key.clone(), value.clone());
+                }
+                failure
+                    .with("automatic_retry", "false")
+                    .with("recovery", "Recover the same durable task request explicitly; do not replace or replay its execution intent")
+            })
     }
 }
 fn path(home: &AikitHome, session: &ResourceRef) -> PathBuf {
@@ -310,14 +294,27 @@ fn authority(
     }
     Ok(binding.revision)
 }
-fn inspect(request: &TaskRequest, requirements: &Value) -> Result<Value> {
-    if !request.workcell_boundary_bin.is_absolute() {
+/// The request is caller source, including historical requests whose boundary
+/// path was normalized by an older owner. A prepared Run separately owns the
+/// effective executable; selecting it must never rewrite that source or make
+/// a changed pending request look equivalent to the retained one.
+fn boundary_executable(record: &TaskRecord) -> Result<&Path> {
+    match (&record.request.prepared_run_scope, &record.prepared_run) {
+        (Some(_), Some(run)) => Ok(&run.boundary_executable),
+        (None, None) => Ok(&record.request.workcell_boundary_bin),
+        _ => Err(error(
+            "The prepared run binding is missing; no material fallback",
+        )),
+    }
+}
+fn inspect(boundary: &Path, requirements: &Value) -> Result<Value> {
+    if !boundary.is_absolute() {
         return Err(error("Explicit Workcell executable required"));
     }
     let file = tempfile::NamedTempFile::new().map_err(error)?;
     fs::write(file.path(), requirements.to_string()).map_err(error)?;
     let output = OwnerRunner.run(&[
-        request.workcell_boundary_bin.display().to_string(),
+        boundary.display().to_string(),
         "inspect".into(),
         file.path().display().to_string(),
         requirements["policy_revision"]
@@ -339,6 +336,126 @@ fn inspect(request: &TaskRequest, requirements: &Value) -> Result<Value> {
         ));
     }
     Ok(value)
+}
+struct TaskCodexRuntime {
+    npm_cache: PathBuf,
+    sqlite_home: PathBuf,
+    projection: Value,
+}
+
+/// The embedded Codex ACP connection uses npx, which writes package/runtime
+/// cache before the protocol opens. Keep those writes in the actual allocated
+/// Task T; neither ambient npm configuration nor another directory is a grant.
+fn task_codex_runtime(
+    record: &TaskRecord,
+    body: &EncounterProvider,
+    argv: &[String],
+) -> Result<Option<TaskCodexRuntime>> {
+    if body.from_profile.as_deref() != Some("codex")
+        || body.protocol != EncounterProtocol::Acp
+        || argv
+            .first()
+            .and_then(|program| std::path::Path::new(program).file_name())
+            != Some(std::ffi::OsStr::new("npx"))
+    {
+        return Ok(None);
+    }
+    let now = record
+        .allocation
+        .as_ref()
+        .ok_or_else(|| error("Codex runtime cache needs the actual native Task allocation"))?
+        .now_directory()?;
+    let requirements = record
+        .requirements
+        .as_ref()
+        .ok_or_else(|| error("Codex runtime cache needs the actual Task write boundary"))?;
+    let inspection = record
+        .inspection
+        .as_ref()
+        .ok_or_else(|| error("Codex runtime cache needs native protection inspection"))?;
+    if !now.is_absolute()
+        || !requirements["writable_paths"]
+            .as_array()
+            .is_some_and(|paths| paths.contains(&json!(now)))
+        || inspection["requirements"] != *requirements
+        || inspection["capabilities"]["supported"] != true
+        || !inspection["capabilities"]["coverage"]
+            .as_array()
+            .is_some_and(|coverage| {
+                [
+                    "file-content",
+                    "file-creation",
+                    "file-removal",
+                    "rename-link",
+                    "truncate",
+                ]
+                .iter()
+                .all(|required| coverage.contains(&json!(required)))
+            })
+    {
+        return Err(error(
+            "Codex runtime cache requires the exact protected Task T write aperture",
+        ));
+    }
+    let runtime = now.join("runtime");
+    let cache = runtime.join("npm-cache");
+    let sqlite_home = runtime.join("codex-sqlite");
+    for directory in [&now, &runtime, &cache, &sqlite_home] {
+        match fs::symlink_metadata(directory) {
+            Ok(metadata)
+                if metadata.is_dir()
+                    && !metadata.file_type().is_symlink()
+                    && directory
+                        .canonicalize()
+                        .map_err(|failure| error(&failure).with_io_source(failure))?
+                        == *directory => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && directory != &now => {}
+            Err(failure) => return Err(error(&failure).with_io_source(failure)),
+            _ => {
+                return Err(error(
+                    "Codex runtime cache ancestors must be real canonical directories",
+                ))
+            }
+        }
+    }
+    // This is the same original native home route delivered by ModelEnvironment,
+    // not provider.env, another credential home, or a Session identity. Native
+    // Codex canonicalizes nonempty CODEX_HOME. Missing/default input refuses
+    // here rather than granting creation in the ambient home.
+    let supplied_home = std::env::var("CODEX_HOME").ok().filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))
+        .ok_or_else(|| error("Codex Task runtime needs the original native home input"))?;
+    // Qualify only once, preserving the exact lexical route supplied to
+    // the unchanged provider environment. The actual native owner checks
+    // this route against the admitted canonical held origin before body.
+    let requested_input_root = if supplied_home.is_absolute() {
+        supplied_home
+    } else {
+        std::env::current_dir()
+            .map_err(|failure| error(&failure).with_io_source(failure))?
+            .join(supplied_home)
+    };
+    let input_root = fs::canonicalize(&requested_input_root)
+        .map_err(|failure| error(&failure).with_io_source(failure))?;
+    if !fs::symlink_metadata(&input_root).map_err(|failure| error(&failure).with_io_source(failure))?.is_dir()
+        || requested_input_root.to_str().is_none() || input_root.to_str().is_none() || now.to_str().is_none() {
+        return Err(error("Codex Task runtime needs an existing representable native input directory"));
+    }
+    let projection = json!({"schema":"workcell.runtime-projection/v1",
+        "requested_input_root":requested_input_root,"input_root":input_root,"runtime_root":now.join("native-codex-runtime"),
+        "immutable_members":["auth.json",".credentials.json","config.toml","config.d","managed_config.toml","hooks.json"],
+        "mutable_directories":["tmp","log","sessions","archived_sessions","shell_snapshots","thread-writer-locks"],
+        "mutable_files":["installation_id","history.jsonl","models_cache.json","session_index.jsonl"],
+        "boundary_digest":inspection["requirements_digest"]});
+    // npm and native Codex create absent runtime directories only after
+    // Workcell applies the object-bound Task aperture. HOME/CODEX_HOME remain
+    // the original auth/config origin; SQLite placement is not a new Session.
+    Ok(Some(TaskCodexRuntime {
+        npm_cache: cache,
+        sqlite_home,
+        projection,
+    }))
 }
 fn validate(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Result<()> {
     if record.schema != "aikit.encounter-task/v1" || !record.ready {
@@ -367,15 +484,16 @@ fn validate(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Res
     if Some(&cwd_anchor) != record.cwd_anchor.as_ref() {
         return Err(error("Task working directory changed since preparation or retains a legacy write-destination anchor; explicitly prepare the same task request again"));
     }
-    let requirements = owner.write_boundary_requirements(
+    let requirements = owner.write_boundary_requirements_with_additional_protection(
         task,
         &record.request.authority_ref,
         &record.request.selected_directories,
+        &record.request.additional_protected_directories,
     )?;
     if Some(&requirements) != record.requirements.as_ref() {
         return Err(error("Material requirements changed; no automatic renewal"));
     }
-    let fresh = inspect(&record.request, &requirements)?;
+    let fresh = inspect(boundary_executable(record)?, &requirements)?;
     // Includes every native path/type/inode and the exact material requirement digest.
     if record.inspection.as_ref().is_none_or(|old| {
         old["requirements_digest"] != fresh["requirements_digest"]
@@ -389,9 +507,7 @@ fn validate(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Res
     }
     match (&record.request.prepared_run_scope, &record.prepared_run) {
         (Some(request), Some(run)) => {
-            if record.request.workcell_boundary_bin != run.boundary_executable
-                || run.scope["prepared_write_boundary"] != fresh
-            {
+            if run.scope["prepared_write_boundary"] != fresh {
                 return Err(error("Prepared run execution boundary changed"));
             }
             run.revalidate(request)?;
@@ -489,10 +605,11 @@ fn prepare_published(
             return Err(error("Central task scope differs from the native Agency World; an explicit owner-backed relation is required"));
         }
         record.cwd_anchor = Some(owner.working_directory_anchor(&task, &record.request.cwd)?);
-        let requirements = owner.write_boundary_requirements(
+        let requirements = owner.write_boundary_requirements_with_additional_protection(
             &task,
             &record.request.authority_ref,
             &record.request.selected_directories,
+            &record.request.additional_protected_directories,
         )?;
         if let Some(previous) = restore {
             let old = previous
@@ -508,12 +625,13 @@ fn prepare_published(
             ));
             }
         }
+        let boundary = boundary_executable(&record)?.to_path_buf();
         record.inspection = Some(
             if let (Some(run), Some(request)) =
                 (&mut record.prepared_run, &record.request.prepared_run_scope)
             {
                 let scope=run.prepare(request,&record.request.cwd,&requirements,&json!({"agency_ref":binding.agency_ref,"source":binding.agency_source.path,"revision":binding.agency_source.revision,"digest":binding.agency_source.content_digest}))?;
-                let current = inspect(&record.request, &requirements)?;
+                let current = inspect(&boundary, &requirements)?;
                 if scope != current {
                     return Err(error(
                         "Prepared run boundary differs from native executable inspection",
@@ -521,7 +639,7 @@ fn prepare_published(
                 }
                 scope
             } else {
-                inspect(&record.request, &requirements)?
+                inspect(&boundary, &requirements)?
             },
         );
         if let Some(host) = &record.request.material_host {
@@ -600,7 +718,7 @@ impl EncounterService {
         input: Value,
         expected: Option<&SourceRevision>,
     ) -> Result<Value> {
-        let mut request: TaskRequest = serde_json::from_value(input).map_err(error)?;
+        let request: TaskRequest = serde_json::from_value(input).map_err(error)?;
         crate::encounter_profile_provider::ensure_connection_facts_reachable(&request.provider)?;
         // Resolve and validate the declared body before journalling a pending
         // task or allocating its NOW. The raw request remains the immutable
@@ -632,9 +750,7 @@ impl EncounterService {
                     "An existing prepared run cannot also allocate another material host",
                 ));
             }
-            let binding = prepared_run::Binding::resolve(run)?;
-            request.workcell_boundary_bin = binding.boundary_executable.clone();
-            Some(binding)
+            Some(prepared_run::Binding::resolve(run)?)
         } else {
             None
         };
@@ -910,27 +1026,37 @@ impl EncounterService {
             let default = crate::model_defaults::for_session(home, session, &resolved_body)?;
             model_argv = crate::model_defaults::launch_argv(&resolved_body, default.as_ref())?;
         }
-        if resolved_body.protocol == EncounterProtocol::PrimeRpc {
-            crate::encounter_service::prime_launch::append_context(home, session, &mut model_argv)?;
+        let codex_runtime = task_codex_runtime(&record, &resolved_body, &model_argv)?;
+        // Only nonsecret routing/type facts enter this private immutable launch
+        // source. It lives with the existing requirements owner, outside Task T.
+        let mut projection_file = if let Some(runtime) = codex_runtime.as_ref() {
+            let mut projection = tempfile::NamedTempFile::new_in(path(home, session).parent().expect("task parent"))
+                .map_err(|failure| error(&failure).with_io_source(failure))?;
+            projection.write_all(runtime.projection.to_string().as_bytes())
+                .map_err(|failure| error(&failure).with_io_source(failure))?;
+            projection.as_file().sync_all().map_err(|failure| error(&failure).with_io_source(failure))?;
+            Some(projection)
+        } else { None };
+        let mut command = Command::new(boundary_executable(&record)?);
+        command.arg(if projection_file.is_some() { "exec-runtime" } else { "exec" })
+            .arg(file.path())
+            .arg(requirements["policy_revision"].as_str().expect("validated revision"))
+            .arg(inspection["requirements_digest"].as_str().expect("validated digest"));
+        if let (Some(projection), Some(runtime)) = (projection_file.as_ref(), codex_runtime.as_ref()) {
+            command.arg(projection.path()).arg(format!("sha256:{:x}", Sha256::digest(runtime.projection.to_string().as_bytes())));
         }
-        let mut command = Command::new(&record.request.workcell_boundary_bin);
-        command
-            .args([
-                "exec",
-                &file.path().display().to_string(),
-                requirements["policy_revision"]
-                    .as_str()
-                    .expect("validated revision"),
-                inspection["requirements_digest"]
-                    .as_str()
-                    .expect("validated digest"),
-                "--",
-            ])
-            .args(&model_argv)
+        command.arg("--").args(&model_argv)
             .env_remove("CENTRAL_NATIVE_TOKEN")
             .env_remove("WORKCELL_CONTROL_TOKEN");
         if let Some(environment) = model_environment {
             environment.apply(&mut command);
+        }
+        if let Some(runtime) = codex_runtime {
+            command.env("npm_config_cache", runtime.npm_cache);
+            // Task-owned native material placement follows the credential
+            // scrub. Codex retains persisted/managed sqlite_home precedence;
+            // this does not override its auth/config home or session storage.
+            command.env("CODEX_SQLITE_HOME", runtime.sqlite_home);
         }
         if let Some(config_dir) = pi_config_dir {
             command.env("PI_CODING_AGENT_DIR", config_dir);
@@ -938,6 +1064,8 @@ impl EncounterService {
         // Retain the immutable requirements path across exec. Its private owner
         // directory is outside every write aperture. History can inspect it.
         let (_file, _retained_path) = file.keep().map_err(error)?;
+        let _retained_projection = projection_file.take().map(|file| file.keep()).transpose()
+            .map_err(|failure| { let cause = failure.error; error(&cause).with_io_source(cause) })?;
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -952,9 +1080,207 @@ impl EncounterService {
     }
 }
 
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod owner_runner_native_tests {
+    use super::*;
+    use std::error::Error;
+
+    #[test]
+    fn completed_native_nonzero_status_and_valid_replacement_character_are_data() {
+        let output = OwnerRunner
+            .run(&[
+                "/bin/sh".into(),
+                "-c".into(),
+                r#"printf '\357\277\275'; printf diagnostic >&2; exit 7"#.into(),
+            ])
+            .unwrap();
+        assert_eq!(output.status, 7);
+        assert_eq!(output.stdout, "\u{fffd}");
+        assert_eq!(output.stderr, "diagnostic");
+    }
+
+    #[test]
+    fn invalid_native_receipt_preserves_actual_effect_exit_lifecycle_and_typed_cause() {
+        let owned = tempfile::tempdir().unwrap();
+        for (stream, script) in [
+            ("stdout", r#"printf effect > "$1"; printf '\377'; exit 7"#),
+            ("stderr", r#"printf effect > "$1"; printf '\377' >&2; exit 7"#),
+        ] {
+            let marker = owned.path().join(stream);
+            let failure = OwnerRunner
+                .run(&[
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    script.into(),
+                    "owned-native-owner".into(),
+                    marker.to_str().unwrap().into(),
+                ])
+                .unwrap_err();
+            assert_eq!(fs::read(marker).unwrap(), b"effect");
+            assert_eq!(failure.code(), "encounter.runtime");
+            assert_eq!(failure.details()["native_runner_code"], "mux.command_utf8_invalid");
+            assert_eq!(failure.details()["stream"], stream);
+            assert_eq!(failure.details()["execution_started"], "true");
+            assert_eq!(failure.details()["known_exit_status"], "7");
+            assert_eq!(failure.details()["direct_child_reaped"], "true");
+            assert_eq!(failure.details()["effects"], "unknown");
+            assert_eq!(failure.details()["automatic_retry"], "false");
+            let actual = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+            assert_eq!(actual.kind(), std::io::ErrorKind::InvalidData);
+            let decoder = actual.get_ref().unwrap().downcast_ref::<std::str::Utf8Error>().unwrap();
+            assert_eq!(decoder.valid_up_to(), 0);
+            assert_eq!(decoder.error_len(), Some(1));
+            let cloned = failure.clone();
+            let retained = cloned.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+            assert!(std::ptr::eq(actual, retained));
+        }
+    }
+
+    #[test]
+    fn missing_actual_native_program_retains_not_started_and_original_io_cause() {
+        let owned = tempfile::tempdir().unwrap();
+        let missing = owned.path().join("missing-native-owner");
+        let failure = OwnerRunner.run(&[missing.to_str().unwrap().into()]).unwrap_err();
+        assert_eq!(failure.code(), "encounter.runtime");
+        assert_eq!(failure.details()["native_runner_code"], "mux.command_spawn_failed");
+        assert_eq!(failure.details()["execution_started"], "false");
+        assert_eq!(failure.details()["automatic_retry"], "false");
+        let actual = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(actual.kind(), std::io::ErrorKind::NotFound);
+        assert!(actual.raw_os_error().is_some());
+    }
+
+    #[test]
+    fn natural_inherited_native_output_retains_the_actual_complete_nonzero_result() {
+        let output = OwnerRunner
+            .run(&[
+                "/bin/sh".into(),
+                "-c".into(),
+                r#"(sleep 0.05; printf late; printf final >&2) & exit 7"#.into(),
+            ])
+            .unwrap();
+        assert_eq!(output.status, 7);
+        assert_eq!(output.stdout, "late");
+        assert_eq!(output.stderr, "final");
+    }
+
+    #[test]
+    fn complete_inherited_invalid_output_keeps_its_actual_decode_cause() {
+        let failure = OwnerRunner
+            .run(&[
+                "/bin/sh".into(),
+                "-c".into(),
+                r#"(sleep 0.05; printf '\377') & exit 0"#.into(),
+            ])
+            .unwrap_err();
+        assert_eq!(failure.code(), "encounter.runtime");
+        assert_eq!(failure.details()["native_runner_code"], "mux.command_utf8_invalid");
+        assert_eq!(failure.details()["known_exit_status"], "0");
+        assert_eq!(failure.details()["direct_child_reaped"], "true");
+        assert_eq!(failure.details()["group_signal"], "not-needed");
+        assert_eq!(failure.details()["capture_cancelled"], "false");
+        assert_eq!(failure.details()["stdout_eof"], "true");
+        assert_eq!(failure.details()["stderr_eof"], "true");
+        assert_eq!(failure.details()["effects"], "unknown");
+        assert_eq!(failure.details()["automatic_retry"], "false");
+        let actual = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(actual.kind(), std::io::ErrorKind::InvalidData);
+        let decoder = actual.get_ref().unwrap().downcast_ref::<std::str::Utf8Error>().unwrap();
+        assert_eq!(decoder.valid_up_to(), 0);
+        assert_eq!(decoder.error_len(), Some(1));
+    }
+
+    #[test]
+    fn unfinished_inherited_capture_refuses_a_receipt_and_keeps_actual_cancellation_facts() {
+        let owned = tempfile::tempdir().unwrap();
+        let marker = owned.path().join("native-descendant-ready");
+        let failure = OwnerRunner
+            .run(&[
+                "/bin/sh".into(),
+                "-c".into(),
+                r#"(printf ready > "$1"; sleep 30; printf unfinished) & while [ ! -s "$1" ]; do sleep 0.005; done; exit 23"#.into(),
+                "owned-native-capture".into(),
+                marker.to_str().unwrap().into(),
+            ])
+            .unwrap_err();
+        assert_eq!(fs::read(marker).unwrap(), b"ready");
+        assert_eq!(failure.code(), "encounter.runtime");
+        match failure.details()["native_runner_code"].as_str() {
+            "mux.command_capture_cancelled" => {
+                assert_eq!(failure.details()["stdout_eof"], "true");
+                assert_eq!(failure.details()["stderr_eof"], "true");
+            }
+            "mux.command_capture_incomplete" => {
+                assert!(failure.details()["stdout_eof"] == "false"
+                    || failure.details()["stderr_eof"] == "false");
+            }
+            other => panic!("actual held native capture had an unrelated failure: {other}"),
+        }
+        assert_eq!(failure.details()["known_exit_status"], "23");
+        assert_eq!(failure.details()["execution_started"], "true");
+        assert_eq!(failure.details()["direct_child_reaped"], "true");
+        assert_eq!(failure.details()["group_signal"], "delivered");
+        assert_eq!(failure.details()["capture_cancelled"], "true");
+        assert_eq!(failure.details()["effects"], "unknown");
+        assert_eq!(failure.details()["automatic_retry"], "false");
+    }
+}
+
 #[cfg(test)]
 mod profile_task_tests {
     use super::*;
+
+    fn raw_task_request(directory: &std::path::Path) -> Value {
+        json!({
+            "central": {
+                "ctrl_bin": directory.join("ctrl"), "central_root": directory,
+                "project": null, "task_ref": "task:request-contract",
+                "purpose": "Request serialization only, no native admission",
+                "participant_refs": ["agent/request-contract"], "source_refs": []
+            },
+            "provider": {"id":"request-contract", "label":"Request contract",
+                "protocol":"acp", "from_profile":"codex"},
+            "cwd": directory, "selected_directories": [],
+            "workcell_boundary_bin": directory.join("workcell-write-boundary"),
+            "authority_ref": "authority:request-contract"
+        })
+    }
+
+    #[test]
+    fn legacy_task_request_omits_empty_additional_protection() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let raw = raw_task_request(&root);
+        let legacy: TaskRequest = serde_json::from_value(raw.clone()).unwrap();
+        let legacy = serde_json::to_value(legacy).unwrap();
+        assert!(legacy.get("additional_protected_directories").is_none());
+        let mut explicit_empty = raw;
+        explicit_empty["additional_protected_directories"] = json!([]);
+        let parsed: TaskRequest = serde_json::from_value(explicit_empty).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), legacy);
+    }
+
+    #[test]
+    fn task_request_retains_exact_explicit_exclusions_as_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let mut raw = raw_task_request(&root);
+        let requested = json!([second, first, second]);
+        raw["additional_protected_directories"] = requested.clone();
+        let parsed: TaskRequest = serde_json::from_value(raw).unwrap();
+        let retained = serde_json::to_value(parsed).unwrap();
+        assert_eq!(retained["additional_protected_directories"], requested);
+        assert!(retained["selected_directories"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(retained["authority_ref"], "authority:request-contract");
+        assert_eq!(retained["central"]["task_ref"], "task:request-contract");
+    }
 
     #[test]
     fn codex_profile_request_keeps_raw_source_and_resolves_inside_the_boundary() {

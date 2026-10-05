@@ -375,7 +375,8 @@ impl CarrierScope {
 pub struct GatewayListenerReading {
     /// `unix` or `websocket`.
     pub carrier: String,
-    /// The Unix path or `HOST:PORT` asked for.
+    /// The requested Unix path or `HOST:PORT` while waiting; the actual bound
+    /// coordinate once the listener is bound. Port zero is an allocation request.
     pub bind: String,
     pub class: ListenerClass,
     /// The scope a client of this carrier gets with its ordinary credential.
@@ -448,6 +449,30 @@ impl GatewayProcessRecord {
     /// Record or update one listener (matched by carrier and bind).
     pub fn set_listener(&self, reading: GatewayListenerReading) {
         if let Ok(mut listeners) = self.listeners.lock() {
+            match listeners.iter_mut().find(|existing| {
+                existing.carrier == reading.carrier && existing.bind == reading.bind
+            }) {
+                Some(existing) => *existing = reading,
+                None => listeners.push(reading),
+            }
+        }
+    }
+
+    /// Record the actual bound listener, retiring only its exact configured
+    /// waiting coordinate in the same update. Other carrier/bind readings remain.
+    /// A non-bound reading never removes a pending configured coordinate.
+    /// Production wiring lands with the listener-reading reconciliation; the
+    /// posture contract itself is exercised by the tests below.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn set_bound_listener(&self, requested_bind: &str, reading: GatewayListenerReading) {
+        if let Ok(mut listeners) = self.listeners.lock() {
+            if reading.state == ListenerState::Bound {
+                listeners.retain(|existing| {
+                    !(existing.carrier == reading.carrier
+                        && existing.bind == requested_bind
+                        && existing.state == ListenerState::Waiting)
+                });
+            }
             match listeners.iter_mut().find(|existing| {
                 existing.carrier == reading.carrier && existing.bind == reading.bind
             }) {
@@ -617,6 +642,70 @@ mod tests {
             undigested.image_match(None, Some("fedcba")),
             ImageMatch::Different,
             "a different revision is different whatever the digest"
+        );
+    }
+
+    #[test]
+    fn a_bound_listener_replaces_only_its_exact_waiting_coordinate() {
+        // This is the record's pure state contract, not a native bind receipt.
+        // No background executable-digest worker is needed for listener state.
+        let record = GatewayProcessRecord {
+            build: GatewayBuildIdentity::of_this_process("listener-state-contract", true, None),
+            digest: std::sync::Arc::new(std::sync::OnceLock::new()),
+            listeners: Mutex::new(Vec::new()),
+        };
+        let reading = |carrier: &str, bind: &str, state| GatewayListenerReading {
+            carrier: carrier.into(),
+            bind: bind.into(),
+            class: ListenerClass::classify_bind(bind),
+            scope: CarrierScope::Peer,
+            state,
+            detail: (state == ListenerState::Waiting).then(|| "pending coordinate".into()),
+        };
+        let requested = "127.0.0.1:0";
+        let actual = "127.0.0.1:43123";
+        let waiting = reading("websocket", requested, ListenerState::Waiting);
+        let unrelated = reading("websocket", "127.0.0.1:43124", ListenerState::Waiting);
+        let other_carrier = reading("unix", requested, ListenerState::Waiting);
+        let current_actual = reading("websocket", actual, ListenerState::Waiting);
+        let bound = reading("websocket", actual, ListenerState::Bound);
+        record.set_listener(waiting.clone());
+        record.set_listener(unrelated.clone());
+        record.set_listener(other_carrier.clone());
+        record.set_listener(current_actual);
+
+        record.set_bound_listener(requested, bound.clone());
+        assert_eq!(
+            record.listeners(),
+            vec![unrelated.clone(), other_carrier.clone(), bound.clone()]
+        );
+        record.set_bound_listener(requested, bound.clone());
+        assert_eq!(
+            record.listeners(),
+            vec![unrelated.clone(), other_carrier.clone(), bound.clone()],
+            "updating the exact actual coordinate must not add another reading"
+        );
+
+        let established = reading("websocket", "127.0.0.1:43125", ListenerState::Bound);
+        record.set_listener(established.clone());
+        record.set_bound_listener(&established.bind, bound.clone());
+        assert_eq!(
+            record.listeners(),
+            vec![
+                unrelated.clone(),
+                other_carrier.clone(),
+                bound.clone(),
+                established.clone(),
+            ],
+            "a bound requested coordinate is not an obsolete waiting reading"
+        );
+
+        record.set_listener(waiting.clone());
+        record.set_bound_listener(requested, unrelated.clone());
+        assert_eq!(
+            record.listeners(),
+            vec![unrelated, other_carrier, bound, established, waiting],
+            "a non-bound observation cannot retire a pending coordinate"
         );
     }
 }

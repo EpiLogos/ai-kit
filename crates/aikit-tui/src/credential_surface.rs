@@ -121,6 +121,7 @@ fn tier_name(tier: SecretProviderTier) -> &'static str {
     match tier {
         SecretProviderTier::OsSecureStore => "os-secure-store",
         SecretProviderTier::BrokeredSecureProvider => "brokered-secure-provider",
+        SecretProviderTier::NamedHarnessAuthStore => "named-harness-auth-store",
         SecretProviderTier::ExplicitEncryptedFallback => "explicit-encrypted-fallback",
         SecretProviderTier::FederatedOrDynamic => "federated-or-dynamic",
         SecretProviderTier::ExplicitEnvironmentImport => "explicit-environment-import",

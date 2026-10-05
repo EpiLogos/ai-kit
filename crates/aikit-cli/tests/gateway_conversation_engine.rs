@@ -1611,7 +1611,32 @@ fn connector_pause_and_resume_stop_ingress_and_show_in_health() {
         .lock()
         .unwrap()
         .push_back(Some(fixture_inbound("while paused", "pause-1")));
-    thread::sleep(Duration::from_millis(300));
+    let mut last_paused_health: Option<Option<ConnectorHealth>> = None;
+    poll_until(
+        "pump-recorded paused health",
+        Duration::from_secs(10),
+        || {
+            let health = gateway
+                .lock()
+                .unwrap()
+                .status()
+                .connector_health
+                .into_iter()
+                .find(|health| health.connector_ref == r(CONNECTOR_REF));
+            let paused = health.as_ref().is_some_and(|health| {
+                health
+                    .detail
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("paused by gateway command")
+            });
+            if last_paused_health.as_ref() != Some(&health) {
+                eprintln!("actual paused connector health observation: {health:?}");
+                last_paused_health = Some(health);
+            }
+            paused
+        },
+    );
     let paused_gateway = gateway.lock().unwrap();
     let health = paused_gateway
         .status()
@@ -1627,22 +1652,58 @@ fn connector_pause_and_resume_stop_ingress_and_show_in_health() {
             .contains("paused by gateway command"),
         "health reflects the pause: {health:?}"
     );
+    assert_eq!(
+        paused_gateway
+            .snapshot()
+            .streams
+            .iter()
+            .map(|stream| stream.events.len())
+            .sum::<usize>(),
+        0,
+        "the paused event has not entered any journal"
+    );
     drop(paused_gateway);
+    let pending = recording.events.lock().unwrap();
+    assert_eq!(pending.len(), 1, "the paused event remains pending");
+    assert_eq!(
+        pending.front().and_then(Option::as_ref).unwrap().event_ref,
+        r("gateway-ingress/fixture/pause-1")
+    );
+    drop(pending);
 
     // Resume: the held event is admitted.
     controls.set_paused(&r(CONNECTOR_REF), false);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        let gateway = gateway.lock().unwrap();
-        if gateway.status().stream_count == 1 {
-            break;
-        }
-        drop(gateway);
-        thread::sleep(Duration::from_millis(10));
-    }
+    poll_until(
+        "the resumed event's journal append",
+        Duration::from_secs(10),
+        || {
+            gateway
+                .lock()
+                .unwrap()
+                .snapshot()
+                .streams
+                .iter()
+                .any(|stream| !stream.events.is_empty())
+        },
+    );
     let gateway = gateway.lock().unwrap();
     assert_eq!(gateway.status().stream_count, 1, "the held event landed");
+    let snapshot = gateway.snapshot();
+    let events = snapshot
+        .streams
+        .iter()
+        .flat_map(|stream| &stream.events)
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 1, "the held event was appended exactly once");
+    assert_eq!(snapshot.streams[0].stream_ref, r(STREAM_REF));
+    assert_eq!(events[0].sequence, 1);
+    assert_eq!(
+        events[0].event["metadata"]["connector_event_ref"],
+        "gateway-ingress/fixture/pause-1"
+    );
+    assert_eq!(events[0].event["content"], "while paused");
     drop(gateway);
+    assert!(recording.events.lock().unwrap().is_empty());
 
     shutdown.store(true, Ordering::SeqCst);
     for worker in workers.drain(..) {
@@ -2514,7 +2575,7 @@ fn a_held_ask_answers_with_the_vacancy_notice() {
 }
 
 #[test]
-fn an_ask_to_a_registered_profile_without_a_position_holds_for_the_agency() {
+fn an_ask_to_a_registered_profile_without_a_position_holds_at_the_agent_address() {
     let dir = TempDir::new().unwrap();
     let router = Arc::new(ProductionResolution {
         home: AikitHome::at(dir.path()),
@@ -2527,14 +2588,14 @@ fn an_ask_to_a_registered_profile_without_a_position_holds_for_the_agency() {
         "a7",
     ));
     harness.wait_until(
-        "the ask to the unembodied agency appends its held Communique and answers the chat",
+        "the ask to the Agent address appends its held Communique and answers the chat",
         Duration::from_secs(30),
         |harness| !harness.executed_sends().is_empty(),
     );
 
-    // The journal holds one Communique addressed to the agency at its own
-    // identity, held for it — the registry answered, and no Position gates
-    // the contact.
+    // The profile supplies an Agent address. The journal retains the mail
+    // there without inferring native Agency, occupancy or admission from
+    // that source; the held address stays recoverable.
     let records = harness
         .gateway
         .lock()
@@ -2548,9 +2609,9 @@ fn an_ask_to_a_registered_profile_without_a_position_holds_for_the_agency() {
     assert_eq!(record.state, CommuniqueState::Held);
     let basis = &record.transitions[0].basis;
     assert!(
-        basis.contains("registered agent profile")
-            && basis.contains("not currently embodied")
-            && basis.contains("held for the agency"),
+        basis.contains("Central AgentProfile with no Position")
+            && basis.contains("held for the Agent address")
+            && basis.contains("native identity and Agency admission are not established"),
         "{basis}"
     );
     // Origin provenance still rides the attribution basis.
@@ -2570,13 +2631,15 @@ fn an_ask_to_a_registered_profile_without_a_position_holds_for_the_agency() {
         record.attribution_basis
     );
 
-    // The chat is answered with the held-for-agency notice.
+    // The notice reports held mail and the source's lack of Agency proof.
     let sends = harness.executed_sends();
     assert!(
-        sends
-            .iter()
-            .any(|text| text.contains("held") && text.contains("not currently embodied")),
-        "the answer carries the held-for-agency fact: {sends:?}"
+        sends.iter().any(|text| {
+            text.contains("held at the same Agent address")
+                && text.contains("no native Agency or occupancy proof")
+                && text.contains("nothing has been delivered")
+        }),
+        "the answer retains the held Agent address without claiming delivery: {sends:?}"
     );
     assert_eq!(harness.source.parked_turns(), 0);
 
@@ -2878,162 +2941,6 @@ fn a_drain_needs_no_binding_and_names_each_interrupted_turn_and_never_replays_it
     assert_eq!(harness.stream_events().len(), 3);
 }
 
-#[test]
-fn an_announcement_that_cannot_be_queued_is_an_error_the_caller_sees_not_a_line_lost_on_stderr() {
-    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
-    // A binding the gateway does not hold: the line has nowhere to go.
-    let missing = r("gateway-binding/never-bound");
-    let announced = harness.engine.execute(
-        missing.clone(),
-        aikit_adapters::GatewayConversationOperation::Announce {
-            text: "gateway upgrade upg-x — completed".into(),
-        },
-    );
-    assert!(
-        announced.is_err(),
-        "an announcement that was not queued must say so, so the sender can try again"
-    );
-    // The same announcement to the bound conversation is queued and answered.
-    let delivered = harness.engine.execute(
-        harness.binding_ref.clone(),
-        aikit_adapters::GatewayConversationOperation::Announce {
-            text: "gateway upgrade upg-x — completed".into(),
-        },
-    );
-    assert!(delivered.is_ok());
-}
-
-/// What a conversation's `/upgrade` asks of the machine's upgrade owner.
-struct RecordingUpgrade {
-    plans: Mutex<usize>,
-    starts: Mutex<Vec<aikit_adapters::UpgradeOrigin>>,
-}
-
-impl aikit_adapters::GatewayUpgradeLauncher for RecordingUpgrade {
-    fn plan(&self) -> aikit_core::Result<(Value, String)> {
-        *self.plans.lock().unwrap() += 1;
-        Ok((json!({"action": "restart"}), "the gateway is stale".into()))
-    }
-    fn start(&self, origin: aikit_adapters::UpgradeOrigin) -> aikit_core::Result<(Value, String)> {
-        self.starts.lock().unwrap().push(origin);
-        Ok((json!({"upgrade": "upg-x"}), "upgrade upg-x started".into()))
-    }
-}
-
-#[test]
-fn upgrade_is_planned_on_request_started_only_by_apply_and_never_from_a_group() {
-    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
-    // The edge parses the two spellings and refuses a third.
-    assert!(matches!(
-        parse_slash("/upgrade"),
-        SlashParse::Operation(aikit_adapters::GatewayConversationOperation::Upgrade {
-            apply: false
-        })
-    ));
-    assert!(matches!(
-        parse_slash("/upgrade apply"),
-        SlashParse::Operation(aikit_adapters::GatewayConversationOperation::Upgrade {
-            apply: true
-        })
-    ));
-    assert!(matches!(
-        parse_slash("/upgrade now"),
-        SlashParse::Unknown(_)
-    ));
-
-    // No upgrade owner wired: it says so and names the command.
-    let execution = harness
-        .engine
-        .execute(
-            harness.binding_ref.clone(),
-            aikit_adapters::GatewayConversationOperation::Upgrade { apply: true },
-        )
-        .unwrap();
-    let GatewayResponse::Conversation { result, .. } = execution.response else {
-        panic!()
-    };
-    assert_eq!(result["upgrade"], "unavailable");
-    assert!(!execution.restart_requested);
-
-    let launcher = Arc::new(RecordingUpgrade {
-        plans: Mutex::new(0),
-        starts: Mutex::new(Vec::new()),
-    });
-    harness.engine.attach_upgrade_launcher(
-        launcher.clone() as Arc<dyn aikit_adapters::GatewayUpgradeLauncher>
-    );
-    let ask = |apply: bool, binding: &ResourceRef| {
-        let execution = harness
-            .engine
-            .execute(
-                binding.clone(),
-                aikit_adapters::GatewayConversationOperation::Upgrade { apply },
-            )
-            .unwrap();
-        // The gateway keeps serving: the upgrade runs in a worker that drains
-        // it when the new build is installed.
-        assert!(!execution.restart_requested);
-        let GatewayResponse::Conversation { result, .. } = execution.response else {
-            panic!()
-        };
-        result
-    };
-    // Reading the plan starts nothing.
-    let planned = ask(false, &harness.binding_ref);
-    assert_eq!(planned["upgrade"], "plan");
-    assert_eq!(*launcher.plans.lock().unwrap(), 1);
-    assert!(launcher.starts.lock().unwrap().is_empty());
-    // `apply` starts it, carrying the conversation the receipt returns to.
-    let started = ask(true, &harness.binding_ref);
-    assert_eq!(started["upgrade"], "started");
-    let starts = launcher.starts.lock().unwrap();
-    assert_eq!(starts.len(), 1);
-    assert_eq!(starts[0].binding_ref, BINDING_REF);
-    assert_eq!(starts[0].connector_ref.as_deref(), Some(CONNECTOR_REF));
-    drop(starts);
-
-    // A group conversation admits several senders and a slash command carries
-    // a message's authority: changing the machine is refused there.
-    let group = r("gateway-binding/fixture-group");
-    {
-        let mut kernel = harness.gateway.lock().unwrap();
-        kernel
-            .bind(GatewayBinding {
-                binding_ref: group.clone(),
-                connector_ref: r(CONNECTOR_REF),
-                address: ConversationAddress {
-                    platform: "fixture".into(),
-                    scope_id: Some("group".into()),
-                    conversation_id: "chat-group".into(),
-                    thread_id: None,
-                },
-                agent_session_ref: r("agent-session/fixture-group"),
-                agency_ref: r("agency/fixture"),
-                actuation_ref: r("actuation/fixture"),
-                actuation_stream_ref: r("actuation-stream/fixture-group"),
-                agent_ref: None,
-                harness_ref: None,
-                surface_ref: None,
-                forked_from: None,
-                context_revision: 1,
-                ingress: GatewayIngressPolicy {
-                    default: GatewayIngressDecision::Allow,
-                    sender_overrides: Default::default(),
-                },
-                provenance: Vec::new(),
-            })
-            .unwrap();
-    }
-    let refused = ask(true, &group);
-    assert_eq!(refused["upgrade"], "refused");
-    assert_eq!(
-        launcher.starts.lock().unwrap().len(),
-        1,
-        "no second upgrade started"
-    );
-    // Reading the plan in a group is harmless and still answers.
-    assert_eq!(ask(false, &group)["upgrade"], "plan");
-}
 
 // ---------------------------------------------------------------------------
 // Restart proof against the real binary

@@ -1112,8 +1112,6 @@ fn operation_name(operation: &GatewayConversationOperation) -> &'static str {
         GatewayConversationOperation::Harness => "harness",
         GatewayConversationOperation::Skills => "skills",
         GatewayConversationOperation::AskPosition { .. } => "ask",
-        GatewayConversationOperation::Announce { .. } => "announce",
-        GatewayConversationOperation::Upgrade { .. } => "upgrade",
     }
 }
 

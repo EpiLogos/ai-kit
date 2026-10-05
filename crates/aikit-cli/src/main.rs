@@ -276,7 +276,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
             Some(SystemGroupCommand::Hook(c)) => cmd_hook(cwd, c, json_mode),
             Some(SystemGroupCommand::ModelCatalogue(a)) => cmd_model_catalogue(cwd, a),
             Some(SystemGroupCommand::Trust(a)) => cmd_trust(cwd, a),
-            Some(SystemGroupCommand::Gateway(c)) => cmd_gateway(*c),
+            Some(SystemGroupCommand::Gateway(c)) => cmd_gateway(c),
             Some(SystemGroupCommand::Shell(c)) => cmd_shell(c),
             Some(SystemGroupCommand::Generations(c)) => match c.command {
                 SystemGenerationsCommand::Prune(a) => cmd_prune(cwd, a),
@@ -376,7 +376,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Alias(c)) => cmd_alias(cwd, c, json_mode),
         Some(Command::Mux(c)) => cmd_mux(cwd, c),
         Some(Command::Shell(c)) => cmd_shell(c),
-        Some(Command::Gateway(c)) => cmd_gateway(*c),
+        Some(Command::Gateway(c)) => cmd_gateway(c),
         Some(Command::Whoami(a)) => cmd_whoami(cwd, a, json_mode),
         Some(Command::Refocus(a)) => cmd_refocus(cwd, a, json_mode),
         Some(Command::Inhabit(a)) => cmd_inhabit(cwd, a, json_mode),
@@ -1446,6 +1446,23 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
     use aikit_cli::routine_cli::{gateway_tick, production_dispatcher, GatewayDispatcherTick};
     let home = AikitHome::discover()?;
     match command.command {
+        GatewaySub::NativeOwner(a) => {
+            let target = aikit_cli::gateway_ops::carrier_target(&home, &a.carrier)?;
+            let request = match a.request_file {
+                None => None,
+                Some(path) => {
+                    let text = if path.as_os_str() == "-" {
+                        std::io::read_to_string(std::io::Read::take(std::io::stdin(), 1024*1024+1))
+                    } else {
+                        std::fs::File::open(path).and_then(|file| std::io::read_to_string(std::io::Read::take(file, 1024*1024+1)))
+                    }.map_err(|e| AikitError::new("gateway.native_owner.request_read", e.to_string()))?;
+                    if text.len() > 1024*1024 { return Err(AikitError::new("gateway.native_owner.request_limit", "Native owner request exceeds the carrier bound")); }
+                    Some(serde_json::from_str(&text).map_err(|e| AikitError::new("gateway.native_owner.request_json", e.to_string()))?)
+                }
+            };
+            let response = aikit_adapters::gateway_command(&target, aikit_adapters::GatewayCommand::NativeOwner { world_ref:a.world_ref, expected_owner_generation:a.expected_owner_generation, request }, None)?;
+            gateway_data(serde_json::to_value(response).map_err(|e| AikitError::new("gateway.native_owner.response_encode", e.to_string()))?)
+        }
         GatewaySub::Serve(a) => {
             let config = aikit_cli::gateway_ops::serve_config(&home, &a)?;
             if config.websocket_bind.is_some() && config.unix_socket.is_none() {
@@ -1455,45 +1472,17 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                      runs. Add --unix to serve this home's socket as well."
                 );
             }
-            let owner_token = aikit_cli::gateway_ops::serve_owner_token(&a)?;
-            // An operator-named ref (flag or service environment) replaces the
-            // one a saved state was written under; with none named, the saved
-            // ref stands and `agency-gateway/local` is only the first-run name.
-            let configured_ref = a
+            let gateway_ref = a
                 .gateway_ref
-                .clone()
                 .or_else(|| std::env::var("AIKIT_GATEWAY_REF").ok())
-                .filter(|value| !value.trim().is_empty());
-            let parse_gateway_ref = |gateway_ref: &str| {
-                aikit_core::resource::ResourceRef::parse(gateway_ref).map_err(|error| {
+                .unwrap_or_else(|| "agency-gateway/local".into());
+            let gateway_ref =
+                aikit_core::resource::ResourceRef::parse(&gateway_ref).map_err(|error| {
                     AikitError::new(
                         "cli.gateway_ref_invalid",
                         format!("parse gateway ref {gateway_ref}: {error}"),
                     )
-                })
-            };
-            let gateway_ref =
-                parse_gateway_ref(configured_ref.as_deref().unwrap_or("agency-gateway/local"))?;
-            let configured_gateway_ref = match configured_ref.as_deref() {
-                Some(value) => Some(parse_gateway_ref(value)?),
-                None => None,
-            };
-            // Which build this process is: the revision the binary was built
-            // from and the Workcell it serves, read from the process itself.
-            let process = aikit_adapters::GatewayBuildIdentity::of_this_process(
-                // The full source revision when the build could read it (inside
-                // a checkout, or stamped by the caller); otherwise the short
-                // one the managed updater stamps for an exported cut. A
-                // process that cannot name its build is a finding, never a
-                // guess.
-                option_env!("AIKIT_BUILD_SOURCE_REVISION")
-                    .or(option_env!("SUITE_BUILD_REVISION"))
-                    .unwrap_or("unknown"),
-                option_env!("AIKIT_BUILD_SOURCE_DIRTY") == Some("1"),
-                std::env::var(aikit_cli::gateway_contact::WORKCELL_ENV)
-                    .ok()
-                    .filter(|value| !value.trim().is_empty()),
-            );
+                })?;
             // The Routine dispatcher ticks beside the carriers. A dispatcher
             // that cannot be built (no Central root to resolve time against)
             // degrades the service to carriers-only, said in plain words.
@@ -1562,28 +1551,6 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
             for line in &coexistence.lines {
                 eprintln!("gateway coexistence: {line}");
             }
-            // SIGTERM (launchctl bootout, systemctl stop) and SIGINT become a
-            // drain-then-exit instead of a process killed mid-turn. A second
-            // signal while the drain runs takes the default action, so a stuck
-            // drain can still be ended.
-            let stop_signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            #[cfg(unix)]
-            for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
-                signal_hook::flag::register_conditional_default(
-                    signal,
-                    std::sync::Arc::clone(&stop_signal),
-                )
-                .and_then(|_| {
-                    signal_hook::flag::register(signal, std::sync::Arc::clone(&stop_signal))
-                })
-                .map_err(|error| {
-                    AikitError::new(
-                        "cli.gateway_signal_handler",
-                        format!("install the stop-signal handler: {error}"),
-                    )
-                })?;
-            }
-            let stop_signal = Some(stop_signal);
             aikit_adapters::run_gateway_service_with_hooks(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
@@ -1603,147 +1570,12 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                                 cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
                             },
                         )),
-                        // `/upgrade` behind a connector conversation: the plan on
-                        // request, and on `apply` a worker that outlives this
-                        // process and reports back into that conversation.
-                        upgrade_launcher: Some(std::sync::Arc::new(
-                            aikit_cli::gateway_upgrade_system::ConversationUpgradeLauncher {
-                                home: home.clone(),
-                            },
-                        )),
                     }),
                     coexistence: coexistence.gate,
-                    owner_token,
-                    process: Some(process),
-                    configured_gateway_ref,
-                    stop_signal,
-                    // A peer's Flow request is answered by this Workcell's own
-                    // encounter owner, at the moment of asking.
-                    encounter_relay: Some(std::sync::Arc::new(
-                        aikit_cli::gateway_encounter_relay::OwnerEncounterRelay {
-                            home: home.clone(),
-                        },
-                    )),
+                    stop_signal: None,
                 },
             )?;
             Ok(Reply::Text("gateway service stopped cleanly".into()))
-        }
-        GatewaySub::Recover(a) => {
-            let data = aikit_cli::gateway_recover::recover(&home, a.apply)?;
-            Ok(Reply::Data {
-                context: EnvelopeContext::default(),
-                data,
-                warnings: vec![],
-                exit_code: json::EXIT_OK,
-            })
-        }
-        GatewaySub::Modes => {
-            let data = aikit_cli::gateway_modes::reading(&home)?;
-            Ok(Reply::Data {
-                context: EnvelopeContext::default(),
-                data,
-                warnings: vec![],
-                exit_code: json::EXIT_OK,
-            })
-        }
-        GatewaySub::Setup(a) => {
-            use aikit_cli::gateway_modes as modes;
-            let mut inputs = modes::gather_inputs(&home, &a.mode);
-            inputs.port = a.port;
-            inputs.bind = a.bind.clone();
-            inputs.gateway_ref = a.gateway_ref.clone();
-            inputs.workcell_ref = a.workcell_ref.clone();
-            inputs.peer_token_location = a.ws_token_location.clone();
-            inputs.owner_token_location = a.ws_owner_token_location.clone();
-            inputs.peer_remote_token_location = a.peer_token_location.clone();
-            inputs.allow_wide_bind = a.allow_wide_bind;
-            for peer in &a.peers {
-                let (workcell, endpoint) = peer.split_once('=').ok_or_else(|| {
-                    AikitError::new(
-                        "cli.usage",
-                        format!("--peer takes WORKCELL=HOST:PORT; got `{peer}`"),
-                    )
-                })?;
-                inputs
-                    .peers
-                    .push((workcell.to_owned(), endpoint.to_owned()));
-            }
-            let plan = modes::plan_setup(&inputs)?;
-            let data = if a.apply {
-                let effects = modes::SystemSetupEffects {
-                    home: home.clone(),
-                    home_dir: inputs.home_dir.clone(),
-                };
-                let results = modes::apply_setup(&plan, &effects, a.apply_tailscale)?;
-                jval!({"plan": plan, "applied": true, "results": results,
-                       "next": "aikit gateway doctor"})
-            } else {
-                jval!({"plan": plan, "applied": false,
-                       "next": "re-run with --apply to do this; nothing has changed"})
-            };
-            Ok(Reply::Data {
-                context: EnvelopeContext::default(),
-                data,
-                warnings: vec![],
-                exit_code: json::EXIT_OK,
-            })
-        }
-        GatewaySub::Doctor => {
-            let data = aikit_cli::gateway_doctor::run(&home)?;
-            Ok(Reply::Data {
-                context: EnvelopeContext::default(),
-                data,
-                warnings: vec![],
-                exit_code: json::EXIT_OK,
-            })
-        }
-        GatewaySub::Upgrade(cmd) => {
-            use aikit_cli::gateway_upgrade_system as upgrade;
-            let data = match cmd.command {
-                GatewayUpgradeSub::Plan(a) => upgrade::plan_command(
-                    &home,
-                    a.channel.as_deref(),
-                    a.candidate.as_deref(),
-                    a.install,
-                )?,
-                GatewayUpgradeSub::Apply(a) => upgrade::apply_command(
-                    &home,
-                    upgrade::ApplyOptions {
-                        install: a.install,
-                        channel: a.channel,
-                        candidate: a.candidate,
-                        origin: a
-                            .origin_binding
-                            .map(|binding_ref| aikit_adapters::UpgradeOrigin {
-                                binding_ref,
-                                connector_ref: None,
-                                in_reply_to_sequence: None,
-                            }),
-                        requested_by: "cli".into(),
-                        auto_rollback: !a.no_rollback,
-                        drain_grace_secs: a.drain_grace_secs,
-                        verify_timeout_secs: a.verify_timeout_secs,
-                        exit_wait_secs: a.exit_wait_secs,
-                        foreground: a.foreground,
-                        wait: a.wait,
-                    },
-                )?,
-                GatewayUpgradeSub::Status(a) => upgrade::status_command(&home, a.id.as_deref())?,
-                GatewayUpgradeSub::Resume(a) => {
-                    upgrade::resume_command(&home, a.id.as_deref(), a.foreground)?
-                }
-                GatewayUpgradeSub::Rollback(a) => upgrade::rollback_command(&home, &a.id)?,
-                GatewayUpgradeSub::Abandon(a) => {
-                    upgrade::abandon_command(&home, a.id.as_deref(), &a.reason)?
-                }
-                GatewayUpgradeSub::Worker(a) => upgrade::worker_command(&home, &a.transaction)?,
-            };
-            Ok(Reply::Data {
-                context: EnvelopeContext::default(),
-                data,
-                warnings: vec![],
-                exit_code: json::EXIT_OK,
-            })
         }
         GatewaySub::Tick => {
             let data = gateway_tick(&home)?;
@@ -1764,8 +1596,10 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                     token_location: a.token_location,
                     gateway_ref: a.gateway_ref,
                     workcell_ref: a.workcell_ref,
-                    owner_token_location: a.owner_token_location,
-                    allow_wide_bind: a.allow_wide_bind,
+                    // The command surface carries no owner-token or wide-bind
+                    // knobs on this lane; the install defaults hold.
+                    owner_token_location: None,
+                    allow_wide_bind: false,
                 },
             )?;
             Ok(Reply::Data {
@@ -1822,13 +1656,14 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                     project_world: a.project_world.as_deref(),
                     instance: a.instance.as_deref(),
                     require_workcell: a.require_workcell.as_deref(),
+                    // No owner ask rides a plain send on this command surface.
                     owner: aikit_cli::gateway_contact::owner_address::OwnerAsk {
-                        subject: a.subject,
-                        propose: a.propose,
-                        proposed_owner: a.proposed_owner,
-                        options: a.options,
-                        now_ref: a.now_ref,
-                        evidence_refs: a.evidence,
+                        subject: None,
+                        propose: false,
+                        proposed_owner: None,
+                        options: Vec::new(),
+                        now_ref: None,
+                        evidence_refs: Vec::new(),
                     },
                 },
             )?)
@@ -1882,14 +1717,12 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 websocket_bind,
                 websocket_path,
                 token_location,
-                no_probe,
-            } => aikit_cli::gateway_contact::remote_add_probed(
+            } => aikit_cli::gateway_contact::remote_add(
                 &home,
                 &workcell,
                 &websocket_bind,
                 &websocket_path,
                 &token_location,
-                !no_probe,
             )?,
             GatewayRemoteSub::List => aikit_cli::gateway_contact::remote_list(&home)?,
             GatewayRemoteSub::Remove { workcell } => {
@@ -1976,13 +1809,9 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Remote(_)
                 | GatewaySub::Connector(_)
                 | GatewaySub::Agent(_)
+                | GatewaySub::NativeOwner(_)
                 | GatewaySub::Coexistence(_)
-                | GatewaySub::Hoist(_)
-                | GatewaySub::Upgrade(_)
-                | GatewaySub::Doctor
-                | GatewaySub::Modes
-                | GatewaySub::Setup(_)
-                | GatewaySub::Recover(_) => unreachable!("handled above"),
+                | GatewaySub::Hoist(_) => unreachable!("handled above"),
             };
             let args = match query {
                 GatewaySub::Protocol(a)
@@ -2003,13 +1832,9 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Remote(_)
                 | GatewaySub::Connector(_)
                 | GatewaySub::Agent(_)
+                | GatewaySub::NativeOwner(_)
                 | GatewaySub::Coexistence(_)
-                | GatewaySub::Hoist(_)
-                | GatewaySub::Upgrade(_)
-                | GatewaySub::Doctor
-                | GatewaySub::Modes
-                | GatewaySub::Setup(_)
-                | GatewaySub::Recover(_) => unreachable!("handled above"),
+                | GatewaySub::Hoist(_) => unreachable!("handled above"),
             };
             let target = aikit_cli::gateway_ops::carrier_target(&home, &args)?;
             let response =
@@ -2165,7 +1990,28 @@ fn cmd_compose(cwd: &std::path::Path, args: ComposeArgs) -> Result<Reply> {
             )
         })
         .transpose()?;
-    let mut data = service.compose_selected_plan(admission.as_ref())?;
+    // An explicitly pinned native resident uses the exact admitted Agency,
+    // not an ambient actor/profile composition. The resident owner rechecks
+    // that source and observes the selected model before issuing a receipt.
+    // Roster selection and ordinary composition still require their full
+    // authored inputs below; this path makes no claim to those components.
+    let mut data = if args.realise && args.model.is_some() && args.resident_target.is_some() {
+        match admission.as_ref() {
+            Some(admitted) => {
+                admitted.basis.read()?;
+                jval!({
+                    "agency_admission": admitted,
+                    "composition_scope": {
+                        "kind": "explicit-native-resident",
+                        "ambient_components_claimed": false
+                    }
+                })
+            }
+            None => service.compose_selected_plan(None)?,
+        }
+    } else {
+        service.compose_selected_plan(admission.as_ref())?
+    };
     if let Some(path) = &args.resident_target {
         let metadata = std::fs::metadata(path)
             .map_err(|e| AikitError::new("compose.resident_target", e.to_string()))?;
@@ -3228,9 +3074,7 @@ fn cmd_z(cwd: &std::path::Path, a: ZArgs, json_mode: bool) -> Result<Reply> {
                         export: None,
                         confirmed: false,
                     })?;
-                    for line in &handle.report.output {
-                        println!("{line}");
-                    }
+                    run::emit_report(&handle.report)?;
                     Ok(Reply::Status(handle.report.status))
                 }
                 // Showing a capability is reading it, never enabling it.
@@ -3536,9 +3380,7 @@ fn open_surface(
                 return Err(run::exec_replace(&command));
             }
             let report = run::execute(&command)?;
-            for line in &report.output {
-                println!("{line}");
-            }
+            run::emit_report(&report)?;
             Ok(Reply::Status(report.status))
         }
         // The palette left to hand an interactive flow to the restored terminal
@@ -3575,27 +3417,18 @@ fn run_credential_setup_from_palette(service: &Service) -> Result<Reply> {
     })?;
     let requirements = credential_requirements_for_model_routes(&route_sets);
 
-    let store = aikit_store::CredentialBindingStore::new(service.home());
-    let unresolved: Vec<_> = requirements
-        .into_iter()
-        .filter(|requirement| {
-            store
-                .load(&requirement.credential_ref)
-                .ok()
-                .flatten()
-                .is_none()
-        })
-        .collect();
+    let unresolved =
+        credential::unresolved_global_credential_requirements(service.home(), &requirements)?;
 
     if unresolved.is_empty() {
-        println!("Every credential this world declares is already bound; nothing to set up.");
+        println!("Every credential this world declares has an eligible global binding; nothing to set up.");
         return Ok(Reply::Status(0));
     }
 
     let chosen = if unresolved.len() == 1 {
         &unresolved[0]
     } else {
-        eprintln!("This world has unbound credentials:");
+        eprintln!("This world has unresolved credentials:");
         for (index, requirement) in unresolved.iter().enumerate() {
             eprintln!("  {}) {}", index + 1, requirement.credential_ref.as_str());
         }
@@ -3770,8 +3603,56 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
         }
         KnowledgeSub::Read(a) => {
             let address = parse_knowledge_address(&a.address)?;
-            jval!(service.knowledge_read_document(&address)?)
+            match &a.span {
+                Some(raw) => {
+                    let (start, end) = parse_span(raw)?;
+                    jval!(service.knowledge_read_span(
+                        &address,
+                        &aikit_core::knowledge_facets::SourceSelector::TextSpan {
+                            start,
+                            end,
+                            anchor_ref: None,
+                        }
+                    )?)
+                }
+                None => jval!(service.knowledge_read_document(&address)?),
+            }
         }
+        KnowledgeSub::Coverage(a) => match &a.command {
+            KnowledgeCoverageSub::Show { sources } => {
+                let wanted = sources
+                    .iter()
+                    .map(|raw| parse_source_revision(raw))
+                    .collect::<Result<Vec<_>>>()?;
+                jval!(service.knowledge_coverage_show(&wanted)?)
+            }
+            KnowledgeCoverageSub::Declare {
+                source,
+                revision,
+                extents,
+                actor,
+                note,
+            } => {
+                let ranges = extents
+                    .iter()
+                    .map(|raw| parse_span(raw))
+                    .collect::<Result<Vec<_>>>()?;
+                jval!(service.knowledge_coverage_declare(
+                    source,
+                    revision,
+                    ranges,
+                    actor.clone(),
+                    note.clone()
+                )?)
+            }
+            KnowledgeCoverageSub::Unreadable {
+                source,
+                revision,
+                note,
+            } => {
+                jval!(service.knowledge_coverage_mark_unreadable(source, revision, note.clone())?)
+            }
+        },
         KnowledgeSub::Relations(a) => {
             let address = parse_knowledge_address(&a.address)?;
             jval!(service.knowledge_relations(&address, a.depth, a.max_nodes, a.max_edges)?)
@@ -4040,6 +3921,34 @@ fn cmd_wiki_shape(cwd: &std::path::Path, c: WikiShapeCmd) -> Result<Reply> {
     })
 }
 
+fn parse_span(raw: &str) -> Result<(u64, u64)> {
+    let (start, end) = raw.split_once(':').ok_or_else(|| {
+        AikitError::new(
+            "knowledge.span_format",
+            "a span reads START:END in char offsets, e.g. --span 0:400",
+        )
+    })?;
+    let start = start
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| AikitError::new("knowledge.span_format", "span start is not a number"))?;
+    let end = end
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| AikitError::new("knowledge.span_format", "span end is not a number"))?;
+    Ok((start, end))
+}
+
+fn parse_source_revision(raw: &str) -> Result<(String, String)> {
+    let (source, revision) = raw.rsplit_once('@').ok_or_else(|| {
+        AikitError::new(
+            "knowledge.coverage_input_format",
+            "name a source at a revision as SOURCE_REF@REVISION",
+        )
+    })?;
+    Ok((source.to_owned(), revision.to_owned()))
+}
+
 fn parse_knowledge_address(raw: &str) -> Result<aikit_core::KnowledgeAddress> {
     use aikit_core::resource::{ResourceRef, SourceRef};
     use aikit_core::KnowledgeAddress;
@@ -4101,9 +4010,7 @@ fn cmd_act(cwd: &std::path::Path, a: ActGroup, json_mode: bool) -> Result<Reply>
         }
         Some(ActGroupCommand::Invoke(args)) => match aikit_cli::act::invoke(&mut service, args)? {
             aikit_cli::act::ActOutcome::Capability { run, digest } => {
-                for line in &run.report.output {
-                    println!("{line}");
-                }
+                run::emit_report(&run.report)?;
                 if json_mode {
                     eprintln!(
                         "{}",
@@ -4847,6 +4754,32 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
     };
     match command.command {
         CredentialSub::Setup(a) => {
+            let harness_declaration = a
+                .harness_auth
+                .map(|harness| -> Result<credential::HarnessAuthDeclaration> {
+                    Ok(credential::HarnessAuthDeclaration {
+                        harness,
+                        provider: a.provider.ok_or_else(|| {
+                            AikitError::new(
+                                "credential.harness_auth_options",
+                                "--provider required",
+                            )
+                        })?,
+                        expires_at: a.expires_at.ok_or_else(|| {
+                            AikitError::new(
+                                "credential.harness_auth_options",
+                                "--expires-at required",
+                            )
+                        })?,
+                        expected_binding: a.expected_binding.ok_or_else(|| {
+                            AikitError::new(
+                                "credential.harness_auth_options",
+                                "--expected-binding required",
+                            )
+                        })?,
+                    })
+                })
+                .transpose()?;
             let request = credential::CredentialRequest {
                 credential: aikit_core::credential::CredentialRef::new(a.credential)?,
                 consumer_ref: a.consumer,
@@ -4858,7 +4791,12 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
                 declared_ref: declared_ref(a.declared_ref)?,
                 stdin: a.stdin,
             };
-            let outcome = credential::setup(service.home(), &request)?;
+            let outcome = match harness_declaration.as_ref() {
+                Some(declaration) => {
+                    credential::declare_harness_auth(service.home(), &request, declaration, false)?
+                }
+                None => credential::setup(service.home(), &request)?,
+            };
             let notes = if outcome.binding.declared_secret_ref.is_some() {
                 vec![format!(
                     "the material stays in the declared store; AIKit holds only the \
@@ -4873,6 +4811,7 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
                 jval!({
                     "credential": request.credential.as_str(),
                     "newly_bound": outcome.newly_bound,
+                    "binding_revision": aikit_store::CredentialBindingStore::revision(Some(&outcome.binding))?,
                     "binding": outcome.binding,
                     "resolution": outcome.resolution,
                 }),
@@ -4897,6 +4836,7 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
                 jval!({
                     "credential": request.credential.as_str(),
                     "resolution": inspection.resolution,
+                    "binding_revision": aikit_store::CredentialBindingStore::revision(inspection.persisted_binding.as_ref())?,
                     "persisted_binding": inspection.persisted_binding,
                     "native_provider": inspection.native_provider,
                     "env_available": inspection.env_available,
@@ -4906,13 +4846,48 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
         }
         CredentialSub::List(_) => {
             let bindings = aikit_store::CredentialBindingStore::new(service.home()).list()?;
+            let revisions: std::collections::BTreeMap<_, _> = bindings
+                .iter()
+                .map(|binding| {
+                    Ok((
+                        binding.credential_ref.as_str().to_string(),
+                        aikit_store::CredentialBindingStore::revision(Some(binding))?,
+                    ))
+                })
+                .collect::<Result<_>>()?;
             Ok(reply(
                 &service,
-                jval!({ "bindings": bindings, "count": bindings.len() }),
+                jval!({ "bindings": bindings, "binding_revisions": revisions, "count": bindings.len() }),
                 vec![],
             ))
         }
         CredentialSub::Rotate(a) => {
+            let harness_declaration = a
+                .harness_auth
+                .map(|harness| -> Result<credential::HarnessAuthDeclaration> {
+                    Ok(credential::HarnessAuthDeclaration {
+                        harness,
+                        provider: a.provider.ok_or_else(|| {
+                            AikitError::new(
+                                "credential.harness_auth_options",
+                                "--provider required",
+                            )
+                        })?,
+                        expires_at: a.expires_at.ok_or_else(|| {
+                            AikitError::new(
+                                "credential.harness_auth_options",
+                                "--expires-at required",
+                            )
+                        })?,
+                        expected_binding: a.expected_binding.ok_or_else(|| {
+                            AikitError::new(
+                                "credential.harness_auth_options",
+                                "--expected-binding required",
+                            )
+                        })?,
+                    })
+                })
+                .transpose()?;
             let request = credential::CredentialRequest {
                 credential: aikit_core::credential::CredentialRef::new(a.credential)?,
                 consumer_ref: a.consumer,
@@ -4924,12 +4899,25 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
                 declared_ref: declared_ref(a.declared_ref)?,
                 stdin: a.stdin,
             };
-            let outcome = credential::rotate(service.home(), &request)?;
+            let outcome = match harness_declaration.as_ref() {
+                Some(declaration) => {
+                    let result = credential::declare_harness_auth(
+                        service.home(),
+                        &request,
+                        declaration,
+                        true,
+                    )?;
+                    credential::CredentialRotationOutcome { binding: result.binding,
+                        notes: vec!["original Pi source remains read-only; exact source basis was re-declared".into()] }
+                }
+                None => credential::rotate(service.home(), &request)?,
+            };
             Ok(reply(
                 &service,
                 jval!({
                     "credential": request.credential.as_str(),
                     "rotated": true,
+                    "binding_revision": aikit_store::CredentialBindingStore::revision(Some(&outcome.binding))?,
                     "binding": outcome.binding,
                 }),
                 outcome.notes,
@@ -5032,9 +5020,7 @@ fn cmd_run(cwd: &std::path::Path, a: RunArgs) -> Result<Reply> {
         // executable is genuinely unreviewed.
         confirmed: a.confirm,
     })?;
-    for line in &handle.report.output {
-        println!("{line}");
-    }
+    run::emit_report(&handle.report)?;
     Ok(Reply::Status(handle.report.status))
 }
 
@@ -6982,6 +6968,56 @@ mod session_command_tests {
                 vec!["cmux", "close-workspace", "--workspace", "workspace:21"],
             ],
             "a foreign workspace in the grouped window forces ownership-bounded teardown"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod scoped_pi_palette_projection_tests {
+    use aikit_adapters::PiHarnessAuthProvider;
+    use aikit_cli::credential;
+    use aikit_core::credential::{
+        CredentialRef, SecretMaterialisationClass, SecretRequirement, SecretRequirementRef,
+    };
+    use aikit_store::{AikitHome, CredentialBindingStore};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn palette_retains_actual_scoped_requirement_instead_of_announcing_all_bound() {
+        let root = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(root.path().join("owner-state"));
+        let original = root.path().join("native-home");
+        let source = original.join(".pi/agent/auth.json");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"unparsed synthetic private palette origin").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let binding = PiHarnessAuthProvider::declare(
+            &original,
+            &CredentialRef::new("credential:z-ai").unwrap(),
+            "agent-session/palette-query",
+            "bounded actual palette consumer regression",
+            "2099-01-01T00:00:00Z",
+        )
+        .unwrap();
+        let store = CredentialBindingStore::new(&home);
+        store.compare_and_save(None, &binding).unwrap();
+        let requirement = SecretRequirement {
+            requirement_ref: SecretRequirementRef::new("secret-requirement:palette-z-ai").unwrap(),
+            credential_ref: binding.credential_ref.clone(),
+            consumer_ref: "aikit:model-routes".into(),
+            purpose: "palette actual unresolved owner requirement".into(),
+            permitted_materialisation: [SecretMaterialisationClass::ProcessEnv].into(),
+        };
+        let unresolved = credential::unresolved_global_credential_requirements(
+            &home,
+            std::slice::from_ref(&requirement),
+        )
+        .unwrap();
+        assert_eq!(unresolved, vec![requirement]);
+        assert_eq!(store.load(&binding.credential_ref).unwrap(), Some(binding));
+        assert_eq!(
+            std::fs::read(source).unwrap(),
+            b"unparsed synthetic private palette origin"
         );
     }
 }

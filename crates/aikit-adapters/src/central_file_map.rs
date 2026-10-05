@@ -1,9 +1,11 @@
 //! Query attachment to Central's persistent file map. Reads never rebuild it.
 use crate::runner::CommandRunner;
+use aikit_core::context_source::{ContextSourcePrivacy, RetrievalTarget};
 use aikit_core::knowledge_source_pool::*;
-use aikit_core::resource::{ProviderRef, ResourceLocator, SourceRef, SourceRevision};
+use aikit_core::resource::{ProviderRef, ResourceLocator, ResourceSource, SourceRef, SourceRevision, SourceState};
 use aikit_core::{AikitError, Result};
 use serde_json::{json, Value};
+use std::time::Duration;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -23,19 +25,46 @@ pub fn call<R: CommandRunner>(
     operation: &str,
     input: &Value,
 ) -> Result<Value> {
+    call_with_timeout(runner, executable, root, operation, input, None)
+}
+
+fn call_with_timeout<R: CommandRunner>(
+    runner: &R, executable: &Path, root: &Path, operation: &str, input: &Value,
+    timeout: Option<Duration>,
+) -> Result<Value> {
+    // This runner's argv contract is text. A lossy conversion could address
+    // another real executable or World; refuse before any owner effect.
+    let executable = executable.to_str().ok_or_else(||
+        AikitError::new("central.file_map_coordinate_invalid", "Native executable coordinate is not representable by the text transport")
+            .with("coordinate", "executable"))?;
+    let root = root.to_str().ok_or_else(||
+        AikitError::new("central.file_map_coordinate_invalid", "Native World coordinate is not representable by the text transport")
+            .with("coordinate", "root"))?;
     let argv = vec![
-        executable.to_string_lossy().into_owned(),
+        executable.to_owned(),
         "--json".into(),
         "--root".into(),
-        root.to_string_lossy().into_owned(),
+        root.to_owned(),
         "action".into(),
         "run".into(),
         format!("central.file-map.{operation}"),
         input.to_string(),
     ];
-    let output = runner.run(&argv)?;
-    let envelope: Value = serde_json::from_str(&output.stdout)
-        .map_err(|e| invalid(format!("Invalid owner response: {e}")))?;
+    let output = match timeout {
+        Some(timeout) => runner.run_with_timeout(&argv, timeout),
+        None => runner.run(&argv),
+    }.map_err(|error| {
+        AikitError::new("central.file_map_unavailable", error.message())
+            .with("owner_operation", format!("central.file-map.{operation}"))
+            .with("transport_error", json!({"code":error.code(), "message":error.message(), "details":error.details()}).to_string())
+            .with_io_source_from(&error)
+    })?;
+    let envelope: Value = serde_json::from_str(&output.stdout).map_err(|error| {
+        invalid(format!("Invalid owner response: {error}"))
+            .with("owner_operation", format!("central.file-map.{operation}"))
+            .with("execution_status", output.status.to_string())
+            .with("stdout", &output.stdout).with("stderr", &output.stderr)
+    })?;
     if !output.ok() || envelope["ok"] != true {
         return Err(AikitError::new(
             match envelope["error"]["code"].as_str() {
@@ -47,11 +76,21 @@ pub fn call<R: CommandRunner>(
             envelope["error"]["message"]
                 .as_str()
                 .unwrap_or("Central map operation failed"),
-        ));
+        )
+        .with("native_result", envelope.to_string())
+        .with("native_error", envelope["error"].to_string())
+        .with("native_error_code", envelope["error"]["code"].as_str().unwrap_or_default())
+        .with("owner_operation", format!("central.file-map.{operation}"))
+        .with("execution_status", output.status.to_string())
+        .with("stderr", &output.stderr));
     }
     let data = &envelope["data"];
     if data["schema"] != SCHEMA || data["operation"] != operation || !data["result"].is_object() {
-        return Err(invalid("Unsupported Central file-map envelope"));
+        return Err(invalid("Unsupported Central file-map envelope")
+            .with("native_result", envelope.to_string())
+            .with("owner_operation", format!("central.file-map.{operation}"))
+            .with("execution_status", output.status.to_string())
+            .with("stderr", &output.stderr));
     }
     Ok(data["result"].clone())
 }
@@ -74,10 +113,30 @@ fn material(v: &Value, body: String) -> Result<SourceMaterial> {
             "Owner withheld source retrieval",
         ));
     }
+    let source = SourceRef::parse(string(&v["source"], "ref")?)?;
+    let revision = SourceRevision::parse(string(v, "revision")?)?;
+    let origin = SourceOrigin {
+        schema: SOURCE_ORIGIN_METADATA.into(),
+        origin: SourceOriginKind::NativeSource {
+            world_ref: string(v, "world_ref")?.into(),
+            source: ResourceSource {
+                source: source.clone(), revision: Some(revision.clone()),
+                authority: None, locator: None, state: SourceState::Available,
+            },
+            observed_binding: NativeOriginBinding {
+                roles: serde_json::from_value(v["source"]["roles"].clone())
+                    .map_err(|error| invalid(error.to_string()))?,
+                provenance: string(&v["source"], "provenance")?.into(),
+                standing: string(&v["source"], "standing")?.into(),
+                treatment: string(&v["source"], "treatment")?.into(),
+                agent_retrieval_allowed: true,
+            },
+        },
+    };
     Ok(SourceMaterial {
         binding: SourceBinding {
-            source: SourceRef::parse(string(&v["source"], "ref")?)?,
-            revision: SourceRevision::parse(string(v, "revision")?)?,
+            source,
+            revision,
             title: string(v, "title")?.into(),
             tags: serde_json::from_value(v["tags"].clone()).map_err(|e| invalid(e.to_string()))?,
             // This is owner-authorised material, not an actor-independent team grant.
@@ -99,7 +158,7 @@ fn material(v: &Value, body: String) -> Result<SourceMaterial> {
             .into(),
             locator: Some(ResourceLocator::Path(string(v, "path")?.into())),
             metadata: BTreeMap::from([
-                ("central".into(), v.clone()),
+                (SOURCE_ORIGIN_METADATA.into(), origin.disclosure_projection()?),
                 ("owner_read_required".into(), json!(true)),
             ]),
         },
@@ -168,6 +227,92 @@ impl<R: CommandRunner> CentralFileMapProvider<R> {
     pub fn descriptors(&self) -> &[SourceMaterial] {
         &self.material
     }
+
+    /// Metadata-only routing for an existing projection consumer. The owner
+    /// supplies identity and location; the consumer still checks its aperture
+    /// before requesting content through this same owner's read_for.
+    pub(crate) fn locate_source(&self, path: &Path) -> Result<(SourceRef, PathBuf)> {
+        self.locate_source_with_timeout(path, None)
+    }
+
+    pub(crate) fn locate_source_with_timeout(&self, path: &Path, timeout: Option<Duration>) -> Result<(SourceRef, PathBuf)> {
+        let path = path.to_str().ok_or_else(||
+            AikitError::new("central.file_map_coordinate_invalid", "Native Source path is not representable by the owner text contract")
+                .with("coordinate", "path"))?;
+        let mut input = self.input.clone();
+        input["path"] = json!(path);
+        input["content"] = json!(false);
+        let reading = call_with_timeout(&self.runner, &self.executable, &self.root, "locate", &input, timeout)?;
+        if reading["source"]["agent_retrieval_allowed"] != true {
+            return Err(AikitError::new("central.file_map_denied", "Owner withheld source retrieval")
+                .with("native_reading", reading.to_string()));
+        }
+        Ok((SourceRef::parse(string(&reading["source"], "ref")?)?, PathBuf::from(string(&reading, "path")?)))
+    }
+
+    pub(crate) fn source_path(&self, source: &SourceRef) -> Result<PathBuf> {
+        let mut input = self.input.clone();
+        input["source_ref"] = json!(source.as_str());
+        input["content"] = json!(false);
+        let reading = call(&self.runner, &self.executable, &self.root, "resolve", &input)?;
+        if reading["source"]["ref"] != source.as_str() {
+            return Err(invalid("Owner returned another SourceRef").with("native_reading", reading.to_string()));
+        }
+        if reading["source"]["agent_retrieval_allowed"] != true {
+            return Err(AikitError::new("central.file_map_denied", "Owner withheld source retrieval")
+                .with("native_reading", reading.to_string()));
+        }
+        Ok(PathBuf::from(string(&reading, "path")?))
+    }
+
+    pub(crate) fn configured_timeout(&self) -> Option<Duration> { self.runner.configured_timeout() }
+
+    /// Current allowed descriptor metadata only. Inspect's metadata revision
+    /// is not a payload SourceRevision and is never forwarded as one.
+    pub(crate) fn visit_source_roster(
+        &self, timeout: Duration, mut visit: impl FnMut(&str, &Path) -> Result<()>,
+    ) -> Result<()> {
+        let mut input = self.input.clone();
+        input["resources"] = json!(true);
+        let reading = call_with_timeout(&self.runner, &self.executable, &self.root, "inspect", &input, Some(timeout))?;
+        let resources = reading["resources"].as_array()
+            .ok_or_else(|| invalid("Owner returned no Source descriptor roster").with("native_reading", reading.to_string()))?;
+        // The native capture/JSON has its own finite transport capacity. Do
+        // not clone the whole World into another roster before a consumer
+        // can charge its selected identities and paths.
+        for entry in resources {
+            if entry["source"]["agent_retrieval_allowed"] != true {
+                return Err(invalid("Owner roster contains an unadmitted Source").with("native_reading", reading.to_string()));
+            }
+            let reference = string(&entry["source"], "ref")?;
+            // Preserve the former roster's native identity validation without
+            // retaining another collection of unselected World identities.
+            let _ = SourceRef::parse(reference)?;
+            visit(reference, Path::new(string(entry, "path")?))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read_for_with_timeout(&self, source: &SourceRef, target: RetrievalTarget, timeout: Duration) -> Result<Option<SourcePoolReading>> {
+        self.read_current_for(source, target, Some(timeout))
+    }
+
+    fn read_current_for(&self, source: &SourceRef, target: RetrievalTarget, timeout: Option<Duration>) -> Result<Option<SourcePoolReading>> {
+        if !source.as_str().starts_with("central:source:") { return Ok(None); }
+        let privacy = ContextSourcePrivacy::default();
+        SourcePoolReading::check_target(privacy, target)?;
+        let mut input = self.input.clone();
+        input["source_ref"] = json!(source);
+        input["content"] = json!(true);
+        let reading = call_with_timeout(&self.runner, &self.executable, &self.root, "resolve", &input, timeout)?;
+        if reading["source"]["ref"] != source.as_str() {
+            return Err(invalid("Owner returned another SourceRef").with("native_reading", reading.to_string()));
+        }
+        let body = reading["content"].as_str().ok_or_else(|| invalid("Owner returned no text payload")
+            .with("native_reading", reading.to_string()))?;
+        Ok(Some(SourcePoolReading { material: material(&reading, body.into())?, privacy }))
+    }
+
 }
 impl<R: CommandRunner> SourcePoolProvider for CentralFileMapProvider<R> {
     fn capabilities(&self) -> SourceProviderCapabilities {
@@ -180,25 +325,12 @@ impl<R: CommandRunner> SourcePoolProvider for CentralFileMapProvider<R> {
         ))
     }
     fn read(&self, source: &SourceRef) -> Result<Option<SourceMaterial>> {
-        // A search can discover a newly registered source after attachment. The
-        // owner resolves it live; a stale attachment roster is not an authority.
-        let mut input = self.input.clone();
-        input["source_ref"] = json!(source);
-        input["content"] = json!(true);
-        let reading = call(
-            &self.runner,
-            &self.executable,
-            &self.root,
-            "resolve",
-            &input,
-        )?;
-        if reading["source"]["ref"] != source.as_str() {
-            return Err(invalid("Owner returned another SourceRef"));
-        }
-        let body = reading["content"]
-            .as_str()
-            .ok_or_else(|| invalid("Owner returned no text payload"))?;
-        Ok(Some(material(&reading, body.into())?))
+        Ok(self.read_for(source, RetrievalTarget::LocalAgent)?.map(|reading| reading.material))
+    }
+    fn read_for(&self, source: &SourceRef, target: RetrievalTarget) -> Result<Option<SourcePoolReading>> {
+        // Nonowners decline before the owning target predicate. Native errors
+        // and denials stay on this exact owner route without replica fallback.
+        self.read_current_for(source, target, None)
     }
     fn search(
         &self,
@@ -239,6 +371,7 @@ impl<R: CommandRunner> SourcePoolProvider for CentralFileMapProvider<R> {
                 }
                 Ok(SourceHit {
                     source: SourceRef::parse(string(&hit["source"], "ref")?)?,
+                    revision: Some(SourceRevision::parse(string(hit, "revision")?)?),
                     provider: provider(),
                     score: hit["score"].as_f64(),
                     title: string(hit, "title")?.into(),
@@ -254,34 +387,5 @@ impl<R: CommandRunner> SourcePoolProvider for CentralFileMapProvider<R> {
                 })
             })
             .collect()
-    }
-}
-
-#[cfg(test)]
-mod wiki_media_tests {
-    use super::*;
-    #[test]
-    fn declared_markdown_locator_is_readable_but_never_grants_access() {
-        let mut value = json!({"source":{"ref":"source:note","agent_retrieval_allowed":true},"revision":"r1","title":"Note","tags":[],"path":"/world/Note.MD","kind":"file"});
-        assert_eq!(
-            material(&value, "# Note".into())
-                .unwrap()
-                .binding
-                .media_type,
-            "text/markdown"
-        );
-        value["media_type"] = json!("text/plain");
-        assert_eq!(
-            material(&value, "literal".into())
-                .unwrap()
-                .binding
-                .media_type,
-            "text/plain"
-        );
-        value["source"]["agent_retrieval_allowed"] = json!(false);
-        assert_eq!(
-            material(&value, "secret".into()).unwrap_err().code(),
-            "central.file_map_denied"
-        );
     }
 }

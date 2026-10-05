@@ -112,6 +112,10 @@ pub struct Discovery {
     /// Exported Skill names the host did NOT report.
     #[serde(default)]
     pub missing_skills: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discovered_native_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_native_tools: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub evidence: String,
 }

@@ -46,7 +46,12 @@ fn initial() -> Value {
     ]})
 }
 fn fixture() -> (TempDir, PathBuf) {
-    let temp = TempDir::new().unwrap();
+    let temporary = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
+    fs::create_dir_all(&temporary).unwrap();
+    let temp = tempfile::Builder::new()
+        .prefix("native-wiki-construction-")
+        .tempdir_in(&temporary)
+        .unwrap();
     let path = temp.path().join("wiki.json");
     fs::write(&path, initial().to_string()).unwrap();
     (temp, path)
@@ -480,8 +485,42 @@ fn symlink_file_and_symlink_lock_are_refused_without_touching_target() {
     let before = fs::read(&path).unwrap();
     let alias = temp.path().join("alias.json");
     symlink(&path, &alias).unwrap();
-    assert_ne!(save(temp.path(), &alias, &create()).0, 0);
-    symlink(&path, temp.path().join(".wiki.json.construction.lock")).unwrap();
-    assert_ne!(save(temp.path(), &path, &create()).0, 0);
+    let (code, source_refusal) = save(temp.path(), &alias, &create());
+    assert_ne!(code, 0, "{source_refusal}");
+    assert_eq!(source_refusal["error"]["code"], "policy.denied");
     assert_eq!(fs::read(&path).unwrap(), before);
+
+    let legacy_target = temp.path().join("retained-legacy-lock-source");
+    fs::write(&legacy_target, "retained legacy source\n").unwrap();
+    let retired_lock = temp.path().join(".wiki.json.construction.lock");
+    symlink(&legacy_target, &retired_lock).unwrap();
+    let canonical_lock = temp.path().join(".wiki.json.publication.lock");
+    symlink(&path, &canonical_lock).unwrap();
+    let (code, lock_refusal) = save(temp.path(), &path, &create());
+    assert_ne!(code, 0, "{lock_refusal}");
+    assert_eq!(
+        lock_refusal["error"]["code"],
+        "knowledge.wiki_publication_identity"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(fs::read_link(&canonical_lock).unwrap(), path);
+    assert_eq!(fs::read_link(&retired_lock).unwrap(), legacy_target);
+    assert_eq!(
+        fs::read(&legacy_target).unwrap(),
+        b"retained legacy source\n"
+    );
+
+    // Remove only this fixture's rejected canonical lock. Actual native save
+    // succeeds without adopting, following or deleting the retired lock.
+    fs::remove_file(&canonical_lock).unwrap();
+    let (code, published) = save(temp.path(), &path, &create());
+    assert_eq!(code, 0, "{published}");
+    assert_eq!(published["data"]["persisted"], true);
+    assert_ne!(fs::read(&path).unwrap(), before);
+    assert!(fs::symlink_metadata(&canonical_lock).unwrap().is_file());
+    assert_eq!(fs::read_link(&retired_lock).unwrap(), legacy_target);
+    assert_eq!(
+        fs::read(&legacy_target).unwrap(),
+        b"retained legacy source\n"
+    );
 }

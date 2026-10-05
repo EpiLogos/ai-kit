@@ -25,9 +25,10 @@ pub mod target;
 
 pub use digest::sha256_hex;
 pub use model::{
-    source_revision, Attribution, CommandContribution, EnvironmentRequirement, HookEvent,
-    HookRequirement, McpDependency, PackageFile, PackageIdentity, PackageMember, PackageMetadata,
-    PackageSource, PortableSkillPackage, Presentation, UnresolvedMember, PORTABLE_PACKAGE_SCHEMA,
+    native_tool_module_path, source_revision, Attribution, CommandContribution,
+    EnvironmentRequirement, HookEvent, HookRequirement, McpDependency, NativeToolContribution,
+    PackageFile, PackageIdentity, PackageMember, PackageMetadata, PackageSource,
+    PortableSkillPackage, Presentation, UnresolvedMember, PORTABLE_PACKAGE_SCHEMA,
 };
 pub use receipt::{
     diff_provenance, CheckStatus, Discovery, NativeValidation, PackageDiff, Receipt, Validation,
@@ -571,3 +572,6 @@ defaultEnabled = false
         assert_eq!(model::kebab_case("Demo Set!!"), "demo-set");
     }
 }
+
+#[cfg(test)]
+mod native_tools_tests;
