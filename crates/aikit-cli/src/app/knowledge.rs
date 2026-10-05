@@ -3755,10 +3755,16 @@ mod discovery_physical_tests {
     fn native_discovery_tempdir() -> tempfile::TempDir {
         let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
         fs::create_dir_all(&scratch).unwrap();
-        tempfile::Builder::new()
+        // The admitted product scratch is a physical fixture prerequisite.
+        // Do not carry the build-time ../.. spelling into selected Source
+        // membership or compare it with the native physical owner basis.
+        let scratch = fs::canonicalize(&scratch).unwrap();
+        let fixture = tempfile::Builder::new()
             .prefix("knowledge-discovery-")
             .tempdir_in(&scratch)
-            .unwrap()
+            .unwrap();
+        assert_eq!(fs::canonicalize(fixture.path()).unwrap(), fixture.path());
+        fixture
     }
 
     fn visited_entry_count(boundary: &DiscoveryBoundary, path: &Path) -> Result<usize> {

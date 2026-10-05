@@ -1667,7 +1667,29 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
                         ));
                     }
                     capacity.retain_native(relative, source)?;
-                    native_sources.insert(relative.to_path_buf(), SourceRef::parse(source)?);
+                    let source = SourceRef::parse(source)?;
+                    let binding = owner
+                        .source_binding_only_with_timeout(&source, Self::remaining(deadline)?)?;
+                    let current = self.native_member(&binding, &basis)?;
+                    Self::remaining(deadline)?;
+                    if binding["ownership"] == "unregistered" {
+                        return Err(AikitError::new(
+                            "now_field.source_roster_changed",
+                            "Native temporal ownership changed after its metadata roster",
+                        )
+                        .with_native_result(binding));
+                    }
+                    let Some(current) = current else {
+                        return Ok(());
+                    };
+                    if current.as_path() != relative {
+                        return Err(AikitError::new(
+                            "now_field.source_roster_changed",
+                            "Native temporal location changed after its metadata roster",
+                        )
+                        .with_native_result(binding));
+                    }
+                    native_sources.insert(relative.to_path_buf(), source);
                 }
                 Ok(())
             })?;
@@ -1680,37 +1702,24 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
                 .includes
                 .retain(|include| include.glob.starts_with("Control/"));
         }
-        let candidates = self.query_candidates(&query_scope, deadline, &mut capacity)?;
+        let candidates = if self.native_owner.is_some() {
+            // Only this selected owner's currently admitted temporal Sources
+            // are query inputs. Independent filesystem presence neither adds
+            // an identity nor makes an unrelated Source this Project's input.
+            let mut selected = Vec::new();
+            for relative in native_sources.keys() {
+                capacity.retain_path(relative)?;
+                selected.push(relative.clone());
+            }
+            selected
+        } else {
+            self.query_candidates(&query_scope, deadline, &mut capacity)?
+        };
         let mut paths = Vec::new();
         for relative in candidates {
             Self::remaining(deadline)?;
             self.check_root(&basis)?;
             self.check_member(&relative)?;
-            if let Some(owner) = self.native_view()? {
-                if !native_sources.contains_key(&relative) {
-                    // Retain the actual native missing/denied response. A new
-                    // admission after the roster makes this operation stale;
-                    // it does not authorise a copied or invented fallback.
-                    let binding = owner.locate_binding_only_with_timeout(
-                        &self.scope.central_root.join(&relative),
-                        Self::remaining(deadline)?,
-                    )?;
-                    Self::remaining(deadline)?;
-                    if binding["ownership"] == "unregistered" {
-                        return Err(AikitError::new(
-                            "now_field.native_binding_unavailable",
-                            "Selected NOW candidate has no current native binding",
-                        )
-                        .with("native_binding", binding.to_string()));
-                    }
-                    self.native_member(&binding, &basis)?;
-                    return Err(AikitError::new(
-                        "now_field.source_roster_changed",
-                        "Native NOW admission changed after the metadata roster",
-                    )
-                    .with("native_binding", binding.to_string()));
-                }
-            }
             capacity.retain_bytes(QueryCapacity::path_size(
                 &self.scope.central_root,
                 Some(relative.as_os_str()),

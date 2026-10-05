@@ -23,7 +23,7 @@ jobs:
     env:
       ACTUATION_SHA: 4af495f6509bb0dd779112a225d71a9df8145b6e
       CENTRAL_SHA: 2a604574774c41921003ed99a2eed73b4c9f4266
-      WORKCELL_SHA: 31041f90cac3b0874267c10276216c2505b0a29f
+      WORKCELL_SHA: 5bdc73df22df1c44574b992cf5c6ab1e5fdc0cca
     steps:
       - uses: actions/checkout@v4
         with:
@@ -81,7 +81,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: EpiLogos/Workcell
-          ref: 31041f90cac3b0874267c10276216c2505b0a29f
+          ref: 5bdc73df22df1c44574b992cf5c6ab1e5fdc0cca
           path: .caw-native/Workcell
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2.9.2
@@ -825,6 +825,31 @@ jobs:
           }
           integration_image="$(read_image_role encounter_shutdown)"
           library_image="$(read_image_role owner-library)"
+          # Exercise the published consumer with this exact Source-built boundary.
+          # The compiler-owned library image and existing before/after custody
+          # remain authoritative; this capability test launches no provider body.
+          selected_runtime_case='encounter_service::agency::task::selected_runtime_native_tests::actual_native_capability_admits_only_the_selected_implemented_runtime'
+          record_command selected-runtime-roster stdout timeout --kill-after=5s 30s "$library_image" "$selected_runtime_case" --list --ignored
+          record_command selected-runtime-case stdout timeout --kill-after=5s 90s "$library_image" "$selected_runtime_case" --ignored --exact --nocapture --test-threads=1
+          SELECTED_RUNTIME_CASE="$selected_runtime_case" python3 - <<'PY_CASE'
+          import json,os,re
+          from pathlib import Path
+          out=Path(os.environ['RUNTIME_GATE_EVIDENCE'])
+          case=os.environ['SELECTED_RUNTIME_CASE']
+          roster=(out/'selected-runtime-roster.stdout').read_text()
+          body=(out/'selected-runtime-case.stdout').read_text()
+          named=sum(line.strip()==('test '+case+' ... ok') for line in body.splitlines())
+          qualified=(roster.splitlines().count(case+': test')==1
+                     and (out/'selected-runtime-roster.exit').read_text().strip()=='0'
+                     and (out/'selected-runtime-case.exit').read_text().strip()=='0'
+                     and named==1
+                     and re.search(r'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured;',body) is not None)
+          (out/'selected-runtime-result.json').write_text(json.dumps({
+              'case':case,'actual_exact_named_pass_count':named,'qualified':qualified,
+              'scope':'actual selected-runtime capability consumer with the immutable compiled Workcell companion; no installed worker or runtime namespace acceptance',
+          },indent=2)+'\n')
+          if not qualified:raise SystemExit(1)
+          PY_CASE
           export AIKIT_IDLE_LEGACY_BIN
           AIKIT_IDLE_LEGACY_BIN="$(read_image_role legacy-aikit)"
           export OWNER_INTEGRATION_ROSTER='["explicit_owner_shutdown_acknowledges_then_releases_socket_and_lock","direct_service_shutdown_is_idempotent_and_denies_later_effects","fragmented_request_and_large_response_cross_real_unix_socket_intact","native_acp_owner_shutdown_reaps_provider_and_preserves_history","actual_idle_ipc_ack_releases_the_same_owner_socket_and_lock","actual_owner_interruption_retains_unresolved_startup_and_refuses_idle","actual_resident_and_detached_resident_refuse_idle_without_stopping_provider","actual_legacy_owner_refuses_new_idle_tag_and_keeps_its_existing_lifecycle"]'

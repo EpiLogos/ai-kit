@@ -3779,10 +3779,9 @@ fn actual_streaming_mixed_corpus_keeps_first_ids_bodies_provenance_diagnostics_a
             assert_eq!(fs::read(corpus.join(relative)).unwrap(), text.as_bytes());
         }
         if apply {
-            let document: Value = serde_json::from_str(&read(&target)).unwrap();
             assert_eq!(
-                document["objects"],
-                serde_json::to_value(expected.objects.clone()).unwrap()
+                aikit_core::parse_wiki_objects(&read(&target)).unwrap(),
+                expected.objects
             );
             let material: Vec<SourceMaterial> = serde_json::from_str(&read(
                 &work.path().join("pipeline-output.sources/corpus-000.json"),

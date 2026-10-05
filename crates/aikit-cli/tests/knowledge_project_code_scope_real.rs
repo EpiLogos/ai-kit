@@ -394,7 +394,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         aikit_adapters::now_field::NowFieldScope::standard(&world),
     )
     .unwrap()
-    .with_native_owner(metadata_owner);
+    .with_native_owner(std::sync::Arc::clone(&metadata_owner));
     assert!(metadata_now.descriptors().is_empty());
     let mut current_refs = std::collections::BTreeSet::new();
     metadata_now
@@ -543,6 +543,81 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     }
     let indexed_before = owner_indexes(&world);
     let registry_before = fs::read(gitnexus_home.join("registry.json")).unwrap();
+    // Registration and body-free metadata do not prove a current payload or
+    // query. Check those exact native boundaries after the real index setup,
+    // through the same attached owner and its selected Project view.
+    use aikit_core::knowledge_source_pool::{SourcePoolProvider, SourceSearchMode};
+    let unregistered = world.join("Control/agents/now/flows/off-roster.md");
+    let unregistered_body = format!("{NEEDLE} in an actual unregistered Control file\n");
+    fs::write(&unregistered, &unregistered_body).unwrap();
+    let nonowner = native_action(
+        &world,
+        "central.file-map.locate",
+        serde_json::json!({"path":unregistered,"binding_only":true}),
+    );
+    assert_eq!(nonowner["ownership"], "unregistered");
+    assert_eq!(nonowner["binding_only"], true);
+    assert!(nonowner.get("source").is_none());
+    let larch_now = aikit_adapters::now_field::NowFieldSourcePoolProvider::connect(
+        aikit_adapters::now_field::default_runner(&world),
+        aikit_adapters::ripgrep::executable(),
+        aikit_adapters::now_field::NowFieldScope::standard(&world).for_project(Some("larch")),
+    )
+    .unwrap()
+    .with_native_owner(std::sync::Arc::clone(&metadata_owner))
+    .with_native_project("larch")
+    .unwrap();
+    assert!(
+        larch_now.status().available,
+        "the real query owner must be available"
+    );
+    let mut larch_refs = std::collections::BTreeSet::new();
+    larch_now
+        .visit_current_native_sources_for(
+            aikit_core::context_source::RetrievalTarget::LocalAgent,
+            Some("larch"),
+            16,
+            |source, _| {
+                larch_refs.insert(source.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(larch_refs, [larch_now_source.clone()].into_iter().collect());
+    let current_larch_now = larch_now
+        .read_for(
+            &larch_now_source,
+            aikit_core::context_source::RetrievalTarget::LocalAgent,
+        )
+        .unwrap()
+        .expect("the currently registered larch temporal Source must be readable");
+    assert_eq!(current_larch_now.material.binding.source, larch_now_source);
+    assert_eq!(
+        current_larch_now.material.body,
+        "larchUniqueLocator from larch NOW\n"
+    );
+    assert!(current_larch_now
+        .material
+        .binding
+        .requires_live_origin_read()
+        .unwrap());
+    let current_larch_hits = larch_now
+        .search(NEEDLE, SourceSearchMode::Fulltext, &[], 256)
+        .unwrap();
+    assert!(
+        current_larch_hits.iter().any(|hit| {
+            hit.source == larch_now_source
+                && hit.revision.as_ref() == Some(&current_larch_now.material.binding.revision)
+        }),
+        "the native literal query must retain its exact current Source and revision"
+    );
+    assert!(current_larch_hits
+        .iter()
+        .all(|hit| hit.source == larch_now_source));
+    assert_eq!(
+        fs::read(&unregistered).unwrap(),
+        unregistered_body.as_bytes()
+    );
 
     let cedar = world.join("Work/cedar");
     let root_text = world.display().to_string();
@@ -574,7 +649,17 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         "real WorkRepos provider did not surface larch source; absences: {:?}",
         cross.absences
     );
-    assert!(has_now_source(&cross, &larch_now_source));
+    assert!(
+        has_now_source(&cross, &larch_now_source),
+        "current registered NOW Source missing at the service boundary; public absences={:?}; provider/resource metadata={:?}",
+        cross.absences,
+        cross.hits.iter().map(|hit| (&hit.provider, &hit.resource)).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        fs::read(&unregistered).unwrap(),
+        unregistered_body.as_bytes()
+    );
+    assert!(!has_now_source(&cross, &common_now_source));
     assert!(cross
         .absences
         .iter()

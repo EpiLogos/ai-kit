@@ -1696,7 +1696,10 @@ mod tests {
             body.push('\n');
             write(&root.join(path), &body);
         }
+        // Actual rg overrides match relative to cwd. ProjectCentral is the
+        // fixture's admitted scratch ancestor, not part of this Work root.
         crate::runner::SystemRunner::new()
+            .with_cwd(root)
             .with_env_removed("RIPGREP_CONFIG_PATH")
             .with_timeout(std::time::Duration::from_secs(30))
     }
@@ -1795,6 +1798,11 @@ mod tests {
                 10,
             )
             .unwrap();
+        assert_eq!(
+            hits.len(),
+            files.len(),
+            "the real current query must retain all nine matching files: {hits:?}"
+        );
         assert_eq!(
             hits[0].source.as_str(),
             work_file_source_ref("demo", Path::new("docs/JEV-REDIS-NOW.md"))

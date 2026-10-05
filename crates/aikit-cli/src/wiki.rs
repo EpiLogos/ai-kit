@@ -4228,11 +4228,54 @@ mod maintenance_tests {
     #[test]
     fn maintenance_requires_a_projectcentral_ground() {
         let temp = TempDir::new().unwrap();
+        let missing = temp.path().join(PROJECT_MANIFEST_SOURCE);
+        assert!(!missing.exists());
+        let oracle = ProjectCentralFilesystemBinding::inspect(temp.path(), None)
+            .err()
+            .expect("the current native owner must refuse the missing ground");
         let (_request_dir, request) = request_file("");
-        let Err(error) = maintenance(temp.path(), &WikiMaintenanceArgs { request }) else {
+        let request_before = fs::read(&request).unwrap();
+        let Err(error) = maintenance(
+            temp.path(),
+            &WikiMaintenanceArgs {
+                request: request.clone(),
+            },
+        ) else {
             panic!("maintenance outside a ProjectCentral ground must be refused");
         };
-        assert_eq!(error.code(), "projectcentral.manifest_read");
+        assert_eq!(error.code(), oracle.code());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            use std::error::Error;
+            assert_eq!(error.code(), "knowledge.wiki_publication_identity");
+            let original_io = oracle
+                .source()
+                .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+                .expect("the native missing parent must retain its original OS cause");
+            let retained_io = error
+                .source()
+                .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+                .expect("the maintenance command must retain that original OS cause");
+            assert_eq!(original_io.kind(), std::io::ErrorKind::NotFound);
+            assert_eq!(
+                (retained_io.kind(), retained_io.raw_os_error()),
+                (original_io.kind(), original_io.raw_os_error())
+            );
+        }
+        let original: Value = serde_json::from_str(&error.details()["original_error"]).unwrap();
+        assert_eq!(
+            original,
+            jval!({"code":oracle.code(), "message":oracle.message(), "details":oracle.details()})
+        );
+        assert_eq!(error.details()["command_effect"], "none");
+        assert_eq!(error.details()["completed_effects"], "[]");
+        let failed: Value = serde_json::from_str(&error.details()["failed_effect"]).unwrap();
+        assert_eq!(failed["owner"], "AIKit/Wiki");
+        assert_eq!(failed["phase"], "prepare");
+        assert_eq!(failed["effect"], "none");
+        assert!(!missing.exists());
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+        assert_eq!(fs::read(&request).unwrap(), request_before);
     }
 
     fn binding_objects(wiki_path: &Path) -> Vec<WikiObject> {
