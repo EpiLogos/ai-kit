@@ -285,6 +285,59 @@ fn authority(
     }
     Ok(binding.revision)
 }
+fn needs_codex_runtime(body: &EncounterProvider, argv: &[String]) -> bool {
+    body.from_profile.as_deref() == Some("codex")
+        && body.protocol == EncounterProtocol::Acp
+        && argv
+            .first()
+            .and_then(|program| std::path::Path::new(program).file_name())
+            == Some(std::ffi::OsStr::new("npx"))
+}
+
+/// Workcell declares implemented runtime operations; ordinary write coverage
+/// cannot admit a different selected runtime. Unknown older receipts refuse.
+fn check_selected_runtime_capability(
+    provider: &EncounterProvider,
+    capabilities: &Value,
+) -> Result<()> {
+    let body = crate::encounter_profile_provider::resolve_provider(provider.clone())?;
+    if !needs_codex_runtime(&body, &body.argv) {
+        return Ok(());
+    }
+    let runtime = &capabilities["runtime_projection"];
+    if runtime["schema"] != "workcell.runtime-projection-capabilities/v1"
+        || runtime["operation"] != "exec-runtime"
+        || runtime["implemented"] != true
+    {
+        return Err(aikit_core::AikitError::new(
+            "encounter.runtime_projection_unavailable",
+            "The selected Codex runtime requires native same-origin projection; this Workcell owner does not declare that implementation",
+        ).with("profile", "codex").with("operation", "exec-runtime")
+         .with("recovery", "Retain the same Task and select or qualify its actual native material explicitly; no plain-exec fallback"));
+    }
+    Ok(())
+}
+
+fn preflight_selected_runtime(request: &TaskRequest, body: &EncounterProvider) -> Result<()> {
+    if !needs_codex_runtime(body, &body.argv) {
+        return Ok(());
+    }
+    if !request.workcell_boundary_bin.is_absolute() {
+        return Err(error("Explicit Workcell executable required"));
+    }
+    let output = OwnerRunner.run(&[
+        request.workcell_boundary_bin.display().to_string(),
+        "capabilities".into(),
+    ])?;
+    let capabilities: Value = serde_json::from_str(&output.stdout).map_err(error)?;
+    if !output.ok() || capabilities["schema"] != "workcell.write-boundary-capabilities/v1" {
+        return Err(error(
+            "Native Workcell runtime capability receipt was refused or invalid",
+        ));
+    }
+    check_selected_runtime_capability(&request.provider, &capabilities)
+}
+
 fn inspect(request: &TaskRequest, requirements: &Value) -> Result<Value> {
     if !request.workcell_boundary_bin.is_absolute() {
         return Err(error("Explicit Workcell executable required"));
@@ -313,6 +366,7 @@ fn inspect(request: &TaskRequest, requirements: &Value) -> Result<Value> {
             "Workcell cannot prepare the exact required protection; no weaker fallback",
         ));
     }
+    check_selected_runtime_capability(&request.provider, &value["capabilities"])?;
     Ok(value)
 }
 struct TaskCodexRuntime {
@@ -329,13 +383,7 @@ fn task_codex_runtime(
     body: &EncounterProvider,
     argv: &[String],
 ) -> Result<Option<TaskCodexRuntime>> {
-    if body.from_profile.as_deref() != Some("codex")
-        || body.protocol != EncounterProtocol::Acp
-        || argv
-            .first()
-            .and_then(|program| std::path::Path::new(program).file_name())
-            != Some(std::ffi::OsStr::new("npx"))
-    {
+    if !needs_codex_runtime(body, argv) {
         return Ok(None);
     }
     let now = record
@@ -882,6 +930,10 @@ impl EncounterService {
         if let Some(host) = &request.material_host {
             host.preflight()?;
         }
+        // Refuse unsupported selected material before publishing pending or
+        // allocating a replacement admission. The actual inspection repeats
+        // this check, including resume/final exec after an owner replacement.
+        preflight_selected_runtime(&request, &resolved_body)?;
         let current = read(home, session)?;
         if current.as_ref().map(|c| &c.revision) != expected {
             return Err(error(
@@ -1492,5 +1544,47 @@ mod profile_task_tests {
             launcher.argv, resolved.argv,
             "Codex is not launched outside Workcell"
         );
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod selected_runtime_native_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires the actual Source-qualified companion Workcell boundary, no mocked receipt"]
+    fn actual_native_capability_admits_only_the_selected_implemented_runtime() {
+        let executable = std::env::var("AIKIT_CAW_WORKCELL_BOUNDARY_BIN")
+            .expect("the actual native Workcell boundary must be supplied");
+        let output = OwnerRunner
+            .run(&[executable, "capabilities".into()])
+            .unwrap();
+        assert!(output.ok());
+        let capabilities: Value = serde_json::from_str(&output.stdout).unwrap();
+        assert_eq!(
+            capabilities["schema"],
+            "workcell.write-boundary-capabilities/v1"
+        );
+        assert_eq!(
+            capabilities["runtime_projection"]["schema"],
+            "workcell.runtime-projection-capabilities/v1"
+        );
+        let codex: EncounterProvider = serde_json::from_value(json!({
+            "id":"native-selected-codex", "label":"Native selected Codex", "protocol":"acp", "from_profile":"codex"
+        })).unwrap();
+        let actual = check_selected_runtime_capability(&codex, &capabilities);
+        if capabilities["runtime_projection"]["implemented"] == true {
+            actual.unwrap();
+        } else {
+            assert_eq!(
+                actual.unwrap_err().code(),
+                "encounter.runtime_projection_unavailable"
+            );
+        }
+        // An unsupported optional runtime cannot disable the real Pi path.
+        let pi: EncounterProvider = serde_json::from_value(json!({
+            "id":"native-selected-pi", "label":"Native selected Pi", "protocol":"pi-rpc", "from_profile":"pi"
+        })).unwrap();
+        check_selected_runtime_capability(&pi, &capabilities).unwrap();
     }
 }
