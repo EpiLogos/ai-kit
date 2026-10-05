@@ -64,20 +64,15 @@ pub fn load_project_wiki(project_root: &Path) -> (Vec<WikiObject>, Vec<String>) 
 /// unavailable, never evidence that the Project is an external standalone.
 /// Captures are operation-local physical continuity, not new semantic IDs.
 pub fn load_project_wiki_in_world(
-    project_root: &Path,
-    native_world_root: Option<&Path>,
+    project_root: &Path, native_world_root: Option<&Path>,
 ) -> (Vec<WikiObject>, Vec<String>) {
     match read_project_wiki(project_root, native_world_root) {
         Ok(Some(objects)) => (objects, Vec::new()),
         Ok(None) => (Vec::new(), Vec::new()),
-        Err(error) => (
-            Vec::new(),
-            vec![format!(
-                "continuity/file-context project wiki withheld or unavailable ({}, {}): {error}",
-                project_root.join(PROJECT_WIKI_MEMBER).display(),
-                error.code(),
-            )],
-        ),
+        Err(error) => (Vec::new(), vec![format!(
+            "continuity/file-context project wiki withheld or unavailable ({}, {}): {error}",
+            project_root.join(PROJECT_WIKI_MEMBER).display(), error.code(),
+        )]),
     }
 }
 
@@ -91,17 +86,12 @@ struct WikiRootObservation {
 }
 
 fn wiki_io(path: &Path, error: std::io::Error) -> aikit_core::AikitError {
-    aikit_core::AikitError::new(
-        "file_context.wiki_unavailable",
-        format!("{}: {error}", path.display()),
-    )
-    .with("path", path.display().to_string())
-    .with("cause_kind", format!("{:?}", error.kind()))
-    .with(
-        "cause_raw_os_error",
-        serde_json::json!(error.raw_os_error()).to_string(),
-    )
-    .with_io_source(error)
+    aikit_core::AikitError::new("file_context.wiki_unavailable",
+        format!("{}: {error}", path.display()))
+        .with("path", path.display().to_string())
+        .with("cause_kind", format!("{:?}", error.kind()))
+        .with("cause_raw_os_error", serde_json::json!(error.raw_os_error()).to_string())
+        .with_io_source(error)
 }
 
 fn wiki_directory_identity(path: &Path) -> aikit_core::Result<(u64, u64)> {
@@ -110,59 +100,41 @@ fn wiki_directory_identity(path: &Path) -> aikit_core::Result<(u64, u64)> {
         use std::os::unix::fs::MetadataExt;
         let metadata = std::fs::metadata(path).map_err(|error| wiki_io(path, error))?;
         if !metadata.is_dir() {
-            return Err(aikit_core::AikitError::new(
-                "file_context.wiki_unavailable",
-                "declared Wiki owner boundary is not a directory",
-            )
-            .with("path", path.display().to_string()));
+            return Err(aikit_core::AikitError::new("file_context.wiki_unavailable",
+                "declared Wiki owner boundary is not a directory")
+                .with("path", path.display().to_string()));
         }
         Ok((metadata.dev(), metadata.ino()))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    Err(aikit_core::AikitError::new(
-        "knowledge.wiki_publication_metadata_unsupported",
-        "native physical Wiki observation is unavailable on this platform",
-    )
-    .with("path", path.display().to_string()))
+    Err(aikit_core::AikitError::new("knowledge.wiki_publication_metadata_unsupported",
+        "native physical Wiki observation is unavailable on this platform")
+        .with("path", path.display().to_string()))
 }
 
 impl WikiRootObservation {
     fn capture(root: &Path) -> aikit_core::Result<Self> {
         // Retain the selected lexical route in invocation coordinates. Do not
         // canonicalize an alias away before the native ancestor policy sees it.
-        let requested = if root.is_absolute() {
-            root.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map_err(|error| wiki_io(root, error))?
-                .join(root)
+        let requested = if root.is_absolute() { root.to_path_buf() } else {
+            std::env::current_dir().map_err(|error| wiki_io(root, error))?.join(root)
         };
-        let canonical =
-            std::fs::canonicalize(&requested).map_err(|error| wiki_io(&requested, error))?;
-        let observation = Self {
-            identity: wiki_directory_identity(&requested)?,
-            requested,
-            canonical,
-        };
+        let canonical = std::fs::canonicalize(&requested).map_err(|error| wiki_io(&requested, error))?;
+        let observation = Self { identity: wiki_directory_identity(&requested)?, requested, canonical };
         observation.check()?;
         Ok(observation)
     }
 
-    fn declared_world_member(
-        &self,
-        world: &Self,
-    ) -> aikit_core::Result<Option<std::path::PathBuf>> {
+    fn declared_world_member(&self, world: &Self) -> aikit_core::Result<Option<std::path::PathBuf>> {
         // Parent components before the World can be legitimate invocation
         // coordinates. Match an actual ancestor without collapsing symlinks
         // or replacing the remaining original route with its destination.
         let mut observed_member = None;
         for ancestor in self.requested.ancestors() {
-            let canonical =
-                std::fs::canonicalize(ancestor).map_err(|error| wiki_io(ancestor, error))?;
+            let canonical = std::fs::canonicalize(ancestor)
+                .map_err(|error| wiki_io(ancestor, error))?;
             if canonical == world.canonical {
-                let member = self
-                    .requested
-                    .strip_prefix(ancestor)
+                let member = self.requested.strip_prefix(ancestor)
                     .expect("an observed path ancestor is a lexical prefix");
                 // Keep the outermost matching boundary. A descendant alias
                 // back to the World must not erase earlier lexical ancestors.
@@ -175,21 +147,17 @@ impl WikiRootObservation {
     fn check(&self) -> aikit_core::Result<()> {
         let canonical = std::fs::canonicalize(&self.requested)
             .map_err(|error| wiki_io(&self.requested, error))?;
-        if canonical != self.canonical || wiki_directory_identity(&self.requested)? != self.identity
-        {
-            return Err(aikit_core::AikitError::new(
-                "file_context.wiki_unavailable",
-                "declared Wiki owner root changed during this observation",
-            )
-            .with("path", self.requested.display().to_string()));
+        if canonical != self.canonical || wiki_directory_identity(&self.requested)? != self.identity {
+            return Err(aikit_core::AikitError::new("file_context.wiki_unavailable",
+                "declared Wiki owner root changed during this observation")
+                .with("path", self.requested.display().to_string()));
         }
         Ok(())
     }
 }
 
 fn admit_project_wiki(
-    project: &WikiRootObservation,
-    world: Option<&WikiRootObservation>,
+    project: &WikiRootObservation, world: Option<&WikiRootObservation>,
 ) -> aikit_core::Result<()> {
     use aikit_adapters::projectcentral::path_agent_readability;
     project.check()?;
@@ -197,11 +165,9 @@ fn admit_project_wiki(
     let admitted = path_agent_readability(&project.requested, member)
         .map_err(|error| wiki_io(&project.requested.join(member), error))?;
     if !admitted {
-        return Err(aikit_core::AikitError::new(
-            "file_context.wiki_withheld",
-            "current native Project read admission refused the selected Wiki",
-        )
-        .with("path", project.requested.join(member).display().to_string()));
+        return Err(aikit_core::AikitError::new("file_context.wiki_withheld",
+            "current native Project read admission refused the selected Wiki")
+            .with("path", project.requested.join(member).display().to_string()));
     }
     if let Some(world) = world {
         world.check()?;
@@ -209,32 +175,20 @@ fn admit_project_wiki(
             let admitted = path_agent_readability(&world.requested, &relative)
                 .map_err(|error| wiki_io(&world.requested.join(&relative), error))?;
             if !admitted {
-                return Err(aikit_core::AikitError::new(
-                    "file_context.wiki_withheld",
-                    "current native World read admission refused the original selected Wiki route",
-                )
-                .with("path", world.requested.join(relative).display().to_string()));
+                return Err(aikit_core::AikitError::new("file_context.wiki_withheld",
+                    "current native World read admission refused the original selected Wiki route")
+                    .with("path", world.requested.join(relative).display().to_string()));
             }
         }
-        let relative = project
-            .canonical
-            .join(member)
-            .strip_prefix(&world.canonical)
-            .map_err(|_| {
-                aikit_core::AikitError::new(
-                    "file_context.wiki_unavailable",
-                    "Project no longer belongs to the admitted native World aperture",
-                )
-            })?
-            .to_path_buf();
+        let relative = project.canonical.join(member).strip_prefix(&world.canonical)
+            .map_err(|_| aikit_core::AikitError::new("file_context.wiki_unavailable",
+                "Project no longer belongs to the admitted native World aperture"))?.to_path_buf();
         let admitted = path_agent_readability(&world.requested, &relative)
             .map_err(|error| wiki_io(&world.requested.join(&relative), error))?;
         if !admitted {
-            return Err(aikit_core::AikitError::new(
-                "file_context.wiki_withheld",
-                "current native World read admission refused the selected Wiki",
-            )
-            .with("path", world.requested.join(relative).display().to_string()));
+            return Err(aikit_core::AikitError::new("file_context.wiki_withheld",
+                "current native World read admission refused the selected Wiki")
+                .with("path", world.requested.join(relative).display().to_string()));
         }
         world.check()?;
     }
@@ -242,17 +196,13 @@ fn admit_project_wiki(
 }
 
 fn read_project_wiki(
-    project_root: &Path,
-    native_world_root: Option<&Path>,
+    project_root: &Path, native_world_root: Option<&Path>,
 ) -> aikit_core::Result<Option<Vec<WikiObject>>> {
     let project = WikiRootObservation::capture(project_root)?;
     let world = match native_world_root {
         Some(root) => {
             let observed = WikiRootObservation::capture(root)?;
-            project
-                .canonical
-                .starts_with(&observed.canonical)
-                .then_some(observed)
+            project.canonical.starts_with(&observed.canonical).then_some(observed)
         }
         None => None,
     };
@@ -266,19 +216,11 @@ fn read_project_wiki(
         }
         Err(error) => return Err(wiki_io(&path, error)),
     };
-    let member = canonical_source
-        .strip_prefix(&project.canonical)
-        .map_err(|_| {
-            aikit_core::AikitError::new(
-                "file_context.wiki_withheld",
-                "selected Wiki is outside its admitted Project boundary",
-            )
-        })?;
+    let member = canonical_source.strip_prefix(&project.canonical)
+        .map_err(|_| aikit_core::AikitError::new("file_context.wiki_withheld",
+            "selected Wiki is outside its admitted Project boundary"))?;
     let observed = aikit_adapters::projectcentral::publication::material_bytes_affiliated(
-        &project.requested,
-        project.identity,
-        member,
-        PROJECT_WIKI_READ_BUDGET,
+        &project.requested, project.identity, member, PROJECT_WIKI_READ_BUDGET,
     );
     let bytes = match observed {
         Ok(bytes) => bytes,
@@ -286,35 +228,24 @@ fn read_project_wiki(
             // Never project final-source Missing from an unresolved owner
             // boundary. Keep the actual original physical cause independently.
             if let Err(current) = admit_project_wiki(&project, world.as_ref()) {
-                return Err(error
-                    .with("current_admission_code", current.code())
+                return Err(error.with("current_admission_code", current.code())
                     .with("current_admission_message", current.message()));
             }
             use std::error::Error;
-            let missing = error
-                .source()
-                .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+            let missing = error.source().and_then(|cause| cause.downcast_ref::<std::io::Error>())
                 .is_some_and(|cause| cause.kind() == std::io::ErrorKind::NotFound);
-            if missing && !error.details().contains_key("observation_stage") {
-                return Ok(None);
-            }
+            if missing && !error.details().contains_key("observation_stage") { return Ok(None); }
             return Err(error);
         }
     };
     admit_project_wiki(&project, world.as_ref())?;
     let current_mapping = std::fs::canonicalize(&path).map_err(|error| wiki_io(&path, error))?;
     if current_mapping != canonical_source {
-        return Err(aikit_core::AikitError::new(
-            "file_context.wiki_withheld",
-            "selected Wiki member mapping changed during this observation",
-        ));
+        return Err(aikit_core::AikitError::new("file_context.wiki_withheld",
+            "selected Wiki member mapping changed during this observation"));
     }
-    let text = String::from_utf8(bytes).map_err(|error| {
-        aikit_core::AikitError::new(
-            "file_context.wiki_unavailable",
-            format!("selected Wiki is not UTF-8: {error}"),
-        )
-    })?;
+    let text = String::from_utf8(bytes).map_err(|error| aikit_core::AikitError::new(
+        "file_context.wiki_unavailable", format!("selected Wiki is not UTF-8: {error}")))?;
     parse_wiki_objects(&text).map(Some)
 }
 

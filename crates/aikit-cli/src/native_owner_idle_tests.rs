@@ -124,7 +124,6 @@ fn actual_prejournal_opening_refuses_idle_without_cancelling_the_open() {
                 provider: "actual-unresponsive-idle".into(),
                 cwd,
                 reconnect: false,
-                released_predecessor: None,
                 model_target: None,
             },
             Instant::now() + Duration::from_secs(3),

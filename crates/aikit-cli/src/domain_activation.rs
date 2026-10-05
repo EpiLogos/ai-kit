@@ -100,9 +100,10 @@ pub fn load_domains(project_root: &Path) -> (Vec<KnowledgeDomain>, Vec<String>) 
     load_domains_in(None, Some(project_root))
 }
 
-/// The prompt text a submit event carries, if any.
+/// The prompt text a submit event carries, if any. `text` is the pi carrier's
+/// field name; the earlier names keep precedence for the carriers using them.
 pub fn prompt_of(event: &HookEvent) -> Option<String> {
-    ["prompt", "user_prompt", "input"]
+    ["prompt", "user_prompt", "input", "text"]
         .iter()
         .find_map(|key| event.payload.get(*key))
         .and_then(|value| value.as_str())

@@ -3,7 +3,7 @@ use aikit_adapters::central_placement::{CentralTaskRequest, NativeCentralPlaceme
 use aikit_adapters::runner::{CommandRunner, SystemRunner};
 use aikit_core::ResourceRef;
 use serde_json::{json, Value};
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, time::Duration};
 
 fn world() -> (tempfile::TempDir, CentralTaskRequest) {
     let dir = tempfile::tempdir().unwrap();
@@ -293,4 +293,374 @@ fn existing_task_intent_mismatch_refuses_without_changing_native_bytes() {
         owner.revalidate(&task).unwrap()["record"]["lifecycle"],
         "active"
     );
+}
+
+fn world_with_protected_index() -> (tempfile::TempDir, CentralTaskRequest) {
+    let (directory, request) = world();
+    // Controlled authored input precedes actual native admission; it is not
+    // a fabricated owner response or a change to the personal World's law.
+    let path = request.central_root.join("Control/user/placement.json");
+    let mut source: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    source["protected"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("Control/relations/source-relations.json"));
+    fs::write(path, source.to_string()).unwrap();
+    (directory, request)
+}
+
+fn native_inspection(requirements: &Value, path: &std::path::Path) -> Value {
+    fs::write(path, requirements.to_string()).unwrap();
+    let binary = std::env::var("AIKIT_CAW_WORKCELL_BOUNDARY_BIN").expect("exact Workcell required");
+    let output = SystemRunner::new()
+        .with_timeout(Duration::from_secs(15))
+        .run(&[
+            binary,
+            "inspect".into(),
+            path.display().to_string(),
+            requirements["policy_revision"].as_str().unwrap().into(),
+        ])
+        .unwrap();
+    assert!(output.ok(), "{} {}", output.stdout, output.stderr);
+    let native: Value = serde_json::from_str(&output.stdout).unwrap();
+    assert_eq!(native["requirements"], *requirements);
+    assert_eq!(native["state"], "prepared-not-executed");
+    native
+}
+
+fn native_protocol_execution(
+    prepared: &Value,
+    path: &std::path::Path,
+    body: &str,
+    arguments: &[PathBuf],
+) -> Value {
+    fs::write(path, prepared.to_string()).unwrap();
+    let binary = std::env::var("AIKIT_CAW_WORKCELL_BOUNDARY_BIN").expect("exact Workcell required");
+    // This finite OS driver only captures the actual native exec. It supplies
+    // pipes required by that protocol boundary and never constructs an owner
+    // success reply, model, Agency or Human decision.
+    let driver = r#"
+import json, subprocess, sys
+result = subprocess.run(sys.argv[1:], input=b'', capture_output=True, timeout=15)
+print(json.dumps({'returncode': result.returncode,
+                  'stdout': result.stdout.decode('utf-8'),
+                  'stderr': result.stderr.decode('utf-8')}))
+"#;
+    let mut argv = vec![
+        "python3".into(),
+        "-B".into(),
+        "-c".into(),
+        driver.into(),
+        binary,
+        "exec".into(),
+        path.display().to_string(),
+        prepared["requirements"]["policy_revision"]
+            .as_str()
+            .unwrap()
+            .into(),
+        prepared["requirements_digest"].as_str().unwrap().into(),
+        "--".into(),
+        "python3".into(),
+        "-B".into(),
+        "-c".into(),
+        body.into(),
+    ];
+    argv.extend(arguments.iter().map(|path| path.display().to_string()));
+    let output = SystemRunner::new()
+        .with_timeout(Duration::from_secs(20))
+        .with_env_removed("CENTRAL_NATIVE_TOKEN")
+        .with_env_removed("WORKCELL_CONTROL_TOKEN")
+        .run(&argv)
+        .unwrap();
+    assert!(output.ok(), "{} {}", output.stdout, output.stderr);
+    serde_json::from_str(&output.stdout).unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires exact native Central and Workcell174+; mandatory CAW workflow"]
+fn native_explicit_exclusion_retains_policy_and_real_child_continuation() {
+    use std::os::unix::fs::MetadataExt;
+    let (_directory, request) = world_with_protected_index();
+    let owner = NativeCentralPlacement::new(SystemRunner::new());
+    let task = owner.allocate(&request).unwrap();
+    let authority = ResourceRef::parse("authority:controlled-native-test").unwrap();
+    let relations = request.central_root.join("Control/relations");
+    let index = relations.join("source-relations.json");
+    let legacy = owner
+        .write_boundary_requirements(&task, &authority, &[])
+        .unwrap();
+    let empty = owner
+        .write_boundary_requirements_with_additional_protection(&task, &authority, &[], &[])
+        .unwrap();
+    assert_eq!(empty, legacy);
+    assert_eq!(
+        legacy["protected_paths"],
+        task.allocation["policy"]["protected_paths"]
+    );
+    let requirements = owner
+        .write_boundary_requirements_with_additional_protection(
+            &task,
+            &authority,
+            &[],
+            &[relations.clone(), relations.clone()],
+        )
+        .unwrap();
+    let mut expected = legacy["protected_paths"].as_array().unwrap().clone();
+    if !expected.contains(&json!(relations)) {
+        expected.push(json!(relations));
+    }
+    assert_eq!(requirements["protected_paths"], json!(expected));
+    for key in [
+        "policy_ref",
+        "policy_revision",
+        "authority_ref",
+        "required_coverage",
+        "expires_at_unix_ms",
+        "writable_paths",
+    ] {
+        assert_eq!(requirements[key], legacy[key], "{key}");
+    }
+    let legacy_prepared = native_inspection(&legacy, &request.central_root.join("legacy-req.json"));
+    let prepared = native_inspection(
+        &requirements,
+        &request.central_root.join("augmented-req.json"),
+    );
+    assert_ne!(
+        prepared["requirements_digest"],
+        legacy_prepared["requirements_digest"]
+    );
+    let covered = prepared["protected_objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["path"] == json!(index))
+        .unwrap();
+    assert_eq!(covered["protection_basis"]["path"], json!(relations));
+    let parent_identity = fs::metadata(&relations).unwrap().ino();
+    let retained_index = fs::File::open(&index).unwrap();
+    let old_index_identity = retained_index.metadata().unwrap().ino();
+    let partial = task.now_directory().unwrap().join("partial-return.bin");
+    fs::write(&partial, b"retained partial\0before").unwrap();
+    let mut child_request = request.clone();
+    child_request.task_ref = ResourceRef::parse("task:native-child-allocation").unwrap();
+    child_request.purpose = "Real native allocation changes its registered source index".into();
+    let native_child = SystemRunner::new()
+        .with_timeout(Duration::from_secs(15))
+        .run(&[
+            request.ctrl_bin.display().to_string(),
+            "--json".into(),
+            "--root".into(),
+            request.central_root.display().to_string(),
+            "action".into(),
+            "run".into(),
+            "central.now.allocate".into(),
+            json!({
+                "task_ref": child_request.task_ref,
+                "purpose": child_request.purpose,
+                "participant_refs": child_request.participant_refs,
+                "source_refs": child_request.source_refs,
+                "parent_now_ref": task.allocation["now_ref"],
+                "workcell_ref": "workcell:controlled-native-test",
+                "expected_policy_revision": task.allocation["policy"]["revision"]
+            })
+            .to_string(),
+        ])
+        .unwrap();
+    assert!(
+        native_child.ok(),
+        "{} {}",
+        native_child.stdout,
+        native_child.stderr
+    );
+    let native_child: Value = serde_json::from_str(&native_child.stdout).unwrap();
+    assert_eq!(native_child["ok"], true);
+    assert_eq!(native_child["data"]["created"], true);
+    let child = owner.allocate(&child_request).unwrap();
+    assert_eq!(child.allocation["created"], false);
+    assert_eq!(
+        child.allocation["record"]["parent_now_ref"],
+        task.allocation["now_ref"]
+    );
+    assert_eq!(child.allocation["record"]["horizon"], "child");
+    assert_ne!(fs::metadata(&index).unwrap().ino(), old_index_identity);
+    assert_eq!(fs::metadata(&relations).unwrap().ino(), parent_identity);
+    let index_after_owner_effect = fs::read(&index).unwrap();
+    let retained = owner
+        .write_boundary_requirements_with_additional_protection(
+            &task,
+            &authority,
+            &[],
+            &[relations],
+        )
+        .unwrap();
+    assert_eq!(retained, requirements);
+    assert_eq!(
+        native_inspection(&retained, &request.central_root.join("after-req.json")),
+        prepared
+    );
+    let marker = task.now_directory().unwrap().join("stale-exec-marker");
+    let refused = native_protocol_execution(
+        &legacy_prepared,
+        &request.central_root.join("legacy-prepared.json"),
+        "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('escaped stale admission')",
+        std::slice::from_ref(&marker),
+    );
+    assert_ne!(refused["returncode"], 0);
+    assert!(refused["stderr"]
+        .as_str()
+        .unwrap()
+        .contains("protected_objects changed"));
+    assert!(!marker.exists());
+    let body = r#"
+import json, os, pathlib, subprocess, sys
+partial = pathlib.Path(sys.argv[1]); source = pathlib.Path(sys.argv[2])
+with partial.open('ab') as stream: stream.write(b'-PARENT')
+child = subprocess.run([sys.executable, '-B', '-c', '''
+import json, os, pathlib, sys
+with pathlib.Path(sys.argv[1]).open('ab') as stream: stream.write(b'-CHILD')
+try: pathlib.Path(sys.argv[2]).write_text('forbidden child rewrite')
+except PermissionError: print(json.dumps({'pid':os.getpid(),'denied':True}))
+else: raise AssertionError('protected source escaped')
+''', str(partial), str(source)], capture_output=True, text=True, timeout=10)
+assert child.returncode == 0, child.stderr
+print(json.dumps({'parent_pid':os.getpid(),'child':json.loads(child.stdout)}))
+"#;
+    let executed = native_protocol_execution(
+        &prepared,
+        &request.central_root.join("augmented-prepared.json"),
+        body,
+        &[partial.clone(), index.clone()],
+    );
+    assert_eq!(executed["returncode"], 0, "{executed}");
+    let processes: Value = serde_json::from_str(executed["stdout"].as_str().unwrap()).unwrap();
+    assert_eq!(processes["child"]["denied"], true);
+    assert_ne!(processes["parent_pid"], processes["child"]["pid"]);
+    assert_eq!(
+        fs::read(&partial).unwrap(),
+        b"retained partial\0before-PARENT-CHILD"
+    );
+    assert_eq!(fs::read(&index).unwrap(), index_after_owner_effect);
+    drop(retained_index);
+    println!("NATIVE_EXPLICIT_EXCLUSION_CONTINUED: actual native owner index effect and confined OS parent/child; no model or Factory leg");
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires exact native Central; mandatory CAW workflow"]
+fn native_explicit_exclusions_refuse_aliases_overlap_and_merged_limit() {
+    let (_directory, request) = world_with_protected_index();
+    let owner = NativeCentralPlacement::new(SystemRunner::new());
+    let task = owner.allocate(&request).unwrap();
+    let authority = ResourceRef::parse("authority:controlled-native-test").unwrap();
+    let now = task.now_directory().unwrap();
+    let relations = request.central_root.join("Control/relations");
+    let alias = request.central_root.join("relations-alias");
+    std::os::unix::fs::symlink(&relations, &alias).unwrap();
+    let writable_child = now.join("writable-child");
+    fs::create_dir(&writable_child).unwrap();
+    let ancestor_alias = request.central_root.join("root-alias");
+    std::os::unix::fs::symlink(&request.central_root, &ancestor_alias).unwrap();
+    let index = relations.join("source-relations.json");
+    let original_index = fs::read(&index).unwrap();
+    let original_now = fs::read(
+        request
+            .central_root
+            .join(task.allocation["source"]["path"].as_str().unwrap()),
+    )
+    .unwrap();
+    for refused in [
+        request.central_root.join("absent"),
+        index.clone(),
+        alias,
+        ancestor_alias.join("Control/relations"),
+        now.clone(),
+        writable_child,
+        now.parent().unwrap().to_path_buf(),
+    ] {
+        assert!(
+            owner
+                .write_boundary_requirements_with_additional_protection(
+                    &task,
+                    &authority,
+                    &[],
+                    std::slice::from_ref(&refused)
+                )
+                .is_err(),
+            "{}",
+            refused.display()
+        );
+        assert_eq!(fs::read(&index).unwrap(), original_index);
+    }
+    let mut exclusions = Vec::new();
+    for n in 0..64 {
+        let path = request.central_root.join(format!("excluded-{n}"));
+        fs::create_dir(&path).unwrap();
+        exclusions.push(path);
+    }
+    let failure = owner
+        .write_boundary_requirements_with_additional_protection(&task, &authority, &[], &exclusions)
+        .unwrap_err();
+    assert!(failure.message().contains("64 total"), "{failure}");
+    assert_eq!(fs::read(&index).unwrap(), original_index);
+    assert_eq!(
+        fs::read(
+            request
+                .central_root
+                .join(task.allocation["source"]["path"].as_str().unwrap())
+        )
+        .unwrap(),
+        original_now
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires exact native Central and Workcell174+; mandatory CAW workflow"]
+fn native_explicit_exclusion_preserves_hardlink_and_parent_identity_fences() {
+    for change in ["hardlink", "parent"] {
+        let (_directory, request) = world_with_protected_index();
+        let owner = NativeCentralPlacement::new(SystemRunner::new());
+        let task = owner.allocate(&request).unwrap();
+        let authority = ResourceRef::parse("authority:controlled-native-test").unwrap();
+        let relations = request.central_root.join("Control/relations");
+        let index = relations.join("source-relations.json");
+        let requirements = owner
+            .write_boundary_requirements_with_additional_protection(
+                &task,
+                &authority,
+                &[],
+                std::slice::from_ref(&relations),
+            )
+            .unwrap();
+        let prepared = native_inspection(
+            &requirements,
+            &request.central_root.join("requirements.json"),
+        );
+        let original_bytes = fs::read(&index).unwrap();
+        if change == "hardlink" {
+            fs::hard_link(&index, task.now_directory().unwrap().join("index-alias")).unwrap();
+        } else {
+            fs::rename(&relations, request.central_root.join("retained-relations")).unwrap();
+            fs::create_dir(&relations).unwrap();
+            fs::write(&index, &original_bytes).unwrap();
+        }
+        let marker = task.now_directory().unwrap().join("must-not-execute");
+        let refused = native_protocol_execution(
+            &prepared,
+            &request.central_root.join("prepared.json"),
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('escaped admission')",
+            std::slice::from_ref(&marker),
+        );
+        assert_ne!(refused["returncode"], 0, "{change}: {refused}");
+        assert!(
+            refused["stderr"]
+                .as_str()
+                .unwrap()
+                .contains("protected_objects changed"),
+            "{change}: {refused}"
+        );
+        assert!(!marker.exists(), "{change}");
+        assert_eq!(fs::read(&index).unwrap(), original_bytes);
+    }
 }

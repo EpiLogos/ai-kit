@@ -386,6 +386,24 @@ impl<R: CommandRunner> NativeCentralPlacement<R> {
         authority: &ResourceRef,
         selected_directories: &[PathBuf],
     ) -> Result<Value> {
+        self.write_boundary_requirements_with_additional_protection(
+            task,
+            authority,
+            selected_directories,
+            &[],
+        )
+    }
+
+    /// Explicit exclusions narrow this caller's material aperture; they do
+    /// not author Central policy. Native rows/order/coverage stay intact, and
+    /// the empty list retains the legacy requirements exactly.
+    pub fn write_boundary_requirements_with_additional_protection(
+        &self,
+        task: &AllocatedCentralTask,
+        authority: &ResourceRef,
+        selected_directories: &[PathBuf],
+        additional_protected_directories: &[PathBuf],
+    ) -> Result<Value> {
         self.revalidate(task)?;
         if selected_directories.len() > 63 {
             return Err(failure(
@@ -413,6 +431,55 @@ impl<R: CommandRunner> NativeCentralPlacement<R> {
             }
         }
         let policy = &task.allocation["policy"];
+        let mut protected = policy["protected_paths"]
+            .as_array()
+            .ok_or_else(|| {
+                failure(
+                    "owner_response",
+                    "Native policy has no protected-path array",
+                )
+            })?
+            .clone();
+        if additional_protected_directories.len() > 64 {
+            return Err(failure(
+                "material_bounds",
+                "At most 64 explicit protected directories",
+            ));
+        }
+        for directory in additional_protected_directories {
+            let metadata = std::fs::symlink_metadata(directory).map_err(io_error)?;
+            if !directory.is_absolute()
+                || !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || directory.canonicalize().map_err(io_error)? != *directory
+            {
+                return Err(failure(
+                    "material_bounds",
+                    "Additional protected directory must exist with its exact canonical identity",
+                ));
+            }
+            if writable
+                .iter()
+                .any(|root| directory.starts_with(root) || root.starts_with(directory))
+            {
+                return Err(failure(
+                    "material_bounds",
+                    "Additional protected directory must be disjoint from every writable root",
+                ));
+            }
+            let value = json!(directory);
+            if !protected.contains(&value) {
+                protected.push(value);
+            }
+        }
+        // The empty list preserves the legacy API, including native policy
+        // rows. Any augmented request must fit the material owner's bound.
+        if !additional_protected_directories.is_empty() && protected.len() > 64 {
+            return Err(failure(
+                "material_bounds",
+                "At most 64 total native and additional protected paths",
+            ));
+        }
         let policy_source = policy["sources"]
             .as_array()
             .and_then(|s| s.last())
@@ -436,7 +503,7 @@ impl<R: CommandRunner> NativeCentralPlacement<R> {
             "schema": "workcell.write-boundary/v1",
             "policy_ref": policy_ref, "policy_revision": policy["revision"],
             "authority_ref": authority, "writable_paths": writable,
-            "protected_paths": policy["protected_paths"],
+            "protected_paths": protected,
             "required_coverage": policy["required_coverage"],
             "expires_at_unix_ms": expiry,
         }))

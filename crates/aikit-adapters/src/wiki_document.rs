@@ -414,6 +414,7 @@ mod tests {
             content: Some(material[0].body.clone()),
             evidence: Vec::new(),
             why_selected: "explicit".into(),
+            span: None,
         };
         let wire = reading_document(&reading, Some(&view), &material).unwrap();
         assert_eq!(wire["content"], reading.content.unwrap());

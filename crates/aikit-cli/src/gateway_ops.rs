@@ -63,15 +63,6 @@ pub fn serve_config(home: &AikitHome, args: &GatewayServeArgs) -> Result<Gateway
     Ok(config)
 }
 
-/// The token that grants a WebSocket client owner scope, read once from its
-/// location. `None` when none is declared.
-pub fn serve_owner_token(args: &GatewayServeArgs) -> Result<Option<String>> {
-    args.websocket_owner_token_location
-        .as_deref()
-        .map(token_from_location)
-        .transpose()
-}
-
 /// Resolve a query carrier: explicit `--unix`/`--ws` wins; with neither, the
 /// well-known home socket.
 pub fn carrier_target(home: &AikitHome, args: &GatewayQueryArgs) -> Result<GatewayCarrierTarget> {
@@ -200,6 +191,7 @@ pub fn takes_carrier(command: &GatewaySub) -> bool {
             | GatewaySub::Delegate(_)
             | GatewaySub::Forward(_)
             | GatewaySub::Agent(_)
+            | GatewaySub::NativeOwner(_)
     )
 }
 
@@ -221,6 +213,7 @@ pub fn override_carriers(command: &mut crate::cli::GatewayCmd, carrier: GatewayQ
         G::Conversation(a) => a.carrier = carrier,
         G::Delegate(a) => a.carrier = carrier,
         G::Agent(a) => a.carrier = carrier,
+        G::NativeOwner(a) => a.carrier = carrier,
         G::Serve(_)
         | G::Tick
         | G::InstallService(_)
@@ -228,22 +221,8 @@ pub fn override_carriers(command: &mut crate::cli::GatewayCmd, carrier: GatewayQ
         | G::Remote(_)
         | G::Connector(_)
         | G::Coexistence(_)
-        | G::Hoist(_)
-        | G::Upgrade(_)
-        | G::Doctor
-        | G::Modes
-        | G::Setup(_)
-        | G::Recover(_) => {}
+        | G::Hoist(_) => {}
     }
-}
-
-/// The foreign harness gateways detected on this machine, one line each.
-pub fn coexistence_lines(home: &AikitHome) -> Result<Vec<String>> {
-    Ok(serve_coexistence(home)?
-        .lines
-        .into_iter()
-        .filter(|line| line.starts_with("foreign gateway"))
-        .collect())
 }
 
 /// The hoist verb's own arguments carry no carrier: hoisting plans from this

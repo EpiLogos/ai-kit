@@ -20,7 +20,7 @@
     },
     "stop": {
       "program": "sh",
-      "args": ["-c", "kill $(cat /ABSOLUTE/TARGET/kev-decision.pid) 2>/dev/null; rm -f /ABSOLUTE/TARGET/kev-decision.pid"]
+      "args": ["/ABSOLUTE/PATH/TO/stop-kev.sh", "/ABSOLUTE/TARGET"]
     },
     "metadata": {
       "target": "decision-model",

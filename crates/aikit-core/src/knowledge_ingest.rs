@@ -67,8 +67,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 use crate::knowledge_source_pool::{
-    SourceBinding, SourceMaterial, SourceOrigin, SourceOriginKind, SourceVisibility,
-    SOURCE_ORIGIN_METADATA,
+    SourceBinding, SourceMaterial, SourceOrigin, SourceOriginKind, SourceVisibility, SOURCE_ORIGIN_METADATA,
 };
 use crate::knowledge_wiki::{
     WikiEdge, WikiEdgeOrigin, WikiNode, WikiObject, WikiProvenanceRef, WikiSpace, OKF_WIKI_PROFILE,
@@ -926,69 +925,6 @@ pub fn ingest_corpus_with_origins(
     room_depth: usize,
     origins: &BTreeMap<String, IngestOriginBinding>,
 ) -> Result<IngestedCorpus> {
-    ingest_corpus_with_origin_policy(records, sources, room_depth, origins, false, None)
-}
-
-/// Compile an operation's already-admitted reads. This pure function grants no
-/// native ownership; the IO caller must retain every current owner observation.
-pub fn compile_corpus_for_current_read(
-    records: &[(String, String)],
-    sources: &[(String, String)],
-    room_depth: usize,
-    origins: &BTreeMap<String, IngestOriginBinding>,
-    privacy: &BTreeMap<String, crate::context_source::ContextSourcePrivacy>,
-    target: crate::context_source::RetrievalTarget,
-) -> Result<(IngestedCorpus, crate::context_source::ContextSourcePrivacy)> {
-    use crate::context_source::{AgentVisibility, ContextSourcePrivacy, ExternalEgress};
-    use crate::knowledge_source_pool::SourcePoolReading;
-    if privacy.len() != records.len() + sources.len() {
-        return Err(AikitError::new(
-            "knowledge.ingest_origin_invalid",
-            "Current privacy must cover every selected input",
-        ));
-    }
-    let mut aggregate = ContextSourcePrivacy {
-        agent_visibility: AgentVisibility::Payload,
-        external_egress: ExternalEgress::Allowed,
-    };
-    for (relative, _) in records.iter().chain(sources) {
-        let current = *privacy.get(relative).ok_or_else(|| {
-            AikitError::new(
-                "knowledge.ingest_origin_invalid",
-                "Current input has no owner privacy",
-            )
-        })?;
-        SourcePoolReading::check_target(current, target)?;
-        aggregate.agent_visibility = match (aggregate.agent_visibility, current.agent_visibility) {
-            (AgentVisibility::Hidden, _) | (_, AgentVisibility::Hidden) => AgentVisibility::Hidden,
-            (AgentVisibility::MetadataOnly, _) | (_, AgentVisibility::MetadataOnly) => {
-                AgentVisibility::MetadataOnly
-            }
-            _ => AgentVisibility::Payload,
-        };
-        if current.external_egress == ExternalEgress::Denied {
-            aggregate.external_egress = ExternalEgress::Denied;
-        }
-    }
-    let compiled = ingest_corpus_with_origin_policy(
-        records,
-        sources,
-        room_depth,
-        origins,
-        true,
-        Some(privacy),
-    )?;
-    Ok((compiled, aggregate))
-}
-
-fn ingest_corpus_with_origin_policy(
-    records: &[(String, String)],
-    sources: &[(String, String)],
-    room_depth: usize,
-    origins: &BTreeMap<String, IngestOriginBinding>,
-    current_read: bool,
-    current_privacy: Option<&BTreeMap<String, crate::context_source::ContextSourcePrivacy>>,
-) -> Result<IngestedCorpus> {
     let invalid = |message: &str| AikitError::new("knowledge.ingest_origin_invalid", message);
     let mut inputs = BTreeMap::new();
     for (relative, body) in records.iter().chain(sources) {
@@ -1000,128 +936,43 @@ fn ingest_corpus_with_origin_policy(
         })?;
         origin.origin.validate()?;
         if origin.content_revision.as_str() != content_revision(body.as_bytes()) {
-            return Err(
-                invalid("Origin content basis differs from the selected input")
-                    .with("input", relative),
-            );
+            return Err(invalid("Origin content basis differs from the selected input").with("input", relative));
         }
-        if !current_read
-            && origin.visibility == SourceVisibility::Personal
-            && origin.owners.is_empty()
-        {
-            return Err(invalid(
-                "Personal publication needs its actual admitted owner",
-            ));
+        if origin.visibility == SourceVisibility::Personal && origin.owners.is_empty() {
+            return Err(invalid("Personal publication needs its actual admitted owner"));
         }
     }
     if origins.len() != inputs.len() {
-        return Err(invalid(
-            "Origin bindings must cover exactly the selected inputs",
-        ));
+        return Err(invalid("Origin bindings must cover exactly the selected inputs"));
     }
-    // Length framing distinguishes keys/roles/bodies and preserves the actual
-    // complete ordered compiler input set without per-alias dependency clones.
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut frame = |bytes: &[u8]| {
-        for byte in (bytes.len() as u64).to_le_bytes().iter().chain(bytes) {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100_0000_01b3);
-        }
-    };
-    frame(&(room_depth as u64).to_le_bytes());
-    for (role, entries) in [("record", records), ("source", sources)] {
-        frame(role.as_bytes());
-        for (relative, body) in entries {
-            let admitted = &origins[relative];
-            frame(relative.as_bytes());
-            frame(body.as_bytes());
-            frame(admitted.content_revision.as_str().as_bytes());
-            frame(
-                &serde_json::to_vec(&admitted.origin)
-                    .map_err(|error| invalid(&error.to_string()))?,
-            );
-            frame(
-                &serde_json::to_vec(&admitted.visibility)
-                    .map_err(|error| invalid(&error.to_string()))?,
-            );
-            frame(
-                &serde_json::to_vec(&admitted.owners)
-                    .map_err(|error| invalid(&error.to_string()))?,
-            );
-            if let Some(current_privacy) = current_privacy {
-                let privacy = current_privacy
-                    .get(relative)
-                    .ok_or_else(|| invalid("Current compiler input lost its owner privacy"))?;
-                frame(&serde_json::to_vec(privacy).map_err(|error| invalid(&error.to_string()))?);
-            }
-        }
-    }
-    let basis = crate::knowledge_source_pool::CorpusCompilerBasis {
-        schema: crate::knowledge_source_pool::CORPUS_COMPILER_BASIS_METADATA.into(),
-        producer_ref: INGEST_PRODUCER_REF.into(),
-        content_revision: format!("{hash:016x}"),
-    };
-    let basis = serde_json::to_value(basis).map_err(|error| invalid(&error.to_string()))?;
     let mut compiled = ingest_corpus(records, sources, room_depth)?;
     let mut by_source = BTreeMap::new();
     for material in &mut compiled.material {
-        let relative = material
-            .binding
-            .metadata
-            .get("relative_path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid("Compiled input lost its locator"))?;
-        let admitted = origins
-            .get(relative)
-            .ok_or_else(|| invalid("Compiled input has no origin"))?;
-        if by_source
-            .insert(material.binding.source.clone(), admitted)
-            .is_some()
-        {
-            return Err(invalid(
-                "Distinct selected inputs cannot claim the same corpus SourceRef",
-            ));
+        let relative = material.binding.metadata.get("relative_path")
+            .and_then(Value::as_str).ok_or_else(|| invalid("Compiled input lost its locator"))?;
+        let admitted = origins.get(relative).ok_or_else(|| invalid("Compiled input has no origin"))?;
+        if by_source.insert(material.binding.source.clone(), admitted).is_some() {
+            return Err(invalid("Distinct selected inputs cannot claim the same corpus SourceRef"));
         }
         material.binding.visibility = admitted.visibility;
         material.binding.owners = admitted.owners.clone();
-        material
-            .binding
-            .set_source_origin(admitted.origin.clone())?;
-        material.binding.metadata.insert(
-            crate::knowledge_source_pool::CORPUS_COMPILER_BASIS_METADATA.into(),
-            basis.clone(),
-        );
-        // Only this operation's already-admitted relative presentation path
-        // participates in pure Markdown link resolution; it is not origin or a grant.
-        if !current_read {
-            material.binding.locator = None;
-        }
+        material.binding.set_source_origin(admitted.origin.clone())?;
+        material.binding.locator = None;
         material.binding.metadata.remove("relative_path");
     }
     for object in &mut compiled.objects {
         if let WikiObject::Node(node) = object {
             let mut native_provenance = Vec::new();
             for provenance in &mut node.provenance {
-                let Some(admitted) = by_source.get(&provenance.source_ref) else {
-                    continue;
-                };
-                provenance.extensions.insert(
-                    SOURCE_ORIGIN_METADATA.into(),
-                    admitted.origin.disclosure_projection()?,
-                );
+                let Some(admitted) = by_source.get(&provenance.source_ref) else { continue; };
+                provenance.extensions.insert(SOURCE_ORIGIN_METADATA.into(), admitted.origin.disclosure_projection()?);
                 if let SourceOriginKind::NativeSource { source, .. } = &admitted.origin.origin {
                     native_provenance.push(WikiProvenanceRef {
                         source_ref: source.source.clone(),
-                        source_revision: source
-                            .revision
-                            .as_ref()
-                            .map(|revision| SemanticRevision::Text(revision.to_string())),
+                        source_revision: source.revision.as_ref().map(|revision| SemanticRevision::Text(revision.to_string())),
                         producer_ref: provenance.producer_ref.clone(),
                         generation_ref: None,
-                        extensions: BTreeMap::from([(
-                            SOURCE_ORIGIN_METADATA.into(),
-                            admitted.origin.disclosure_projection()?,
-                        )]),
+                        extensions: BTreeMap::from([(SOURCE_ORIGIN_METADATA.into(), admitted.origin.disclosure_projection()?)]),
                     });
                 }
             }
@@ -1269,8 +1120,7 @@ pub fn select_ingestable_records_owned(
 ) -> CorpusSelection {
     let mut selector = CorpusSelector::default();
     for (relative, text) in corpus {
-        selector
-            .push_owned_with(relative, text, |_, _| Ok(()))
+        selector.push_owned_with(relative, text, |_, _| Ok(()))
             .expect("unconditional pure selection admission cannot refuse");
     }
     selector.finish()
@@ -1298,11 +1148,8 @@ impl CorpusSelector {
             self.selection.unparseable.push(relative);
             return Ok(());
         }
-        let record_id = front
-            .get("record_id")
-            .map(String::as_str)
-            .map(str::trim)
-            .filter(|id| !id.is_empty());
+        let record_id = front.get("record_id").map(String::as_str)
+            .map(str::trim).filter(|id| !id.is_empty());
         if let Some(record_id) = record_id {
             match self.claimed_records.get(record_id) {
                 Some(kept_path) => self.selection.duplicate_record_id.push(format!(
@@ -1316,11 +1163,8 @@ impl CorpusSelector {
             }
             return Ok(());
         }
-        let source_id = front
-            .get("source_id")
-            .map(String::as_str)
-            .map(str::trim)
-            .filter(|id| !id.is_empty());
+        let source_id = front.get("source_id").map(String::as_str)
+            .map(str::trim).filter(|id| !id.is_empty());
         if let Some(source_id) = source_id {
             match self.claimed_sources.get(source_id) {
                 Some(kept_path) => self.selection.duplicate_source_id.push(format!(
@@ -1334,22 +1178,16 @@ impl CorpusSelector {
             }
             return Ok(());
         }
-        let carried: Vec<&str> = CORPUS_METADATA_KEYS
-            .iter()
-            .copied()
-            .filter(|key| front.contains_key(*key))
-            .collect();
+        let carried: Vec<&str> = CORPUS_METADATA_KEYS.iter().copied()
+            .filter(|key| front.contains_key(*key)).collect();
         if carried.is_empty() {
             self.selection.skipped_inert += 1;
         } else {
             self.selection.skipped_unaddressable.push(format!(
                 "{relative}: declares {} but neither `record_id` nor `source_id`; its corpus \
                  metadata — tags included — cannot be placed",
-                carried
-                    .iter()
-                    .map(|key| format!("`{key}:`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                carried.iter().map(|key| format!("`{key}:`"))
+                    .collect::<Vec<_>>().join(", ")
             ));
         }
         Ok(())
@@ -1944,28 +1782,16 @@ mod origin_contract_tests {
     use super::*;
 
     fn selected() -> Vec<(String, String)> {
-        vec![(
-            "room/record.md".into(),
-            "---\nrecord_id: origin-record\nrecord_type: note\n---\n\n# Original record\n".into(),
-        )]
+        vec![("room/record.md".into(), "---\nrecord_id: origin-record\nrecord_type: note\n---\n\n# Original record\n".into())]
     }
 
     fn origins(records: &[(String, String)]) -> BTreeMap<String, IngestOriginBinding> {
-        records
-            .iter()
-            .map(|(relative, body)| {
-                (
-                    relative.clone(),
-                    IngestOriginBinding {
-                        origin: SourceOrigin::declared_corpus(),
-                        content_revision: SourceRevision::parse(content_revision(body.as_bytes()))
-                            .unwrap(),
-                        visibility: SourceVisibility::Team,
-                        owners: vec![],
-                    },
-                )
-            })
-            .collect()
+        records.iter().map(|(relative, body)| (relative.clone(), IngestOriginBinding {
+            origin: SourceOrigin::declared_corpus(),
+            content_revision: SourceRevision::parse(content_revision(body.as_bytes())).unwrap(),
+            visibility: SourceVisibility::Team,
+            owners: vec![],
+        })).collect()
     }
 
     #[test]
@@ -1973,42 +1799,20 @@ mod origin_contract_tests {
         let records = selected();
         let old = ingest_corpus(&records, &[], 1).unwrap();
         let new = ingest_corpus_with_origins(&records, &[], 1, &origins(&records)).unwrap();
-        assert_eq!(
-            new.material[0].binding.source,
-            old.material[0].binding.source
-        );
-        assert_eq!(
-            new.material[0].binding.revision,
-            old.material[0].binding.revision
-        );
+        assert_eq!(new.material[0].binding.source, old.material[0].binding.source);
+        assert_eq!(new.material[0].binding.revision, old.material[0].binding.revision);
         assert_eq!(new.material[0].body, old.material[0].body);
         assert!(old.material[0].binding.source_origin().unwrap().is_none());
         assert!(!old.material[0].binding.requires_live_origin_read().unwrap());
         assert!(new.material[0].binding.requires_live_origin_read().unwrap());
         assert!(new.material[0].binding.locator.is_none());
-        assert!(!new.material[0]
-            .binding
-            .metadata
-            .contains_key("relative_path"));
+        assert!(!new.material[0].binding.metadata.contains_key("relative_path"));
         let persisted = serde_json::to_value(&new.material[0]).unwrap();
         let recovered: SourceMaterial = serde_json::from_value(persisted).unwrap();
         assert_eq!(recovered, new.material[0]);
-        let node = new
-            .objects
-            .iter()
-            .find_map(|object| match object {
-                WikiObject::Node(node) => Some(node),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(
-            node.provenance[0].source_ref,
-            old.material[0].binding.source
-        );
-        assert_eq!(
-            node.provenance[0].extensions[SOURCE_ORIGIN_METADATA],
-            json!(SourceOrigin::declared_corpus())
-        );
+        let node = new.objects.iter().find_map(|object| match object { WikiObject::Node(node) => Some(node), _ => None }).unwrap();
+        assert_eq!(node.provenance[0].source_ref, old.material[0].binding.source);
+        assert_eq!(node.provenance[0].extensions[SOURCE_ORIGIN_METADATA], json!(SourceOrigin::declared_corpus()));
     }
 
     #[test]
@@ -2016,44 +1820,22 @@ mod origin_contract_tests {
         let records = selected();
         assert!(ingest_corpus_with_origins(&records, &[], 1, &BTreeMap::new()).is_err());
         let mut mapped = origins(&records);
-        mapped.get_mut(&records[0].0).unwrap().content_revision =
-            SourceRevision::parse("older-basis").unwrap();
+        mapped.get_mut(&records[0].0).unwrap().content_revision = SourceRevision::parse("older-basis").unwrap();
         assert!(ingest_corpus_with_origins(&records, &[], 1, &mapped).is_err());
         let mut mapped = origins(&records);
         mapped.insert("unselected.md".into(), mapped[&records[0].0].clone());
         assert!(ingest_corpus_with_origins(&records, &[], 1, &mapped).is_err());
-        assert!(ingest_corpus_with_origins(
-            &[records[0].clone(), records[0].clone()],
-            &[],
-            1,
-            &origins(&records)
-        )
-        .is_err());
-        let collision = vec![
-            records[0].clone(),
-            ("other/record.md".into(), records[0].1.clone()),
-        ];
+        assert!(ingest_corpus_with_origins(&[records[0].clone(), records[0].clone()], &[], 1, &origins(&records)).is_err());
+        let collision = vec![records[0].clone(), ("other/record.md".into(), records[0].1.clone())];
         assert!(ingest_corpus_with_origins(&collision, &[], 1, &origins(&collision)).is_err());
     }
 
     #[test]
     fn outward_projection_removes_legacy_owner_body_and_private_route_but_keeps_canonical_data() {
-        let mut material = ingest_corpus(&selected(), &[], 1)
-            .unwrap()
-            .material
-            .remove(0);
-        material.binding.metadata.insert(
-            "central".into(),
-            json!({"path":"/private/owner/source.md","content":"private native payload"}),
-        );
-        material
-            .binding
-            .metadata
-            .insert("owner_read_required".into(), json!(true));
-        material.binding.metadata.insert(
-            "local_route".into(),
-            json!({"owner_root":"/private/owner", "member":"source.md"}),
-        );
+        let mut material = ingest_corpus(&selected(), &[], 1).unwrap().material.remove(0);
+        material.binding.metadata.insert("central".into(), json!({"path":"/private/owner/source.md","content":"private native payload"}));
+        material.binding.metadata.insert("owner_read_required".into(), json!(true));
+        material.binding.metadata.insert("local_route".into(), json!({"owner_root":"/private/owner", "member":"source.md"}));
         material.binding.locator = Some(ResourceLocator::Path("/private/owner/source.md".into()));
         let canonical = serde_json::to_value(&material.binding).unwrap();
         let outward = material.binding.disclosure_projection().unwrap();
@@ -2107,42 +1889,28 @@ mod origin_contract_tests {
         assert_eq!(borrowed.duplicate_source_id, owned.duplicate_source_id);
         let compiled = ingest_corpus(&owned.records, &owned.sources, 1).unwrap();
         assert_eq!(compiled.objects, expected.objects);
-        assert_eq!(
-            serde_json::to_value(&compiled.material).unwrap(),
-            serde_json::to_value(&expected.material).unwrap()
-        );
+        assert_eq!(serde_json::to_value(&compiled.material).unwrap(), serde_json::to_value(&expected.material).unwrap());
         assert_eq!(compiled.absences, expected.absences);
     }
 
     #[test]
     fn refused_selected_retention_does_not_claim_an_id_or_retain_its_body() {
         let mut selector = CorpusSelector::default();
-        let refused =
-            "---\nrecord_id: actual-ID\nrecord_type: note\n---\n\n# Refused retention\n".to_owned();
-        let retained =
-            "---\nrecord_id: actual-ID\nrecord_type: note\n---\n\n# Actual retained input\n"
-                .to_owned();
+        let refused = "---\nrecord_id: actual-ID\nrecord_type: note\n---\n\n# Refused retention\n".to_owned();
+        let retained = "---\nrecord_id: actual-ID\nrecord_type: note\n---\n\n# Actual retained input\n".to_owned();
         let available = refused.len() - 1;
-        let error = selector
-            .push_owned_with("refused.md".into(), refused.clone(), |_, text| {
-                if text.len() > available {
-                    Err(AikitError::new(
-                        "selection.capacity",
-                        "the caller's actual retained-input capacity is exceeded",
-                    ))
-                } else {
-                    Ok(())
-                }
-            })
-            .unwrap_err();
+        let error = selector.push_owned_with("refused.md".into(), refused.clone(), |_, text| {
+            if text.len() > available {
+                Err(AikitError::new("selection.capacity", "the caller's actual retained-input capacity is exceeded"))
+            } else { Ok(()) }
+        }).unwrap_err();
         assert_eq!(error.code(), "selection.capacity");
-        selector
-            .push_owned_with("retained.md".into(), retained.clone(), |_, _| Ok(()))
-            .unwrap();
+        selector.push_owned_with("retained.md".into(), retained.clone(), |_, _| Ok(())).unwrap();
         let selected = selector.finish();
         assert_eq!(selected.records, vec![("retained.md".into(), retained)]);
         assert!(selected.duplicate_record_id.is_empty());
         assert!(selected.sources.is_empty());
         assert_eq!(selected.skipped_inert, 0);
     }
+
 }

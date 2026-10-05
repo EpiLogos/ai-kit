@@ -814,13 +814,12 @@ pub(crate) fn direct_launcher(
     session: &ResourceRef,
     provider: &EncounterProvider,
     model: &PreparedModel,
-    entry_point: crate::SessionSpaceEntryPoint,
 ) -> Result<Vec<String>> {
     let mut argv = vec![std::env::current_exe()
         .map_err(error)?
         .display()
         .to_string()];
-    if let Some(prefix) = entry_point.verb_prefix() {
+    if let Some(prefix) = crate::session_space_verb_prefix() {
         argv.push(prefix.to_owned());
     }
     argv.push("encounter-model-exec".into());
@@ -872,10 +871,7 @@ impl EncounterService {
                 }),
             )?;
         }
-        let (mut argv, environment) = (resolved.argv, resolved.environment);
-        if provider.protocol == EncounterProtocol::PrimeRpc {
-            crate::encounter_service::prime_launch::append_context(home, session, &mut argv)?;
-        }
+        let (argv, environment) = (resolved.argv, resolved.environment);
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| error("Missing native model executable"))?;
@@ -988,8 +984,8 @@ impl EncounterService {
                 provider: provider.id,
                 cwd: request.cwd.clone(),
                 reconnect: false,
-                model_target: Some(&request),
                 released_predecessor,
+                model_target: Some(&request),
             },
             std::time::Instant::now() + crate::encounter_service::NATIVE_STARTUP_TIMEOUT,
         )?;

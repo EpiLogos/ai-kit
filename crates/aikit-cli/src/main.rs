@@ -1,7 +1,7 @@
 //! The `aikit` binary.
 //!
-//! Deliberately thin: applied multicall exports retain their command authority;
-//! an unbound name can admit the typed native SessionSpace route. It parses
+//! Deliberately thin: it decides whether it was invoked as `aikit` or under an
+//! exported command name (the multicall shim, [`aikit_cli::multicall`]), parses
 //! the [`aikit_cli::cli`] tree, and dispatches to the one shared
 //! [`aikit_cli::app::Service`]. Every substantive command speaks the stable JSON
 //! envelope under `--json` and maps its error to the published exit-code table.
@@ -51,36 +51,11 @@ fn run_multicall(export: &str, args: &[String]) -> i32 {
     })();
     match result {
         Ok(status) => status,
-        // An applied export keeps precedence even if its arguments resemble
-        // native commands. Only an absent export/context may admit the main
-        // CLI's typed SessionSpace route for a renamed native executable.
-        // Trust, revision, catalogue and execution failures never fall back.
-        Err(e)
-            if matches!(
-                e.code(),
-                "context.unknown" | "generation.no_current" | "multicall.unknown_export"
-            ) && is_native_session_space_invocation(args) =>
-        {
-            run_cli()
-        }
         Err(e) => {
             eprintln!("aikit: {e}");
             json::exit_code(&e)
         }
     }
-}
-
-fn is_native_session_space_invocation(args: &[String]) -> bool {
-    let argv = std::iter::once("aikit").chain(args.iter().map(String::as_str));
-    Cli::try_parse_from(argv).is_ok_and(|cli| {
-        matches!(
-            cli.command,
-            Some(Command::SessionSpace { .. })
-                | Some(Command::Work(WorkGroup {
-                    command: WorkGroupCommand::Space { .. },
-                }))
-        )
-    })
 }
 
 /// The normal path: parse and run a subcommand.
@@ -301,7 +276,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
             Some(SystemGroupCommand::Hook(c)) => cmd_hook(cwd, c, json_mode),
             Some(SystemGroupCommand::ModelCatalogue(a)) => cmd_model_catalogue(cwd, a),
             Some(SystemGroupCommand::Trust(a)) => cmd_trust(cwd, a),
-            Some(SystemGroupCommand::Gateway(c)) => cmd_gateway(*c),
+            Some(SystemGroupCommand::Gateway(c)) => cmd_gateway(c),
             Some(SystemGroupCommand::Shell(c)) => cmd_shell(c),
             Some(SystemGroupCommand::Generations(c)) => match c.command {
                 SystemGenerationsCommand::Prune(a) => cmd_prune(cwd, a),
@@ -401,7 +376,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Alias(c)) => cmd_alias(cwd, c, json_mode),
         Some(Command::Mux(c)) => cmd_mux(cwd, c),
         Some(Command::Shell(c)) => cmd_shell(c),
-        Some(Command::Gateway(c)) => cmd_gateway(*c),
+        Some(Command::Gateway(c)) => cmd_gateway(c),
         Some(Command::Whoami(a)) => cmd_whoami(cwd, a, json_mode),
         Some(Command::Refocus(a)) => cmd_refocus(cwd, a, json_mode),
         Some(Command::Inhabit(a)) => cmd_inhabit(cwd, a, json_mode),
@@ -420,10 +395,7 @@ fn forward_session_space(cwd: &std::path::Path, args: Vec<std::ffi::OsString>) -
         cwd.as_os_str().to_os_string(),
     ];
     argv.extend(args);
-    std::process::exit(aikit_cli::session_space_cli::run_from_args_with_entrypoint(
-        argv,
-        aikit_cli::SessionSpaceEntryPoint::Main,
-    ));
+    std::process::exit(aikit_cli::session_space_cli::run_from_args(argv));
 }
 
 /// The exact flags bare `compose` starts from, used by `compose plan`: the
@@ -1474,6 +1446,23 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
     use aikit_cli::routine_cli::{gateway_tick, production_dispatcher, GatewayDispatcherTick};
     let home = AikitHome::discover()?;
     match command.command {
+        GatewaySub::NativeOwner(a) => {
+            let target = aikit_cli::gateway_ops::carrier_target(&home, &a.carrier)?;
+            let request = match a.request_file {
+                None => None,
+                Some(path) => {
+                    let text = if path.as_os_str() == "-" {
+                        std::io::read_to_string(std::io::Read::take(std::io::stdin(), 1024*1024+1))
+                    } else {
+                        std::fs::File::open(path).and_then(|file| std::io::read_to_string(std::io::Read::take(file, 1024*1024+1)))
+                    }.map_err(|e| AikitError::new("gateway.native_owner.request_read", e.to_string()))?;
+                    if text.len() > 1024*1024 { return Err(AikitError::new("gateway.native_owner.request_limit", "Native owner request exceeds the carrier bound")); }
+                    Some(serde_json::from_str(&text).map_err(|e| AikitError::new("gateway.native_owner.request_json", e.to_string()))?)
+                }
+            };
+            let response = aikit_adapters::gateway_command(&target, aikit_adapters::GatewayCommand::NativeOwner { world_ref:a.world_ref, expected_owner_generation:a.expected_owner_generation, request }, None)?;
+            gateway_data(serde_json::to_value(response).map_err(|e| AikitError::new("gateway.native_owner.response_encode", e.to_string()))?)
+        }
         GatewaySub::Serve(a) => {
             let config = aikit_cli::gateway_ops::serve_config(&home, &a)?;
             if config.websocket_bind.is_some() && config.unix_socket.is_none() {
@@ -1483,45 +1472,17 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                      runs. Add --unix to serve this home's socket as well."
                 );
             }
-            let owner_token = aikit_cli::gateway_ops::serve_owner_token(&a)?;
-            // An operator-named ref (flag or service environment) replaces the
-            // one a saved state was written under; with none named, the saved
-            // ref stands and `agency-gateway/local` is only the first-run name.
-            let configured_ref = a
+            let gateway_ref = a
                 .gateway_ref
-                .clone()
                 .or_else(|| std::env::var("AIKIT_GATEWAY_REF").ok())
-                .filter(|value| !value.trim().is_empty());
-            let parse_gateway_ref = |gateway_ref: &str| {
-                aikit_core::resource::ResourceRef::parse(gateway_ref).map_err(|error| {
+                .unwrap_or_else(|| "agency-gateway/local".into());
+            let gateway_ref =
+                aikit_core::resource::ResourceRef::parse(&gateway_ref).map_err(|error| {
                     AikitError::new(
                         "cli.gateway_ref_invalid",
                         format!("parse gateway ref {gateway_ref}: {error}"),
                     )
-                })
-            };
-            let gateway_ref =
-                parse_gateway_ref(configured_ref.as_deref().unwrap_or("agency-gateway/local"))?;
-            let configured_gateway_ref = match configured_ref.as_deref() {
-                Some(value) => Some(parse_gateway_ref(value)?),
-                None => None,
-            };
-            // Which build this process is: the revision the binary was built
-            // from and the Workcell it serves, read from the process itself.
-            let process = aikit_adapters::GatewayBuildIdentity::of_this_process(
-                // The full source revision when the build could read it (inside
-                // a checkout, or stamped by the caller); otherwise the short
-                // one the managed updater stamps for an exported cut. A
-                // process that cannot name its build is a finding, never a
-                // guess.
-                option_env!("AIKIT_BUILD_SOURCE_REVISION")
-                    .or(option_env!("SUITE_BUILD_REVISION"))
-                    .unwrap_or("unknown"),
-                option_env!("AIKIT_BUILD_SOURCE_DIRTY") == Some("1"),
-                std::env::var(aikit_cli::gateway_contact::WORKCELL_ENV)
-                    .ok()
-                    .filter(|value| !value.trim().is_empty()),
-            );
+                })?;
             // The Routine dispatcher ticks beside the carriers. A dispatcher
             // that cannot be built (no Central root to resolve time against)
             // degrades the service to carriers-only, said in plain words.
@@ -1590,28 +1551,6 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
             for line in &coexistence.lines {
                 eprintln!("gateway coexistence: {line}");
             }
-            // SIGTERM (launchctl bootout, systemctl stop) and SIGINT become a
-            // drain-then-exit instead of a process killed mid-turn. A second
-            // signal while the drain runs takes the default action, so a stuck
-            // drain can still be ended.
-            let stop_signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            #[cfg(unix)]
-            for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
-                signal_hook::flag::register_conditional_default(
-                    signal,
-                    std::sync::Arc::clone(&stop_signal),
-                )
-                .and_then(|_| {
-                    signal_hook::flag::register(signal, std::sync::Arc::clone(&stop_signal))
-                })
-                .map_err(|error| {
-                    AikitError::new(
-                        "cli.gateway_signal_handler",
-                        format!("install the stop-signal handler: {error}"),
-                    )
-                })?;
-            }
-            let stop_signal = Some(stop_signal);
             aikit_adapters::run_gateway_service_with_hooks(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
@@ -1631,144 +1570,11 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                                 cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
                             },
                         )),
-                        // `/upgrade` behind a connector conversation: the plan on
-                        // request, and on `apply` a worker that outlives this
-                        // process and reports back into that conversation.
-                        upgrade_launcher: Some(std::sync::Arc::new(
-                            aikit_cli::gateway_upgrade_system::ConversationUpgradeLauncher {
-                                home: home.clone(),
-                            },
-                        )),
                     }),
                     coexistence: coexistence.gate,
-                    owner_token,
-                    process: Some(process),
-                    configured_gateway_ref,
-                    stop_signal,
-                    // A peer's Flow request is answered by this Workcell's own
-                    // encounter owner, at the moment of asking.
-                    encounter_relay: Some(std::sync::Arc::new(
-                        aikit_cli::gateway_encounter_relay::OwnerEncounterRelay {
-                            home: home.clone(),
-                        },
-                    )),
                 },
             )?;
             Ok(Reply::Text("gateway service stopped cleanly".into()))
-        }
-        GatewaySub::Recover(a) => {
-            let data = aikit_cli::gateway_recover::recover(&home, a.apply)?;
-            Ok(Reply::Data {
-                context: EnvelopeContext::default(),
-                data,
-                warnings: vec![],
-                exit_code: json::EXIT_OK,
-            })
-        }
-        GatewaySub::Modes => {
-            let data = aikit_cli::gateway_modes::reading(&home)?;
-            Ok(Reply::Data {
-                context: EnvelopeContext::default(),
-                data,
-                warnings: vec![],
-                exit_code: json::EXIT_OK,
-            })
-        }
-        GatewaySub::Setup(a) => {
-            use aikit_cli::gateway_modes as modes;
-            let mut inputs = modes::gather_inputs(&home, &a.mode);
-            inputs.port = a.port;
-            inputs.bind = a.bind.clone();
-            inputs.gateway_ref = a.gateway_ref.clone();
-            inputs.workcell_ref = a.workcell_ref.clone();
-            inputs.peer_token_location = a.ws_token_location.clone();
-            inputs.owner_token_location = a.ws_owner_token_location.clone();
-            inputs.peer_remote_token_location = a.peer_token_location.clone();
-            inputs.allow_wide_bind = a.allow_wide_bind;
-            for peer in &a.peers {
-                let (workcell, endpoint) = peer.split_once('=').ok_or_else(|| {
-                    AikitError::new(
-                        "cli.usage",
-                        format!("--peer takes WORKCELL=HOST:PORT; got `{peer}`"),
-                    )
-                })?;
-                inputs
-                    .peers
-                    .push((workcell.to_owned(), endpoint.to_owned()));
-            }
-            let plan = modes::plan_setup(&inputs)?;
-            let data = if a.apply {
-                let effects = modes::SystemSetupEffects {
-                    home: home.clone(),
-                    home_dir: inputs.home_dir.clone(),
-                };
-                let results = modes::apply_setup(&plan, &effects, a.apply_tailscale)?;
-                jval!({"plan": plan, "applied": true, "results": results,
-                       "next": "aikit gateway doctor"})
-            } else {
-                jval!({"plan": plan, "applied": false,
-                       "next": "re-run with --apply to do this; nothing has changed"})
-            };
-            Ok(Reply::Data {
-                context: EnvelopeContext::default(),
-                data,
-                warnings: vec![],
-                exit_code: json::EXIT_OK,
-            })
-        }
-        GatewaySub::Doctor => {
-            let data = aikit_cli::gateway_doctor::run(&home)?;
-            Ok(Reply::Data {
-                context: EnvelopeContext::default(),
-                data,
-                warnings: vec![],
-                exit_code: json::EXIT_OK,
-            })
-        }
-        GatewaySub::Upgrade(cmd) => {
-            use aikit_cli::gateway_upgrade_system as upgrade;
-            let data = match cmd.command {
-                GatewayUpgradeSub::Plan(a) => upgrade::plan_command(
-                    &home,
-                    a.channel.as_deref(),
-                    a.candidate.as_deref(),
-                    a.install,
-                )?,
-                GatewayUpgradeSub::Apply(a) => upgrade::apply_command(
-                    &home,
-                    upgrade::ApplyOptions {
-                        install: a.install,
-                        channel: a.channel,
-                        candidate: a.candidate,
-                        origin: a
-                            .origin_binding
-                            .map(|binding_ref| aikit_adapters::UpgradeOrigin {
-                                binding_ref,
-                                connector_ref: None,
-                                in_reply_to_sequence: None,
-                            }),
-                        requested_by: "cli".into(),
-                        auto_rollback: !a.no_rollback,
-                        drain_grace_secs: a.drain_grace_secs,
-                        verify_timeout_secs: a.verify_timeout_secs,
-                        exit_wait_secs: a.exit_wait_secs,
-                        foreground: a.foreground,
-                        wait: a.wait,
-                    },
-                )?,
-                GatewayUpgradeSub::Status(a) => upgrade::status_command(&home, a.id.as_deref())?,
-                GatewayUpgradeSub::Resume(a) => {
-                    upgrade::resume_command(&home, a.id.as_deref(), a.foreground)?
-                }
-                GatewayUpgradeSub::Rollback(a) => upgrade::rollback_command(&home, &a.id)?,
-                GatewayUpgradeSub::Worker(a) => upgrade::worker_command(&home, &a.transaction)?,
-            };
-            Ok(Reply::Data {
-                context: EnvelopeContext::default(),
-                data,
-                warnings: vec![],
-                exit_code: json::EXIT_OK,
-            })
         }
         GatewaySub::Tick => {
             let data = gateway_tick(&home)?;
@@ -1789,8 +1595,6 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                     token_location: a.token_location,
                     gateway_ref: a.gateway_ref,
                     workcell_ref: a.workcell_ref,
-                    owner_token_location: a.owner_token_location,
-                    allow_wide_bind: a.allow_wide_bind,
                 },
             )?;
             Ok(Reply::Data {
@@ -1847,14 +1651,6 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                     project_world: a.project_world.as_deref(),
                     instance: a.instance.as_deref(),
                     require_workcell: a.require_workcell.as_deref(),
-                    owner: aikit_cli::gateway_contact::owner_address::OwnerAsk {
-                        subject: a.subject,
-                        propose: a.propose,
-                        proposed_owner: a.proposed_owner,
-                        options: a.options,
-                        now_ref: a.now_ref,
-                        evidence_refs: a.evidence,
-                    },
                 },
             )?)
         }
@@ -1907,14 +1703,12 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 websocket_bind,
                 websocket_path,
                 token_location,
-                no_probe,
-            } => aikit_cli::gateway_contact::remote_add_probed(
+            } => aikit_cli::gateway_contact::remote_add(
                 &home,
                 &workcell,
                 &websocket_bind,
                 &websocket_path,
                 &token_location,
-                !no_probe,
             )?,
             GatewayRemoteSub::List => aikit_cli::gateway_contact::remote_list(&home)?,
             GatewayRemoteSub::Remove { workcell } => {
@@ -2001,13 +1795,9 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Remote(_)
                 | GatewaySub::Connector(_)
                 | GatewaySub::Agent(_)
+                | GatewaySub::NativeOwner(_)
                 | GatewaySub::Coexistence(_)
-                | GatewaySub::Hoist(_)
-                | GatewaySub::Upgrade(_)
-                | GatewaySub::Doctor
-                | GatewaySub::Modes
-                | GatewaySub::Setup(_)
-                | GatewaySub::Recover(_) => unreachable!("handled above"),
+                | GatewaySub::Hoist(_) => unreachable!("handled above"),
             };
             let args = match query {
                 GatewaySub::Protocol(a)
@@ -2028,13 +1818,9 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Remote(_)
                 | GatewaySub::Connector(_)
                 | GatewaySub::Agent(_)
+                | GatewaySub::NativeOwner(_)
                 | GatewaySub::Coexistence(_)
-                | GatewaySub::Hoist(_)
-                | GatewaySub::Upgrade(_)
-                | GatewaySub::Doctor
-                | GatewaySub::Modes
-                | GatewaySub::Setup(_)
-                | GatewaySub::Recover(_) => unreachable!("handled above"),
+                | GatewaySub::Hoist(_) => unreachable!("handled above"),
             };
             let target = aikit_cli::gateway_ops::carrier_target(&home, &args)?;
             let response =
@@ -2190,6 +1976,11 @@ fn cmd_compose(cwd: &std::path::Path, args: ComposeArgs) -> Result<Reply> {
             )
         })
         .transpose()?;
+    // An explicitly pinned native resident uses the exact admitted Agency,
+    // not an ambient actor/profile composition. The resident owner rechecks
+    // that source and observes the selected model before issuing a receipt.
+    // Roster selection and ordinary composition still require their full
+    // authored inputs below; this path makes no claim to those components.
     let mut data = if args.realise && args.model.is_some() && args.resident_target.is_some() {
         match admission.as_ref() {
             Some(admitted) => {
@@ -3768,44 +3559,13 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
     // dispatched before `Service::discover` rather than requiring one.
     let command = match c.command {
         KnowledgeSub::Code(code_cmd) => {
-            if c.source_corpus.is_some() {
-                return Err(aikit_core::AikitError::new(
-                    "knowledge.corpus_selection_invalid",
-                    "The independent code lens does not consume a corpus selection",
-                ));
-            }
             let data = aikit_cli::contemplation_field::knowledge_code(code_cmd.command)?;
             return data_reply(data);
         }
         other => other,
     };
 
-    if c.source_corpus.is_some()
-        && matches!(
-            &command,
-            KnowledgeSub::Flow(_)
-                | KnowledgeSub::Wiki(_)
-                | KnowledgeSub::WikiShape(_)
-                | KnowledgeSub::WikiConstruct(_)
-                | KnowledgeSub::Jev(_)
-                | KnowledgeSub::History(_)
-                | KnowledgeSub::Forget(_)
-        )
-    {
-        return Err(aikit_core::AikitError::new(
-            "knowledge.corpus_selection_invalid",
-            "This independent operation does not consume the selected current corpus",
-        ));
-    }
     let mut service = Service::discover(cwd)?;
-    if let Some(corpus) = c.source_corpus {
-        service =
-            service.with_current_corpus_selection(aikit_cli::app::CurrentCorpusSelection {
-                corpus,
-                extension: c.source_extension.unwrap_or_else(|| "md".into()),
-                room_depth: c.source_room_depth.unwrap_or(1),
-            })?;
-    }
     let mut warnings = diagnostic_warnings(&service);
     let data = match command {
         KnowledgeSub::Search(a) => {
@@ -3829,8 +3589,56 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
         }
         KnowledgeSub::Read(a) => {
             let address = parse_knowledge_address(&a.address)?;
-            jval!(service.knowledge_read_document(&address)?)
+            match &a.span {
+                Some(raw) => {
+                    let (start, end) = parse_span(raw)?;
+                    jval!(service.knowledge_read_span(
+                        &address,
+                        &aikit_core::knowledge_facets::SourceSelector::TextSpan {
+                            start,
+                            end,
+                            anchor_ref: None,
+                        }
+                    )?)
+                }
+                None => jval!(service.knowledge_read_document(&address)?),
+            }
         }
+        KnowledgeSub::Coverage(a) => match &a.command {
+            KnowledgeCoverageSub::Show { sources } => {
+                let wanted = sources
+                    .iter()
+                    .map(|raw| parse_source_revision(raw))
+                    .collect::<Result<Vec<_>>>()?;
+                jval!(service.knowledge_coverage_show(&wanted)?)
+            }
+            KnowledgeCoverageSub::Declare {
+                source,
+                revision,
+                extents,
+                actor,
+                note,
+            } => {
+                let ranges = extents
+                    .iter()
+                    .map(|raw| parse_span(raw))
+                    .collect::<Result<Vec<_>>>()?;
+                jval!(service.knowledge_coverage_declare(
+                    source,
+                    revision,
+                    ranges,
+                    actor.clone(),
+                    note.clone()
+                )?)
+            }
+            KnowledgeCoverageSub::Unreadable {
+                source,
+                revision,
+                note,
+            } => {
+                jval!(service.knowledge_coverage_mark_unreadable(source, revision, note.clone())?)
+            }
+        },
         KnowledgeSub::Relations(a) => {
             let address = parse_knowledge_address(&a.address)?;
             jval!(service.knowledge_relations(&address, a.depth, a.max_nodes, a.max_edges)?)
@@ -4097,6 +3905,34 @@ fn cmd_wiki_shape(cwd: &std::path::Path, c: WikiShapeCmd) -> Result<Reply> {
         warnings: outcome.warnings,
         exit_code: outcome.exit_code,
     })
+}
+
+fn parse_span(raw: &str) -> Result<(u64, u64)> {
+    let (start, end) = raw.split_once(':').ok_or_else(|| {
+        AikitError::new(
+            "knowledge.span_format",
+            "a span reads START:END in char offsets, e.g. --span 0:400",
+        )
+    })?;
+    let start = start
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| AikitError::new("knowledge.span_format", "span start is not a number"))?;
+    let end = end
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| AikitError::new("knowledge.span_format", "span end is not a number"))?;
+    Ok((start, end))
+}
+
+fn parse_source_revision(raw: &str) -> Result<(String, String)> {
+    let (source, revision) = raw.rsplit_once('@').ok_or_else(|| {
+        AikitError::new(
+            "knowledge.coverage_input_format",
+            "name a source at a revision as SOURCE_REF@REVISION",
+        )
+    })?;
+    Ok((source.to_owned(), revision.to_owned()))
 }
 
 fn parse_knowledge_address(raw: &str) -> Result<aikit_core::KnowledgeAddress> {

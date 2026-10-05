@@ -11,7 +11,13 @@ use aikit_store::{AikitHome, ContextLock, LockOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{fs, io::Write, path::PathBuf, process::Command, time::Duration};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
+};
 
 #[path = "encounter_task_material.rs"]
 mod material;
@@ -28,6 +34,10 @@ struct TaskRequest {
     provider: EncounterProvider,
     cwd: PathBuf,
     selected_directories: Vec<PathBuf>,
+    /// Explicit caller-owned exclusions narrow the native grant without
+    /// changing Central's authored policy or the legacy request shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    additional_protected_directories: Vec<PathBuf>,
     #[serde(default)]
     workcell_boundary_bin: PathBuf,
     #[serde(default)]
@@ -151,7 +161,6 @@ fn launcher_for(
     session: &ResourceRef,
     provider: &EncounterProvider,
     revision: &SourceRevision,
-    entry_point: crate::SessionSpaceEntryPoint,
 ) -> Result<EncounterProvider> {
     let resolved_body = crate::encounter_profile_provider::resolve_provider(provider.clone())?;
     let mut launcher = provider.clone();
@@ -164,7 +173,7 @@ fn launcher_for(
         .map_err(error)?
         .display()
         .to_string()];
-    if let Some(prefix) = entry_point.verb_prefix() {
+    if let Some(prefix) = crate::session_space_verb_prefix() {
         argv.push(prefix.to_owned());
     }
     argv.push("encounter-task-exec".into());
@@ -285,67 +294,27 @@ fn authority(
     }
     Ok(binding.revision)
 }
-fn needs_codex_runtime(body: &EncounterProvider, argv: &[String]) -> bool {
-    body.from_profile.as_deref() == Some("codex")
-        && body.protocol == EncounterProtocol::Acp
-        && argv
-            .first()
-            .and_then(|program| std::path::Path::new(program).file_name())
-            == Some(std::ffi::OsStr::new("npx"))
+/// The request is caller source, including historical requests whose boundary
+/// path was normalized by an older owner. A prepared Run separately owns the
+/// effective executable; selecting it must never rewrite that source or make
+/// a changed pending request look equivalent to the retained one.
+fn boundary_executable(record: &TaskRecord) -> Result<&Path> {
+    match (&record.request.prepared_run_scope, &record.prepared_run) {
+        (Some(_), Some(run)) => Ok(&run.boundary_executable),
+        (None, None) => Ok(&record.request.workcell_boundary_bin),
+        _ => Err(error(
+            "The prepared run binding is missing; no material fallback",
+        )),
+    }
 }
-
-/// Workcell declares implemented runtime operations; ordinary write coverage
-/// cannot admit a different selected runtime. Unknown older receipts refuse.
-fn check_selected_runtime_capability(
-    provider: &EncounterProvider,
-    capabilities: &Value,
-) -> Result<()> {
-    let body = crate::encounter_profile_provider::resolve_provider(provider.clone())?;
-    if !needs_codex_runtime(&body, &body.argv) {
-        return Ok(());
-    }
-    let runtime = &capabilities["runtime_projection"];
-    if runtime["schema"] != "workcell.runtime-projection-capabilities/v1"
-        || runtime["operation"] != "exec-runtime"
-        || runtime["implemented"] != true
-    {
-        return Err(aikit_core::AikitError::new(
-            "encounter.runtime_projection_unavailable",
-            "The selected Codex runtime requires native same-origin projection; this Workcell owner does not declare that implementation",
-        ).with("profile", "codex").with("operation", "exec-runtime")
-         .with("recovery", "Retain the same Task and select or qualify its actual native material explicitly; no plain-exec fallback"));
-    }
-    Ok(())
-}
-
-fn preflight_selected_runtime(request: &TaskRequest, body: &EncounterProvider) -> Result<()> {
-    if !needs_codex_runtime(body, &body.argv) {
-        return Ok(());
-    }
-    if !request.workcell_boundary_bin.is_absolute() {
-        return Err(error("Explicit Workcell executable required"));
-    }
-    let output = OwnerRunner.run(&[
-        request.workcell_boundary_bin.display().to_string(),
-        "capabilities".into(),
-    ])?;
-    let capabilities: Value = serde_json::from_str(&output.stdout).map_err(error)?;
-    if !output.ok() || capabilities["schema"] != "workcell.write-boundary-capabilities/v1" {
-        return Err(error(
-            "Native Workcell runtime capability receipt was refused or invalid",
-        ));
-    }
-    check_selected_runtime_capability(&request.provider, &capabilities)
-}
-
-fn inspect(request: &TaskRequest, requirements: &Value) -> Result<Value> {
-    if !request.workcell_boundary_bin.is_absolute() {
+fn inspect(boundary: &Path, requirements: &Value) -> Result<Value> {
+    if !boundary.is_absolute() {
         return Err(error("Explicit Workcell executable required"));
     }
     let file = tempfile::NamedTempFile::new().map_err(error)?;
     fs::write(file.path(), requirements.to_string()).map_err(error)?;
     let output = OwnerRunner.run(&[
-        request.workcell_boundary_bin.display().to_string(),
+        boundary.display().to_string(),
         "inspect".into(),
         file.path().display().to_string(),
         requirements["policy_revision"]
@@ -366,7 +335,6 @@ fn inspect(request: &TaskRequest, requirements: &Value) -> Result<Value> {
             "Workcell cannot prepare the exact required protection; no weaker fallback",
         ));
     }
-    check_selected_runtime_capability(&request.provider, &value["capabilities"])?;
     Ok(value)
 }
 struct TaskCodexRuntime {
@@ -383,7 +351,13 @@ fn task_codex_runtime(
     body: &EncounterProvider,
     argv: &[String],
 ) -> Result<Option<TaskCodexRuntime>> {
-    if !needs_codex_runtime(body, argv) {
+    if body.from_profile.as_deref() != Some("codex")
+        || body.protocol != EncounterProtocol::Acp
+        || argv
+            .first()
+            .and_then(|program| std::path::Path::new(program).file_name())
+            != Some(std::ffi::OsStr::new("npx"))
+    {
         return Ok(None);
     }
     let now = record
@@ -448,9 +422,7 @@ fn task_codex_runtime(
     // not provider.env, another credential home, or a Session identity. Native
     // Codex canonicalizes nonempty CODEX_HOME. Missing/default input refuses
     // here rather than granting creation in the ambient home.
-    let supplied_home = std::env::var("CODEX_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
+    let supplied_home = std::env::var("CODEX_HOME").ok().filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))
         .ok_or_else(|| error("Codex Task runtime needs the original native home input"))?;
@@ -466,16 +438,9 @@ fn task_codex_runtime(
     };
     let input_root = fs::canonicalize(&requested_input_root)
         .map_err(|failure| error(&failure).with_io_source(failure))?;
-    if !fs::symlink_metadata(&input_root)
-        .map_err(|failure| error(&failure).with_io_source(failure))?
-        .is_dir()
-        || requested_input_root.to_str().is_none()
-        || input_root.to_str().is_none()
-        || now.to_str().is_none()
-    {
-        return Err(error(
-            "Codex Task runtime needs an existing representable native input directory",
-        ));
+    if !fs::symlink_metadata(&input_root).map_err(|failure| error(&failure).with_io_source(failure))?.is_dir()
+        || requested_input_root.to_str().is_none() || input_root.to_str().is_none() || now.to_str().is_none() {
+        return Err(error("Codex Task runtime needs an existing representable native input directory"));
     }
     let projection = json!({"schema":"workcell.runtime-projection/v1",
         "requested_input_root":requested_input_root,"input_root":input_root,"runtime_root":now.join("native-codex-runtime"),
@@ -519,15 +484,16 @@ fn validate(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Res
     if Some(&cwd_anchor) != record.cwd_anchor.as_ref() {
         return Err(error("Task working directory changed since preparation or retains a legacy write-destination anchor; explicitly prepare the same task request again"));
     }
-    let requirements = owner.write_boundary_requirements(
+    let requirements = owner.write_boundary_requirements_with_additional_protection(
         task,
         &record.request.authority_ref,
         &record.request.selected_directories,
+        &record.request.additional_protected_directories,
     )?;
     if Some(&requirements) != record.requirements.as_ref() {
         return Err(error("Material requirements changed; no automatic renewal"));
     }
-    let fresh = inspect(&record.request, &requirements)?;
+    let fresh = inspect(boundary_executable(record)?, &requirements)?;
     // Includes every native path/type/inode and the exact material requirement digest.
     if record.inspection.as_ref().is_none_or(|old| {
         old["requirements_digest"] != fresh["requirements_digest"]
@@ -541,9 +507,7 @@ fn validate(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Res
     }
     match (&record.request.prepared_run_scope, &record.prepared_run) {
         (Some(request), Some(run)) => {
-            if record.request.workcell_boundary_bin != run.boundary_executable
-                || run.scope["prepared_write_boundary"] != fresh
-            {
+            if run.scope["prepared_write_boundary"] != fresh {
                 return Err(error("Prepared run execution boundary changed"));
             }
             run.revalidate(request)?;
@@ -575,127 +539,6 @@ pub(super) fn check(home: &AikitHome, session: &ResourceRef) -> Result<()> {
     }
     Ok(())
 }
-
-/// A fresh successor keeps the semantic Task and retained COW. The prior record
-/// is historical evidence only; validate() authorises only the current record.
-pub(super) fn validate_successor_task(
-    home: &AikitHome,
-    session: &ResourceRef,
-    expected: &SourceRevision,
-    predecessor: &Value,
-) -> Result<Value> {
-    let current =
-        read(home, session)?.ok_or_else(|| error("Task successor requires current native Task"))?;
-    if &current.revision != expected {
-        return Err(error("Task successor revision conflict; no body launched"));
-    }
-    validate(home, session, &current)?;
-    let mut snapshot = predecessor["opening"]["basis"]["task_basis"].clone();
-    if !snapshot.is_object() {
-        return Err(error("Prior native startup has no typed Task basis"));
-    }
-    // These are the existing explicit optional/default fields of TaskRecord.
-    // Preserve every original field of legacy readings; only
-    // an absent declared optional member receives its existing null default.
-    for key in ["material", "prepared_run", "cleanup"] {
-        if snapshot.get(key).is_none() {
-            snapshot[key] = Value::Null;
-        }
-    }
-    let prior: TaskRecord = serde_json::from_value(snapshot.clone()).map_err(error)?;
-    let historical = historical_ready(home, session, &prior.revision)?;
-    if !prior.ready || serde_json::to_value(&historical).map_err(error)? != snapshot {
-        return Err(error(
-            "Exact prior ready Task differs from retained native startup/history",
-        ));
-    }
-    let binding = &predecessor["binding"];
-    let digest = blake3::hash(
-        serde_json::to_vec(&prior.launcher.argv)
-            .map_err(error)?
-            .as_slice(),
-    )
-    .to_hex()
-    .to_string();
-    if !launcher_belongs_to(session, &prior)
-        || binding["provider_argv_digest"] != digest
-        || binding["body_basis"]["owner_launcher_argv_digest"] != digest
-        || binding["body_basis"]["task_bound"] != true
-        || binding["body_basis"]
-            .get("task_revision")
-            .is_some_and(|revision| revision != &json!(prior.revision))
-    {
-        return Err(error(
-            "Historical native launcher does not match its exact Task binding",
-        ));
-    }
-    // Preserve the complete underlying provider except the explicitly renewed
-    // policy reading; its source identity/path may not be redirected.
-    let mut old_request = serde_json::to_value(&prior.request).map_err(error)?;
-    let mut new_request = serde_json::to_value(&current.request).map_err(error)?;
-    if old_request["provider"]["model_policy"]["source"]
-        != new_request["provider"]["model_policy"]["source"]
-        || old_request["provider"]["model_policy"]["path"]
-            != new_request["provider"]["model_policy"]["path"]
-    {
-        return Err(error(
-            "Task successor changed the original model policy origin",
-        ));
-    }
-    old_request["provider"]["model_policy"] = Value::Null;
-    new_request["provider"]["model_policy"] = Value::Null;
-    if old_request != new_request
-        || prior
-            .allocation
-            .as_ref()
-            .map(|task| &task.allocation["now_ref"])
-            != current
-                .allocation
-                .as_ref()
-                .map(|task| &task.allocation["now_ref"])
-        || prior
-            .allocation
-            .as_ref()
-            .map(|task| &task.allocation["writable_destination"])
-            != current
-                .allocation
-                .as_ref()
-                .map(|task| &task.allocation["writable_destination"])
-        || prior.cwd_anchor != current.cwd_anchor
-    {
-        return Err(error(
-            "Task successor changed canonical undertaking, cwd, grants or retained COW location",
-        ));
-    }
-    let mut old_requirements = prior
-        .requirements
-        .clone()
-        .ok_or_else(|| error("Prior Task lacks native requirements"))?;
-    let mut new_requirements = current
-        .requirements
-        .clone()
-        .ok_or_else(|| error("Current Task lacks native requirements"))?;
-    for value in [&mut old_requirements, &mut new_requirements] {
-        let object = value
-            .as_object_mut()
-            .ok_or_else(|| error("Native requirements are not an object"))?;
-        object.remove("expires_at_unix_ms");
-        object.remove("policy_revision");
-    }
-    if old_requirements != new_requirements {
-        return Err(error(
-            "Task successor changed material grant/protection/coverage",
-        ));
-    }
-    Ok(
-        json!({"prior_revision":prior.revision,"current_revision":current.revision,
-        "prior_launcher":prior.launcher,"current_launcher":current.launcher,
-        "prior_requirements":prior.requirements,"current_requirements":current.requirements,
-        "same_task":true,"same_now":true,"current_authority_revalidated":true,
-        "historical_authority_is_current":false}),
-    )
-}
-
 /// Called at the existing prompt boundary for human and addressed turns alike.
 /// A new task configuration cannot bless an older, unconfined resident process.
 pub(super) fn prompt(service: &EncounterService, session: &ResourceRef) -> Result<String> {
@@ -762,10 +605,11 @@ fn prepare_published(
             return Err(error("Central task scope differs from the native Agency World; an explicit owner-backed relation is required"));
         }
         record.cwd_anchor = Some(owner.working_directory_anchor(&task, &record.request.cwd)?);
-        let requirements = owner.write_boundary_requirements(
+        let requirements = owner.write_boundary_requirements_with_additional_protection(
             &task,
             &record.request.authority_ref,
             &record.request.selected_directories,
+            &record.request.additional_protected_directories,
         )?;
         if let Some(previous) = restore {
             let old = previous
@@ -781,12 +625,13 @@ fn prepare_published(
             ));
             }
         }
+        let boundary = boundary_executable(&record)?.to_path_buf();
         record.inspection = Some(
             if let (Some(run), Some(request)) =
                 (&mut record.prepared_run, &record.request.prepared_run_scope)
             {
                 let scope=run.prepare(request,&record.request.cwd,&requirements,&json!({"agency_ref":binding.agency_ref,"source":binding.agency_source.path,"revision":binding.agency_source.revision,"digest":binding.agency_source.content_digest}))?;
-                let current = inspect(&record.request, &requirements)?;
+                let current = inspect(&boundary, &requirements)?;
                 if scope != current {
                     return Err(error(
                         "Prepared run boundary differs from native executable inspection",
@@ -794,7 +639,7 @@ fn prepare_published(
                 }
                 scope
             } else {
-                inspect(&record.request, &requirements)?
+                inspect(&boundary, &requirements)?
             },
         );
         if let Some(host) = &record.request.material_host {
@@ -873,23 +718,7 @@ impl EncounterService {
         input: Value,
         expected: Option<&SourceRevision>,
     ) -> Result<Value> {
-        Self::configure_task_with_entrypoint(
-            home,
-            session,
-            input,
-            expected,
-            crate::SessionSpaceEntryPoint::Standalone,
-        )
-    }
-
-    pub fn configure_task_with_entrypoint(
-        home: &AikitHome,
-        session: &ResourceRef,
-        input: Value,
-        expected: Option<&SourceRevision>,
-        entry_point: crate::SessionSpaceEntryPoint,
-    ) -> Result<Value> {
-        let mut request: TaskRequest = serde_json::from_value(input).map_err(error)?;
+        let request: TaskRequest = serde_json::from_value(input).map_err(error)?;
         crate::encounter_profile_provider::ensure_connection_facts_reachable(&request.provider)?;
         // Resolve and validate the declared body before journalling a pending
         // task or allocating its NOW. The raw request remains the immutable
@@ -921,19 +750,13 @@ impl EncounterService {
                     "An existing prepared run cannot also allocate another material host",
                 ));
             }
-            let binding = prepared_run::Binding::resolve(run)?;
-            request.workcell_boundary_bin = binding.boundary_executable.clone();
-            Some(binding)
+            Some(prepared_run::Binding::resolve(run)?)
         } else {
             None
         };
         if let Some(host) = &request.material_host {
             host.preflight()?;
         }
-        // Refuse unsupported selected material before publishing pending or
-        // allocating a replacement admission. The actual inspection repeats
-        // this check, including resume/final exec after an owner replacement.
-        preflight_selected_runtime(&request, &resolved_body)?;
         let current = read(home, session)?;
         if current.as_ref().map(|c| &c.revision) != expected {
             return Err(error(
@@ -995,7 +818,7 @@ impl EncounterService {
             }
         }
         let revision = SourceRevision::parse(format!("task-binding/{}", ulid::Ulid::generate()))?;
-        let launcher = launcher_for(session, &request.provider, &revision, entry_point)?;
+        let launcher = launcher_for(session, &request.provider, &revision)?;
         let record = TaskRecord {
             schema: "aikit.encounter-task/v1".into(),
             revision,
@@ -1022,22 +845,6 @@ impl EncounterService {
         session: &ResourceRef,
         expected: &SourceRevision,
         restore: &SourceRevision,
-    ) -> Result<Value> {
-        Self::abort_task_preparation_with_entrypoint(
-            home,
-            session,
-            expected,
-            restore,
-            crate::SessionSpaceEntryPoint::Standalone,
-        )
-    }
-
-    pub fn abort_task_preparation_with_entrypoint(
-        home: &AikitHome,
-        session: &ResourceRef,
-        expected: &SourceRevision,
-        restore: &SourceRevision,
-        entry_point: crate::SessionSpaceEntryPoint,
     ) -> Result<Value> {
         let _lock = ContextLock::acquire(
             home,
@@ -1092,12 +899,7 @@ impl EncounterService {
         let agency_revision = authority(home, session, &prior.request)?;
         let historical = prior.clone();
         prior.revision = SourceRevision::parse(format!("task-binding/{}", ulid::Ulid::generate()))?;
-        prior.launcher = launcher_for(
-            session,
-            &prior.request.provider,
-            &prior.revision,
-            entry_point,
-        )?;
+        prior.launcher = launcher_for(session, &prior.request.provider, &prior.revision)?;
         prior.agency_revision = agency_revision;
         prior.ready = false;
         prior.allocation = None;
@@ -1224,56 +1026,26 @@ impl EncounterService {
             let default = crate::model_defaults::for_session(home, session, &resolved_body)?;
             model_argv = crate::model_defaults::launch_argv(&resolved_body, default.as_ref())?;
         }
-        if resolved_body.protocol == EncounterProtocol::PrimeRpc {
-            crate::encounter_service::prime_launch::append_context(home, session, &mut model_argv)?;
-        }
         let codex_runtime = task_codex_runtime(&record, &resolved_body, &model_argv)?;
         // Only nonsecret routing/type facts enter this private immutable launch
         // source. It lives with the existing requirements owner, outside Task T.
         let mut projection_file = if let Some(runtime) = codex_runtime.as_ref() {
-            let mut projection =
-                tempfile::NamedTempFile::new_in(path(home, session).parent().expect("task parent"))
-                    .map_err(|failure| error(&failure).with_io_source(failure))?;
-            projection
-                .write_all(runtime.projection.to_string().as_bytes())
+            let mut projection = tempfile::NamedTempFile::new_in(path(home, session).parent().expect("task parent"))
                 .map_err(|failure| error(&failure).with_io_source(failure))?;
-            projection
-                .as_file()
-                .sync_all()
+            projection.write_all(runtime.projection.to_string().as_bytes())
                 .map_err(|failure| error(&failure).with_io_source(failure))?;
+            projection.as_file().sync_all().map_err(|failure| error(&failure).with_io_source(failure))?;
             Some(projection)
-        } else {
-            None
-        };
-        let mut command = Command::new(&record.request.workcell_boundary_bin);
-        command
-            .arg(if projection_file.is_some() {
-                "exec-runtime"
-            } else {
-                "exec"
-            })
+        } else { None };
+        let mut command = Command::new(boundary_executable(&record)?);
+        command.arg(if projection_file.is_some() { "exec-runtime" } else { "exec" })
             .arg(file.path())
-            .arg(
-                requirements["policy_revision"]
-                    .as_str()
-                    .expect("validated revision"),
-            )
-            .arg(
-                inspection["requirements_digest"]
-                    .as_str()
-                    .expect("validated digest"),
-            );
-        if let (Some(projection), Some(runtime)) =
-            (projection_file.as_ref(), codex_runtime.as_ref())
-        {
-            command.arg(projection.path()).arg(format!(
-                "sha256:{:x}",
-                Sha256::digest(runtime.projection.to_string().as_bytes())
-            ));
+            .arg(requirements["policy_revision"].as_str().expect("validated revision"))
+            .arg(inspection["requirements_digest"].as_str().expect("validated digest"));
+        if let (Some(projection), Some(runtime)) = (projection_file.as_ref(), codex_runtime.as_ref()) {
+            command.arg(projection.path()).arg(format!("sha256:{:x}", Sha256::digest(runtime.projection.to_string().as_bytes())));
         }
-        command
-            .arg("--")
-            .args(&model_argv)
+        command.arg("--").args(&model_argv)
             .env_remove("CENTRAL_NATIVE_TOKEN")
             .env_remove("WORKCELL_CONTROL_TOKEN");
         if let Some(environment) = model_environment {
@@ -1292,14 +1064,8 @@ impl EncounterService {
         // Retain the immutable requirements path across exec. Its private owner
         // directory is outside every write aperture. History can inspect it.
         let (_file, _retained_path) = file.keep().map_err(error)?;
-        let _retained_projection = projection_file
-            .take()
-            .map(|file| file.keep())
-            .transpose()
-            .map_err(|failure| {
-                let cause = failure.error;
-                error(&cause).with_io_source(cause)
-            })?;
+        let _retained_projection = projection_file.take().map(|file| file.keep()).transpose()
+            .map_err(|failure| { let cause = failure.error; error(&cause).with_io_source(cause) })?;
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -1338,10 +1104,7 @@ mod owner_runner_native_tests {
         let owned = tempfile::tempdir().unwrap();
         for (stream, script) in [
             ("stdout", r#"printf effect > "$1"; printf '\377'; exit 7"#),
-            (
-                "stderr",
-                r#"printf effect > "$1"; printf '\377' >&2; exit 7"#,
-            ),
+            ("stderr", r#"printf effect > "$1"; printf '\377' >&2; exit 7"#),
         ] {
             let marker = owned.path().join(stream);
             let failure = OwnerRunner
@@ -1355,35 +1118,20 @@ mod owner_runner_native_tests {
                 .unwrap_err();
             assert_eq!(fs::read(marker).unwrap(), b"effect");
             assert_eq!(failure.code(), "encounter.runtime");
-            assert_eq!(
-                failure.details()["native_runner_code"],
-                "mux.command_utf8_invalid"
-            );
+            assert_eq!(failure.details()["native_runner_code"], "mux.command_utf8_invalid");
             assert_eq!(failure.details()["stream"], stream);
             assert_eq!(failure.details()["execution_started"], "true");
             assert_eq!(failure.details()["known_exit_status"], "7");
             assert_eq!(failure.details()["direct_child_reaped"], "true");
             assert_eq!(failure.details()["effects"], "unknown");
             assert_eq!(failure.details()["automatic_retry"], "false");
-            let actual = failure
-                .source()
-                .unwrap()
-                .downcast_ref::<std::io::Error>()
-                .unwrap();
+            let actual = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
             assert_eq!(actual.kind(), std::io::ErrorKind::InvalidData);
-            let decoder = actual
-                .get_ref()
-                .unwrap()
-                .downcast_ref::<std::str::Utf8Error>()
-                .unwrap();
+            let decoder = actual.get_ref().unwrap().downcast_ref::<std::str::Utf8Error>().unwrap();
             assert_eq!(decoder.valid_up_to(), 0);
             assert_eq!(decoder.error_len(), Some(1));
             let cloned = failure.clone();
-            let retained = cloned
-                .source()
-                .unwrap()
-                .downcast_ref::<std::io::Error>()
-                .unwrap();
+            let retained = cloned.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
             assert!(std::ptr::eq(actual, retained));
         }
     }
@@ -1392,21 +1140,12 @@ mod owner_runner_native_tests {
     fn missing_actual_native_program_retains_not_started_and_original_io_cause() {
         let owned = tempfile::tempdir().unwrap();
         let missing = owned.path().join("missing-native-owner");
-        let failure = OwnerRunner
-            .run(&[missing.to_str().unwrap().into()])
-            .unwrap_err();
+        let failure = OwnerRunner.run(&[missing.to_str().unwrap().into()]).unwrap_err();
         assert_eq!(failure.code(), "encounter.runtime");
-        assert_eq!(
-            failure.details()["native_runner_code"],
-            "mux.command_spawn_failed"
-        );
+        assert_eq!(failure.details()["native_runner_code"], "mux.command_spawn_failed");
         assert_eq!(failure.details()["execution_started"], "false");
         assert_eq!(failure.details()["automatic_retry"], "false");
-        let actual = failure
-            .source()
-            .unwrap()
-            .downcast_ref::<std::io::Error>()
-            .unwrap();
+        let actual = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
         assert_eq!(actual.kind(), std::io::ErrorKind::NotFound);
         assert!(actual.raw_os_error().is_some());
     }
@@ -1435,10 +1174,7 @@ mod owner_runner_native_tests {
             ])
             .unwrap_err();
         assert_eq!(failure.code(), "encounter.runtime");
-        assert_eq!(
-            failure.details()["native_runner_code"],
-            "mux.command_utf8_invalid"
-        );
+        assert_eq!(failure.details()["native_runner_code"], "mux.command_utf8_invalid");
         assert_eq!(failure.details()["known_exit_status"], "0");
         assert_eq!(failure.details()["direct_child_reaped"], "true");
         assert_eq!(failure.details()["group_signal"], "not-needed");
@@ -1447,17 +1183,9 @@ mod owner_runner_native_tests {
         assert_eq!(failure.details()["stderr_eof"], "true");
         assert_eq!(failure.details()["effects"], "unknown");
         assert_eq!(failure.details()["automatic_retry"], "false");
-        let actual = failure
-            .source()
-            .unwrap()
-            .downcast_ref::<std::io::Error>()
-            .unwrap();
+        let actual = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
         assert_eq!(actual.kind(), std::io::ErrorKind::InvalidData);
-        let decoder = actual
-            .get_ref()
-            .unwrap()
-            .downcast_ref::<std::str::Utf8Error>()
-            .unwrap();
+        let decoder = actual.get_ref().unwrap().downcast_ref::<std::str::Utf8Error>().unwrap();
         assert_eq!(decoder.valid_up_to(), 0);
         assert_eq!(decoder.error_len(), Some(1));
     }
@@ -1483,10 +1211,8 @@ mod owner_runner_native_tests {
                 assert_eq!(failure.details()["stderr_eof"], "true");
             }
             "mux.command_capture_incomplete" => {
-                assert!(
-                    failure.details()["stdout_eof"] == "false"
-                        || failure.details()["stderr_eof"] == "false"
-                );
+                assert!(failure.details()["stdout_eof"] == "false"
+                    || failure.details()["stderr_eof"] == "false");
             }
             other => panic!("actual held native capture had an unrelated failure: {other}"),
         }
@@ -1503,6 +1229,58 @@ mod owner_runner_native_tests {
 #[cfg(test)]
 mod profile_task_tests {
     use super::*;
+
+    fn raw_task_request(directory: &std::path::Path) -> Value {
+        json!({
+            "central": {
+                "ctrl_bin": directory.join("ctrl"), "central_root": directory,
+                "project": null, "task_ref": "task:request-contract",
+                "purpose": "Request serialization only, no native admission",
+                "participant_refs": ["agent/request-contract"], "source_refs": []
+            },
+            "provider": {"id":"request-contract", "label":"Request contract",
+                "protocol":"acp", "from_profile":"codex"},
+            "cwd": directory, "selected_directories": [],
+            "workcell_boundary_bin": directory.join("workcell-write-boundary"),
+            "authority_ref": "authority:request-contract"
+        })
+    }
+
+    #[test]
+    fn legacy_task_request_omits_empty_additional_protection() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let raw = raw_task_request(&root);
+        let legacy: TaskRequest = serde_json::from_value(raw.clone()).unwrap();
+        let legacy = serde_json::to_value(legacy).unwrap();
+        assert!(legacy.get("additional_protected_directories").is_none());
+        let mut explicit_empty = raw;
+        explicit_empty["additional_protected_directories"] = json!([]);
+        let parsed: TaskRequest = serde_json::from_value(explicit_empty).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), legacy);
+    }
+
+    #[test]
+    fn task_request_retains_exact_explicit_exclusions_as_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let mut raw = raw_task_request(&root);
+        let requested = json!([second, first, second]);
+        raw["additional_protected_directories"] = requested.clone();
+        let parsed: TaskRequest = serde_json::from_value(raw).unwrap();
+        let retained = serde_json::to_value(parsed).unwrap();
+        assert_eq!(retained["additional_protected_directories"], requested);
+        assert!(retained["selected_directories"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(retained["authority_ref"], "authority:request-contract");
+        assert_eq!(retained["central"]["task_ref"], "task:request-contract");
+    }
 
     #[test]
     fn codex_profile_request_keeps_raw_source_and_resolves_inside_the_boundary() {
@@ -1525,13 +1303,7 @@ mod profile_task_tests {
 
         let session = ResourceRef::parse("agent-session/codex-native-task").unwrap();
         let revision = SourceRevision::parse("task-binding/codex-native-task").unwrap();
-        let launcher = launcher_for(
-            &session,
-            &raw,
-            &revision,
-            crate::SessionSpaceEntryPoint::Standalone,
-        )
-        .unwrap();
+        let launcher = launcher_for(&session, &raw, &revision).unwrap();
         assert!(
             raw.argv.is_empty(),
             "saved request is still the raw profile source"
@@ -1544,47 +1316,5 @@ mod profile_task_tests {
             launcher.argv, resolved.argv,
             "Codex is not launched outside Workcell"
         );
-    }
-}
-
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-mod selected_runtime_native_tests {
-    use super::*;
-
-    #[test]
-    #[ignore = "requires the actual Source-qualified companion Workcell boundary, no mocked receipt"]
-    fn actual_native_capability_admits_only_the_selected_implemented_runtime() {
-        let executable = std::env::var("AIKIT_CAW_WORKCELL_BOUNDARY_BIN")
-            .expect("the actual native Workcell boundary must be supplied");
-        let output = OwnerRunner
-            .run(&[executable, "capabilities".into()])
-            .unwrap();
-        assert!(output.ok());
-        let capabilities: Value = serde_json::from_str(&output.stdout).unwrap();
-        assert_eq!(
-            capabilities["schema"],
-            "workcell.write-boundary-capabilities/v1"
-        );
-        assert_eq!(
-            capabilities["runtime_projection"]["schema"],
-            "workcell.runtime-projection-capabilities/v1"
-        );
-        let codex: EncounterProvider = serde_json::from_value(json!({
-            "id":"native-selected-codex", "label":"Native selected Codex", "protocol":"acp", "from_profile":"codex"
-        })).unwrap();
-        let actual = check_selected_runtime_capability(&codex, &capabilities);
-        if capabilities["runtime_projection"]["implemented"] == true {
-            actual.unwrap();
-        } else {
-            assert_eq!(
-                actual.unwrap_err().code(),
-                "encounter.runtime_projection_unavailable"
-            );
-        }
-        // An unsupported optional runtime cannot disable the real Pi path.
-        let pi: EncounterProvider = serde_json::from_value(json!({
-            "id":"native-selected-pi", "label":"Native selected Pi", "protocol":"pi-rpc", "from_profile":"pi"
-        })).unwrap();
-        check_selected_runtime_capability(&pi, &capabilities).unwrap();
     }
 }

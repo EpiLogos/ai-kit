@@ -678,11 +678,7 @@ mod agent_work {
                 ));
             }
         };
-        crate::encounter_service::start_with_entrypoint(
-            service.home(),
-            &binding.cwd,
-            crate::SessionSpaceEntryPoint::Main,
-        )?;
+        crate::encounter_service::start(service.home(), &binding.cwd)?;
         let receipt = crate::encounter_service::request(
             &crate::encounter_service::socket_path(service.home()),
             &crate::encounter_service::EncounterRequest::Open {

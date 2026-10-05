@@ -1,30 +1,25 @@
 //! Full production Service path: no QL, model, Central installation or alternate
 //! document resolver. The controlled source files are only test data.
-use aikit_cli::app::{CurrentCorpusSelection, Service};
+use aikit_cli::app::Service;
 use aikit_core::{resource::SourceRef, KnowledgeAddress};
 use aikit_store::AikitHome;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::fs;
 use tempfile::TempDir;
 
 fn corpus(temp: &TempDir) {
-    let root = temp.path().join("current-corpus");
-    fs::create_dir_all(root.join("withheld")).unwrap();
+    let values = vec![
+        json!({"binding":{"source":"source:a","revision":"r1","title":"Alpha","tags":["notes"],"visibility":"public","owners":[],"media_type":"text/markdown","locator":{"kind":"path","value":"/world/a.md"},"metadata":{}},"body":"---\ntitle: Alpha\naliases: [Opening]\ntags: [notes, research]\n---\n# Alpha\n\n🌱 Follow [[Beta#Part|the next note]] and [again](b.md#^claim).\n\nA **strong** relation, *with care*.\n\n- [x] Keep the source\n- [ ] Return\n\n| Relation | Kind |\n| --- | --- |\n| Alpha → Beta | authored |\n\n`[[not a link]]` \\#not-a-tag\n\n> An exact source matters.\n\n<script>window.__injected = true</script>\n\n![Remote image](https://example.invalid/image.png)\n\n[[Missing]] [[Same]]\n"}),
+        json!({"binding":{"source":"source:b","revision":"r1","title":"Beta","tags":[],"visibility":"public","owners":[],"media_type":"text/markdown","locator":{"kind":"path","value":"/world/b.md"},"metadata":{}},"body":"# Part\n\nAn exact paragraph. ^claim\n\n[[Alpha]]\n"}),
+        json!({"binding":{"source":"source:c","revision":"r1","title":"Same","tags":[],"visibility":"public","owners":[],"media_type":"text/markdown","metadata":{}},"body":"One interpretation."}),
+        json!({"binding":{"source":"source:d","revision":"r1","title":"Same","tags":[],"visibility":"public","owners":[],"media_type":"text/markdown","metadata":{}},"body":"Another interpretation."}),
+        json!({"binding":{"source":"source:private","revision":"r1","title":"PRIVATE_SENTINEL","tags":[],"visibility":"personal","owners":["another-actor"],"media_type":"text/markdown","metadata":{}},"body":"Never expose PRIVATE_SENTINEL."}),
+    ];
     fs::write(
-        root.join("withheld/.no-agent-retrieval"),
-        "actual local input withdrawal",
+        temp.path().join("source-material.json"),
+        serde_json::to_vec_pretty(&values).unwrap(),
     )
     .unwrap();
-    let inputs = [
-        ("a.md", "---\nsource_id: a\nrecord_type: book\ntitle_full: Alpha\ntitle: Alpha\naliases: [Opening]\ntags: [notes, research]\n---\n# Alpha\n\n🌱 Follow [[Beta#Part|the next note]] and [again](b.md#^claim).\n\nA **strong** relation, *with care*.\n\n- [x] Keep the source\n- [ ] Return\n\n| Relation | Kind |\n| --- | --- |\n| Alpha → Beta | authored |\n\n`[[not a link]]` \\#not-a-tag\n\n> An exact source matters.\n\n<script>window.__injected = true</script>\n\n![Remote image](https://example.invalid/image.png)\n\n[[Missing]] [[Same]]\n"),
-        ("b.md", "---\nsource_id: b\nrecord_type: book\ntitle_full: Beta\n---\n# Part\n\nAn exact paragraph. ^claim\n\n[[Alpha]]\n"),
-        ("c.md", "---\nsource_id: c\nrecord_type: book\ntitle_full: Same\n---\nOne interpretation."),
-        ("d.md", "---\nsource_id: d\nrecord_type: book\ntitle_full: Same\n---\nAnother interpretation."),
-        ("withheld/private.md", "---\nsource_id: private\nrecord_type: book\ntitle_full: PRIVATE_SENTINEL\n---\nNever expose PRIVATE_SENTINEL."),
-    ];
-    for (relative, body) in inputs {
-        fs::write(root.join(relative), body).unwrap();
-    }
 }
 fn service(temp: &TempDir) -> Service {
     Service::open(
@@ -33,12 +28,6 @@ fn service(temp: &TempDir) -> Service {
         |_| None,
     )
     .unwrap()
-    .with_current_corpus_selection(CurrentCorpusSelection {
-        corpus: temp.path().join("current-corpus"),
-        extension: "md".into(),
-        room_depth: 1,
-    })
-    .expect("select actual input bytes; the marked private member remains withheld")
 }
 fn source(reference: &str) -> KnowledgeAddress {
     KnowledgeAddress::Source(SourceRef::parse(reference).unwrap())
@@ -50,13 +39,13 @@ fn ordinary_corpus_reader_graph_backlinks_and_search_share_native_identity() {
     corpus(&temp);
     let service = service(&temp);
     let a = service
-        .knowledge_read_document(&source("central:source:corpus:a"))
+        .knowledge_read_document(&source("source:a"))
         .unwrap();
     assert_eq!(a["document"]["schema"], "aikit.markdown-reading/v1");
     assert_eq!(
         a["content"],
         service
-            .knowledge_read(&source("central:source:corpus:a"))
+            .knowledge_read(&source("source:a"))
             .unwrap()
             .content
             .unwrap()
@@ -71,12 +60,12 @@ fn ordinary_corpus_reader_graph_backlinks_and_search_share_native_identity() {
     );
     assert!(occurrence.iter().any(|o| o["state"] == "ambiguous"));
     let related = service
-        .knowledge_relations(&source("central:source:corpus:a"), 1, 32, 64)
+        .knowledge_relations(&source("source:a"), 1, 32, 64)
         .unwrap();
     let own: Vec<_> = related
         .edges
         .iter()
-        .filter(|e| e.from.as_str() == "central:source:corpus:a")
+        .filter(|e| e.from.as_str() == "source:a")
         .collect();
     assert_eq!(
         own.len(),
@@ -88,19 +77,19 @@ fn ordinary_corpus_reader_graph_backlinks_and_search_share_native_identity() {
         .all(|e| e.reference.is_some() && e.authored_relation.is_some()));
     assert_ne!(own[0].reference, own[1].reference);
     assert!(service
-        .knowledge_relations(&source("central:source:corpus:a"), 0, 32, 64)
+        .knowledge_relations(&source("source:a"), 0, 32, 64)
         .unwrap()
         .edges
         .is_empty());
     let b = service
-        .knowledge_read_document(&source("central:source:corpus:b"))
+        .knowledge_read_document(&source("source:b"))
         .unwrap();
     assert_eq!(
         b["document"]["incoming"]
             .as_array()
             .unwrap()
             .iter()
-            .filter(|e| e["from"] == "central:source:corpus:a")
+            .filter(|e| e["from"] == "source:a")
             .count(),
         2
     );
@@ -111,7 +100,7 @@ fn ordinary_corpus_reader_graph_backlinks_and_search_share_native_identity() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|n| n["resource"] == "central:source:corpus:a" && n["address"]["kind"] == "source"),
+            .any(|n| n["resource"] == "source:a" && n["address"]["kind"] == "source"),
         "{graph}"
     );
     assert_eq!(
@@ -119,9 +108,7 @@ fn ordinary_corpus_reader_graph_backlinks_and_search_share_native_identity() {
             .as_array()
             .unwrap()
             .iter()
-            .filter(
-                |e| e["from"] == "central:source:corpus:a" && e["to"] == "central:source:corpus:b"
-            )
+            .filter(|e| e["from"] == "source:a" && e["to"] == "source:b")
             .count(),
         2
     );
@@ -143,25 +130,31 @@ fn changed_source_rebuild_retracts_occurrences_without_changing_source_identity(
     let temp = TempDir::new().unwrap();
     corpus(&temp);
     let before = service(&temp)
-        .knowledge_read_document(&source("central:source:corpus:a"))
+        .knowledge_read_document(&source("source:a"))
         .unwrap();
-    let changed = "---\nsource_id: a\nrecord_type: book\ntitle_full: Alpha\n---\n# Changed\n\nNo links remain.\n";
-    fs::write(temp.path().join("current-corpus/a.md"), changed).unwrap();
-    let revision = aikit_core::knowledge_ingest::corpus_content_revision(changed.as_bytes());
+    let mut values: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("source-material.json")).unwrap())
+            .unwrap();
+    values[0]["binding"]["revision"] = json!("r2");
+    values[0]["body"] = json!("# Changed\n\nNo links remain.\n");
+    fs::write(
+        temp.path().join("source-material.json"),
+        serde_json::to_vec(&values).unwrap(),
+    )
+    .unwrap();
     let service = service(&temp);
     let after = service
-        .knowledge_read_document(&source("central:source:corpus:a"))
+        .knowledge_read_document(&source("source:a"))
         .unwrap();
     assert_eq!(before["resource"], after["resource"]);
-    assert_eq!(after["revision"], revision);
-    assert_ne!(before["revision"], after["revision"]);
+    assert_eq!(after["revision"], "r2");
     assert!(after["document"]["occurrences"]
         .as_array()
         .unwrap()
         .is_empty());
     assert_eq!(
         service
-            .knowledge_read_document(&source("central:source:corpus:b"))
+            .knowledge_read_document(&source("source:b"))
             .unwrap()["document"]["incoming"],
         json!([])
     );

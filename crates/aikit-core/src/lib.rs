@@ -323,8 +323,8 @@ pub use knowledge_resolution::{
 };
 pub use knowledge_source_pool::{
     material_for_actor, NativeSourcePoolProvider, SourceBinding, SourceHit, SourceMaterial,
-    SourcePool, SourcePoolProvider, SourcePoolReading, SourceProviderCapabilities,
-    SourceProviderStatus, SourceSearchMode, SourceVisibility, BKMR_GLADE_CONFORMANCE_VERSION,
+    SourcePool, SourcePoolProvider, SourcePoolReading, SourceProviderCapabilities, SourceProviderStatus,
+    SourceSearchMode, SourceVisibility, BKMR_GLADE_CONFORMANCE_VERSION,
 };
 pub use knowledge_wiki::{
     parse_wiki_objects, OkfWikiBundle, SemanticRevision, WikiConstellation,

@@ -31,7 +31,6 @@ pub mod control_ground;
 pub mod credential;
 pub(crate) mod credential_delivery;
 pub mod decide;
-pub mod development_entry;
 pub mod direct_agent_session;
 pub mod discover;
 pub mod doctor;
@@ -42,19 +41,14 @@ pub mod foreign;
 pub mod foreign_cron;
 pub mod gateway_connectors;
 pub mod gateway_contact;
-pub mod gateway_doctor;
-pub mod gateway_encounter_relay;
 pub mod gateway_hoist;
 pub mod gateway_install;
-pub mod gateway_modes;
 pub mod gateway_ops;
 pub mod gateway_owners;
-pub mod gateway_recover;
-pub mod gateway_upgrade;
-pub mod gateway_upgrade_system;
 pub mod guardian_family;
 pub mod harness_auth;
 pub mod harness_disclosure;
+pub mod development_entry;
 pub mod hook;
 pub mod inhabit;
 pub mod inhabit_team;
@@ -118,21 +112,13 @@ pub mod encounter_native_projection;
 pub mod encounter_profile_provider;
 pub mod encounter_service;
 
-/// The parser which admitted a native SessionSpace invocation. Executable
-/// custody remains `current_exe`; its basename does not identify its parser.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SessionSpaceEntryPoint {
-    /// The main CLI folds native verbs under `session-space`.
-    Main,
-    /// The standalone CLI admits those same verbs directly.
-    Standalone,
-}
-
-impl SessionSpaceEntryPoint {
-    pub fn verb_prefix(self) -> Option<&'static str> {
-        match self {
-            Self::Main => Some("session-space"),
-            Self::Standalone => None,
-        }
-    }
+/// Self-invocation shape for session-space verbs. The main `aikit` binary
+/// takes them under the `session-space` subcommand; the standalone
+/// `aikit-session-space` binary (kept so direct callers keep working) takes
+/// them unprefixed. Anything that re-invokes its own executable — resident
+/// spawn, model-exec launcher, task launcher — must match its own shape.
+pub fn session_space_verb_prefix() -> Option<&'static str> {
+    let exe = std::env::current_exe().ok()?;
+    let name = exe.file_name()?.to_str()?;
+    (name == "aikit").then_some("session-space")
 }

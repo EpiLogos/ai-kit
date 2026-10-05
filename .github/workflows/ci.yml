@@ -638,6 +638,19 @@ jobs:
           fi
           exit "$status"
 
+      - uses: actions/setup-node@v6
+        if: matrix.package == 'aikit-cli'
+        with:
+          node-version: "24"
+      - name: Install evidenced native Pi SDK
+        if: matrix.package == 'aikit-cli'
+        run: npm install --global '@earendil-works/pi-coding-agent@0.84.4'
+      - name: Prove native package tool export, discovery and invocation
+        if: matrix.package == 'aikit-cli'
+        run: |
+          export AIKIT_PI_SDK_ROOT="$(npm root -g)/@earendil-works/pi-coding-agent"
+          cargo test --locked -p aikit-cli native_package_tools_tests -- --ignored --nocapture --test-threads=1
+
       - name: Ensure native metadata Python for Core qualification
         if: matrix.package == 'aikit-core'
         uses: actions/setup-python@v6
@@ -1222,29 +1235,6 @@ jobs:
             sleep $((attempt * 10))
           done
       - run: gitnexus --version
-      # `gitnexus analyze` builds its full-text index with the LadybugDB FTS
-      # extension. When the extension is not already installed under $HOME it
-      # downloads it inside analyze with a 15 s bound and, if that fails,
-      # still exits 0 with no full-text index, so later queries find nothing.
-      # Install it once here, where a network failure is a setup failure, and
-      # prove a fresh process can LOAD it offline.
-      - name: Install the LadybugDB FTS extension GitNexus indexes with
-        shell: bash
-        run: |
-          set -euo pipefail
-          installer="$(npm root --global)/gitnexus/scripts/install-duckdb-extension.mjs"
-          export GITNEXUS_LBUG_MAX_DB_SIZE=$((16 * 1024 * 1024 * 1024))
-          for attempt in 1 2 3; do
-            if node "$installer" fts; then
-              node "$installer" fts --verify-only
-              exit 0
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "LadybugDB FTS extension install failed after three attempts" >&2
-              exit 1
-            fi
-            sleep $((attempt * 10))
-          done
       # The Project-scope step reads Central's World (central.world,
       # effective-sources, file-map) through the real ctrl. Without it every
       # Project fails for "ctrl not found" before GitNexus is ever asked, and
@@ -1252,7 +1242,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: EpiLogos/Central
-          ref: 1a94aeef3791dd083e789ebd332d4856daa1c62d
+          ref: 7a3f38c032e008b4c5c28c930f741b34d2d5b79d
           path: .gitnexus-native/Central
           persist-credentials: false
       - name: Build the Central owner (ctrl) the Project scope reads

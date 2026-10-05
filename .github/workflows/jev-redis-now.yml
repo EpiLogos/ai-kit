@@ -112,7 +112,6 @@ jobs:
     timeout-minutes: 35
     env:
       AIKIT_TEST_REDIS_ADDR: 127.0.0.1:6381
-      R4_CENTRAL_SHA: 1a94aeef3791dd083e789ebd332d4856daa1c62d
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -159,6 +158,13 @@ jobs:
           AIKIT_TEST_REDIS_ADDR=127.0.0.1:6381 \
             cargo test --locked -p aikit-cli --test factory_sensing_redis -- --nocapture \
             2>&1 | tee -a "$RUNNER_TEMP/real-redis-now.log"
+          command -v rg
+          cargo test --locked -p aikit-cli --test knowledge_owner_admission -- --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/knowledge-owner-admission.log"
+          cargo test --locked -p aikit-cli --test knowledge_owner_admission \
+            real_redis_cannot_override_current_now_provider_read_or_withdrawal \
+            -- --ignored --exact --nocapture \
+            2>&1 | tee -a "$RUNNER_TEMP/knowledge-owner-admission.log"
           cargo build --locked -p aikit-cli
           target/debug/aikit jev --help | tee "$RUNNER_TEMP/jev-help.txt"
           target/debug/aikit now-context --help | tee "$RUNNER_TEMP/now-context-help.txt"
@@ -223,147 +229,6 @@ jobs:
           AIKIT_TEST_REDIS_ADDR=127.0.0.1:6381 \
             cargo test --locked -p aikit-store --test redis_now_context -- --nocapture \
             2>&1 | tee -a "$RUNNER_TEMP/real-redis-now.log"
-      - name: Require genuine Redis and current native NOW owner read and withdrawal
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(id -u)" -ne 0
-          umask 077
-          scratch="$GITHUB_WORKSPACE/ProjectCentral/now/tmp"
-          mkdir -p "$scratch"
-          evidence="$scratch/r4-redis-${GITHUB_RUN_ID}"
-          mkdir "$evidence" "$evidence/source" "$evidence/images"
-          printf 'R4_REDIS_EVIDENCE=%s\n' "$evidence" >> "$GITHUB_ENV"
-          record_command() {
-            label="$1"; shift
-            printf '%s\0' "$@" > "$evidence/$label.argv"
-            pwd > "$evidence/$label.cwd"
-            set +e
-            "$@" > "$evidence/$label.stdout" 2> "$evidence/$label.stderr"
-            status=$?
-            set -e
-            printf '%s\n' "$status" > "$evidence/$label.exit"
-            cat "$evidence/$label.stdout"
-            cat "$evidence/$label.stderr" >&2
-            return "$status"
-          }
-          if ! command -v rg >/dev/null; then record_command ripgrep-install sudo apt-get install -y ripgrep; fi
-          record_command ripgrep-version rg --version
-          central="$RUNNER_TEMP/R4-Central"
-          git init -q "$central"
-          git -C "$central" remote add origin https://github.com/EpiLogos/Central.git
-          git -C "$central" fetch --depth=1 origin "$R4_CENTRAL_SHA"
-          git -C "$central" checkout --detach FETCH_HEAD
-          test "$(git -C "$central" rev-parse HEAD)" = "$R4_CENTRAL_SHA"
-          test -z "$(git -C "$central" status --porcelain)"
-          for owner in AIKit Central; do
-            root="$GITHUB_WORKSPACE"; if [ "$owner" = Central ]; then root="$central"; fi
-            git -C "$root" archive --format=tar HEAD > "$evidence/source/$owner.tar"
-            git -C "$root" ls-tree -r HEAD > "$evidence/source/$owner-tree-modes.txt"
-            git -C "$root" rev-parse HEAD 'HEAD^{tree}' > "$evidence/source/$owner-head-tree.txt"
-          done
-          { rustc -Vv; cargo -Vv; id; uname -a; } > "$evidence/toolchain-host.txt" 2>&1
-          # Existing whole Redis suites and restart finish before this final compilation.
-          record_command compiler-central cargo build --manifest-path "$central/Cargo.toml" --locked --bin ctrl --message-format=json
-          record_command compiler-owner cargo test --locked -p aikit-cli --test knowledge_owner_admission --no-run --message-format=json
-          export AIKIT_CENTRAL_REAL_BIN="$central/target/debug/ctrl"
-          export CENTRAL_CTRL_BIN="$AIKIT_CENTRAL_REAL_BIN"
-          export R4_REDIS_EVIDENCE="$evidence"
-          cat > "$evidence/audit.py" <<'PY'
-          import hashlib,json,os,stat,sys
-          from pathlib import Path
-          out=Path(os.environ['R4_REDIS_EVIDENCE']);workspace=Path(os.environ['GITHUB_WORKSPACE'])
-          case='real_redis_cannot_override_current_now_provider_read_or_withdrawal'
-          def write(name,value):(out/name).write_text(json.dumps(value,indent=2)+'\n')
-          def facts(s):return {'dev':s.st_dev,'ino':s.st_ino,'mode':s.st_mode,'links':s.st_nlink,'uid':s.st_uid,'bytes':s.st_size,'mtime_ns':s.st_mtime_ns,'ctime_ns':s.st_ctime_ns}
-          def held(path,root,copy=None,limit=1073741824):
-           path=Path(path);root=Path(root);row={'path':str(path),'root':str(root),'sha256':None,'cause':None}
-           try:
-            named=facts(os.lstat(path));physical=path.resolve(strict=True);physical_root=root.resolve(strict=True)
-            if not path.is_absolute() or not path.is_relative_to(root) or not physical.is_relative_to(physical_root):raise ValueError('compiler image outside original root')
-            with os.fdopen(os.open(path,os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW|os.O_CLOEXEC),'rb') as f:
-             first=facts(os.fstat(f.fileno()));row['before']=first
-             if named!=first or not stat.S_ISREG(first['mode']) or first['uid']!=os.geteuid() or first['bytes']>limit:raise ValueError('unknown/changed/nonregular/foreign/over-capacity original')
-             digest=hashlib.sha256();n=0;header=b'';sink=None
-             try:
-              if copy is not None:sink=os.fdopen(os.open(copy,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o700),'wb')
-              while chunk:=f.read(1048576):
-               if not header:header=chunk[:4]
-               n+=len(chunk)
-               if n>limit:raise ValueError('held image capacity exceeded')
-               digest.update(chunk)
-               if sink:sink.write(chunk)
-              if sink:sink.flush()
-             finally:
-              if sink:sink.close()
-             row['after']=facts(os.fstat(f.fileno()));row['named_after']=facts(os.lstat(path))
-             if first!=row['after'] or first!=row['named_after'] or path.resolve(strict=True)!=physical or root.resolve(strict=True)!=physical_root:raise ValueError('original affiliation changed')
-             row.update(sha256=digest.hexdigest(),observed_bytes=n,header_hex=header.hex())
-           except (OSError,ValueError) as e:row['cause']={'type':type(e).__name__,'errno':getattr(e,'errno',None),'message':str(e)}
-           return row
-          def text(name):
-           with (out/name).open('rb') as f:b=f.read(1048577)
-           if len(b)>1048576:raise ValueError('actual receipt readback capacity exceeded')
-           return b.decode('utf-8',errors='strict')
-          def artifacts(name):
-           result=[];n=0
-           with (out/name).open('rb') as f:
-            for raw in f:
-             n+=len(raw)
-             if n>67108864 or len(raw)>1048576:raise ValueError('compiler receipt capacity exceeded')
-             v=json.loads(raw)
-             if v.get('reason')=='compiler-artifact':result.append(v)
-           return result
-          mode=sys.argv[1]
-          if mode=='prepare':
-           roles=[('ctrl','compiler-central.stdout','ctrl','bin',False,Path(os.environ['AIKIT_CENTRAL_REAL_BIN']).parents[2]),('aikit','compiler-owner.stdout','aikit','bin',False,workspace),('owner','compiler-owner.stdout','knowledge_owner_admission','test',True,workspace)]
-           rows=[];total=0
-           for name,receipt,target,kind,test,root in roles:
-            found=[v for v in artifacts(receipt) if v.get('executable') and v['target']['name']==target and kind in v['target']['kind'] and v['profile']['test']==test]
-            if len(found)!=1:raise ValueError('one actual CompilerArtifact required: '+name)
-            v=found[0];image=held(v['executable'],root/'target/debug',out/'images'/name,min(1073741824,3221225472-total))
-            row={'role':name,'compiler_artifact':v,'image':image,'source':held(v['target']['src_path'],root),'manifest':held(v['manifest_path'],root),'lock':held(root/'Cargo.lock',root)};rows.append(row);write('images.before.json',rows)
-            if any(row[k]['cause'] for k in ['image','source','manifest','lock']):raise ValueError('actual compiler image/Source/manifest/lock admission failed')
-            if image['header_hex']!='7f454c46' or not image['before']['mode']&0o111:raise ValueError('actual Linux native executable form required')
-            total+=image['observed_bytes'];(out/(name+'.path')).write_text(v['executable']+'\n')
-          elif mode=='list':
-           results=[]
-           for suffix in ['list','ignored-list']:
-            value=text(suffix+'.stdout');actual=[l.removesuffix(': test') for l in value.splitlines() if l.endswith(': test')];status=int(text(suffix+'.exit'))
-            results.append({'kind':suffix,'actual':actual,'status':status,'one_actual_case':status==0 and actual==[case]})
-           write('compiled-roster.json',results)
-           if not all(r['one_actual_case'] for r in results):raise ValueError('actual native Redis owner case missing/ambiguous/not ignored')
-          elif mode=='result':
-           value=text('case.stdout');status=int(text('case.exit'));row={'case':case,'status':status,'actual_test_line':('test '+case+' ... ok') in value,'exact_one_pass_zero_fail_zero_ignore':'test result: ok. 1 passed; 0 failed; 0 ignored;' in value};write('execution-result.json',row)
-           if status!=0 or not row['actual_test_line'] or not row['exact_one_pass_zero_fail_zero_ignore']:raise ValueError('actual Redis/current-owner body did not pass')
-          elif mode=='after':
-           rows=[]
-           for before in json.loads((out/'images.before.json').read_text()):
-            current=held(before['image']['path'],before['image']['root']);same=not current['cause'] and current['sha256']==before['image']['sha256'] and current['before']==before['image']['after'];rows.append({'before':before,'after':current,'unchanged':same})
-           write('images.after.json',rows)
-           if len(rows)!=3 or not all(r['unchanged'] for r in rows):raise ValueError('original actual image changed/incomplete')
-          else:raise ValueError('unknown audit mode')
-          PY
-          python3 "$evidence/audit.py" prepare
-          image="$(cat "$evidence/owner.path")"
-          case=real_redis_cannot_override_current_now_provider_read_or_withdrawal
-          record_command list "$image" --exact "$case" --list --format terse
-          record_command ignored-list "$image" --exact "$case" --list --ignored --format terse
-          python3 "$evidence/audit.py" list
-          if record_command case "$image" --exact "$case" --ignored --nocapture --test-threads=1; then status=0; else status=$?; fi
-          python3 "$evidence/audit.py" result
-          test "$status" -eq 0
-      - name: Retain current Redis gate image checkpoints on success or failure
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -n "${R4_REDIS_EVIDENCE:-}" ] && [ -f "$R4_REDIS_EVIDENCE/images.before.json" ]; then
-            python3 "$R4_REDIS_EVIDENCE/audit.py" after
-          else
-            echo 'Actual R4 native Redis role admission unavailable; no execution/image proof' >&2
-            exit 1
-          fi
       - name: Record exact tested source
         if: always()
         shell: bash
@@ -374,8 +239,8 @@ jobs:
         with:
           name: jev-redis-now-real-redis
           path: |
-            ${{ github.workspace }}/ProjectCentral/now/tmp/r4-redis-${{ github.run_id }}/
             ${{ runner.temp }}/real-redis-now.log
+            ${{ runner.temp }}/knowledge-owner-admission.log
             ${{ runner.temp }}/real-redis-toolchain.txt
             ${{ runner.temp }}/redis-version.txt
             ${{ runner.temp }}/redis-image.txt

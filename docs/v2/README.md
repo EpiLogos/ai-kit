@@ -1,5 +1,10 @@
 # AIKit V2 — Vision and Design Specification
 
+> Current source-to-operation route: [architecture navigation](../ARCHITECTURE-NAVIGATION.md).
+> Read target design separately from later implementation/evidence and installed
+> delivery. Human surface successors include [23 TUI](23-TUI-HUMAN-EXPERIENCE-SPEC.md)
+> and [24 model/realtime modalities](24-MODEL-MODALITY-AND-REALTIME-SURFACES.md).
+
 **Status:** AUTHORITATIVE TARGET DESIGN — proposed for V2 programme  
 **Date:** 2026-08-19  
 **Repository:** `EpiLogos/ai-kit`  

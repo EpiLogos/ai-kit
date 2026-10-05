@@ -1,5 +1,12 @@
 # AIKit architecture
 
+> **Reading boundary, 30 September 2026:** this is the earlier resolver/migration
+> baseline. The [V2 field](v2/README.md) states target design and numbered returned
+> implementation contracts; [current native architecture navigation](ARCHITECTURE-NAVIGATION.md)
+> identifies source/context, praxis, encounter, Flow and upgrade owners. The old
+> “not a session launcher” framing below is historical product scope, not a claim
+> that AIKit lacks its later canonical encounter/session operations.
+
 AIKit is a **context-scoped capability router for agentic terminal work**. It is
 not a skill registry, a dotfiles manager, a session launcher or a command
 palette; those are all views or consumers of the one thing it actually is.
@@ -436,6 +443,56 @@ old bytes instead of treating unavailable material as deletion. Dry run still
 discloses skipped files. This does not establish fresh retrieval of retained
 unavailable material or resolve later audience withdrawal policy.
 
+### Source origin and current disclosure
+
+The existing SourceBinding metadata key `aikit.source-origin/v1` carries typed
+semantic lineage: an explicitly selected authored corpus, or an actual native
+World, SourceRef, original revision and body-free owner binding. Available and
+agent_retrieval_allowed are observations, not audience grants. New physical
+root/member/executable routes remain transient; this release persists no local
+route and invents no owner or audience revision. Full material persistence and
+an outward disclosure projection are separate operations. Source explanation
+removes legacy Central routing/body payloads, local-route metadata and
+origin-required physical locators while retaining semantic refs and revisions; canonical serde is not
+silently redacted. Missing current origin routing withholds generic copies,
+without deleting or automatically adopting retained bytes.
+
+The pure already-authorised SourcePool and `ingest_corpus` APIs remain useful
+without Central. The additive origin-aware compiler checks exact selected-input
+coverage and actual compiler content basis, preserving stable corpus identity.
+That basis is the existing plain 16-hex FNV-1a64 token; native prefixed revisions
+and physical SHA-256 publication bases remain distinct. IO, current owner
+admission and compatible output scope belong to the caller. Team denotes
+Project-horizon eligibility, separately from external-provider egress. Current
+selected local native retrieval alone does not establish the destination
+World/Project publication relation; without that actual compatible relation
+the corpus command refuses before Wiki/material publication. An enclosing native floor governs ancestor withholding, but a
+manifest or test scratch path alone is not a native Source identity. Explicit
+standalone selection retains its declared-root contract; an unavailable owner
+is disclosed separately and never proves native nonparticipation.
+
+An origin-required source read must obtain the current owner result, and its
+identity, revision, origin and body must match retained material. None, error
+or a changed basis cannot substitute copied bytes or put a new body under an
+old revision. Source explanations, search title/snippet hits and route revisions use the
+same current-material validator. `SourcePoolReading` carries transient owner
+privacy, and additive `read_for` admits this operation's `RetrievalTarget`
+through the existing `ContextSourcePrivacy::payload_boundary`. The default
+KnowledgeApplication target is LocalAgent; callers explicitly select the actual
+Human, LocalAgent or ExternalProvider delivery relation. Both held material and
+unheld live hits are admitted before payload projection. An index hit without a
+current selected reading cannot prove admission. Independent already-authorised
+local memory material remains compatible, with external egress denied by default.
+Copied Team/Public labels never substitute an owner grant. Denied search metadata is
+omitted with only a generic unavailable/withheld reason and stable error code;
+selected reads/explanations retain the exact native failure. Wiki-owned
+citation-only relations remain meaningful without materialising the source.
+Explicit named Wiki query reads have a separate document contract; this clause
+does not claim universal origin admission for that route. The ordinary pure
+in-memory fallback stays compatible. Native
+file-map inspect/locate/resolve are ReadOnly owner operations; the separately
+contracted projectcentral.source.read reconciles derived horizon state and is
+LocallyMutating. Their actual envelopes and effects remain distinct.
 
 ---
 
@@ -560,3 +617,92 @@ payloads on demand, and uses owner-grounded skill snapshots for contextual and
 harness projection. It does not rebuild the owner's map. See
 [integrations/bkmr.md](integrations/bkmr.md) for the implemented Actions,
 `source bind-central` path, degraded behaviour and joined acceptance.
+
+### Native command capture
+
+The existing SystemRunner owns one bounded process-output lifecycle on Linux
+and macOS. It reads held nonblocking pipes without output reader threads or
+EOF joins. The default captured-byte capacity is 16 MiB per stream; an explicit
+positive finite override admits a larger transport. A configured timeout still
+bounds the live leader. Without a timeout a live leader may continue, while
+output capacity and the post-leader cancellation, direct-child reap and drain
+remain bounded. Exit observation keeps the owned leader unreaped until the
+runner decides whether inherited pipes require a group signal. Completed EOF
+reaps without signalling descendants whose streams are already closed. Actual
+child-ownership loss or an earlier reap forbids group and direct-child signals;
+no numeric PID/PGID lookup reconstructs that authority. The caller exclusively
+owns its Child while this native lifecycle runs. Nonzero exits remain ordinary
+status data. A limit is an error, never truncated success. Unsupported capture
+platforms refuse before spawn.
+
+Knowledge native owner invocations share one application-owned runner with a
+60-second deadline per command and the explicit 128 MiB transport allowance.
+This mechanical limit does not change the generic runner's no-timeout default,
+source admission or source size. Timeout retains actual execution/effect facts
+and original cause; it is unavailable, never copied-source fallback or absence.
+
+Native body transport uses an explicit 128 MiB command allowance where a valid
+16 MiB source can expand through JSON escaping and its envelope. The mechanical
+source limit and native identity/admission do not change. An oversized aggregate
+Wiki response is unavailable rather than silently truncated. A failure after
+execution retains possible effects, actual known exit status, bounded captured
+prefix and original IO cause. Signal delivery is distinct from reaping and from
+retirement of arbitrary descendants; a finite cleanup failure cannot be reported
+as normal command success or as rollback.
+
+### Current Knowledge source admission
+
+An explicitly configured Central owner keeps its original invocation locator,
+including an alias, even when current observation is unavailable. Missing or
+unreadable known-owner state cannot select an implicit standalone horizon. A
+truly absent undeclared home hint remains optional. Current observation carries
+the original IO cause; labels alone do not determine disclosure scope. This
+relation does not establish retained semantic Service World/Project identity
+or preserve an original selected Project route erased by upstream discovery.
+
+Each Knowledge operation materialises its current native inputs and uses the
+owning providers. A result-cache hit, a process-held material horizon, file
+metadata or TTL does not grant permission to disclose a source body, snippet or
+dependent relation. Native source identity, scope, revision and refusals remain
+the owning contract. Useful indexes and read models remain valid when the
+owning query checks their current basis and admission. This does not promise
+exclusion of arbitrary external mutations after the last owner checkpoint.
+
+The application result-cache wrappers, process basis memo and Ground/Full
+shortcut are retired; the Knowledge runtime belongs to one operation. The
+public store transport API remains compatible: storing bytes is not source
+admission. Prepared NOW, delivery, revocation and learning retain their existing
+native contracts. The application no longer reads the old disposable
+`knowledge` result-key family or uses `AIKIT_KNOWLEDGE_RESULT_CACHE` to select a
+shortcut. TTL bounds retained bytes, not authority. No source, Wiki, history,
+configuration or user bytes are deleted. Older installed consumers require an
+explicit cutover before composed acceptance.
+
+Generic discovery checks the existing native path predicate before and after
+candidate body IO, and prunes a marked directory before listing descendants.
+A selected descendant narrows discovery, not its known native disclosure
+boundary. Actual World or Project boundaries come from existing context and
+bindings; genuinely standalone material retains its declared root without a
+new universal above-root convention. The physical predicate is not a source
+identity, an origin receipt or an atomic exclusion of concurrent writers.
+
+Known live-source projections require their originating owner's current
+admission and authoritative basis. Independently accepted retained material
+follows its actual owner. Missing legacy origin remains preserved and
+disclosed, never guessed or automatically promoted. Removing the result cache
+does not by itself repair an absent compiler-origin relation. Open, route,
+frame, accessibility, familiarity, history, span and coverage continue to
+record actual use through their existing native paths. Retrieval and skill
+selection do not grant mutation or disclosure authority.
+
+Read-only physical material observation reuses the existing publication adapter:
+held requested/canonical parent affiliation, an ordinary single-link source,
+descriptor-relative no-follow/nonblocking opens, bounded rereads and final
+named/held identity checks. It creates no lock and confers no source authority.
+The material-basis operation retains its 16 MiB limit; generic JSON discovery
+retains its 4 MiB limit. Eager ProjectCentral source/Wiki reads have an explicit
+16 MiB capacity. A larger source receives an honest budget/unavailable result,
+never truncation or a claim that the source is missing. Its bytes remain in
+place; use a supported bounded native-owner read when available, otherwise the
+next repair belongs to that owner's chunked-read contract. Direct IO failures
+retain their actual original cause independently of the stable domain envelope.

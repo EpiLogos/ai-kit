@@ -28,6 +28,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "encounter_native_release.rs"]
+mod native_release;
+pub use native_release::NativeReleasedPredecessor;
+
 #[path = "encounter_agency.rs"]
 mod agency;
 pub use agency::mint::{
@@ -36,22 +40,11 @@ pub use agency::mint::{
 };
 pub use agency::model::EncounterModelOpen;
 pub(crate) use agency::model::PreparedModel;
-#[path = "encounter_native_release.rs"]
-mod native_release;
-pub use agency::speech::{
-    configure as configure_local_speech, disclose as disclose_local_speech, LocalSpeechConfig,
-};
 pub use agency::{
     conversation::{ConversationEntry, ConversationRecipientSpec, ConversationSendRequest},
     EncounterA2aFraming, EncounterAddressedTurn, EncounterAgencyBinding, EncounterContextPacket,
     EncounterGroupRecipient,
 };
-pub use native_release::NativeReleasedPredecessor;
-
-#[path = "encounter_prime_launch.rs"]
-pub(crate) mod prime_launch;
-#[path = "encounter_prime_resume.rs"]
-mod prime_resume;
 
 #[path = "encounter_addressing.rs"]
 mod encounter_addressing;
@@ -281,27 +274,26 @@ pub enum EncounterRequest {
     OpenModel {
         request: Box<EncounterModelOpen>,
     },
-    /// Explicit new native body for the same current Task after observed closure.
-    OpenModelWithPredecessor {
-        request: Box<EncounterModelOpen>,
-        released_predecessor: NativeReleasedPredecessor,
-    },
+    /// Release only an idle, exactly identified owned native body. Retained
+    /// canonical history remains; this operation never claims native resume.
     ReleaseNative {
         agent_session: ResourceRef,
         expected_native_session_id: String,
         expected_generation: String,
     },
+    /// Explicitly create a fresh body after an owner-observed exact release.
+    /// Ordinary OpenModel and Reconnect retain their existing semantics.
+    ReplaceModel {
+        request: Box<EncounterModelOpen>,
+        released_predecessor: NativeReleasedPredecessor,
+    },
     Health,
     /// Current native owner census under the exclusive lifecycle fence.
     /// A busy admitted operation is an error, never an empty complete census.
-    OwnerOccupancy {
-        expected_pid: u32,
-    },
+    OwnerOccupancy { expected_pid: u32 },
     /// Close this owner only when the SAME fenced census proves native idle.
     /// A refusal never drains residents or changes shutdown_requested.
-    ShutdownIdle {
-        expected_pid: u32,
-    },
+    ShutdownIdle { expected_pid: u32 },
     /// Stop only this explicitly identified owner after its provider processes
     /// have been shut down. This is never an ordinary view-detach operation.
     Shutdown {
@@ -516,6 +508,7 @@ struct Resident {
     model: Option<agency::model::PreparedModel>,
     body_basis: Value,
     now_context: Option<EncounterNowContextConfig>,
+    child_messages: Mutex<Option<native_release::OwnedChildWatcher>>,
 }
 impl Resident {
     /// The resident provider as a view may describe it: identity, the owner's
@@ -542,8 +535,8 @@ struct NativeOpenRequest<'a> {
     provider: String,
     cwd: PathBuf,
     reconnect: bool,
-    model_target: Option<&'a EncounterModelOpen>,
     released_predecessor: Option<NativeReleasedPredecessor>,
+    model_target: Option<&'a EncounterModelOpen>,
 }
 
 struct NativeModeRequest<'a> {
@@ -566,7 +559,6 @@ struct NativePublicationTestCheckpoint {
 
 pub struct EncounterService {
     home: AikitHome,
-    entry_point: crate::SessionSpaceEntryPoint,
     lifecycle: RwLock<Lifecycle>,
     shutdown_requested: std::sync::atomic::AtomicBool,
     store: Arc<EncounterStore>,
@@ -830,18 +822,8 @@ struct FailedLaunchAttempt<'a> {
     more_variants: bool,
 }
 impl EncounterService {
-    /// Library construction uses the standalone native grammar. Binary owners
-    /// supply their actual entrypoint through `new_with_entrypoint`.
     pub fn new(home: AikitHome) -> Result<Self> {
-        Self::new_with_entrypoint(home, crate::SessionSpaceEntryPoint::Standalone)
-    }
-
-    pub fn new_with_entrypoint(
-        home: AikitHome,
-        entry_point: crate::SessionSpaceEntryPoint,
-    ) -> Result<Self> {
         Ok(Self {
-            entry_point,
             lifecycle: RwLock::new(Lifecycle::Running),
             shutdown_requested: std::sync::atomic::AtomicBool::new(false),
             store: Arc::new(EncounterStore::open(&home)?),
@@ -861,13 +843,46 @@ impl EncounterService {
     fn native_open_state(&self, session: &ResourceRef) -> Result<Option<Value>> {
         if let Some(opening) = self.openings.lock().map_err(error)?.get(session).cloned() {
             return Ok(Some(
-                json!({"state":"Opening","error":null,"opening":opening}),
+                json!({"state":if opening["kind"]=="native-release-validation" {"Releasing"}else{"Opening"},"error":null,"opening":opening}),
             ));
         }
-        self.store.native_open_recovery(session)
+        if let Some(recovery) = self.store.native_open_recovery(session)? {
+            return Ok(Some(recovery));
+        }
+        if let Some(binding) = self.store.last_native_binding(session)? {
+            if let (Some(native), Some(generation)) = (
+                binding["native_session_id"].as_str(),
+                binding["connection_generation"].as_str(),
+            ) {
+                if let Some(release) = self
+                    .store
+                    .native_release_receipt(session, native, generation)?
+                {
+                    if release["receipt"]["cleanup_confirmed"] == true {
+                        return Ok(Some(
+                            json!({"state":"Released","error":null,"native_session_id":native,"connection_generation":generation,"native_release":release,"released_predecessor":{"expected_native_session_id":native,"expected_generation":generation,"release_cursor":release["terminal_cursor"]}}),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn begin_native_open(&self, session: &ResourceRef) -> Result<NativeOpenGuard<'_>> {
+        self.begin_native_lease(
+            session,
+            ulid::Ulid::generate().to_string(),
+            "native-open-validation",
+        )
+    }
+
+    fn begin_native_lease(
+        &self,
+        session: &ResourceRef,
+        generation: String,
+        kind: &str,
+    ) -> Result<NativeOpenGuard<'_>> {
         let mut openings = self.openings.lock().map_err(error)?;
         if openings.contains_key(session) {
             return Err(AikitError::new(
@@ -879,11 +894,10 @@ impl EncounterService {
             return Err(AikitError::new("encounter.native_open_recovery_required",
                 "Retained native startup has unresolved cleanup; reconcile its exact generation before another open"));
         }
-        let generation = ulid::Ulid::generate().to_string();
         openings.insert(
             session.clone(),
             json!({
-                "kind":"native-open-validation", "connection_generation":generation,
+                "kind":kind, "connection_generation":generation,
                 "owner_pid":std::process::id()
             }),
         );
@@ -932,6 +946,9 @@ impl EncounterService {
                 "This session has no unresolved native startup",
             )
         })?;
+        if retained["opening"]["kind"] == "native-release-requested" {
+            return Err(AikitError::new("encounter.native_release_uncertain", "Startup cleanup attestation cannot certify an idle-body release; actual exact owned cleanup is required"));
+        }
         if retained["opening"]["connection_generation"].as_str()
             != Some(expected_generation.as_str())
         {
@@ -1231,15 +1248,10 @@ impl EncounterService {
         Ok(())
     }
 
-    fn owner_exclusive(
-        &self,
-        expected_pid: u32,
-    ) -> Result<std::sync::RwLockWriteGuard<'_, Lifecycle>> {
+    fn owner_exclusive(&self, expected_pid: u32) -> Result<std::sync::RwLockWriteGuard<'_, Lifecycle>> {
         if expected_pid != std::process::id() {
-            return Err(AikitError::new(
-                "encounter.owner_changed",
-                "The requested PID does not identify this encounter owner",
-            ));
+            return Err(AikitError::new("encounter.owner_changed",
+                "The requested PID does not identify this encounter owner"));
         }
         match self.lifecycle.try_write() {
             Ok(lease) => Ok(lease),
@@ -1249,19 +1261,12 @@ impl EncounterService {
         }
     }
 
-    fn owner_occupancy_fenced(
-        &self,
-        lifecycle: &std::sync::RwLockWriteGuard<'_, Lifecycle>,
-    ) -> Result<Value> {
+    fn owner_occupancy_fenced(&self, lifecycle: &std::sync::RwLockWriteGuard<'_, Lifecycle>) -> Result<Value> {
         if !matches!(**lifecycle, Lifecycle::Running)
-            || self
-                .shutdown_requested
-                .load(std::sync::atomic::Ordering::SeqCst)
+            || self.shutdown_requested.load(std::sync::atomic::Ordering::SeqCst)
         {
-            return Err(AikitError::new(
-                "encounter.owner_stopped",
-                "The owner is stopping, stopped or failed; native idleness is not inferred",
-            ));
+            return Err(AikitError::new("encounter.owner_stopped",
+                "The owner is stopping, stopped or failed; native idleness is not inferred"));
         }
         let residents: Vec<Value> = self.residents.lock().map_err(error)?.iter().map(|(session, resident)| {
             json!({"agent_session":session,"native_session_id":resident.lane.binding().native_session_id,
@@ -1271,38 +1276,22 @@ impl EncounterService {
             json!({"agent_session":session,"connection_generation":opening["connection_generation"],
                 "phase":opening["kind"]})
         }).collect();
-        let pending_permissions: Vec<ResourceRef> = self
-            .permissions
-            .lock()
-            .map_err(error)?
-            .iter()
-            .filter(|(_, pending)| !pending.is_empty())
-            .map(|(session, _)| session.clone())
-            .collect();
+        let pending_permissions: Vec<ResourceRef> = self.permissions.lock().map_err(error)?.iter().filter(|(_, pending)| !pending.is_empty()).map(|(session, _)| session.clone()).collect();
         // This native reducer includes detached canonical sessions. No view,
         // attachment list, PID liveness heuristic or copied journal substitutes.
-        let recoveries: Vec<Value> = self
-            .store
-            .native_open_recoveries()?
-            .into_iter()
-            .map(|(session, recovery)| {
-                json!({"agent_session":session,"state":recovery["state"],
+        let recoveries: Vec<Value> = self.store.native_open_recoveries()?.into_iter().map(|(session, recovery)| {
+            json!({"agent_session":session,"state":recovery["state"],
                 "connection_generation":recovery["opening"]["connection_generation"]})
-            })
-            .collect();
+        }).collect();
         let durable_work = self.store.owner_work_standing()?;
-        let native_idle = residents.is_empty()
-            && openings.is_empty()
-            && pending_permissions.is_empty()
-            && recoveries.is_empty();
-        Ok(
-            json!({"schema":"aikit.encounter-owner-occupancy/v1","protocol":"aikit-encounter-v1",
+        let native_idle = residents.is_empty() && openings.is_empty()
+            && pending_permissions.is_empty() && recoveries.is_empty();
+        Ok(json!({"schema":"aikit.encounter-owner-occupancy/v1","protocol":"aikit-encounter-v1",
             "pid":std::process::id(),"complete":true,"native_idle":native_idle,
             "residents":residents,"openings":openings,"pending_permission_sessions":pending_permissions,
             "unresolved_native_startups":recoveries,"durable_work":durable_work,
             "scope":"current native owner and retained startup recovery; not whole-machine process discovery",
-            "session_space_attachment_required":false,"automatic_retry":false}),
-        )
+            "session_space_attachment_required":false,"automatic_retry":false}))
     }
 
     fn owner_occupancy(&self, expected_pid: u32) -> Result<Value> {
@@ -1325,8 +1314,7 @@ impl EncounterService {
         }
         // Admission and closure are one native critical section. No resident
         // is stopped, journal reconciled, permission resolved or request replayed.
-        self.shutdown_requested
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.shutdown_requested.store(true, std::sync::atomic::Ordering::SeqCst);
         let receipt = json!({"protocol":"aikit-encounter-v1","pid":std::process::id(),
             "shutdown":true,"idle_only":true,"occupancy":occupancy,"stopped":[],
             "canonical_sessions_retained":true,"durable_work_retained":true,
@@ -1369,6 +1357,10 @@ impl EncounterService {
                     // Journal failure must not prevent material cleanup.
                     if let Err(error) = self.store.append(&session, &json!({"kind":"owner-shutdown-requested","native_session_id":native,"reason":"explicit owner lifecycle operation"})) {
                         failures.push(format!("{session}: shutdown request journal: {error}"));
+                    }
+                    let watcher_cleanup = resident.stop_child_messages();
+                    if let Err(failure) = &watcher_cleanup {
+                        failures.push(format!("{session}: child-message watcher: {failure}"));
                     }
                     match resident.host.shutdown() {
                         Ok(status) => {
@@ -1594,8 +1586,8 @@ impl EncounterService {
                 provider,
                 cwd,
                 reconnect,
-                model_target,
                 released_predecessor: None,
+                model_target,
             },
             Instant::now() + NATIVE_STARTUP_TIMEOUT,
         )
@@ -1610,19 +1602,10 @@ impl EncounterService {
         // Actual pre-reservation scheduling only; it supplies no native answer.
         #[cfg(test)]
         {
-            let barrier = self
-                .native_validation_test_barrier
-                .lock()
-                .map_err(error)?
-                .clone();
+            let barrier = self.native_validation_test_barrier.lock().map_err(error)?.clone();
             if let Some(barrier) = barrier {
                 barrier.reached.send(Instant::now()).map_err(error)?;
-                barrier
-                    .proceed
-                    .lock()
-                    .map_err(error)?
-                    .recv_timeout(Duration::from_secs(5))
-                    .map_err(error)?;
+                barrier.proceed.lock().map_err(error)?.recv_timeout(Duration::from_secs(5)).map_err(error)?;
             }
         }
         let outcome = self.open_native_owned(request, deadline, &mut opening);
@@ -1641,8 +1624,8 @@ impl EncounterService {
             provider,
             cwd,
             reconnect,
-            model_target,
             released_predecessor,
+            model_target,
         } = request;
         let authored = SessionSpaceApplicationStore::new(self.home.clone()).load(&space)?;
         if !authored.agent_sessions.contains_key(&agent_session) {
@@ -1679,6 +1662,7 @@ impl EncounterService {
         let task_basis = Self::read_task(&self.home, &agent_session)?;
         crate::direct_agent_session::check(&self.home, &agent_session, &cwd)?;
         let previous = self.store.last_native_binding(&agent_session)?;
+
         // Never retain the global map lock across credential/protocol work.
         // The per-session opening lease promptly fences duplicate native opens.
         let held = self
@@ -1687,20 +1671,22 @@ impl EncounterService {
             .map_err(error)?
             .get(&agent_session)
             .cloned();
-        let successor_basis = if let Some(predecessor) = &released_predecessor {
-            ensure_native_startup_deadline(deadline)?;
-            let basis = native_release::validate_predecessor(
-                self,
+        if let Some(predecessor) = &released_predecessor {
+            let owned_successor = held.as_ref().is_some_and(|resident| {
+                previous.as_ref().is_some_and(|binding| {
+                    binding["connection_generation"].as_str() == Some(resident.generation.as_str())
+                        && binding["native_session_id"].as_str()
+                            == Some(resident.lane.binding().native_session_id.as_str())
+                })
+            });
+            native_release::validate_predecessor(
+                &self.store,
                 &agent_session,
                 previous.as_ref(),
                 predecessor,
-                held.is_some(),
+                owned_successor,
             )?;
-            ensure_native_startup_deadline(deadline)?;
-            Some(basis)
-        } else {
-            None
-        };
+        }
         let mut failed_resident = None;
         if let Some(held) = held {
             if held.space != space || held.provider != provider || held.cwd != cwd {
@@ -1727,24 +1713,7 @@ impl EncounterService {
                     Some(deadline),
                 )?;
                 let current_binding = held.host.identity(&agent_session)?.binding;
-                if released_predecessor.is_some()
-                    && previous.as_ref().is_none_or(|binding| {
-                        binding["connection_generation"].as_str() != Some(held.generation.as_str())
-                            || binding["native_session_id"]
-                                != json!(current_binding.native_session_id)
-                    })
-                {
-                    return Err(error(
-                        "Owned successor does not match the exact current journal generation",
-                    ));
-                }
-                let mut receipt = json!({"agent_session":agent_session,"native_session_id":current_binding.native_session_id,"model_observation":current_binding.model_observation,"provider":held.provider,"protocol":held.protocol,"body_basis":held.body_basis,"model_selection":held.model,"resident":true,"inference_observed":false});
-                if released_predecessor.is_some() {
-                    receipt["continuation"] = json!("fresh-native-successor");
-                    receipt["released_predecessor"] = json!(released_predecessor);
-                    receipt["successor_basis"] = json!(successor_basis);
-                    receipt["connection_generation"] = json!(held.generation);
-                }
+                let receipt = json!({"agent_session":agent_session,"native_session_id":current_binding.native_session_id,"model_observation":current_binding.model_observation,"provider":held.provider,"protocol":held.protocol,"body_basis":held.body_basis,"model_selection":held.model,"connection_generation":held.generation,"released_predecessor":previous.as_ref().and_then(|value|value.get("released_predecessor")),"resident":true,"inference_observed":false});
                 opening.terminal_recorded = true;
                 drop(agency_lock);
                 return self.open_receipt_with_drain(agent_session, receipt);
@@ -1825,12 +1794,7 @@ impl EncounterService {
             blake3::hash(agent_session.as_str().as_bytes()).to_hex()
         ))
         .map_err(error)?;
-        if reconnect
-            && !matches!(
-                configured.protocol,
-                EncounterProtocol::Acp | EncounterProtocol::PrimeRpc
-            )
-        {
+        if reconnect && configured.protocol != EncounterProtocol::Acp {
             return Err(AikitError::new(
                 "encounter.reconnect_unsupported",
                 "This native provider does not publish a supported resume operation; ACP reconnect rides the capability-gated session/resume, and this protocol has no reconnect route through the encounter service; no replacement session was created",
@@ -1883,12 +1847,7 @@ impl EncounterService {
             if task_bound {
                 configured.argv.clone()
             } else {
-                agency::model::direct_launcher(
-                    &agent_session,
-                    &configured,
-                    model,
-                    self.entry_point,
-                )?
+                agency::model::direct_launcher(&agent_session, &configured, model)?
             }
         } else if task_bound {
             configured.argv.clone()
@@ -1901,12 +1860,25 @@ impl EncounterService {
         // record the child wrote through its inherited skill, correlated to
         // the child's locus digest like every faculty receipt.
         let child_message_dir = if configured.protocol == EncounterProtocol::PrimeRpc {
-            let dir = prime_launch::child_message_dir(&self.home, &agent_session)?;
-            // AIKit's model/task wrappers carry their own typed arguments.
-            // They add native context only at their admitted final exec seam.
-            if model.is_none() && !task_bound {
-                prime_launch::append_context(&self.home, &agent_session, &mut launch_argv)?;
+            launch_argv.extend(["--agent-session".into(), agent_session.to_string()]);
+            let dir = self
+                .home
+                .state()
+                .join("encounter-child-messages")
+                .join(
+                    blake3::hash(agent_session.as_str().as_bytes())
+                        .to_hex()
+                        .to_string(),
+                )
+                .join(&generation);
+            std::fs::create_dir_all(&dir).map_err(error)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                    .map_err(error)?;
             }
+            launch_argv.extend(["--child-message-dir".into(), dir.display().to_string()]);
             Some(dir)
         } else {
             None
@@ -1918,24 +1890,6 @@ impl EncounterService {
         // and take no environment from this spawn.
         let launch_environment = if model.is_none() && !task_bound {
             agency::model::profile_environment(&self.home, &agent_session, &configured)?
-        } else {
-            None
-        };
-        let prime_resume_target = if reconnect && configured.protocol == EncounterProtocol::PrimeRpc
-        {
-            let native = previous
-                .as_ref()
-                .and_then(|p| p["native_session_id"].as_str())
-                .ok_or_else(|| error("Prior native session identity is missing"))?;
-            // Selected-model/task launchers re-exec AIKit and do not expose
-            // --prime-bin. Resolve their already-admitted native body through
-            // the same execution seam used at that final exec boundary.
-            let (native_argv, native_environment) =
-                agency::model::execution(&self.home, &agent_session, &body_provider)?;
-            Some((
-                native.to_owned(),
-                prime_resume::locate(&native_argv, native, &cwd, native_environment.as_ref())?,
-            ))
         } else {
             None
         };
@@ -1967,7 +1921,6 @@ impl EncounterService {
         // not to that executable's basename.
         let harness_profile = agency::model::declared_provider_profile(&body_provider)?
             .map(|profile| profile.slug.clone());
-        let task_revision = task_basis.get("revision").cloned();
         let body_basis = json!({
             "schema":"aikit.resident-body-basis/v1",
             "provider_id":body_provider.id,
@@ -1978,41 +1931,17 @@ impl EncounterService {
             "effective_launch_argv_digest":effective_launch_argv_digest,
             "harness_profile":harness_profile,
             "task_bound":task_bound,
-            "task_revision":task_revision,
             "cwd":cwd,
             "required_context":configured.required_context,
             "model_basis_digest":model.as_ref().map(PreparedModel::fingerprint).transpose()?,
         });
-        if let Some(basis) = &successor_basis {
-            let previous_body = &basis["predecessor"]["binding"]["body_basis"];
-            for key in [
-                "provider_id",
-                "protocol",
-                "provider_argv_digest",
-                "harness_profile",
-                "task_bound",
-                "cwd",
-                "required_context",
-            ] {
-                if previous_body[key] != body_basis[key] {
-                    return Err(error(
-                        "Explicit Task successor changed the actual underlying provider body",
-                    ));
-                }
-            }
-        }
-        let mut reserve_basis = json!({
+        opening.reserve(json!({
             "agent_session":agent_session,"space":space,"provider":provider,
             "cwd":cwd,"continuation_requested":reconnect,"body_basis":body_basis,
             "agency_basis":agency_basis,"task_basis":task_basis,
             "model_selection":model,
-            "prior_native_binding":previous
-        });
-        if released_predecessor.is_some() {
-            reserve_basis["released_predecessor"] = json!(released_predecessor);
-            reserve_basis["successor_basis"] = json!(successor_basis);
-        }
-        opening.reserve(reserve_basis)?;
+            "prior_native_binding":previous,"released_predecessor":released_predecessor,"child_message_dir":child_message_dir
+        }))?;
         if let Some(held) = failed_resident.take() {
             let mut residents = self.residents.lock().map_err(error)?;
             if !residents
@@ -2041,6 +1970,7 @@ impl EncounterService {
             drop(residents);
             opening.process_started = true;
             opening.cleanup_confirmed = false;
+            removed.stop_child_messages()?;
             opening.host = Some(removed.host);
             self.store.append(
                 &agent_session,
@@ -2079,18 +2009,14 @@ impl EncounterService {
             for argv in &configured.argv_fallback {
                 let mut variant = configured.clone();
                 variant.argv = argv.clone();
-                let mut argv = crate::model_defaults::launch_argv(
+                launch_variants.push(crate::model_defaults::launch_argv(
                     &variant,
                     if task_bound {
                         None
                     } else {
                         launch_default.as_ref()
                     },
-                )?;
-                if configured.protocol == EncounterProtocol::PrimeRpc && !task_bound {
-                    prime_launch::append_context(&self.home, &agent_session, &mut argv)?;
-                }
-                launch_variants.push(argv);
+                )?);
             }
         }
         let single_variant = launch_variants.len() == 1;
@@ -2148,12 +2074,6 @@ impl EncounterService {
                                 cwd.to_string_lossy().into_owned(),
                                 provenance.clone(),
                             );
-                            let adapter = match &prime_resume_target {
-                                Some((id, path)) => {
-                                    adapter.with_resume_target(id.clone(), path.clone())?
-                                }
-                                None => adapter,
-                            };
                             match &model {
                                 Some(model) => adapter.with_selected_model(
                                     &model.policy.native_provider,
@@ -2358,14 +2278,6 @@ impl EncounterService {
                 "The harness returned another native identity to session/resume; no binding or successful continuation was recorded",
             ));
         }
-        if released_predecessor.as_ref().is_some_and(|predecessor| {
-            predecessor.expected_native_session_id.as_str() == native.as_str()
-        }) {
-            return Err(AikitError::new(
-                "encounter.native_successor_identity_reused",
-                "The harness returned the released predecessor identity to an explicit fresh open; no successor binding was recorded",
-            ));
-        }
         // A bound policy is delivered, never assumed. Pi RPC carried its
         // selection into the session open through the adapter; an ACP
         // resident receives it now, through the native session's own model
@@ -2519,31 +2431,8 @@ impl EncounterService {
                     })?;
             }
         }
-        if let Some(predecessor) = &released_predecessor {
-            ensure_native_startup_deadline(deadline)?;
-            let fresh = native_release::validate_predecessor(
-                self,
-                &agent_session,
-                self.store.last_native_binding(&agent_session)?.as_ref(),
-                predecessor,
-                false,
-            )?;
-            ensure_native_startup_deadline(deadline)?;
-            if Some(&fresh) != successor_basis.as_ref() {
-                return Err(AikitError::new(
-                    "encounter.native_open_basis_changed",
-                    "Task predecessor/current authority changed before successor binding",
-                ));
-            }
-        }
         let opened_mode_observation = lane.binding().mode_observation.clone();
-        let mut binding_event = json!({"kind":"binding","connection_generation":generation,"owner_pid":std::process::id(),"space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":owner_launcher_argv_digest,"body_basis":body_basis,"now_context_config_digest":blake3::hash(serde_json::to_vec(&configured.now_context).expect("NOW config JSON").as_slice()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"mode_observation":opened_mode_observation,"model_selection":model_reading,"launch_model_default":launch_default,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-resume"} else {"new-native-session"},"composed_tools_route":if mcp_native_fallback.is_some() {"harness-native-mcp-config-seam"} else {"session-wire-or-none"},"mcp_native_fallback_reason":mcp_native_fallback.as_ref().map(|(reason, _)| reason.clone())});
-        if released_predecessor.is_some() {
-            binding_event["continuation"] = json!("fresh-native-successor");
-            binding_event["released_predecessor"] = json!(released_predecessor);
-            binding_event["successor_basis"] = json!(successor_basis);
-        }
-        self.store.append(&agent_session, &binding_event)?;
+        self.store.append(&agent_session,&json!({"kind":"binding","connection_generation":generation,"space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":owner_launcher_argv_digest,"body_basis":body_basis,"now_context_config_digest":blake3::hash(serde_json::to_vec(&configured.now_context).expect("NOW config JSON").as_slice()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"mode_observation":opened_mode_observation,"model_selection":model_reading,"launch_model_default":launch_default,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-resume"} else if released_predecessor.is_some() {"fresh-native-successor"} else {"new-native-session"},"released_predecessor":released_predecessor,"child_message_dir":child_message_dir,"composed_tools_route":if mcp_native_fallback.is_some() {"harness-native-mcp-config-seam"} else {"session-wire-or-none"},"mcp_native_fallback_reason":mcp_native_fallback.as_ref().map(|(reason, _)| reason.clone())}))?;
         opening.binding_recorded = true;
         let drain = lane.clone();
         let mode_observation = host
@@ -2599,6 +2488,7 @@ impl EncounterService {
                 model,
                 body_basis: body_basis.clone(),
                 now_context: configured.now_context,
+                child_messages: Mutex::new(None),
             }),
         );
         opening.terminal_recorded = true;
@@ -2608,82 +2498,19 @@ impl EncounterService {
         // The owner drains transport delivery; durable cursor readers are
         // independent views of the same canonical journal.
         std::thread::spawn(move || while drain.recv().is_some() {});
-        // Drain the bounded child-to-parent message channel into the same
-        // journal: one file is one record the child wrote through its
-        // inherited skill, removed only after it is journalled. A file that
-        // cannot be journalled is renamed aside and named, never silently
-        // dropped. The channel carries words, never effects.
         if let Some(dir) = child_message_dir {
-            let store = Arc::clone(&self.store);
-            let session = agent_session.clone();
-            std::thread::spawn(move || loop {
-                std::thread::sleep(std::time::Duration::from_millis(400));
-                let Ok(entries) = std::fs::read_dir(&dir) else {
-                    return;
-                };
-                let mut files: Vec<std::path::PathBuf> = entries
-                    .filter_map(|entry| entry.ok())
-                    .map(|entry| entry.path())
-                    .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
-                    .collect();
-                files.sort();
-                for path in files {
-                    let journaled = (|| -> std::result::Result<(), AikitError> {
-                        let bytes = std::fs::read(&path).map_err(error)?;
-                        if bytes.len() > 64 * 1024 {
-                            return Err(error("child message exceeds the 64 KiB channel bound"));
-                        }
-                        let value: serde_json::Value =
-                            serde_json::from_slice(&bytes).map_err(error)?;
-                        if value.get("schema").and_then(|s| s.as_str())
-                            != Some("actuation.child-message/v1")
-                        {
-                            return Err(error("unrecognised child message schema"));
-                        }
-                        let cursor = store
-                            .append(
-                                &session,
-                                &json!({
-                                    "kind":"child-message",
-                                    "from":value.get("from").cloned().unwrap_or(serde_json::Value::Null),
-                                    "receiver_role":value.get("receiver_role").cloned().unwrap_or(serde_json::Value::Null),
-                                    "text":value.get("text").cloned().unwrap_or(serde_json::Value::Null),
-                                    "text_sha256":value.get("text_sha256").cloned().unwrap_or(serde_json::Value::Null),
-                                    "file":path.file_name().map(|name| name.to_string_lossy().to_string()),
-                                }),
-                            )
-                            .map_err(|e| error(e.to_string()))?;
-                        let _ = cursor;
-                        Ok(())
-                    })();
-                    match journaled {
-                        Ok(()) => {
-                            let _ = std::fs::remove_file(&path);
-                        }
-                        Err(failure) => {
-                            let _ = std::fs::rename(&path, path.with_extension("json.rejected"));
-                            let _ = store.append(
-                                &session,
-                                &json!({
-                                    "kind":"child-message-rejected",
-                                    "file":path.file_name().map(|name| name.to_string_lossy().to_string()),
-                                    "reason":failure.to_string(),
-                                }),
-                            );
-                        }
-                    }
-                }
-            });
+            let resident = self.resident(&agent_session)?;
+            let watcher = native_release::OwnedChildWatcher::start(
+                Arc::clone(&self.store),
+                agent_session.clone(),
+                generation.clone(),
+                dir,
+            );
+            *resident.child_messages.lock().map_err(error)? = Some(watcher);
         }
         // The resident just became ready: this is the moment queued durable
         // deliveries wait for. Drain before answering the open.
-        let mut receipt = json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"mode_observation":mode_observation,"model_selection":model_reading,"provider":receipt_provider,"protocol":receipt_protocol,"body_basis":body_basis,"body_ref":configured.body_ref,"body_revision":configured.body_revision,"resident":true,"inference_observed":false});
-        if released_predecessor.is_some() {
-            receipt["continuation"] = json!("fresh-native-successor");
-            receipt["released_predecessor"] = json!(released_predecessor);
-            receipt["successor_basis"] = json!(successor_basis);
-            receipt["connection_generation"] = json!(generation);
-        }
+        let mut receipt = json!({"agent_session":agent_session,"native_session_id":native,"model_observation":model_observation,"mode_observation":mode_observation,"model_selection":model_reading,"provider":receipt_provider,"protocol":receipt_protocol,"body_basis":body_basis,"body_ref":configured.body_ref,"body_revision":configured.body_revision,"connection_generation":generation,"released_predecessor":released_predecessor,"resident":true,"inference_observed":false});
         if let Some((reason, projection)) = &mcp_native_fallback {
             // The composed tool surface does not ride this session's wire: the
             // open outcome names the harness's native MCP configuration seam
@@ -2917,7 +2744,7 @@ impl EncounterService {
                 )
             }
             EncounterRequest::OpenModel { request } => self.open_model(*request),
-            EncounterRequest::OpenModelWithPredecessor {
+            EncounterRequest::ReplaceModel {
                 request,
                 released_predecessor,
             } => self.open_model_with_predecessor(*request, Some(released_predecessor)),
@@ -3005,9 +2832,9 @@ impl EncounterService {
                 }
                 Ok(json!({"sent":true,"request_id":request_id}))
             }
-            EncounterRequest::Health => {
-                Ok(json!({"protocol":"aikit-encounter-v1","pid":std::process::id()}))
-            }
+            EncounterRequest::Health => Ok(
+                json!({"protocol":"aikit-encounter-v1","pid":std::process::id(),"native_body_lifecycle":{"release":"release-native","fresh_successor":"replace-model","exact_generation_required":true,"release_is_native_resume":false}}),
+            ),
             EncounterRequest::View {
                 agent_session,
                 before,
@@ -3027,7 +2854,7 @@ impl EncounterService {
                         let state = format!("{:?}", identity.state);
                         let ready = state == "Resident" && fault.is_none();
                         (
-                            json!({"resident":true,"native_session_id":identity.binding.native_session_id,"state":state,"error":fault,"provider":resident.provider_view()}),
+                            json!({"resident":true,"native_session_id":identity.binding.native_session_id,"state":state,"error":fault,"provider":resident.provider_view(),"connection_generation":resident.generation}),
                             ready,
                         )
                     }
@@ -3064,7 +2891,9 @@ impl EncounterService {
                     && !self.providers()?.is_empty();
                 view["actions"] = json!([
                     {"ref":"aikit.encounter.open","enabled":can_open,"reason":if can_open{None}else{Some("A current resident/startup or unresolved native cleanup prevents another open")}},
-                    {"ref":"aikit.encounter.reconcile-native-open","enabled":matches!(view["connection"]["state"].as_str(),Some("RecoveryRequired"|"CleanupUncertain")),"reason":"Exact retained generation, explicit native cleanup confirmation and evidence are required; attestation does not claim provider success"},
+                    {"ref":"aikit.encounter.reconcile-native-open","enabled":matches!(view["connection"]["state"].as_str(),Some("RecoveryRequired"|"CleanupUncertain")) && view["connection"]["opening"]["kind"]!="native-release-requested","reason":"Exact retained generation, explicit native cleanup confirmation and evidence are required; attestation does not claim provider success"},
+                    {"ref":"aikit.encounter.release-native","enabled":view["connection"]["resident"]==true && view["connection"]["state"]=="Resident","reason":"Exact native session and connection generation, idle lane and no pending delivery are required; release is not a Return"},
+                    {"ref":"aikit.encounter.replace-model","enabled":view["connection"]["state"]=="Released","reason":"Explicit owner-observed released predecessor and current model/Agency/Task admission are required"},
                     {"ref":"aikit.encounter.draft","enabled":true,"reason":null},
                     {"ref":"aikit.encounter.context","enabled":true,"reason":null},
                     {"ref":"aikit.encounter.prompt","enabled":ready,"reason":if ready{None}else{Some("A ready resident provider is required")}},
@@ -3082,8 +2911,6 @@ impl EncounterService {
                     let mut row = provider_launch_facts(p.protocol, &p.argv);
                     row["id"] = json!(p.id);
                     row["label"] = json!(p.label);
-                    row["body_ref"] = json!(p.body_ref);
-                    row["body_revision"] = json!(p.body_revision);
                     row
                 })
                 .collect::<Vec<_>>())),
@@ -3172,61 +2999,7 @@ impl EncounterService {
                         "The requested provider model conflicts with this resident's explicit durable model policy; reopen through the policy owner",
                     ));
                 }
-                let controls = resident.lane.model_controls()?;
-                if !controls.model_selection {
-                    return Err(AikitError::new(
-                        "encounter.model_selection_unavailable",
-                        controls.reason.clone().unwrap_or_else(|| {
-                            "The resident native session exposes no model selector".into()
-                        }),
-                    ));
-                }
-                let model_observation =
-                    observed.binding.model_observation.as_ref().ok_or_else(|| {
-                        AikitError::new(
-                            "encounter.model_selection_unavailable",
-                            "The resident native session exposes no model observation",
-                        )
-                    })?;
-                if !model_observation
-                    .available_models
-                    .iter()
-                    .any(|model| model.model_id == provider_model_id)
-                {
-                    return Err(AikitError::new(
-                        "encounter.model_not_advertised",
-                        "The requested model was not advertised by this resident native session",
-                    ));
-                }
-                if let Some(requested_effort) = provider_reasoning_effort.as_deref() {
-                    if !controls.reasoning_effort_selection {
-                        return Err(AikitError::new(
-                            "encounter.reasoning_effort_selection_unavailable",
-                            controls.reason.clone().unwrap_or_else(|| {
-                                "The resident native session exposes no reasoning-effort selector"
-                                    .into()
-                            }),
-                        ));
-                    }
-                    let selector =
-                        model_observation.reasoning_effort.as_ref().ok_or_else(|| {
-                            AikitError::new(
-                                "encounter.reasoning_effort_selection_unavailable",
-                                "The resident native session exposes no reasoning-effort selector",
-                            )
-                        })?;
-                    if !selector
-                        .options
-                        .iter()
-                        .any(|option| option.value == requested_effort)
-                    {
-                        return Err(AikitError::new(
-                            "encounter.reasoning_effort_not_advertised",
-                            "The requested reasoning effort was not advertised by this resident native session",
-                        ));
-                    }
-                }
-                let before = observed;
+                let before = resident.host.identity(&agent_session)?;
                 self.store.append(&agent_session, &json!({
                     "kind":"native-model-configuration-requested",
                     "agent_session":agent_session,
@@ -3239,15 +3012,9 @@ impl EncounterService {
                 let mut receipt = resident
                     .lane
                     .set_model_before(&provider_model_id, native_control_deadline)?;
-                self.store.append(&agent_session, &json!({
-                    "kind":"native-model-configuration-confirmed",
-                    "receipt":receipt,
-                    "authority":"provider-confirmed model configuration; reasoning effort, durable model policy, and Agency are unchanged"
-                })).map_err(|e| AikitError::new("encounter.model_configuration_uncertain", format!("Provider confirmed model configuration but receipt persistence failed; do not resend automatically: {e}")))?;
                 if let Some(provider_reasoning_effort) = provider_reasoning_effort.as_deref() {
-                    // Preserve the 003 partial-effect observation before the
-                    // second native write. Main's separate acknowledged model
-                    // receipt never implies reasoning or overall selection.
+                    // A later reasoning refusal/timeout cannot erase this real
+                    // model effect. Overall selection remains unconfirmed.
                     self.store.append(&agent_session, &json!({
                         "kind":"native-model-configuration-partial-confirmed",
                         "stage":"model", "receipt":receipt,
@@ -3259,12 +3026,12 @@ impl EncounterService {
                         provider_reasoning_effort,
                         native_control_deadline,
                     )?;
-                    self.store.append(&agent_session, &json!({
-                        "kind":"native-reasoning-effort-configuration-confirmed",
-                        "receipt":receipt,
-                        "authority":"provider-confirmed reasoning-effort configuration after a separately confirmed model configuration; durable model policy and Agency are unchanged"
-                    })).map_err(|e| AikitError::new("encounter.reasoning_effort_configuration_uncertain", format!("Provider confirmed reasoning-effort configuration but receipt persistence failed; do not resend automatically: {e}")))?;
                 }
+                self.store.append(&agent_session, &json!({
+                    "kind":"native-model-configuration-confirmed",
+                    "receipt":receipt,
+                    "authority":"provider-confirmed-session-config; not-durable-model-policy-or-agency"
+                })).map_err(|e| AikitError::new("encounter.model_configuration_uncertain", format!("Provider confirmed configuration but receipt persistence failed; do not resend automatically: {e}")))?;
                 Ok(json!({
                     "agent_session":receipt.agent_session,
                     "native_session_id":receipt.native_session_id,
@@ -3457,7 +3224,7 @@ impl EncounterService {
                 // require an exact body read them from here, never from a
                 // persisted active flag.
                 Ok(
-                    json!({"agent_session":agent_session,"native_session_id":identity.binding.native_session_id,"state":format!("{:?}",identity.state),"error":resident.host.transport_error(),"provider":resident.provider_view(),"model_observation":identity.binding.model_observation,"permissions":self.permissions.lock().map_err(error)?.get(&agent_session).map(|r|r.values().cloned().collect::<Vec<_>>()).unwrap_or_default(),"permission_authority":"native-provider-consent"}),
+                    json!({"agent_session":agent_session,"native_session_id":identity.binding.native_session_id,"state":format!("{:?}",identity.state),"connection_generation":resident.generation,"error":resident.host.transport_error(),"provider":resident.provider_view(),"model_observation":identity.binding.model_observation,"permissions":self.permissions.lock().map_err(error)?.get(&agent_session).map(|r|r.values().cloned().collect::<Vec<_>>()).unwrap_or_default(),"permission_authority":"native-provider-consent"}),
                 )
             }
         }
@@ -3474,15 +3241,6 @@ pub fn socket_path(home: &AikitHome) -> PathBuf {
 
 #[cfg(unix)]
 pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
-    serve_with_entrypoint(home, socket, crate::SessionSpaceEntryPoint::Standalone)
-}
-
-#[cfg(unix)]
-pub fn serve_with_entrypoint(
-    home: AikitHome,
-    socket: &Path,
-    entry_point: crate::SessionSpaceEntryPoint,
-) -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -3525,7 +3283,7 @@ pub fn serve_with_entrypoint(
     }
     let listener = UnixListener::bind(socket).map_err(error)?;
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600)).map_err(error)?;
-    let service = Arc::new(EncounterService::new_with_entrypoint(home, entry_point)?);
+    let service = Arc::new(EncounterService::new(home)?);
     agency::conversation::spawn_worker(&service);
     let clients = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
@@ -3579,22 +3337,15 @@ pub fn serve_with_entrypoint(
                     return Err(error("encounter request exceeds byte limit"));
                 }
                 let request = serde_json::from_slice(&bytes).map_err(error)?;
-                shutdown = matches!(
-                    request,
-                    EncounterRequest::Shutdown { .. } | EncounterRequest::ShutdownIdle { .. }
-                );
-                owner_observation = matches!(
-                    request,
-                    EncounterRequest::OwnerOccupancy { .. } | EncounterRequest::ShutdownIdle { .. }
-                );
+                shutdown = matches!(request, EncounterRequest::Shutdown { .. } | EncounterRequest::ShutdownIdle { .. });
+                owner_observation = matches!(request, EncounterRequest::OwnerOccupancy { .. } | EncounterRequest::ShutdownIdle { .. });
                 service.apply(request)
             })();
             let shutdown_succeeded = shutdown && result.is_ok();
             let response = match result {
                 Ok(data) => json!({"ok":true,"data":data}),
                 Err(error) => {
-                    let mut response =
-                        json!({"ok":false,"error":{"code":error.code(),"message":error.message()}});
+                    let mut response = json!({"ok":false,"error":{"code":error.code(),"message":error.message()}});
                     // Only the new owner operations expose their declared
                     // metadata census. Other native errors keep the original
                     // response shape and retain their causes inside the owner.
@@ -3654,15 +3405,6 @@ pub fn request(socket: &Path, request: &EncounterRequest) -> Result<Value> {
 /// Start the generic native owner once. No provider is opened by startup.
 #[cfg(unix)]
 pub fn start(home: &AikitHome, cwd: &Path) -> Result<Value> {
-    start_with_entrypoint(home, cwd, crate::SessionSpaceEntryPoint::Standalone)
-}
-
-#[cfg(unix)]
-pub fn start_with_entrypoint(
-    home: &AikitHome,
-    cwd: &Path,
-    entry_point: crate::SessionSpaceEntryPoint,
-) -> Result<Value> {
     let socket = socket_path(home);
     let _starting = aikit_store::ContextLock::acquire(
         home,
@@ -3682,7 +3424,7 @@ pub fn start_with_entrypoint(
     let mut child = std::process::Command::new(std::env::current_exe().map_err(error)?)
         .arg("-C")
         .arg(cwd)
-        .args(entry_point.verb_prefix())
+        .args(crate::session_space_verb_prefix())
         .arg("encounter-serve")
         .stdin(std::process::Stdio::null())
         .stdout(log.try_clone().map_err(error)?)
@@ -3790,29 +3532,6 @@ mod tests {
             refused_unsafe.to_string().contains("safe id"),
             "an unsafe id never reaches the filesystem: {refused_unsafe}"
         );
-    }
-
-    #[test]
-    fn provider_catalogue_retains_configured_body_pins_without_launching_a_resident() {
-        let home = test_home();
-        let mut provider = profile_provider("pinned-body", "gemini");
-        provider.body_ref = Some("agent-body/catalogue-contract".into());
-        provider.body_revision = Some("source-revision-for-catalogue-contract".into());
-        EncounterService::configure(&home, provider).unwrap();
-        let service = EncounterService::new(home).unwrap();
-
-        let rows = service.apply(EncounterRequest::Providers).unwrap();
-        let row = &rows.as_array().unwrap()[0];
-        assert_eq!(row["body_ref"], "agent-body/catalogue-contract");
-        assert_eq!(
-            row["body_revision"],
-            "source-revision-for-catalogue-contract"
-        );
-        assert_eq!(row["id"], "pinned-body");
-        assert_eq!(row["command"], "gemini");
-        assert!(row.get("argv").is_none());
-        assert!(row.get("env").is_none());
-        assert!(service.residents.lock().unwrap().is_empty());
     }
 
     #[test]
