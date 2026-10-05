@@ -345,10 +345,7 @@ fn preflight_discloses_exact_reads_and_never_auto_invokes() {
             .starts_with("flow-contemplate/"),
         "the invocation ref is a deterministic preflight digest"
     );
-    assert_eq!(
-        preflight.standing.disclosed_body(),
-        Some(FLOW_BODY)
-    );
+    assert_eq!(preflight.standing.disclosed_body(), Some(FLOW_BODY));
     // Explain disclosure follows the repo's ExplainEvidence shape and
     // includes the exact-reads facts plus the execution invariant.
     assert!(

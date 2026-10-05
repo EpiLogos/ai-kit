@@ -1536,7 +1536,10 @@ mod tests {
     fn store_reads_and_writes_stay_on_their_sides_of_the_fence() {
         let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
         std::fs::create_dir_all(&scratch).unwrap();
-        let directory = tempfile::Builder::new().prefix("bkmr-owner-route-").tempdir_in(scratch).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("bkmr-owner-route-")
+            .tempdir_in(scratch)
+            .unwrap();
         let runner = store_cli_scripted().on(
             "--db",
             r#"[{"bookmark":{"id":41,"title":"A","description":"human bookmark","tags":[],"content":"the body"}}]"#,
@@ -1561,11 +1564,21 @@ mod tests {
         // participating owner's successful native read.
         let unrelated = BkmrStoreSearchProvider::connect(
             crate::runner::SystemRunner::probe(),
-            directory.path().join("absent-owner").to_string_lossy().into_owned(),
+            directory
+                .path()
+                .join("absent-owner")
+                .to_string_lossy()
+                .into_owned(),
             vec![store("books", &directory.path().join("books.db"))],
         );
-        assert!(unrelated.read(&SourceRef::parse("source:bkmr:other:41").unwrap()).unwrap().is_none());
-        assert!(unrelated.read(&SourceRef::parse("central:source:control:root:Control/user/note.md").unwrap()).unwrap().is_none());
+        assert!(unrelated
+            .read(&SourceRef::parse("source:bkmr:other:41").unwrap())
+            .unwrap()
+            .is_none());
+        assert!(unrelated
+            .read(&SourceRef::parse("central:source:control:root:Control/user/note.md").unwrap())
+            .unwrap()
+            .is_none());
         let error = provider
             .read(&SourceRef::parse("source:bkmr:books:not-an-id").unwrap())
             .unwrap_err();

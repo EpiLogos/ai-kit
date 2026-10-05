@@ -814,12 +814,13 @@ pub(crate) fn direct_launcher(
     session: &ResourceRef,
     provider: &EncounterProvider,
     model: &PreparedModel,
+    entry_point: crate::SessionSpaceEntryPoint,
 ) -> Result<Vec<String>> {
     let mut argv = vec![std::env::current_exe()
         .map_err(error)?
         .display()
         .to_string()];
-    if let Some(prefix) = crate::session_space_verb_prefix() {
+    if let Some(prefix) = entry_point.verb_prefix() {
         argv.push(prefix.to_owned());
     }
     argv.push("encounter-model-exec".into());

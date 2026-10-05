@@ -1517,6 +1517,7 @@ fn actual_codex_task_acp_session_creation_and_reentry_keep_thread_locks_in_task_
         ]);
     let mut first_native_session = None;
     let mut first_coordination_inode = None;
+    let mut first_coordination_bytes = None;
     let mut first_session_paths = Vec::new();
     for label in ["actual-task-acp-first", "actual-task-acp-reentry"] {
         // Each second launch follows a successful, fully reaped EOF outcome.
@@ -1563,16 +1564,19 @@ fn actual_codex_task_acp_session_creation_and_reentry_keep_thread_locks_in_task_
             metadata.is_file() && !metadata.file_type().is_symlink(),
             "real session/new must create its native coordination lock in Task COW material"
         );
+        let coordination_bytes = fs::read(&lock).unwrap();
         let paths = native_task_session_files(&sessions);
-        assert!(
-            paths
-                .iter()
-                .any(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl")),
-            "actual native session/new must retain its rollout material inside Task T"
-        );
+        // Codex 0.154 defers a new rollout until persistence. This bounded
+        // initialize/session-new exchange sends no prompt, so an absent rollout
+        // is valid. Keep the real lock/COW/reentry checks and record actual
+        // materialization; this case does not certify persisted rollout recovery.
+        let rollout_materialized = paths
+            .iter()
+            .any(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl"));
         if label == "actual-task-acp-first" {
             first_native_session = Some(native_session.clone());
             first_coordination_inode = Some((metadata.dev(), metadata.ino()));
+            first_coordination_bytes = Some(coordination_bytes.clone());
             first_session_paths = paths.clone();
         } else {
             assert_ne!(Some(native_session.clone()),first_native_session,
@@ -1581,6 +1585,11 @@ fn actual_codex_task_acp_session_creation_and_reentry_keep_thread_locks_in_task_
                 Some((metadata.dev(), metadata.ino())),
                 first_coordination_inode,
                 "same Task retains its existing native lock material"
+            );
+            assert_eq!(
+                Some(coordination_bytes.clone()),
+                first_coordination_bytes,
+                "same Task reentry must retain its actual native coordination bytes"
             );
             assert!(
                 first_session_paths.iter().all(|p| paths.contains(p)),
@@ -1604,6 +1613,9 @@ fn actual_codex_task_acp_session_creation_and_reentry_keep_thread_locks_in_task_
             serde_json::to_vec_pretty(&json!({"taskRevision":prepared["revision"],"taskT":now,
                 "lockPath":lock,"lockDevice":metadata.dev(),"lockInode":metadata.ino(),
                 "sessionPaths":paths,"nativeSessionId":native_session,
+                "rolloutMaterialized":rollout_materialized,"rolloutPersistenceCertified":false,
+                "coordinationBytes":coordination_bytes.len(),
+                "coordinationSHA256":format!("{:x}",Sha256::digest(&coordination_bytes)),
                 "originalMetadataEntryCount":original.len(),"originalMetadataUnchanged":true,
                 "policySource":policy_source,"nativeProgram":native_program,
                 "standing":"actual native no-prompt ACP session material; controlled test Task, no Original Run or worker Return"})).unwrap()).unwrap();

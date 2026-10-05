@@ -151,7 +151,10 @@ fn knowledge_retrieval_expresses_through_the_one_resolver_contract() {
 
     // 3. A relation combines both sides. A substring scanner cannot union.
     let related = service
-        .knowledge_search("@2 authentication x @0 \"central:source:corpus:authentication\"", 50)
+        .knowledge_search(
+            "@2 authentication x @0 \"central:source:corpus:authentication\"",
+            50,
+        )
         .unwrap();
     assert!(
         matches!(

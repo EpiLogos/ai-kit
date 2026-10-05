@@ -7,7 +7,8 @@
 //! `aikit-session-space` directly keeps working, byte-for-byte.
 
 fn main() {
-    std::process::exit(aikit_cli::session_space_cli::run_from_args(
+    std::process::exit(aikit_cli::session_space_cli::run_from_args_with_entrypoint(
         std::env::args_os(),
+        aikit_cli::SessionSpaceEntryPoint::Standalone,
     ));
 }

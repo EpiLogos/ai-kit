@@ -352,8 +352,22 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
+    run_from_args_with_entrypoint(args, crate::SessionSpaceEntryPoint::Standalone)
+}
+
+/// Admit the shared grammar with the actual binary entrypoint, retained by
+/// owners which reinvoke that same executable. Library callers keep the
+/// standalone `run_from_args` contract.
+pub fn run_from_args_with_entrypoint<I, T>(
+    args: I,
+    entry_point: crate::SessionSpaceEntryPoint,
+) -> i32
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
     let cli = Cli::parse_from(args);
-    match run(cli) {
+    match run(cli, entry_point) {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("{}: {}", error.code(), error.message());
@@ -362,7 +376,7 @@ where
     }
 }
 
-fn run(cli: Cli) -> Result<()> {
+fn run(cli: Cli, entry_point: crate::SessionSpaceEntryPoint) -> Result<()> {
     let cwd = match cli.cwd {
         Some(cwd) => cwd,
         None => std::env::current_dir().map_err(|error| {
@@ -407,12 +421,15 @@ fn run(cli: Cli) -> Result<()> {
                 .as_deref()
                 .map(aikit_core::SourceRevision::parse)
                 .transpose()?;
-            emit(&crate::encounter_service::EncounterService::configure_task(
-                service.home(),
-                &aikit_core::ResourceRef::parse(agent_session)?,
-                parse_json_arg(&request_json)?,
-                expected.as_ref(),
-            )?)
+            emit(
+                &crate::encounter_service::EncounterService::configure_task_with_entrypoint(
+                    service.home(),
+                    &aikit_core::ResourceRef::parse(agent_session)?,
+                    parse_json_arg(&request_json)?,
+                    expected.as_ref(),
+                    entry_point,
+                )?,
+            )
         }
         Command::EncounterTaskRead { agent_session } => {
             emit(&crate::encounter_service::EncounterService::read_task(
@@ -425,11 +442,12 @@ fn run(cli: Cli) -> Result<()> {
             expected_revision,
             restore_revision,
         } => emit(
-            &crate::encounter_service::EncounterService::abort_task_preparation(
+            &crate::encounter_service::EncounterService::abort_task_preparation_with_entrypoint(
                 service.home(),
                 &aikit_core::ResourceRef::parse(agent_session)?,
                 &aikit_core::SourceRevision::parse(expected_revision)?,
                 &aikit_core::SourceRevision::parse(restore_revision)?,
+                entry_point,
             )?,
         ),
         Command::EncounterTaskExec {
@@ -441,11 +459,16 @@ fn run(cli: Cli) -> Result<()> {
             &aikit_core::SourceRevision::parse(expected_revision)?,
         ),
         #[cfg(unix)]
-        Command::EncounterStart => emit(&crate::encounter_service::start(service.home(), &cwd)?),
+        Command::EncounterStart => emit(&crate::encounter_service::start_with_entrypoint(
+            service.home(),
+            &cwd,
+            entry_point,
+        )?),
         #[cfg(unix)]
-        Command::EncounterServe { socket } => crate::encounter_service::serve(
+        Command::EncounterServe { socket } => crate::encounter_service::serve_with_entrypoint(
             service.home().clone(),
             &socket.unwrap_or_else(|| crate::encounter_service::socket_path(service.home())),
+            entry_point,
         ),
         Command::EncounterConfigure { provider_json } => {
             crate::encounter_service::EncounterService::configure(

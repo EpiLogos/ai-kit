@@ -1,7 +1,7 @@
 //! The `aikit` binary.
 //!
-//! Deliberately thin: it decides whether it was invoked as `aikit` or under an
-//! exported command name (the multicall shim, [`aikit_cli::multicall`]), parses
+//! Deliberately thin: applied multicall exports retain their command authority;
+//! an unbound name can admit the typed native SessionSpace route. It parses
 //! the [`aikit_cli::cli`] tree, and dispatches to the one shared
 //! [`aikit_cli::app::Service`]. Every substantive command speaks the stable JSON
 //! envelope under `--json` and maps its error to the published exit-code table.
@@ -51,11 +51,36 @@ fn run_multicall(export: &str, args: &[String]) -> i32 {
     })();
     match result {
         Ok(status) => status,
+        // An applied export keeps precedence even if its arguments resemble
+        // native commands. Only an absent export/context may admit the main
+        // CLI's typed SessionSpace route for a renamed native executable.
+        // Trust, revision, catalogue and execution failures never fall back.
+        Err(e)
+            if matches!(
+                e.code(),
+                "context.unknown" | "generation.no_current" | "multicall.unknown_export"
+            ) && is_native_session_space_invocation(args) =>
+        {
+            run_cli()
+        }
         Err(e) => {
             eprintln!("aikit: {e}");
             json::exit_code(&e)
         }
     }
+}
+
+fn is_native_session_space_invocation(args: &[String]) -> bool {
+    let argv = std::iter::once("aikit").chain(args.iter().map(String::as_str));
+    Cli::try_parse_from(argv).is_ok_and(|cli| {
+        matches!(
+            cli.command,
+            Some(Command::SessionSpace { .. })
+                | Some(Command::Work(WorkGroup {
+                    command: WorkGroupCommand::Space { .. },
+                }))
+        )
+    })
 }
 
 /// The normal path: parse and run a subcommand.
@@ -395,7 +420,10 @@ fn forward_session_space(cwd: &std::path::Path, args: Vec<std::ffi::OsString>) -
         cwd.as_os_str().to_os_string(),
     ];
     argv.extend(args);
-    std::process::exit(aikit_cli::session_space_cli::run_from_args(argv));
+    std::process::exit(aikit_cli::session_space_cli::run_from_args_with_entrypoint(
+        argv,
+        aikit_cli::SessionSpaceEntryPoint::Main,
+    ));
 }
 
 /// The exact flags bare `compose` starts from, used by `compose plan`: the
@@ -3741,8 +3769,10 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
     let command = match c.command {
         KnowledgeSub::Code(code_cmd) => {
             if c.source_corpus.is_some() {
-                return Err(aikit_core::AikitError::new("knowledge.corpus_selection_invalid",
-                    "The independent code lens does not consume a corpus selection"));
+                return Err(aikit_core::AikitError::new(
+                    "knowledge.corpus_selection_invalid",
+                    "The independent code lens does not consume a corpus selection",
+                ));
             }
             let data = aikit_cli::contemplation_field::knowledge_code(code_cmd.command)?;
             return data_reply(data);
@@ -3750,20 +3780,31 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
         other => other,
     };
 
-    if c.source_corpus.is_some() && matches!(&command,
-        KnowledgeSub::Flow(_) | KnowledgeSub::Wiki(_) | KnowledgeSub::WikiShape(_)
-            | KnowledgeSub::WikiConstruct(_) | KnowledgeSub::Jev(_) | KnowledgeSub::History(_)
-            | KnowledgeSub::Forget(_))
+    if c.source_corpus.is_some()
+        && matches!(
+            &command,
+            KnowledgeSub::Flow(_)
+                | KnowledgeSub::Wiki(_)
+                | KnowledgeSub::WikiShape(_)
+                | KnowledgeSub::WikiConstruct(_)
+                | KnowledgeSub::Jev(_)
+                | KnowledgeSub::History(_)
+                | KnowledgeSub::Forget(_)
+        )
     {
-        return Err(aikit_core::AikitError::new("knowledge.corpus_selection_invalid",
-            "This independent operation does not consume the selected current corpus"));
+        return Err(aikit_core::AikitError::new(
+            "knowledge.corpus_selection_invalid",
+            "This independent operation does not consume the selected current corpus",
+        ));
     }
     let mut service = Service::discover(cwd)?;
     if let Some(corpus) = c.source_corpus {
-        service = service.with_current_corpus_selection(aikit_cli::app::CurrentCorpusSelection {
-            corpus, extension: c.source_extension.unwrap_or_else(|| "md".into()),
-            room_depth: c.source_room_depth.unwrap_or(1),
-        })?;
+        service =
+            service.with_current_corpus_selection(aikit_cli::app::CurrentCorpusSelection {
+                corpus,
+                extension: c.source_extension.unwrap_or_else(|| "md".into()),
+                room_depth: c.source_room_depth.unwrap_or(1),
+            })?;
     }
     let mut warnings = diagnostic_warnings(&service);
     let data = match command {

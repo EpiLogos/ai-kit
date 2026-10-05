@@ -24,7 +24,8 @@ use sha2::Digest;
 
 use aikit_adapters::projectcentral::ProjectCentralFilesystemBinding;
 use aikit_core::knowledge_ingest::{
-    corpus_content_revision, ingest_corpus_with_origins, CorpusSelection, CorpusSelector, IngestOriginBinding,
+    corpus_content_revision, ingest_corpus_with_origins, CorpusSelection, CorpusSelector,
+    IngestOriginBinding,
 };
 use aikit_core::knowledge_source_pool::{SourceMaterial, SourceOrigin, SourceVisibility};
 use aikit_core::knowledge_wiki::{
@@ -1232,46 +1233,72 @@ struct CorpusReadCapacity {
 
 impl CorpusReadCapacity {
     fn next_read_limit(&self) -> Result<usize> {
-        let used = self.observed_payload_bytes.checked_add(self.failed_payload_reserved_bytes)
+        let used = self
+            .observed_payload_bytes
+            .checked_add(self.failed_payload_reserved_bytes)
             .ok_or_else(|| self.read_failure(None))?;
         let available = WIKI_INGEST_READ_BYTES.saturating_sub(used);
         if available == 0 {
             // Refuse before observing the next file: it may be empty. Known
             // payload and failed-attempt reservations exhaust the allowance,
             // but neither establishes an observed byte overage.
-            return Err(AikitError::new("knowledge.ingest_corpus_capacity",
-                "The initial payload read allowance is exhausted before observing the next Source")
-                .with("dimension", "initial_read_payload")
-                .with("capacity_limit", WIKI_INGEST_READ_BYTES.to_string())
-                .with("capacity_used", used.to_string())
-                .with("admission_reason", "initial_read_allowance_exhausted")
-                .with("remaining_read_allowance", "0")
-                .with("next_material", "unobserved")
-                .with("remaining_corpus", "unknown"));
+            return Err(AikitError::new(
+                "knowledge.ingest_corpus_capacity",
+                "The initial payload read allowance is exhausted before observing the next Source",
+            )
+            .with("dimension", "initial_read_payload")
+            .with("capacity_limit", WIKI_INGEST_READ_BYTES.to_string())
+            .with("capacity_used", used.to_string())
+            .with("admission_reason", "initial_read_allowance_exhausted")
+            .with("remaining_read_allowance", "0")
+            .with("next_material", "unobserved")
+            .with("remaining_corpus", "unknown"));
         }
         Ok(available.min(WIKI_INGEST_SOURCE_BYTES))
     }
 
     fn read_failure(&self, next_observed_lower_bound: Option<usize>) -> AikitError {
-        let mut failure = AikitError::new("knowledge.ingest_corpus_capacity",
-            "The selected corpus cannot complete within its logical read allowance")
-            .with("dimension", "initial_read_payload")
-            .with("capacity_limit", WIKI_INGEST_READ_BYTES.to_string())
-            .with("observed_payload_bytes", self.observed_payload_bytes.to_string())
-            .with("failed_payload_reserved_bytes", self.failed_payload_reserved_bytes.to_string())
-            .with("failed_read_causes", jval!(self.failed_read_causes).to_string());
+        let mut failure = AikitError::new(
+            "knowledge.ingest_corpus_capacity",
+            "The selected corpus cannot complete within its logical read allowance",
+        )
+        .with("dimension", "initial_read_payload")
+        .with("capacity_limit", WIKI_INGEST_READ_BYTES.to_string())
+        .with(
+            "observed_payload_bytes",
+            self.observed_payload_bytes.to_string(),
+        )
+        .with(
+            "failed_payload_reserved_bytes",
+            self.failed_payload_reserved_bytes.to_string(),
+        )
+        .with(
+            "failed_read_causes",
+            jval!(self.failed_read_causes).to_string(),
+        );
         let known = self.observed_payload_bytes as u128;
         let charged = known + self.failed_payload_reserved_bytes as u128;
         if let Some(next) = next_observed_lower_bound {
             // The actual physical reader saw at least limit+1 bytes. Prior
             // failed-read reservations remain budget charges, not observations.
-            failure = failure.with("next_payload_observed_lower_bound", next.to_string())
+            failure = failure
+                .with("next_payload_observed_lower_bound", next.to_string())
                 .with("observed_lower_bound", (known + next as u128).to_string())
-                .with("budget_charge_lower_bound", (charged + next as u128).to_string())
-                .with("lower_bound_basis", "returned_payload_plus_actual_next_physical_bound")
-                .with("budget_charge_basis", "observed_payload_plus_failed_attempt_reservations_plus_actual_next_bound");
+                .with(
+                    "budget_charge_lower_bound",
+                    (charged + next as u128).to_string(),
+                )
+                .with(
+                    "lower_bound_basis",
+                    "returned_payload_plus_actual_next_physical_bound",
+                )
+                .with(
+                    "budget_charge_basis",
+                    "observed_payload_plus_failed_attempt_reservations_plus_actual_next_bound",
+                );
         } else {
-            failure = failure.with("budget_charge_lower_bound", charged.to_string())
+            failure = failure
+                .with("budget_charge_lower_bound", charged.to_string())
                 .with("next_material", "unobserved")
                 .with("arithmetic_refusal", "logical_counter_overflow");
         }
@@ -1279,25 +1306,41 @@ impl CorpusReadCapacity {
     }
 
     fn annotate_failure(&self, error: AikitError, files_read: usize) -> AikitError {
-        error.with("files_read", files_read.to_string())
-            .with("observed_payload_bytes", self.observed_payload_bytes.to_string())
-            .with("failed_payload_reserved_bytes", self.failed_payload_reserved_bytes.to_string())
+        error
+            .with("files_read", files_read.to_string())
+            .with(
+                "observed_payload_bytes",
+                self.observed_payload_bytes.to_string(),
+            )
+            .with(
+                "failed_payload_reserved_bytes",
+                self.failed_payload_reserved_bytes.to_string(),
+            )
             .with("selected_text_bytes", self.selected_text_bytes.to_string())
-            .with("failed_read_causes", jval!(self.failed_read_causes).to_string())
+            .with(
+                "failed_read_causes",
+                jval!(self.failed_read_causes).to_string(),
+            )
     }
 
     fn retain_selected(&mut self, text: &str) -> Result<()> {
-        let next = self.selected_text_bytes.checked_add(text.len()).ok_or_else(|| {
-            corpus_capacity_error("selected_text", WIKI_INGEST_SELECTED_BYTES, usize::MAX)
-        })?;
+        let next = self
+            .selected_text_bytes
+            .checked_add(text.len())
+            .ok_or_else(|| {
+                corpus_capacity_error("selected_text", WIKI_INGEST_SELECTED_BYTES, usize::MAX)
+            })?;
         if next > WIKI_INGEST_SELECTED_BYTES {
-            return Err(corpus_capacity_error("selected_text", WIKI_INGEST_SELECTED_BYTES, next));
+            return Err(corpus_capacity_error(
+                "selected_text",
+                WIKI_INGEST_SELECTED_BYTES,
+                next,
+            ));
         }
         self.selected_text_bytes = next;
         Ok(())
     }
 }
-
 
 /// Walk `root` into [`ingest_corpus`]'s input shape: `(relative path, text)`
 /// pairs, sorted lexicographically so ingestion never depends on filesystem
@@ -1326,7 +1369,10 @@ struct WalkedCorpus {
 fn corpus_io_error(error: std::io::Error) -> AikitError {
     AikitError::new("knowledge.ingest_corpus_unreadable", error.to_string())
         .with("cause_kind", format!("{:?}", error.kind()))
-        .with("cause_raw_os_error", jval!(error.raw_os_error()).to_string())
+        .with(
+            "cause_raw_os_error",
+            jval!(error.raw_os_error()).to_string(),
+        )
         .with_io_source(error)
 }
 
@@ -1342,17 +1388,28 @@ impl CorpusAdmission {
         Self::new_with_selected_root(cwd, corpus, None)
     }
 
-    fn new_with_selected_root(cwd: &Path, corpus: &Path, selected_root: Option<Option<&Path>>) -> Result<Self> {
+    fn new_with_selected_root(
+        cwd: &Path,
+        corpus: &Path,
+        selected_root: Option<Option<&Path>>,
+    ) -> Result<Self> {
         let mut remaining = 2 * WIKI_INGEST_SOURCE_BYTES;
         Self::new_with_read_budget(cwd, corpus, selected_root, None, &mut remaining)
     }
 
     fn new_with_read_budget(
-        cwd: &Path, corpus: &Path, selected_root: Option<Option<&Path>>,
-        deadline: Option<std::time::Instant>, remaining_payload_bytes: &mut usize,
+        cwd: &Path,
+        corpus: &Path,
+        selected_root: Option<Option<&Path>>,
+        deadline: Option<std::time::Instant>,
+        remaining_payload_bytes: &mut usize,
     ) -> Result<Self> {
-        if let Some(deadline) = deadline { corpus_remaining(deadline)?; }
-        let invocation_cwd = if cwd.is_absolute() { cwd.to_path_buf() } else {
+        if let Some(deadline) = deadline {
+            corpus_remaining(deadline)?;
+        }
+        let invocation_cwd = if cwd.is_absolute() {
+            cwd.to_path_buf()
+        } else {
             std::env::current_dir().map_err(corpus_io_error)?.join(cwd)
         };
         let physical = std::fs::canonicalize(corpus).map_err(corpus_io_error)?;
@@ -1363,58 +1420,94 @@ impl CorpusAdmission {
             // configured/optional owner. Do not reinterpret environment/global roots.
             // This existing invocation binding supplies a route, not semantic Source
             // identity. Locate below is the native owner operation that supplies it.
-            let configured = std::env::var_os("CENTRAL_ROOT").filter(|value| !value.is_empty()).map(PathBuf::from);
-            let root = configured.clone().or_else(|| crate::temporal::process_central_root(Some(cwd)))
+            let configured = std::env::var_os("CENTRAL_ROOT")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from);
+            let root = configured
+                .clone()
+                .or_else(|| crate::temporal::process_central_root(Some(cwd)))
                 .or_else(|| crate::temporal::central_root_enclosing(Some(cwd)))
                 // Native --root resolves relative to the actual invocation cwd.
                 // Keep that lexical route, including its accepted root aliases.
-                .map(|root| if root.is_absolute() { root } else { invocation_cwd.join(root) });
+                .map(|root| {
+                    if root.is_absolute() {
+                        root
+                    } else {
+                        invocation_cwd.join(root)
+                    }
+                });
             let explicitly_configured = configured.is_some();
             let central_root = match root {
                 // The configured invocation route survives a missing or unreadable
                 // user aperture. Actual member/owner admission below remains required.
                 Some(root) if explicitly_configured => Some(root),
                 Some(root) => match std::fs::metadata(root.join("Control/user")) {
-                        Ok(metadata) if metadata.is_dir() => Some(root),
-                        Ok(_) => return Err(AikitError::new("knowledge.ingest_origin_invalid",
-                            "The enclosing native user aperture is not a directory")),
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                        Err(error) => return Err(corpus_io_error(error)),
+                    Ok(metadata) if metadata.is_dir() => Some(root),
+                    Ok(_) => {
+                        return Err(AikitError::new(
+                            "knowledge.ingest_origin_invalid",
+                            "The enclosing native user aperture is not a directory",
+                        ))
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(corpus_io_error(error)),
                 },
                 None => None,
             };
             central_root
         };
-        let mut admission = Self { project: None, central_root };
+        let mut admission = Self {
+            project: None,
+            central_root,
+        };
         // Check actual enclosing and selected-directory floors before any
         // Project metadata body; neither a directory nor a floor mints an ID.
         admission.check_floor(corpus)?;
         for route in [corpus, physical.as_path()] {
             match std::fs::metadata(route.join(".no-agent-retrieval")) {
-                Ok(metadata) if metadata.is_file() => return Err(AikitError::new(
-                    "knowledge.ingest_corpus_withheld", "The selected corpus root is withheld")),
+                Ok(metadata) if metadata.is_file() => {
+                    return Err(AikitError::new(
+                        "knowledge.ingest_corpus_withheld",
+                        "The selected corpus root is withheld",
+                    ))
+                }
                 Ok(_) => {}
                 Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
                 Err(cause) => return Err(corpus_io_error(cause)),
             }
         }
         for root in physical.ancestors() {
-            if let Some(deadline) = deadline { corpus_remaining(deadline)?; }
+            if let Some(deadline) = deadline {
+                corpus_remaining(deadline)?;
+            }
             match std::fs::symlink_metadata(root.join(PROJECT_MANIFEST_SOURCE)) {
                 Ok(_) => {
-                    let relative = physical.strip_prefix(root).map_err(|_|
-                        AikitError::new("knowledge.ingest_origin_invalid", "Project floor mapping changed"))?;
+                    let relative = physical.strip_prefix(root).map_err(|_| {
+                        AikitError::new(
+                            "knowledge.ingest_origin_invalid",
+                            "Project floor mapping changed",
+                        )
+                    })?;
                     if !relative.as_os_str().is_empty()
                         && !aikit_adapters::projectcentral::path_agent_readability(root, relative)
                             .map_err(corpus_io_error)?
                     {
-                        return Err(AikitError::new("knowledge.ingest_corpus_withheld",
-                            "The actual Project marker floor withholds the selected corpus"));
+                        return Err(AikitError::new(
+                            "knowledge.ingest_corpus_withheld",
+                            "The actual Project marker floor withholds the selected corpus",
+                        ));
                     }
                     let binding = match deadline {
                         Some(deadline) => ProjectCentralFilesystemBinding::inspect_before(
-                            root, admission.central_root.as_deref(), deadline, remaining_payload_bytes)?,
-                        None => ProjectCentralFilesystemBinding::inspect(root, admission.central_root.as_deref())?,
+                            root,
+                            admission.central_root.as_deref(),
+                            deadline,
+                            remaining_payload_bytes,
+                        )?,
+                        None => ProjectCentralFilesystemBinding::inspect(
+                            root,
+                            admission.central_root.as_deref(),
+                        )?,
                     };
                     admission.project = Some((root.to_path_buf(), binding));
                     break;
@@ -1424,27 +1517,37 @@ impl CorpusAdmission {
             }
         }
         admission.check_floor(corpus)?;
-        if let Some(deadline) = deadline { corpus_remaining(deadline)?; }
+        if let Some(deadline) = deadline {
+            corpus_remaining(deadline)?;
+        }
         Ok(admission)
     }
 
     fn known_project_member(&self, physical: &Path) -> bool {
         self.project.as_ref().is_some_and(|(root, binding)| {
-            physical.strip_prefix(root).ok().is_some_and(|relative| binding.semantic.sources.iter().any(|source| {
-                source.kind != aikit_core::projectcentral::ProjectCentralSourceKind::NativeProjectRoot
-                    && source.exists
-                    && (relative == source.relative_path || (source.is_directory && relative.starts_with(&source.relative_path)))
-            }))
+            physical.strip_prefix(root).ok().is_some_and(|relative| {
+                binding.semantic.sources.iter().any(|source| {
+                    source.kind
+                        != aikit_core::projectcentral::ProjectCentralSourceKind::NativeProjectRoot
+                        && source.exists
+                        && (relative == source.relative_path
+                            || (source.is_directory && relative.starts_with(&source.relative_path)))
+                })
+            })
         })
     }
 
     fn known_native_member(&self, physical: &Path) -> Result<bool> {
-        if self.known_project_member(physical) { return Ok(true); }
-        let Some(root) = &self.central_root else { return Ok(false); };
-        let physical_root = std::fs::canonicalize(root).map_err(|error| {
-            corpus_io_error(error)
-        })?;
-        let Ok(relative) = physical.strip_prefix(&physical_root) else { return Ok(false); };
+        if self.known_project_member(physical) {
+            return Ok(true);
+        }
+        let Some(root) = &self.central_root else {
+            return Ok(false);
+        };
+        let physical_root = std::fs::canonicalize(root).map_err(|error| corpus_io_error(error))?;
+        let Ok(relative) = physical.strip_prefix(&physical_root) else {
+            return Ok(false);
+        };
         // These are the supplied Control root's native source apertures,
         // declared by Central source_horizon::CONTROL_TREE_BINDINGS. Their
         // tree-stamp relation is known even when the executable cannot be
@@ -1457,67 +1560,114 @@ impl CorpusAdmission {
             "Control/agents/profiles",
             "Control/agents/expressions",
             "Control/agents/agent-sets",
-        ].iter().any(|aperture| relative.starts_with(aperture)))
+        ]
+        .iter()
+        .any(|aperture| relative.starts_with(aperture)))
     }
 
     fn check_floor(&self, path: &Path) -> Result<()> {
-        let physical = std::fs::canonicalize(path).map_err(|error| {
-            corpus_io_error(error)
-        })?;
-        for floor in self.project.as_ref().map(|(root, _)| root).into_iter().chain(self.central_root.as_ref()) {
-            let root = std::fs::canonicalize(floor).map_err(|error| {
-                corpus_io_error(error)
-            })?;
+        let physical = std::fs::canonicalize(path).map_err(|error| corpus_io_error(error))?;
+        for floor in self
+            .project
+            .as_ref()
+            .map(|(root, _)| root)
+            .into_iter()
+            .chain(self.central_root.as_ref())
+        {
+            let root = std::fs::canonicalize(floor).map_err(|error| corpus_io_error(error))?;
             // Both routes participate. Choosing only a canonical fallback can
             // lose a marker above an in-World lexical member alias.
-            let lexical = path.strip_prefix(floor).or_else(|_| path.strip_prefix(&root)).ok();
+            let lexical = path
+                .strip_prefix(floor)
+                .or_else(|_| path.strip_prefix(&root))
+                .ok();
             let canonical = physical.strip_prefix(&root).ok();
-            for (route, relative) in lexical.map(|relative| (floor, relative)).into_iter()
+            for (route, relative) in lexical
+                .map(|relative| (floor, relative))
+                .into_iter()
                 .chain(canonical.map(|relative| (&root, relative)))
             {
-                if relative.as_os_str().is_empty() { continue; }
-                let admitted = aikit_adapters::projectcentral::path_agent_readability(route, relative)
-                    .map_err(corpus_io_error)?;
+                if relative.as_os_str().is_empty() {
+                    continue;
+                }
+                let admitted =
+                    aikit_adapters::projectcentral::path_agent_readability(route, relative)
+                        .map_err(corpus_io_error)?;
                 if !admitted {
-                    return Err(command_failure(AikitError::new("knowledge.ingest_corpus_withheld",
-                        "The actual native source floor withholds this selected member"),
-                        &[], "AIKit/SourcePool", path, "selection", "none"));
+                    return Err(command_failure(
+                        AikitError::new(
+                            "knowledge.ingest_corpus_withheld",
+                            "The actual native source floor withholds this selected member",
+                        ),
+                        &[],
+                        "AIKit/SourcePool",
+                        path,
+                        "selection",
+                        "none",
+                    ));
                 }
             }
         }
         Ok(())
     }
 
-    fn recheck_selected(&self, root: &Path, inputs: &[(String, String)], warnings: &mut Vec<String>, observations: &mut Vec<Value>) -> Result<()> {
+    fn recheck_selected(
+        &self,
+        root: &Path,
+        inputs: &[(String, String)],
+        warnings: &mut Vec<String>,
+        observations: &mut Vec<Value>,
+    ) -> Result<()> {
         for (relative, body) in inputs {
             let path = root.join(relative);
-            let failure = |error| command_failure(error, &[], "AIKit/SourcePool", &path, "origin-admission", "none");
-            if !aikit_adapters::projectcentral::path_agent_readability(root, Path::new(relative)).map_err(|error| {
-                failure(corpus_io_error(error))
-            })? {
-                return Err(failure(AikitError::new("knowledge.ingest_corpus_withheld", "Source admission changed after selection")));
+            let failure = |error| {
+                command_failure(
+                    error,
+                    &[],
+                    "AIKit/SourcePool",
+                    &path,
+                    "origin-admission",
+                    "none",
+                )
+            };
+            if !aikit_adapters::projectcentral::path_agent_readability(root, Path::new(relative))
+                .map_err(|error| failure(corpus_io_error(error)))?
+            {
+                return Err(failure(AikitError::new(
+                    "knowledge.ingest_corpus_withheld",
+                    "Source admission changed after selection",
+                )));
             }
             self.check_floor(&path)?;
             self.check_native_target(&path, warnings, observations)?;
-            let current = aikit_adapters::wiki_publication::material_bytes(&path, 16 * 1024 * 1024).map_err(failure)?;
+            let current = aikit_adapters::wiki_publication::material_bytes(&path, 16 * 1024 * 1024)
+                .map_err(failure)?;
             if current != body.as_bytes() {
-                return Err(failure(AikitError::new("knowledge.ingest_origin_revision_conflict",
-                    "Selected source content changed before publication; refresh explicitly")));
+                return Err(failure(AikitError::new(
+                    "knowledge.ingest_origin_revision_conflict",
+                    "Selected source content changed before publication; refresh explicitly",
+                )));
             }
             self.check_floor(&path)?;
-            if !aikit_adapters::projectcentral::path_agent_readability(root, Path::new(relative)).map_err(|error| {
-                failure(corpus_io_error(error))
-            })? {
-                return Err(failure(AikitError::new("knowledge.ingest_corpus_withheld", "Source admission changed during read")));
+            if !aikit_adapters::projectcentral::path_agent_readability(root, Path::new(relative))
+                .map_err(|error| failure(corpus_io_error(error)))?
+            {
+                return Err(failure(AikitError::new(
+                    "knowledge.ingest_corpus_withheld",
+                    "Source admission changed during read",
+                )));
             }
         }
         Ok(())
     }
 
-    fn check_native_target(&self, path: &Path, warnings: &mut Vec<String>, observations: &mut Vec<Value>) -> Result<()> {
-        let physical = std::fs::canonicalize(path).map_err(|error| {
-            corpus_io_error(error)
-        })?;
+    fn check_native_target(
+        &self,
+        path: &Path,
+        warnings: &mut Vec<String>,
+        observations: &mut Vec<Value>,
+    ) -> Result<()> {
+        let physical = std::fs::canonicalize(path).map_err(|error| corpus_io_error(error))?;
         let known = self.known_native_member(&physical)?;
         let Some(root) = &self.central_root else {
             if known {
@@ -1527,25 +1677,55 @@ impl CorpusAdmission {
             }
             return Ok(());
         };
-        let runner = aikit_adapters::runner::SystemRunner::new().with_timeout(std::time::Duration::from_secs(15));
-        match aikit_adapters::central_file_map::call(&runner, &aikit_adapters::central_file_map::executable(),
-            root, "locate", &jval!({"path": path, "binding_only": true}))
-        {
-            Ok(owner) if owner["ownership"] == "unregistered" && owner["binding_only"] == true
-                && owner["requested_path"] == jval!(path)
-                && ["source", "world_ref", "project", "path", "kind", "revision", "content",
-                    "content_encoding", "relation_revision", "material_metadata_basis"].iter()
-                    .all(|key| owner.get(*key).is_none()) => {
+        let runner = aikit_adapters::runner::SystemRunner::new()
+            .with_timeout(std::time::Duration::from_secs(15));
+        match aikit_adapters::central_file_map::call(
+            &runner,
+            &aikit_adapters::central_file_map::executable(),
+            root,
+            "locate",
+            &jval!({"path": path, "binding_only": true}),
+        ) {
+            Ok(owner)
+                if owner["ownership"] == "unregistered"
+                    && owner["binding_only"] == true
+                    && owner["requested_path"] == jval!(path)
+                    && [
+                        "source",
+                        "world_ref",
+                        "project",
+                        "path",
+                        "kind",
+                        "revision",
+                        "content",
+                        "content_encoding",
+                        "relation_revision",
+                        "material_metadata_basis",
+                    ]
+                    .iter()
+                    .all(|key| owner.get(*key).is_none()) =>
+            {
                 if known {
-                    return Err(command_failure(AikitError::new("knowledge.ingest_origin_unavailable",
-                        "Known native input is no longer registered by its current owner")
-                        .with("native_reading", owner.to_string()),
-                        &[], "AIKit/SourcePool", path, "origin-admission", "none"));
+                    return Err(command_failure(
+                        AikitError::new(
+                            "knowledge.ingest_origin_unavailable",
+                            "Known native input is no longer registered by its current owner",
+                        )
+                        .with_native_result(owner),
+                        &[],
+                        "AIKit/SourcePool",
+                        path,
+                        "origin-admission",
+                        "none",
+                    ));
                 }
                 Ok(())
             }
-            Ok(owner) if owner["ownership"] == "owned" && owner["binding_only"] == true
-                && owner["source"]["agent_retrieval_allowed"] == true => {
+            Ok(owner)
+                if owner["ownership"] == "owned"
+                    && owner["binding_only"] == true
+                    && owner["source"]["agent_retrieval_allowed"] == true =>
+            {
                 // Current selected local retrieval does not establish the
                 // destination World/Project publication relation. Team describes
                 // project eligibility, not permission for external egress.
@@ -1556,14 +1736,30 @@ impl CorpusAdmission {
                     .with("native_relation_revision", owner["relation_revision"].to_string()),
                     &[], "AIKit/SourcePool", path, "target-admission", "none"))
             }
-            Ok(owner) => Err(command_failure(AikitError::new("central.file_map_invalid",
-                "Native participation did not return a supported explicit binding disposition")
-                .with("native_reading", owner.to_string()),
-                &[], "AIKit/SourcePool", path, "origin-admission", "none")),
-            Err(error) if !known && error.code() == "central.file_map_unavailable"
-                && error.details().get("native_error_code").is_none_or(|code| code.is_empty()) => {
+            Ok(owner) => Err(command_failure(
+                AikitError::new(
+                    "central.file_map_invalid",
+                    "Native participation did not return a supported explicit binding disposition",
+                )
+                .with_native_result(owner),
+                &[],
+                "AIKit/SourcePool",
+                path,
+                "origin-admission",
+                "none",
+            )),
+            Err(error)
+                if !known
+                    && error.code() == "central.file_map_unavailable"
+                    && error
+                        .details()
+                        .get("native_error_code")
+                        .is_none_or(|code| code.is_empty()) =>
+            {
                 let warning = "Native participation could not be observed; only the explicitly selected standalone authored corpus contract is used";
-                if !warnings.iter().any(|held| held == warning) { warnings.push(warning.into()); }
+                if !warnings.iter().any(|held| held == warning) {
+                    warnings.push(warning.into());
+                }
                 // Local invocation depth only: the actual transport/native
                 // failure is not persisted in SourceBinding or Wiki provenance
                 // and is not proof of nonparticipation or an audience grant.
@@ -1572,10 +1768,19 @@ impl CorpusAdmission {
                     "owner_operation": "central.file-map.locate",
                     "original_error": {"code": error.code(), "message": error.message(), "details": error.details()},
                 });
-                if !observations.contains(&observation) { observations.push(observation); }
+                if !observations.contains(&observation) {
+                    observations.push(observation);
+                }
                 Ok(())
             }
-            Err(error) => Err(command_failure(error, &[], "AIKit/SourcePool", path, "origin-admission", "none")),
+            Err(error) => Err(command_failure(
+                error,
+                &[],
+                "AIKit/SourcePool",
+                path,
+                "origin-admission",
+                "none",
+            )),
         }
     }
 }
@@ -1594,12 +1799,21 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
     // A selected excluded root is a refusal, not an empty successful refresh:
     // an empty apply would otherwise prune material retained from an earlier run.
     let check_root = || {
-        let marker = match std::fs::metadata(root.join(aikit_core::projectcentral::NO_AGENT_RETRIEVAL_MARKER)) {
+        let marker = match std::fs::metadata(
+            root.join(aikit_core::projectcentral::NO_AGENT_RETRIEVAL_MARKER),
+        ) {
             Ok(metadata) => metadata.is_file(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(command_failure(
-                corpus_io_error(error),
-                &[], "AIKit/SourcePool", root, "selection", "none")),
+            Err(error) => {
+                return Err(command_failure(
+                    corpus_io_error(error),
+                    &[],
+                    "AIKit/SourcePool",
+                    root,
+                    "selection",
+                    "none",
+                ))
+            }
         };
         if marker {
             Err(command_failure(
@@ -1623,14 +1837,28 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
     // Reuse the native fallible policy at the explicit standalone boundary.
     // This does not introduce an above-root convention for an unbound corpus.
     let withheld = |path: &Path| -> Result<bool> {
-        if path == root { check_root()?; return Ok(false); }
+        if path == root {
+            check_root()?;
+            return Ok(false);
+        }
         let relative = path.strip_prefix(root).map_err(|_| {
-            AikitError::new("knowledge.ingest_corpus_unreadable", "Corpus walk escaped its selected boundary")
+            AikitError::new(
+                "knowledge.ingest_corpus_unreadable",
+                "Corpus walk escaped its selected boundary",
+            )
         })?;
         aikit_adapters::projectcentral::path_agent_readability(root, relative)
-            .map(|admitted| !admitted).map_err(|error| command_failure(
-                corpus_io_error(error),
-                &[], "AIKit/SourcePool", path, "selection", "none"))
+            .map(|admitted| !admitted)
+            .map_err(|error| {
+                command_failure(
+                    corpus_io_error(error),
+                    &[],
+                    "AIKit/SourcePool",
+                    path,
+                    "selection",
+                    "none",
+                )
+            })
     };
     let suffix = format!(".{extension}");
     let mut found: Vec<(String, PathBuf)> = Vec::new();
@@ -1638,18 +1866,29 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
     let mut participation_warnings = Vec::new();
     let mut participation_observations = Vec::new();
     let mut traversal_error = None;
-    let entries = walkdir::WalkDir::new(root).follow_links(false).into_iter().filter_entry(|entry| {
-        if traversal_error.is_some() { return false; }
-        match withheld(entry.path()) {
-            Ok(true) => false,
-            Err(error) => { traversal_error = Some(error); false }
-            Ok(false) => match admission.check_floor(entry.path()) {
-                Ok(()) => true,
-                Err(error) if error.code() == "knowledge.ingest_corpus_withheld" => false,
-                Err(error) => { traversal_error = Some(error); false }
-            },
-        }
-    });
+    let entries = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            if traversal_error.is_some() {
+                return false;
+            }
+            match withheld(entry.path()) {
+                Ok(true) => false,
+                Err(error) => {
+                    traversal_error = Some(error);
+                    false
+                }
+                Ok(false) => match admission.check_floor(entry.path()) {
+                    Ok(()) => true,
+                    Err(error) if error.code() == "knowledge.ingest_corpus_withheld" => false,
+                    Err(error) => {
+                        traversal_error = Some(error);
+                        false
+                    }
+                },
+            }
+        });
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -1657,10 +1896,14 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
                 if let Some(path) = error.path() {
                     // A marker may have arrived after entry admission. Its
                     // withheld name must not escape via traversal diagnostics.
-                    if withheld(path)? { continue; }
+                    if withheld(path)? {
+                        continue;
+                    }
                     match admission.check_floor(path) {
                         Ok(()) => {}
-                        Err(failure) if failure.code() == "knowledge.ingest_corpus_withheld" => continue,
+                        Err(failure) if failure.code() == "knowledge.ingest_corpus_withheld" => {
+                            continue
+                        }
                         Err(failure) => return Err(failure),
                     }
                 }
@@ -1701,7 +1944,10 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
             )
             .with("corpus", root.display().to_string())
             .with("file_limit", WIKI_INGEST_MAX_FILES.to_string())
-            .with("observed_files_lower_bound", (WIKI_INGEST_MAX_FILES + 1).to_string())
+            .with(
+                "observed_files_lower_bound",
+                (WIKI_INGEST_MAX_FILES + 1).to_string(),
+            )
             .with("remaining_roster", "unknown"));
         }
         let relative = path
@@ -1711,7 +1957,9 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
             .replace('\\', "/");
         found.push((relative, path.to_path_buf()));
     }
-    if let Some(error) = traversal_error { return Err(error); }
+    if let Some(error) = traversal_error {
+        return Err(error);
+    }
     found.sort_by(|left, right| left.0.cmp(&right.0));
 
     let mut selector = CorpusSelector::default();
@@ -1723,15 +1971,22 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
             continue;
         }
         admission.check_floor(&path)?;
-        admission.check_native_target(&path, &mut participation_warnings, &mut participation_observations)?;
-        let read_limit = capacity.next_read_limit()
+        admission.check_native_target(
+            &path,
+            &mut participation_warnings,
+            &mut participation_observations,
+        )?;
+        let read_limit = capacity
+            .next_read_limit()
             .map_err(|error| capacity.annotate_failure(error, files_read))?;
         match aikit_adapters::wiki_publication::material_bytes(&path, read_limit as u64) {
             Ok(bytes) => {
                 // Count every returned payload before decoding, including invalid
                 // UTF-8. The physical owner's consistency reread is not measured
                 // by this logical initial-payload counter.
-                capacity.observed_payload_bytes = capacity.observed_payload_bytes.checked_add(bytes.len())
+                capacity.observed_payload_bytes = capacity
+                    .observed_payload_bytes
+                    .checked_add(bytes.len())
                     .ok_or_else(|| capacity.read_failure(None))?;
                 match String::from_utf8(bytes) {
                     Ok(text) => {
@@ -1739,7 +1994,10 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
                         admission.check_floor(&path)?;
                         if !withheld(&path)? {
                             files_read += 1;
-                            selector.push_owned_with(relative, text, |_, text| capacity.retain_selected(text))
+                            selector
+                                .push_owned_with(relative, text, |_, text| {
+                                    capacity.retain_selected(text)
+                                })
                                 .map_err(|error| capacity.annotate_failure(error, files_read))?;
                         }
                     }
@@ -1754,7 +2012,11 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
                 let failure = if read_limit < WIKI_INGEST_SOURCE_BYTES {
                     capacity.read_failure(Some(read_limit + 1))
                 } else {
-                    corpus_capacity_error("source_payload", WIKI_INGEST_SOURCE_BYTES, read_limit + 1)
+                    corpus_capacity_error(
+                        "source_payload",
+                        WIKI_INGEST_SOURCE_BYTES,
+                        read_limit + 1,
+                    )
                 };
                 return Err(capacity.annotate_failure(failure.with("original_error", jval!({
                     "code":error.code(), "message":error.message(), "details":error.details(),
@@ -1764,13 +2026,17 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
                 // An unsuccessful physical observation has no byte-count receipt.
                 // Charge its bounded attempt conservatively; do not call this
                 // reservation observed bytes or erase the original IO failure.
-                capacity.failed_payload_reserved_bytes = capacity.failed_payload_reserved_bytes.checked_add(read_limit)
+                capacity.failed_payload_reserved_bytes = capacity
+                    .failed_payload_reserved_bytes
+                    .checked_add(read_limit)
                     .ok_or_else(|| capacity.read_failure(None))?;
                 capacity.failed_read_causes.push(jval!({
                     "source_path":path.display().to_string(), "code":error.code(),
                     "message":error.message(), "details":error.details(),
                 }));
-                skipped.push(format!("{relative}: unreadable ({error}); set aside, not ingested"));
+                skipped.push(format!(
+                    "{relative}: unreadable ({error}); set aside, not ingested"
+                ));
             }
         }
     }
@@ -1797,21 +2063,32 @@ pub(crate) fn read_current_corpus(
     cwd: &Path,
     selection: &crate::app::CurrentCorpusSelection,
     native_root: Option<&Path>,
-    owner: Option<&aikit_adapters::central_file_map::CentralFileMapProvider<aikit_adapters::runner::SystemRunner>>,
+    owner: Option<
+        &aikit_adapters::central_file_map::CentralFileMapProvider<
+            aikit_adapters::runner::SystemRunner,
+        >,
+    >,
     member: Option<&str>,
     target: aikit_core::context_source::RetrievalTarget,
     deadline: std::time::Instant,
 ) -> Result<CurrentCorpusReading> {
     use aikit_core::knowledge_ingest::compile_corpus_for_current_read;
-    let cwd = if cwd.is_absolute() { cwd.to_path_buf() } else {
+    let cwd = if cwd.is_absolute() {
+        cwd.to_path_buf()
+    } else {
         std::env::current_dir().map_err(corpus_io_error)?.join(cwd)
     };
-    let root = if selection.corpus.is_absolute() { selection.corpus.clone() } else {
+    let root = if selection.corpus.is_absolute() {
+        selection.corpus.clone()
+    } else {
         cwd.join(&selection.corpus)
     };
     let root_metadata = std::fs::metadata(&root).map_err(corpus_io_error)?;
     if !root_metadata.is_dir() {
-        return Err(AikitError::new("knowledge.corpus_selection_invalid", "Current corpus root is not a directory"));
+        return Err(AikitError::new(
+            "knowledge.corpus_selection_invalid",
+            "Current corpus root is not a directory",
+        ));
     }
     let root_basis = current_corpus_root_basis(&root)?;
     corpus_remaining(deadline)?;
@@ -1820,45 +2097,101 @@ pub(crate) fn read_current_corpus(
     // do not constitute a separately measured logical payload receipt.
     let mut remaining_payload_bytes = WIKI_INGEST_READ_BYTES;
     let admission = CorpusAdmission::new_with_read_budget(
-        &cwd, &root, Some(native_root), Some(deadline), &mut remaining_payload_bytes,
+        &cwd,
+        &root,
+        Some(native_root),
+        Some(deadline),
+        &mut remaining_payload_bytes,
     )?;
     if admission.central_root.is_some() && owner.is_none() {
-        return Err(AikitError::new("knowledge.corpus_owner_unavailable",
-            "The selected corpus needs its configured current native owner"));
+        return Err(AikitError::new(
+            "knowledge.corpus_owner_unavailable",
+            "The selected corpus needs its configured current native owner",
+        ));
     }
     corpus_remaining(deadline)?;
-    let first = current_corpus_inputs(&root, &root_basis, &selection.extension, &admission, owner, member, target, deadline, &mut remaining_payload_bytes)?;
-    let (compiled, privacy) = compile_corpus_for_current_read(&first.0.records, &first.0.sources,
-        selection.room_depth, &first.1, &first.2, target)?;
+    let first = current_corpus_inputs(
+        &root,
+        &root_basis,
+        &selection.extension,
+        &admission,
+        owner,
+        member,
+        target,
+        deadline,
+        &mut remaining_payload_bytes,
+    )?;
+    let (compiled, privacy) = compile_corpus_for_current_read(
+        &first.0.records,
+        &first.0.sources,
+        selection.room_depth,
+        &first.1,
+        &first.2,
+        target,
+    )?;
     // Membership and all observed inputs are checked again, including inert
     // files that may have become new compiler inputs. No memo or old shard is
     // a current read witness. Both observations use this same operation budget.
-    let second = current_corpus_inputs(&root, &root_basis, &selection.extension, &admission, owner, member, target, deadline, &mut remaining_payload_bytes)?;
-    let (current, current_privacy) = compile_corpus_for_current_read(&second.0.records, &second.0.sources,
-        selection.room_depth, &second.1, &second.2, target)?;
+    let second = current_corpus_inputs(
+        &root,
+        &root_basis,
+        &selection.extension,
+        &admission,
+        owner,
+        member,
+        target,
+        deadline,
+        &mut remaining_payload_bytes,
+    )?;
+    let (current, current_privacy) = compile_corpus_for_current_read(
+        &second.0.records,
+        &second.0.sources,
+        selection.room_depth,
+        &second.1,
+        &second.2,
+        target,
+    )?;
     corpus_remaining(deadline)?;
     if first.3 != second.3 || compiled.material != current.material || privacy != current_privacy {
-        return Err(AikitError::new("knowledge.source_origin_revision_conflict",
-            "The complete current corpus changed during compilation; refresh explicitly"));
+        return Err(AikitError::new(
+            "knowledge.source_origin_revision_conflict",
+            "The complete current corpus changed during compilation; refresh explicitly",
+        ));
     }
     // Reuse the existing serializer capacity check without publishing a shard.
     validate_current_corpus_root(&root, &root_basis)?;
     let rendered = render_source_pool(&compiled.material)?;
     drop(rendered);
-    Ok(CurrentCorpusReading { material: compiled.material, privacy })
+    Ok(CurrentCorpusReading {
+        material: compiled.material,
+        privacy,
+    })
 }
 
 fn corpus_remaining(deadline: std::time::Instant) -> Result<std::time::Duration> {
-    deadline.checked_duration_since(std::time::Instant::now()).filter(|time| !time.is_zero())
-        .ok_or_else(|| AikitError::new("knowledge.corpus_read_incomplete",
-            "The complete current corpus read exhausted its operation budget"))
+    deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|time| !time.is_zero())
+        .ok_or_else(|| {
+            AikitError::new(
+                "knowledge.corpus_read_incomplete",
+                "The complete current corpus read exhausted its operation budget",
+            )
+        })
 }
 
 type CurrentCorpusInputs = (
     aikit_core::knowledge_ingest::CorpusSelection,
     BTreeMap<String, IngestOriginBinding>,
     BTreeMap<String, aikit_core::context_source::ContextSourcePrivacy>,
-    BTreeMap<String, (String, Option<aikit_core::knowledge_source_pool::SourceOrigin>, aikit_core::context_source::ContextSourcePrivacy)>,
+    BTreeMap<
+        String,
+        (
+            String,
+            Option<aikit_core::knowledge_source_pool::SourceOrigin>,
+            aikit_core::context_source::ContextSourcePrivacy,
+        ),
+    >,
 );
 
 // These are operation-local physical coordinates, never semantic ownership.
@@ -1869,37 +2202,59 @@ fn current_corpus_root_basis(root: &Path) -> Result<(PathBuf, (u64, u64))> {
         let canonical = std::fs::canonicalize(root).map_err(corpus_io_error)?;
         let metadata = std::fs::metadata(&canonical).map_err(corpus_io_error)?;
         if !metadata.is_dir() {
-            return Err(AikitError::new("knowledge.corpus_read_incomplete", "Current corpus root changed physical form"));
+            return Err(AikitError::new(
+                "knowledge.corpus_read_incomplete",
+                "Current corpus root changed physical form",
+            ));
         }
         Ok((canonical, (metadata.dev(), metadata.ino())))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = root;
-        Err(AikitError::new("knowledge.wiki_publication_metadata_unsupported", "Current corpus held physical observation is unavailable on this platform"))
+        Err(AikitError::new(
+            "knowledge.wiki_publication_metadata_unsupported",
+            "Current corpus held physical observation is unavailable on this platform",
+        ))
     }
 }
 
 fn validate_current_corpus_root(root: &Path, basis: &(PathBuf, (u64, u64))) -> Result<()> {
     if current_corpus_root_basis(root)? != *basis {
-        return Err(AikitError::new("knowledge.source_origin_revision_conflict", "Current corpus root affiliation changed"));
+        return Err(AikitError::new(
+            "knowledge.source_origin_revision_conflict",
+            "Current corpus root affiliation changed",
+        ));
     }
     Ok(())
 }
 
 fn current_corpus_inputs(
-    root: &Path, root_basis: &(PathBuf, (u64, u64)), extension: &str, admission: &CorpusAdmission,
-    owner: Option<&aikit_adapters::central_file_map::CentralFileMapProvider<aikit_adapters::runner::SystemRunner>>,
-    member: Option<&str>, target: aikit_core::context_source::RetrievalTarget,
-    deadline: std::time::Instant, remaining_payload_bytes: &mut usize,
+    root: &Path,
+    root_basis: &(PathBuf, (u64, u64)),
+    extension: &str,
+    admission: &CorpusAdmission,
+    owner: Option<
+        &aikit_adapters::central_file_map::CentralFileMapProvider<
+            aikit_adapters::runner::SystemRunner,
+        >,
+    >,
+    member: Option<&str>,
+    target: aikit_core::context_source::RetrievalTarget,
+    deadline: std::time::Instant,
+    remaining_payload_bytes: &mut usize,
 ) -> Result<CurrentCorpusInputs> {
     use aikit_core::context_source::ContextSourcePrivacy;
     use aikit_core::knowledge_source_pool::SourcePoolReading;
     validate_current_corpus_root(root, root_basis)?;
     admission.check_floor(root)?;
     match std::fs::metadata(root.join(".no-agent-retrieval")) {
-        Ok(metadata) if metadata.is_file() => return Err(AikitError::new("knowledge.ingest_corpus_withheld",
-            "The selected current corpus root is withheld")),
+        Ok(metadata) if metadata.is_file() => {
+            return Err(AikitError::new(
+                "knowledge.ingest_corpus_withheld",
+                "The selected current corpus root is withheld",
+            ))
+        }
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(corpus_io_error(error)),
@@ -1907,56 +2262,94 @@ fn current_corpus_inputs(
     let mut found = Vec::new();
     let mut visited = 0usize;
     let mut floor_failure = None;
-    let mut entries = walkdir::WalkDir::new(root).follow_links(false).max_open(8).into_iter().filter_entry(|entry| {
-        if floor_failure.is_some() { return false; }
-        let result = corpus_remaining(deadline).and_then(|_| admission.check_floor(entry.path())).and_then(|_| {
-            let relative = entry.path().strip_prefix(root).map_err(|_|
-                AikitError::new("knowledge.corpus_read_incomplete", "Current corpus escaped its selected boundary"))?;
-            if relative.as_os_str().is_empty() {
-                // Existing per-member predicate does not test its own root.
-                match std::fs::metadata(root.join(".no-agent-retrieval")) {
-                    Ok(metadata) => Ok(!metadata.is_file()),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
-                    Err(error) => Err(corpus_io_error(error)),
+    let mut entries = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .max_open(8)
+        .into_iter()
+        .filter_entry(|entry| {
+            if floor_failure.is_some() {
+                return false;
+            }
+            let result = corpus_remaining(deadline)
+                .and_then(|_| admission.check_floor(entry.path()))
+                .and_then(|_| {
+                    let relative = entry.path().strip_prefix(root).map_err(|_| {
+                        AikitError::new(
+                            "knowledge.corpus_read_incomplete",
+                            "Current corpus escaped its selected boundary",
+                        )
+                    })?;
+                    if relative.as_os_str().is_empty() {
+                        // Existing per-member predicate does not test its own root.
+                        match std::fs::metadata(root.join(".no-agent-retrieval")) {
+                            Ok(metadata) => Ok(!metadata.is_file()),
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+                            Err(error) => Err(corpus_io_error(error)),
+                        }
+                    } else {
+                        aikit_adapters::projectcentral::path_agent_readability(root, relative)
+                            .map_err(corpus_io_error)
+                    }
+                });
+            match result {
+                Ok(allowed) => allowed,
+                Err(error) if error.code() == "knowledge.ingest_corpus_withheld" => false,
+                Err(error) => {
+                    floor_failure = Some(error);
+                    false
                 }
-            } else {
-                aikit_adapters::projectcentral::path_agent_readability(root, relative).map_err(corpus_io_error)
             }
         });
-        match result {
-            Ok(allowed) => allowed,
-            Err(error) if error.code() == "knowledge.ingest_corpus_withheld" => false,
-            Err(error) => { floor_failure = Some(error); false }
-        }
-    });
     for entry in &mut entries {
         corpus_remaining(deadline)?;
         let entry = entry.map_err(|error| {
             let message = error.to_string();
             match error.into_io_error() {
-                Some(cause) => AikitError::new("knowledge.corpus_read_incomplete", message).with_io_source(cause),
+                Some(cause) => AikitError::new("knowledge.corpus_read_incomplete", message)
+                    .with_io_source(cause),
                 None => AikitError::new("knowledge.corpus_read_incomplete", message),
             }
         })?;
         visited += 1;
         if visited > WIKI_INGEST_MAX_FILES {
-            return Err(corpus_capacity_error("candidate_entries", WIKI_INGEST_MAX_FILES, visited));
+            return Err(corpus_capacity_error(
+                "candidate_entries",
+                WIKI_INGEST_MAX_FILES,
+                visited,
+            ));
         }
-        if entry.file_type().is_dir() { continue; }
-        let relative = entry.path().strip_prefix(root).map_err(|_|
-            AikitError::new("knowledge.corpus_read_incomplete", "Current corpus escaped its selection"))?;
-        let relative = relative.to_str().ok_or_else(||
-            AikitError::new("knowledge.corpus_read_incomplete", "Current corpus member has no exact text compiler coordinate"))?;
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        let relative = entry.path().strip_prefix(root).map_err(|_| {
+            AikitError::new(
+                "knowledge.corpus_read_incomplete",
+                "Current corpus escaped its selection",
+            )
+        })?;
+        let relative = relative.to_str().ok_or_else(|| {
+            AikitError::new(
+                "knowledge.corpus_read_incomplete",
+                "Current corpus member has no exact text compiler coordinate",
+            )
+        })?;
         if relative.contains('\\') {
-            return Err(AikitError::new("knowledge.corpus_read_incomplete", "Current compiler key cannot alias a literal backslash"));
+            return Err(AikitError::new(
+                "knowledge.corpus_read_incomplete",
+                "Current compiler key cannot alias a literal backslash",
+            ));
         }
-        if entry.path().extension().and_then(|ext| ext.to_str()) != Some(extension) { continue; }
+        if entry.path().extension().and_then(|ext| ext.to_str()) != Some(extension) {
+            continue;
+        }
         // Nonregular selected forms reach the SAME held reader's finite form
         // refusal. Do not let a FIFO become a skipped authoritative input.
         found.push((relative.to_owned(), entry.path().to_path_buf()));
     }
     drop(entries);
-    if let Some(error) = floor_failure { return Err(error); }
+    if let Some(error) = floor_failure {
+        return Err(error);
+    }
     found.sort_by(|left, right| left.0.cmp(&right.0));
     let mut selector = CorpusSelector::default();
     let mut capacity = CorpusReadCapacity {
@@ -1969,13 +2362,22 @@ fn current_corpus_inputs(
     for (relative, path) in found {
         validate_current_corpus_root(root, root_basis)?;
         admission.check_floor(&path)?;
-        if !aikit_adapters::projectcentral::path_agent_readability(root, Path::new(&relative)).map_err(corpus_io_error)? {
-            return Err(AikitError::new("knowledge.ingest_corpus_withheld", "Current corpus admission changed during observation"));
+        if !aikit_adapters::projectcentral::path_agent_readability(root, Path::new(&relative))
+            .map_err(corpus_io_error)?
+        {
+            return Err(AikitError::new(
+                "knowledge.ingest_corpus_withheld",
+                "Current corpus admission changed during observation",
+            ));
         }
         let limit = capacity.next_read_limit()?;
         let native = match owner {
             Some(owner) => match member {
-                Some(member) => owner.for_project(member)?.read_selected_path_for(&path, target, corpus_remaining(deadline)?)?,
+                Some(member) => owner.for_project(member)?.read_selected_path_for(
+                    &path,
+                    target,
+                    corpus_remaining(deadline)?,
+                )?,
                 None => owner.read_selected_path_for(&path, target, corpus_remaining(deadline)?)?,
             },
             None => None,
@@ -1984,46 +2386,92 @@ fn current_corpus_inputs(
             Some(reading) => {
                 let current_privacy = reading.privacy;
                 let material = reading.admit(target)?;
-                let origin = material.binding.source_origin()?.ok_or_else(||
-                    AikitError::new("knowledge.ingest_origin_invalid", "Actual native read has no native origin"))?;
-                (material.body, origin, material.binding.visibility, material.binding.owners, current_privacy)
+                let origin = material.binding.source_origin()?.ok_or_else(|| {
+                    AikitError::new(
+                        "knowledge.ingest_origin_invalid",
+                        "Actual native read has no native origin",
+                    )
+                })?;
+                (
+                    material.body,
+                    origin,
+                    material.binding.visibility,
+                    material.binding.owners,
+                    current_privacy,
+                )
             }
             None => {
                 let physical = std::fs::canonicalize(&path).map_err(corpus_io_error)?;
                 if admission.known_native_member(&physical)? {
-                    return Err(AikitError::new("knowledge.corpus_owner_unavailable",
-                        "Known native input has no current participating owner reading"));
+                    return Err(AikitError::new(
+                        "knowledge.corpus_owner_unavailable",
+                        "Known native input has no current participating owner reading",
+                    ));
                 }
                 let current_privacy = ContextSourcePrivacy::default();
                 SourcePoolReading::check_target(current_privacy, target)?;
-                let bytes = aikit_adapters::wiki_publication::material_bytes_affiliated(root, root_basis.1, Path::new(&relative), limit as u64)?;
-                let body = String::from_utf8(bytes).map_err(|_|
-                    AikitError::new("knowledge.corpus_read_incomplete", "Selected current corpus input is not UTF-8"))?;
-                (body, SourceOrigin::declared_corpus(), SourceVisibility::Team, Vec::new(), current_privacy)
+                let bytes = aikit_adapters::wiki_publication::material_bytes_affiliated(
+                    root,
+                    root_basis.1,
+                    Path::new(&relative),
+                    limit as u64,
+                )?;
+                let body = String::from_utf8(bytes).map_err(|_| {
+                    AikitError::new(
+                        "knowledge.corpus_read_incomplete",
+                        "Selected current corpus input is not UTF-8",
+                    )
+                })?;
+                (
+                    body,
+                    SourceOrigin::declared_corpus(),
+                    SourceVisibility::Team,
+                    Vec::new(),
+                    current_privacy,
+                )
             }
         };
-        if body.len() > limit { return Err(corpus_capacity_error("source_payload", limit, body.len())); }
+        if body.len() > limit {
+            return Err(corpus_capacity_error("source_payload", limit, body.len()));
+        }
         capacity.observed_payload_bytes += body.len();
         *remaining_payload_bytes -= body.len();
         let revision = aikit_core::SourceRevision::parse(corpus_content_revision(body.as_bytes()))?;
-        checkpoint.insert(relative.clone(), (revision.to_string(), Some(origin.clone()), current_privacy));
+        checkpoint.insert(
+            relative.clone(),
+            (revision.to_string(), Some(origin.clone()), current_privacy),
+        );
         admission.check_floor(&path)?;
-        if !aikit_adapters::projectcentral::path_agent_readability(root, Path::new(&relative)).map_err(corpus_io_error)? {
-            return Err(AikitError::new("knowledge.ingest_corpus_withheld", "Current corpus admission changed after observation"));
+        if !aikit_adapters::projectcentral::path_agent_readability(root, Path::new(&relative))
+            .map_err(corpus_io_error)?
+        {
+            return Err(AikitError::new(
+                "knowledge.ingest_corpus_withheld",
+                "Current corpus admission changed after observation",
+            ));
         }
         corpus_remaining(deadline)?;
         selector.push_owned_with(relative, body, |relative, body| {
             capacity.retain_selected(body)?;
-            origins.insert(relative.to_owned(), IngestOriginBinding {
-                origin, content_revision: revision, visibility, owners,
-            });
+            origins.insert(
+                relative.to_owned(),
+                IngestOriginBinding {
+                    origin,
+                    content_revision: revision,
+                    visibility,
+                    owners,
+                },
+            );
             privacy.insert(relative.to_owned(), current_privacy);
             Ok(())
         })?;
     }
     let selection = selector.finish();
     if !selection.unparseable.is_empty() {
-        return Err(AikitError::new("knowledge.corpus_read_incomplete", "Selected corpus has unreadable compiler metadata"));
+        return Err(AikitError::new(
+            "knowledge.corpus_read_incomplete",
+            "Selected corpus has unreadable compiler metadata",
+        ));
     }
     corpus_remaining(deadline)?;
     validate_current_corpus_root(root, root_basis)?;
@@ -2041,20 +2489,47 @@ fn current_corpus_inputs(
 /// holds — ingest never silently overwrites an authored or previously
 /// ingested object.
 fn ingest(cwd: &Path, args: &WikiIngestArgs) -> Result<WikiOutcome> {
-    let supplied_corpus = if args.corpus.is_absolute() { args.corpus.clone() } else { cwd.join(&args.corpus) };
+    let supplied_corpus = if args.corpus.is_absolute() {
+        args.corpus.clone()
+    } else {
+        cwd.join(&args.corpus)
+    };
     // Keep the selected lexical route and its native floor on the same
     // invocation basis, including when -C itself is relative. Canonicalising
     // here would erase an alias's withheld lexical ancestor.
-    let invocation_cwd = if cwd.is_absolute() { cwd.to_path_buf() } else {
-        std::env::current_dir().map_err(|error| {
-            command_failure(corpus_io_error(error), &[], "AIKit/SourcePool", &supplied_corpus,
-                "selection", "none")
-        })?.join(cwd)
+    let invocation_cwd = if cwd.is_absolute() {
+        cwd.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| {
+                command_failure(
+                    corpus_io_error(error),
+                    &[],
+                    "AIKit/SourcePool",
+                    &supplied_corpus,
+                    "selection",
+                    "none",
+                )
+            })?
+            .join(cwd)
     };
-    let corpus_root = if args.corpus.is_absolute() { args.corpus.clone() } else { invocation_cwd.join(&args.corpus) };
+    let corpus_root = if args.corpus.is_absolute() {
+        args.corpus.clone()
+    } else {
+        invocation_cwd.join(&args.corpus)
+    };
     let preeffect = |error: AikitError| {
-        if error.details().contains_key("command_effect") { error } else {
-            command_failure(error, &[], "AIKit/SourcePool", &corpus_root, "selection", "none")
+        if error.details().contains_key("command_effect") {
+            error
+        } else {
+            command_failure(
+                error,
+                &[],
+                "AIKit/SourcePool",
+                &corpus_root,
+                "selection",
+                "none",
+            )
         }
     };
     let admission = CorpusAdmission::new(&invocation_cwd, &corpus_root).map_err(preeffect)?;
@@ -2062,15 +2537,31 @@ fn ingest(cwd: &Path, args: &WikiIngestArgs) -> Result<WikiOutcome> {
     let selection = walked.selection;
     let io_skipped = walked.skipped;
     let mut participation_observations = walked.participation_observations;
-    let origins = selection.records.iter().chain(&selection.sources).map(|(relative, body)| {
-        Ok((relative.clone(), IngestOriginBinding {
-            origin: SourceOrigin::declared_corpus(),
-            content_revision: aikit_core::SourceRevision::parse(corpus_content_revision(body.as_bytes()))?,
-            visibility: SourceVisibility::Team,
-            owners: Vec::new(),
-        }))
-    }).collect::<Result<BTreeMap<_, _>>>()?;
-    let compiled = ingest_corpus_with_origins(&selection.records, &selection.sources, args.room_depth, &origins).map_err(preeffect)?;
+    let origins = selection
+        .records
+        .iter()
+        .chain(&selection.sources)
+        .map(|(relative, body)| {
+            Ok((
+                relative.clone(),
+                IngestOriginBinding {
+                    origin: SourceOrigin::declared_corpus(),
+                    content_revision: aikit_core::SourceRevision::parse(corpus_content_revision(
+                        body.as_bytes(),
+                    ))?,
+                    visibility: SourceVisibility::Team,
+                    owners: Vec::new(),
+                },
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let compiled = ingest_corpus_with_origins(
+        &selection.records,
+        &selection.sources,
+        args.room_depth,
+        &origins,
+    )
+    .map_err(preeffect)?;
     let (objects, material, absences) = (compiled.objects, compiled.material, compiled.absences);
     let pool_dir = source_pool_dir(args);
 
@@ -2160,7 +2651,8 @@ fn ingest(cwd: &Path, args: &WikiIngestArgs) -> Result<WikiOutcome> {
     // Dry-run success must admit the same complete, discoverable next material
     // as apply; serialization capacity is settled before either can succeed.
     let rendered_material = render_source_pool(&material)?;
-    summary["rendered_material_bytes"] = jval!(rendered_material.iter().map(String::len).sum::<usize>());
+    summary["rendered_material_bytes"] =
+        jval!(rendered_material.iter().map(String::len).sum::<usize>());
     summary["prepared_source_pool_files"] = jval!(rendered_material.len());
     if !args.apply {
         let held = WikiDocument::parse(&read(&args.file)?)?;
@@ -2189,8 +2681,22 @@ fn ingest(cwd: &Path, args: &WikiIngestArgs) -> Result<WikiOutcome> {
             .with("skipped", jval!(io_skipped).to_string()), &[], "AIKit/SourcePool",
             &args.corpus, "read_corpus", "none"));
     }
-    admission.recheck_selected(&corpus_root, &selection.records, &mut warnings, &mut participation_observations).map_err(preeffect)?;
-    admission.recheck_selected(&corpus_root, &selection.sources, &mut warnings, &mut participation_observations).map_err(preeffect)?;
+    admission
+        .recheck_selected(
+            &corpus_root,
+            &selection.records,
+            &mut warnings,
+            &mut participation_observations,
+        )
+        .map_err(preeffect)?;
+    admission
+        .recheck_selected(
+            &corpus_root,
+            &selection.sources,
+            &mut warnings,
+            &mut participation_observations,
+        )
+        .map_err(preeffect)?;
     summary["native_participation"] = jval!(participation_observations);
     let mut unchanged = 0usize;
     let receipt = mutate_file_receipt(&args.file, |doc, ledger| {
@@ -2265,31 +2771,55 @@ impl std::io::Write for BoundedMaterialJson {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let Some(next) = self.bytes.len().checked_add(bytes.len()) else {
             self.refused_lower_bound = Some(usize::MAX);
-            return Err(std::io::Error::other("serialized Source material capacity arithmetic overflowed"));
+            return Err(std::io::Error::other(
+                "serialized Source material capacity arithmetic overflowed",
+            ));
         };
         if next > self.limit {
             self.refused_lower_bound = Some(next);
-            return Err(std::io::Error::other("serialized Source material exceeds its admitted capacity"));
+            return Err(std::io::Error::other(
+                "serialized Source material exceeds its admitted capacity",
+            ));
         }
         self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
     }
 
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
-fn append_rendered_fragment(buffer: &mut Vec<u8>, completed_bytes: usize, bytes: &[u8]) -> Result<()> {
-    let next = completed_bytes.checked_add(buffer.len()).and_then(|used| used.checked_add(bytes.len()))
-        .ok_or_else(|| corpus_capacity_error("rendered_material", WIKI_INGEST_RENDERED_BYTES, usize::MAX))?;
+fn append_rendered_fragment(
+    buffer: &mut Vec<u8>,
+    completed_bytes: usize,
+    bytes: &[u8],
+) -> Result<()> {
+    let next = completed_bytes
+        .checked_add(buffer.len())
+        .and_then(|used| used.checked_add(bytes.len()))
+        .ok_or_else(|| {
+            corpus_capacity_error("rendered_material", WIKI_INGEST_RENDERED_BYTES, usize::MAX)
+        })?;
     if next > WIKI_INGEST_RENDERED_BYTES {
-        return Err(corpus_capacity_error("rendered_material", WIKI_INGEST_RENDERED_BYTES, next));
+        return Err(corpus_capacity_error(
+            "rendered_material",
+            WIKI_INGEST_RENDERED_BYTES,
+            next,
+        ));
     }
     buffer.extend_from_slice(bytes);
     Ok(())
 }
 
-fn finish_rendered_shard(buffer: &mut Vec<u8>, completed_bytes: &mut usize, rendered: &mut Vec<String>) -> Result<()> {
-    if buffer.is_empty() { return Ok(()); }
+fn finish_rendered_shard(
+    buffer: &mut Vec<u8>,
+    completed_bytes: &mut usize,
+    rendered: &mut Vec<String>,
+) -> Result<()> {
+    if buffer.is_empty() {
+        return Ok(());
+    }
     append_rendered_fragment(buffer, *completed_bytes, b"\n]")?;
     let bytes = std::mem::take(buffer);
     *completed_bytes = completed_bytes.checked_add(bytes.len()).ok_or_else(|| {
@@ -2313,24 +2843,43 @@ fn render_source_pool(material: &[SourceMaterial]) -> Result<Vec<String>> {
         let mut completed_bytes = 0usize;
         for item in material {
             let mut singleton = BoundedMaterialJson {
-                bytes: Vec::new(), limit: SOURCE_POOL_DISCOVERY_BYTES, refused_lower_bound: None,
+                bytes: Vec::new(),
+                limit: SOURCE_POOL_DISCOVERY_BYTES,
+                refused_lower_bound: None,
             };
-            if let Err(error) = serde_json::to_writer_pretty(&mut singleton, std::slice::from_ref(item)) {
+            if let Err(error) =
+                serde_json::to_writer_pretty(&mut singleton, std::slice::from_ref(item))
+            {
                 let failure = match singleton.refused_lower_bound {
-                    Some(observed) => corpus_capacity_error("source_pool_material", SOURCE_POOL_DISCOVERY_BYTES, observed)
-                        .with("source", item.binding.source.to_string()),
-                    None => AikitError::new("knowledge.ingest_source_pool_unwritable",
-                        format!("SourcePool material could not be rendered: {error}")),
+                    Some(observed) => corpus_capacity_error(
+                        "source_pool_material",
+                        SOURCE_POOL_DISCOVERY_BYTES,
+                        observed,
+                    )
+                    .with("source", item.binding.source.to_string()),
+                    None => AikitError::new(
+                        "knowledge.ingest_source_pool_unwritable",
+                        format!("SourcePool material could not be rendered: {error}"),
+                    ),
                 };
-                return Err(failure.with("serialization_error", error.to_string())
+                return Err(failure
+                    .with("serialization_error", error.to_string())
                     .with_io_source(std::io::Error::other(error)));
             }
             // A nonempty singleton pretty array has exactly '[\n' and '\n]'.
             // Its own Source body and metadata remain serialized by serde.
             let interior = &singleton.bytes[2..singleton.bytes.len() - 2];
-            let next_shard_bytes = shard.len().checked_add(2).and_then(|used| used.checked_add(interior.len()))
-                .and_then(|used| used.checked_add(2)).ok_or_else(|| {
-                    corpus_capacity_error("rendered_material", WIKI_INGEST_RENDERED_BYTES, usize::MAX)
+            let next_shard_bytes = shard
+                .len()
+                .checked_add(2)
+                .and_then(|used| used.checked_add(interior.len()))
+                .and_then(|used| used.checked_add(2))
+                .ok_or_else(|| {
+                    corpus_capacity_error(
+                        "rendered_material",
+                        WIKI_INGEST_RENDERED_BYTES,
+                        usize::MAX,
+                    )
                 })?;
             if !shard.is_empty() && next_shard_bytes > SOURCE_POOL_SHARD_BYTES {
                 finish_rendered_shard(&mut shard, &mut completed_bytes, &mut rendered)?;
@@ -2345,7 +2894,16 @@ fn render_source_pool(material: &[SourceMaterial]) -> Result<Vec<String>> {
         finish_rendered_shard(&mut shard, &mut completed_bytes, &mut rendered)?;
         Ok(rendered)
     })();
-    prepared.map_err(|error| command_failure(error, &[], "AIKit/SourcePool", Path::new("corpus"), "render", "none"))
+    prepared.map_err(|error| {
+        command_failure(
+            error,
+            &[],
+            "AIKit/SourcePool",
+            Path::new("corpus"),
+            "render",
+            "none",
+        )
+    })
 }
 
 /// Recognise only the exact names emitted by the native shard writer. No lossy
@@ -3685,33 +4243,47 @@ mod maintenance_tests {
     #[test]
     fn material_rendering_keeps_exact_pretty_array_and_metadata_escape_boundaries() {
         let input = vec![("actual-source.md".to_owned(), "---\nsource_id: actual-render-source\ntitle_full: Actual rendering source\n---\n\n# Actual source\n".to_owned())];
-        let mut material = aikit_core::knowledge_ingest::ingest_corpus(&[], &input, 0).unwrap().material;
-        material[0].binding.metadata.insert("actual_escaped_metadata".into(), jval!("\u{0}\t\n\"\\"));
+        let mut material = aikit_core::knowledge_ingest::ingest_corpus(&[], &input, 0)
+            .unwrap()
+            .material;
+        material[0]
+            .binding
+            .metadata
+            .insert("actual_escaped_metadata".into(), jval!("\u{0}\t\n\"\\"));
         let complete = serde_json::to_string_pretty(&material).unwrap();
         let rendered = render_source_pool(&material).unwrap();
         assert_eq!(rendered, vec![complete]);
         let decoded: Vec<SourceMaterial> = serde_json::from_str(&rendered[0]).unwrap();
-        assert_eq!(serde_json::to_value(decoded).unwrap(), serde_json::to_value(&material).unwrap());
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            serde_json::to_value(&material).unwrap()
+        );
 
         material[0].body.clear();
-        material[0].binding.revision = aikit_core::SourceRevision::parse(corpus_content_revision(b"")).unwrap();
+        material[0].binding.revision =
+            aikit_core::SourceRevision::parse(corpus_content_revision(b"")).unwrap();
         let overhead = serde_json::to_string_pretty(&material).unwrap().len();
         material[0].body = "x".repeat(SOURCE_POOL_DISCOVERY_BYTES - overhead);
-        material[0].binding.revision = aikit_core::SourceRevision::parse(corpus_content_revision(material[0].body.as_bytes())).unwrap();
+        material[0].binding.revision =
+            aikit_core::SourceRevision::parse(corpus_content_revision(material[0].body.as_bytes()))
+                .unwrap();
         let boundary = render_source_pool(&material).unwrap();
         assert_eq!(boundary[0].len(), SOURCE_POOL_DISCOVERY_BYTES);
-        assert_eq!(serde_json::to_string_pretty(&material).unwrap(), boundary[0]);
+        assert_eq!(
+            serde_json::to_string_pretty(&material).unwrap(),
+            boundary[0]
+        );
         material[0].body.push('x');
-        material[0].binding.revision = aikit_core::SourceRevision::parse(corpus_content_revision(material[0].body.as_bytes())).unwrap();
+        material[0].binding.revision =
+            aikit_core::SourceRevision::parse(corpus_content_revision(material[0].body.as_bytes()))
+                .unwrap();
         let error = render_source_pool(&material).unwrap_err();
         assert_eq!(error.code(), "knowledge.ingest_corpus_capacity");
         assert_eq!(error.details()["dimension"], "source_pool_material");
         assert_eq!(error.details()["command_effect"], "none");
         assert!(error.details().contains_key("serialization_error"));
     }
-
 }
-
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod r4_metadata_corpus_tests {
@@ -3726,12 +4298,22 @@ mod r4_metadata_corpus_tests {
     impl Fixture {
         fn new() -> Self {
             let scratch = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent().unwrap().parent().unwrap().join("ProjectCentral/now/tmp");
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("ProjectCentral/now/tmp");
             fs::create_dir_all(&scratch).unwrap();
-            Self(Some(tempfile::Builder::new().prefix("r4-corpus-metadata-")
-                .tempdir_in(scratch).unwrap()))
+            Self(Some(
+                tempfile::Builder::new()
+                    .prefix("r4-corpus-metadata-")
+                    .tempdir_in(scratch)
+                    .unwrap(),
+            ))
         }
-        fn root(&self) -> &Path { self.0.as_ref().unwrap().path() }
+        fn root(&self) -> &Path {
+            self.0.as_ref().unwrap().path()
+        }
         fn setup(&self) -> (PathBuf, Vec<u8>) {
             let root = self.root().join("native-project");
             fs::create_dir_all(root.join("ProjectCentral")).unwrap();
@@ -3747,14 +4329,21 @@ mod r4_metadata_corpus_tests {
         }
         fn finish(mut self) {
             let path = self.0.take().unwrap().keep();
-            fs::remove_dir_all(&path).unwrap_or_else(|cause|
-                panic!("Owned corpus metadata fixture cleanup failed at {}: {cause:?}", path.display()));
+            fs::remove_dir_all(&path).unwrap_or_else(|cause| {
+                panic!(
+                    "Owned corpus metadata fixture cleanup failed at {}: {cause:?}",
+                    path.display()
+                )
+            });
         }
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
             if let Some(directory) = self.0.take() {
-                eprintln!("Retained actual corpus metadata failure fixture: {}", directory.keep().display());
+                eprintln!(
+                    "Retained actual corpus metadata failure fixture: {}",
+                    directory.keep().display()
+                );
             }
         }
     }
@@ -3763,9 +4352,15 @@ mod r4_metadata_corpus_tests {
         fn drop(&mut self) {
             if let Err(cause) = fs::set_permissions(&self.0, self.1.clone()) {
                 if std::thread::panicking() {
-                    eprintln!("Corpus fixture permission restoration failed at {}: {cause:?}", self.0.display());
+                    eprintln!(
+                        "Corpus fixture permission restoration failed at {}: {cause:?}",
+                        self.0.display()
+                    );
                 } else {
-                    panic!("Corpus fixture permission restoration failed at {}: {cause:?}", self.0.display());
+                    panic!(
+                        "Corpus fixture permission restoration failed at {}: {cause:?}",
+                        self.0.display()
+                    );
                 }
             }
         }
@@ -3774,53 +4369,88 @@ mod r4_metadata_corpus_tests {
         let mut command = std::process::Command::new("/usr/bin/mkfifo");
         command.arg(path);
         let output = aikit_adapters::runner::SystemRunner::new()
-            .with_timeout(Duration::from_secs(2)).with_output_limit_bytes(4096)
-            .with_strict_utf8().capture_command(&mut command).unwrap();
+            .with_timeout(Duration::from_secs(2))
+            .with_output_limit_bytes(4096)
+            .with_strict_utf8()
+            .capture_command(&mut command)
+            .unwrap();
         assert_eq!(output.status, 0, "actual FIFO prerequisite: {output:?}");
         assert!(fs::symlink_metadata(path).unwrap().file_type().is_fifo());
     }
 
     #[test]
     fn original_corpus_deadline_refuses_before_fifo_metadata_body() {
-        let fixture = Fixture::new(); let (root, bytes) = fixture.setup();
+        let fixture = Fixture::new();
+        let (root, bytes) = fixture.setup();
         let manifest = root.join(PROJECT_MANIFEST_SOURCE);
-        let retained = root.join("retained-manifest.json"); fs::rename(&manifest, &retained).unwrap();
+        let retained = root.join("retained-manifest.json");
+        fs::rename(&manifest, &retained).unwrap();
         fifo(&manifest);
         let mut remaining = WIKI_INGEST_READ_BYTES;
         let begun = Instant::now();
-        let failure = CorpusAdmission::new_with_read_budget(&root, &root.join("corpus"),
-            Some(None), Some(Instant::now()), &mut remaining).err().expect("expired actual deadline must refuse");
+        let failure = CorpusAdmission::new_with_read_budget(
+            &root,
+            &root.join("corpus"),
+            Some(None),
+            Some(Instant::now()),
+            &mut remaining,
+        )
+        .err()
+        .expect("expired actual deadline must refuse");
         assert_eq!(failure.code(), "knowledge.corpus_read_incomplete");
         assert_eq!(remaining, WIKI_INGEST_READ_BYTES);
         assert!(begun.elapsed() < Duration::from_secs(2));
-        assert!(fs::symlink_metadata(&manifest).unwrap().file_type().is_fifo());
+        assert!(fs::symlink_metadata(&manifest)
+            .unwrap()
+            .file_type()
+            .is_fifo());
         assert_eq!(fs::read(&retained).unwrap(), bytes);
         fixture.finish();
     }
 
     #[test]
     fn corpus_prerequisite_fifo_and_oversize_retain_actual_native_refusals() {
-        let fixture = Fixture::new(); let (root, bytes) = fixture.setup();
+        let fixture = Fixture::new();
+        let (root, bytes) = fixture.setup();
         let manifest = root.join(PROJECT_MANIFEST_SOURCE);
-        let retained = root.join("retained-manifest.json"); fs::rename(&manifest, &retained).unwrap();
+        let retained = root.join("retained-manifest.json");
+        fs::rename(&manifest, &retained).unwrap();
         fifo(&manifest);
-        let begun = Instant::now(); let mut remaining = WIKI_INGEST_READ_BYTES;
-        let failure = CorpusAdmission::new_with_read_budget(&root, &root.join("corpus"),
-            Some(None), Some(Instant::now() + Duration::from_secs(2)), &mut remaining)
-            .err().expect("actual FIFO metadata must refuse");
+        let begun = Instant::now();
+        let mut remaining = WIKI_INGEST_READ_BYTES;
+        let failure = CorpusAdmission::new_with_read_budget(
+            &root,
+            &root.join("corpus"),
+            Some(None),
+            Some(Instant::now() + Duration::from_secs(2)),
+            &mut remaining,
+        )
+        .err()
+        .expect("actual FIFO metadata must refuse");
         assert_eq!(failure.code(), "knowledge.wiki_publication_identity");
         assert!(begun.elapsed() < Duration::from_secs(2));
         assert_eq!(remaining, WIKI_INGEST_READ_BYTES);
-        fs::remove_file(&manifest).unwrap(); fs::rename(&retained, &manifest).unwrap();
+        fs::remove_file(&manifest).unwrap();
+        fs::rename(&retained, &manifest).unwrap();
         let file = fs::OpenOptions::new().write(true).open(&manifest).unwrap();
-        file.set_len((WIKI_INGEST_SOURCE_BYTES + 1) as u64).unwrap(); drop(file);
+        file.set_len((WIKI_INGEST_SOURCE_BYTES + 1) as u64).unwrap();
+        drop(file);
         let before = fs::metadata(&manifest).unwrap();
-        let failure = CorpusAdmission::new_with_read_budget(&root, &root.join("corpus"),
-            Some(None), Some(Instant::now() + Duration::from_secs(2)), &mut remaining)
-            .err().expect("actual oversized metadata must refuse");
+        let failure = CorpusAdmission::new_with_read_budget(
+            &root,
+            &root.join("corpus"),
+            Some(None),
+            Some(Instant::now() + Duration::from_secs(2)),
+            &mut remaining,
+        )
+        .err()
+        .expect("actual oversized metadata must refuse");
         assert_eq!(failure.code(), "knowledge.wiki_publication_budget");
         let after = fs::metadata(&manifest).unwrap();
-        assert_eq!((after.dev(), after.ino(), after.len()), (before.dev(), before.ino(), before.len()));
+        assert_eq!(
+            (after.dev(), after.ino(), after.len()),
+            (before.dev(), before.ino(), before.len())
+        );
         assert_eq!(remaining, WIKI_INGEST_READ_BYTES);
         // The test's admitted operation restores its own original metadata.
         fs::write(&manifest, &bytes).unwrap();
@@ -3830,16 +4460,36 @@ mod r4_metadata_corpus_tests {
 
     #[test]
     fn metadata_payload_uses_same_remaining_allowance_and_literal_project_identity() {
-        let fixture = Fixture::new(); let (root, bytes) = fixture.setup();
-        let corpus = root.join("corpus"); let mut remaining = WIKI_INGEST_READ_BYTES;
+        let fixture = Fixture::new();
+        let (root, bytes) = fixture.setup();
+        let corpus = root.join("corpus");
+        let mut remaining = WIKI_INGEST_READ_BYTES;
         let deadline = Instant::now() + Duration::from_secs(2);
-        let first = CorpusAdmission::new_with_read_budget(&root, &corpus, Some(None),
-            Some(deadline), &mut remaining).unwrap();
-        assert_eq!(first.project.as_ref().unwrap().1.semantic.project_id, "literal-native-corpus-id");
+        let first = CorpusAdmission::new_with_read_budget(
+            &root,
+            &corpus,
+            Some(None),
+            Some(deadline),
+            &mut remaining,
+        )
+        .unwrap();
+        assert_eq!(
+            first.project.as_ref().unwrap().1.semantic.project_id,
+            "literal-native-corpus-id"
+        );
         assert_eq!(remaining, WIKI_INGEST_READ_BYTES - bytes.len());
-        let second = CorpusAdmission::new_with_read_budget(&root, &corpus, Some(None),
-            Some(deadline), &mut remaining).unwrap();
-        assert_eq!(second.project.as_ref().unwrap().1.semantic.project_id, "literal-native-corpus-id");
+        let second = CorpusAdmission::new_with_read_budget(
+            &root,
+            &corpus,
+            Some(None),
+            Some(deadline),
+            &mut remaining,
+        )
+        .unwrap();
+        assert_eq!(
+            second.project.as_ref().unwrap().1.semantic.project_id,
+            "literal-native-corpus-id"
+        );
         assert_eq!(remaining, WIKI_INGEST_READ_BYTES - 2 * bytes.len());
         assert_eq!(fs::read(root.join(PROJECT_MANIFEST_SOURCE)).unwrap(), bytes);
         fixture.finish();
@@ -3847,39 +4497,67 @@ mod r4_metadata_corpus_tests {
 
     #[test]
     fn project_and_enclosing_corpus_floors_precede_invalid_manifest_parse() {
-        let fixture = Fixture::new(); let (root, _) = fixture.setup();
-        let corpus = root.join("corpus"); let manifest = root.join(PROJECT_MANIFEST_SOURCE);
+        let fixture = Fixture::new();
+        let (root, _) = fixture.setup();
+        let corpus = root.join("corpus");
+        let manifest = root.join(PROJECT_MANIFEST_SOURCE);
         fs::write(&manifest, b"actual-invalid-native-metadata").unwrap();
         let enclosing = fixture.root().to_path_buf();
         for floor in [&root, &enclosing] {
-            let marker = floor.join(".no-agent-retrieval"); fs::write(&marker, b"actual withheld floor").unwrap();
+            let marker = floor.join(".no-agent-retrieval");
+            fs::write(&marker, b"actual withheld floor").unwrap();
             let mut remaining = WIKI_INGEST_READ_BYTES;
-            let failure = CorpusAdmission::new_with_read_budget(&root, &corpus,
-                Some(Some(&enclosing)), Some(Instant::now() + Duration::from_secs(2)), &mut remaining)
-                .err().expect("actual floor must refuse before metadata parse");
+            let failure = CorpusAdmission::new_with_read_budget(
+                &root,
+                &corpus,
+                Some(Some(&enclosing)),
+                Some(Instant::now() + Duration::from_secs(2)),
+                &mut remaining,
+            )
+            .err()
+            .expect("actual floor must refuse before metadata parse");
             assert_eq!(failure.code(), "knowledge.ingest_corpus_withheld");
             assert_eq!(remaining, WIKI_INGEST_READ_BYTES);
-            assert_eq!(fs::read(&manifest).unwrap(), b"actual-invalid-native-metadata");
+            assert_eq!(
+                fs::read(&manifest).unwrap(),
+                b"actual-invalid-native-metadata"
+            );
             fs::remove_file(marker).unwrap();
         }
         let mut remaining = WIKI_INGEST_READ_BYTES;
-        assert_eq!(CorpusAdmission::new_with_read_budget(&root, &corpus, Some(None),
-            Some(Instant::now() + Duration::from_secs(2)), &mut remaining)
-            .err().expect("actually selected malformed metadata must fail").code(), "projectcentral.manifest_invalid");
+        assert_eq!(
+            CorpusAdmission::new_with_read_budget(
+                &root,
+                &corpus,
+                Some(None),
+                Some(Instant::now() + Duration::from_secs(2)),
+                &mut remaining
+            )
+            .err()
+            .expect("actually selected malformed metadata must fail")
+            .code(),
+            "projectcentral.manifest_invalid"
+        );
         fixture.finish();
     }
 
     #[test]
     fn actual_failed_reads_then_reduced_capacity_distinguish_observed_bytes_from_reservations() {
-        let fixture = Fixture::new(); let (root, bytes) = fixture.setup();
-        let corpus = root.join("corpus"); let mut restored = Vec::new();
+        let fixture = Fixture::new();
+        let (root, bytes) = fixture.setup();
+        let corpus = root.join("corpus");
+        let mut restored = Vec::new();
         let mut actual_causes = Vec::new();
         for index in 0..15 {
             let path = corpus.join(format!("a-unreadable-{index:02}.md"));
             fs::write(&path, b"actual retained unreadable source").unwrap();
-            restored.push(RestoreMode(path.clone(), fs::metadata(&path).unwrap().permissions()));
+            restored.push(RestoreMode(
+                path.clone(),
+                fs::metadata(&path).unwrap().permissions(),
+            ));
             fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
-            let oracle = fs::File::open(&path).err()
+            let oracle = fs::File::open(&path)
+                .err()
                 .expect("real EACCES prerequisite requires a nonroot native test host");
             assert_eq!(oracle.kind(), std::io::ErrorKind::PermissionDenied);
             actual_causes.push(oracle);
@@ -3887,34 +4565,61 @@ mod r4_metadata_corpus_tests {
         fs::write(corpus.join("b-observed.md"), b"x").unwrap();
         let next = corpus.join("z-next.md");
         let file = fs::File::create(&next).unwrap();
-        file.set_len(WIKI_INGEST_SOURCE_BYTES as u64).unwrap(); drop(file);
+        file.set_len(WIKI_INGEST_SOURCE_BYTES as u64).unwrap();
+        drop(file);
         let before = fs::metadata(&next).unwrap();
-        let admission = CorpusAdmission::new_with_selected_root(&root, &corpus, Some(None)).unwrap();
-        let failure = walk_corpus(&corpus, "md", &admission).err()
+        let admission =
+            CorpusAdmission::new_with_selected_root(&root, &corpus, Some(None)).unwrap();
+        let failure = walk_corpus(&corpus, "md", &admission)
+            .err()
             .expect("actual unreadable reservations plus next physical bound must refuse");
         assert_eq!(failure.code(), "knowledge.ingest_corpus_capacity");
         assert_eq!(failure.details()["files_read"], "1");
         assert_eq!(failure.details()["observed_payload_bytes"], "1");
-        assert_eq!(failure.details()["failed_payload_reserved_bytes"], (15 * WIKI_INGEST_SOURCE_BYTES).to_string());
-        assert_eq!(failure.details()["next_payload_observed_lower_bound"], WIKI_INGEST_SOURCE_BYTES.to_string());
-        assert_eq!(failure.details()["observed_lower_bound"], (WIKI_INGEST_SOURCE_BYTES + 1).to_string());
-        assert_eq!(failure.details()["budget_charge_lower_bound"], (WIKI_INGEST_READ_BYTES + 1).to_string());
-        let causes: Vec<Value> = serde_json::from_str(&failure.details()["failed_read_causes"]).unwrap();
+        assert_eq!(
+            failure.details()["failed_payload_reserved_bytes"],
+            (15 * WIKI_INGEST_SOURCE_BYTES).to_string()
+        );
+        assert_eq!(
+            failure.details()["next_payload_observed_lower_bound"],
+            WIKI_INGEST_SOURCE_BYTES.to_string()
+        );
+        assert_eq!(
+            failure.details()["observed_lower_bound"],
+            (WIKI_INGEST_SOURCE_BYTES + 1).to_string()
+        );
+        assert_eq!(
+            failure.details()["budget_charge_lower_bound"],
+            (WIKI_INGEST_READ_BYTES + 1).to_string()
+        );
+        let causes: Vec<Value> =
+            serde_json::from_str(&failure.details()["failed_read_causes"]).unwrap();
         assert_eq!(causes.len(), actual_causes.len());
         for (cause, oracle) in causes.iter().zip(&actual_causes) {
-            assert_eq!(cause["details"]["cause_kind"], format!("{:?}", oracle.kind()));
-            assert_eq!(cause["details"]["cause_raw_os_error"], jval!(oracle.raw_os_error()).to_string());
+            assert_eq!(
+                cause["details"]["cause_kind"],
+                format!("{:?}", oracle.kind())
+            );
+            assert_eq!(
+                cause["details"]["cause_raw_os_error"],
+                jval!(oracle.raw_os_error()).to_string()
+            );
         }
         let original: Value = serde_json::from_str(&failure.details()["original_error"]).unwrap();
         assert_eq!(original["code"], "knowledge.wiki_publication_budget");
         drop(restored);
         for index in 0..15 {
-            assert_eq!(fs::read(corpus.join(format!("a-unreadable-{index:02}.md"))).unwrap(),
-                b"actual retained unreadable source");
+            assert_eq!(
+                fs::read(corpus.join(format!("a-unreadable-{index:02}.md"))).unwrap(),
+                b"actual retained unreadable source"
+            );
         }
         assert_eq!(fs::read(root.join(PROJECT_MANIFEST_SOURCE)).unwrap(), bytes);
         let after = fs::metadata(&next).unwrap();
-        assert_eq!((after.dev(), after.ino(), after.len()), (before.dev(), before.ino(), before.len()));
+        assert_eq!(
+            (after.dev(), after.ino(), after.len()),
+            (before.dev(), before.ino(), before.len())
+        );
         fixture.finish();
     }
 }

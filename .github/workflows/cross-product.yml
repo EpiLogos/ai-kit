@@ -193,7 +193,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
-      CENTRAL_SHA: 2a604574774c41921003ed99a2eed73b4c9f4266
+      CENTRAL_SHA: 1a94aeef3791dd083e789ebd332d4856daa1c62d
       ACTUATION_SHA: 4af495f6509bb0dd779112a225d71a9df8145b6e
     steps:
       - uses: actions/checkout@v4
@@ -246,11 +246,13 @@ jobs:
           workspace=Path(os.environ['GITHUB_WORKSPACE'])
           roles=[
            {'name':'ctrl','receipt':'compiler-central.stdout','root':str(Path(os.environ['RUNNER_TEMP'])/'Central'),'target':'ctrl','kind':'bin','test':False},
-           {'name':'aikit','receipt':'compiler-integration.stdout','root':str(workspace),'target':'aikit','kind':'bin','test':False},
+           {'name':'aikit','receipt':'compiler-r4-cli.stdout','root':str(workspace),'target':'aikit','kind':'bin','test':False},
            {'name':'compose-native','receipt':'compiler-integration.stdout','root':str(workspace),'target':'compose_native_central','kind':'test','test':True},
            {'name':'wiki-native','receipt':'compiler-integration.stdout','root':str(workspace),'target':'knowledge_wiki_scope_native','kind':'test','test':True},
            {'name':'project-scope','receipt':'compiler-project-scope.stdout','root':str(workspace),'target':'aikit_cli','kind':'lib','test':True},
           ]
+          roles.extend([{'name': 'r4-adapters-lib', 'receipt': 'compiler-r4-adapters.stdout', 'root': str(workspace), 'target': 'aikit_adapters', 'kind': 'lib', 'test': True}, {'name': 'r4-central_file_map', 'receipt': 'compiler-r4-adapters.stdout', 'root': str(workspace), 'target': 'central_file_map', 'kind': 'test', 'test': True}, {'name': 'r4-central_world_sources', 'receipt': 'compiler-r4-adapters.stdout', 'root': str(workspace), 'target': 'central_world_sources', 'kind': 'test', 'test': True}, {'name': 'r4-knowledge_application_v2', 'receipt': 'compiler-r4-cli.stdout', 'root': str(workspace), 'target': 'knowledge_application_v2', 'kind': 'test', 'test': True}, {'name': 'r4-knowledge_one_query_path_v2', 'receipt': 'compiler-r4-cli.stdout', 'root': str(workspace), 'target': 'knowledge_one_query_path_v2', 'kind': 'test', 'test': True}, {'name': 'r4-knowledge_resolution_open', 'receipt': 'compiler-r4-cli.stdout', 'root': str(workspace), 'target': 'knowledge_resolution_open', 'kind': 'test', 'test': True}, {'name': 'r4-flow_cognition_acceptance', 'receipt': 'compiler-r4-cli.stdout', 'root': str(workspace), 'target': 'flow_cognition_acceptance', 'kind': 'test', 'test': True}, {'name': 'r4-wiki_document_end_to_end', 'receipt': 'compiler-r4-cli.stdout', 'root': str(workspace), 'target': 'wiki_document_end_to_end', 'kind': 'test', 'test': True}, {'name': 'r4-wiki_commands', 'receipt': 'compiler-r4-cli.stdout', 'root': str(workspace), 'target': 'wiki_commands', 'kind': 'test', 'test': True}, {'name': 'r4-knowledge_owner_admission', 'receipt': 'compiler-r4-cli.stdout', 'root': str(workspace), 'target': 'knowledge_owner_admission', 'kind': 'test', 'test': True}])
+          r4_groups=json.loads('[{"id":"r4-group-00","role":"r4-central_file_map","filter":null,"expected":["live_native_identity_revision_withdrawal_and_new_source_survive_one_attachment","absent_owner_binary_is_genuine_unavailability_not_a_capability","disposable_provider_refuses_central_owned_database","actual_indexed_native_search_and_retained_routes_withhold_withdrawn_or_changed_origins","completed_native_search_receipt_cannot_validate_changed_current_payload","nonowners_decline_before_current_central_and_independent_work_owners","attached_now_preserves_registered_project_identity_current_payload_and_native_failure","selected_now_roster_is_bounded_without_capping_unselected_world_sources","native_now_operation_budget_preserves_actual_transport_failure_without_fallback","non_utf8_coordinates_cannot_address_a_real_replacement_named_owner_or_world","native_now_does_not_stamp_a_later_revision_on_an_original_rg_match","native_work_exact_ids_collisions_current_declaration_and_historical_copies_remain_distinct","actual_custom_issued_source_is_read_current_without_prefix_authority","actual_healthy_unregistered_declines_but_known_missing_source_preserves_native_failure","actual_unreadable_payload_allows_only_metadata_and_target_denial_before_body","actual_binding_change_after_metadata_preserves_both_native_readings_and_refuses_old_admission","native_now_custom_source_uses_current_owner_before_independent_control_grammar","actual_borrowed_project_owner_scope_queries_two_projects_and_only_native_linked_common_source","actual_custom_temporal_return_source_keeps_owner_identity_and_declines_other_families_before_body","actual_allocated_now_source_keeps_its_native_record_coreference_and_revision","native_now_selected_read_preserves_configured_transport_deadline_and_original_failure","actual_native_now_metadata_and_payload_share_one_configured_read_deadline","native_file_map_spawn_failure_preserves_the_same_io_without_public_invocation_bytes","native_selected_source_failure_diagnostics_withhold_body_and_retain_actual_transport"],"ignored":["live_native_identity_revision_withdrawal_and_new_source_survive_one_attachment","actual_indexed_native_search_and_retained_routes_withhold_withdrawn_or_changed_origins","completed_native_search_receipt_cannot_validate_changed_current_payload","nonowners_decline_before_current_central_and_independent_work_owners","attached_now_preserves_registered_project_identity_current_payload_and_native_failure","selected_now_roster_is_bounded_without_capping_unselected_world_sources","native_now_operation_budget_preserves_actual_transport_failure_without_fallback","native_now_does_not_stamp_a_later_revision_on_an_original_rg_match","native_work_exact_ids_collisions_current_declaration_and_historical_copies_remain_distinct","actual_custom_issued_source_is_read_current_without_prefix_authority","actual_healthy_unregistered_declines_but_known_missing_source_preserves_native_failure","actual_unreadable_payload_allows_only_metadata_and_target_denial_before_body","actual_binding_change_after_metadata_preserves_both_native_readings_and_refuses_old_admission","native_now_custom_source_uses_current_owner_before_independent_control_grammar","actual_borrowed_project_owner_scope_queries_two_projects_and_only_native_linked_common_source","actual_custom_temporal_return_source_keeps_owner_identity_and_declines_other_families_before_body","actual_allocated_now_source_keeps_its_native_record_coreference_and_revision","native_now_selected_read_preserves_configured_transport_deadline_and_original_failure","actual_native_now_metadata_and_payload_share_one_configured_read_deadline","native_selected_source_failure_diagnostics_withhold_body_and_retain_actual_transport"],"selected":[{"name":"live_native_identity_revision_withdrawal_and_new_source_survive_one_attachment","ignored":true},{"name":"absent_owner_binary_is_genuine_unavailability_not_a_capability","ignored":false},{"name":"disposable_provider_refuses_central_owned_database","ignored":false},{"name":"actual_indexed_native_search_and_retained_routes_withhold_withdrawn_or_changed_origins","ignored":true},{"name":"completed_native_search_receipt_cannot_validate_changed_current_payload","ignored":true},{"name":"nonowners_decline_before_current_central_and_independent_work_owners","ignored":true},{"name":"attached_now_preserves_registered_project_identity_current_payload_and_native_failure","ignored":true},{"name":"selected_now_roster_is_bounded_without_capping_unselected_world_sources","ignored":true},{"name":"native_now_operation_budget_preserves_actual_transport_failure_without_fallback","ignored":true},{"name":"non_utf8_coordinates_cannot_address_a_real_replacement_named_owner_or_world","ignored":false},{"name":"native_now_does_not_stamp_a_later_revision_on_an_original_rg_match","ignored":true},{"name":"native_work_exact_ids_collisions_current_declaration_and_historical_copies_remain_distinct","ignored":true},{"name":"actual_custom_issued_source_is_read_current_without_prefix_authority","ignored":true},{"name":"actual_healthy_unregistered_declines_but_known_missing_source_preserves_native_failure","ignored":true},{"name":"actual_unreadable_payload_allows_only_metadata_and_target_denial_before_body","ignored":true},{"name":"actual_binding_change_after_metadata_preserves_both_native_readings_and_refuses_old_admission","ignored":true},{"name":"native_now_custom_source_uses_current_owner_before_independent_control_grammar","ignored":true},{"name":"actual_borrowed_project_owner_scope_queries_two_projects_and_only_native_linked_common_source","ignored":true},{"name":"actual_custom_temporal_return_source_keeps_owner_identity_and_declines_other_families_before_body","ignored":true},{"name":"actual_allocated_now_source_keeps_its_native_record_coreference_and_revision","ignored":true},{"name":"native_now_selected_read_preserves_configured_transport_deadline_and_original_failure","ignored":true},{"name":"actual_native_now_metadata_and_payload_share_one_configured_read_deadline","ignored":true},{"name":"native_file_map_spawn_failure_preserves_the_same_io_without_public_invocation_bytes","ignored":false},{"name":"native_selected_source_failure_diagnostics_withhold_body_and_retain_actual_transport","ignored":true}]},{"id":"r4-group-01","role":"r4-central_world_sources","filter":null,"expected":["binding_annotates_entities_with_propagation_and_keeps_refs","excluded_source_withholds_the_entity_from_the_context_and_discloses","project_stand_in_redeclaring_a_subject_is_refused","empty_binding_leaves_objects_untouched","native_bare_prefixed_and_slash_ids_use_owner_ref_without_remint","native_source_override_exclusion_and_every_provenance_hop_reach_context","native_present_target_with_missing_ancestor_never_uses_root_fallback","native_manifest_less_existing_member_differs_from_nonexistent_member","native_malformed_wrong_form_and_missing_owner_do_not_become_declaration_absence","native_manifest_eacces_retains_actual_owner_cause_and_never_assumes_root","native_shared_probe_limits_and_final_identity_reobservation_are_operative","native_unchanged_root_alias_works_and_retargeted_owner_ref_is_refused","native_non_utf8_coordinate_refuses_before_selecting_lossy_owner","native_final_manifest_alias_and_fifo_refuse_without_opening_replacement","native_runner_decode_and_timeout_failures_never_become_absent_owner","native_world_failure_diagnostics_withhold_selected_body_and_retain_actual_receipt"],"ignored":["native_bare_prefixed_and_slash_ids_use_owner_ref_without_remint","native_source_override_exclusion_and_every_provenance_hop_reach_context","native_present_target_with_missing_ancestor_never_uses_root_fallback","native_manifest_less_existing_member_differs_from_nonexistent_member","native_malformed_wrong_form_and_missing_owner_do_not_become_declaration_absence","native_manifest_eacces_retains_actual_owner_cause_and_never_assumes_root","native_shared_probe_limits_and_final_identity_reobservation_are_operative","native_unchanged_root_alias_works_and_retargeted_owner_ref_is_refused","native_non_utf8_coordinate_refuses_before_selecting_lossy_owner","native_final_manifest_alias_and_fifo_refuse_without_opening_replacement","native_runner_decode_and_timeout_failures_never_become_absent_owner","native_world_failure_diagnostics_withhold_selected_body_and_retain_actual_receipt"],"selected":[{"name":"binding_annotates_entities_with_propagation_and_keeps_refs","ignored":false},{"name":"excluded_source_withholds_the_entity_from_the_context_and_discloses","ignored":false},{"name":"project_stand_in_redeclaring_a_subject_is_refused","ignored":false},{"name":"empty_binding_leaves_objects_untouched","ignored":false},{"name":"native_bare_prefixed_and_slash_ids_use_owner_ref_without_remint","ignored":true},{"name":"native_source_override_exclusion_and_every_provenance_hop_reach_context","ignored":true},{"name":"native_present_target_with_missing_ancestor_never_uses_root_fallback","ignored":true},{"name":"native_manifest_less_existing_member_differs_from_nonexistent_member","ignored":true},{"name":"native_malformed_wrong_form_and_missing_owner_do_not_become_declaration_absence","ignored":true},{"name":"native_manifest_eacces_retains_actual_owner_cause_and_never_assumes_root","ignored":true},{"name":"native_shared_probe_limits_and_final_identity_reobservation_are_operative","ignored":true},{"name":"native_unchanged_root_alias_works_and_retargeted_owner_ref_is_refused","ignored":true},{"name":"native_non_utf8_coordinate_refuses_before_selecting_lossy_owner","ignored":true},{"name":"native_final_manifest_alias_and_fifo_refuse_without_opening_replacement","ignored":true},{"name":"native_runner_decode_and_timeout_failures_never_become_absent_owner","ignored":true},{"name":"native_world_failure_diagnostics_withhold_selected_body_and_retain_actual_receipt","ignored":true}]},{"id":"r4-group-02","role":"r4-knowledge_application_v2","filter":null,"expected":["one_production_service_materialises_routes_history_forget_and_tui_views"],"ignored":[],"selected":[{"name":"one_production_service_materialises_routes_history_forget_and_tui_views","ignored":false}]},{"id":"r4-group-03","role":"r4-knowledge_one_query_path_v2","filter":null,"expected":["knowledge_retrieval_expresses_through_the_one_resolver_contract","knowledge_and_resource_search_share_one_path_identity","unreadable_input_is_disclosed_rather_than_answered_off_path"],"ignored":[],"selected":[{"name":"knowledge_retrieval_expresses_through_the_one_resolver_contract","ignored":false},{"name":"knowledge_and_resource_search_share_one_path_identity","ignored":false},{"name":"unreadable_input_is_disclosed_rather_than_answered_off_path","ignored":false}]},{"id":"r4-group-04","role":"r4-knowledge_resolution_open","filter":null,"expected":["one_query_returns_a_real_file_and_a_real_flow_through_the_canonical_path","resolve_query_display_and_refresh_record_no_familiarity_open_records_exactly_one"],"ignored":[],"selected":[{"name":"one_query_returns_a_real_file_and_a_real_flow_through_the_canonical_path","ignored":false},{"name":"resolve_query_display_and_refresh_record_no_familiarity_open_records_exactly_one","ignored":false}]},{"id":"r4-group-05","role":"r4-flow_cognition_acceptance","filter":null,"expected":["preflight_without_owner_seams_is_explicitly_unavailable_and_records_nothing","preflight_discloses_exact_reads_and_never_auto_invokes","contemplate_without_host_executor_is_unavailable_and_records_nothing","one_successful_contemplate_records_exactly_one_familiarity_observation","changed_since_returns_typed_rows_with_provenance_and_explicit_states","now_subject_preflight_discloses_the_stream_and_records_nothing","now_subject_mismatch_and_foreign_seams_are_refused","now_subject_execution_is_record_gated_and_the_learning_stays_a_proposal"],"ignored":[],"selected":[{"name":"preflight_without_owner_seams_is_explicitly_unavailable_and_records_nothing","ignored":false},{"name":"preflight_discloses_exact_reads_and_never_auto_invokes","ignored":false},{"name":"contemplate_without_host_executor_is_unavailable_and_records_nothing","ignored":false},{"name":"one_successful_contemplate_records_exactly_one_familiarity_observation","ignored":false},{"name":"changed_since_returns_typed_rows_with_provenance_and_explicit_states","ignored":false},{"name":"now_subject_preflight_discloses_the_stream_and_records_nothing","ignored":false},{"name":"now_subject_mismatch_and_foreign_seams_are_refused","ignored":false},{"name":"now_subject_execution_is_record_gated_and_the_learning_stays_a_proposal","ignored":false}]},{"id":"r4-group-06","role":"r4-wiki_document_end_to_end","filter":null,"expected":["ordinary_corpus_reader_graph_backlinks_and_search_share_native_identity","changed_source_rebuild_retracts_occurrences_without_changing_source_identity"],"ignored":[],"selected":[{"name":"ordinary_corpus_reader_graph_backlinks_and_search_share_native_identity","ignored":false},{"name":"changed_source_rebuild_retracts_occurrences_without_changing_source_identity","ignored":false}]},{"id":"r4-group-07","role":"r4-wiki_commands","filter":null,"expected":["canonical_wiki_writers_delegate_one_publication_contract","concurrent_real_cli_writers_preserve_every_acknowledged_node","query_reads_a_federated_file_without_rewriting_or_inventing_peer_objects","query_still_refuses_an_unreciprocated_relation_between_local_spaces","a_healthy_document_validates_and_a_broken_one_fails_with_its_findings","a_node_written_through_the_cli_reparses_and_reindexes_identically","a_refused_write_leaves_the_file_byte_identical","a_prune_dry_run_writes_nothing_and_apply_removes_exactly_one_ref","the_root_doctor_reports_the_dangling_and_healthy_sets_and_writes_nothing","the_root_doctor_exits_zero_when_every_child_resolves","adopt_federates_an_authored_project_wiki_idempotently","an_adopt_refuses_a_project_that_has_no_authored_wiki","stage_records_the_authored_alignment_and_leaves_the_prose_alone","stage_without_an_authored_alignment_is_a_refusal_not_a_guess","stage_refuses_positions_outside_the_local_sixfold_and_units_absent","stage_replaces_only_when_told_and_advances_the_revision","the_root_anchor_cites_the_live_identity_manifest_over_the_folded_stub","a_world_without_the_manifest_still_anchors_on_the_stub","anchor_root_creates_a_minimal_identity_node_and_is_idempotent","anchor_project_names_the_root_node_from_the_project","ingest_never_reads_a_room_the_owner_withheld_from_agent_retrieval","selected_withheld_corpus_root_refuses_dry_run_and_apply_without_pruning_retained_material","cited_bibliography_is_findable_and_an_empty_traversal_says_why","same_named_source_files_do_not_collide_and_the_dry_run_predicts_the_apply","ingest_dry_run_reports_the_real_mixed_tree_and_writes_nothing","ingest_apply_writes_objects_then_refuses_a_rerun_without_update","ingest_update_advances_only_the_record_that_changed","query_backlinks_and_search_see_the_ingested_field_as_first_class_results","ingest_refuses_a_corpus_path_that_is_not_a_directory","federated_link_failure_retains_the_first_publication_and_exact_cause","ingest_material_preparation_failure_keeps_the_acknowledged_wiki","actual_created_unreadable_source_pool_retains_known_wiki_and_directory_effects","incomplete_corpus_keeps_all_existing_wiki_and_material_bytes","rejected_material_replacement_retains_old_shards_and_acknowledged_wiki","source_pool_basis_refuses_actual_symlink_and_fifo_substitutions_without_losing_wiki_acknowledgement","source_material_replacement_completes_before_stale_shards_are_removed","actual_process_file_size_failure_during_staging_keeps_previous_material","real_refresh_prunes_only_canonical_native_shards_and_preserves_foreign_names","explicit_standalone_ingest_without_an_owner_keeps_content_basis_and_no_private_origin_route","actual_native_source_and_ancestor_withdrawal_refuse_corpus_target_without_output_effects","marked_directory_is_pruned_before_diagnostics_and_refresh_keeps_native_sources_and_old_wiki","actual_marker_observation_permission_failure_refuses_before_output_effects","configured_native_root_survives_missing_user_aperture_and_external_invocation_cwd","actual_manifest_observation_error_cannot_be_reclassified_as_standalone","relative_native_floor_keeps_absolute_selected_alias_ancestor_and_actual_cwd","relative_invocation_cwd_and_root_preserve_marked_selected_alias_ancestor","actual_corpus_file_limit_refuses_before_body_and_output_effects","actual_corpus_exact_file_limit_keeps_useful_selected_input_and_dry_run","actual_streaming_mixed_corpus_keeps_first_ids_bodies_provenance_diagnostics_and_file_counts","actual_selected_text_capacity_refuses_without_clipping_source_or_refreshing_outputs","actual_initial_payload_capacity_counts_inert_and_invalid_utf8_and_keeps_exact_boundary","actual_escaped_single_source_refuses_before_dry_run_or_apply_when_not_discoverable","actual_aggregate_serialization_capacity_counts_escaping_before_any_output_effect","actual_exact_selected_capacity_keeps_all_source_identities_and_discoverable_full_shards"],"ignored":["actual_native_source_and_ancestor_withdrawal_refuse_corpus_target_without_output_effects","configured_native_root_survives_missing_user_aperture_and_external_invocation_cwd","relative_native_floor_keeps_absolute_selected_alias_ancestor_and_actual_cwd","relative_invocation_cwd_and_root_preserve_marked_selected_alias_ancestor","actual_corpus_file_limit_refuses_before_body_and_output_effects","actual_corpus_exact_file_limit_keeps_useful_selected_input_and_dry_run","actual_selected_text_capacity_refuses_without_clipping_source_or_refreshing_outputs","actual_initial_payload_capacity_counts_inert_and_invalid_utf8_and_keeps_exact_boundary","actual_escaped_single_source_refuses_before_dry_run_or_apply_when_not_discoverable","actual_aggregate_serialization_capacity_counts_escaping_before_any_output_effect","actual_exact_selected_capacity_keeps_all_source_identities_and_discoverable_full_shards"],"selected":[{"name":"actual_native_source_and_ancestor_withdrawal_refuse_corpus_target_without_output_effects","ignored":true},{"name":"configured_native_root_survives_missing_user_aperture_and_external_invocation_cwd","ignored":true},{"name":"relative_native_floor_keeps_absolute_selected_alias_ancestor_and_actual_cwd","ignored":true},{"name":"relative_invocation_cwd_and_root_preserve_marked_selected_alias_ancestor","ignored":true},{"name":"actual_corpus_file_limit_refuses_before_body_and_output_effects","ignored":true},{"name":"actual_corpus_exact_file_limit_keeps_useful_selected_input_and_dry_run","ignored":true},{"name":"actual_selected_text_capacity_refuses_without_clipping_source_or_refreshing_outputs","ignored":true},{"name":"actual_initial_payload_capacity_counts_inert_and_invalid_utf8_and_keeps_exact_boundary","ignored":true},{"name":"actual_escaped_single_source_refuses_before_dry_run_or_apply_when_not_discoverable","ignored":true},{"name":"actual_aggregate_serialization_capacity_counts_escaping_before_any_output_effect","ignored":true},{"name":"actual_exact_selected_capacity_keeps_all_source_identities_and_discoverable_full_shards","ignored":true}]},{"id":"r4-group-08","role":"r4-knowledge_owner_admission","filter":null,"expected":["explicit_authorised_pure_source_pool_stays_usable_without_owner_or_redis_composition","unknown_legacy_generic_copy_is_withheld_same_service_fresh_service_and_actual_cli","actual_descendant_output_descriptor_cannot_hold_bounded_capture_until_its_sleep_finishes","world_nested_flow_read_returns_actual_unavailable_state_without_shared_runtime_borrow","real_redis_cannot_override_current_now_provider_read_or_withdrawal","configured_missing_native_executable_cannot_be_replaced_by_independent_control_records","an_explicit_missing_native_owner_keeps_actual_notfound_instead_of_standalone","same_service_rechecks_removed_configured_alias_without_using_the_old_canonical_owner","genuinely_absent_optional_home_hint_keeps_declared_standalone_service_useful","actual_nonroot_known_owner_privacy_failure_retains_original_permission_cause","explicit_current_corpus_reads_same_service_restart_cli_and_current_citation_basis","copied_native_and_declared_corpus_origin_claims_do_not_acquire_current_io_ownership","selected_current_corpus_refuses_real_oversize_input_without_output_or_truncation","selected_current_corpus_refuses_real_fifo_without_a_writer_or_indefinite_open","actual_native_current_corpus_alias_retains_issued_ref_body_basis_target_and_withdrawal","actual_root_service_and_cli_project_query_exclude_sibling_native_payloads_before_delivery"],"ignored":["real_redis_cannot_override_current_now_provider_read_or_withdrawal","actual_nonroot_known_owner_privacy_failure_retains_original_permission_cause","actual_native_current_corpus_alias_retains_issued_ref_body_basis_target_and_withdrawal","actual_root_service_and_cli_project_query_exclude_sibling_native_payloads_before_delivery"],"selected":[{"name":"actual_nonroot_known_owner_privacy_failure_retains_original_permission_cause","ignored":true},{"name":"explicit_current_corpus_reads_same_service_restart_cli_and_current_citation_basis","ignored":false},{"name":"copied_native_and_declared_corpus_origin_claims_do_not_acquire_current_io_ownership","ignored":false},{"name":"selected_current_corpus_refuses_real_oversize_input_without_output_or_truncation","ignored":false},{"name":"selected_current_corpus_refuses_real_fifo_without_a_writer_or_indefinite_open","ignored":false},{"name":"actual_native_current_corpus_alias_retains_issued_ref_body_basis_target_and_withdrawal","ignored":true},{"name":"actual_root_service_and_cli_project_query_exclude_sibling_native_payloads_before_delivery","ignored":true}]},{"id":"r4-group-09","role":"r4-adapters-lib","filter":"projectcentral::metadata_read_tests::","expected":["projectcentral::metadata_read_tests::fifo_manifest_without_writer_reaches_same_native_held_form_refusal","projectcentral::metadata_read_tests::optional_relation_absence_is_distinct_from_fifo_directory_and_dangling_alias","projectcentral::metadata_read_tests::oversized_metadata_and_expired_budget_refuse_without_truncation_or_reset","projectcentral::metadata_read_tests::actual_manifest_eacces_preserves_same_original_io_and_restored_bytes","projectcentral::metadata_read_tests::project_and_enclosing_markers_refuse_before_invalid_metadata_parse","projectcentral::metadata_read_tests::actual_relation_project_mismatch_and_same_metadata_payload_charge_are_retained","projectcentral::metadata_read_tests::unchanged_root_alias_remains_useful_and_original_affiliation_rejects_retarget"],"ignored":[],"selected":[{"name":"projectcentral::metadata_read_tests::fifo_manifest_without_writer_reaches_same_native_held_form_refusal","ignored":false},{"name":"projectcentral::metadata_read_tests::optional_relation_absence_is_distinct_from_fifo_directory_and_dangling_alias","ignored":false},{"name":"projectcentral::metadata_read_tests::oversized_metadata_and_expired_budget_refuse_without_truncation_or_reset","ignored":false},{"name":"projectcentral::metadata_read_tests::actual_manifest_eacces_preserves_same_original_io_and_restored_bytes","ignored":false},{"name":"projectcentral::metadata_read_tests::project_and_enclosing_markers_refuse_before_invalid_metadata_parse","ignored":false},{"name":"projectcentral::metadata_read_tests::actual_relation_project_mismatch_and_same_metadata_payload_charge_are_retained","ignored":false},{"name":"projectcentral::metadata_read_tests::unchanged_root_alias_remains_useful_and_original_affiliation_rejects_retarget","ignored":false}]},{"id":"r4-group-10","role":"project-scope","filter":"wiki::r4_metadata_corpus_tests::","expected":["wiki::r4_metadata_corpus_tests::original_corpus_deadline_refuses_before_fifo_metadata_body","wiki::r4_metadata_corpus_tests::corpus_prerequisite_fifo_and_oversize_retain_actual_native_refusals","wiki::r4_metadata_corpus_tests::metadata_payload_uses_same_remaining_allowance_and_literal_project_identity","wiki::r4_metadata_corpus_tests::project_and_enclosing_corpus_floors_precede_invalid_manifest_parse","wiki::r4_metadata_corpus_tests::actual_failed_reads_then_reduced_capacity_distinguish_observed_bytes_from_reservations"],"ignored":[],"selected":[{"name":"wiki::r4_metadata_corpus_tests::original_corpus_deadline_refuses_before_fifo_metadata_body","ignored":false},{"name":"wiki::r4_metadata_corpus_tests::corpus_prerequisite_fifo_and_oversize_retain_actual_native_refusals","ignored":false},{"name":"wiki::r4_metadata_corpus_tests::metadata_payload_uses_same_remaining_allowance_and_literal_project_identity","ignored":false},{"name":"wiki::r4_metadata_corpus_tests::project_and_enclosing_corpus_floors_precede_invalid_manifest_parse","ignored":false},{"name":"wiki::r4_metadata_corpus_tests::actual_failed_reads_then_reduced_capacity_distinguish_observed_bytes_from_reservations","ignored":false}]},{"id":"r4-group-11","role":"project-scope","filter":"app::knowledge::discovery_physical_tests::","expected":["app::knowledge::discovery_physical_tests::real_wide_directory_uses_one_bounded_native_stream","app::knowledge::discovery_physical_tests::real_frontier_seen_and_actual_path_capacity_refuse_before_retention","app::knowledge::discovery_physical_tests::actual_directory_alias_retarget_prevents_pending_body_commit","app::knowledge::discovery_physical_tests::actual_member_and_parent_loss_preserve_first_io_and_failed_affiliation","app::knowledge::discovery_physical_tests::marked_subtree_does_not_consume_frontier_or_hide_an_admitted_sibling","app::knowledge::discovery_physical_tests::canonical_wiki_floor_is_whole_and_independent_of_generic_candidate_capacity","app::knowledge::discovery_physical_tests::actual_canonical_path_collection_preserves_order_and_refuses_capacity_before_retention","app::knowledge::discovery_physical_tests::actual_directory_marker_prunes_before_listing_and_material_sniff","app::knowledge::discovery_physical_tests::actual_known_world_ancestor_marker_cannot_be_downgraded_to_selected_root","app::knowledge::discovery_physical_tests::actual_external_root_remains_standalone_but_unknown_native_root_does_not","app::knowledge::discovery_physical_tests::actual_in_root_directory_alias_is_admitted_and_cycle_is_visited_once","app::knowledge::discovery_physical_tests::actual_final_symlink_and_external_directory_alias_cannot_disclose_foreign_bytes","app::knowledge::discovery_physical_tests::actual_fifo_and_hardlink_are_refused_without_blocking_or_changing_retained_bytes","app::knowledge::discovery_physical_tests::actual_generic_capacity_and_canonical_wiki_capacity_remain_distinct","app::knowledge::discovery_physical_tests::native_owner_constructor_keeps_one_finite_deadline_and_transport_capacity","app::knowledge::discovery_physical_tests::actual_stalled_process_on_the_native_constructor_retains_execution_uncertainty","app::knowledge::discovery_physical_tests::actual_original_world_alias_floor_survives_mixed_invocation_coordinates","app::knowledge::discovery_physical_tests::actual_selected_root_alias_retarget_refuses_same_bytes_at_foreign_root","app::knowledge::discovery_physical_tests::actual_compiler_default_material_precedes_a_full_incidental_candidate_allowance","app::knowledge::discovery_physical_tests::two_declared_direct_inputs_precede_unattributed_nested_json_without_an_extra_budget","app::knowledge::discovery_physical_tests::declared_io_priority_keeps_current_marker_refusal_and_independent_canonical_graph","app::knowledge::discovery_physical_tests::declared_directory_escape_and_nonregular_form_preserve_actual_io_and_bytes","app::knowledge::discovery_physical_tests::declared_alias_does_not_consume_a_second_candidate_and_keeps_unmarked_nested_material","app::knowledge::discovery_physical_tests::exact_native_project_identity_selection_precedes_real_code_provider_observation","app::knowledge::discovery_physical_tests::actual_native_world_scoped_runtime_prepares_only_its_selected_project_and_root_keeps_both","app::knowledge::discovery_physical_tests::actual_selected_corpus_operation_refuses_changed_complete_basis_with_unchanged_alias_body","app::knowledge::discovery_physical_tests::actual_bkmr_current_corpus_query_preserves_alias_and_refuses_changed_input_before_delivery"],"ignored":["app::knowledge::discovery_physical_tests::actual_native_world_scoped_runtime_prepares_only_its_selected_project_and_root_keeps_both","app::knowledge::discovery_physical_tests::actual_bkmr_current_corpus_query_preserves_alias_and_refuses_changed_input_before_delivery"],"selected":[{"name":"app::knowledge::discovery_physical_tests::actual_native_world_scoped_runtime_prepares_only_its_selected_project_and_root_keeps_both","ignored":true},{"name":"app::knowledge::discovery_physical_tests::actual_selected_corpus_operation_refuses_changed_complete_basis_with_unchanged_alias_body","ignored":false},{"name":"app::knowledge::discovery_physical_tests::actual_bkmr_current_corpus_query_preserves_alias_and_refuses_changed_input_before_delivery","ignored":true}]}]')
           actor=[
            'explicit_compose_discloses_authored_basis_and_refuses_broken_source',
            'unreadable_authored_profile_refuses_context_and_projection_with_actual_owner_error',
@@ -267,9 +269,9 @@ jobs:
            (out/name).write_text(json.dumps(value,indent=2)+'\n')
           def facts(s):
            return dict(device=s.st_dev,inode=s.st_ino,mode=s.st_mode,links=s.st_nlink,uid=s.st_uid,gid=s.st_gid,bytes=s.st_size,mtime_ns=s.st_mtime_ns,ctime_ns=s.st_ctime_ns)
-          def held(path,root,copy=None,limit=1073741824):
+          def held(path,root,copy=None,limit=1073741824,installed_rg=None):
            p=Path(path);root=Path(root)
-           row={'path':str(p),'requested_root':str(root),'sha256':None,'cause':None}
+           row={'path':str(p),'requested_root':str(root),'sha256':None,'cause':None,'installed_provider_admission':installed_rg}
            try:
             row['named_before']=facts(os.lstat(p));actual_root=root.resolve(strict=True);physical=p.resolve(strict=True)
             row['physical_root']=str(actual_root);row['physical_path']=str(physical)
@@ -279,7 +281,18 @@ jobs:
             with os.fdopen(fd,'rb') as f:
              row['held_before']=facts(os.fstat(f.fileno()))
              first=row['held_before']
-             if not stat.S_ISREG(first['mode']) or first['uid']!=os.geteuid() or first['bytes']>limit:
+             admitted_uid=os.geteuid()
+             if installed_rg is not None:
+              if installed_rg['role']!='installed-ripgrep' or str(p)!=installed_rg['physical'] or str(actual_root)!=installed_rg['physical_root']:
+               raise ValueError('installed provider role does not match this exact selected rg image')
+              admitted_uid=installed_rg['uid']
+              row['provider_parent_before']=facts(os.lstat(p.parent))
+              parent=row['provider_parent_before']
+              if not stat.S_ISDIR(parent['mode']) or parent['uid']!=admitted_uid or parent['mode']&0o022:
+               raise ValueError('selected installed rg parent is not its ordinary read-only package basis')
+              if not first['mode']&0o111 or first['mode']&0o022:
+               raise ValueError('selected installed rg is not an admitted read-only executable')
+             if not stat.S_ISREG(first['mode']) or first['uid']!=admitted_uid or first['bytes']>limit:
               raise ValueError('nonregular/foreign/over-capacity original; no byte read admitted')
              if first!=row['named_before']:
               raise ValueError('named original changed before held read; digest unavailable')
@@ -299,11 +312,15 @@ jobs:
              row['held_after']=facts(os.fstat(f.fileno()));row['named_after']=facts(os.lstat(p))
              if first!=row['held_after'] or first!=row['named_after'] or p.resolve(strict=True)!=physical or root.resolve(strict=True)!=actual_root:
               raise ValueError('held/named original or parent alias affiliation changed; digest unavailable')
+             if installed_rg is not None:
+              row['provider_parent_after']=facts(os.lstat(p.parent))
+              if any(row['provider_parent_before'][key]!=row['provider_parent_after'][key] for key in ['device','inode','mode','uid','gid']):
+               raise ValueError('selected installed rg parent affiliation changed')
              row['sha256']=digest.hexdigest();row['observed_bytes']=observed;row['header_hex']=prefix.hex()
              row['standing']='bounded unchanged held regular original; original links observed, not required one; checkpoints are not atomic exclusion of external writers'
              if copy is not None:
               row['private_copy']={'path':str(copy),'metadata':facts(os.lstat(copy))}
-              if not stat.S_ISREG(row['private_copy']['metadata']['mode']) or row['private_copy']['metadata']['links']!=1:
+              if not stat.S_ISREG(row['private_copy']['metadata']['mode']) or row['private_copy']['metadata']['links']!=1 or row['private_copy']['metadata']['uid']!=os.geteuid():
                raise ValueError('private evidence image must be ordinary single-link')
            except (OSError,ValueError) as e:
             row['sha256']=None;row['cause']={'type':type(e).__name__,'errno':getattr(e,'errno',None),'message':str(e)}
@@ -321,6 +338,34 @@ jobs:
            with Path(path).open('rb') as stream:raw=stream.read(1048577)
            if len(raw)>1048576:raise ValueError('test receipt exceeded one MiB selection capacity')
            return raw.decode('utf-8',errors='strict')
+          def installed_rg_basis():
+           import shutil
+           selected=Path(os.environ['R4_RG_BIN']);physical=selected.resolve(strict=True)
+           if not selected.is_absolute() or shutil.which('rg')!=str(selected):raise ValueError('PATH rg differs from the exact package-selected prerequisite')
+           if int((out/'ripgrep-version.exit').read_text())!=0:raise ValueError('actual rg version prerequisite failed')
+           if os.uname().sysname=='Linux':
+            if str(selected)!='/usr/bin/rg' or physical!=selected:raise ValueError('Linux installed-rg role requires actual dpkg /usr/bin/rg')
+            for label in ['ripgrep-package','ripgrep-package-version']:
+             if int((out/(label+'.exit')).read_text())!=0:raise ValueError('actual dpkg prerequisite failed')
+            if 'ripgrep: /usr/bin/rg' not in bounded_text(out/'ripgrep-package.stdout').splitlines():raise ValueError('dpkg does not name the exact selected rg image')
+            package=bounded_text(out/'ripgrep-package-version.stdout').splitlines()
+            if len(package)!=1 or not package[0].startswith('ripgrep\t') or not package[0].endswith('\tinstall ok installed'):raise ValueError('actual installed ripgrep package state is unconfirmed')
+            root=physical.parent;uid=0;kind='dpkg-installed-ripgrep'
+           elif os.uname().sysname=='Darwin':
+            for label in ['ripgrep-package-root','ripgrep-package-list']:
+             if int((out/(label+'.exit')).read_text())!=0:raise ValueError('actual brew prerequisite failed')
+            lines=bounded_text(out/'ripgrep-package-root.stdout').splitlines()
+            if len(lines)!=1:raise ValueError('actual brew package prefix is ambiguous')
+            root=Path(lines[0]).resolve(strict=True)
+            if physical!=(root/'bin/rg').resolve(strict=True) or str(physical) not in bounded_text(out/'ripgrep-package-list.stdout').splitlines():raise ValueError('brew does not name the exact selected rg image')
+            uid=os.geteuid();kind='brew-installed-ripgrep'
+           else:raise ValueError('installed-rg role unsupported on this host')
+           return {'role':'installed-ripgrep','requested':str(selected),'physical':str(physical),'physical_root':str(root),'uid':uid,'package_kind':kind,'package_receipts':'actual retained package/version command argv/status/stdout/stderr; not a compiler receipt or universal upstream authenticity claim'}
+          def r4_cases():
+           rows=[dict(case,role=group['role']) for group in r4_groups for case in group['selected']]
+           if len(rows)!=89 or len({r['name'] for r in rows})!=89:raise ValueError('exact89 unique source-backed selected bodies required')
+           for ordinal,row in enumerate(rows,1):row['prefix']='r4-case-'+str(ordinal).zfill(3)
+           return rows
           mode=sys.argv[1]
           if mode=='prepare':
            records=[];total=0
@@ -349,6 +394,20 @@ jobs:
             archive_rows.append(held(path,out/'source'));write('source-archives.json',archive_rows)
             if archive_rows[-1]['cause']:raise ValueError('source archive digest unavailable')
            if len(archive_rows)!=3:raise ValueError('exact three actual product source archives required')
+           provider_rows=[]
+           for name,path,root in [('bkmr',os.environ['CENTRAL_BKMR_BIN'],str(Path(os.environ['RUNNER_TEMP'])/'r4-bkmr')),('ripgrep',__import__('shutil').which('rg'),'/')]:
+            if not path:raise ValueError('selected actual lexical provider is missing')
+            selected=Path(path);named=facts(os.lstat(selected));physical=selected.resolve(strict=True)
+            admission=installed_rg_basis() if name=='ripgrep' else None
+            if admission is not None:root=admission['physical_root']
+            row={'name':name,'requested':str(selected),'requested_before':named,'physical':str(physical),'admission':admission,'original':held(physical,Path(root).resolve(strict=True),out/'images'/('provider-'+name),min(1073741824,3221225472-total),installed_rg=admission)};provider_rows.append(row);write('providers.before.json',provider_rows)
+            if facts(os.lstat(selected))!=named or selected.resolve(strict=True)!=physical:raise ValueError('provider selected alias changed before original admission')
+            if row['original']['cause']:raise ValueError('selected native provider original image unavailable')
+            if name=='ripgrep':
+             header=row['original']['header_hex'][:8]
+             if header not in expected[os.uname().sysname] or not row['original']['held_before']['mode']&0o111:raise ValueError('actual lexical provider native image form/executable mode mismatch')
+            total+=row['original']['observed_bytes']
+            if total>3221225472:raise ValueError('aggregate compiler/provider image capacity exceeded')
            write('environment.json',{'os':os.uname().sysname,'python':sys.version,'values':{key:os.environ.get(key) for key in ['GITHUB_RUN_ID','GITHUB_SHA','GITHUB_REPOSITORY','RUSTFLAGS','RUSTC_WRAPPER','CARGO_TARGET_DIR','CARGO_BUILD_TARGET','AIKIT_NATIVE_TEST_ARTIFACT_ROOT','AIKIT_CENTRAL_REAL_BIN','CENTRAL_CTRL_BIN']},'limits':{'original_image_bytes':1073741824,'aggregate_image_bytes':3221225472,'compiler_bytes':67108864,'compiler_line_bytes':1048576},'standing':'hosted test-owned material; no installed/original/provider/human acceptance'})
           elif mode=='roster':
            kind=sys.argv[2];expected=actor if kind=='actor' else wiki
@@ -374,6 +433,36 @@ jobs:
             rows.append(row);write(kind+'-execution-results.json',{'expected':expected,'actual':rows,'standing':'actual executable raw result assertions, not badge/census inference'})
            if len(rows)!=len(expected) or not all(r['status']==0 and r['actual_test_line'] and r['one_pass_zero_fail_zero_ignored'] for r in rows):
             raise ValueError('exact required '+kind+' execution assertions failed')
+          elif mode=='r4-plan':
+           write('r4-required-plan.json',{'groups':r4_groups,'required_unique_bodies':89,'source_text_is_not_compiled_proof':True})
+           cases=r4_cases();write('r4-case-prefixes.json',cases)
+           with (out/'r4-groups.tsv').open('w') as f:
+            for group in r4_groups:f.write(group['id']+'\t'+group['role']+'\t'+(group['filter'] or '-')+'\n')
+           with (out/'r4-cases.tsv').open('w') as f:
+            for case in cases:f.write(case['prefix']+'\t'+case['role']+'\t'+case['name']+'\t'+str(int(case['ignored']))+'\n')
+          elif mode=='r4-roster':
+           group=next(g for g in r4_groups if g['id']==sys.argv[2]);rows=[]
+           for suffix,key in [('list','expected'),('ignored-list','ignored')]:
+            label=group['id']+'-'+suffix;text=bounded_text(out/(label+'.stdout'));status=int((out/(label+'.exit')).read_text())
+            actual=[line.removesuffix(': test') for line in text.splitlines() if line.endswith(': test')]
+            row={'kind':suffix,'expected':group[key],'actual':actual,'status':status,'match':status==0 and sorted(actual)==sorted(group[key])};rows.append(row)
+           write(group['id']+'-roster.json',{'actual':rows})
+           if not all(row['match'] for row in rows):raise ValueError('required complete/ignored compiled R4 roster mismatch')
+          elif mode=='r4-result':
+           prefix,name=sys.argv[2:4];case=next((r for r in r4_cases() if r['prefix']==prefix and r['name']==name),None)
+           if case is None:raise ValueError('case/prefix is not the exact source-backed selection')
+           text=bounded_text(out/(prefix+'.stdout'));status=int((out/(prefix+'.exit')).read_text())
+           row=dict(case,status=status,actual_test_line=('test '+name+' ... ok') in text,one_pass_zero_fail_zero_ignored='test result: ok. 1 passed; 0 failed; 0 ignored;' in text)
+           write(prefix+'.result.json',row)
+           if status!=0 or not row['actual_test_line'] or not row['one_pass_zero_fail_zero_ignored']:raise ValueError('required actual R4 body did not complete as exactly one passed case')
+          elif mode=='r4-results':
+           cases=r4_cases();expected=[case['name'] for case in cases];rows=[]
+           for case in cases:
+            p=out/(case['prefix']+'.result.json');row=json.loads(p.read_text()) if p.is_file() else dict(case,missing=True)
+            if any(row.get(key)!=case[key] for key in ['prefix','role','name','ignored']):raise ValueError('actual result is not the selected literal case/prefix')
+            rows.append(row)
+           write('r4-execution-results.json',{'expected':expected,'actual':rows,'standing':'actual per-case receipts; missing/failed/ignored is not acceptance'})
+           if len(expected)!=89 or len(set(expected))!=89 or not all(r.get('status')==0 and r.get('actual_test_line') and r.get('one_pass_zero_fail_zero_ignored') for r in rows):raise ValueError('incomplete required R4 case execution')
           elif mode=='after':
            before=json.loads((out/'images.before.json').read_text());rows=[];failed=len(before)!=len(roles)
            for row in before:
@@ -382,8 +471,67 @@ jobs:
             rows.append({'role':row['role'],'original_before':row['image'],'current_after':after,'same_original':same});failed|=not same
            write('images.after.json',{'actual':rows,'complete_roles':len(before)==len(roles),'all_unchanged':not failed,'standing':'actual held source-image checkpoints; no universal process cleanup/EOF claim'})
            if failed:raise ValueError('original native image basis changed or incomplete')
+           provider_rows=[]
+           for row in json.loads((out/'providers.before.json').read_text()):
+            current=held(row['original']['path'],row['original']['requested_root'],installed_rg=row.get('admission'));same=facts(os.lstat(row['requested']))==row['requested_before'] and str(Path(row['requested']).resolve(strict=True))==row['physical'] and not current['cause'] and current['sha256']==row['original']['sha256'] and current['held_before']==row['original'].get('held_after')
+            provider_rows.append({'before':row,'after':current,'same':same})
+           write('providers.after.json',provider_rows)
+           if not all(r['same'] for r in provider_rows):raise ValueError('actual selected lexical provider changed')
+          elif mode=='upload-paths':
+           root_before=facts(os.lstat(out))
+           if not stat.S_ISDIR(root_before['mode']) or root_before['uid']!=os.geteuid() or root_before['mode']&0o022:raise ValueError('artifact root is not the current owned ordinary evidence directory')
+           allowed=[];refused=[];seen=0
+           for directory,children,files in os.walk(out,followlinks=False):
+            for name in list(children)+files:
+             seen+=1
+             if seen>10000:raise ValueError('artifact path census exceeds finite10000 entry profile')
+             path=Path(directory)/name;relative=path.relative_to(out);metadata=os.lstat(path)
+             portable=all(part not in ['.','..'] and all(ord(c)>=32 and c not in '\"<>:|?*\\' for c in part) for part in relative.parts)
+             if not portable or stat.S_ISLNK(metadata.st_mode) or not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)):
+              refused.append({'relative':str(relative),'metadata':facts(metadata),'portable':portable})
+              if name in children:children.remove(name)
+             elif stat.S_ISREG(metadata.st_mode):allowed.append(str(path))
+           root_after=facts(os.lstat(out))
+           if any(root_before[key]!=root_after[key] for key in ['device','inode','mode','uid','gid']):raise ValueError('artifact root affiliation changed during path admission')
+           write('upload-path-admission.json',{'root_before':root_before,'root_after':root_after,'known_regular_portable_files':len(allowed),'refused':refused,'profile_entries':10000,'standing':'path/form metadata admission only; no special-file reads, no fixture deletion, no atomic writer exclusion'})
+           allowed.append(str(out/'upload-path-admission.json'))
+           payload='\n'.join(sorted(set(allowed)))
+           if len(payload.encode())>1048576:raise ValueError('portable artifact path list exceeds one MiB profile')
+           with Path(os.environ['GITHUB_OUTPUT']).open('a') as f:f.write('paths<<R4_PORTABLE_PATHS\n'+payload+'\nR4_PORTABLE_PATHS\n')
+           if refused:raise ValueError('unsupported artifact paths/forms refused; known portable partial evidence remains eligible')
           else:raise ValueError('unknown evidence operation')
           PY
+      - name: Admit actual R4 lexical providers without embedding or model substitutes
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "$NATIVE_COMPOSITION_EVIDENCE/record-command.sh"
+          if ! command -v rg >/dev/null; then
+            if [ "$RUNNER_OS" = Linux ]; then
+              record_command ripgrep-install sudo apt-get install -y ripgrep
+            else
+              record_command ripgrep-install brew install ripgrep
+            fi
+          fi
+          record_command ripgrep-version rg --version
+          rg_selected="$(command -v rg)"
+          case "$rg_selected" in /*) ;; *) echo 'Selected rg must be an actual absolute executable' >&2; exit 1 ;; esac
+          if [ "$RUNNER_OS" = Linux ]; then
+            record_command ripgrep-package dpkg-query -S "$rg_selected"
+            grep -Fx "ripgrep: $rg_selected" "$NATIVE_COMPOSITION_EVIDENCE/ripgrep-package.stdout"
+            record_command ripgrep-package-version dpkg-query -W -f='${Package}\t${Version}\t${Status}\n' ripgrep
+          else
+            record_command ripgrep-package-root brew --prefix ripgrep
+            record_command ripgrep-package-list brew list --verbose ripgrep
+          fi
+          printf 'R4_RG_BIN=%s\n' "$rg_selected" >> "$GITHUB_ENV"
+          record_command bkmr-venv python3 -m venv "$RUNNER_TEMP/r4-bkmr"
+          record_command bkmr-install "$RUNNER_TEMP/r4-bkmr/bin/pip" install --disable-pip-version-check --report "$NATIVE_COMPOSITION_EVIDENCE/bkmr-install-report.json" 'bkmr==7.6.7'
+          record_command bkmr-version "$RUNNER_TEMP/r4-bkmr/bin/bkmr" --version
+          grep -Fx 'bkmr 7.6.7' "$NATIVE_COMPOSITION_EVIDENCE/bkmr-version.stdout"
+          printf '%s\n' "$RUNNER_TEMP/r4-bkmr/bin" >> "$GITHUB_PATH"
+          printf 'CENTRAL_BKMR_BIN=%s\n' "$RUNNER_TEMP/r4-bkmr/bin/bkmr" >> "$GITHUB_ENV"
+          command -v mkfifo
       - name: Exact native owner dependencies
         shell: bash
         run: |
@@ -432,6 +580,8 @@ jobs:
           source "$NATIVE_COMPOSITION_EVIDENCE/record-command.sh"
           record_command compiler-integration cargo test --locked -p aikit-cli --test compose_native_central --test knowledge_wiki_scope_native --no-run --message-format=json
           record_command compiler-project-scope cargo test --locked -p aikit-cli --lib --no-run --message-format=json
+          record_command compiler-r4-adapters cargo test --locked -p aikit-adapters --lib --test central_file_map --test central_world_sources --no-run --message-format=json
+          record_command compiler-r4-cli cargo test --locked -p aikit-cli --test knowledge_application_v2 --test knowledge_one_query_path_v2 --test knowledge_resolution_open --test flow_cognition_acceptance --test wiki_document_end_to_end --test wiki_commands --test knowledge_owner_admission --no-run --message-format=json
           python3 "$NATIVE_COMPOSITION_EVIDENCE/audit.py" prepare
       - name: Run native composition and exact source-byte receipt regression first
         shell: bash
@@ -476,6 +626,34 @@ jobs:
             record_command "$case" "$image" --exact "$case" --ignored --nocapture --test-threads=1
           done
           python3 "$NATIVE_COMPOSITION_EVIDENCE/audit.py" results wiki
+      - name: Require complete R4 compiled rosters and every selected body
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "$NATIVE_COMPOSITION_EVIDENCE/record-command.sh"
+          test "$(id -u)" -ne 0
+          test "$(python3 -c 'import os; print(os.path.realpath(os.environ["AIKIT_CENTRAL_REAL_BIN"]))')" = "$(python3 -c 'import os; print(os.path.realpath(os.environ["CENTRAL_CTRL_BIN"]))')"
+          python3 "$NATIVE_COMPOSITION_EVIDENCE/audit.py" r4-plan
+          while IFS=$'\t' read -r group role filter; do
+            image="$(cat "$NATIVE_COMPOSITION_EVIDENCE/$role.path")"
+            args=(); if [ "$filter" != - ]; then args+=("$filter"); fi
+            record_command "$group-list" "$image" "${args[@]}" --list --format terse
+            record_command "$group-ignored-list" "$image" "${args[@]}" --list --ignored --format terse
+            python3 "$NATIVE_COMPOSITION_EVIDENCE/audit.py" r4-roster "$group"
+          done < "$NATIVE_COMPOSITION_EVIDENCE/r4-groups.tsv"
+          while IFS=$'\t' read -r prefix role case ignored; do
+            image="$(cat "$NATIVE_COMPOSITION_EVIDENCE/$role.path")"
+            args=(); if [ "$ignored" = 1 ]; then args+=(--ignored); fi
+            # Retain actual status/raw even on failure before asserting the result.
+            if record_command "$prefix" "$image" --exact "$case" "${args[@]}" --nocapture --test-threads=1; then
+              case_status=0
+            else
+              case_status=$?
+            fi
+            python3 "$NATIVE_COMPOSITION_EVIDENCE/audit.py" r4-result "$prefix" "$case"
+            test "$case_status" -eq 0
+          done < "$NATIVE_COMPOSITION_EVIDENCE/r4-cases.tsv"
+          python3 "$NATIVE_COMPOSITION_EVIDENCE/audit.py" r4-results
       - name: Retain current held image basis and exact execution context on success or failure
         if: always()
         shell: bash
@@ -500,12 +678,20 @@ jobs:
             echo 'Native evidence root unavailable; no compilation/case/custody proof' >&2
             exit 1
           fi
-      - uses: actions/upload-artifact@v4
+      - name: Admit portable native evidence paths and retain known partial output
+        id: r4-upload-paths
         if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$NATIVE_COMPOSITION_EVIDENCE/audit.py"
+          python3 "$NATIVE_COMPOSITION_EVIDENCE/audit.py" upload-paths
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.r4-upload-paths.outputs.paths != ''
         with:
           name: development-field-native-composition-${{ runner.os }}-${{ github.sha }}
           path: |
-            ${{ github.workspace }}/ProjectCentral/now/tmp/native-composition-${{ github.run_id }}-${{ runner.os }}/
+            ${{ steps.r4-upload-paths.outputs.paths }}
             ${{ runner.temp }}/composition-basis.txt
           if-no-files-found: error
 

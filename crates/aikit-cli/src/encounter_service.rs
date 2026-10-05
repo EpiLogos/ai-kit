@@ -566,6 +566,7 @@ struct NativePublicationTestCheckpoint {
 
 pub struct EncounterService {
     home: AikitHome,
+    entry_point: crate::SessionSpaceEntryPoint,
     lifecycle: RwLock<Lifecycle>,
     shutdown_requested: std::sync::atomic::AtomicBool,
     store: Arc<EncounterStore>,
@@ -829,8 +830,18 @@ struct FailedLaunchAttempt<'a> {
     more_variants: bool,
 }
 impl EncounterService {
+    /// Library construction uses the standalone native grammar. Binary owners
+    /// supply their actual entrypoint through `new_with_entrypoint`.
     pub fn new(home: AikitHome) -> Result<Self> {
+        Self::new_with_entrypoint(home, crate::SessionSpaceEntryPoint::Standalone)
+    }
+
+    pub fn new_with_entrypoint(
+        home: AikitHome,
+        entry_point: crate::SessionSpaceEntryPoint,
+    ) -> Result<Self> {
         Ok(Self {
+            entry_point,
             lifecycle: RwLock::new(Lifecycle::Running),
             shutdown_requested: std::sync::atomic::AtomicBool::new(false),
             store: Arc::new(EncounterStore::open(&home)?),
@@ -1872,7 +1883,12 @@ impl EncounterService {
             if task_bound {
                 configured.argv.clone()
             } else {
-                agency::model::direct_launcher(&agent_session, &configured, model)?
+                agency::model::direct_launcher(
+                    &agent_session,
+                    &configured,
+                    model,
+                    self.entry_point,
+                )?
             }
         } else if task_bound {
             configured.argv.clone()
@@ -3458,6 +3474,15 @@ pub fn socket_path(home: &AikitHome) -> PathBuf {
 
 #[cfg(unix)]
 pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
+    serve_with_entrypoint(home, socket, crate::SessionSpaceEntryPoint::Standalone)
+}
+
+#[cfg(unix)]
+pub fn serve_with_entrypoint(
+    home: AikitHome,
+    socket: &Path,
+    entry_point: crate::SessionSpaceEntryPoint,
+) -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -3500,7 +3525,7 @@ pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
     }
     let listener = UnixListener::bind(socket).map_err(error)?;
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600)).map_err(error)?;
-    let service = Arc::new(EncounterService::new(home)?);
+    let service = Arc::new(EncounterService::new_with_entrypoint(home, entry_point)?);
     agency::conversation::spawn_worker(&service);
     let clients = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
@@ -3629,6 +3654,15 @@ pub fn request(socket: &Path, request: &EncounterRequest) -> Result<Value> {
 /// Start the generic native owner once. No provider is opened by startup.
 #[cfg(unix)]
 pub fn start(home: &AikitHome, cwd: &Path) -> Result<Value> {
+    start_with_entrypoint(home, cwd, crate::SessionSpaceEntryPoint::Standalone)
+}
+
+#[cfg(unix)]
+pub fn start_with_entrypoint(
+    home: &AikitHome,
+    cwd: &Path,
+    entry_point: crate::SessionSpaceEntryPoint,
+) -> Result<Value> {
     let socket = socket_path(home);
     let _starting = aikit_store::ContextLock::acquire(
         home,
@@ -3648,7 +3682,7 @@ pub fn start(home: &AikitHome, cwd: &Path) -> Result<Value> {
     let mut child = std::process::Command::new(std::env::current_exe().map_err(error)?)
         .arg("-C")
         .arg(cwd)
-        .args(crate::session_space_verb_prefix())
+        .args(entry_point.verb_prefix())
         .arg("encounter-serve")
         .stdin(std::process::Stdio::null())
         .stdout(log.try_clone().map_err(error)?)

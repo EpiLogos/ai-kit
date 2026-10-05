@@ -10,7 +10,11 @@ use tempfile::TempDir;
 fn corpus(temp: &TempDir) {
     let root = temp.path().join("current-corpus");
     fs::create_dir_all(root.join("withheld")).unwrap();
-    fs::write(root.join("withheld/.no-agent-retrieval"), "actual local input withdrawal").unwrap();
+    fs::write(
+        root.join("withheld/.no-agent-retrieval"),
+        "actual local input withdrawal",
+    )
+    .unwrap();
     let inputs = [
         ("a.md", "---\nsource_id: a\nrecord_type: book\ntitle_full: Alpha\ntitle: Alpha\naliases: [Opening]\ntags: [notes, research]\n---\n# Alpha\n\n🌱 Follow [[Beta#Part|the next note]] and [again](b.md#^claim).\n\nA **strong** relation, *with care*.\n\n- [x] Keep the source\n- [ ] Return\n\n| Relation | Kind |\n| --- | --- |\n| Alpha → Beta | authored |\n\n`[[not a link]]` \\#not-a-tag\n\n> An exact source matters.\n\n<script>window.__injected = true</script>\n\n![Remote image](https://example.invalid/image.png)\n\n[[Missing]] [[Same]]\n"),
         ("b.md", "---\nsource_id: b\nrecord_type: book\ntitle_full: Beta\n---\n# Part\n\nAn exact paragraph. ^claim\n\n[[Alpha]]\n"),
@@ -115,7 +119,9 @@ fn ordinary_corpus_reader_graph_backlinks_and_search_share_native_identity() {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|e| e["from"] == "central:source:corpus:a" && e["to"] == "central:source:corpus:b")
+            .filter(
+                |e| e["from"] == "central:source:corpus:a" && e["to"] == "central:source:corpus:b"
+            )
             .count(),
         2
     );

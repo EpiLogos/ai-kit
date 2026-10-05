@@ -27,13 +27,19 @@ where
     let explicit = env("CENTRAL_ROOT").filter(|s| !s.is_empty());
     // Capture the configured locator once. Environment-relative paths keep
     // their process-invocation interpretation; selected -C never changes cwd.
-    let configured = explicit.as_ref().map(|value| {
-        let path = PathBuf::from(value);
-        if path.is_absolute() { Ok(path) } else {
-            std::env::current_dir().map(|cwd| cwd.join(&path))
-                .map_err(|error| invalid_io(&path, error))
-        }
-    }).transpose()?;
+    let configured = explicit
+        .as_ref()
+        .map(|value| {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                Ok(path)
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(&path))
+                    .map_err(|error| invalid_io(&path, error))
+            }
+        })
+        .transpose()?;
     let candidate = configured.clone().or_else(|| {
         env("HOME")
             .or_else(|| env("USERPROFILE"))
@@ -170,7 +176,11 @@ fn scope_chain(root: &Path, discovered: Option<&DiscoveredProject>) -> Vec<Proje
 /// Revalidate location before returning a binding. A removed/redirected root is
 /// not converted to an ungrounded successful context. No source body is read.
 pub(super) fn binding(root: &Path) -> Result<ProjectBinding> {
-    if root.canonicalize().map_err(|error| invalid_io(root, error))? != root {
+    if root
+        .canonicalize()
+        .map_err(|error| invalid_io(root, error))?
+        != root
+    {
         return Err(invalid("Central root changed location"));
     }
     for member in ["Control", "Work"] {
@@ -231,7 +241,10 @@ mod tests {
         .unwrap();
         let canonical = root.canonicalize().unwrap();
         assert_eq!(meta_root.as_ref(), Some(&canonical));
-        assert!(configured.is_some(), "actual explicit root locator remains retained");
+        assert!(
+            configured.is_some(),
+            "actual explicit root locator remains retained"
+        );
         let project = project.unwrap();
         assert_eq!(project.root, canonical);
         assert_eq!(project.chain.len(), 2);
@@ -265,7 +278,10 @@ mod tests {
         let project = project.unwrap();
         let canonical = root.canonicalize().unwrap();
         assert_eq!(meta_root.as_ref(), Some(&canonical));
-        assert!(configured.is_some(), "actual explicit root locator remains retained");
+        assert!(
+            configured.is_some(),
+            "actual explicit root locator remains retained"
+        );
         assert_eq!(project.root, canonical);
         assert_eq!(project.specification.as_deref(), Some("root-spec"));
         assert_eq!(project.skill_sets, vec!["root-skills"]);

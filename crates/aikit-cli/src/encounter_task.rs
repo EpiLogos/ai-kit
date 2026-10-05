@@ -151,6 +151,7 @@ fn launcher_for(
     session: &ResourceRef,
     provider: &EncounterProvider,
     revision: &SourceRevision,
+    entry_point: crate::SessionSpaceEntryPoint,
 ) -> Result<EncounterProvider> {
     let resolved_body = crate::encounter_profile_provider::resolve_provider(provider.clone())?;
     let mut launcher = provider.clone();
@@ -163,7 +164,7 @@ fn launcher_for(
         .map_err(error)?
         .display()
         .to_string()];
-    if let Some(prefix) = crate::session_space_verb_prefix() {
+    if let Some(prefix) = entry_point.verb_prefix() {
         argv.push(prefix.to_owned());
     }
     argv.push("encounter-task-exec".into());
@@ -824,6 +825,22 @@ impl EncounterService {
         input: Value,
         expected: Option<&SourceRevision>,
     ) -> Result<Value> {
+        Self::configure_task_with_entrypoint(
+            home,
+            session,
+            input,
+            expected,
+            crate::SessionSpaceEntryPoint::Standalone,
+        )
+    }
+
+    pub fn configure_task_with_entrypoint(
+        home: &AikitHome,
+        session: &ResourceRef,
+        input: Value,
+        expected: Option<&SourceRevision>,
+        entry_point: crate::SessionSpaceEntryPoint,
+    ) -> Result<Value> {
         let mut request: TaskRequest = serde_json::from_value(input).map_err(error)?;
         crate::encounter_profile_provider::ensure_connection_facts_reachable(&request.provider)?;
         // Resolve and validate the declared body before journalling a pending
@@ -926,7 +943,7 @@ impl EncounterService {
             }
         }
         let revision = SourceRevision::parse(format!("task-binding/{}", ulid::Ulid::generate()))?;
-        let launcher = launcher_for(session, &request.provider, &revision)?;
+        let launcher = launcher_for(session, &request.provider, &revision, entry_point)?;
         let record = TaskRecord {
             schema: "aikit.encounter-task/v1".into(),
             revision,
@@ -953,6 +970,22 @@ impl EncounterService {
         session: &ResourceRef,
         expected: &SourceRevision,
         restore: &SourceRevision,
+    ) -> Result<Value> {
+        Self::abort_task_preparation_with_entrypoint(
+            home,
+            session,
+            expected,
+            restore,
+            crate::SessionSpaceEntryPoint::Standalone,
+        )
+    }
+
+    pub fn abort_task_preparation_with_entrypoint(
+        home: &AikitHome,
+        session: &ResourceRef,
+        expected: &SourceRevision,
+        restore: &SourceRevision,
+        entry_point: crate::SessionSpaceEntryPoint,
     ) -> Result<Value> {
         let _lock = ContextLock::acquire(
             home,
@@ -1007,7 +1040,12 @@ impl EncounterService {
         let agency_revision = authority(home, session, &prior.request)?;
         let historical = prior.clone();
         prior.revision = SourceRevision::parse(format!("task-binding/{}", ulid::Ulid::generate()))?;
-        prior.launcher = launcher_for(session, &prior.request.provider, &prior.revision)?;
+        prior.launcher = launcher_for(
+            session,
+            &prior.request.provider,
+            &prior.revision,
+            entry_point,
+        )?;
         prior.agency_revision = agency_revision;
         prior.ready = false;
         prior.allocation = None;
@@ -1435,7 +1473,13 @@ mod profile_task_tests {
 
         let session = ResourceRef::parse("agent-session/codex-native-task").unwrap();
         let revision = SourceRevision::parse("task-binding/codex-native-task").unwrap();
-        let launcher = launcher_for(&session, &raw, &revision).unwrap();
+        let launcher = launcher_for(
+            &session,
+            &raw,
+            &revision,
+            crate::SessionSpaceEntryPoint::Standalone,
+        )
+        .unwrap();
         assert!(
             raw.argv.is_empty(),
             "saved request is still the raw profile source"
