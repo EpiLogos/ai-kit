@@ -1923,14 +1923,12 @@ fn authority_rank(authority: SourceAuthority) -> u8 {
 }
 
 /// The SemanticWiki's score is a match-distance penalty (0 = exact, growing
-/// by match tier per token), while every other provider in this merged
-/// ranking scores content quality near 1.0. Mapped through `1/(1 + penalty)`
-/// an exact title match scored 1.0 but an ordinary multi-token match scored
-/// 0.1–0.3, so curated Wiki knowledge — the ground's own authored answer —
-/// sank beneath default-scored file hits and behind the surfaced limit on
-/// any realistic query. Tier the penalty into the merged band instead:
-/// authored knowledge stays at or above the 0.5 provider default, ordered
-/// monotonically by match quality.
+/// by match tier per token). Map it monotonically into the relevance band
+/// used by providers with a 0.5 default. Other providers retain their actual
+/// native relevance, which need not be bounded by 1.0. Authored and observed
+/// hits share an authority tier; a Wiki match does not outrank a stronger
+/// Source match simply because its provider is the Wiki. Provider caps keep
+/// a large native corpus from excluding the other faculties from the surface.
 fn wiki_rank(penalty: u32) -> f64 {
     match penalty {
         0 => 1.0,
@@ -2365,12 +2363,10 @@ mod tests {
         );
     }
 
-    /// A realistic multi-token query matches a curated Wiki node at
-    /// contains tier (penalty grows per token), which the old
-    /// `1/(1 + penalty)` mapping scored around 0.2 — under a flood of
-    /// default-scored source hits. The tiered ranking keeps authored
-    /// knowledge competitive in the merged band where the authority sort
-    /// actually decides.
+    /// A real native corpus has stronger title/body matches than this Wiki
+    /// node's looser multi-token match. Preserve that actual relevance and
+    /// the shared authored/observed authority tier while proving that provider
+    /// caps keep the curated match on the surface even at a two-hit limit.
     #[test]
     fn a_multi_token_wiki_match_is_not_buried_by_actual_native_source_hits() {
         let index = wiki();
@@ -2414,13 +2410,61 @@ mod tests {
             .iter()
             .position(|hit| hit.resource.as_str() == "wiki:node:auth")
             .unwrap();
-        assert!(
-            source_positions
+        let native_hits = native
+            .search("authentication concept", SourceSearchMode::Fulltext, &[], 8)
+            .unwrap();
+        assert_eq!(
+            native_hits.len(),
+            8,
+            "the real corpus exercises the provider cap"
+        );
+        assert_eq!(
+            source_positions.len(),
+            5,
+            "the same native pool keeps its best half"
+        );
+        assert_eq!(
+            authority_rank(wiki_hit.authority),
+            authority_rank(SourceAuthority::Observed),
+            "Wiki ownership does not invent precedence over observed Source"
+        );
+        for &position in &source_positions {
+            let hit = &result.hits[position];
+            let native_hit = native_hits
                 .iter()
-                .all(|&position| wiki_position < position),
-            "the authored match at {wiki_position} must rank ahead of every \
-             actual native source hit at {source_positions:?}: {:#?}",
-            result.hits
+                .find(|native_hit| native_hit.source.as_str() == hit.resource.as_str())
+                .expect("every surfaced Source has actual native evidence");
+            assert_eq!(
+                Some(hit.score),
+                native_hit.score,
+                "provider relevance stays native"
+            );
+            assert!(
+                hit.score > wiki_hit.score,
+                "these actual title/body matches are stronger"
+            );
+            assert!(
+                position < wiki_position,
+                "the stronger same-tier match keeps its order"
+            );
+        }
+        let narrow = app.search("authentication concept", 2);
+        assert_eq!(narrow.hits.len(), 2);
+        assert!(
+            narrow
+                .hits
+                .iter()
+                .any(|hit| hit.resource.as_str() == "wiki:node:auth"),
+            "the actual Wiki match survives even a two-hit surface: {narrow:#?}"
+        );
+        assert_eq!(
+            narrow
+                .hits
+                .iter()
+                .filter(|hit| hit.provider.as_str() == "provider/source-pool/native")
+                .count(),
+            1,
+            "the competing corpus cannot occupy both surface rows"
         );
     }
 

@@ -344,6 +344,65 @@ jobs:
                    'reason':'ignored list-only census does not run the real account body; no hosted auth/cloud/model qualification'}
               write(prefix+'-census.json',row)
               if status!=0 or names!=[case]:raise ValueError('exact genuine ignored account definition is missing or duplicated; no zero-case success')
+          elif mode=='account-full-roster':
+              required=json.loads(os.environ['RUNTIME_GATE_EXPECTED_ROSTER'])
+              extra=json.loads(os.environ['RUNTIME_GATE_ACCOUNT_ROSTER'])
+              expected=required+extra
+              with (out/'account-full-roster.stdout').open('rb') as stream:raw=stream.read(1048577)
+              if len(raw)>1048576:raise ValueError('account full roster exceeds one MiB')
+              names=[line[:-6] for line in raw.decode('utf-8').splitlines() if line.endswith(': test')]
+              status=int((out/'account-full-roster.exit').read_text())
+              write('account-full-roster.json',{'actual':names,'required':expected,'actual_total':len(names),
+                  'required_default_ignored_total':27,'required_account_only_total':5,'required_total':32,
+                  'status':status,'executed_total':0,'qualification':'COMPILED_LIST_ONLY_NOT_EXECUTED_UNQUALIFIED'})
+              if status!=0 or len(required)!=27 or len(extra)!=5 or len(expected)!=32 or len(set(expected))!=32 or sorted(names)!=sorted(expected):
+                  raise ValueError('feature image must retain the complete27 ordinary plus5 genuine account definitions')
+          elif mode=='entrypoint-bind':
+              root=Path(os.environ['WORKCELL_TEST_ARTIFACT_ROOT']);workspace=Path(os.environ['GITHUB_WORKSPACE'])
+              admission={'requested':str(root),'Source':'current compiler-bound CAW fixture material; not native World identity','checkpoints':[],'complete':False}
+              opened=[]
+              try:
+                  if root!=workspace/'ProjectCentral/now/tmp/entrypoint' or not workspace.is_absolute() or workspace.resolve(strict=True)!=workspace:
+                      raise ValueError('selected existing native Run fixture root differs from its admitted repository coordinate')
+                  current=workspace
+                  for index,part in enumerate([None,'ProjectCentral','now','tmp','entrypoint']):
+                      if part is not None:
+                          try:os.mkdir(part,0o700,dir_fd=opened[-1])
+                          except FileExistsError:pass
+                          current=current/part
+                      named=os.lstat(current)
+                      if not stat.S_ISDIR(named.st_mode) or named.st_uid!=os.geteuid() or named.st_mode&0o022:
+                          raise ValueError('native Run fixture ancestor is not ordinary/current-user/nonwritable-by-others')
+                      fd=os.open(current,os.O_RDONLY|os.O_DIRECTORY|os.O_NONBLOCK|os.O_NOFOLLOW|os.O_CLOEXEC);opened.append(fd)
+                      held_basis=os.fstat(fd)
+                      if (named.st_dev,named.st_ino,named.st_uid,named.st_mode)!=(held_basis.st_dev,held_basis.st_ino,held_basis.st_uid,held_basis.st_mode):
+                          raise ValueError('native Run fixture ancestor changed during held admission')
+                      admission['checkpoints'].append({'path':str(current),'named':facts(named),'held':facts(held_basis)})
+                  for row,fd in zip(admission['checkpoints'],opened):
+                      named=os.lstat(row['path']);held_basis=os.fstat(fd);expected=row['held']
+                      if (named.st_dev,named.st_ino,named.st_uid,named.st_mode)!=(expected['device'],expected['inode'],expected['uid'],expected['mode']) or (held_basis.st_dev,held_basis.st_ino)!=(named.st_dev,named.st_ino):
+                          raise ValueError('native Run fixture held/named ancestor changed before case effects')
+                  admission['complete']=True
+              except (OSError,ValueError) as error:
+                  admission['cause']={'type':type(error).__name__,'errno':getattr(error,'errno',None),'message':str(error)}
+                  raise
+              finally:
+                  for fd in reversed(opened):os.close(fd)
+                  write('entrypoint-fixture-admission.json',admission)
+              records=json.loads((out/'images.before.json').read_text());bindings=[]
+              for role,selector,target,source in [('Main','AIKIT_MAIN_BINARY','aikit','src/main.rs'),('Standalone','AIKIT_SESSION_SPACE_BINARY','aikit-session-space','src/bin/aikit-session-space.rs')]:
+                  selected=[row for row in records if row['role']['name']==target]
+                  if len(selected)!=1:raise ValueError('same Source native entrypoint role is missing or ambiguous')
+                  row=selected[0];artifact=row['compiler_artifact'];r=row['role']
+                  expected_source=workspace/'crates/aikit-cli'/source
+                  if r['receipt']!='compiler-test.jsonl' or r['root']!=str(workspace) or r['target']!=target or r['kind']!='bin' or r['test'] is not False or artifact['target']['src_path']!=str(expected_source) or 'codex-account-native' in artifact.get('features',[]):
+                      raise ValueError('entrypoint must be the actual credential-free current Source Main/Standalone CompilerArtifact')
+                  observed=held(row['image']['path'],workspace/'target/debug')
+                  binding={'entry_point':role,'selector':selector,'role':r,'compiler_artifact':artifact,'before':row['image'],'observed':observed}
+                  bindings.append(binding);write('entrypoint-image-bindings.json',bindings)
+                  if observed['cause'] or observed['sha256']!=row['image']['sha256'] or observed['held_before']!=row['image']['held_before']:
+                      raise ValueError('original entrypoint image changed before native case effects')
+                  (out/('entrypoint-'+role+'.path')).write_text(row['image']['path']+'\n')
           elif mode=='roster':
               expected=json.loads(os.environ['RUNTIME_GATE_CASES'])
               names=[line[:-6] for line in (out/'roster.stdout').read_text().splitlines() if line.endswith(': test')]
@@ -362,6 +421,36 @@ jobs:
               body=(out/paths['stdout']).read_text()
               ok=code==0 and any(line.startswith('test result: ok. 1 passed; 0 failed; 0 ignored;') for line in body.splitlines())
               row={'case':case,'exit_status':code,'exact_one_pass_zero_failed_ignored':ok,'evidence_prefix':paths['prefix'],'stdout':str(out/paths['stdout']),'stderr':str(out/paths['stderr']),'exit_file':str(out/paths['exit']),'test_image':(out/'test-image.path').read_text().strip(),'outer_timeout_seconds':120,'standing':'foreground test-harness status/raw files; inner native EOF and retirement are asserted by the actual case, not inferred from a shell status'}
+              if case in ('renamed_and_aliased_main_keeps_native_task_and_owner_grammar','standalone_named_aikit_and_alias_keep_native_task_and_owner_grammar'):
+                  role='Main' if case.startswith('renamed_') else 'Standalone'
+                  bindings=json.loads((out/'entrypoint-image-bindings.json').read_text())
+                  selected=[item for item in bindings if item['entry_point']==role]
+                  if len(selected)!=1:raise ValueError('actual native entrypoint image binding is missing')
+                  native=[]
+                  for line in body.splitlines():
+                      at=line.find('{')
+                      if at<0:continue
+                      try:item=json.loads(line[at:])
+                      except json.JSONDecodeError:continue
+                      if isinstance(item,dict) and item.get('schema')=='aikit.native-entrypoint-regression/v2':native.append(item)
+                  row['native_entrypoint_observations']=native
+                  row['original_compiler_binding']=selected[0]
+                  valid=len(native)==2
+                  for item in native:
+                      valid=valid and item.get('entry_point')==role and item.get('image_sha256')==selected[0]['before']['sha256']
+                      valid=valid and item.get('stale_launcher_refused') is True and item.get('native_owner_retirement_observed') is True and item.get('provider_opened') is False
+                      valid=valid and type(item.get('native_owner_pid')) is int and item['native_owner_pid']>0 and isinstance(item.get('native_owner_birth'),str) and bool(item['native_owner_birth'])
+                      valid=valid and all(isinstance(item.get(key),str) and bool(item[key]) for key in ['prior_task_revision','current_task_revision','now_ref','invoked','evidence']) and item.get('prior_task_revision')!=item.get('current_task_revision')
+                  if len(native)==2:valid=valid and native[0].get('invoked')!=native[1].get('invoked')
+                  root=Path(os.environ['WORKCELL_TEST_ARTIFACT_ROOT'])
+                  for item in native:
+                      if all(isinstance(item.get(key),str) and bool(item[key]) for key in ['invoked','evidence']):
+                          for key in ['invoked','evidence']:
+                              path=Path(item[key])
+                              valid=valid and path.is_absolute() and path.resolve(strict=True).is_relative_to(root)
+                  row['actual_two_copy_alias_observations_match']=bool(valid)
+                  ok=ok and bool(valid)
+                  row['exact_one_pass_zero_failed_ignored']=ok
               write(paths['result'],row)
               if not ok:raise ValueError('actual selected native case failed; no unsupported-kernel skip')
           elif mode=='upload':
@@ -384,10 +473,11 @@ jobs:
                       row['admitted']=True
               write('upload-admission.json',{'entries':rows,'entry_count':count,'complete':True,
                   'standing':'current retained name/form checkpoints, no byte rehash or atomic exclusion of external replacement'})
-          elif mode=='snapshot':
+          elif mode in ('snapshot','entrypoint-snapshot'):
               base=Path(os.environ['WORKCELL_TEST_ARTIFACT_ROOT']);rows=[];count=0;total=0
               # Do not feed a retained adverse FIFO/symlink to artifact streaming.
-              pending=[base];dest=out/'fixture-snapshot';dest.mkdir(exist_ok=True)
+              entrypoint_snapshot=mode=='entrypoint-snapshot'
+              pending=[base];dest=out/('entrypoint-fixture-snapshot' if entrypoint_snapshot else 'fixture-snapshot');dest.mkdir(exist_ok=True)
               while pending:
                   directory=pending.pop()
                   for p in sorted(directory.iterdir()):
@@ -396,14 +486,19 @@ jobs:
                       s=os.lstat(p);rel=p.relative_to(base);row={'relative':str(rel),'metadata':facts(s),'sha256':None}
                       if stat.S_ISDIR(s.st_mode):pending.append(p)
                       elif stat.S_ISREG(s.st_mode):
-                          copy=dest/rel;copy.parent.mkdir(parents=True,exist_ok=True)
+                          if entrypoint_snapshot and (s.st_size>4194304 or s.st_size>67108864-total):
+                              row['digest_standing']='ordinary bytes not recopied under this4MiB/64MiB snapshot profile; original retained. Current compiler images and actual inner copy receipt remain separate evidence.'
+                              rows.append(row);write('entrypoint-fixture-snapshot.json',{'entries':rows,'entry_count':count,'copied_regular_bytes':total,'standing':'bounded snapshot, not whole fixture byte retention or inner retirement'})
+                              continue
+                          copy=dest/('entry-'+str(count) if entrypoint_snapshot else rel);copy.parent.mkdir(parents=True,exist_ok=True)
+                          row['copy_relative']=str(copy.relative_to(out))
                           row['reading']=held(p,base,copy,min(4194304,67108864-total));row['sha256']=row['reading']['sha256']
                           total+=row['reading'].get('observed_bytes',0)
                           if row['reading']['cause'] or total>67108864:raise ValueError('fixture payload snapshot unavailable/over capacity')
                       else:
                           row['digest_standing']='not admitted for byte reading; retained type/identity only'
                           if stat.S_ISLNK(s.st_mode):row['link_target']=os.readlink(p)
-                      rows.append(row);write('fixture-snapshot.json',{'entries':rows,'entry_count':count,'copied_regular_bytes':total,'standing':'owned controlled fixture snapshot; original FIFO/aliases remain on runner, no nonregular byte read or external atomic exclusion claim'})
+                      rows.append(row);write('entrypoint-fixture-snapshot.json' if entrypoint_snapshot else 'fixture-snapshot.json',{'entries':rows,'entry_count':count,'copied_regular_bytes':total,'standing':'owned controlled fixture snapshot; original FIFO/aliases remain on runner, no nonregular byte read or external atomic exclusion claim'})
           elif mode=='owner-census':
               def listed(name):
                   return [line[:-6] for line in (out/name).read_text().splitlines() if line.endswith(': test')]
@@ -508,7 +603,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p aikit-cli --test caw_task_dispatch -- --ignored --skip npm_runtime:: --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
+          cargo test --locked -p aikit-cli --test caw_task_dispatch -- --ignored --skip npm_runtime:: --skip renamed_and_aliased_main_keeps_native_task_and_owner_grammar --skip standalone_named_aikit_and_alias_keep_native_task_and_owner_grammar --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
           grep -q TASK_NATIVE_PROTECTED_DISPATCH_EXECUTED "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
           grep -q TASK_NATIVE_PERSISTENT_STORAGE_EXECUTED "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
           grep -q TASK_NATIVE_WORKCELL_HOSTED_ENCOUNTER_EXECUTED "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
@@ -522,7 +617,7 @@ jobs:
           grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/native-sqlite-redirection.log"
           timeout 10m cargo test --locked -p aikit-cli --test caw_task_dispatch npm_runtime::native_codex_task_exec_preserves_non_directory_sqlite_material_on_refusal -- --ignored --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/native-sqlite-form.log"
           grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/caw-evidence/native-sqlite-form.log"
-      - name: Actual current Task runtime refusal and unchanged suite census
+      - name: Actual current Task runtime refusal, native entrypoints and strict suite census
         timeout-minutes: 10
         shell: bash
         run: |
@@ -543,10 +638,35 @@ jobs:
             return "$status"
           }
           record_command roster stdout timeout --kill-after=5s 30s "$test_image" --ignored --list --format terse
-          export RUNTIME_GATE_CASES='["npm_runtime::native_codex_task_projection_redirect_retains_foreign_material_and_task_revision","npm_runtime::native_codex_task_projection_auth_redirect_refuses_before_any_runtime_material"]'
-          export RUNTIME_GATE_EXPECTED_ROSTER='["expired_unhosted_ready_is_reprepared_with_same_native_now_and_fresh_lease","first_pending_preparation_remains_bound_to_same_native_request","material::a_healthy_unrelated_process_cannot_satisfy_encounter_hosting","material::absent_attachment_foreign_host_and_dropped_requirement_cannot_start_work","material::hosted_pending_task_cannot_abort_uncertain_native_demand","material::persistent_storage_reentry_and_release_govern_real_turns_without_duplicate_work","material::workcell_really_hosts_the_native_encounter_owner_and_its_protected_response","missing_task_authority_refuses_before_now_allocation","native_prepared_run_preserves_authority_and_existing_worktree","npm_runtime::native_codex_task_exec_preserves_non_directory_sqlite_material_on_refusal","npm_runtime::native_codex_task_exec_refuses_redirected_runtime_cache_without_task_write","npm_runtime::native_codex_task_exec_refuses_redirected_sqlite_before_any_provider_write","npm_runtime::native_codex_task_projection_auth_redirect_refuses_before_any_runtime_material","npm_runtime::native_codex_task_projection_redirect_retains_foreign_material_and_task_revision","npm_runtime::native_workcell_scrubbed_npm_writes_cache_only_inside_actual_task_t","pending_abort_refuses_changed_native_placement_policy_and_remains_recoverable","profile_derived_codex_task_keeps_its_body_inside_the_workcell_launcher","protected_or_sibling_working_directory_refuses_before_provider_start","real_pi_task_refuses_redirected_allocated_config_directory","real_pi_task_startup_uses_allocated_now_instead_of_ambient_config","real_task_dispatch_confines_protocol_and_rechecks_source_without_duplicate_work","refused_central_source_amendment_keeps_ready_task_and_same_now","removed_or_replaced_working_directory_refuses_at_task_continuation","unhosted_pending_abort_revalidates_ready_with_fresh_revision_and_stale_cas_refuses","wrong_actual_cwd_and_removed_now_cannot_launch_a_provider"]'
-          export RUNTIME_GATE_TOTAL=25
+          export RUNTIME_GATE_CASES='["npm_runtime::native_codex_task_projection_redirect_retains_foreign_material_and_task_revision","npm_runtime::native_codex_task_projection_auth_redirect_refuses_before_any_runtime_material","renamed_and_aliased_main_keeps_native_task_and_owner_grammar","standalone_named_aikit_and_alias_keep_native_task_and_owner_grammar"]'
+          export RUNTIME_GATE_EXPECTED_ROSTER='["expired_unhosted_ready_is_reprepared_with_same_native_now_and_fresh_lease","first_pending_preparation_remains_bound_to_same_native_request","material::a_healthy_unrelated_process_cannot_satisfy_encounter_hosting","material::absent_attachment_foreign_host_and_dropped_requirement_cannot_start_work","material::hosted_pending_task_cannot_abort_uncertain_native_demand","material::persistent_storage_reentry_and_release_govern_real_turns_without_duplicate_work","material::workcell_really_hosts_the_native_encounter_owner_and_its_protected_response","missing_task_authority_refuses_before_now_allocation","native_prepared_run_preserves_authority_and_existing_worktree","npm_runtime::native_codex_task_exec_preserves_non_directory_sqlite_material_on_refusal","npm_runtime::native_codex_task_exec_refuses_redirected_runtime_cache_without_task_write","npm_runtime::native_codex_task_exec_refuses_redirected_sqlite_before_any_provider_write","npm_runtime::native_codex_task_projection_auth_redirect_refuses_before_any_runtime_material","npm_runtime::native_codex_task_projection_redirect_retains_foreign_material_and_task_revision","npm_runtime::native_workcell_scrubbed_npm_writes_cache_only_inside_actual_task_t","pending_abort_refuses_changed_native_placement_policy_and_remains_recoverable","profile_derived_codex_task_keeps_its_body_inside_the_workcell_launcher","protected_or_sibling_working_directory_refuses_before_provider_start","real_pi_task_refuses_redirected_allocated_config_directory","real_pi_task_startup_uses_allocated_now_instead_of_ambient_config","real_task_dispatch_confines_protocol_and_rechecks_source_without_duplicate_work","refused_central_source_amendment_keeps_ready_task_and_same_now","removed_or_replaced_working_directory_refuses_at_task_continuation","renamed_and_aliased_main_keeps_native_task_and_owner_grammar","standalone_named_aikit_and_alias_keep_native_task_and_owner_grammar","unhosted_pending_abort_revalidates_ready_with_fresh_revision_and_stale_cas_refuses","wrong_actual_cwd_and_removed_now_cannot_launch_a_provider"]'
+          export RUNTIME_GATE_TOTAL=27
           python3 "$RUNTIME_GATE_EVIDENCE/audit.py" roster
+          export RUNTIME_GATE_ACCOUNT_ROSTER='["npm_runtime::actual_codex_task_exec_eof_uses_allocated_npm_cache_and_preserves_native_task","npm_runtime::actual_codex_task_acp_session_creation_and_reentry_keep_thread_locks_in_task_t","npm_runtime::actual_codex_encounter_selected_model_survives_status_read_and_warm_open","npm_runtime::actual_codex_task_successor_after_selected_release_preserves_task_cow","npm_runtime::actual_codex_task_successor_after_full_owner_handoff_preserves_task_cow"]'
+          account_test_image=$(cat "$RUNTIME_GATE_EVIDENCE/account-test-image.path")
+          record_command account-full-roster stdout timeout --kill-after=5s 30s "$account_test_image" --ignored --list --format terse
+          python3 "$RUNTIME_GATE_EVIDENCE/audit.py" account-full-roster
+          export WORKCELL_TEST_ARTIFACT_ROOT="$GITHUB_WORKSPACE/ProjectCentral/now/tmp/entrypoint"
+          finish_entrypoint_gate() {
+            local primary=$? snapshot_status custody_status
+            trap - EXIT
+            set +e
+            record_command entrypoint-fixture-snapshot stdout python3 "$RUNTIME_GATE_EVIDENCE/audit.py" entrypoint-snapshot
+            snapshot_status=$?
+            record_command final-image-custody stdout python3 "$RUNTIME_GATE_EVIDENCE/audit.py" after
+            custody_status=$?
+            printf '%s\n' "$primary" > "$RUNTIME_GATE_EVIDENCE/entrypoint-primary.exit"
+            printf '%s\n' "$snapshot_status" > "$RUNTIME_GATE_EVIDENCE/entrypoint-snapshot.exit"
+            printf '%s\n' "$custody_status" > "$RUNTIME_GATE_EVIDENCE/entrypoint-final-custody.exit"
+            if test "$primary" -ne 0; then exit "$primary"; fi
+            if test "$snapshot_status" -ne 0; then exit "$snapshot_status"; fi
+            exit "$custody_status"
+          }
+          trap finish_entrypoint_gate EXIT
+          record_command entrypoint-bind stdout python3 "$RUNTIME_GATE_EVIDENCE/audit.py" entrypoint-bind
+          export AIKIT_MAIN_BINARY AIKIT_SESSION_SPACE_BINARY
+          AIKIT_MAIN_BINARY=$(cat "$RUNTIME_GATE_EVIDENCE/entrypoint-Main.path")
+          AIKIT_SESSION_SPACE_BINARY=$(cat "$RUNTIME_GATE_EVIDENCE/entrypoint-Standalone.path")
           failed=0
           while IFS= read -r case_name; do
             case_path=$(python3 "$RUNTIME_GATE_EVIDENCE/audit.py" case-prefix "$case_name")
@@ -561,6 +681,8 @@ jobs:
           done <<'CASES'
           npm_runtime::native_codex_task_projection_redirect_retains_foreign_material_and_task_revision
           npm_runtime::native_codex_task_projection_auth_redirect_refuses_before_any_runtime_material
+          renamed_and_aliased_main_keeps_native_task_and_owner_grammar
+          standalone_named_aikit_and_alias_keep_native_task_and_owner_grammar
           CASES
           if ! python3 "$RUNTIME_GATE_EVIDENCE/audit.py" after; then failed=1; fi
           test "$failed" = 0
@@ -666,7 +788,8 @@ jobs:
             if test "$primary" -ne 0; then exit "$primary"; fi
             exit "$post"
           }
-          export WORKCELL_TEST_ARTIFACT_ROOT="$GITHUB_WORKSPACE/ProjectCentral/now/tmp"
+          # Separate retained images from the unchanged bounded idle fixture snapshot.
+          export WORKCELL_TEST_ARTIFACT_ROOT="$GITHUB_WORKSPACE/ProjectCentral/now/tmp/idle-owner"
           mkdir -p "$WORKCELL_TEST_ARTIFACT_ROOT"
           trap finish_owner_gate EXIT
           legacy_root="$GITHUB_WORKSPACE/.caw-native/AIKit-legacy"

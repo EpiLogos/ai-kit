@@ -309,7 +309,7 @@ fn assert_current_native_read(
     assert_eq!(reading.revision.as_deref(), current["revision"].as_str());
 }
 
-fn assert_native_withheld(service: &Service, address: &KnowledgeAddress, needle: &str) {
+fn assert_native_withheld(service: &mut Service, address: &KnowledgeAddress, needle: &str) {
     // A truthful current-owner refusal may remain an error. It must never
     // become a successful copied payload or a declaration of Source absence.
     if let Ok(reading) = service.knowledge_read(address) {
@@ -439,7 +439,7 @@ fn real_redis_cannot_override_current_now_provider_read_or_withdrawal() {
         })
         .unwrap()
     };
-    let service = open_service();
+    let mut service = open_service();
     assert_current_native_read(&service, &address, &old);
     let old_search = service.knowledge_search("R4oldCedar", 32).unwrap();
     assert!(
@@ -505,8 +505,8 @@ fn real_redis_cannot_override_current_now_provider_read_or_withdrawal() {
     let retained = fs::read(&file).unwrap();
     let marker = file.parent().unwrap().join(".no-agent-retrieval");
     fs::write(&marker, "owner withdrawal\n").unwrap();
-    assert_native_withheld(&service, &address, "R4newAlder");
-    assert_native_withheld(&open_service(), &address, "R4newAlder");
+    assert_native_withheld(&mut service, &address, "R4newAlder");
+    assert_native_withheld(&mut open_service(), &address, "R4newAlder");
     let withheld = cli_read();
     assert!(!withheld.ok() && !withheld.stdout.contains("R4newAlder"));
     assert_eq!(fs::read(&file).unwrap(), retained);
