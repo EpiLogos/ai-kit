@@ -1733,6 +1733,9 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                     upgrade::resume_command(&home, a.id.as_deref(), a.foreground)?
                 }
                 GatewayUpgradeSub::Rollback(a) => upgrade::rollback_command(&home, &a.id)?,
+                GatewayUpgradeSub::Abandon(a) => {
+                    upgrade::abandon_command(&home, a.id.as_deref(), &a.reason)?
+                }
                 GatewayUpgradeSub::Worker(a) => upgrade::worker_command(&home, &a.transaction)?,
             };
             Ok(Reply::Data {

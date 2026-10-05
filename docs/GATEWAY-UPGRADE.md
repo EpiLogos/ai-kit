@@ -33,7 +33,7 @@ inspect/plan → choose the candidate → retain a recovery basis → managed in
 | Step | What happens | Where it is recorded |
 |---|---|---|
 | inspect / plan | the running process is read (`protocol`: revision, pid, start time, executable digest, lifecycle); the installed build is what the service definition's executable resolves to; every declared peer is asked what it runs and which features it lacks | `upgrade plan` |
-| choose | `--install` runs the managed installer (`oi update --apply [--channel mainline] [--candidate ai-kit=<rev>] ai-kit`); `--candidate` names the exact commit to build. Without `--install` the upgrade restarts onto the build already installed. `--install` refuses first when less than 3 GiB is free where the install builds (`gateway_upgrade.disk_low`): nothing is changed | the transaction's `plan` |
+| choose | `--install` runs the managed installer (`oi update --apply [--channel mainline] [--candidate ai-kit=<rev>] ai-kit`); `--candidate` names the exact commit to build. Without `--install` the upgrade restarts onto the build already installed. `--install` refuses first when less than 3 GiB is free on the volume holding this home (`$HOME`; `gateway_upgrade.disk_low`): nothing is changed. It does not measure where the installer builds, which can be another volume (a shared `target-dir`) — carried in ai-kit#481 | the transaction's `plan` |
 | recovery basis | the gateway's state files are copied aside; the installed build before the upgrade is recorded; the installer's own rollback (`oi update --rollback`) is named | `<state>/gateway-upgrade/<id>/recovery/` |
 | managed install | the installer runs with a time bound and its log kept. The installed build is read before and after: an installer that flipped the build and *then* failed is rolled back, not reported as "unchanged" | `installer.log` |
 | drain | see below | the transaction's `drain` |
@@ -62,6 +62,10 @@ such a gateway stops it with its clean shutdown (it persists after every command
 and the receipt says the drain was **not measured**: what the old process had in
 flight at that moment is *unknown*, not zero. "0 interrupted" is only ever stated
 from a drain that ran and counted. Nothing is replayed either way.
+
+The same holds when a drain *ran* but its reply was lost (the connection closed
+with the process): whatever it counted was never seen, so the receipt says
+unknown. "Nothing was in flight" is stated only when no gateway was running.
 
 Two kinds of work are *uncertain* after a restart, and the receipt names each:
 
@@ -106,6 +110,18 @@ is the visible receipt meanwhile.
 | not running | starts the installed build |
 | already the installed build | `no-change`; nothing is drained |
 
+## A transaction that cannot run, and one that cannot be resumed
+
+A step that cannot run (an unreadable state file, say) is **recorded** in the
+transaction, and one that had changed nothing yet ends `failed-before-change`, so it
+cannot sit in `planned` blocking every later `apply`. A later phase stays
+resumable. A transaction whose worker is gone and which keeps failing is ended by
+`aikit gateway upgrade abandon [ID] --reason "…"`: refused while a worker holds it,
+and it changes nothing on disk or in the running gateway — the receipt says what was
+known. A gateway that holds the socket but does not answer in time is **never
+taken for gone**: it is not drained and not restarted around, and the upgrade says
+so (`needs-operator`), rather than starting a second gateway beside a slow one.
+
 ## Failure and recovery
 
 | What went wrong | What the upgrade does | What is left |
@@ -119,8 +135,11 @@ is the visible receipt meanwhile.
 | a terminal is lost | nothing: the worker is not attached to it | — |
 | a peer is offline | the plan shows it unreachable; relayed Communiques queue and are re-resolved when it returns | — |
 
-`aikit gateway upgrade rollback <id>` restores the previous build of any
-recorded upgrade and verifies it.
+`aikit gateway upgrade rollback <id>` restores the previous build of the **latest upgrade
+that changed the installed build** and verifies it (the installer's rollback restores the
+previous set of the latest update). An older install is refused, naming the latest; a
+restart-only run, a `no-change`, an install that failed before changing anything or one
+already rolled back does not count as "latest" and cannot itself be rolled back.
 
 **A rollback does not undo effects.** It restores a build. Turns that were
 interrupted, messages that were sent, and state written while the new build ran
@@ -151,8 +170,9 @@ belongs to Tailscale, not to a binary that changes on every update (see
 
 ## Controlled instances
 
-`scripts/gateway-upgrade-rehearse.py` runs the five scenarios (upgrade, already
-current, installer fails, installer flips then fails, new build exits at once)
+`scripts/gateway-upgrade-rehearse.py` runs the six scenarios (upgrade, already
+current, installer fails, installer flips then fails, new build exits at once, and an
+upgrade asked for through the gateway itself)
 against such an instance under the platform's real service manager and prints an
 evidence document. A rehearsal should never touch the real service. `AIKIT_GATEWAY_SERVICE_INSTANCE=<name>`
 makes `install-service`, `uninstall-service`, the upgrade worker and the doctor
