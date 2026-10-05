@@ -1252,7 +1252,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: EpiLogos/Central
-          ref: 7a3f38c032e008b4c5c28c930f741b34d2d5b79d
+          ref: 1a94aeef3791dd083e789ebd332d4856daa1c62d
           path: .gitnexus-native/Central
           persist-credentials: false
       - name: Build the Central owner (ctrl) the Project scope reads

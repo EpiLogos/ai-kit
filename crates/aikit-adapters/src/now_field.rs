@@ -669,6 +669,86 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
         &self.scope
     }
 
+    /// Visit current owner-admitted temporal metadata for a local graph.
+    /// This borrows the existing native roster and binding-only read; it does
+    /// not read payloads, derive identities from paths or preload a replica.
+    /// A selected Work member narrows both the same owner's route and the
+    /// existing temporal family before discovery; it supplies no new grant.
+    /// Each acknowledged row has its own current native observation, not an
+    /// atomic snapshot of the entire World over the duration of the visit.
+    pub fn visit_current_native_sources_for(
+        &self,
+        target: RetrievalTarget,
+        project: Option<&str>,
+        limit: usize,
+        mut visit: impl FnMut(&SourceRef, &Path) -> Result<()>,
+    ) -> Result<()> {
+        if limit == 0 {
+            return Ok(());
+        }
+        // The same conservative native privacy applies to metadata discovery.
+        // A successful owner lookup is not an external disclosure grant.
+        SourcePoolReading::check_target(ContextSourcePrivacy::default(), target)?;
+        let attached = self.native_owner.as_ref().ok_or_else(|| {
+            AikitError::new(
+                "now_field.native_binding_unavailable",
+                "Current temporal metadata requires its attached native owner",
+            )
+        })?;
+        let project = project.or(self.native_project.as_deref());
+        let owner = match project {
+            Some(member) => attached.for_project(member)?,
+            None => attached.view(),
+        };
+        let deadline = Self::native_read_deadline(&owner)?;
+        let basis = self.root_basis()?;
+        let scope = match project {
+            Some(member) => self.current_scope().for_project(Some(member)),
+            None => self.current_scope(),
+        };
+        let mut capacity = QueryCapacity::default();
+        let mut selected = 0usize;
+        owner.visit_source_roster(Self::remaining(deadline)?, |reference, path| {
+            Self::remaining(deadline)?;
+            let Some(relative) = self.borrowed_owner_member(path, &basis, &scope)? else {
+                return Ok(());
+            };
+            // Charge the exact selected route before retaining/parsing its ref.
+            capacity.retain_native(relative, reference)?;
+            let source = SourceRef::parse(reference)?;
+            let binding =
+                owner.source_binding_only_with_timeout(&source, Self::remaining(deadline)?)?;
+            let current = self.native_member(&binding, &basis)?;
+            Self::remaining(deadline)?;
+            if binding["ownership"] == "unregistered" {
+                return Err(AikitError::new(
+                    "now_field.source_roster_changed",
+                    "Native temporal ownership changed after its metadata roster",
+                )
+                .with_native_result(binding));
+            }
+            let Some(current) = current else {
+                return Ok(());
+            };
+            if current.as_path() != relative {
+                return Err(AikitError::new(
+                    "now_field.source_roster_changed",
+                    "Native temporal location changed after its metadata roster",
+                )
+                .with_native_result(binding));
+            }
+            if selected >= limit {
+                return Err(QueryCapacity::failure("graph_sources"));
+            }
+            selected += 1;
+            visit(&source, &current)?;
+            Self::remaining(deadline)?;
+            self.check_root(&basis)
+        })?;
+        Self::remaining(deadline)?;
+        self.check_root(&basis)
+    }
+
     /// Every currently-authorised record, enumerated from the same scope the
     /// searches run over. Bodies stay on disk; the roster carries identity so
     /// the Knowledge read path can attach this provider to its sources.

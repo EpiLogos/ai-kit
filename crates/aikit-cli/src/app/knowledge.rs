@@ -1436,10 +1436,18 @@ impl Service {
             ));
         }
         let found =
-            self.knowledge_search(query, max_nodes.saturating_add(max_edges).saturating_add(1))?;
+            if query.trim().is_empty() {
+                // Metadata listing does not hydrate an empty full-text search.
+                None
+            } else {
+                Some(self.knowledge_search(
+                    query,
+                    max_nodes.saturating_add(max_edges).saturating_add(1),
+                )?)
+            };
         let expression =
             parse_or_search_expression_in_scope(query, self.knowledge_scope_project().as_deref())?;
-        self.with_knowledge(|runtime, _| {
+        self.with_knowledge_for_scope(expression_scope_project(&expression), |runtime, _| {
             let mut objects: Vec<_> = runtime
                 .wiki_index()
                 .map(|index| {
@@ -1480,8 +1488,71 @@ impl Service {
                         )
                 });
             }
-            let mut hits = found.hits.clone();
+            let mut hits = found
+                .as_ref()
+                .map(|found| found.hits.clone())
+                .unwrap_or_default();
+            let absences = found
+                .as_ref()
+                .map(|found| found.absences.clone())
+                .unwrap_or_else(|| {
+                    let scoped =
+                        runtime.scoped_project_display(expression_scope_project(&expression));
+                    let mut absences = runtime.absences.clone();
+                    absences.extend(
+                        runtime
+                            .project_absences
+                            .iter()
+                            .filter(|absence| {
+                                scoped
+                                    .as_deref()
+                                    .is_none_or(|scope| scope == absence.project)
+                            })
+                            .map(|absence| absence.message.clone()),
+                    );
+                    absences
+                });
             if query.trim().is_empty() {
+                // Empty graphs list current admitted metadata; they do not
+                // invent a search or read every unselected temporal body.
+                // The same attached owner and temporal family are selected
+                // before metadata discovery for this invocation's Project.
+                if let Some(provider) = &runtime.now_field {
+                    let provider_ref = provider.status().provider;
+                    let display =
+                        runtime.scoped_project_display(expression_scope_project(&expression));
+                    let member = display
+                        .as_deref()
+                        .map(|display| {
+                            display.strip_prefix("Work/").ok_or_else(|| {
+                                aikit_core::AikitError::new(
+                                    "knowledge.scope_invalid",
+                                    "Native graph scope has no actual Work member coordinate",
+                                )
+                            })
+                        })
+                        .transpose()?;
+                    provider.visit_current_native_sources_for(
+                        aikit_core::context_source::RetrievalTarget::LocalAgent,
+                        member,
+                        max_nodes,
+                        |source, relative| {
+                            hits.push(aikit_core::knowledge_navigation::KnowledgeSearchHit {
+                                address: KnowledgeAddress::Source(source.clone()),
+                                resource: ResourceRef::parse(source.as_str())?,
+                                kind: ResourceKind::KnowledgeSource,
+                                label: relative.to_string_lossy().into_owned(),
+                                score: 0.0,
+                                snippet: String::new(),
+                                provider: provider_ref.clone(),
+                                authority: SourceAuthority::Observed,
+                                ranking: None,
+                                corroborated_by: Vec::new(),
+                            });
+                            Ok(())
+                        },
+                    )?;
+                }
                 for item in &material {
                     let provider = runtime
                         .central
@@ -1520,12 +1591,7 @@ impl Service {
                 }
             }
             Ok(aikit_adapters::wiki_graph::project_graph(
-                &hits,
-                &objects,
-                &material,
-                max_nodes,
-                max_edges,
-                &found.absences,
+                &hits, &objects, &material, max_nodes, max_edges, &absences,
             ))
         })
     }

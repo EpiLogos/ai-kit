@@ -8,7 +8,7 @@ use std::process::Command;
 
 use aikit_cli::app::Service;
 use aikit_core::resource::{parse_or_search_expression, ResolveExpression};
-use aikit_core::KnowledgeAddress;
+use aikit_core::{KnowledgeAddress, SourceRef};
 use aikit_store::AikitHome;
 use tempfile::TempDir;
 
@@ -33,17 +33,91 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
+fn native_action(world: &Path, name: &str, input: serde_json::Value) -> serde_json::Value {
+    let mut command = Command::new(aikit_adapters::central_file_map::executable());
+    command
+        .args(["--json", "--root"])
+        .arg(world)
+        .args(["action", "run", name])
+        .arg(input.to_string());
+    let output = aikit_adapters::runner::SystemRunner::new()
+        .with_timeout(std::time::Duration::from_secs(30))
+        .with_output_limit_bytes(8 * 1024 * 1024)
+        .with_strict_utf8()
+        .capture_command(&mut command)
+        .unwrap();
+    let envelope: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+    assert!(
+        output.ok() && envelope["ok"] == true,
+        "actual {name} refused: {envelope}; stderr={}",
+        output.stderr
+    );
+    if let Some(operation) = name.strip_prefix("central.file-map.") {
+        assert_eq!(envelope["data"]["schema"], "central.file-map/v1");
+        assert_eq!(envelope["data"]["operation"], operation);
+        assert!(envelope["data"]["result"].is_object());
+        envelope["data"]["result"].clone()
+    } else {
+        assert!(envelope["data"].is_object());
+        envelope["data"].clone()
+    }
+}
+
+fn register_now_source(world: &Path, project: Option<&str>, member: &str) -> SourceRef {
+    let inspected = native_action(
+        world,
+        "central.file-map.inspect",
+        serde_json::json!({"project":project,"resources":false}),
+    );
+    assert_eq!(inspected["provider"]["available"], false);
+    assert!(
+        !Path::new(inspected["database"].as_str().unwrap()).exists(),
+        "metadata qualification must not depend on an initialized BKMR index"
+    );
+    let registered = native_action(
+        world,
+        "central.file-map.register",
+        serde_json::json!({"project":project,"path":member,
+            "expected_revision":inspected["revision"].as_str().unwrap()}),
+    );
+    let source = SourceRef::parse(registered["source_ref"].as_str().unwrap()).unwrap();
+    let reading = native_action(
+        world,
+        "central.file-map.resolve",
+        serde_json::json!({"project":project,"federated":false,
+            "source_ref":source,"binding_only":true}),
+    );
+    assert_eq!(reading["ownership"], "owned");
+    assert_eq!(reading["binding_only"], true);
+    assert_eq!(reading["kind"], "file");
+    assert_eq!(reading["source"]["ref"], source.as_str());
+    assert_eq!(reading["source"]["path"], member);
+    assert_eq!(reading["project"], serde_json::json!(project));
+    assert_eq!(
+        reading["world_ref"],
+        project.map_or_else(
+            || "control:root".to_owned(),
+            |project| format!("project:{project}")
+        )
+    );
+    let owner_root = project.map_or_else(
+        || world.to_path_buf(),
+        |project| world.join("Work").join(project),
+    );
+    assert_eq!(reading["path"], serde_json::json!(owner_root.join(member)));
+    assert!(reading["content"].is_null());
+    assert!(reading["revision"].is_null());
+    assert!(reading["relation_revision"].is_string());
+    source
+}
+
 fn project(world: &Path, name: &str, source: &str, committed_repo: bool) {
     let root = world.join("Work").join(name);
-    write(
-        &root.join("ProjectCentral/project.json"),
-        &format!(
-            r#"{{"schema":"central.project/v1","project_id":"{name}","human_source":"ProjectCentral/user","wiki":{{"profile":"okf-wiki/v1","source":"ProjectCentral/agents/wiki/wiki.json","adopted_sources":[]}}}}"#
-        ),
-    );
-    write(
-        &root.join("ProjectCentral/agents/wiki/wiki.json"),
-        r#"{"profile":"okf-wiki/v1","objects":[]}"#,
+    fs::create_dir_all(&root).unwrap();
+    native_action(
+        world,
+        "projectcentral.init",
+        serde_json::json!({"project":name,"project_id":name}),
     );
     write(
         &root.join("package.json"),
@@ -76,19 +150,24 @@ fn has_larch_code(result: &aikit_core::KnowledgeSearchResult) -> bool {
     })
 }
 
-fn has_larch_project_source(result: &aikit_core::KnowledgeSearchResult) -> bool {
-    result
-        .hits
-        .iter()
-        .any(|hit| hit.resource.as_str().starts_with("source:project:larch:"))
+fn has_project_source(result: &aikit_core::KnowledgeSearchResult, project: &str) -> bool {
+    let expected =
+        aikit_adapters::work_file_source_ref(project, Path::new("src/owner.ts")).unwrap();
+    result.hits.iter().any(|hit| {
+        matches!(&hit.address, KnowledgeAddress::Source(source) if source == &expected)
+            && hit.resource.as_str() == expected.as_str()
+    })
 }
 
-fn has_now_source(result: &aikit_core::KnowledgeSearchResult, relative: &str) -> bool {
-    let expected = format!("central:source:control:root:{relative}");
-    result
-        .hits
-        .iter()
-        .any(|hit| hit.resource.as_str() == expected)
+fn has_larch_project_source(result: &aikit_core::KnowledgeSearchResult) -> bool {
+    has_project_source(result, "larch")
+}
+
+fn has_now_source(result: &aikit_core::KnowledgeSearchResult, expected: &SourceRef) -> bool {
+    result.hits.iter().any(|hit| {
+        matches!(&hit.address, KnowledgeAddress::Source(source) if source == expected)
+            && hit.resource.as_str() == expected.as_str()
+    })
 }
 
 fn code_query_failed_for(result: &aikit_core::KnowledgeSearchResult, project: &Path) -> bool {
@@ -100,14 +179,17 @@ fn code_query_failed_for(result: &aikit_core::KnowledgeSearchResult, project: &P
 
 fn work_repos_search_failed(result: &aikit_core::KnowledgeSearchResult) -> bool {
     result.absences.iter().any(|absence| {
-        absence.starts_with("SourcePool search degraded for provider/source-pool/work-repos:")
+        // The real denied file below identifies the producer. Its public
+        // absence carries the native error code, not private paths/output.
+        absence == "SourcePool search unavailable (search.ripgrep_failed)"
     })
 }
 
 fn now_field_search_failed(result: &aikit_core::KnowledgeSearchResult) -> bool {
-    result.absences.iter().any(|absence| {
-        absence.starts_with("SourcePool search degraded for provider/source-pool/now-field:")
-    })
+    result
+        .absences
+        .iter()
+        .any(|absence| absence == "SourcePool search unavailable (search.ripgrep_failed)")
 }
 
 #[cfg(unix)]
@@ -189,6 +271,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     // The real Central root also carries an AIKit marker. Its topmost profile
     // must not make a nested Git worktree outside Work/ a root-wide query.
     fs::create_dir_all(world.join(".aikit")).unwrap();
+    native_action(&world, "central.init", serde_json::json!({}));
     project(
         &world,
         "cedar",
@@ -231,6 +314,159 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         &world.join("Control/agents/now/flows/common.md"),
         "cedarOwnedLocator from common Control NOW\n",
     );
+    write(
+        &world.join("Control/agents/now/clearings/public-proof/audience.md"),
+        "public fixture clearing is not a common Project temporal record\n",
+    );
+    // Real registration supplies the current literal temporal identities.
+    // The fixtures are authored records, not fabricated native NOW receipts.
+    let cedar_now_source =
+        register_now_source(&world, Some("cedar"), "ProjectCentral/now/returns/own.md");
+    let larch_now_source = register_now_source(
+        &world,
+        Some("larch"),
+        "ProjectCentral/now/returns/sibling.md",
+    );
+    let common_now_source = register_now_source(&world, None, "Control/agents/now/flows/common.md");
+    let clearing_source = register_now_source(
+        &world,
+        None,
+        "Control/agents/now/clearings/public-proof/audience.md",
+    );
+    assert_ne!(cedar_now_source, larch_now_source);
+    assert_ne!(cedar_now_source, common_now_source);
+    assert_ne!(larch_now_source, common_now_source);
+    // Common Control is explicitly linked by its owner into cedar; a
+    // participating Root is not by itself a cross-Project read grant.
+    let inspected = native_action(
+        &world,
+        "central.file-map.inspect",
+        serde_json::json!({"project":"cedar","resources":false}),
+    );
+    let linked = native_action(
+        &world,
+        "central.file-map.link",
+        serde_json::json!({"project":"cedar","path":"common/now.md",
+            "source_ref":common_now_source,"owner":"test:gitnexus-scope",
+            "expected_revision":inspected["revision"].as_str().unwrap()}),
+    );
+    assert_eq!(linked["source_ref"], common_now_source.as_str());
+    assert!(fs::symlink_metadata(world.join("Work/cedar/common/now.md"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    let inspected = native_action(
+        &world,
+        "central.file-map.inspect",
+        serde_json::json!({"project":"cedar","resources":false}),
+    );
+    let linked_clearing = native_action(
+        &world,
+        "central.file-map.link",
+        serde_json::json!({"project":"cedar","path":"common/clearing.md",
+            "source_ref":clearing_source,"owner":"test:gitnexus-scope",
+            "expected_revision":inspected["revision"].as_str().unwrap()}),
+    );
+    assert_eq!(linked_clearing["source_ref"], clearing_source.as_str());
+    assert!(
+        fs::symlink_metadata(world.join("Work/cedar/common/clearing.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    // The same native attachment lists admitted metadata without a BKMR
+    // map or body copies, refuses external disclosure, and charges the real
+    // retained roster before crossing its explicit caller allowance.
+    let metadata_owner = std::sync::Arc::new(
+        aikit_adapters::central_file_map::CentralFileMapProvider::connect(
+            aikit_adapters::runner::SystemRunner::new()
+                .with_timeout(std::time::Duration::from_secs(30))
+                .with_strict_utf8(),
+            aikit_adapters::central_file_map::executable(),
+            &world,
+            None,
+        )
+        .unwrap(),
+    );
+    let metadata_now = aikit_adapters::now_field::NowFieldSourcePoolProvider::connect(
+        aikit_adapters::now_field::default_runner(&world),
+        aikit_adapters::ripgrep::executable(),
+        aikit_adapters::now_field::NowFieldScope::standard(&world),
+    )
+    .unwrap()
+    .with_native_owner(metadata_owner);
+    assert!(metadata_now.descriptors().is_empty());
+    let mut current_refs = std::collections::BTreeSet::new();
+    metadata_now
+        .visit_current_native_sources_for(
+            aikit_core::context_source::RetrievalTarget::LocalAgent,
+            None,
+            16,
+            |source, _| {
+                current_refs.insert(source.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        current_refs,
+        [
+            cedar_now_source.clone(),
+            larch_now_source.clone(),
+            common_now_source.clone(),
+            clearing_source.clone()
+        ]
+        .into_iter()
+        .collect()
+    );
+    let mut cedar_refs = std::collections::BTreeSet::new();
+    metadata_now
+        .visit_current_native_sources_for(
+            aikit_core::context_source::RetrievalTarget::LocalAgent,
+            Some("cedar"),
+            16,
+            |source, _| {
+                cedar_refs.insert(source.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        cedar_refs,
+        [cedar_now_source.clone(), common_now_source.clone()]
+            .into_iter()
+            .collect()
+    );
+    assert!(!cedar_refs.contains(&clearing_source));
+    assert!(!cedar_refs.contains(&larch_now_source));
+    let mut externally_disclosed = 0usize;
+    let refused_target = metadata_now
+        .visit_current_native_sources_for(
+            aikit_core::context_source::RetrievalTarget::ExternalProvider,
+            None,
+            16,
+            |_, _| {
+                externally_disclosed += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+    assert_eq!(refused_target.code(), "knowledge.source_target_withheld");
+    assert_eq!(externally_disclosed, 0);
+    let mut admitted_before_capacity = 0usize;
+    let refused_capacity = metadata_now
+        .visit_current_native_sources_for(
+            aikit_core::context_source::RetrievalTarget::LocalAgent,
+            None,
+            1,
+            |_, _| {
+                admitted_before_capacity += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+    assert_eq!(refused_capacity.code(), "now_field.source_roster_budget");
+    assert_eq!(admitted_before_capacity, 1);
     let cedar_worktree = temp.path().join("external-cedar-scope");
     git(
         &world.join("Work/cedar"),
@@ -338,10 +574,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         "real WorkRepos provider did not surface larch source; absences: {:?}",
         cross.absences
     );
-    assert!(has_now_source(
-        &cross,
-        "Work/larch/ProjectCentral/now/returns/sibling.md"
-    ));
+    assert!(has_now_source(&cross, &larch_now_source));
     assert!(cross
         .absences
         .iter()
@@ -363,20 +596,11 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         "cedar scope did not retain its own indexed Code"
     );
     assert!(
-        own_positive
-            .hits
-            .iter()
-            .any(|hit| hit.resource.as_str().starts_with("source:project:cedar:")),
+        has_project_source(&own_positive, "cedar"),
         "cedar scope did not retain its own source"
     );
-    assert!(has_now_source(
-        &own_positive,
-        "Work/cedar/ProjectCentral/now/returns/own.md"
-    ));
-    assert!(has_now_source(
-        &own_positive,
-        "Control/agents/now/flows/common.md"
-    ));
+    assert!(has_now_source(&own_positive, &cedar_now_source));
+    assert!(has_now_source(&own_positive, &common_now_source));
     let own_graph = service.knowledge_graph("", 4096, 16384).unwrap();
     let graph_resources = |graph: &serde_json::Value| -> Vec<String> {
         graph["nodes"]
@@ -387,12 +611,18 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
             .collect()
     };
     let own_graph_resources = graph_resources(&own_graph);
-    assert!(own_graph_resources.iter().any(|resource| {
-        resource == "central:source:control:root:Work/cedar/ProjectCentral/now/returns/own.md"
-    }));
-    assert!(!own_graph_resources.iter().any(|resource| {
-        resource == "central:source:control:root:Work/larch/ProjectCentral/now/returns/sibling.md"
-    }), "empty cedar graph disclosed sibling NOW roster");
+    assert!(own_graph_resources
+        .iter()
+        .any(|resource| resource == cedar_now_source.as_str()));
+    assert!(
+        !own_graph_resources
+            .iter()
+            .any(|resource| resource == larch_now_source.as_str()),
+        "empty cedar graph disclosed sibling NOW roster"
+    );
+    assert!(!own_graph_resources
+        .iter()
+        .any(|resource| resource == clearing_source.as_str()));
 
     let own = service.knowledge_search(NEEDLE, 256).unwrap();
     assert!(!has_larch_code(&own), "cedar search leaked larch Code");
@@ -400,10 +630,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         !has_larch_project_source(&own),
         "cedar search leaked larch Source/ProjectMap material"
     );
-    assert!(!has_now_source(
-        &own,
-        "Work/larch/ProjectCentral/now/returns/sibling.md"
-    ));
+    assert!(!has_now_source(&own, &larch_now_source));
     assert!(
         !own.absences
             .iter()
@@ -443,10 +670,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         !has_larch_project_source(&direct),
         "cedar resolve leaked larch Source/ProjectMap material"
     );
-    assert!(!has_now_source(
-        &direct,
-        "Work/larch/ProjectCentral/now/returns/sibling.md"
-    ));
+    assert!(!has_now_source(&direct, &larch_now_source));
 
     // An empty subject reaches the real GitNexus query command after both
     // repositories indexed, and GitNexus refuses it. The failure itself must
@@ -497,10 +721,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     assert!(
         !has_larch_code(&wildcard)
             && !has_larch_project_source(&wildcard)
-            && !has_now_source(
-                &wildcard,
-                "Work/larch/ProjectCentral/now/returns/sibling.md"
-            ),
+            && !has_now_source(&wildcard, &larch_now_source),
         "an unknown wildcard scope searched discovered Work projects"
     );
 
@@ -525,14 +746,11 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     let global = root_service.knowledge_search(NEEDLE, 256).unwrap();
     assert!(has_larch_code(&global));
     assert!(has_larch_project_source(&global));
-    assert!(has_now_source(
-        &global,
-        "Work/larch/ProjectCentral/now/returns/sibling.md"
-    ));
+    assert!(has_now_source(&global, &larch_now_source));
     let global_graph = root_service.knowledge_graph("", 4096, 16384).unwrap();
-    assert!(graph_resources(&global_graph).iter().any(|resource| {
-        resource == "central:source:control:root:Work/larch/ProjectCentral/now/returns/sibling.md"
-    }));
+    assert!(graph_resources(&global_graph)
+        .iter()
+        .any(|resource| resource == larch_now_source.as_str()));
     assert!(global
         .absences
         .iter()
@@ -554,10 +772,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         .unwrap();
     assert!(has_larch_code(&global_direct));
     assert!(has_larch_project_source(&global_direct));
-    assert!(has_now_source(
-        &global_direct,
-        "Work/larch/ProjectCentral/now/returns/sibling.md"
-    ));
+    assert!(has_now_source(&global_direct, &larch_now_source));
     let root_failure = root_service.knowledge_search("", 256).unwrap();
     assert!(code_query_failed_for(
         &root_failure,
@@ -584,23 +799,14 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     assert!(
         !has_larch_code(&worktree_cross)
             && !has_larch_project_source(&worktree_cross)
-            && !has_now_source(
-                &worktree_cross,
-                "Work/larch/ProjectCentral/now/returns/sibling.md"
-            ),
+            && !has_now_source(&worktree_cross, &larch_now_source),
         "real cedar Git worktree search was treated as root-wide"
     );
     let worktree_own = worktree_service
         .knowledge_search("cedarOwnedLocator", 256)
         .unwrap();
-    assert!(worktree_own
-        .hits
-        .iter()
-        .any(|hit| { hit.resource.as_str().starts_with("source:project:cedar:") }));
-    assert!(has_now_source(
-        &worktree_own,
-        "Work/cedar/ProjectCentral/now/returns/own.md"
-    ));
+    assert!(has_project_source(&worktree_own, "cedar"));
+    assert!(has_now_source(&worktree_own, &cedar_now_source));
 
     #[cfg(unix)]
     {
@@ -634,10 +840,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
             own_with_sibling_error.absences
         );
         assert!(
-            own_with_sibling_error
-                .hits
-                .iter()
-                .any(|hit| hit.resource.as_str().starts_with("source:project:cedar:")),
+            has_project_source(&own_with_sibling_error, "cedar"),
             "cedar's healthy source should remain searchable"
         );
         let explicit_larch_error = service
@@ -676,12 +879,27 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
             .output()
             .unwrap();
         assert_eq!(ripgrep_now.status.code(), Some(2));
+        assert_eq!(
+            fs::File::open(&larch_now).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let metadata_graph = root_service.knowledge_graph("", 4096, 16384).unwrap();
+        let temporal_node = metadata_graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["resource"] == larch_now_source.as_str())
+            .unwrap();
+        assert!(
+            temporal_node["revision"].is_null(),
+            "metadata is not a payload revision"
+        );
+        assert!(!metadata_graph
+            .to_string()
+            .contains("larchUniqueLocator from larch NOW"));
         let own_with_now_error = service.knowledge_search("cedarOwnedLocator", 256).unwrap();
         assert!(!now_field_search_failed(&own_with_now_error));
-        assert!(has_now_source(
-            &own_with_now_error,
-            "Control/agents/now/flows/common.md"
-        ));
+        assert!(has_now_source(&own_with_now_error, &common_now_source));
         let explicit_larch_now_error = service
             .knowledge_search(": larch cedarOwnedLocator", 256)
             .unwrap();
@@ -694,6 +912,21 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         assert_eq!(
             fs::metadata(&larch_now).unwrap().permissions().mode(),
             now_original_mode
+        );
+        let now_marker = larch_now.parent().unwrap().join(".no-agent-retrieval");
+        write(&now_marker, "owner withholds this temporal subtree\n");
+        let withdrawn_graph = root_service.knowledge_graph("", 4096, 16384).unwrap();
+        assert!(!graph_resources(&withdrawn_graph)
+            .iter()
+            .any(|resource| resource == larch_now_source.as_str()));
+        fs::remove_file(&now_marker).unwrap();
+        let restored_graph = root_service.knowledge_graph("", 4096, 16384).unwrap();
+        assert!(graph_resources(&restored_graph)
+            .iter()
+            .any(|resource| resource == larch_now_source.as_str()));
+        assert_eq!(
+            fs::read_to_string(&larch_now).unwrap(),
+            "larchUniqueLocator from larch NOW\n"
         );
     }
 

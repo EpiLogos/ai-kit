@@ -2363,15 +2363,23 @@ mod tests {
             &wiki_json("Root", None),
         );
         assert_eq!(fs::read(&path).unwrap(), original);
-        let marked = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
-        let descriptor = marked
+        // A new binding cannot reread the required declaration behind the
+        // current enclosing floor. The retained binding is historical metadata,
+        // never a replacement grant for that fresh observation or payload.
+        assert_eq!(
+            ProjectCentralFilesystemBinding::inspect(&project, Some(&central))
+                .unwrap_err()
+                .code(),
+            "projectcentral.source_withheld"
+        );
+        let descriptor = binding
             .semantic
             .sources
             .iter()
             .find(|source| source.source == binding.semantic.canonical_wiki)
             .unwrap();
         assert!(descriptor.exists);
-        assert!(!descriptor.agent_readable);
+        assert!(descriptor.agent_readable);
         assert_eq!(descriptor.standing, ProjectCentralStanding::AgentMaintained);
         fs::remove_file(&marker).unwrap();
         exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
