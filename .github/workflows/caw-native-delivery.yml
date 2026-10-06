@@ -170,6 +170,9 @@ jobs:
           AIKIT_CAW_NPM_BIN="$(command -v npm)"
           test -x "$AIKIT_CAW_NPM_BIN"
           export AIKIT_CAW_NPM_BIN
+          AIKIT_CAW_NPX_BIN="$(command -v npx)"
+          test -x "$AIKIT_CAW_NPX_BIN"
+          export AIKIT_CAW_NPX_BIN
           mkdir -p "$AIKIT_CAW_NATIVE_NPM_EVIDENCE_DIR"
           cargo test --locked -p aikit-cli --test caw_task_dispatch -- --ignored --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
           grep -q TASK_NATIVE_PROTECTED_DISPATCH_EXECUTED "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
