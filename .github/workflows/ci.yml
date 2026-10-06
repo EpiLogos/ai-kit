@@ -224,3 +224,82 @@ jobs:
         env:
           AIKIT_REQUIRE_RIPGREP_REAL: "1"
         run: cargo test --locked -p aikit-adapters --test now_field_real -- --nocapture --test-threads=1
+
+  # The upgrade signal: the same real suites against gitnexus@latest. The
+  # pinned job above is the gate; this one is allowed to fail — its red is
+  # the cue to run the suites deliberately, move GITNEXUS_TESTED_VERSION and
+  # the pin together, and land the move. It exists so the integration is
+  # never frozen by default and never broken silently.
+  gitnexus-next:
+    name: GitNexus next (upgrade signal — non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install Rust 1.98
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: |
+            . -> target
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24.11.0"
+      - name: Install GitNexus next
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if npm install --global 'gitnexus@latest'; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "GitNexus next install failed after three attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+      - name: Name the version the signal runs against
+        run: gitnexus --version
+      - name: Install the LadybugDB FTS extension GitNexus indexes with
+        shell: bash
+        run: |
+          set -euo pipefail
+          installer="$(npm root --global)/gitnexus/scripts/install-duckdb-extension.mjs"
+          export GITNEXUS_LBUG_MAX_DB_SIZE=$((16 * 1024 * 1024 * 1024))
+          for attempt in 1 2 3; do
+            if node "$installer" fts; then
+              node "$installer" fts --verify-only
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "LadybugDB FTS extension install failed after three attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+      - name: Ensure real ripgrep for WorkRepos conformance
+        run: |
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y ripgrep
+          fi
+          rg --version
+      - name: Run the real GitNexus surface against next
+        shell: bash
+        env:
+          AIKIT_REQUIRE_GITNEXUS_REAL: "1"
+        run: |
+          set +e
+          cargo test --locked -p aikit-adapters --test gitnexus_real -- --nocapture --test-threads=1 2>&1 | tee /tmp/aikit-next.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -E '(^error(\[|:)|^failures:|^test result:|^thread .*panicked|^  left:|^ right:|^note:|^help:)' /tmp/aikit-next.log | tail -n 100 > /tmp/aikit-next-focus.log || true
+            message=$(cat /tmp/aikit-next-focus.log)
+            message=${message//'%'/'%25'}; message=${message//$'\r'/'%0D'}; message=${message//$'\n'/'%0A'}
+            echo "::error title=GitNexus next conformance failure (move the pin deliberately)::$message"
+          fi
+          exit "$status"
