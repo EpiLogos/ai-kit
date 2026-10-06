@@ -160,8 +160,14 @@ jobs:
           cargo test --locked -p aikit-adapters --test caw_native_placement -- --ignored --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/placement.log"
       - name: Actual task-bound resident protocol and dispatch
         shell: bash
+        env:
+          # The task runtime allocates its per-run native evidence directories
+          # under an explicitly provided absolute root; the tests refuse to
+          # invent one.
+          AIKIT_CAW_NATIVE_NPM_EVIDENCE_DIR: \${{ runner.temp }}/caw-npm-evidence
         run: |
           set -euo pipefail
+          mkdir -p "$AIKIT_CAW_NATIVE_NPM_EVIDENCE_DIR"
           cargo test --locked -p aikit-cli --test caw_task_dispatch -- --ignored --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
           grep -q TASK_NATIVE_PROTECTED_DISPATCH_EXECUTED "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
           grep -q TASK_NATIVE_PERSISTENT_STORAGE_EXECUTED "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
