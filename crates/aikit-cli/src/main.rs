@@ -1256,6 +1256,16 @@ fn cmd_decide(command: DecideCmd) -> Result<Reply> {
     let data = match command.command {
         DecideSub::Status(args) => aikit_cli::decide::decide_status(args)?,
         DecideSub::Invoke(args) => aikit_cli::decide::decide_invoke(args)?,
+        DecideSub::Service(service) => match service.command {
+            DecideServiceSub::Provision(args) => {
+                aikit_cli::decide_service::service_provision(args)?
+            }
+            DecideServiceSub::Start(args) => aikit_cli::decide_service::service_start(args)?,
+            DecideServiceSub::Status(args) => aikit_cli::decide_service::service_status(args)?,
+            DecideServiceSub::Stop(args) => aikit_cli::decide_service::service_stop(args)?,
+            DecideServiceSub::Restart(args) => aikit_cli::decide_service::service_restart(args)?,
+            DecideServiceSub::Upgrade(args) => aikit_cli::decide_service::service_upgrade(args)?,
+        },
     };
     data_reply(data)
 }

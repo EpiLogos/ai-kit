@@ -181,8 +181,8 @@ configuration:
 | mode | placement | notes |
 |---|---|---|
 | `none` | no decision service | the ordinary path; unrelated work never requires one and never falls back to hosted inference on its own |
-| `managed-local` | Workcell-owned local model service on loopback | recommended where installed; the serving process, material, health, restart and cleanup belong to Workcell's declared services |
-| `endpoint` | an existing self-hosted SystemOne-compatible endpoint | beyond loopback this requires an explicit `allow_remote` election and HTTPS |
+| `managed-local` | a loopback model service whose lifecycle the Workcell product owns where it is installed | the serving process, material, health, restart and cleanup belong to Workcell's declared services; the election itself never requires a `workcell` executable |
+| `endpoint` | a SystemOne-compatible endpoint | beyond loopback this requires an explicit `allow_remote` election and HTTPS; also the honest placement of the local service AIKit provisions itself (below) |
 | `hosted` | the TypeSafe/Jev API | unchanged law: native credential, `JevLimits`, concrete returned version |
 
 The decision provider is independent of the acting (coding/writing) models:
@@ -243,6 +243,44 @@ happens at start and "started" means ready-at-speed. The input ceiling
 trained state envelope (~7.5k tokens): keep the shared state lean and put
 per-candidate detail in the question entries — small models lose accuracy on
 long states, so narrowing scope beats fattening the state.
+
+### Local lifecycle without Workcell: `aikit decide service`
+
+An installation that does not have Workcell gets the complete Kev lifecycle
+from AIKit itself. Nothing in these verbs discovers, runs or requires a
+`workcell` or `factory` executable, and the generated election is mode
+`endpoint`, never `managed-local`.
+
+```sh
+aikit decide service provision [--port 8019] [--service-dir DIR] [--recipe-file R]
+aikit decide service start     [--ready-timeout-secs 600] [--no-warm]
+aikit decide service status    [--verify-material] [--probe]
+aikit decide service stop      [--grace-secs 15]
+aikit decide service restart
+aikit decide service upgrade   [--recipe-file R] [--force]
+```
+
+- The service directory defaults to `<AIKIT_HOME>/services/decision/kev-0.8b`
+  and holds `service.json` (state), `decision-material-manifest.json`
+  (SHA-256 of every pinned artifact), `decision-provider.json` (the `endpoint`
+  election to pass to `aikit decide`/`now-context`), `service.log`, the pinned
+  upstream checkout and its environment.
+- The recipe pins upstream, adapter and base by full revision (the adapter by
+  revision, where the scripts only named the repository). A branch or tag is
+  refused.
+- `start` adopts only a process this service started (pid + start time +
+  command line recorded). A listener on the same port that it did not start —
+  for example Workcell's own Kev — is reported as `foreign-listener`, never
+  adopted, stopped or restarted. Ready means the pinned model card answers
+  (name, run and base must match the recipe) and one real warm decision
+  completed through the elected provider.
+- `stop` is identity-checked TERM then KILL and idempotent. `upgrade` moves to a
+  different pinned recipe and returns to the previous cut, restarting it if it
+  was running, when the new cut cannot be provisioned or does not come up
+  healthy; the receipt says whether the rollback held.
+- The service process does not inherit `WORKCELL_*` variables.
+- Redis has the same gap and is not yet covered by this lifecycle: its process,
+  configuration and health still come from Workcell's declared services.
 
 ### Meaning, disclosure and evaluation
 
