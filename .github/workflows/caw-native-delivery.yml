@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 30
     env:
       ACTUATION_SHA: 4af495f6509bb0dd779112a225d71a9df8145b6e
-      CENTRAL_SHA: 5d1b8bf6692f9aca45b2fe39db54cbc378dda70e
+      CENTRAL_SHA: 2a604574774c41921003ed99a2eed73b4c9f4266
       WORKCELL_SHA: c6a55af47a6616e98203e6e946a1f70e6804de82
     steps:
       - uses: actions/checkout@v4
