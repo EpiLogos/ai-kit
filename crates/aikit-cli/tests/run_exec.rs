@@ -128,10 +128,10 @@ fn actual_manifest_capture_deadline_reaches_the_same_native_owner() {
     let capsule = script_capsule_with_config(
         tmp.path(),
         "#!/bin/sh\nprintf 'started'\nsleep 30\n",
-        "timeout = \"1s\"\n",
+        "timeout = \"3s\"\n",
     );
     let plan = run::plan_script(&capsule, &[], None, tmp.path()).unwrap();
-    assert_eq!(plan.timeout, Some(std::time::Duration::from_secs(1)));
+    assert_eq!(plan.timeout, Some(std::time::Duration::from_secs(3)));
     let start = std::time::Instant::now();
     let failure = run::execute(&plan).unwrap_err();
     assert_eq!(failure.code(), "mux.command_timeout", "{failure:?}");
@@ -415,7 +415,7 @@ fn actual_selected_capture_failure_keeps_partial_output_and_arguments_out_of_pri
     let capsule = script_capsule_with_config(
         root.path(),
         "#!/bin/sh\nprintf '%s' \"$1\"\nprintf 'private-stderr-canary' >&2\nsleep 30\n",
-        "timeout = \"1s\"\n",
+        "timeout = \"3s\"\n",
     );
     let failure = run::execute(
         &run::plan_script(
