@@ -702,6 +702,7 @@ struct NativeOpenGuard<'a> {
     generation: String,
     host: Option<AgentSessionHost>,
     reserved: bool,
+    continuation_requested: bool,
     terminal_recorded: bool,
     terminal_attempted: bool,
     process_started: bool,
@@ -712,10 +713,12 @@ struct NativeOpenGuard<'a> {
 
 impl NativeOpenGuard<'_> {
     fn reserve(&mut self, basis: Value) -> Result<()> {
+        self.continuation_requested = basis["continuation_requested"].as_bool().unwrap_or(false);
         let reservation = json!({
             "kind":"native-open-reserved",
             "connection_generation":self.generation,
             "owner_pid":std::process::id(),
+            "continuation_requested":self.continuation_requested,
             "basis":basis,
             "control_budget_ms":NATIVE_STARTUP_TIMEOUT.as_millis()
         });
@@ -744,19 +747,25 @@ impl NativeOpenGuard<'_> {
     fn record_refusal(&mut self, code: &str, reason: &str) -> Result<()> {
         if self.reserved && !self.terminal_recorded && !self.terminal_attempted {
             self.terminal_attempted = true;
+            // The durable refusal contract: generation-bound, phase-named, and
+            // explicit about continuation, process, cleanup, binding, replay
+            // and inference. Cleanup error detail stays on the returned error,
+            // never in this journal shape.
             self.service.store.append(
                 &self.session,
                 &json!({
                     "kind":"native-open-refused",
                     "connection_generation":self.generation,
                     "owner_pid":std::process::id(),
+                    "continuation_requested":self.continuation_requested,
+                    "phase":"session-open",
+                    "process_started":self.process_started,
                     "error_code":code,
                     "reason":reason,
-                    "process_started":self.process_started,
                     "cleanup_confirmed":self.cleanup_confirmed,
-                    "cleanup_error":self.cleanup_error,
                     "binding_recorded":self.binding_recorded,
-                    "turn_replayed":false
+                    "turn_replayed":false,
+                    "inference_observed":false
                 }),
             )?;
             self.terminal_recorded = true;
@@ -914,6 +923,7 @@ impl EncounterService {
             generation,
             host: None,
             reserved: false,
+            continuation_requested: false,
             terminal_recorded: false,
             terminal_attempted: false,
             process_started: false,
