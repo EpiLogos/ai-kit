@@ -110,6 +110,18 @@ case "$action" in
     printf '%s' '{"ok":true,"data":{"schema":"central.file-map/v1","operation":"inspect","result":{"revision":"stub-map-rev-1","resources":[]}}}'
     exit 0
     ;;
+  central.file-map.register)
+    printf '%s' '{"ok":true,"data":{"result":{"registered":true}}}'
+    exit 0
+    ;;
+  central.init)
+    printf '%s' '{"ok":true,"data":{}}'
+    exit 0
+    ;;
+  central.world-relations.save)
+    printf '%s' '{"ok":true,"data":{"created":true,"revision":"stub-relations-v1","source_path":"Control/relations/worlds/world-stub.json"}}'
+    exit 0
+    ;;
   *)
     printf '%s' '{"ok":false,"error":{"code":"central.world_declaration_absent","message":"missing World project:stub"}}'
     exit 2
@@ -188,98 +200,6 @@ fn matrix_world() -> TempDir {
             .join("own.md"),
         "cedarMatrixScopeNeedle from cedar NOW\n",
     );
-    // The grounding reads the owner's World and admits members through the
-    // real map: declare the root and each project, and register the asserted
-    // members, each against its map's basis.
-    let ctrl = std::env::var_os("CENTRAL_CTRL_BIN")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("ctrl"));
-    let action = |action: &str, input: serde_json::Value| {
-        let output = std::process::Command::new(&ctrl)
-            .args([
-                "--json",
-                "--root",
-                world.to_str().unwrap(),
-                "action",
-                "run",
-                action,
-                &input.to_string(),
-            ])
-            .output()
-            .expect("the real ctrl runs the fixture world action");
-        let envelope: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("native action receipt parses");
-        assert_eq!(envelope["ok"], true, "fixture action {action}: {envelope}");
-        envelope["data"].clone()
-    };
-    action("central.init", serde_json::json!({}));
-    let root_sources = serde_json::json!([
-        {"ref": "central:source:control:root:ProjectCentral",
-         "revision": "fixture-root-v1",
-         "authority": "controlled-test-fixture-not-personal-adoption",
-         "treatment": "canonical"},
-        {"ref": "central:source:control:root:Control/agents",
-         "revision": "fixture-agents-v1",
-         "authority": "controlled-test-fixture-not-personal-adoption",
-         "treatment": "canonical"}
-    ]);
-    action(
-        "central.world-relations.save",
-        serde_json::json!({
-            "scope": "root",
-            "record": {"schema": "central.world-relations/v1", "ref": "control:root",
-                "revision": "fixture-world-v1", "parent": null,
-                "sources": root_sources, "excluded_sources": []}
-        }),
-    );
-    for member in ["cedar", "larch"] {
-        let id = format!("epilogos/{member}");
-        let here = action("central.world.here", serde_json::json!({"project": member}));
-        let reference = here["project_world"]["ref"]
-            .as_str()
-            .expect("the project world ref")
-            .to_owned();
-        action(
-            "central.world-relations.save",
-            serde_json::json!({
-                "scope": "project",
-                "project": member,
-                "record": {"schema": "central.world-relations/v1", "ref": reference,
-                    "revision": "fixture-project-world-v1", "parent": "control:root",
-                    "sources": [
-                        {"ref": format!("central:source:control:root:Work/{member}/ProjectCentral"),
-                         "revision": "fixture-project-v1",
-                         "authority": "controlled-test-fixture-not-personal-adoption",
-                         "treatment": "canonical"},
-                        {"ref": "central:source:control:root:Control/agents",
-                         "revision": "fixture-agents-v1",
-                         "authority": "controlled-test-fixture-not-personal-adoption",
-                         "treatment": "canonical"}
-                    ],
-                    "excluded_sources": []}
-            }),
-        );
-        let _ = id;
-    }
-    for (project, path) in [
-        (Some("cedar"), "ProjectCentral/now/returns/own.md"),
-        (Some("larch"), "ProjectCentral/user/capability-matrix.json"),
-        (None, "ProjectCentral/user/capability-matrix.json"),
-    ] {
-        let mut inspect = serde_json::json!({"resources": false});
-        if let Some(project) = project {
-            inspect["project"] = serde_json::json!(project);
-        }
-        let basis = action("central.file-map.inspect", inspect)["result"]["revision"]
-            .as_str()
-            .expect("the map basis carries its revision")
-            .to_owned();
-        let mut register = serde_json::json!({"path": path, "expected_revision": basis});
-        if let Some(project) = project {
-            register["project"] = serde_json::json!(project);
-        }
-        action("central.file-map.register", register);
-    }
     isolate_home(&temp);
     temp
 }

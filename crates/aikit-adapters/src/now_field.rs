@@ -189,6 +189,12 @@ impl NowFieldScope {
                 glob: "Control/agents/now/flows/**".into(),
                 family: "flow",
             },
+            // Agent continuation records: the working field's own registered
+            // session returns, one named file per return.
+            ScopeInclude {
+                glob: "Control/agents/now/agents/*.json".into(),
+                family: "now",
+            },
             ScopeInclude {
                 glob: "Control/user/day/*/day.md".into(),
                 family: "day",
@@ -2317,7 +2323,7 @@ mod tests {
         let first_directory = parent.join("actual-0000");
         let first_file = first_directory.join("current.json");
         assert!(
-            first_file.as_os_str().as_encoded_bytes().len() + 1 <= path_max,
+            first_file.as_os_str().as_encoded_bytes().len() < path_max,
             "the actual owned fixture path must fit PATH_MAX before creation"
         );
         let branch_bytes = 3 * first_directory.as_os_str().as_encoded_bytes().len()

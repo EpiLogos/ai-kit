@@ -1403,7 +1403,7 @@ fn native_work_exact_ids_collisions_current_declaration_and_historical_copies_re
         assert_eq!(hit.revision.as_ref(), Some(&material.binding.revision));
     }
     let native = aikit_adapters::ProjectCentralFilesystemBinding::inspect(
-        &root.join("Work/left"),
+        root.join("Work/left"),
         Some(&root),
     )
     .unwrap();

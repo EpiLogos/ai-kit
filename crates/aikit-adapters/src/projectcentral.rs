@@ -35,8 +35,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::Digest;
 
-#[path = "wiki_publication.rs"]
-pub mod publication;
+// One module load: the publication machinery is declared once at the crate
+// root and re-exported here under the historical `publication` name.
+pub use crate::wiki_publication as publication;
 
 const EAGER_SOURCE_BUDGET: u64 = 16 * 1024 * 1024;
 

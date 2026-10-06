@@ -101,21 +101,6 @@ fn has_larch_project_source(result: &aikit_core::KnowledgeSearchResult) -> bool 
     })
 }
 
-fn has_project_source(result: &aikit_core::KnowledgeSearchResult, project: &str) -> bool {
-    result.hits.iter().any(|hit| {
-        hit.resource
-            .as_str()
-            .starts_with(&format!("source:project:{project}:"))
-            || aikit_core::SourceRef::parse(hit.resource.as_str())
-                .ok()
-                .and_then(|source| {
-                    aikit_adapters::work_repos::decode_work_file_source_ref(&source).ok()
-                })
-                .flatten()
-                .is_some_and(|address| address.project_id == project)
-    })
-}
-
 fn has_now_source(result: &aikit_core::KnowledgeSearchResult, relative: &str) -> bool {
     let root_form = format!("central:source:control:root:{relative}");
     // A Project's own NOW record answers under the Project's identity; a
@@ -347,10 +332,11 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     // revision of its moment. A common Control record is registered at the
     // root and then LINKED into each Project that asserts it — the declared
     // link is what the owner's project admission reads.
-    let mut registrations: Vec<(Option<&str>, &str)> = Vec::new();
-    registrations.push((Some("cedar"), "ProjectCentral/now/returns/own.md"));
-    registrations.push((Some("larch"), "ProjectCentral/now/returns/sibling.md"));
-    registrations.push((None, "Control/agents/now/flows/common.md"));
+    let registrations: Vec<(Option<&str>, &str)> = vec![
+        (Some("cedar"), "ProjectCentral/now/returns/own.md"),
+        (Some("larch"), "ProjectCentral/now/returns/sibling.md"),
+        (None, "Control/agents/now/flows/common.md"),
+    ];
     for (project, path) in registrations {
         let mut inspect = serde_json::json!({"resources": false});
         if let Some(project) = project {

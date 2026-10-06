@@ -29,6 +29,10 @@ pub struct SourceOrigin {
     pub origin: SourceOriginKind,
 }
 
+// The native-origin variant legitimately carries the owner's binding facts
+// beside a data-free declared-corpus variant; boxing the payload would only
+// complicate the tagged wire form the schema fixes.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum SourceOriginKind {

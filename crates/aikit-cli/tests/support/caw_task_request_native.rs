@@ -369,7 +369,7 @@ fn recover_and_check_history(
     // provider setup, protected exec or body effect.
     let late = Command::new(NativeRequest::current_binary())
         .env("AIKIT_HOME", native.world.home.root())
-        .current_dir(&native.world.root.join("Work/demo"))
+        .current_dir(native.world.root.join("Work/demo"))
         .args([
             "encounter-task-exec",
             "--agent-session",

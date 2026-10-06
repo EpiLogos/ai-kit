@@ -736,6 +736,10 @@ fn marker_exclude_globs(project_root: &Path) -> Vec<String> {
     globs
 }
 
+// The native-basis variant legitimately carries the whole inspected project
+// beside a data-free explicit variant; boxing it would only complicate the
+// attachment matching the enum fixes.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 enum WorkAttachmentBasis {
     Native(NativeWorkRepoProject),

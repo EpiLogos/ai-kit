@@ -307,17 +307,7 @@ mod tests {
     use aikit_core::session_space_application::{
         SessionSpaceAgentAttachmentIntent, SessionSpaceMutation,
     };
-    use std::process::{Child, Command};
-    struct OwnedWriter(Child);
-    impl Drop for OwnedWriter {
-        fn drop(&mut self) {
-            if self.0.try_wait().is_ok_and(|status| status.is_none()) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
-            }
-        }
-    }
-
+    use std::process::Command;
     #[test]
     #[ignore = "requires exact installed AIKIT_CAW_PI_BIN; actual Pi plus OS child-channel writer, never prompts"]
     fn actual_pi_release_joins_owned_reader_and_retains_late_channel_bytes() {

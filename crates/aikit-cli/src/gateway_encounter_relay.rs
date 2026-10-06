@@ -436,11 +436,8 @@ mod native_cache_tests {
             // unix-socket allocation does: the actual address is known by
             // construction, and the service must serve exactly the listener
             // it was handed.
-            let listener = Some(TcpListener::bind("127.0.0.1:0").unwrap());
-            let address = listener
-                .as_ref()
-                .map(|listener| listener.local_addr().unwrap().to_string())
-                .unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap().to_string();
             let socket = root.join("s");
             if allocate_in_service {
                 use std::os::unix::ffi::OsStrExt;
@@ -465,12 +462,8 @@ mod native_cache_tests {
                 // The websocket listener is always pre-bound here: the actual
                 // address is known by construction, and the service must serve
                 // exactly the listener it was handed.
-                let result = run_gateway_service_on_websocket_listener(
-                    gateway,
-                    config,
-                    hooks,
-                    listener.expect("fixture always pre-binds its websocket listener"),
-                );
+                let result =
+                    run_gateway_service_on_websocket_listener(gateway, config, hooks, listener);
                 let _ = send.send(result);
             });
             let index = self.gateways.len();

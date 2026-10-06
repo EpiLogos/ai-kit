@@ -2466,10 +2466,20 @@ mod native {
             let path = directory.path().join("wiki.json");
             let lock_path = directory.path().join(".wiki.json.publication.lock");
             fs::write(&path, "retained").unwrap();
-            let mut child = Reap(Command::new(std::env::current_exe().unwrap())
-                .args(["--ignored", "--exact", "projectcentral::publication::native::tests::publication_lock_holder_process", "--nocapture"])
-                .env("AIKIT_WIKI_PUBLICATION_TEST_LOCK", &lock_path)
-                .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap());
+            let mut child = Reap(
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--ignored",
+                        "--exact",
+                        "wiki_publication::native::tests::publication_lock_holder_process",
+                        "--nocapture",
+                    ])
+                    .env("AIKIT_WIKI_PUBLICATION_TEST_LOCK", &lock_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+            );
             let stdout = child.0.stdout.take().unwrap();
             let (ready_tx, ready_rx) = std::sync::mpsc::channel();
             let reader = std::thread::spawn(move || {

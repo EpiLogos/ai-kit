@@ -1258,7 +1258,7 @@ impl Service {
 
     /// Additive native document facet; plain KnowledgeReading users keep their API.
     pub fn knowledge_read_document(&self, address: &KnowledgeAddress) -> Result<serde_json::Value> {
-        self.with_knowledge(|runtime, application| {
+        let document = self.with_knowledge(|runtime, application| {
             let reading = application.read(address)?;
             let material = runtime.document_material();
             let objects: Vec<_> = runtime
@@ -1284,7 +1284,14 @@ impl Service {
                 relations.as_ref(),
                 &runtime.document_material(),
             )
-        })
+        })?;
+        // A plain read observes the whole body: the extent records itself,
+        // whatever document facets the answer carries. The re-read is the
+        // cached ordinary read; its only effect here is the coverage row.
+        if let Ok(reading) = self.knowledge_read(address) {
+            self.record_reading_coverage(&reading);
+        }
+        Ok(document)
     }
 
     /// Complete metadata projection within explicit caller budgets; ranking and
@@ -2013,6 +2020,7 @@ impl Service {
                 .sources
                 .retain(|source, _| !source.as_str().starts_with("central:source:control:root:"));
         }
+        withhold_uncited_legacy_paper_copies(&mut discovered, &mut absences);
         let mut material = Vec::new();
         let mut bindings = Vec::new();
         for item in discovered.sources.into_values() {
@@ -2688,6 +2696,9 @@ impl CanonicalPaths {
     }
 }
 
+// The arguments are the disclosed capacity facts themselves — the absence
+// names each counter — so a facts struct would only re-wrap the same tuple.
+#[allow(clippy::too_many_arguments)]
 fn discovery_capacity_absence(
     absences: &mut Vec<String>,
     phase: &str,
@@ -3158,7 +3169,8 @@ fn discover_material_with_limits(
                 let path = entry.path();
                 if path.capacity() > limits.single_path_bytes {
                     return Ok(PendingDiscovery::Capacity(DiscoveryCapacity {
-                        dimension: "single_path_capacity_bytes", limit: limits.single_path_bytes,
+                        dimension: "single_path_capacity_bytes",
+                        limit: limits.single_path_bytes,
                     }));
                 }
                 let metadata = fs::metadata(&path).map_err(discovery_io)?;
@@ -3234,22 +3246,115 @@ fn discover_material_with_limits(
         match visit {
             Ok(DirectoryVisit::Complete) => {}
             Ok(DirectoryVisit::Stopped(capacity)) => {
-                discovery_capacity_absence(
-                    absences,
-                    "generic",
-                    capacity,
-                    budget.observed,
-                    files.get(),
-                    frontier.queued.len(),
-                    frontier.seen.len(),
-                    frontier.queued_bytes + frontier.seen_bytes,
-                );
+                if capacity.dimension == "generic_candidate_files" {
+                    // A bound that fires stays acceptable; one that hides what
+                    // it skipped is the defect: the absence names the stopping
+                    // directory and the approximate unexamined count, beside
+                    // the structured capacity facts.
+                    let unexamined = fs::read_dir(&dir)
+                        .map(|entries| {
+                            entries
+                                .flatten()
+                                .filter(|entry| !entry.path().is_dir())
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    absences.push(format!(
+                        "Knowledge discovery stopped after {} candidate files in {} \
+                         ({} limit {}); ~{unexamined} further files unexamined in that subtree; \
+                         {} queued directories were never visited; observed {} directory entries, \
+                         {} seen directories, {} retained path capacity bytes; \
+                         unseen remainder is unknown",
+                        capacity.limit,
+                        dir.display(),
+                        capacity.dimension,
+                        capacity.limit,
+                        frontier.queued.len(),
+                        budget.observed,
+                        frontier.seen.len(),
+                        frontier.queued_bytes + frontier.seen_bytes,
+                    ));
+                } else {
+                    discovery_capacity_absence(
+                        absences,
+                        "generic",
+                        capacity,
+                        budget.observed,
+                        files.get(),
+                        frontier.queued.len(),
+                        frontier.seen.len(),
+                        frontier.queued_bytes + frontier.seen_bytes,
+                    );
+                }
                 break;
             }
             Err(error) => discovery_absence(absences, &error),
         }
     }
     Ok(discovered)
+}
+
+/// A generic copy discovered on disk acquires no standing of its own.
+/// `source:paper:` refs are the citation namespace of compiled knowledge —
+/// papers a project's own wiki cites — not a Project shard namespace, so a
+/// disk copy claiming one is admitted only where this project's compiled
+/// knowledge actually cites that ref (the shard is then the operative
+/// carrier of a cited source). An uncited retained copy is withheld, named,
+/// never served: an old world's leftover copy must not become
+/// agent-retrievable material through discovery alone.
+fn withhold_uncited_legacy_paper_copies(
+    discovered: &mut DiscoveredMaterial,
+    absences: &mut Vec<String>,
+) {
+    if !discovered
+        .sources
+        .keys()
+        .any(|source| source.as_str().starts_with("source:paper:"))
+    {
+        return;
+    }
+    let cited = cited_wiki_refs(&discovered.wiki);
+    let withheld: Vec<SourceRef> = discovered
+        .sources
+        .keys()
+        .filter(|source| {
+            source.as_str().starts_with("source:paper:") && !cited.contains(source.as_str())
+        })
+        .cloned()
+        .collect();
+    for source in withheld {
+        discovered.sources.remove(&source);
+        absences.push(format!(
+            "Discovered legacy generic copy {source} is withheld: it carries no operative origin in this project's compiled knowledge"
+        ));
+    }
+}
+
+fn cited_wiki_refs(objects: &[WikiObject]) -> BTreeSet<String> {
+    let mut refs = BTreeSet::new();
+    for object in objects {
+        let entries: Box<dyn Iterator<Item = &SourceRef>> = match object {
+            WikiObject::Node(node) => Box::new(
+                node.source_refs
+                    .iter()
+                    .chain(node.provenance.iter().map(|entry| &entry.source_ref)),
+            ),
+            WikiObject::Space(value) => {
+                Box::new(value.provenance.iter().map(|entry| &entry.source_ref))
+            }
+            WikiObject::Edge(value) => {
+                Box::new(value.provenance.iter().map(|entry| &entry.source_ref))
+            }
+            WikiObject::Frame(value) => {
+                Box::new(value.provenance.iter().map(|entry| &entry.source_ref))
+            }
+            WikiObject::Reading(value) => {
+                Box::new(value.provenance.iter().map(|entry| &entry.source_ref))
+            }
+        };
+        refs.extend(entries.map(|ref_| ref_.as_str().to_owned()));
+    }
+    refs
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]

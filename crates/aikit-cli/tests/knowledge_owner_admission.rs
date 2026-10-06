@@ -126,7 +126,9 @@ fn assert_withheld(service: &mut Service, address: &KnowledgeAddress, needle: &s
         .hits
         .iter()
         .any(|hit| hit.resource == address.resource_ref()));
-    let frame = service.knowledge_frame(None, &[address.clone()]).unwrap();
+    let frame = service
+        .knowledge_frame(None, std::slice::from_ref(address))
+        .unwrap();
     assert!(!serde_json::to_string(&frame).unwrap().contains(needle));
 }
 
@@ -319,7 +321,7 @@ fn assert_native_withheld(service: &mut Service, address: &KnowledgeAddress, nee
             .any(|hit| hit.resource == address.resource_ref()));
         assert!(!serde_json::to_string(&search).unwrap().contains(needle));
     }
-    if let Ok(frame) = service.knowledge_frame(None, &[address.clone()]) {
+    if let Ok(frame) = service.knowledge_frame(None, std::slice::from_ref(address)) {
         assert!(!serde_json::to_string(&frame).unwrap().contains(needle));
     }
 }
@@ -725,7 +727,7 @@ fn actual_nonroot_known_owner_privacy_failure_retains_original_permission_cause(
         permissions: fs::metadata(&owner).unwrap().permissions(),
     };
     let before = fs::read(&ground.source).unwrap();
-    fs::set_permissions(&owner, fs::Permissions::from_mode(0)).unwrap();
+    fs::set_permissions(&owner, fs::Permissions::from_mode(0o000)).unwrap();
     let actual = fs::symlink_metadata(owner.join("Control"))
         .expect_err("selected nonroot gate must observe actual denial, never green skip");
     assert_eq!(actual.kind(), std::io::ErrorKind::PermissionDenied);

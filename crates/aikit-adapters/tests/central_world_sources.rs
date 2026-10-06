@@ -641,7 +641,7 @@ fn native_manifest_eacces_retains_actual_owner_cause_and_never_assumes_root() {
         manifest.clone(),
         fs::metadata(&manifest).unwrap().permissions(),
     );
-    fs::set_permissions(&manifest, fs::Permissions::from_mode(0)).unwrap();
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o000)).unwrap();
     let actual = fs::read(&manifest).unwrap_err();
     let (binding, absences) = world.binding("Locked");
     assert!(binding.is_none());

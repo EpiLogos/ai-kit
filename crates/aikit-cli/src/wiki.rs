@@ -1364,7 +1364,7 @@ impl CorpusAdmission {
         } else {
             std::env::current_dir().map_err(corpus_io_error)?.join(cwd)
         };
-        let physical = std::fs::canonicalize(corpus).map_err(|error| corpus_io_error(error))?;
+        let physical = std::fs::canonicalize(corpus).map_err(corpus_io_error)?;
         let mut project = None;
         for root in physical.ancestors() {
             match std::fs::metadata(root.join(PROJECT_MANIFEST_SOURCE)) {
@@ -1444,7 +1444,7 @@ impl CorpusAdmission {
         let Some(root) = &self.central_root else {
             return Ok(false);
         };
-        let physical_root = std::fs::canonicalize(root).map_err(|error| corpus_io_error(error))?;
+        let physical_root = std::fs::canonicalize(root).map_err(corpus_io_error)?;
         let Ok(relative) = physical.strip_prefix(&physical_root) else {
             return Ok(false);
         };
@@ -1466,7 +1466,7 @@ impl CorpusAdmission {
     }
 
     fn check_floor(&self, path: &Path) -> Result<()> {
-        let physical = std::fs::canonicalize(path).map_err(|error| corpus_io_error(error))?;
+        let physical = std::fs::canonicalize(path).map_err(corpus_io_error)?;
         for floor in self
             .project
             .as_ref()
@@ -1474,7 +1474,7 @@ impl CorpusAdmission {
             .into_iter()
             .chain(self.central_root.as_ref())
         {
-            let root = std::fs::canonicalize(floor).map_err(|error| corpus_io_error(error))?;
+            let root = std::fs::canonicalize(floor).map_err(corpus_io_error)?;
             // Both routes participate. Choosing only a canonical fallback can
             // lose a marker above an in-World lexical member alias.
             let lexical = path
@@ -1567,7 +1567,7 @@ impl CorpusAdmission {
         warnings: &mut Vec<String>,
         observations: &mut Vec<Value>,
     ) -> Result<()> {
-        let physical = std::fs::canonicalize(path).map_err(|error| corpus_io_error(error))?;
+        let physical = std::fs::canonicalize(path).map_err(corpus_io_error)?;
         let known = self.known_native_member(&physical)?;
         let Some(root) = &self.central_root else {
             if known {

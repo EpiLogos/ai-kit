@@ -68,7 +68,7 @@ fn wiki(cwd: &Path, args: &[&str]) -> (i32, Value) {
     let envelope: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| {
         panic!(
             "aikit {args:?} must emit a JSON envelope; got stdout={stdout:?} stderr={:?}",
-            &output.stderr
+            output.stderr
         )
     });
     (output.status, envelope)
@@ -3132,7 +3132,7 @@ fn marked_directory_is_pruned_before_diagnostics_and_refresh_keeps_native_source
         }
         let guard = OwnedPermissions(corpus.join("withheld-private-room/deep"));
         fs::create_dir_all(&guard.0).unwrap();
-        fs::set_permissions(&guard.0, fs::Permissions::from_mode(0)).unwrap();
+        fs::set_permissions(&guard.0, fs::Permissions::from_mode(0o000)).unwrap();
         guard
     };
     let mut refresh = args.to_vec();
@@ -3194,7 +3194,7 @@ fn actual_marker_observation_permission_failure_refuses_before_output_effects() 
         }
     }
     let permission = OwnedSearchPermission(corpus.clone());
-    fs::set_permissions(&corpus, fs::Permissions::from_mode(0)).unwrap();
+    fs::set_permissions(&corpus, fs::Permissions::from_mode(0o000)).unwrap();
     for apply in [false, true] {
         let mut command = Command::new(assert_cmd::cargo::cargo_bin("aikit"));
         command.current_dir(scratch.path()).args([
@@ -3338,7 +3338,7 @@ fn actual_manifest_observation_error_cannot_be_reclassified_as_standalone() {
         }
     }
     let permissions = OwnedManifestDirectory(manifest.parent().unwrap().into());
-    fs::set_permissions(&permissions.0, fs::Permissions::from_mode(0)).unwrap();
+    fs::set_permissions(&permissions.0, fs::Permissions::from_mode(0o000)).unwrap();
     let observed = fs::metadata(&manifest).unwrap_err();
     assert_eq!(observed.kind(), std::io::ErrorKind::PermissionDenied);
     for apply in [false, true] {

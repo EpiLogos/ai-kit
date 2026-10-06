@@ -122,12 +122,36 @@ fn open_service(temp: &TempDir) -> Service {
 /// Which hits carry the given source ref, with their providers.
 fn find_hit<'a>(
     result: &'a aikit_core::KnowledgeSearchResult,
-    source_suffix: &str,
+    legacy_ref: &str,
 ) -> Vec<&'a aikit_core::KnowledgeSearchHit> {
+    // The Work pool mints portable exact addresses
+    // (`source:work-file:v1:<id>:<member>`); the asserted legacy ref
+    // (`source:project:<id>:<member>`) decodes to the same project and
+    // member, so either identity answers.
+    let legacy = legacy_ref
+        .strip_prefix("source:project:")
+        .and_then(|rest| rest.split_once(':'))
+        .map(|(project_id, member)| (project_id.to_owned(), member.to_owned()));
     result
         .hits
         .iter()
-        .filter(|hit| hit.resource.as_str().ends_with(source_suffix))
+        .filter(|hit| {
+            if hit.resource.as_str().ends_with(legacy_ref) {
+                return true;
+            }
+            let Some((project_id, member)) = &legacy else {
+                return false;
+            };
+            aikit_core::SourceRef::parse(hit.resource.as_str())
+                .ok()
+                .and_then(|source| {
+                    aikit_adapters::work_repos::decode_work_file_source_ref(&source).ok()
+                })
+                .flatten()
+                .is_some_and(|address| {
+                    &address.project_id == project_id && address.member.to_string_lossy() == *member
+                })
+        })
         .collect()
 }
 

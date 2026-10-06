@@ -77,7 +77,7 @@ impl CommandRunner for WorldRunner {
         let input: Value = argv
             .last()
             .and_then(|input| serde_json::from_str::<Value>(input).ok())
-            .unwrap_or_else(|| Value::Null);
+            .unwrap_or(Value::Null);
         if action == "central.world.here" {
             // The facet probe: a fixture Work member without its manifest
             // reads manifest-absent and inherits the root lineage; a project
