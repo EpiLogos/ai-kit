@@ -357,9 +357,26 @@ pub struct OutboundOperation {
     pub actuation_stream_ref: Option<ResourceRef>,
     #[serde(default)]
     pub provenance: Vec<String>,
+    /// How many times the pump began executing this operation. Recorded on
+    /// the durable pending record BEFORE each attempt, so a crash between an
+    /// attempt and its receipt leaves evidence that the attempt happened —
+    /// an outcome the recovery reads honestly instead of guessing.
+    #[serde(default)]
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attempt_at_unix_ms: Option<u64>,
 }
 
 impl OutboundOperation {
+    /// Whether a re-attempt can never make a new external effect: the
+    /// operation either acts on an existing target (edit, delete, react,
+    /// typing) or is void. A `send` is NOT idempotent — a re-attempt after an
+    /// unknown outcome may duplicate a message the recipient already read —
+    /// so sends are held for evidence, never blindly re-sent.
+    pub fn is_idempotent(&self) -> bool {
+        !matches!(self.operation, OutboundOperationKind::Send { .. })
+    }
+
     pub fn validate(&self, descriptor: &ConnectorDescriptor) -> Result<()> {
         descriptor.validate()?;
         self.address.validate()?;
@@ -670,6 +687,8 @@ mod tests {
             agent_session_ref: Some(r("agent-session/root")),
             actuation_stream_ref: Some(r("actuation-stream/root")),
             provenance: vec!["gateway delivery".into()],
+            attempts: 0,
+            last_attempt_at_unix_ms: None,
         };
         assert_eq!(
             operation.validate(&limited).unwrap_err().code(),
@@ -697,6 +716,8 @@ mod tests {
             agent_session_ref: Some(r("agent-session/root")),
             actuation_stream_ref: Some(r("actuation-stream/root")),
             provenance: Vec::new(),
+            attempts: 0,
+            last_attempt_at_unix_ms: None,
         };
         operation.validate(&descriptor()).unwrap();
         assert_eq!(

@@ -74,14 +74,7 @@ impl SystemEnv {
     /// The executable the service definition starts (what a supervisor would
     /// exec after a restart), else `aikit` on PATH.
     fn service_executable(&self) -> Option<PathBuf> {
-        if let Ok(platform) = ServicePlatform::current() {
-            if let Ok(definition) = std::fs::read_to_string(platform.unit_path(&self.home_dir)) {
-                if let Some(path) = executable_named_by(&definition, platform) {
-                    return Some(path);
-                }
-            }
-        }
-        crate::probe::which("aikit")
+        service_executable(&self.home_dir)
     }
 
     /// The pid recorded by the gateway's state lock, for a gateway that does
@@ -113,6 +106,21 @@ pub fn executable_named_by(definition: &str, platform: ServicePlatform) -> Optio
             .and_then(|command| command.split_whitespace().next())
             .map(|program| PathBuf::from(program.trim_matches('"'))),
     }
+}
+
+/// The executable THIS home's service definition starts — what the supervisor
+/// execs on restart, and therefore what an upgrade worker must act on behalf
+/// of. Falls back to `aikit` on PATH only when no definition can be read (a
+/// foreground gateway, a home with no installed service).
+pub fn service_executable(home_dir: &Path) -> Option<PathBuf> {
+    if let Ok(platform) = ServicePlatform::current() {
+        if let Ok(definition) = std::fs::read_to_string(platform.unit_path(home_dir)) {
+            if let Some(path) = executable_named_by(&definition, platform) {
+                return Some(path);
+            }
+        }
+    }
+    crate::probe::which("aikit")
 }
 
 fn revision_from_version_line(line: &str) -> Option<String> {
@@ -634,9 +642,16 @@ pub fn spawn_worker(home: &AikitHome, id: &str) -> Result<String> {
             format!("cannot locate this executable to start the upgrade worker: {error}"),
         )
     })?;
-    // Run the worker on the managed path a restart will also resolve, not on
-    // whichever build this process happens to be.
-    let aikit = crate::probe::which("aikit").unwrap_or(aikit);
+    // Run the worker on the executable the service DEFINITION names — the
+    // image a restart will run, and the instance's own build when the
+    // definition is a controlled instance's. Resolving by PATH instead would
+    // put a rehearsal's worker on the machine's installed `aikit` whenever a
+    // service manager supplies its own PATH, and the rehearsal would exercise
+    // this code on the gateway side only.
+    let home_dir = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| AikitError::new("gateway_upgrade.home_unresolved", "no HOME is set"))?;
+    let aikit = service_executable(&home_dir).unwrap_or(aikit);
     let store = Store::new(&home.state());
     let log = store.dir(id).join("worker.log");
     std::fs::create_dir_all(store.dir(id)).map_err(|error| {
@@ -653,9 +668,6 @@ pub fn spawn_worker(home: &AikitHome, id: &str) -> Result<String> {
         "--txn".into(),
         id.to_owned(),
     ];
-    let home_dir = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| AikitError::new("gateway_upgrade.home_unresolved", "no HOME is set"))?;
     let environment = worker_environment(home, &home_dir)?;
     let short = worker_short_id(id);
 
@@ -901,6 +913,34 @@ pub fn install_min_free_kib() -> u64 {
         .unwrap_or(INSTALL_MIN_FREE_KIB)
 }
 
+/// The volume the managed installer actually builds on and installs into: the
+/// O:I data root (`OI_DATA_HOME`, else the platform default), under which live
+/// both the build cache (`cache/build`) and the product store (`products`).
+/// Measuring `$HOME` instead answers a different volume whenever the data root
+/// is mounted or overridden elsewhere — the preflight would read the wrong
+/// disk and refuse (or pass) for the wrong reason.
+pub fn managed_install_root() -> Option<PathBuf> {
+    if let Some(root) = std::env::var_os("OI_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|root| !root.as_os_str().is_empty())
+    {
+        return Some(root);
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| !home.as_os_str().is_empty())?;
+    if cfg!(target_os = "macos") {
+        return Some(home.join("Library/Application Support/OI"));
+    }
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|xdg| !xdg.as_os_str().is_empty())
+    {
+        return Some(xdg.join("oi"));
+    }
+    Some(home.join(".local/share/oi"))
+}
+
 pub struct ApplyOptions {
     pub install: bool,
     pub channel: Option<String>,
@@ -926,23 +966,30 @@ pub fn apply_command(home: &AikitHome, options: ApplyOptions) -> Result<Value> {
         validate_candidate(candidate)?;
     }
     if options.install {
-        let at = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.state());
-        if let Some(free) = free_kib(&at) {
-            let floor = install_min_free_kib();
-            if free < floor {
-                return Err(three_part(
-                    "gateway_upgrade.disk_low",
-                    format!(
-                        "{} MiB are free where the managed install builds ({}); it needs at least {} MiB (AIKIT_INSTALL_MIN_FREE_MIB changes the floor).",
-                        free / 1024,
-                        at.display(),
-                        floor / 1024
-                    ),
-                    "Nothing was changed; the running gateway was not touched.",
-                    "Free space (build caches of retired work are the usual cause), then run it again; or restart onto the installed build with `aikit gateway upgrade apply`.",
-                ));
+        // The preflight reads the volume the installer will actually build on
+        // and install into (the O:I data root), not `$HOME`'s volume: those
+        // differ whenever the data root is mounted or overridden elsewhere.
+        let at = managed_install_root().or_else(|| {
+            std::env::var_os("HOME").map(PathBuf::from)
+        });
+        if let Some(at) = at {
+            if let Some(free) = free_kib(&at) {
+                let floor = install_min_free_kib();
+                if free < floor {
+                    return Err(three_part(
+                        "gateway_upgrade.disk_low",
+                        format!(
+                            "{} MiB are free on the volume the managed install builds on and \
+                             installs into ({}); it needs at least {} MiB \
+                             (AIKIT_INSTALL_MIN_FREE_MIB changes the floor).",
+                            free / 1024,
+                            at.display(),
+                            floor / 1024
+                        ),
+                        "Nothing was changed; the running gateway was not touched.",
+                        "Free space (build caches of retired work are the usual cause), then run it again; or restart onto the installed build with `aikit gateway upgrade apply`.",
+                    ));
+                }
             }
         }
     }
@@ -998,22 +1045,92 @@ pub fn apply_command(home: &AikitHome, options: ApplyOptions) -> Result<Value> {
         "receipt": store.dir(&transaction.id).join("receipt.md").display().to_string(),
     });
     if options.wait {
-        let waited = wait_for(&store, &transaction.id, Duration::from_secs(45 * 60 + 300));
+        let (waited, wait_note) = wait_for(&store, &transaction.id, Duration::from_secs(45 * 60 + 300));
         reading["phase"] = json!(waited.phase);
         reading["outcome"] = json!(waited.outcome);
+        if let Some(note) = wait_note {
+            reading["wait"] = note;
+        }
     }
     Ok(reading)
 }
 
-fn wait_for(store: &Store, id: &str, limit: Duration) -> Transaction {
+/// How long a non-terminal transaction with no driver holding its lock and no
+/// progress may sit before `--wait` stops waiting on it. A dead worker (it
+/// failed in a non-planned phase) otherwise holds the caller to the full
+/// bound. `AIKIT_UPGRADE_WAIT_QUIET_SECS` shortens it for tests.
+fn wait_quiet() -> Duration {
+    std::env::var("AIKIT_UPGRADE_WAIT_QUIET_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|secs| Duration::from_secs(secs))
+        .unwrap_or(Duration::from_secs(120))
+}
+
+/// Wait (bounded) for a worker to finish `id`. A transaction that is past its
+/// planned phase, whose driver lock is FREE, and that has been quiet for
+/// longer than the quiet bound, has nothing driving it: say so and point at
+/// `resume`/`abandon`, instead of waiting out the clock on a worker that is
+/// never coming back.
+fn wait_for(store: &Store, id: &str, limit: Duration) -> (Transaction, Option<Value>) {
     let started = std::time::Instant::now();
+    let quiet = wait_quiet();
     loop {
         if let Ok(transaction) = store.load(id) {
             if transaction.phase.is_terminal() || started.elapsed() >= limit {
-                return transaction;
+                return (transaction, None);
+            }
+            if started.elapsed() > quiet
+                && quiet_since(&transaction)
+                    .map(|quiet_for| quiet_for >= quiet)
+                    .unwrap_or(false)
+            {
+                // Only trust the quiet reading when the lock is actually
+                // free: a live worker holds it for the whole drive. A planned
+                // transaction quiet this long with a free lock never got a
+                // worker; a non-planned one lost it. Either way nothing is
+                // driving.
+                if lock_driver_free(store, id) {
+                    return (
+                        transaction,
+                        Some(json!({
+                            "ended": "nothing-is-driving",
+                            "detail": format!(
+                                "the worker is gone (no driver holds the lock, no progress for \
+                                 {} s) and the transaction is {}; the wait stopped instead of \
+                                 holding you to its bound",
+                                quiet.as_secs(),
+                                id
+                            ),
+                            "next": [
+                                format!("aikit gateway upgrade resume {id} --foreground"),
+                                format!("aikit gateway upgrade abandon {id} --reason …"),
+                            ],
+                        })),
+                    );
+                }
             }
         }
         std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// How long since the transaction last changed, when it can be said.
+fn quiet_since(transaction: &Transaction) -> Option<Duration> {
+    let now = aikit_adapters::gateway_posture::unix_ms_now();
+    let updated = transaction.updated_at_unix_ms;
+    (updated > 0).then(|| Duration::from_millis(now.saturating_sub(updated)))
+}
+
+/// Whether no worker holds the driver lock right now. The lock is taken and
+/// immediately dropped: acquisition IS the finding.
+fn lock_driver_free(store: &Store, id: &str) -> bool {
+    match lock_driver(store, id) {
+        Ok(lock) => {
+            drop(lock);
+            true
+        }
+        Err(_) => false,
     }
 }
 
@@ -1032,6 +1149,24 @@ pub fn worker_command(home: &AikitHome, id: &str) -> Result<Value> {
     let store = env.store();
     let _lock = lock_driver(&store, id)?;
     let mut transaction = store.load(id)?;
+    // The worker records the executable it IS: the receipt can then be held
+    // against the service definition's named image — the rehearsal fails when
+    // a worker ran on a PATH-resolved `aikit` instead of the instance's build.
+    if let Ok(worker_exe) = std::env::current_exe() {
+        let note = format!(
+            "worker executable: {}",
+            worker_exe.display()
+        );
+        if !transaction.steps.iter().any(|step| step.detail == note) {
+            transaction.steps.push(crate::gateway_upgrade::Step {
+                at_unix_ms: aikit_adapters::gateway_posture::unix_ms_now(),
+                phase: transaction.phase,
+                ok: true,
+                detail: note,
+            });
+            let _ = store.save(&transaction);
+        }
+    }
     let driver = Driver {
         env: &env,
         store: &store,
@@ -1379,6 +1514,7 @@ pub fn probe_remote(remote: &crate::gateway_contact::GatewayRemote) -> Value {
             reading["reachable"] = json!(true);
             reading["revision"] = json!(build.as_ref().map(|b| b.revision.clone()));
             reading["pid"] = json!(build.as_ref().map(|b| b.pid));
+            reading["oi_revision"] = json!(build.as_ref().and_then(|b| b.oi_revision.clone()));
             reading["features"] = json!(features);
             reading["missing_features"] = json!(missing);
             reading["answers_as_workcell"] = json!(build.and_then(|b| b.workcell_ref));
@@ -1470,6 +1606,81 @@ mod tests {
             .unwrap();
         transaction.receipt_delivered = true;
         store.save(&transaction).unwrap();
+    }
+
+    /// #481 item 14: `apply --wait` must not hold its caller to the bound on
+    /// a transaction nothing is driving. A quiet, non-terminal transaction
+    /// whose driver lock is free ends the wait with the finding, naming
+    /// resume/abandon. A live worker holds the lock, so the wait keeps
+    /// waiting while one is actually running.
+    /// #481 item 12: the install preflight reads the volume the managed
+    /// installer actually builds on and installs into — the O:I data root —
+    /// not `$HOME`'s volume, which is a different disk whenever the data root
+    /// is mounted or overridden elsewhere.
+    #[test]
+    fn the_managed_install_root_follows_the_data_root_not_the_home() {
+        // OI_DATA_HOME wins outright.
+        std::env::set_var("OI_DATA_HOME", "/tmp/preflight-oi-data");
+        assert_eq!(
+            managed_install_root().as_deref(),
+            Some(Path::new("/tmp/preflight-oi-data"))
+        );
+        std::env::remove_var("OI_DATA_HOME");
+        // Without it, the platform derivation from HOME (not HOME itself).
+        if cfg!(target_os = "macos") {
+            std::env::set_var("HOME", "/Users/preflight");
+            assert_eq!(
+                managed_install_root().as_deref(),
+                Some(Path::new("/Users/preflight/Library/Application Support/OI"))
+            );
+        } else {
+            std::env::remove_var("XDG_DATA_HOME");
+            std::env::set_var("HOME", "/home/preflight");
+            assert_eq!(
+                managed_install_root().as_deref(),
+                Some(Path::new("/home/preflight/.local/share/oi"))
+            );
+            std::env::set_var("XDG_DATA_HOME", "/xdg/data");
+            assert_eq!(
+                managed_install_root().as_deref(),
+                Some(Path::new("/xdg/data/oi"))
+            );
+        }
+        std::env::remove_var("XDG_DATA_HOME");
+    }
+
+    #[test]
+    fn a_quiet_transaction_nothing_is_driving_ends_the_wait_and_a_live_worker_holds_it() {
+        use crate::gateway_upgrade::Phase;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let long_ago = aikit_adapters::gateway_posture::unix_ms_now() - 3_600_000;
+        transaction_in(&store, "upg-dead", Phase::Installing, long_ago);
+        std::env::set_var("AIKIT_UPGRADE_WAIT_QUIET_SECS", "1");
+
+        // Nothing holds the lock: the wait ends early with the finding.
+        let (transaction, note) = wait_for(&store, "upg-dead", Duration::from_secs(30));
+        assert!(!transaction.phase.is_terminal(), "{:?}", transaction.phase);
+        let note = note.expect("the dead-worker finding");
+        assert_eq!(note["ended"], "nothing-is-driving", "{note}");
+        let next = note["next"].as_array().unwrap();
+        assert!(
+            next.iter().any(|step| step.as_str().unwrap().contains("resume upg-dead"))
+                && next.iter().any(|step| step.as_str().unwrap().contains("abandon upg-dead")),
+            "the finding names resume and abandon: {next:?}"
+        );
+
+        // A live worker holds the driver lock for the whole drive: the wait
+        // keeps waiting (here: hits its bound instead of ending early).
+        let _held = lock_driver(&store, "upg-dead").unwrap();
+        let started = std::time::Instant::now();
+        let (_, note) = wait_for(&store, "upg-dead", Duration::from_millis(1500));
+        assert!(
+            started.elapsed() >= Duration::from_millis(1500),
+            "the wait ran to its bound while a worker held the lock"
+        );
+        assert!(note.is_none(), "a held lock is a live worker: {note:?}");
+        std::env::remove_var("AIKIT_UPGRADE_WAIT_QUIET_SECS");
     }
 
     #[test]

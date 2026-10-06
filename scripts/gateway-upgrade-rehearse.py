@@ -224,13 +224,52 @@ try:
             if any("gateway upgrade upg-" in d and "completed" in d for d in details): break
             time.sleep(1)
         told = [d for d in details if "gateway upgrade upg-" in d and "completed" in d]
+        # The worker must run the executable the instance's service DEFINITION
+        # names (the instance's own build), not whatever `aikit` the manager's
+        # PATH resolves to. The worker records its own executable as a step of
+        # the transaction; read it back and hold it against the definition.
+        worker_exe = None
+        definition_named = None
+        if system == "darwin":
+            definition = os.path.expanduser(f"~/Library/LaunchAgents/{instance}.plist")
+        else:
+            definition = os.path.expanduser(f"~/.config/systemd/user/{instance}.service")
+        if os.path.exists(definition):
+            text = open(definition).read()
+            import re as _re
+            if system == "darwin":
+                m = _re.search(r"<string>(/[^<]+aikit[^<]*)</string>", text)
+            else:
+                m = _re.search(r"ExecStart=(/[^\s]+)", text)
+            if m:
+                definition_named = os.path.realpath(m.group(1))
+        txn_dir = os.path.join(home, "state", "gateway-upgrade")
+        if os.path.isdir(txn_dir):
+            for txn in sorted(os.listdir(txn_dir), reverse=True):
+                txn_json = os.path.join(txn_dir, txn, "transaction.json")
+                if not os.path.exists(txn_json):
+                    continue
+                try:
+                    body = open(txn_json).read()
+                except OSError:
+                    continue
+                import re as _re
+                m = _re.search(r"worker executable: (/[^\"\\n]+)", body)
+                if m:
+                    worker_exe = os.path.realpath(m.group(1))
+                    break
+        worker_matches_definition = bool(
+            worker_exe and definition_named and worker_exe == definition_named
+        )
         entry = {"name": "asked-through-the-gateway", "seconds": round(time.time() - t0, 1),
                  "ask_accepted": bool(asked and asked.get("ok")),
                  "worker_under_service_manager": worker_seen, "pid_before": before["pid"],
                  "pid_after": after["pid"] if after else None, "revision_after": after["revision"][:12] if after else None,
+                 "worker_executable": worker_exe, "definition_names": definition_named,
+                 "worker_ran_the_definitions_executable": worker_matches_definition,
                  "receipt_announced_into_the_conversation": len(told), "receipt": told[0][:200] if told else None,
-                 "expected": "completed, announced once, worker under the service manager",
-                 "ok": bool(after) and len(told) == 1 and bool(worker_seen)}
+                 "expected": "completed, announced once, worker under the service manager, worker running the definition's executable",
+                 "ok": bool(after) and len(told) == 1 and bool(worker_seen) and worker_matches_definition}
         evidence["scenarios"].append(entry)
     status, _ = aikit("gateway", "doctor")
     evidence["doctor_verdict"] = status.get("data", {}).get("verdict") if isinstance(status, dict) else None

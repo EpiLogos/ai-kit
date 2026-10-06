@@ -544,6 +544,57 @@ impl Harness {
 }
 
 #[test]
+fn a_message_admitted_during_a_drain_is_named_in_the_report_retained_and_never_served() {
+    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
+    // The first drain puts the engine in its draining state (as a restart
+    // would) and names nothing: nothing was admitted yet.
+    let first = harness.engine.drain("restart", None).unwrap();
+    assert!(first.admitted_unserved.is_empty());
+    assert!(first.measured);
+
+    // A human message arrives while the drain holds: the kernel appends it
+    // (the journal is the durable record), the engine names it unserved, and
+    // no turn is started for it.
+    let result = harness.admit(fixture_inbound("hello while draining", "d1"));
+    assert!(matches!(result, GatewayIngressResult::Appended { .. }));
+
+    let report = harness.engine.drain("second drain", None).unwrap();
+    assert_eq!(report.admitted_unserved.len(), 1, "{report:#}");
+    let admission = &report.admitted_unserved[0];
+    assert_eq!(admission.platform, "fixture");
+    assert_eq!(admission.conversation_id, "chat-1");
+    assert_eq!(admission.connector_ref, CONNECTOR_REF);
+    assert!(admission.preview.contains("while draining"), "{admission:?}");
+    assert!(admission.stream_ref.starts_with("actuation-stream/"));
+
+    // The message is in its stream, retained — never deleted, never replayed.
+    let kernel = harness.gateway.lock().unwrap();
+    let events = kernel
+        .snapshot()
+        .streams
+        .into_iter()
+        .flat_map(|stream| stream.events)
+        .collect::<Vec<_>>();
+    let kinds = events
+        .iter()
+        .map(|event| event.event["kind"].as_str().unwrap_or("").to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        kinds.iter().any(|kind| kind == "human-message"),
+        "the admitted message is retained: {kinds:?}"
+    );
+    assert!(
+        !kinds.iter().any(|kind| kind == "agent-message"),
+        "no turn answered it: {kinds:?}"
+    );
+    assert_eq!(
+        harness.source.prompted_turns(),
+        0,
+        "a drain admits no new turns"
+    );
+}
+
+#[test]
 fn an_admitted_message_runs_a_turn_answers_on_the_same_stream_and_rides_the_outbound_queue_to_a_receipt(
 ) {
     let harness = Harness::new(aikit_adapters::EnginePolicy::default());

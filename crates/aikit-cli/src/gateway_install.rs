@@ -1240,6 +1240,43 @@ mod tests {
         );
     }
 
+    /// The instance name reaches the REAL definition through `environment()`
+    /// — the method the renderer calls — not only through
+    /// `environment_for_instance` that the unit test can drive directly. This
+    /// is the pin #481 item 15 asks for: a gateway and the workers it starts
+    /// must act on their own definition, and the renderer is what writes it.
+    /// The env var is process-global; the test removes it again on scope exit.
+    #[test]
+    fn environment_writes_the_instance_into_both_rendered_definitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = remote_options(dir.path());
+        std::env::set_var(SERVICE_INSTANCE_ENV, "rehearsal-1");
+        let named = options.environment();
+        assert!(
+            named.contains(&(SERVICE_INSTANCE_ENV, "rehearsal-1".to_owned())),
+            "environment() must carry the instance from the process env: {named:?}"
+        );
+        let binary = Path::new("/usr/local/bin/aikit");
+        let log = Path::new("/tmp/instance-test.log");
+        let plist = render_plist_for(binary, log, &owners(), &options);
+        assert!(
+            plist.contains(&format!("<key>{SERVICE_INSTANCE_ENV}</key>"))
+                && plist.contains("<string>rehearsal-1</string>"),
+            "the rendered LaunchAgent must name the instance"
+        );
+        let unit = render_systemd_unit(binary, &owners(), &options);
+        assert!(
+            unit.contains(&format!("Environment={SERVICE_INSTANCE_ENV}=rehearsal-1")),
+            "the rendered systemd unit must name the instance"
+        );
+        std::env::remove_var(SERVICE_INSTANCE_ENV);
+        let default = options.environment();
+        assert!(
+            default.iter().all(|(name, _)| *name != SERVICE_INSTANCE_ENV),
+            "without the env var the default service names no instance: {default:?}"
+        );
+    }
+
     #[test]
     fn the_systemd_unit_serves_both_carriers_restarts_and_is_wanted_by_the_default_target() {
         let dir = tempfile::tempdir().unwrap();

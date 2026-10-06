@@ -41,6 +41,7 @@ use crate::inspector_render::{self, InspectorSnapshot};
 use crate::layout::{Glyphs, Layout, Width};
 use crate::navigation::AmbientContext;
 use crate::navigator_groups::{self, NavigatorRow};
+use crate::now_field_view;
 use crate::project_workspace_render::{
     workspace_section_label, BoundaryReading, HistoryReading, SessionSpaceRoster, WorkspaceReading,
 };
@@ -238,6 +239,10 @@ pub struct ApplicationSurfaceController {
     /// environment boundary, read exactly once at construction. `None` for
     /// standalone AIKit: the view then operates over what is actually here.
     composed_world: Option<world_entry::ComposedWorld>,
+    /// The composed NOW field supplied through the same boundary, read exactly
+    /// once at construction. `None` for standalone AIKit: the pane then does
+    /// not render.
+    now_field: Option<now_field_view::NowFieldReading>,
 }
 
 /// Which field of the §1.3 creator path the text lane is editing. The lane's
@@ -314,6 +319,7 @@ impl ApplicationSurfaceController {
             conversation: ConversationSurface::default(),
             agent_work_bindings: backend.agent_work_bindings(),
             composed_world: world_entry::ComposedWorld::from_env(),
+            now_field: now_field_view::NowFieldReading::from_env(),
         };
         controller
             .conversation
@@ -322,11 +328,17 @@ impl ApplicationSurfaceController {
                 {
                     aikit_store::home::AikitHome::discover()
                         .map(|home| ConversationCarrier::for_home(&home))
-                        .unwrap_or(ConversationCarrier::Absent)
+                        .unwrap_or(ConversationCarrier::Absent {
+                            reason: "no AIKit home could be resolved to find a gateway carrier \
+                                     under"
+                                .into(),
+                        })
                 }
                 #[cfg(not(unix))]
                 {
-                    ConversationCarrier::Absent
+                    ConversationCarrier::Absent {
+                        reason: "this platform has no default gateway carrier".into(),
+                    }
                 }
             }));
         controller.refresh_relation(backend)?;
@@ -429,7 +441,8 @@ impl ApplicationSurfaceController {
                 WorkspaceReading::new(world, &self.session_spaces, &self.history)
                     .with_factory_work_entry(&self.factory_work_entry)
                     .with_agent_work_bindings(self.agent_work_bindings)
-                    .with_composed_world(self.composed_world.as_ref()),
+                    .with_composed_world(self.composed_world.as_ref())
+                    .with_now_field(self.now_field.as_ref()),
                 self.shell_glyphs,
             );
         } else {

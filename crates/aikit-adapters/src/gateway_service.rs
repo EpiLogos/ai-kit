@@ -2305,6 +2305,7 @@ mod tests {
                 executable_sha256: None,
                 workcell_ref: None,
                 lifecycle: Default::default(),
+                oi_revision: None,
             })),
         })
     }

@@ -208,6 +208,8 @@ mod tests {
             agent_session_ref: Some(r("agent-session/root")),
             actuation_stream_ref: Some(r("actuation-stream/root")),
             provenance: Vec::new(),
+            attempts: 0,
+            last_attempt_at_unix_ms: None,
         }
     }
 

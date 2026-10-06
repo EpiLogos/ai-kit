@@ -506,6 +506,10 @@ pub struct GatewayStatus {
     pub binding_count: usize,
     pub stream_count: usize,
     pub pending_delivery_count: usize,
+    /// The prepared-and-not-receipted operations, by ref. A recovery names
+    /// them; it never blindly re-sends one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_operations: Vec<String>,
     pub delivery_receipt_count: usize,
     #[serde(default)]
     pub connector_health: Vec<ConnectorHealth>,
@@ -527,6 +531,21 @@ pub struct DrainedTurn {
     pub in_reply_to_sequence: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+}
+
+/// One message admitted while a drain held the conversation engine: it is in
+/// its stream, journalled and retained, but nothing served it and nothing
+/// ever will replay it. A drain report names each one, so the receipt says
+/// what a restart cost in full — named, not silently dropped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnservedAdmission {
+    pub stream_ref: String,
+    pub sequence: u64,
+    pub connector_ref: String,
+    pub platform: String,
+    pub conversation_id: String,
+    /// Bounded preview of what was said; the stream keeps the full event.
+    pub preview: String,
 }
 
 /// What a drain found and did, exact rather than counted: work that could not
@@ -558,6 +577,11 @@ pub struct DrainReport {
     /// Communiques waiting at this gateway, by Position. They are in the
     /// journal and survive the restart.
     pub communiques: Vec<CommuniqueCount>,
+    /// Messages admitted while the drain held the engine, each named. They
+    /// are retained in their streams and never replayed; this list is the
+    /// receipt's record of what the drain did not serve.
+    #[serde(default)]
+    pub admitted_unserved: Vec<UnservedAdmission>,
 }
 
 impl DrainReport {
@@ -987,6 +1011,8 @@ impl AgencyGateway {
                 format!("Agency Gateway {AGENCY_GATEWAY_VERSION}"),
                 format!("binding {}", binding.binding_ref),
             ],
+            attempts: 0,
+            last_attempt_at_unix_ms: None,
         };
         prepared.validate(descriptor)?;
         self.pending_deliveries
@@ -1019,6 +1045,45 @@ impl AgencyGateway {
         self.pending_deliveries.remove(&receipt.operation_ref);
         self.delivery_receipts.push(receipt);
         Ok(())
+    }
+
+    /// Record that the pump began executing this pending operation. Written
+    /// before the attempt: a crash between the attempt and its receipt leaves
+    /// `attempts >= 1` with no receipt — evidence recovery reads as "attempted,
+    /// outcome unknown", never as "not sent".
+    pub fn mark_delivery_attempt(
+        &mut self,
+        operation_ref: &ResourceRef,
+        at_unix_ms: u64,
+    ) -> Result<u32> {
+        let pending = self
+            .pending_deliveries
+            .get_mut(operation_ref)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "agency_gateway.unknown_delivery",
+                    format!("attempt mark refers to unknown operation {operation_ref}"),
+                )
+            })?;
+        pending.attempts = pending.attempts.saturating_add(1);
+        pending.last_attempt_at_unix_ms = Some(at_unix_ms);
+        Ok(pending.attempts)
+    }
+
+    /// The prepared-and-not-receipted operations, optionally one connector's.
+    /// Recovery reads these; a `send` among them is held for evidence, never
+    /// blindly re-sent.
+    pub fn pending_deliveries_for(
+        &self,
+        connector_ref: Option<&ResourceRef>,
+    ) -> Vec<OutboundOperation> {
+        self.pending_deliveries
+            .values()
+            .filter(|operation| {
+                connector_ref.is_none() || Some(&operation.connector_ref) == connector_ref
+            })
+            .cloned()
+            .collect()
     }
 
     pub fn set_connector_health(&mut self, health: ConnectorHealth) -> Result<()> {
@@ -1269,6 +1334,7 @@ impl AgencyGateway {
             binding_count: self.bindings.len(),
             stream_count: self.streams.len(),
             pending_delivery_count: self.pending_deliveries.len(),
+            pending_operations: self.pending_operation_refs(),
             delivery_receipt_count: self.delivery_receipts.len(),
             connector_health: self.connector_health.values().cloned().collect(),
             build: None,
@@ -1615,6 +1681,20 @@ pub enum GatewayCommand {
     RecordDelivery {
         receipt: DeliveryReceipt,
     },
+    /// The pump began executing this operation. Written before the attempt,
+    /// so a crash between the attempt and its receipt leaves evidence that
+    /// the attempt happened.
+    MarkDeliveryAttempt {
+        operation_ref: ResourceRef,
+        at_unix_ms: u64,
+    },
+    /// The pending outbound operations of one connector (all, when no
+    /// connector is named), as prepared and not yet receipted. Recovery and
+    /// re-arm read this; a send is never blindly re-sent from it.
+    PendingDeliveries {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connector_ref: Option<ResourceRef>,
+    },
     SetConnectorHealth {
         health: ConnectorHealth,
     },
@@ -1668,6 +1748,12 @@ pub enum GatewayCommand {
     ReadCommunique {
         communique_ref: String,
     },
+    /// The sender-side delivery readback: where does THIS gateway's copy of
+    /// that relayed Communique stand? The forwarding gateway asks its peer
+    /// this on the relay pass, and learns its own record's delivery.
+    CommuniqueFate {
+        communique_ref: String,
+    },
     /// Record the explicit crossing into Factory custody.
     EscalateCommunique {
         communique_ref: String,
@@ -1677,6 +1763,18 @@ pub enum GatewayCommand {
     },
     CommuniqueCounts,
     CommuniqueForwardQueue,
+    /// The sender-side readback command: record that the recipient's gateway
+    /// reports this forwarded Communique delivered there. Owner and peer
+    /// carriers both serve relay records, but the readback completion is a
+    /// local record-keeping act: it rides the relay pass, in process, and is
+    /// not a carrier command.
+    RecordRemoteDelivery {
+        communique_ref: String,
+        at_unix_ms: u64,
+        basis: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivered_to_generation_ref: Option<String>,
+    },
     RecordCommuniqueForward {
         communique_ref: String,
         outcome: CommuniqueForwardOutcome,
@@ -1750,8 +1848,10 @@ impl GatewayCommand {
                 | Self::CommuniqueInbox { .. }
                 | Self::CommuniqueConversation { .. }
                 | Self::ReadCommunique { .. }
+                | Self::CommuniqueFate { .. }
                 | Self::CommuniqueCounts
                 | Self::CommuniqueForwardQueue
+                | Self::PendingDeliveries { .. }
                 | Self::OccupancyRead { .. }
                 | Self::OccupancyList
         )
@@ -1788,6 +1888,7 @@ impl GatewayCommand {
                 | Self::AcknowledgeCommuniques { .. }
                 | Self::CommuniqueConversation { .. }
                 | Self::ReadCommunique { .. }
+                | Self::CommuniqueFate { .. }
                 | Self::EscalateCommunique { .. }
                 | Self::CommuniqueCounts
                 | Self::CommuniqueForwardQueue
@@ -1876,6 +1977,15 @@ pub enum GatewayResponse {
     DeliveryRecorded {
         operation_ref: ResourceRef,
     },
+    DeliveryAttemptMarked {
+        operation_ref: ResourceRef,
+        attempts: u32,
+    },
+    /// The prepared-and-not-receipted operations that matched a
+    /// `PendingDeliveries` read.
+    PendingDeliveries {
+        operations: Vec<OutboundOperation>,
+    },
     ConnectorHealthRecorded {
         connector_ref: ResourceRef,
     },
@@ -1907,6 +2017,14 @@ pub enum GatewayResponse {
     },
     CommuniqueRecord {
         communique: Communique,
+    },
+    /// The answer to a sender-side delivery readback: what the asked gateway
+    /// knows about that relayed Communique. `None` when it holds no such
+    /// record — a fact in itself (it may have been journaled elsewhere or
+    /// retired), never silently read as delivered.
+    CommuniqueFate {
+        communique_ref: String,
+        fate: Option<crate::gateway_communique::CommuniqueFate>,
     },
     CommuniqueCounts {
         counts: Vec<CommuniqueCount>,
@@ -1999,6 +2117,21 @@ pub fn execute_gateway_command(
             gateway.record_delivery(receipt)?;
             Ok(GatewayResponse::DeliveryRecorded { operation_ref })
         }
+        GatewayCommand::MarkDeliveryAttempt {
+            operation_ref,
+            at_unix_ms,
+        } => {
+            let attempts = gateway.mark_delivery_attempt(&operation_ref, at_unix_ms)?;
+            Ok(GatewayResponse::DeliveryAttemptMarked {
+                operation_ref,
+                attempts,
+            })
+        }
+        GatewayCommand::PendingDeliveries { connector_ref } => {
+            Ok(GatewayResponse::PendingDeliveries {
+                operations: gateway.pending_deliveries_for(connector_ref.as_ref()),
+            })
+        }
         GatewayCommand::SetConnectorHealth { health } => {
             let connector_ref = health.connector_ref.clone();
             gateway.set_connector_health(health)?;
@@ -2083,6 +2216,12 @@ pub fn execute_gateway_command(
                 communique: gateway.communiques.get(&communique_ref)?.clone(),
             })
         }
+        GatewayCommand::CommuniqueFate { communique_ref } => {
+            Ok(GatewayResponse::CommuniqueFate {
+                communique_ref: communique_ref.clone(),
+                fate: gateway.communiques.fate(&communique_ref),
+            })
+        }
         GatewayCommand::EscalateCommunique {
             communique_ref,
             custody_ref,
@@ -2127,6 +2266,19 @@ pub fn execute_gateway_command(
             communique: gateway
                 .communiques
                 .record_forward(&communique_ref, outcome, routing)?,
+        }),
+        GatewayCommand::RecordRemoteDelivery {
+            communique_ref,
+            at_unix_ms,
+            basis,
+            delivered_to_generation_ref,
+        } => Ok(GatewayResponse::CommuniqueRecord {
+            communique: gateway.communiques.record_remote_delivery(
+                &communique_ref,
+                at_unix_ms,
+                &basis,
+                delivered_to_generation_ref,
+            )?,
         }),
         GatewayCommand::OccupancyRead { .. } | GatewayCommand::OccupancyList => {
             Err(AikitError::new(

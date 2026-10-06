@@ -1123,6 +1123,8 @@ mod tests {
             agent_session_ref: Some(r("agent-session/root")),
             actuation_stream_ref: Some(r("actuation-stream/root")),
             provenance: vec!["gateway".into()],
+            attempts: 0,
+            last_attempt_at_unix_ms: None,
         };
         let receipt = connector.execute_now(operation).unwrap();
         assert_eq!(receipt.state, DeliveryState::Delivered);
@@ -1159,6 +1161,8 @@ mod tests {
             agent_session_ref: None,
             actuation_stream_ref: None,
             provenance: Vec::new(),
+            attempts: 0,
+            last_attempt_at_unix_ms: None,
         };
         connector.execute_now(operation).unwrap();
         let call = &connector.transport_ref().calls[1];
@@ -1190,6 +1194,8 @@ mod tests {
             agent_session_ref: None,
             actuation_stream_ref: None,
             provenance: Vec::new(),
+            attempts: 0,
+            last_attempt_at_unix_ms: None,
         };
         connector.execute_now(edit).unwrap();
         assert_eq!(connector.transport_ref().calls[1].0, "chat.update");
@@ -1209,6 +1215,8 @@ mod tests {
             agent_session_ref: None,
             actuation_stream_ref: None,
             provenance: Vec::new(),
+            attempts: 0,
+            last_attempt_at_unix_ms: None,
         };
         connector.execute_now(react).unwrap();
         assert_eq!(connector.transport_ref().calls[2].0, "reactions.add");
@@ -1232,6 +1240,8 @@ mod tests {
             agent_session_ref: None,
             actuation_stream_ref: None,
             provenance: Vec::new(),
+            attempts: 0,
+            last_attempt_at_unix_ms: None,
         };
         connector.execute_now(delete).unwrap();
         assert_eq!(connector.transport_ref().calls[3].0, "chat.delete");
@@ -1254,6 +1264,8 @@ mod tests {
             agent_session_ref: Some(r("agent-session/root")),
             actuation_stream_ref: Some(r("actuation-stream/root")),
             provenance: Vec::new(),
+            attempts: 0,
+            last_attempt_at_unix_ms: None,
         };
         let receipt = connector.execute_now(operation).unwrap();
         assert_eq!(receipt.state, DeliveryState::Failed);
@@ -1289,6 +1301,8 @@ mod tests {
             agent_session_ref: None,
             actuation_stream_ref: None,
             provenance: Vec::new(),
+            attempts: 0,
+            last_attempt_at_unix_ms: None,
         };
         assert_eq!(
             typing
@@ -1321,6 +1335,8 @@ mod tests {
             agent_session_ref: None,
             actuation_stream_ref: None,
             provenance: Vec::new(),
+            attempts: 0,
+            last_attempt_at_unix_ms: None,
         };
         assert_eq!(
             media_send

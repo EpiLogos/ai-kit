@@ -52,6 +52,7 @@ use crate::gateway_runtime::{
     execute_gateway_command, AgencyGateway, GatewayCommand, GatewayIngressResult, GatewayResponse,
 };
 use crate::gateway_service::{persist_gateway_state, SubscriptionHub};
+use crate::gateway_posture::unix_ms_now;
 
 /// Error code a cooperative connector yields from `next_event` when no frame
 /// arrived within its poll window — a tick, not a failure. The worker services
@@ -258,6 +259,23 @@ fn run_connector_worker(
                             provenance: vec!["gateway connector pump".into()],
                         },
                     );
+                    // (Re-)arm what this connector still owes: on first
+                    // connect after a restart AND on every reconnect. The
+                    // law is per kind: idempotent operations are re-attempted
+                    // (their failure modes resolve honestly); a send whose
+                    // outcome is unknown stays held for evidence, because a
+                    // blind re-send may duplicate a message the recipient
+                    // already read.
+                    let held = rearm_pending(&context, &connector_ref, &context.queue);
+                    if !held.is_empty() {
+                        eprintln!(
+                            "connector {}: {} unreceipted send(s) held (attempted, outcome \
+                             unknown); resolve them with evidence via \
+                             `aikit gateway recover` — never re-sent blindly",
+                            connector_ref,
+                            held.len()
+                        );
+                    }
                     connect_failures = 0;
                     match serve_event_loop(&context, connector.as_mut(), &generation) {
                         LoopExit::Shutdown => {
@@ -444,12 +462,70 @@ fn serve_event_loop(
     }
 }
 
+/// Re-arm one connector's durable pending operations onto its pump queue:
+/// the idempotent kinds are re-queued (a re-attempt either succeeds or fails
+/// into an honest receipt); the send kind stays held — an attempted-but-
+/// unreceipted send may already be in the recipient's chat, and a blind
+/// re-send would duplicate it. Answers the held sends' refs.
+fn rearm_pending(
+    context: &WorkerContext,
+    connector_ref: &ResourceRef,
+    queue: &Arc<ConnectorOutbound>,
+) -> Vec<String> {
+    let operations = match locked_command(
+        context,
+        GatewayCommand::PendingDeliveries {
+            connector_ref: Some(connector_ref.clone()),
+        },
+    ) {
+        Ok(GatewayResponse::PendingDeliveries { operations }) => operations,
+        Ok(other) => {
+            eprintln!(
+                "connector pump: the pending-deliveries read answered unexpectedly ({other:?}); \
+                 nothing was re-armed"
+            );
+            return Vec::new();
+        }
+        Err(error) => {
+            eprintln!(
+                "connector pump: the pending deliveries could not be read ({error}); nothing \
+                 was re-armed"
+            );
+            return Vec::new();
+        }
+    };
+    let mut held = Vec::new();
+    for operation in operations {
+        if operation.is_idempotent() {
+            queue.push(operation);
+        } else {
+            held.push(operation.operation_ref.to_string());
+        }
+    }
+    held
+}
+
 fn execute_and_record(
     context: &WorkerContext,
     connector: &mut dyn GatewayConnector,
     operation: OutboundOperation,
     generation: &crate::gateway_connector::ConnectorDescriptor,
 ) -> Result<()> {
+    // Evidence before action: the attempt is durable before the connector is
+    // invoked, so a crash mid-attempt leaves "attempted, outcome unknown" —
+    // which recovery reads honestly — instead of a silently vanished send.
+    if let Err(error) = locked_command(
+        context,
+        GatewayCommand::MarkDeliveryAttempt {
+            operation_ref: operation.operation_ref.clone(),
+            at_unix_ms: unix_ms_now(),
+        },
+    ) {
+        eprintln!(
+            "connector pump could not mark the attempt of {}: {error}",
+            operation.operation_ref
+        );
+    }
     let receipt = match block_on(connector.execute(operation.clone())) {
         Ok(receipt) => receipt,
         Err(error) => DeliveryReceipt {
@@ -944,6 +1020,108 @@ pub mod tests {
                 std::thread::sleep(Duration::from_millis(20));
             }
             panic!("timed out waiting for {what}");
+        }
+    }
+
+    /// The durable outbound law (#481 items 2 and 9): a send whose outcome is
+    /// unknown survives a restart HELD — re-armed for nothing, named for
+    /// evidence — while an idempotent operation is re-attempted when its
+    /// connector reconnects. The attempt marker lands before the connector is
+    /// invoked, so an attempt is never silently lost.
+    #[test]
+    fn a_pending_send_is_held_on_reconnect_an_idempotent_operation_is_rearmed_and_attempts_are_durable(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let state_file = dir.path().join("gateway.json");
+        let mut gateway = AgencyGateway::new(ResourceRef::parse("agency-gateway/fixture").unwrap());
+        seed_binding(&mut gateway);
+        // Two pending operations from a previous life: a send (never
+        // blindly re-sent) and an edit (idempotent, re-attempted).
+        let send = gateway
+            .prepare_operation(
+                &ResourceRef::parse(BINDING_REF).unwrap(),
+                OutboundOperationKind::Send {
+                    text: Some("a reply".into()),
+                    media: Vec::new(),
+                    reply_to_native_message_id: None,
+                },
+            )
+            .unwrap();
+        let edit = gateway
+            .prepare_operation(
+                &ResourceRef::parse(BINDING_REF).unwrap(),
+                OutboundOperationKind::Edit {
+                    native_message_id: "fixture-message-1".into(),
+                    text: "edited".into(),
+                },
+            )
+            .unwrap();
+        // Attempt evidence: the edit was mid-flight when the process died.
+        let attempts = gateway
+            .mark_delivery_attempt(&edit.operation_ref, unix_ms_now())
+            .unwrap();
+        assert_eq!(attempts, 1);
+        // The restart: state restored from the snapshot, the send still
+        // pending, its attempt evidence intact.
+        let snapshot = gateway.snapshot();
+        let mut restored = AgencyGateway::from_snapshot(snapshot).unwrap();
+        assert_eq!(
+            restored.pending_deliveries_for(None).len(),
+            2,
+            "an unreceipted operation is retained across a restart"
+        );
+        let restored_send = restored
+            .pending_deliveries_for(None)
+            .into_iter()
+            .find(|op| op.operation_ref == send.operation_ref)
+            .unwrap();
+        assert_eq!(restored_send.attempts, 0, "the send was never attempted");
+
+        // Re-arm, exactly as the connector worker does on (re)connect.
+        let context = WorkerContext {
+            gateway: Arc::new(Mutex::new(restored)),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            state_file: Some(state_file.clone()),
+            hub: Arc::new(SubscriptionHub::default()),
+            queue: Arc::new(ConnectorOutbound::default()),
+            controls: Arc::new(ConnectorPumpControls::default()),
+            engine: None,
+        };
+        let connector_ref = ResourceRef::parse(CONNECTOR_REF).unwrap();
+        let held = rearm_pending(&context, &connector_ref, &context.queue);
+        assert_eq!(
+            held,
+            vec![send.operation_ref.to_string()],
+            "the outcome-unknown send is held, named for evidence resolution"
+        );
+        assert!(
+            context.queue.try_pop().is_some(),
+            "the idempotent edit is re-attempted onto the connector's queue"
+        );
+
+        // An owner's evidence resolution retires a held send without sending
+        // anything: the receipt is recorded and the pending entry is gone.
+        {
+            let mut kernel = context.gateway.lock().unwrap();
+            kernel
+                .record_delivery(DeliveryReceipt {
+                    operation_ref: send.operation_ref.clone(),
+                    connector_ref: ResourceRef::parse("gateway-connector/resolved-by-evidence")
+                        .unwrap(),
+                    state: DeliveryState::Delivered,
+                    native_message_id: None,
+                    detail: Some("the recipient's own word".into()),
+                    native: Default::default(),
+                    provenance: vec!["resolved by owner evidence".into()],
+                })
+                .unwrap();
+            let pending = kernel.pending_deliveries_for(None);
+            assert!(
+                pending.is_empty(),
+                "the evidence resolution retires the pending entry: {pending:?}"
+            );
+            let receipts = kernel.snapshot().delivery_receipts;
+            assert!(receipts.iter().any(|r| r.operation_ref == send.operation_ref));
         }
     }
 

@@ -1629,7 +1629,7 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
             Ok(Reply::Text("gateway service stopped cleanly".into()))
         }
         GatewaySub::Recover(a) => {
-            let data = aikit_cli::gateway_recover::recover(&home, a.apply)?;
+            let data = aikit_cli::gateway_recover::recover(&home, &a)?;
             Ok(Reply::Data {
                 context: EnvelopeContext::default(),
                 data,

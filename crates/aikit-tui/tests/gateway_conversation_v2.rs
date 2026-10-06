@@ -309,6 +309,7 @@ impl FakeGateway {
                     }],
                     build: None,
                     listeners: Vec::new(),
+                    pending_operations: Vec::new(),
                 },
             },
             GatewayCommand::Ecology => GatewayResponse::Ecology {

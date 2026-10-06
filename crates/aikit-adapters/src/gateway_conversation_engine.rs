@@ -86,7 +86,7 @@ use crate::gateway_connector_pump::{ConnectorPumpControls, ConnectorQueues};
 use crate::gateway_runtime::{
     execute_gateway_command, AgencyGateway, DrainReport, DrainedTurn, GatewayAgentReply,
     GatewayAgentReplyFailure, GatewayBinding, GatewayCommand, GatewayConversationOperation,
-    GatewayResponse, GatewayStreamEvent,
+    GatewayResponse, GatewayStreamEvent, UnservedAdmission,
 };
 use crate::gateway_service::{persist_gateway_state, SubscriptionHub};
 
@@ -1209,6 +1209,9 @@ struct EngineInner {
     in_flight: BTreeMap<ResourceRef, InFlightTurn>,
     /// Set when a restart was requested: no new work is admitted.
     draining: bool,
+    /// Messages admitted while `draining` held: named for the drain report,
+    /// never served, never replayed.
+    unserved: Vec<UnservedAdmission>,
 }
 
 /// The conversation an upgrade was asked for from, so its receipt returns
@@ -1263,7 +1266,49 @@ pub struct GatewayConversationEngine {
     inner: Mutex<EngineInner>,
 }
 
+/// The named record of one message a drain left unserved: which stream and
+/// sequence, which conversation, and a bounded preview. The stream keeps the
+/// full event; this is the receipt's pointer to it.
+fn unserved_admission(kernel: &AgencyGateway, event: &GatewayStreamEvent) -> UnservedAdmission {
+    let metadata = event.event.get("metadata");
+    let metadata = metadata.and_then(Value::as_object);
+    let text = event
+        .event
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let mut preview: String = text.chars().take(80).collect();
+    if text.chars().count() > 80 {
+        preview.push('…');
+    }
+    // Which stream holds this sequence: the journal is small, and the drain
+    // path is cold — a linear read is honest and cheap here.
+    let stream_ref = kernel
+        .snapshot()
+        .streams
+        .into_iter()
+        .find(|stream| stream.events.iter().any(|e| e.sequence == event.sequence))
+        .map(|stream| stream.stream_ref.to_string())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let field = |name: &str| {
+        metadata
+            .and_then(|m| m.get(name))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned()
+    };
+    UnservedAdmission {
+        stream_ref,
+        sequence: event.sequence,
+        connector_ref: field("connector_ref"),
+        platform: field("platform"),
+        conversation_id: field("conversation_id"),
+        preview,
+    }
+}
+
 impl GatewayConversationEngine {
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         gateway: Arc<Mutex<AgencyGateway>>,
@@ -1287,6 +1332,7 @@ impl GatewayConversationEngine {
             inner: Mutex::new(EngineInner {
                 in_flight: BTreeMap::new(),
                 draining: false,
+                unserved: Vec::new(),
             }),
         })
     }
@@ -1318,8 +1364,22 @@ impl GatewayConversationEngine {
     /// lookup reads the same state the append just wrote. Turn work is
     /// spawned, never run inline.
     pub fn appended(self: &Arc<Self>, kernel: &AgencyGateway, event: &GatewayStreamEvent) {
-        if self.inner.lock().expect("conversation engine").draining {
-            return;
+        // A message admitted while a drain holds the engine is journalled and
+        // retained — and named here, so the drain report (and the receipt it
+        // feeds) says what was left unserved. It is never replayed.
+        let draining = self.inner.lock().expect("conversation engine").draining;
+        let admission = draining.then(|| {
+            unserved_admission(kernel, event)
+        });
+        if let Some(admission) = admission {
+            let mut inner = self.inner.lock().expect("conversation engine");
+            if inner.draining {
+                // Re-check under the write lock: the drain may have ended
+                // between the read and here, and a served message is not
+                // unserved.
+                inner.unserved.push(admission);
+                return;
+            }
         }
         let kind = event.event.get("kind").and_then(Value::as_str);
         if kind != Some("human-message") {
@@ -2565,11 +2625,13 @@ impl GatewayConversationEngine {
             }
         }
         self.persist()?;
-        let (pending_operations, communiques) = {
+        let (pending_operations, communiques, admitted_unserved) = {
             let kernel = self.gateway.lock().map_err(|_| poisoned())?;
+            let mut inner = self.inner.lock().expect("conversation engine");
             (
                 kernel.pending_operation_refs(),
                 kernel.communiques().counts(),
+                std::mem::take(&mut inner.unserved),
             )
         };
         Ok(DrainReport {
@@ -2582,6 +2644,7 @@ impl GatewayConversationEngine {
             turns_interrupted,
             pending_operations,
             communiques,
+            admitted_unserved,
         })
     }
 
@@ -2591,15 +2654,18 @@ impl GatewayConversationEngine {
         let report = self.drain("conversation restart", None)?;
         let resolved = report.turns_resolved.len();
         let interrupted = report.turns_interrupted.len();
+        let unserved = report.admitted_unserved.len();
         let summary = json!({
             "resolved": resolved,
             "interrupted": interrupted,
+            "admitted_unserved": report.admitted_unserved,
             "turn_grace_ms": report.grace_ms,
         });
         Ok((
             json!({"restarting": true, "drain": summary}),
             Some(format!(
-                "restarting: {resolved} turn(s) resolved, {interrupted} interrupted; the state \
+                "restarting: {resolved} turn(s) resolved, {interrupted} interrupted, \
+                 {unserved} message(s) admitted during the drain and retained unserved; the state \
                  snapshot is persisted and the service manager will rematerialise the gateway"
             )),
             None,

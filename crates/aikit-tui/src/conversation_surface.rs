@@ -72,16 +72,27 @@ pub enum ConversationCarrier {
         bearer_token: String,
         workcell_ref: String,
     },
-    /// No socket carrier was resolved: either this platform has no default
-    /// Unix carrier, or no AIKit home could be resolved to find one under.
-    /// The aperture can still open and say so, which is more honest than
-    /// pretending to poll.
-    Absent,
+    /// No socket carrier was resolved. `reason` says which kind of absence it
+    /// is: no default carrier on this platform, no AIKit home to look under —
+    /// or, when `AIKIT_GATEWAY_AT` named a remote Workcell, the exact
+    /// resolution failure. A named remote that cannot be resolved stays
+    /// absent-with-its-reason: it must never fall back to this home's local
+    /// gateway, because a pointing error would then open a quiet
+    /// conversation with the wrong gateway.
+    Absent { reason: String },
 }
 
 impl ConversationCarrier {
     pub fn for_home(home: &AikitHome) -> Self {
-        if let Some(carrier) = Self::for_env(home) {
+        let at = std::env::var("AIKIT_GATEWAY_AT").ok();
+        Self::for_home_with(home, at.as_deref())
+    }
+
+    /// [`Self::for_home`] with the remote reference given, so the law — a set
+    /// reference is a commitment: never a quiet fall back to the local
+    /// gateway — is testable without mutating process environment.
+    pub fn for_home_with(home: &AikitHome, at: Option<&str>) -> Self {
+        if let Some(carrier) = Self::for_env(home, at) {
             return carrier;
         }
         #[cfg(unix)]
@@ -91,21 +102,34 @@ impl ConversationCarrier {
         #[cfg(not(unix))]
         {
             let _ = home;
-            Self::Absent
+            Self::Absent {
+                reason: "this platform has no default gateway carrier".into(),
+            }
         }
     }
 
     /// `AIKIT_GATEWAY_AT=<workcell-ref>`: address the gateway declared for
-    /// that remote Workcell. An undeclared Workcell or an unusable token
-    /// location resolves to `Absent`, and the aperture says the gateway is
-    /// unreachable rather than silently falling back to the local one — a
-    /// pointing error must never become a quiet conversation with the wrong
-    /// gateway.
-    fn for_env(home: &AikitHome) -> Option<Self> {
-        let reference = std::env::var("AIKIT_GATEWAY_AT")
-            .ok()
-            .filter(|value| !value.trim().is_empty())?;
-        let bytes = std::fs::read(home.state().join("gateway-remotes.json")).ok()?;
+    /// that remote Workcell. `None` means the variable is not set and the
+    /// caller may fall back to its local carrier. A set variable commits the
+    /// answer: the declared remote's WebSocket carrier, or an `Absent` that
+    /// carries the exact resolution failure — never `None`, because falling
+    /// back now would open a quiet conversation with the wrong gateway.
+    fn for_env(home: &AikitHome, at: Option<&str>) -> Option<Self> {
+        let reference = at
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?
+            .to_owned();
+        let bytes = match std::fs::read(home.state().join("gateway-remotes.json")) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Some(Self::Absent {
+                    reason: format!(
+                        "the gateway endpoints of {reference} could not be read from {}: {error}",
+                        home.state().join("gateway-remotes.json").display()
+                    ),
+                })
+            }
+        };
         #[derive(serde::Deserialize)]
         struct Remotes {
             #[serde(default)]
@@ -122,12 +146,38 @@ impl ConversationCarrier {
         fn default_ws_path() -> String {
             "/".into()
         }
-        let remotes: Remotes = serde_json::from_slice(&bytes).ok()?;
-        let remote = remotes
+        let remotes: Remotes = match serde_json::from_slice(&bytes) {
+            Ok(remotes) => remotes,
+            Err(error) => {
+                return Some(Self::Absent {
+                    reason: format!(
+                        "the gateway endpoint declarations for {} are unreadable: {error}",
+                        reference
+                    ),
+                })
+            }
+        };
+        let Some(remote) = remotes
             .remotes
             .into_iter()
-            .find(|remote| remote.workcell_ref == reference)?;
-        let token = resolve_token(&remote.token_location)?;
+            .find(|remote| remote.workcell_ref == reference)
+        else {
+            return Some(Self::Absent {
+                reason: format!(
+                    "{reference} is not declared here; declare its gateway with `aikit gateway \
+                     remote add {reference} ...`"
+                ),
+            });
+        };
+        let Some(token) = resolve_token(&remote.token_location) else {
+            return Some(Self::Absent {
+                reason: format!(
+                    "the carrier token of {reference} could not be resolved from {}; a named \
+                     remote is never answered by this home's local gateway",
+                    remote.token_location
+                ),
+            });
+        };
         Some(Self::WebSocket {
             bind: remote.websocket_bind,
             path: remote.websocket_path,
@@ -327,6 +377,11 @@ impl ConversationSurface {
         self.note.as_deref()
     }
 
+    /// Whether the carrier answered its last status read.
+    pub fn is_reachable(&self) -> bool {
+        self.reachable
+    }
+
     pub fn compose(&self) -> &str {
         &self.compose
     }
@@ -365,17 +420,28 @@ impl ConversationSurface {
                 path: path.clone(),
                 bearer_token: bearer_token.clone(),
             }),
-            ConversationCarrier::Absent => None,
+            ConversationCarrier::Absent { .. } => None,
+        }
+    }
+
+    /// Why no carrier target resolved, when one did not. An `Absent` carrier
+    /// carries its own reason — for a named remote, the exact resolution
+    /// failure, so a pointing error is readable instead of masquerading as
+    /// "this home has no gateway".
+    fn absence_note(&mut self) -> Option<String> {
+        match self.carrier()? {
+            ConversationCarrier::Absent { reason } => Some(reason.clone()),
+            _ => None,
         }
     }
 
     fn refresh_roster(&mut self) {
         let Some(target) = self.target() else {
             self.reachable = false;
-            self.note = Some(
+            self.note = Some(self.absence_note().unwrap_or_else(|| {
                 "no gateway socket was resolved for this home; start one with `aikit gateway serve`"
-                    .into(),
-            );
+                    .into()
+            }));
             return;
         };
         match gateway_command_within(&target, GatewayCommand::Status, None, READ_TIMEOUT) {
@@ -430,10 +496,10 @@ impl ConversationSurface {
     /// as the initial history.
     pub fn open_selected(&mut self) {
         let Some(target) = self.target() else {
-            self.note = Some(
+            self.note = Some(self.absence_note().unwrap_or_else(|| {
                 "no gateway socket was resolved for this home; start one with `aikit gateway serve`"
-                    .into(),
-            );
+                    .into()
+            }));
             return;
         };
         let Some(entry) = self.entries.get(self.selected).cloned() else {
@@ -1367,5 +1433,109 @@ fn connection_state_word(state: ConnectorConnectionState) -> &'static str {
         ConnectorConnectionState::Reconnecting => "reconnecting",
         ConnectorConnectionState::Unavailable => "unavailable",
         ConnectorConnectionState::Closed => "closed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aikit_store::home::AikitHome;
+
+    #[test]
+    fn a_set_remote_reference_is_a_commitment_and_never_the_local_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let carrier = ConversationCarrier::for_home_with(&home, Some("workcell:omarchy"));
+        match carrier {
+            ConversationCarrier::Absent { reason } => {
+                assert!(
+                    reason.contains("workcell:omarchy"),
+                    "the absence must name the remote that could not be resolved: {reason}"
+                );
+            }
+            other => panic!(
+                "an undeclared remote must be an absent carrier with its reason, never a quiet \
+                 fall back; got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn without_a_remote_reference_the_local_carrier_stands_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let carrier = ConversationCarrier::for_home_with(&home, None);
+        #[cfg(unix)]
+        assert!(
+            matches!(carrier, ConversationCarrier::UnixSocket(_)),
+            "no reference: the local socket is the carrier, got {carrier:?}"
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_token_keeps_the_remote_absent_with_its_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        std::fs::create_dir_all(home.state()).unwrap();
+        std::fs::write(
+            home.state().join("gateway-remotes.json"),
+            r#"{"remotes":[{"workcell_ref":"workcell:omarchy","websocket_bind":"100.64.0.9:7788","token_location":"file:/tmp/definitely-missing-gateway-token"}]}"#,
+        )
+        .unwrap();
+        let carrier = ConversationCarrier::for_home_with(&home, Some("workcell:omarchy"));
+        match carrier {
+            ConversationCarrier::Absent { reason } => {
+                assert!(
+                    reason.contains("token") && reason.contains("workcell:omarchy"),
+                    "the absence must name the token failure: {reason}"
+                );
+            }
+            other => panic!(
+                "an unusable token must stay an absent carrier with its reason, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn a_declared_remote_with_a_usable_token_is_a_websocket_carrier() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        std::fs::create_dir_all(home.state()).unwrap();
+        let token_path = dir.path().join("omarchy.token");
+        std::fs::write(&token_path, "sekrit").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        std::fs::write(
+            home.state().join("gateway-remotes.json"),
+            format!(
+                r#"{{"remotes":[{{"workcell_ref":"workcell:omarchy","websocket_bind":"100.64.0.9:7788","token_location":"file:{}"}}]}}"#,
+                token_path.display()
+            ),
+        )
+        .unwrap();
+        let carrier = ConversationCarrier::for_home_with(&home, Some("workcell:omarchy"));
+        assert!(
+            matches!(carrier, ConversationCarrier::WebSocket { .. }),
+            "a declared remote with a usable token is its WebSocket carrier, got {carrier:?}"
+        );
+    }
+
+    #[test]
+    fn the_aperture_says_the_remote_resolution_failure_not_a_missing_local_socket() {
+        let mut surface = ConversationSurface::default();
+        surface.set_carrier(ConversationCarrier::Absent {
+            reason: "workcell:omarchy is not declared here".into(),
+        });
+        surface.open_aperture();
+        surface.refresh_roster();
+        assert!(!surface.is_reachable());
+        let note = surface.note().unwrap_or_default();
+        assert!(
+            note.contains("workcell:omarchy"),
+            "the note must carry the remote failure, got: {note}"
+        );
     }
 }

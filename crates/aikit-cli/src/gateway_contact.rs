@@ -2700,6 +2700,7 @@ fn forward_pass_via(
             queued.push(json!({"communique_ref": record.communique_ref, "report": report}));
         }
     }
+    let readback = readback_forwarded(gateway, carrier, &remotes, now_unix_ms())?;
     Ok(json!({
         "considered": queue.len(),
         "local_workcell": { "ref": local, "basis": basis },
@@ -2709,7 +2710,111 @@ fn forward_pass_via(
         "held": held,
         "ambiguous": ambiguous,
         "restood": restood,
+        "readback": readback,
         "remotes": survey.map(|survey| survey.statuses()).unwrap_or_default(),
+    }))
+}
+
+/// The sender side of remote delivery: every Communique this gateway relayed
+/// and still counts as pending is read back from the gateway it was relayed
+/// to. When that gateway has recorded the delivery, the sender copy learns
+/// it (state `delivered`, basis naming the remote and the readback); when it
+/// has not, the copy stays exactly as it was and the pass says so. A readback
+/// never marks anything delivered on its own authority — only the remote's
+/// own record does.
+fn readback_forwarded(
+    gateway: &dyn GatewayAccess,
+    carrier: RemoteCarrier<'_>,
+    remotes: &GatewayRemotes,
+    at: u64,
+) -> Result<Value> {
+    let mut learned = Vec::new();
+    let mut unresolved = Vec::new();
+    // One survey of the queue; the forwarded subset is what a readback means.
+    let queue = expect_list(gateway.call(GatewayCommand::CommuniqueForwardQueue)?)?;
+    for record in queue.iter().filter(|record| {
+        record.state.is_undelivered()
+            && matches!(record.forward, Some(CommuniqueForward::Forwarded { .. }))
+    }) {
+        let Some(CommuniqueForward::Forwarded {
+            workcell_ref,
+            remote_gateway_ref,
+            ..
+        }) = &record.forward
+        else {
+            continue;
+        };
+        let Some(entry) = remotes
+            .remotes
+            .iter()
+            .find(|entry| &entry.workcell_ref == workcell_ref)
+        else {
+            unresolved.push(json!({
+                "communique_ref": record.communique_ref,
+                "workcell_ref": workcell_ref,
+                "reason": "the Workcell it was relayed to is no longer declared here",
+            }));
+            continue;
+        };
+        let fate = match carrier(entry, GatewayCommand::CommuniqueFate {
+            communique_ref: record.communique_ref.clone(),
+        }) {
+            Ok(GatewayResponse::CommuniqueFate { fate, .. }) => fate,
+            Ok(other) => {
+                unresolved.push(json!({
+                    "communique_ref": record.communique_ref,
+                    "remote_gateway_ref": remote_gateway_ref,
+                    "reason": format!("the remote answered the readback unexpectedly: {}", unexpected(&other)),
+                }));
+                continue;
+            }
+            Err(error) => {
+                unresolved.push(json!({
+                    "communique_ref": record.communique_ref,
+                    "remote_gateway_ref": remote_gateway_ref,
+                    "reason": error.to_string(),
+                }));
+                continue;
+            }
+        };
+        match fate {
+            Some(fate) if fate.state == CommuniqueState::Delivered => {
+                let basis = format!(
+                    "delivered at Workcell {workcell_ref} through gateway {remote_gateway_ref}; \
+                     read back on the relay pass"
+                );
+                gateway.call(GatewayCommand::RecordRemoteDelivery {
+                    communique_ref: record.communique_ref.clone(),
+                    at_unix_ms: at,
+                    basis,
+                    delivered_to_generation_ref: fate.delivered_to_generation_ref.clone(),
+                })?;
+                learned.push(json!({
+                    "communique_ref": record.communique_ref,
+                    "workcell_ref": workcell_ref,
+                    "remote_gateway_ref": remote_gateway_ref,
+                    "delivered_to_generation_ref": fate.delivered_to_generation_ref,
+                }));
+            }
+            Some(fate) => {
+                unresolved.push(json!({
+                    "communique_ref": record.communique_ref,
+                    "remote_gateway_ref": remote_gateway_ref,
+                    "reason": format!("the remote records it {}", fate.state.as_str()),
+                }));
+            }
+            None => {
+                unresolved.push(json!({
+                    "communique_ref": record.communique_ref,
+                    "remote_gateway_ref": remote_gateway_ref,
+                    "reason": "the remote holds no such record",
+                }));
+            }
+        }
+    }
+    Ok(json!({
+        "learned_delivery": learned,
+        "unresolved": unresolved,
     }))
 }
 
@@ -3659,13 +3764,17 @@ mod exact_instance_binding_tests {
     /// A gateway double. `features` is what its protocol answer advertises;
     /// `strip` drops `to_instance` from every record it answers with (what an
     /// older binary's serde does); `refuse_standing` fails
-    /// RecordCommuniqueStanding for those refs.
+    /// RecordCommuniqueStanding for those refs. `fates` answers the
+    /// sender-side readback (ref → the record's fate there, `None` for "no
+    /// such record"); `delivered` collects the readback completions.
     #[derive(Default)]
     struct StubGateway {
         features: Vec<&'static str>,
         strip: bool,
         refuse_standing: Vec<String>,
         queue: Vec<Communique>,
+        fates: BTreeMap<String, Option<&'static str>>,
+        delivered: RefCell<Vec<String>>,
         log: RefCell<Vec<String>>,
     }
 
@@ -3710,6 +3819,7 @@ mod exact_instance_binding_tests {
                         connector_health: Vec::new(),
                         build: None,
                         listeners: Vec::new(),
+                        pending_operations: Vec::new(),
                     },
                 }),
                 GatewayCommand::SendCommunique { draft } => {
@@ -3730,6 +3840,40 @@ mod exact_instance_binding_tests {
                     communiques: self.queue.clone(),
                 }),
                 GatewayCommand::RecordCommuniqueForward { communique_ref, .. } => {
+                    let found = self
+                        .queue
+                        .iter()
+                        .find(|c| c.communique_ref == communique_ref)
+                        .cloned()
+                        .unwrap_or_else(|| record(&communique_ref, "g", "pending"));
+                    Ok(GatewayResponse::CommuniqueRecord {
+                        communique: self.answer(found),
+                    })
+                }
+                GatewayCommand::CommuniqueFate { communique_ref } => {
+                    Ok(GatewayResponse::CommuniqueFate {
+                        fate: self
+                            .fates
+                            .get(&communique_ref)
+                            .map(|fate| {
+                                fate.map(|state| aikit_adapters::CommuniqueFate {
+                                    state: CommuniqueState::Delivered,
+                                    delivered_at_unix_ms: Some(2),
+                                    delivered_to_generation_ref: Some("gen-there".into()),
+                                })
+                            })
+                            .flatten(),
+                        communique_ref,
+                    })
+                }
+                GatewayCommand::RecordRemoteDelivery {
+                    communique_ref,
+                    basis,
+                    ..
+                } => {
+                    self.delivered
+                        .borrow_mut()
+                        .push(format!("{communique_ref}|{basis}"));
                     let found = self
                         .queue
                         .iter()
@@ -3929,6 +4073,81 @@ mod exact_instance_binding_tests {
             command: "stub".into(),
             reason: "not in this test".into(),
         }
+    }
+
+    /// The sender side of remote delivery (#481 item 3): a record this
+    /// gateway forwarded learns its delivery from the gateway it was relayed
+    /// to, on the relay pass. A record the remote does not know stays exactly
+    /// as it was, named unresolved — never read as delivered.
+    #[test]
+    fn the_sender_copy_learns_remote_delivery_on_the_relay_pass_and_unknown_stays_unresolved() {
+        if std::env::var(WORKCELL_ENV).is_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let path = remotes_path(&home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&GatewayRemotes {
+                schema: GATEWAY_REMOTES_SCHEMA.into(),
+                remotes: vec![remote_b()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut forwarded = record("communique:01fwd", "gen-x", "pending");
+        forwarded.to_instance = None;
+        forwarded.forward = Some(CommuniqueForward::Forwarded {
+            workcell_ref: "workcell:b".into(),
+            remote_gateway_ref: "agency-gateway/b".into(),
+            forwarded_at_unix_ms: 1,
+            attempts: 1,
+        });
+        let mut unknown = forwarded.clone();
+        unknown.communique_ref = "communique:02unknown".into();
+        // The remote knows the first was delivered and holds no record of the
+        // second (a foreign or retired journal).
+        let local = StubGateway {
+            queue: vec![forwarded, unknown],
+            ..StubGateway::modern()
+        };
+        let remote = StubGateway {
+            fates: BTreeMap::from([
+                ("communique:01fwd".to_owned(), Some("delivered")),
+                ("communique:02unknown".to_owned(), None),
+            ]),
+            ..StubGateway::modern()
+        };
+        let pass = forward_pass_via(&home, &StubOwners, &local, dir.path(), &|_, command| {
+            remote.call(command)
+        })
+        .unwrap();
+        let readback = &pass["readback"];
+        let learned = readback["learned_delivery"].as_array().unwrap();
+        assert_eq!(learned.len(), 1, "{pass:#}");
+        assert_eq!(learned[0]["communique_ref"], "communique:01fwd");
+        assert_eq!(learned[0]["remote_gateway_ref"], "agency-gateway/b");
+        let unresolved = readback["unresolved"].as_array().unwrap();
+        assert_eq!(unresolved.len(), 1, "{pass:#}");
+        assert_eq!(unresolved[0]["communique_ref"], "communique:02unknown");
+        // The completion was recorded on the SENDER gateway, for the learned
+        // record only, with the basis naming where delivery was read back.
+        let delivered = local.delivered.borrow();
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        assert!(delivered[0].starts_with("communique:01fwd|"), "{delivered:?}");
+        assert!(delivered[0].contains("workcell:b"), "{delivered:?}");
+        // And the remote was asked about the fate of both, never more.
+        assert_eq!(
+            remote
+                .log
+                .borrow()
+                .iter()
+                .filter(|k| **k == "communique-fate")
+                .count(),
+            2
+        );
     }
 
     #[test]

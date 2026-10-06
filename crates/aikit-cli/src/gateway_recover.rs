@@ -1,4 +1,5 @@
-//! `aikit gateway recover` — a gateway whose state file will not load.
+//! `aikit gateway recover` — a gateway whose state file will not load, and
+//! the delivery ledger nothing else names.
 //!
 //! The service restores `state/gateway.json` at start and refuses to run from a
 //! file it cannot decode (a torn write on a full disk, a hand edit). Before this
@@ -12,19 +13,30 @@
 //! 3. with no copy, the gateway starts empty and says so — the quarantined file
 //!    is still there to read by hand.
 //!
-//! It refuses while a gateway is running: the service owns the file for as long
-//! as it runs.
+//! The same command reads the gateway's **pending deliveries** (`--deliveries`):
+//! every prepared, unreceipted outbound operation, with its attempt evidence.
+//! An attempted-but-unreceipted send is outcome-unknown — `--resolve` records
+//! the receipt the owner's evidence supports (`delivered` or `abandoned`) and
+//! retires the pending entry. Nothing is ever re-sent by recovery.
+//!
+//! State-file repair refuses while a gateway is running: the service owns the
+//! file for as long as it runs. The delivery ledger reads and resolves through
+//! the running gateway's owner carrier (the unix socket, whose file mode is
+//! the owner scope).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use aikit_adapters::{
-    gateway_command_within, GatewayCarrierTarget, GatewayCommand, GatewaySnapshot,
+    gateway_command_within, DeliveryReceipt, DeliveryState, GatewayCarrierTarget, GatewayCommand,
+    GatewayResponse, GatewaySnapshot,
 };
+use aikit_core::resource::ResourceRef;
 use aikit_core::{AikitError, Result};
 use aikit_store::home::AikitHome;
 use serde_json::{json, Value};
 
+use crate::cli::GatewayRecoverArgs;
 use crate::gateway_contact::three_part;
 use crate::gateway_upgrade::write_atomic;
 
@@ -99,8 +111,120 @@ fn gateway_answers(home: &AikitHome) -> bool {
     .is_ok()
 }
 
-/// Plan (or, with `apply`, perform) the recovery of this home's gateway state.
-pub fn recover(home: &AikitHome, apply: bool) -> Result<Value> {
+/// The pending outbound operations this gateway still owes: prepared, not
+/// receipted. A send whose outcome is unknown (attempted, no receipt) is
+/// named for evidence resolution — never blindly re-sent; the idempotent
+/// kinds were already re-attempted by the connector pump on its reconnect.
+pub fn pending_deliveries(home: &AikitHome) -> Result<Value> {
+    let target = owner_carrier(home);
+    let response = aikit_adapters::gateway_command(
+        &target,
+        GatewayCommand::PendingDeliveries { connector_ref: None },
+        None,
+    )?;
+    let GatewayResponse::PendingDeliveries { operations } = response else {
+        return Err(AikitError::new(
+            "gateway.recover_unexpected_answer",
+            "the gateway answered the pending-deliveries read with something else",
+        ));
+    };
+    let listed: Vec<Value> = operations
+        .iter()
+        .map(|operation| {
+            json!({
+                "operation_ref": operation.operation_ref.to_string(),
+                "connector_ref": operation.connector_ref.to_string(),
+                "platform": operation.address.platform,
+                "conversation_id": operation.address.conversation_id,
+                "attempts": operation.attempts,
+                "last_attempt_at_unix_ms": operation.last_attempt_at_unix_ms,
+                "outcome": if operation.attempts > 0 {
+                    "attempted, outcome unknown: resolve by evidence or leave it held"
+                } else {
+                    "prepared, never attempted: idempotent kinds re-attempt on connector reconnect; sends hold"
+                },
+            })
+        })
+        .collect();
+    Ok(json!({
+        "schema": RECOVER_SCHEMA,
+        "reading": "pending-deliveries",
+        "pending_count": listed.len(),
+        "pending": listed,
+        "law": "an unreceipted operation is re-attempted only when idempotent; a send is resolved by evidence (`--resolve`), never blindly re-sent",
+    }))
+}
+
+/// Resolve one pending delivery by evidence: record the receipt the evidence
+/// supports and retire the pending entry. Nothing is re-sent.
+pub fn resolve_delivery(
+    home: &AikitHome,
+    operation_ref: &str,
+    state: &str,
+    evidence: Option<&str>,
+) -> Result<Value> {
+    let delivery_state = match state {
+        "delivered" => DeliveryState::Delivered,
+        "abandoned" => DeliveryState::Failed,
+        other => {
+            return Err(AikitError::new(
+                "gateway.recover_state_invalid",
+                format!(
+                    "`{other}` is not a delivery resolution: use `delivered` or `abandoned`"
+                ),
+            ))
+        }
+    };
+    let reference = ResourceRef::parse(operation_ref).map_err(|error| {
+        AikitError::new(
+            "gateway.recover_ref_invalid",
+            format!("{operation_ref} is not an operation ref: {error}"),
+        )
+    })?;
+    let target = owner_carrier(home);
+    let mut provenance = vec![
+        "resolved by owner evidence through `aikit gateway recover --resolve`".to_owned(),
+    ];
+    if let Some(evidence) = evidence {
+        provenance.push(format!("evidence: {evidence}"));
+    }
+    let receipt = DeliveryReceipt {
+        operation_ref: reference.clone(),
+        connector_ref: ResourceRef::parse("gateway-connector/resolved-by-evidence")
+            .expect("static ref parses"),
+        state: delivery_state,
+        native_message_id: None,
+        detail: Some(evidence.unwrap_or("the owner resolved it by evidence").to_owned()),
+        native: Default::default(),
+        provenance: provenance.clone(),
+    };
+    aikit_adapters::gateway_command(&target, GatewayCommand::RecordDelivery { receipt }, None)?;
+    Ok(json!({
+        "schema": RECOVER_SCHEMA,
+        "reading": "delivery-resolved",
+        "operation_ref": reference.to_string(),
+        "state": state,
+        "evidence": evidence,
+        "note": "recorded as a receipt; the pending entry is retired. Nothing was re-sent",
+    }))
+}
+
+/// The owner carrier of this home: the unix socket, whose file mode is the
+/// owner scope.
+fn owner_carrier(home: &AikitHome) -> GatewayCarrierTarget {
+    GatewayCarrierTarget::UnixSocket(home.gateway_socket())
+}
+
+/// `aikit gateway recover`: state-file repair (the default), the delivery
+/// ledger (`--deliveries`), or an evidence resolution (`--resolve …`).
+pub fn recover(home: &AikitHome, args: &GatewayRecoverArgs) -> Result<Value> {
+    if args.deliveries {
+        return pending_deliveries(home);
+    }
+    if let (Some(operation), Some(state)) = (&args.resolve, &args.resolve_state) {
+        return resolve_delivery(home, operation, state, args.evidence.as_deref());
+    }
+    let apply = args.apply;
     let state = home.gateway_state();
     if gateway_answers(home) {
         return Err(three_part(

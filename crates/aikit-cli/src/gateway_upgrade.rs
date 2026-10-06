@@ -850,10 +850,11 @@ impl<E: UpgradeEnv> Driver<'_, E> {
                         true,
                         format!(
                             "drained: {} turn(s) resolved, {} interrupted, {} operation(s) \
-                             pending, nothing replayed",
+                             pending, {} message(s) admitted unserved, nothing replayed",
                             report.turns_resolved.len(),
                             report.turns_interrupted.len(),
-                            report.pending_operations.len()
+                            report.pending_operations.len(),
+                            report.admitted_unserved.len()
                         ),
                     );
                 } else {
@@ -1196,10 +1197,11 @@ impl<E: UpgradeEnv> Driver<'_, E> {
         let effects = match measured {
             Some(report) => format!(
                 "{} turn(s) finished, {} interrupted and recorded, {} unreceipted operation(s) \
-                 retained; nothing was replayed",
+                 retained, {} message(s) admitted unserved and named; nothing was replayed",
                 report.turns_resolved.len(),
                 report.turns_interrupted.len(),
-                report.pending_operations.len()
+                report.pending_operations.len(),
+                report.admitted_unserved.len()
             ),
             None if transaction.drain.is_some() => "what the predecessor had in flight when it \
                  stopped is unknown: no drain measured it (its state was persisted when it \
@@ -1366,8 +1368,10 @@ pub fn receipt_json(transaction: &Transaction) -> Value {
                     "measured": true,
                     "interrupted_turns": report.turns_interrupted,
                     "unreceipted_operations": report.pending_operations,
+                    "admitted_unserved": report.admitted_unserved,
                     "law": "recorded, never replayed: what a turn or tool did before it was \
-                            interrupted is not known and is not repeated",
+                            interrupted is not known and is not repeated; messages admitted \
+                            during the drain are named and retained, never served late",
                 })
             } else {
                 json!({
@@ -1450,6 +1454,17 @@ pub fn receipt_markdown(transaction: &Transaction) -> String {
                 "  - operation {operation} stays pending; it is not re-sent blindly\n"
             ));
         }
+        for admission in &drain.admitted_unserved {
+            text.push_str(&format!(
+                "  - admitted unserved: {} #{} ({} conversation {}): \"{}\" — retained in \
+                 its stream, never replayed\n",
+                admission.stream_ref,
+                admission.sequence,
+                admission.platform,
+                admission.conversation_id,
+                admission.preview
+            ));
+        }
     }
     text.push_str("\n## Steps\n");
     for step in &transaction.steps {
@@ -1506,11 +1521,39 @@ pub fn plan_reading<E: UpgradeEnv>(
                 .into(),
         );
     }
+    // Installed `oi` across the fleet: two machines can run the same gateway
+    // build over different installed `oi` cuts — the installer the next
+    // `apply --install` would run differs per machine, and neither end could
+    // say so before the build carried its oi revision.
+    let local_oi = aikit_adapters::gateway_posture::installed_oi_revision();
+    for peer in &peers {
+        let Some(peer_oi) = peer["oi_revision"].as_str() else {
+            continue;
+        };
+        let Some(local) = &local_oi else {
+            notes.push(format!(
+                "peer {} runs installed oi {} and this machine's installed oi could not be \
+                 read (`oi --version` failed); a mixed-oi fleet cannot be ruled out",
+                peer["workcell_ref"].as_str().unwrap_or("?"),
+                peer_oi
+            ));
+            continue;
+        };
+        if local != peer_oi {
+            notes.push(format!(
+                "installed oi differs across the fleet: this machine runs {local}, peer {} \
+                 runs {peer_oi}; each machine's `apply --install` runs its own installer, so \
+                 upgrade one machine's oi at a time and read the plan on both",
+                peer["workcell_ref"].as_str().unwrap_or("?")
+            ));
+        }
+    }
     Ok(json!({
         "schema": PLAN_SCHEMA,
         "running": running,
         "installed": installed,
         "stale": stale,
+        "installed_oi": aikit_adapters::gateway_posture::installed_oi_revision(),
         "action": action,
         "installer": installer,
         "peers": peers,

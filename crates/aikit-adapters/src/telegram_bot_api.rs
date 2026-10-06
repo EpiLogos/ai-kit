@@ -1128,6 +1128,8 @@ mod tests {
             agent_session_ref: Some(r("agent-session/root")),
             actuation_stream_ref: Some(r("actuation-stream/root")),
             provenance: vec!["gateway".into()],
+            attempts: 0,
+            last_attempt_at_unix_ms: None,
         };
         let receipt = connector.execute_now(operation).unwrap();
         assert_eq!(receipt.state, DeliveryState::Delivered);
@@ -1171,6 +1173,8 @@ mod tests {
             agent_session_ref: Some(r("agent-session/root")),
             actuation_stream_ref: Some(r("actuation-stream/root")),
             provenance: Vec::new(),
+            attempts: 0,
+            last_attempt_at_unix_ms: None,
         };
         connector.execute_now(operation).unwrap();
         let call = &connector.transport_ref().calls[1];
@@ -1200,6 +1204,8 @@ mod tests {
             agent_session_ref: Some(r("agent-session/root")),
             actuation_stream_ref: Some(r("actuation-stream/root")),
             provenance: Vec::new(),
+            attempts: 0,
+            last_attempt_at_unix_ms: None,
         };
         let receipt = connector.execute_now(operation).unwrap();
         assert_eq!(receipt.state, DeliveryState::Failed);

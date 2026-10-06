@@ -617,6 +617,8 @@ done
             agent_session_ref: None,
             actuation_stream_ref: None,
             provenance: Vec::new(),
+            attempts: 0,
+            last_attempt_at_unix_ms: None,
         }
     }
 

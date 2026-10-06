@@ -76,6 +76,39 @@ pub struct GatewayBuildIdentity {
     pub workcell_ref: Option<String>,
     #[serde(default)]
     pub lifecycle: GatewayLifecycle,
+    /// The source revision of the `oi` installed on this machine (the managed
+    /// installer's own build), when it can be read. This is what makes a
+    /// mixed-oi fleet visible: two machines can run the same gateway build
+    /// over different installed `oi` cuts, and neither plan nor doctor could
+    /// say so before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oi_revision: Option<String>,
+}
+
+/// The source revision of the `oi` on PATH (`oi --version` prints
+/// `oi 0.1.0 (<revision>)`), when one is installed and answers.
+pub fn installed_oi_revision() -> Option<String> {
+    let oi = which_existing("oi")?;
+    let output = std::process::Command::new(oi)
+        .arg("--version")
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let open = text.find('(')?;
+    let close = text[open..].find(')')? + open;
+    let revision = text[open + 1..close].trim().to_owned();
+    (!revision.is_empty()).then_some(revision)
+}
+
+fn which_existing(program: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(program);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Who keeps the gateway process running.
@@ -158,6 +191,9 @@ impl GatewayBuildIdentity {
             executable_sha256: None,
             workcell_ref,
             lifecycle: GatewayLifecycle::detect(),
+            // `oi --version` is a cheap child read, but it is still a child
+            // read: taken once, here, at process construction.
+            oi_revision: installed_oi_revision(),
         }
     }
 

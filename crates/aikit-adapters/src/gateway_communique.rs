@@ -344,6 +344,19 @@ pub struct CommuniqueCount {
     pub pending: usize,
 }
 
+/// What one gateway knows about where a Communique stands, answered to the
+/// gateway that forwarded it. The sender-side readback turns this into the
+/// sender copy's own standing: when the recipient's gateway has recorded the
+/// delivery, the sender copy learns it instead of staying pending forever.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommuniqueFate {
+    pub state: CommuniqueState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_at_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_to_generation_ref: Option<String>,
+}
+
 /// The append-only Communique journal a gateway keeps.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommuniqueJournal {
@@ -953,6 +966,71 @@ impl CommuniqueJournal {
             .filter(|record| record.awaits_local_delivery())
             .cloned()
             .collect()
+    }
+
+    /// The delivery fate of one record, for the sender-side readback: a
+    /// forwarding gateway asks this about the records it relayed here. The
+    /// answer is the remote's own knowledge — whether its occupant has been
+    /// recorded as having received it — and nothing more.
+    pub fn fate(&self, communique_ref: &str) -> Option<CommuniqueFate> {
+        let record = self.records.iter().find(|r| r.communique_ref == communique_ref)?;
+        Some(CommuniqueFate {
+            state: record.state,
+            delivered_at_unix_ms: record.delivered_at_unix_ms,
+            delivered_to_generation_ref: record.delivered_to_generation_ref.clone(),
+        })
+    }
+
+    /// Record the delivery the recipient's gateway reported on a sender-side
+    /// readback: the sender copy learns its remote delivery instead of
+    /// staying pending forever. Only a record this gateway has actually
+    /// forwarded can learn it, and only from a `Forwarded` standing — a
+    /// readback can never deliver a record still queued here.
+    pub fn record_remote_delivery(
+        &mut self,
+        communique_ref: &str,
+        at_unix_ms: u64,
+        basis: &str,
+        delivered_to_generation_ref: Option<String>,
+    ) -> Result<Communique> {
+        non_empty("basis", basis)?;
+        let record = self.get_mut(communique_ref)?;
+        if !matches!(record.forward, Some(CommuniqueForward::Forwarded { .. })) {
+            return Err(invalid(
+                "agency_gateway.communique_not_forwarded",
+                format!(
+                    "Communique {communique_ref} was never forwarded from here; a readback \
+                     cannot deliver it"
+                ),
+            ));
+        }
+        if record.state == CommuniqueState::Delivered {
+            return Ok(record.clone());
+        }
+        if !record.awaits_local_delivery() {
+            return Err(invalid(
+                "agency_gateway.communique_not_deliverable",
+                format!(
+                    "Communique {communique_ref} is {}; its standing is no longer this \
+                     gateway's to change",
+                    record.state.as_str()
+                ),
+            ));
+        }
+        record.state = CommuniqueState::Delivered;
+        if record.delivered_at_unix_ms.is_none() {
+            record.delivered_at_unix_ms = Some(at_unix_ms);
+        }
+        if record.delivered_to_generation_ref.is_none() {
+            record.delivered_to_generation_ref = delivered_to_generation_ref;
+        }
+        record.transitions.push(CommuniqueTransition {
+            at_unix_ms,
+            state: CommuniqueState::Delivered,
+            basis: basis.into(),
+            generation_ref: record.delivered_to_generation_ref.clone(),
+        });
+        Ok(record.clone())
     }
 
     /// Record one relay attempt. `routing` names the remote occupancy answer

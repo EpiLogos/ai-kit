@@ -483,6 +483,32 @@ pub fn diagnose(facts: &Facts) -> Report {
             })
             .unwrap_or_default();
         let their_revision = remote["revision"].as_str();
+        // The installed `oi` each machine runs, when both ends can say: a
+        // mixed-oi fleet runs different installers per machine, and the next
+        // `apply --install` on each side would build from a different cut.
+        let their_oi = remote["oi_revision"].as_str();
+        let our_oi = facts
+            .running
+            .as_ref()
+            .and_then(|r| r.build.as_ref())
+            .and_then(|b| b.oi_revision.as_deref());
+        if let (Some(ours), Some(theirs)) = (our_oi, their_oi) {
+            if ours != theirs {
+                findings.push(finding(
+                    "peer.oi_revision_differs",
+                    Severity::Info,
+                    format!(
+                        "installed oi differs: this machine runs {ours}, peer {workcell} runs \
+                         {theirs}; each machine's `apply --install` builds with its own installer"
+                    ),
+                    vec![],
+                    Some("upgrade oi on one machine (`oi update --apply`), then the other; compare with `aikit gateway upgrade plan`"),
+                ));
+            }
+        } else if their_oi.is_none() || our_oi.is_none() {
+            // A peer that predates the field, or an oi that would not answer:
+            // honest unknown, not a mismatch.
+        }
         if !missing.is_empty() {
             findings.push(finding(
                 "peer.features_missing",
@@ -1112,6 +1138,7 @@ mod tests {
             executable_sha256: Some(sha.into()),
             workcell_ref: Some("workcell:mac".into()),
             lifecycle: GatewayLifecycle::SupervisedLaunchd,
+            oi_revision: None,
         }
     }
 
