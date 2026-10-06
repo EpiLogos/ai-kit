@@ -39,12 +39,13 @@ use aikit_adapters::actuation_harness_detection::{
     intake_actuation_detection, DetectionEntry, DetectionOutcome, DetectionState,
 };
 use aikit_adapters::clients::{
-    antigravity::AntigravityAdapter, broker::BrokerAdapter, claude::ClaudeAdapter,
-    cline::ClineAdapter, codex::CodexAdapter, copilot::CopilotAdapter, droid::DroidAdapter,
-    gemini::GeminiAdapter, grok::GrokAdapter, hermes::HermesAdapter, kimi::KimiAdapter,
+    antigravity::AntigravityAdapter, aider::AiderAdapter, broker::BrokerAdapter,
+    claude::ClaudeAdapter, cline::ClineAdapter, codex::CodexAdapter, copilot::CopilotAdapter,
+    cursor::CursorAdapter, droid::DroidAdapter, dsh::DshAdapter, gemini::GeminiAdapter,
+    goose::GooseAdapter, grok::GrokAdapter, hermes::HermesAdapter, kimi::KimiAdapter,
     kiro_cli::KiroCliAdapter, ollama::OllamaAdapter, openclaw::OpenclawAdapter,
-    opencode::OpencodeAdapter, pi::PiAdapter, qoder::QoderAdapter, zcode::ZcodeAdapter,
-    ClientAdapter,
+    opencode::OpencodeAdapter, pi::PiAdapter, qoder::QoderAdapter, qwen::QwenAdapter,
+    zcode::ZcodeAdapter, ClientAdapter,
 };
 use aikit_adapters::tool_sources::{
     plan_tools_projection, ToolSourceEntry, ToolsProjectionOutcome,
@@ -588,6 +589,61 @@ static OVERLAYS: &[ClientOverlay] = &[
             build: |dirs| Box::new(DroidAdapter::new(projection_dir(dirs, "droid"))),
         },
         admission: |dirs| DroidAdapter::new(projection_dir(dirs, "droid")).admission(),
+    },
+    // The context-effect dispatch has carried these five adapters since the
+    // harness-admission sweeps; the client-status surface now joins the same
+    // adapters, so a detected harness stops reading as "no AIKit adapter".
+    // Their roster rows still appear only when Actuation declares the
+    // capability descriptor, never before.
+    ClientOverlay {
+        name: TargetId::CURSOR_CLI,
+        aliases: &[],
+        catalog_slug: TargetId::CURSOR_CLI,
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(CursorAdapter::new(projection_dir(dirs, "cursor"))),
+        },
+        admission: |dirs| CursorAdapter::new(projection_dir(dirs, "cursor")).admission(),
+    },
+    ClientOverlay {
+        name: TargetId::DEEPSEEK_HARNESS,
+        aliases: &[],
+        catalog_slug: TargetId::DEEPSEEK_HARNESS,
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(DshAdapter::new(projection_dir(dirs, "dsh"))),
+        },
+        admission: |dirs| DshAdapter::new(projection_dir(dirs, "dsh")).admission(),
+    },
+    ClientOverlay {
+        name: TargetId::AIDER,
+        aliases: &[],
+        catalog_slug: TargetId::AIDER,
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(AiderAdapter::new(projection_dir(dirs, "aider"))),
+        },
+        admission: |dirs| AiderAdapter::new(projection_dir(dirs, "aider")).admission(),
+    },
+    ClientOverlay {
+        name: TargetId::GOOSE,
+        aliases: &[],
+        catalog_slug: TargetId::GOOSE,
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(GooseAdapter::new(projection_dir(dirs, "goose"))),
+        },
+        admission: |dirs| GooseAdapter::new(projection_dir(dirs, "goose")).admission(),
+    },
+    ClientOverlay {
+        name: TargetId::QWEN_CODE,
+        aliases: &[],
+        catalog_slug: TargetId::QWEN_CODE,
+        semantic: SemanticBasis::None,
+        reach: Reach::AdapterOnly {
+            build: |dirs| Box::new(QwenAdapter::new(projection_dir(dirs, "qwen"))),
+        },
+        admission: |dirs| QwenAdapter::new(projection_dir(dirs, "qwen")).admission(),
     },
 ];
 
@@ -2756,6 +2812,16 @@ mod tests {
             assert!(
                 aikit_adapters::profiles::for_slug(slug).is_some(),
                 "{target} joins to profile `{slug}` but no embedded profile carries it"
+            );
+            // Parity in the other direction: a harness the effects dispatch
+            // carries must also join the client-status roster — through the
+            // catalog slug, the same resolution the roster itself joins by —
+            // or a detected install reads as "no AIKit adapter" while its
+            // adapter exists.
+            assert!(
+                client_overlay(slug).is_some(),
+                "{target} (catalog slug `{slug}`) is dispatched in client_effects \
+                 but has no client-status overlay"
             );
         }
 

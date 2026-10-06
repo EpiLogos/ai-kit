@@ -48,6 +48,14 @@ const OVERLAY_NAMES: &[&str] = &[
     "kiro-cli",
     "qoder",
     "droid",
+    // The context-effect dispatch's five admitted adapters joined the
+    // client-status roster (client_effects parity guard in client.rs): rows
+    // exist once Actuation's descriptors declare the slugs, never before.
+    "cursor-cli",
+    "deepseek-harness",
+    "aider",
+    "goose",
+    "qwen-code",
 ];
 
 /// A stand-in `actuation` binary: serves fixture descriptors for the slugs a
@@ -259,11 +267,12 @@ fn a_client_honours_its_own_config_home_override_over_every_default() {
 fn a_registered_adapter_with_a_descriptor_fixture_gets_its_row() {
     let home = scenario_with_partial_intake();
     let rows = rows_with_fixtures_env(&home, &["client", "status"]);
-    // The record's four entries (two overlaid, one generic, one not-installed)
-    // + the eight overlays the record does not name + the broker.
+    // The record's four entries (two overlaid, one generic, one not-installed
+    // but itself overlaid: aider) + the overlays the record does not name
+    // (aider is named AND overlaid, so it is not counted twice) + the broker.
     assert_eq!(
         rows.len(),
-        4 + (OVERLAY_NAMES.len() - 2) + 1,
+        4 + (OVERLAY_NAMES.len() - 3) + 1,
         "every reported descriptor answers, overlaid or not"
     );
 
