@@ -6,7 +6,7 @@ use aikit_adapters::central_placement::{
     AllocatedCentralTask, CentralTaskRequest, NativeCentralPlacement,
 };
 use aikit_adapters::runner::{CommandRunner, Output, SystemRunner};
-use aikit_core::{ResourceRef, Result, SourceRevision};
+use aikit_core::{AikitError, ResourceRef, Result, SourceRevision};
 use aikit_store::{AikitHome, ContextLock, LockOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -307,6 +307,26 @@ fn boundary_executable(record: &TaskRecord) -> Result<&Path> {
         )),
     }
 }
+/// A native owner that exits non-zero must be refused as itself: its actual
+/// bounded diagnostics travel with the structured refusal. An exited owner's
+/// empty reply is never reparsed into an unrelated JSON parse error.
+fn owner_refusal(operation: &str, output: &Output) -> AikitError {
+    let diagnostics = [output.stderr.trim(), output.stdout.trim()]
+        .into_iter()
+        .find(|text| !text.is_empty())
+        .map(|text| {
+            let mut bounded: String = text.chars().take(1024).collect();
+            if text.chars().count() > 1024 {
+                bounded.push('…');
+            }
+            bounded
+        })
+        .unwrap_or_else(|| "no diagnostics were emitted".to_string());
+    error(format!(
+        "Native owner {operation} refused with exit status {}: {diagnostics}",
+        output.status
+    ))
+}
 fn inspect(boundary: &Path, requirements: &Value) -> Result<Value> {
     if !boundary.is_absolute() {
         return Err(error("Explicit Workcell executable required"));
@@ -322,9 +342,11 @@ fn inspect(boundary: &Path, requirements: &Value) -> Result<Value> {
             .ok_or_else(|| error("Missing policy revision"))?
             .into(),
     ])?;
+    if !output.ok() {
+        return Err(owner_refusal("write-boundary inspect", &output));
+    }
     let value: Value = serde_json::from_str(&output.stdout).map_err(error)?;
-    if !output.ok()
-        || value["schema"] != "workcell.prepared-write-boundary/v1"
+    if value["schema"] != "workcell.prepared-write-boundary/v1"
         || value["requirements"] != *requirements
         || value["state"] != "prepared-not-executed"
         || value["requirements_digest"]

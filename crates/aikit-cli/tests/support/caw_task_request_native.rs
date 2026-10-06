@@ -77,11 +77,15 @@ impl NativeRequest {
         .unwrap();
         let state = world.root.join("Work/demo/material-request");
         fs::create_dir(&state).unwrap();
+        // The run's native source seat is the caller's selected working source.
+        // The material owner prepares a run scope only inside the exact boundary
+        // the caller selected; it never broadens a boundary to an unselected
+        // parent directory.
         fs::write(
             state.join("storage.json"),
             json!({"schema":"workcell.directory-storage/v1",
             "directories":[{"logical_ref":"source-seat:native-task-request",
-                "path":world.root.join("Work/demo")}]})
+                "path":world.root.join("Work/demo/src")}]})
             .to_string(),
         )
         .unwrap();
@@ -99,6 +103,9 @@ impl NativeRequest {
         };
         let started = native.start_run(SLUG);
         let mut request = native.world.prepare_input();
+        // A prepared-run resident is born inside the run's source seat, so the
+        // caller's working directory is the seat itself.
+        request["cwd"] = json!(native.world.root.join("Work/demo/src"));
         request["provider"] = json!({"id":"native-request-codex", "label":"Preparation only",
             "protocol":"acp", "from_profile":"codex"});
         request["prepared_run_scope"] = json!({"run_slug":SLUG,
@@ -283,7 +290,13 @@ fn pending_after_missing_directory(native: &NativeRequest, binary: &Path) -> (Va
     let ready = successful(native.configure(binary, &native.first, &native.request, None));
     assert_eq!(ready["ready"], true);
     let mut missing = native.request.clone();
-    missing["selected_directories"] = json!([native.world.root.join("Work/demo/src/recoverable")]);
+    // The changed selection keeps the run's live source seat and adds one
+    // absent directory: the refusal must come from the missing source, not
+    // from a boundary that no longer covers the prepared run.
+    missing["selected_directories"] = json!([
+        native.world.root.join("Work/demo/src"),
+        native.world.root.join("Work/demo/src/recoverable"),
+    ]);
     let run = native.run();
     let output = native.configure(binary, &native.first, &missing, ready["revision"].as_str());
     assert!(
@@ -411,7 +424,7 @@ fn native_pending_request_is_immutable_across_resolved_boundary_change() {
         "protocol":"pi-rpc","from_profile":"pi"});
     native.assert_refusal_unchanged(&changed, revision, refusal);
     changed = missing.clone();
-    changed["cwd"] = json!(native.world.root.join("Work/demo/src"));
+    changed["cwd"] = json!(native.world.root.join("Work/demo"));
     native.assert_refusal_unchanged(&changed, revision, refusal);
     changed = missing.clone();
     changed["central"]["source_refs"] = json!(["source/changed-caller-source"]);

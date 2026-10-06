@@ -56,8 +56,11 @@ fn call(program: &Path, state_root: &Path, args: &[String]) -> Result<Value> {
     ];
     argv.extend_from_slice(args);
     let output = OwnerRunner.run(&argv)?;
+    if !output.ok() {
+        return Err(super::owner_refusal("material run operation", &output));
+    }
     let value: Value = serde_json::from_str(&output.stdout).map_err(error)?;
-    if !output.ok() || value["ok"] != true {
+    if value["ok"] != true {
         return Err(error(
             "Workcell refused the selected material run operation",
         ));
