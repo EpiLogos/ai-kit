@@ -39,7 +39,7 @@ use aikit_adapters::actuation_harness_detection::{
     intake_actuation_detection, DetectionEntry, DetectionOutcome, DetectionState,
 };
 use aikit_adapters::clients::{
-    antigravity::AntigravityAdapter, aider::AiderAdapter, broker::BrokerAdapter,
+    aider::AiderAdapter, antigravity::AntigravityAdapter, broker::BrokerAdapter,
     claude::ClaudeAdapter, cline::ClineAdapter, codex::CodexAdapter, copilot::CopilotAdapter,
     cursor::CursorAdapter, droid::DroidAdapter, dsh::DshAdapter, gemini::GeminiAdapter,
     goose::GooseAdapter, grok::GrokAdapter, hermes::HermesAdapter, kimi::KimiAdapter,
