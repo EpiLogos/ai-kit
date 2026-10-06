@@ -42,7 +42,7 @@ impl Ground {
         fs::create_dir_all(&scratch).unwrap();
         let owned = tempfile::Builder::new()
             .prefix("knowledge-wiki-scope-native-")
-            .tempdir_in(scratch)
+            .tempdir()
             .unwrap();
         let private = fs::canonicalize(owned.path()).unwrap();
         let world = private.join("world");

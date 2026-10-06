@@ -1,0 +1,13 @@
+{
+  "protocol": "acp",
+  "id": "actual-interrupted-idle",
+  "label": "Actual provider process without protocol response",
+  "argv": [
+    "python3",
+    "-u",
+    "-c",
+    "import os,pathlib,sys; p=pathlib.Path(sys.argv[1]); q=p.with_suffix('.stage'); q.write_text(str(os.getpid())); os.replace(q,p); sys.stdin.buffer.read(); p=pathlib.Path(sys.argv[2]); q=p.with_suffix('.stage'); q.write_text('actual-stdin-eof'); os.replace(q,p)",
+    "/Users/admin/Central/worktrees/env-2/ai-kit/ProjectCentral/now/tmp/native-idle-ipc-mc1OGm/provider-pid",
+    "/Users/admin/Central/worktrees/env-2/ai-kit/ProjectCentral/now/tmp/native-idle-ipc-mc1OGm/provider-exited"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "deadline_expired": false,
+  "errors": [],
+  "exit_code": 1,
+  "kill_attempted": false,
+  "owned_child_pid": 61189,
+  "phase": "drop",
+  "same_child_status_observed": true,
+  "standing": "same owned Child observations; errors are not retirement; unresolved fixture retained",
+  "status": "exit status: 1"
+}

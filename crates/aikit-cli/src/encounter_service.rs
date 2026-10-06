@@ -293,10 +293,14 @@ pub enum EncounterRequest {
     Health,
     /// Current native owner census under the exclusive lifecycle fence.
     /// A busy admitted operation is an error, never an empty complete census.
-    OwnerOccupancy { expected_pid: u32 },
+    OwnerOccupancy {
+        expected_pid: u32,
+    },
     /// Close this owner only when the SAME fenced census proves native idle.
     /// A refusal never drains residents or changes shutdown_requested.
-    ShutdownIdle { expected_pid: u32 },
+    ShutdownIdle {
+        expected_pid: u32,
+    },
     /// Stop only this explicitly identified owner after its provider processes
     /// have been shut down. This is never an ordinary view-detach operation.
     Shutdown {
@@ -1251,10 +1255,15 @@ impl EncounterService {
         Ok(())
     }
 
-    fn owner_exclusive(&self, expected_pid: u32) -> Result<std::sync::RwLockWriteGuard<'_, Lifecycle>> {
+    fn owner_exclusive(
+        &self,
+        expected_pid: u32,
+    ) -> Result<std::sync::RwLockWriteGuard<'_, Lifecycle>> {
         if expected_pid != std::process::id() {
-            return Err(AikitError::new("encounter.owner_changed",
-                "The requested PID does not identify this encounter owner"));
+            return Err(AikitError::new(
+                "encounter.owner_changed",
+                "The requested PID does not identify this encounter owner",
+            ));
         }
         match self.lifecycle.try_write() {
             Ok(lease) => Ok(lease),
@@ -1264,12 +1273,19 @@ impl EncounterService {
         }
     }
 
-    fn owner_occupancy_fenced(&self, lifecycle: &std::sync::RwLockWriteGuard<'_, Lifecycle>) -> Result<Value> {
+    fn owner_occupancy_fenced(
+        &self,
+        lifecycle: &std::sync::RwLockWriteGuard<'_, Lifecycle>,
+    ) -> Result<Value> {
         if !matches!(**lifecycle, Lifecycle::Running)
-            || self.shutdown_requested.load(std::sync::atomic::Ordering::SeqCst)
+            || self
+                .shutdown_requested
+                .load(std::sync::atomic::Ordering::SeqCst)
         {
-            return Err(AikitError::new("encounter.owner_stopped",
-                "The owner is stopping, stopped or failed; native idleness is not inferred"));
+            return Err(AikitError::new(
+                "encounter.owner_stopped",
+                "The owner is stopping, stopped or failed; native idleness is not inferred",
+            ));
         }
         let residents: Vec<Value> = self.residents.lock().map_err(error)?.iter().map(|(session, resident)| {
             json!({"agent_session":session,"native_session_id":resident.lane.binding().native_session_id,
@@ -1279,22 +1295,38 @@ impl EncounterService {
             json!({"agent_session":session,"connection_generation":opening["connection_generation"],
                 "phase":opening["kind"]})
         }).collect();
-        let pending_permissions: Vec<ResourceRef> = self.permissions.lock().map_err(error)?.iter().filter(|(_, pending)| !pending.is_empty()).map(|(session, _)| session.clone()).collect();
+        let pending_permissions: Vec<ResourceRef> = self
+            .permissions
+            .lock()
+            .map_err(error)?
+            .iter()
+            .filter(|(_, pending)| !pending.is_empty())
+            .map(|(session, _)| session.clone())
+            .collect();
         // This native reducer includes detached canonical sessions. No view,
         // attachment list, PID liveness heuristic or copied journal substitutes.
-        let recoveries: Vec<Value> = self.store.native_open_recoveries()?.into_iter().map(|(session, recovery)| {
-            json!({"agent_session":session,"state":recovery["state"],
+        let recoveries: Vec<Value> = self
+            .store
+            .native_open_recoveries()?
+            .into_iter()
+            .map(|(session, recovery)| {
+                json!({"agent_session":session,"state":recovery["state"],
                 "connection_generation":recovery["opening"]["connection_generation"]})
-        }).collect();
+            })
+            .collect();
         let durable_work = self.store.owner_work_standing()?;
-        let native_idle = residents.is_empty() && openings.is_empty()
-            && pending_permissions.is_empty() && recoveries.is_empty();
-        Ok(json!({"schema":"aikit.encounter-owner-occupancy/v1","protocol":"aikit-encounter-v1",
+        let native_idle = residents.is_empty()
+            && openings.is_empty()
+            && pending_permissions.is_empty()
+            && recoveries.is_empty();
+        Ok(
+            json!({"schema":"aikit.encounter-owner-occupancy/v1","protocol":"aikit-encounter-v1",
             "pid":std::process::id(),"complete":true,"native_idle":native_idle,
             "residents":residents,"openings":openings,"pending_permission_sessions":pending_permissions,
             "unresolved_native_startups":recoveries,"durable_work":durable_work,
             "scope":"current native owner and retained startup recovery; not whole-machine process discovery",
-            "session_space_attachment_required":false,"automatic_retry":false}))
+            "session_space_attachment_required":false,"automatic_retry":false}),
+        )
     }
 
     fn owner_occupancy(&self, expected_pid: u32) -> Result<Value> {
@@ -1317,7 +1349,8 @@ impl EncounterService {
         }
         // Admission and closure are one native critical section. No resident
         // is stopped, journal reconciled, permission resolved or request replayed.
-        self.shutdown_requested.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.shutdown_requested
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let receipt = json!({"protocol":"aikit-encounter-v1","pid":std::process::id(),
             "shutdown":true,"idle_only":true,"occupancy":occupancy,"stopped":[],
             "canonical_sessions_retained":true,"durable_work_retained":true,
@@ -1605,10 +1638,19 @@ impl EncounterService {
         // Actual pre-reservation scheduling only; it supplies no native answer.
         #[cfg(test)]
         {
-            let barrier = self.native_validation_test_barrier.lock().map_err(error)?.clone();
+            let barrier = self
+                .native_validation_test_barrier
+                .lock()
+                .map_err(error)?
+                .clone();
             if let Some(barrier) = barrier {
                 barrier.reached.send(Instant::now()).map_err(error)?;
-                barrier.proceed.lock().map_err(error)?.recv_timeout(Duration::from_secs(5)).map_err(error)?;
+                barrier
+                    .proceed
+                    .lock()
+                    .map_err(error)?
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(error)?;
             }
         }
         let outcome = self.open_native_owned(request, deadline, &mut opening);
@@ -2435,7 +2477,7 @@ impl EncounterService {
             }
         }
         let opened_mode_observation = lane.binding().mode_observation.clone();
-        self.store.append(&agent_session,&json!({"kind":"binding","connection_generation":generation,"space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":owner_launcher_argv_digest,"body_basis":body_basis,"now_context_config_digest":blake3::hash(serde_json::to_vec(&configured.now_context).expect("NOW config JSON").as_slice()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"mode_observation":opened_mode_observation,"model_selection":model_reading,"launch_model_default":launch_default,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-resume"} else if released_predecessor.is_some() {"fresh-native-successor"} else {"new-native-session"},"released_predecessor":released_predecessor,"child_message_dir":child_message_dir,"composed_tools_route":if mcp_native_fallback.is_some() {"harness-native-mcp-config-seam"} else {"session-wire-or-none"},"mcp_native_fallback_reason":mcp_native_fallback.as_ref().map(|(reason, _)| reason.clone())}))?;
+        self.store.append(&agent_session,&json!({"kind":"binding","connection_generation":generation,"owner_pid":std::process::id(),"space":space,"provider":provider,"protocol":configured.protocol,"body_ref":body_ref,"body_revision":body_revision,"cwd":cwd,"provider_argv_digest":owner_launcher_argv_digest,"body_basis":body_basis,"now_context_config_digest":blake3::hash(serde_json::to_vec(&configured.now_context).expect("NOW config JSON").as_slice()).to_hex().to_string(),"native_session_id":native,"model_observation":model_observation,"mode_observation":opened_mode_observation,"model_selection":model_reading,"launch_model_default":launch_default,"effective_launch_argv":launch_argv,"continuation":if reconnect {"native-resume"} else if released_predecessor.is_some() {"fresh-native-successor"} else {"new-native-session"},"released_predecessor":released_predecessor,"child_message_dir":child_message_dir,"composed_tools_route":if mcp_native_fallback.is_some() {"harness-native-mcp-config-seam"} else {"session-wire-or-none"},"mcp_native_fallback_reason":mcp_native_fallback.as_ref().map(|(reason, _)| reason.clone())}))?;
         opening.binding_recorded = true;
         let drain = lane.clone();
         let mode_observation = host
@@ -2914,6 +2956,11 @@ impl EncounterService {
                     let mut row = provider_launch_facts(p.protocol, &p.argv);
                     row["id"] = json!(p.id);
                     row["label"] = json!(p.label);
+                    // Admission chooses an acting body before a resident
+                    // exists. Keep the configured pins available in that
+                    // catalogue, as they already are in Resident::provider_view.
+                    row["body_ref"] = json!(p.body_ref);
+                    row["body_revision"] = json!(p.body_revision);
                     row
                 })
                 .collect::<Vec<_>>())),
@@ -3003,6 +3050,32 @@ impl EncounterService {
                     ));
                 }
                 let before = resident.host.identity(&agent_session)?;
+                // Admission against the resident's own advertisement precedes
+                // any journal record or native mutation: an unadvertised
+                // reasoning effort is a refusal, not a failed attempt.
+                if let Some(requested_effort) = provider_reasoning_effort.as_deref() {
+                    let selector = before
+                        .binding
+                        .model_observation
+                        .as_ref()
+                        .and_then(|observation| observation.reasoning_effort.as_ref())
+                        .ok_or_else(|| {
+                            AikitError::new(
+                                "encounter.reasoning_effort_selection_unavailable",
+                                "The resident native session exposes no reasoning-effort selector",
+                            )
+                        })?;
+                    if !selector
+                        .options
+                        .iter()
+                        .any(|option| option.value == requested_effort)
+                    {
+                        return Err(AikitError::new(
+                            "encounter.reasoning_effort_not_advertised",
+                            "The requested reasoning effort was not advertised by this resident native session",
+                        ));
+                    }
+                }
                 self.store.append(&agent_session, &json!({
                     "kind":"native-model-configuration-requested",
                     "agent_session":agent_session,
@@ -3015,26 +3088,26 @@ impl EncounterService {
                 let mut receipt = resident
                     .lane
                     .set_model_before(&provider_model_id, native_control_deadline)?;
+                // Each provider-confirmed stage is journaled as its own
+                // confirmation, in order: a later stage's refusal cannot
+                // un-see an earlier real effect.
+                self.store.append(&agent_session, &json!({
+                    "kind":"native-model-configuration-confirmed",
+                    "receipt":receipt,
+                    "authority":"provider-confirmed-session-config; not-durable-model-policy-or-agency"
+                })).map_err(|e| AikitError::new("encounter.model_configuration_uncertain", format!("Provider confirmed the model but receipt persistence failed; no reasoning continuation was sent and do not resend automatically: {e}")))?;
                 if let Some(provider_reasoning_effort) = provider_reasoning_effort.as_deref() {
-                    // A later reasoning refusal/timeout cannot erase this real
-                    // model effect. Overall selection remains unconfirmed.
-                    self.store.append(&agent_session, &json!({
-                        "kind":"native-model-configuration-partial-confirmed",
-                        "stage":"model", "receipt":receipt,
-                        "overall_selection_confirmed":false,
-                        "authority":"provider-confirmed-session-config; not-durable-model-policy-or-agency"
-                    })).map_err(|e| AikitError::new("encounter.model_configuration_uncertain", format!("Provider confirmed the model but partial-effect persistence failed; no reasoning continuation was sent and do not resend automatically: {e}")))?;
                     ensure_native_control_deadline(native_control_deadline)?;
                     receipt = resident.lane.set_reasoning_effort_before(
                         provider_reasoning_effort,
                         native_control_deadline,
                     )?;
+                    self.store.append(&agent_session, &json!({
+                        "kind":"native-reasoning-effort-configuration-confirmed",
+                        "receipt":receipt,
+                        "authority":"provider-confirmed-session-config; not-durable-model-policy-or-agency"
+                    })).map_err(|e| AikitError::new("encounter.model_configuration_uncertain", format!("Provider confirmed configuration but receipt persistence failed; do not resend automatically: {e}")))?;
                 }
-                self.store.append(&agent_session, &json!({
-                    "kind":"native-model-configuration-confirmed",
-                    "receipt":receipt,
-                    "authority":"provider-confirmed-session-config; not-durable-model-policy-or-agency"
-                })).map_err(|e| AikitError::new("encounter.model_configuration_uncertain", format!("Provider confirmed configuration but receipt persistence failed; do not resend automatically: {e}")))?;
                 Ok(json!({
                     "agent_session":receipt.agent_session,
                     "native_session_id":receipt.native_session_id,
@@ -3340,15 +3413,22 @@ pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
                     return Err(error("encounter request exceeds byte limit"));
                 }
                 let request = serde_json::from_slice(&bytes).map_err(error)?;
-                shutdown = matches!(request, EncounterRequest::Shutdown { .. } | EncounterRequest::ShutdownIdle { .. });
-                owner_observation = matches!(request, EncounterRequest::OwnerOccupancy { .. } | EncounterRequest::ShutdownIdle { .. });
+                shutdown = matches!(
+                    request,
+                    EncounterRequest::Shutdown { .. } | EncounterRequest::ShutdownIdle { .. }
+                );
+                owner_observation = matches!(
+                    request,
+                    EncounterRequest::OwnerOccupancy { .. } | EncounterRequest::ShutdownIdle { .. }
+                );
                 service.apply(request)
             })();
             let shutdown_succeeded = shutdown && result.is_ok();
             let response = match result {
                 Ok(data) => json!({"ok":true,"data":data}),
                 Err(error) => {
-                    let mut response = json!({"ok":false,"error":{"code":error.code(),"message":error.message()}});
+                    let mut response =
+                        json!({"ok":false,"error":{"code":error.code(),"message":error.message()}});
                     // Only the new owner operations expose their declared
                     // metadata census. Other native errors keep the original
                     // response shape and retain their causes inside the owner.

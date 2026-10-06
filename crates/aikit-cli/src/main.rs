@@ -1452,16 +1452,41 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 None => None,
                 Some(path) => {
                     let text = if path.as_os_str() == "-" {
-                        std::io::read_to_string(std::io::Read::take(std::io::stdin(), 1024*1024+1))
+                        std::io::read_to_string(std::io::Read::take(
+                            std::io::stdin(),
+                            1024 * 1024 + 1,
+                        ))
                     } else {
-                        std::fs::File::open(path).and_then(|file| std::io::read_to_string(std::io::Read::take(file, 1024*1024+1)))
-                    }.map_err(|e| AikitError::new("gateway.native_owner.request_read", e.to_string()))?;
-                    if text.len() > 1024*1024 { return Err(AikitError::new("gateway.native_owner.request_limit", "Native owner request exceeds the carrier bound")); }
-                    Some(serde_json::from_str(&text).map_err(|e| AikitError::new("gateway.native_owner.request_json", e.to_string()))?)
+                        std::fs::File::open(path).and_then(|file| {
+                            std::io::read_to_string(std::io::Read::take(file, 1024 * 1024 + 1))
+                        })
+                    }
+                    .map_err(|e| {
+                        AikitError::new("gateway.native_owner.request_read", e.to_string())
+                    })?;
+                    if text.len() > 1024 * 1024 {
+                        return Err(AikitError::new(
+                            "gateway.native_owner.request_limit",
+                            "Native owner request exceeds the carrier bound",
+                        ));
+                    }
+                    Some(serde_json::from_str(&text).map_err(|e| {
+                        AikitError::new("gateway.native_owner.request_json", e.to_string())
+                    })?)
                 }
             };
-            let response = aikit_adapters::gateway_command(&target, aikit_adapters::GatewayCommand::NativeOwner { world_ref:a.world_ref, expected_owner_generation:a.expected_owner_generation, request }, None)?;
-            gateway_data(serde_json::to_value(response).map_err(|e| AikitError::new("gateway.native_owner.response_encode", e.to_string()))?)
+            let response = aikit_adapters::gateway_command(
+                &target,
+                aikit_adapters::GatewayCommand::NativeOwner {
+                    world_ref: a.world_ref,
+                    expected_owner_generation: a.expected_owner_generation,
+                    request,
+                },
+                None,
+            )?;
+            gateway_data(serde_json::to_value(response).map_err(|e| {
+                AikitError::new("gateway.native_owner.response_encode", e.to_string())
+            })?)
         }
         GatewaySub::Serve(a) => {
             let config = aikit_cli::gateway_ops::serve_config(&home, &a)?;
@@ -1573,6 +1598,13 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                     }),
                     coexistence: coexistence.gate,
                     stop_signal: None,
+                    // A peer's Flow request is answered by this Workcell's
+                    // own encounter owner, at the moment of asking.
+                    encounter_relay: Some(std::sync::Arc::new(
+                        aikit_cli::gateway_encounter_relay::OwnerEncounterRelay {
+                            home: home.clone(),
+                        },
+                    )),
                 },
             )?;
             Ok(Reply::Text("gateway service stopped cleanly".into()))

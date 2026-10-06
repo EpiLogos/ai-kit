@@ -354,8 +354,7 @@ mod tests {
 mod native_cache_tests {
     use super::*;
     use aikit_adapters::gateway_service::{
-        run_gateway_service_on_websocket_listener,
-        GatewayServiceConfig, GatewayServiceHooks,
+        run_gateway_service_on_websocket_listener, GatewayServiceConfig, GatewayServiceHooks,
     };
     use aikit_adapters::AgencyGateway;
     use aikit_core::resource::ResourceRef;
@@ -433,15 +432,15 @@ mod native_cache_tests {
                 .unwrap();
             file.write_all(token.as_bytes()).unwrap();
             drop(file);
-            let listener = if allocate_in_service {
-                None
-            } else {
-                Some(TcpListener::bind("127.0.0.1:0").unwrap())
-            };
+            // The websocket listener is always pre-bound here, whatever the
+            // unix-socket allocation does: the actual address is known by
+            // construction, and the service must serve exactly the listener
+            // it was handed.
+            let listener = Some(TcpListener::bind("127.0.0.1:0").unwrap());
             let address = listener
                 .as_ref()
                 .map(|listener| listener.local_addr().unwrap().to_string())
-                .unwrap_or_else(|| "127.0.0.1:0".into());
+                .unwrap();
             let socket = root.join("s");
             if allocate_in_service {
                 use std::os::unix::ffi::OsStrExt;

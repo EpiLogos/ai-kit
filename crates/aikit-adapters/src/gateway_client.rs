@@ -889,6 +889,7 @@ mod tests {
             conversation: None,
             coexistence: None,
             stop_signal: None,
+            encounter_relay: None,
         };
         let (done_tx, done_rx) = mpsc::channel();
         thread::spawn(move || {

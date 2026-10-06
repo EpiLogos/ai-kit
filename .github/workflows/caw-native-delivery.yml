@@ -75,7 +75,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: EpiLogos/Central
-          ref: 5d1b8bf6692f9aca45b2fe39db54cbc378dda70e
+          # The placement conformance reads the owner's World through the real
+          # ctrl: this pin carries central.now.list and the world declaration
+          # surface those tests drive.
+          ref: 2a604574774c41921003ed99a2eed73b4c9f4266
           path: .caw-native/Central
           persist-credentials: false
       - uses: actions/checkout@v4

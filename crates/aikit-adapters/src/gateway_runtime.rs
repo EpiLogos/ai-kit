@@ -52,7 +52,15 @@ pub const GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE: &str = "communique-exact-in
 
 /// Every protocol feature this gateway advertises in its `protocol` answer.
 pub const GATEWAY_FEATURE_NATIVE_OWNER: &str = "native-owner/v1";
-pub const GATEWAY_PROTOCOL_FEATURES: [&str; 2] = [GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE, GATEWAY_FEATURE_NATIVE_OWNER];
+pub const GATEWAY_PROTOCOL_FEATURES: [&str; 3] = [
+    GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE,
+    GATEWAY_FEATURE_NATIVE_OWNER,
+    // Relay advertisement rides the service: a peer that sees it may route an
+    // EncounterRelay here, and the serving gateway answers it through its
+    // Workcell's encounter owner (or refuses by name when none stands behind
+    // this process).
+    crate::gateway_posture::GATEWAY_FEATURE_ENCOUNTER_RELAY,
+];
 
 /// A serving gateway's answer to "who occupies this Position on your
 /// Workcell" (or, with no Position, the whole listing). The gateway keeps no
@@ -1678,7 +1686,9 @@ impl GatewayCommand {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum GatewayResponse {
-    NativeOwner { reading: serde_json::Value },
+    NativeOwner {
+        reading: serde_json::Value,
+    },
     Protocol {
         gateway_version: String,
         connector_sdk_version: String,

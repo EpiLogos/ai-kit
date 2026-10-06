@@ -54,11 +54,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use aikit_adapters::{
-    gateway_command_within, Communique, CommuniqueDraft, CommuniqueForward, CommuniqueForwardOutcome,
-    CommuniqueInstance, CommuniqueInstanceHold, CommuniqueRouting, CommuniqueState, GatewayAskRequest,
-    GatewayAskRoute, GatewayCarrierTarget, GatewayCommand, GatewayResponse, ListenerClass,
-    SenderAttribution, COMMUNIQUE_REF_PREFIX, GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE,
-    GATEWAY_PROTOCOL_FEATURES,
+    gateway_command_within, Communique, CommuniqueDraft, CommuniqueForward,
+    CommuniqueForwardOutcome, CommuniqueInstance, CommuniqueInstanceHold, CommuniqueRouting,
+    CommuniqueState, GatewayAskRequest, GatewayAskRoute, GatewayCarrierTarget, GatewayCommand,
+    GatewayResponse, ListenerClass, SenderAttribution, COMMUNIQUE_REF_PREFIX,
+    GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE, GATEWAY_PROTOCOL_FEATURES,
 };
 use aikit_core::{AikitError, Result};
 use aikit_store::AikitHome;
@@ -328,7 +328,8 @@ fn store_remotes(home: &AikitHome, remotes: &GatewayRemotes) -> Result<()> {
 /// The retired protocol carried a build identity that could name the remote's
 /// Workcell; today the probe answers what the wire answers, no more.
 fn probe_remote(remote: &GatewayRemote) -> Value {
-    let token = SecretLocation::parse(&remote.token_location).and_then(|location| location.resolve());
+    let token =
+        SecretLocation::parse(&remote.token_location).and_then(|location| location.resolve());
     let mut reading = json!({
         "workcell_ref": remote.workcell_ref,
         "endpoint": remote.websocket_bind,
@@ -347,7 +348,12 @@ fn probe_remote(remote: &GatewayRemote) -> Value {
         path: remote.websocket_path.clone(),
         bearer_token: token.expose().to_owned(),
     };
-    match gateway_command_within(&target, GatewayCommand::Protocol, None, Duration::from_secs(3)) {
+    match gateway_command_within(
+        &target,
+        GatewayCommand::Protocol,
+        None,
+        Duration::from_secs(3),
+    ) {
         Ok(GatewayResponse::Protocol { features, .. }) => {
             let missing: Vec<&str> = GATEWAY_PROTOCOL_FEATURES
                 .iter()

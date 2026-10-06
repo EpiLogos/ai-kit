@@ -26,6 +26,46 @@ fn knowledge_search_reaches_the_now_field_through_the_one_service() {
     .unwrap();
     fs::create_dir_all(temp.path().join("Work")).unwrap();
 
+    // The NOW field answers through the attached native owner, and the owner
+    // answers its registered members: admit the clearing record the search
+    // asserts, against the root map's basis.
+    let ctrl = std::env::var_os("CENTRAL_CTRL_BIN")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("ctrl"));
+    let action = |action: &str, input: serde_json::Value| {
+        let output = std::process::Command::new(&ctrl)
+            .args([
+                "--json",
+                "--root",
+                temp.path().to_str().unwrap(),
+                "action",
+                "run",
+                action,
+                &input.to_string(),
+            ])
+            .output()
+            .expect("the real ctrl runs the fixture map action");
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("native action receipt parses");
+        assert_eq!(envelope["ok"], true, "fixture action {action}: {envelope}");
+        envelope["data"].clone()
+    };
+    action("central.init", serde_json::json!({}));
+    let basis = action(
+        "central.file-map.inspect",
+        serde_json::json!({"resources": false}),
+    )["result"]["revision"]
+        .as_str()
+        .expect("the map basis carries its revision")
+        .to_owned();
+    action(
+        "central.file-map.register",
+        serde_json::json!({
+            "path": "Control/agents/now/clearings/abc/now.json",
+            "expected_revision": basis
+        }),
+    );
+
     let home = AikitHome::at(temp.path().join("aikit-home"));
     let service =
         Service::open(home, temp.path(), |_| None).expect("open production application service");
@@ -40,9 +80,11 @@ fn knowledge_search_reaches_the_now_field_through_the_one_service() {
         now_field.available,
         "ripgrep is present, so the provider is available"
     );
+    // With the native owner attached, the status discloses the owner
+    // delegation; the scope allowlist remains the un-owned variant's phrase.
     assert!(
-        now_field.detail.contains("scope allowlist"),
-        "status discloses that authorisation is by scope, got: {}",
+        now_field.detail.contains("attached native owner"),
+        "status discloses that identity and payload ride the owner, got: {}",
         now_field.detail
     );
 

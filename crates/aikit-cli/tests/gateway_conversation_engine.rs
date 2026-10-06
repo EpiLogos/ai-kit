@@ -2941,7 +2941,6 @@ fn a_drain_needs_no_binding_and_names_each_interrupted_turn_and_never_replays_it
     assert_eq!(harness.stream_events().len(), 3);
 }
 
-
 // ---------------------------------------------------------------------------
 // Restart proof against the real binary
 // ---------------------------------------------------------------------------

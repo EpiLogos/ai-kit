@@ -41,16 +41,19 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aikit_adapters::central_temporal::project_ground_root;
 use aikit_adapters::runner::{CommandRunner, SystemRunner};
-use aikit_adapters::work_repos::{decode_work_file_source_ref, discover_native_work_projects, query_terms, work_file_source_ref, NativeWorkProjectEntry, NativeWorkRepoProject, WorkReposSourcePoolProvider};
+use aikit_adapters::work_repos::{
+    decode_work_file_source_ref, discover_native_work_projects, query_terms, work_file_source_ref,
+    NativeWorkProjectEntry, NativeWorkRepoProject, WorkReposSourcePoolProvider,
+};
 use aikit_core::context_source::{AgentVisibility, ExternalEgress};
 use aikit_core::hooks::{HookEvent, HookEventKind};
 use aikit_core::id::CapsuleId;
 use aikit_core::knowledge_source_pool::{SourcePoolProvider, SourceSearchMode};
 use aikit_core::method::{praxis_form, praxis_payload, PraxisForm};
 use aikit_core::resolve::ResolvedView;
+use aikit_core::resource::SourceRef;
 use aikit_core::Kind;
 use aikit_core::{AikitError, ResourceRef, Result};
-use aikit_core::resource::SourceRef;
 use aikit_store::now_context::{
     NowContextBasis, NowContextChange, NowContextItem, NowDeliveryReceipt, PreparedNowContext,
     RedisNowConfig, RedisNowStore, NOW_DELIVERY_SCHEMA, NOW_PREPARED_SCHEMA,
@@ -128,15 +131,24 @@ pub fn resolve_scope(central: &Path, cwd: &Path) -> Option<EntryScope> {
 }
 
 pub fn resolve_scope_current(central: &Path, cwd: &Path) -> Result<Option<EntryScope>> {
-    let Some(primary) = project_ground_root(central, cwd) else { return Ok(None); };
+    let Some(primary) = project_ground_root(central, cwd) else {
+        return Ok(None);
+    };
     let checkout = cwd
         .ancestors()
         .find(|dir| dir.join(".git").exists())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| primary.clone());
-    let project = primary.file_name().and_then(|name| name.to_str()).ok_or_else(|| {
-        fail("development_entry.project_transport_unsupported", "The actual Project display is not exact UTF-8")
-    })?.to_owned();
+    let project = primary
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            fail(
+                "development_entry.project_transport_unsupported",
+                "The actual Project display is not exact UTF-8",
+            )
+        })?
+        .to_owned();
     let native = NativeWorkRepoProject::inspect(&primary, &project, Some(central))?
         .with_checkout(&checkout)?;
     let project_id = native.project().project_id.clone();
@@ -408,26 +420,47 @@ fn search_sources(
     project: NativeWorkRepoProject,
     concern: &str,
     limit: usize,
-) -> Result<(WorkReposSourcePoolProvider<SystemRunner>, Vec<aikit_core::knowledge_source_pool::SourceHit>)> {
+) -> Result<(
+    WorkReposSourcePoolProvider<SystemRunner>,
+    Vec<aikit_core::knowledge_source_pool::SourceHit>,
+)> {
     let provider = WorkReposSourcePoolProvider::connect_native(
         SystemRunner::new().with_timeout(Duration::from_secs(10)),
-        aikit_adapters::ripgrep::executable(), vec![project],
+        aikit_adapters::ripgrep::executable(),
+        vec![project],
     )?;
     let hits = provider.search(concern, SourceSearchMode::Fulltext, &[], limit)?;
     Ok((provider, hits))
 }
 
 fn relative_of(project_id: &str, source: &SourceRef) -> Result<Option<String>> {
-    let Some(address) = decode_work_file_source_ref(source)? else { return Ok(None); };
-    if address.project_id != project_id { return Ok(None); }
+    let Some(address) = decode_work_file_source_ref(source)? else {
+        return Ok(None);
+    };
+    if address.project_id != project_id {
+        return Ok(None);
+    }
     Ok(address.member.to_str().map(str::to_owned))
 }
 
-fn candidate_revision(provider: &WorkReposSourcePoolProvider<SystemRunner>, source: &SourceRef, expected_native_revision: Option<&aikit_core::SourceRevision>) -> Result<String> {
-    let bytes = provider.read_bytes(source)?.ok_or_else(|| fail(
-        "development_entry.source_owner_missing", "The retained Work owner declined its selected Source"))?;
-    if expected_native_revision.is_some_and(|revision| revision.as_str() != aikit_adapters::now_field::content_revision(&bytes)) {
-        return Err(fail("development_entry.source_revision_conflict", "The selected query's native byte basis changed before preparation"));
+fn candidate_revision(
+    provider: &WorkReposSourcePoolProvider<SystemRunner>,
+    source: &SourceRef,
+    expected_native_revision: Option<&aikit_core::SourceRevision>,
+) -> Result<String> {
+    let bytes = provider.read_bytes(source)?.ok_or_else(|| {
+        fail(
+            "development_entry.source_owner_missing",
+            "The retained Work owner declined its selected Source",
+        )
+    })?;
+    if expected_native_revision.is_some_and(|revision| {
+        revision.as_str() != aikit_adapters::now_field::content_revision(&bytes)
+    }) {
+        return Err(fail(
+            "development_entry.source_revision_conflict",
+            "The selected query's native byte basis changed before preparation",
+        ));
     }
     // This local prepared-context basis remains blake3. It is not the native
     // Source binding's FNV revision and never mints a replacement SourceRef.
@@ -437,7 +470,10 @@ fn candidate_revision(provider: &WorkReposSourcePoolProvider<SystemRunner>, sour
 fn native_scope_project(central: &Path, scope: &EntryScope) -> Result<NativeWorkRepoProject> {
     let project = NativeWorkRepoProject::inspect(&scope.primary, &scope.project, Some(central))?;
     if project.project().project_id != scope.project_id {
-        return Err(fail("development_entry.native_project_changed", "The EntryScope no longer names its actual native Project; resolve afresh"));
+        return Err(fail(
+            "development_entry.native_project_changed",
+            "The EntryScope no longer names its actual native Project; resolve afresh",
+        ));
     }
     project.with_checkout(&scope.checkout)
 }
@@ -460,7 +496,9 @@ pub fn collect_inventory(
     // owner-issued reference. No display-name identity or copied-body route.
     let mut sources = Vec::new();
     let mut current_provider = None;
-    match native_scope_project(central, scope).and_then(|project| search_sources(project, concern, 40)) {
+    match native_scope_project(central, scope)
+        .and_then(|project| search_sources(project, concern, 40))
+    {
         Ok((provider, hits)) => {
             let mut docs = 0;
             let mut code = 0;
@@ -468,21 +506,43 @@ pub fn collect_inventory(
                 let path = match relative_of(&scope.project_id, &hit.source) {
                     Ok(Some(path)) => path,
                     Ok(None) => continue,
-                    Err(error) => { absences.push(format!("source address unavailable: {error}")); continue; }
+                    Err(error) => {
+                        absences.push(format!("source address unavailable: {error}"));
+                        continue;
+                    }
                 };
                 let authored = is_authored(&path);
-                if authored && docs >= DOC_LIMIT || !authored && code >= CODE_LIMIT { continue; }
-                let revision = match candidate_revision(&provider, &hit.source, hit.revision.as_ref()) {
-                    Ok(revision) => revision,
-                    Err(error) => { absences.push(format!("selected source unavailable: {error}")); continue; }
-                };
-                if authored { docs += 1; } else { code += 1; }
+                if authored && docs >= DOC_LIMIT || !authored && code >= CODE_LIMIT {
+                    continue;
+                }
+                let revision =
+                    match candidate_revision(&provider, &hit.source, hit.revision.as_ref()) {
+                        Ok(revision) => revision,
+                        Err(error) => {
+                            absences.push(format!("selected source unavailable: {error}"));
+                            continue;
+                        }
+                    };
+                if authored {
+                    docs += 1;
+                } else {
+                    code += 1;
+                }
                 sources.push(SourceCandidate {
-                    project: scope.project.clone(), source: hit.source,
-                    absolute: scope.checkout.join(&path), path, revision,
-                    score: hit.score.unwrap_or(0.0), snippet: hit.snippet.chars().take(160).collect(),
-                    line: hit.provider_binding.as_deref().and_then(|binding| binding.strip_prefix("line:")).and_then(|line| line.parse().ok()),
-                    authored, mandatory: false,
+                    project: scope.project.clone(),
+                    source: hit.source,
+                    absolute: scope.checkout.join(&path),
+                    path,
+                    revision,
+                    score: hit.score.unwrap_or(0.0),
+                    snippet: hit.snippet.chars().take(160).collect(),
+                    line: hit
+                        .provider_binding
+                        .as_deref()
+                        .and_then(|binding| binding.strip_prefix("line:"))
+                        .and_then(|line| line.parse().ok()),
+                    authored,
+                    mandatory: false,
                 });
             }
             current_provider = Some(provider);
@@ -494,15 +554,27 @@ pub fn collect_inventory(
             existing.mandatory = true;
             continue;
         }
-        let Some(provider) = current_provider.as_ref() else { continue; };
+        let Some(provider) = current_provider.as_ref() else {
+            continue;
+        };
         match work_file_source_ref(&scope.project_id, Path::new(path)).and_then(|source| {
             candidate_revision(provider, &source, None).map(|revision| (source, revision))
         }) {
-            Ok((source, revision)) => sources.insert(0, SourceCandidate {
-                project: scope.project.clone(), source, path: path.clone(),
-                absolute: scope.checkout.join(path), revision, score: 1.0,
-                snippet: String::new(), line: None, authored: is_authored(path), mandatory: true,
-            }),
+            Ok((source, revision)) => sources.insert(
+                0,
+                SourceCandidate {
+                    project: scope.project.clone(),
+                    source,
+                    path: path.clone(),
+                    absolute: scope.checkout.join(path),
+                    revision,
+                    score: 1.0,
+                    snippet: String::new(),
+                    line: None,
+                    authored: is_authored(path),
+                    mandatory: true,
+                },
+            ),
             Err(error) => absences.push(format!("explicit source unavailable: {error}")),
         }
     }
@@ -512,7 +584,8 @@ pub fn collect_inventory(
         let related = NativeWorkRepoProject::inspect(&root, &name, Some(central));
         match related.and_then(|project| {
             let project_id = project.project().project_id.clone();
-            search_sources(project, concern, 20).map(|(provider,hits)| (project_id,provider,hits))
+            search_sources(project, concern, 20)
+                .map(|(provider, hits)| (project_id, provider, hits))
         }) {
             Ok((project_id, provider, hits)) => {
                 let mut retained = 0;
@@ -520,19 +593,39 @@ pub fn collect_inventory(
                     let path = match relative_of(&project_id, &hit.source) {
                         Ok(Some(path)) => path,
                         Ok(None) => continue,
-                        Err(error) => { absences.push(format!("{name}: source address unavailable: {error}")); continue; }
+                        Err(error) => {
+                            absences.push(format!("{name}: source address unavailable: {error}"));
+                            continue;
+                        }
                     };
-                    if !is_authored(&path) || retained >= CROSS_PROJECT_LIMIT { continue; }
-                    let revision = match candidate_revision(&provider, &hit.source, hit.revision.as_ref()) {
-                        Ok(revision) => revision,
-                        Err(error) => { absences.push(format!("{name}: selected source unavailable: {error}")); continue; }
-                    };
+                    if !is_authored(&path) || retained >= CROSS_PROJECT_LIMIT {
+                        continue;
+                    }
+                    let revision =
+                        match candidate_revision(&provider, &hit.source, hit.revision.as_ref()) {
+                            Ok(revision) => revision,
+                            Err(error) => {
+                                absences
+                                    .push(format!("{name}: selected source unavailable: {error}"));
+                                continue;
+                            }
+                        };
                     retained += 1;
                     sources.push(SourceCandidate {
-                        project: name.clone(), source: hit.source, absolute: root.join(&path), path, revision,
-                        score: hit.score.unwrap_or(0.0), snippet: hit.snippet.chars().take(160).collect(),
-                        line: hit.provider_binding.as_deref().and_then(|binding| binding.strip_prefix("line:")).and_then(|line| line.parse().ok()),
-                        authored: true, mandatory: false,
+                        project: name.clone(),
+                        source: hit.source,
+                        absolute: root.join(&path),
+                        path,
+                        revision,
+                        score: hit.score.unwrap_or(0.0),
+                        snippet: hit.snippet.chars().take(160).collect(),
+                        line: hit
+                            .provider_binding
+                            .as_deref()
+                            .and_then(|binding| binding.strip_prefix("line:"))
+                            .and_then(|line| line.parse().ok()),
+                        authored: true,
+                        mandatory: false,
                     });
                 }
             }
@@ -814,8 +907,12 @@ fn candidate_item(
 /// Work-source delivery retains its actual current owner privacy. Other
 /// capability/praxis preparation continues through candidate_item unchanged.
 fn work_candidate_item(source: &SourceCandidate) -> Result<NowContextItem> {
-    let mut item = candidate_item(source.source.as_str(), &source.revision,
-        &source.path, source.snippet.clone())?;
+    let mut item = candidate_item(
+        source.source.as_str(),
+        &source.revision,
+        &source.path,
+        source.snippet.clone(),
+    )?;
     item.external_egress = ExternalEgress::Denied;
     Ok(item)
 }
@@ -846,10 +943,7 @@ pub fn provider_selection(
         .enumerate()
         .filter(|(_, s)| !s.mandatory)
     {
-        add(
-            format!("source/{index}"),
-            work_candidate_item(source),
-        );
+        add(format!("source/{index}"), work_candidate_item(source));
     }
     for (index, capability) in inventory
         .capabilities
@@ -1116,56 +1210,111 @@ pub struct EntryLedger {
     pub refinement: Option<String>,
 }
 
-fn ledger_work_owner(central: &Path, scope: &EntryScope, ledger: &EntryLedger) -> Result<WorkReposSourcePoolProvider<SystemRunner>> {
-    let current = native_scope_project(central,scope)?;
+fn ledger_work_owner(
+    central: &Path,
+    scope: &EntryScope,
+    ledger: &EntryLedger,
+) -> Result<WorkReposSourcePoolProvider<SystemRunner>> {
+    let current = native_scope_project(central, scope)?;
     let mut required = BTreeSet::new();
     for source in ledger.source_refs.values() {
-        let address=decode_work_file_source_ref(source)?.ok_or_else(|| fail(
-            "development_entry.source_owner_unknown", "A retained source reference has no known Work owner language"))?;
+        let address = decode_work_file_source_ref(source)?.ok_or_else(|| {
+            fail(
+                "development_entry.source_owner_unknown",
+                "A retained source reference has no known Work owner language",
+            )
+        })?;
         required.insert(address.project_id);
     }
-    let primary=std::fs::canonicalize(&scope.primary).map_err(|error| fail(
-        "development_entry.source_binding_unavailable",error.to_string()).with_io_source(error))?;
-    let mut projects=vec![current];
+    let primary = std::fs::canonicalize(&scope.primary).map_err(|error| {
+        fail(
+            "development_entry.source_binding_unavailable",
+            error.to_string(),
+        )
+        .with_io_source(error)
+    })?;
+    let mut projects = vec![current];
     for entry in discover_native_work_projects(central)? {
         match entry {
             NativeWorkProjectEntry::Project(project) => {
                 if project.project().project_id == scope.project_id {
-                    let root=std::fs::canonicalize(&project.project().root).map_err(|error| fail(
-                        "development_entry.source_binding_unavailable",error.to_string()).with_io_source(error))?;
-                    if root != primary { return Err(fail("development_entry.source_binding_conflict",
-                        "The actual native World has conflicting roots for this literal Project ID")); }
-                } else if required.contains(&project.project().project_id) { projects.push(project); }
+                    let root = std::fs::canonicalize(&project.project().root).map_err(|error| {
+                        fail(
+                            "development_entry.source_binding_unavailable",
+                            error.to_string(),
+                        )
+                        .with_io_source(error)
+                    })?;
+                    if root != primary {
+                        return Err(fail("development_entry.source_binding_conflict",
+                        "The actual native World has conflicting roots for this literal Project ID"));
+                    }
+                } else if required.contains(&project.project().project_id) {
+                    projects.push(project);
+                }
             }
-            NativeWorkProjectEntry::Absence {name,error} => return Err(fail(
-                "development_entry.source_binding_unavailable",format!("Work/{name}: {error}"))
-                .with("native_code",error.code()).with_io_source_from(&error)),
+            NativeWorkProjectEntry::Absence { name, error } => {
+                return Err(fail(
+                    "development_entry.source_binding_unavailable",
+                    format!("Work/{name}: {error}"),
+                )
+                .with("native_code", error.code())
+                .with_io_source_from(&error))
+            }
         }
     }
-    WorkReposSourcePoolProvider::connect_native(SystemRunner::probe(),
-        aikit_adapters::ripgrep::executable(),projects)
+    WorkReposSourcePoolProvider::connect_native(
+        SystemRunner::probe(),
+        aikit_adapters::ripgrep::executable(),
+        projects,
+    )
 }
 
-fn current_ledger_changes(central: &Path, scope: &EntryScope, ledger: &EntryLedger) -> Result<Vec<(String,String,String)>> {
-    let owner = if ledger.source_refs.is_empty() { None } else { Some(ledger_work_owner(central,scope,ledger)?) };
-    let mut changed=Vec::new();
+fn current_ledger_changes(
+    central: &Path,
+    scope: &EntryScope,
+    ledger: &EntryLedger,
+) -> Result<Vec<(String, String, String)>> {
+    let owner = if ledger.source_refs.is_empty() {
+        None
+    } else {
+        Some(ledger_work_owner(central, scope, ledger)?)
+    };
+    let mut changed = Vec::new();
     for (path, revision) in &ledger.source_revisions {
-        let now=if let Some(source)=ledger.source_refs.get(path) {
-            let owner=owner.as_ref().expect("source refs required an owner");
-            let address=decode_work_file_source_ref(source)?.ok_or_else(|| fail(
-                "development_entry.source_owner_unknown", "The retained source has no Work owner address"))?;
-            let project=owner.projects().iter().find(|project|project.project_id==address.project_id)
-                .ok_or_else(|| fail("development_entry.source_owner_missing", "The retained native Project is no longer discoverable"))?;
+        let now = if let Some(source) = ledger.source_refs.get(path) {
+            let owner = owner.as_ref().expect("source refs required an owner");
+            let address = decode_work_file_source_ref(source)?.ok_or_else(|| {
+                fail(
+                    "development_entry.source_owner_unknown",
+                    "The retained source has no Work owner address",
+                )
+            })?;
+            let project = owner
+                .projects()
+                .iter()
+                .find(|project| project.project_id == address.project_id)
+                .ok_or_else(|| {
+                    fail(
+                        "development_entry.source_owner_missing",
+                        "The retained native Project is no longer discoverable",
+                    )
+                })?;
             if project.root.join(&address.member) != Path::new(path) {
-                return Err(fail("development_entry.source_binding_changed", "The issued Source no longer maps to its retained selected path"));
+                return Err(fail(
+                    "development_entry.source_binding_changed",
+                    "The issued Source no longer maps to its retained selected path",
+                ));
             }
-            candidate_revision(owner,source,None)?
+            candidate_revision(owner, source, None)?
         } else {
             // Matrix/legacy path observations stay local observations. They
             // cannot emit a newly reconstructed native Source change.
             content_revision(Path::new(path)).unwrap_or_else(|| "absent".into())
         };
-        if &now != revision { changed.push((path.clone(),revision.clone(),now)); }
+        if &now != revision {
+            changed.push((path.clone(), revision.clone(), now));
+        }
     }
     Ok(changed)
 }
@@ -1523,7 +1672,7 @@ pub fn deliver(request: &EntryRequest<'_>) -> Result<Option<String>> {
             // The session moved to another checkout: its entry no longer
             // describes where it stands. Prepare afresh for the new scope.
         } else {
-            let changed = current_ledger_changes(central,&scope,&ledger)?;
+            let changed = current_ledger_changes(central, &scope, &ledger)?;
             if changed.is_empty() {
                 return Ok(None);
             }
@@ -1539,7 +1688,9 @@ pub fn deliver(request: &EntryRequest<'_>) -> Result<Option<String>> {
             if let Some(Ok(store)) = &store {
                 if let Ok((participant, _)) = participant_refs(request.client, &session) {
                     for (path, before, after) in &changed {
-                        let Some(source) = ledger.source_refs.get(path) else { continue; };
+                        let Some(source) = ledger.source_refs.get(path) else {
+                            continue;
+                        };
                         let change = NowContextChange {
                             change_id: format!(
                                 "development-entry:{}",
@@ -1761,7 +1912,11 @@ fn prepare(
                     }),
             )
             .collect(),
-        source_refs: selection.sources.iter().map(|source| (source.absolute.display().to_string(),source.source.clone())).collect(),
+        source_refs: selection
+            .sources
+            .iter()
+            .map(|source| (source.absolute.display().to_string(), source.source.clone()))
+            .collect(),
         emitted_at_unix_ms: now_ms(),
         redeliver_pending: false,
         selected: selected_keys(&selection),
@@ -2038,7 +2193,6 @@ pub fn refine(cwd: &Path, client: &str, session: &str) -> Result<Value> {
     Ok(outcome)
 }
 
-
 /// The work a body is carrying, exactly as the World join resolved it.
 /// Restored with the occupancy readers that consume it (`refocus`,
 /// `inhabitation`); the entry pipeline itself no longer names it.
@@ -2101,7 +2255,6 @@ impl WorkBinding {
         format!("participant/{}", self.position_ref)
     }
 }
-
 
 /// The authored concern of the work: the unit's own developmental concern and
 /// the difference it must make — never the text of a chat turn.
@@ -2302,7 +2455,11 @@ mod tests {
         for index in 0..80 {
             selection.sources.push(SourceCandidate {
                 project: "ai-kit".into(),
-                source: work_file_source_ref("fixture-native-id", Path::new(&format!("docs/long-document-{index}.md"))).unwrap(),
+                source: work_file_source_ref(
+                    "fixture-native-id",
+                    Path::new(&format!("docs/long-document-{index}.md")),
+                )
+                .unwrap(),
                 path: format!("docs/long-document-{index}.md"),
                 absolute: format!("/c/docs/long-document-{index}.md").into(),
                 revision: "blake3:0123456789abcdef".into(),
@@ -2370,80 +2527,174 @@ mod tests {
     }
 
     fn native_work_scratch() -> tempfile::TempDir {
-        let parent=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
+        let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
         std::fs::create_dir_all(&parent).unwrap();
-        tempfile::Builder::new().prefix("entry-native-work-").tempdir_in(parent).unwrap()
+        tempfile::Builder::new()
+            .prefix("entry-native-work-")
+            .tempdir_in(parent)
+            .unwrap()
     }
 
     #[test]
     #[ignore = "explicit native integration: requires built/pinned AIKIT_CENTRAL_REAL_BIN and real ripgrep"]
     fn actual_native_entry_retains_owner_ref_local_byte_basis_and_declaration_failure() {
-        let ctrl=PathBuf::from(std::env::var_os("AIKIT_CENTRAL_REAL_BIN").expect("real pinned ctrl is required"));
+        let ctrl = PathBuf::from(
+            std::env::var_os("AIKIT_CENTRAL_REAL_BIN").expect("real pinned ctrl is required"),
+        );
         assert!(ctrl.is_file());
-        let owned=native_work_scratch();
-        let world=std::fs::canonicalize(owned.path()).unwrap();
-        let run=|action:&str,input:Value| {
-            let mut command=std::process::Command::new(&ctrl);
-            command.args(["--json","--root"]).arg(&world).args(["action","run",action]).arg(input.to_string());
-            let output=SystemRunner::new().with_timeout(Duration::from_secs(30)).with_strict_utf8()
-                .capture_command(&mut command).unwrap();
-            let receipt:Value=serde_json::from_str(&output.stdout).unwrap();
-            assert!(output.ok()&&receipt["ok"]==true,"{receipt}; {}",output.stderr);
+        let owned = native_work_scratch();
+        let world = std::fs::canonicalize(owned.path()).unwrap();
+        let run = |action: &str, input: Value| {
+            let mut command = std::process::Command::new(&ctrl);
+            command
+                .args(["--json", "--root"])
+                .arg(&world)
+                .args(["action", "run", action])
+                .arg(input.to_string());
+            let output = SystemRunner::new()
+                .with_timeout(Duration::from_secs(30))
+                .with_strict_utf8()
+                .capture_command(&mut command)
+                .unwrap();
+            let receipt: Value = serde_json::from_str(&output.stdout).unwrap();
+            assert!(
+                output.ok() && receipt["ok"] == true,
+                "{receipt}; {}",
+                output.stderr
+            );
             receipt["data"].clone()
         };
-        run("central.init",json!({}));
-        let primary=world.join("Work/display-name");
+        run("central.init", json!({}));
+        let primary = world.join("Work/display-name");
         std::fs::create_dir_all(&primary).unwrap();
-        run("projectcentral.init",json!({"project":"display-name","project_id":"native:a:b"}));
-        let bytes=b"# Exact entry source\nNativeentryneedle owner basis.\n";
-        std::fs::write(primary.join("README.md"),bytes).unwrap();
-        let scope=resolve_scope_current(&world,&primary).unwrap().unwrap();
-        assert_eq!(scope.project,"display-name");
-        assert_eq!(scope.project_id,"native:a:b");
-        let (provider,hits)=search_sources(native_scope_project(&world,&scope).unwrap(),"Nativeentryneedle",8).unwrap();
-        let reference=work_file_source_ref("native:a:b",Path::new("README.md")).unwrap();
-        let hit=hits.iter().find(|hit|hit.source==reference).expect("real native rg match");
-        assert_eq!(relative_of(&scope.project_id,&hit.source).unwrap().as_deref(),Some("README.md"));
-        let revision=candidate_revision(&provider,&hit.source,hit.revision.as_ref()).unwrap();
-        assert_eq!(revision,format!("blake3:{}",blake3::hash(bytes).to_hex()));
-        let candidate = SourceCandidate { project:scope.project.clone(),source:hit.source.clone(),
-            path:"README.md".into(),absolute:primary.join("README.md"),revision:revision.clone(),
-            score:hit.score.unwrap_or(0.0),snippet:hit.snippet.clone(),line:None,authored:true,mandatory:false };
-        let item=work_candidate_item(&candidate).unwrap();
-        assert_eq!(item.external_egress,ExternalEgress::Denied,"selected Work cannot gain egress during preparation");
-        assert_eq!(item.source_ref.as_str(),reference.as_str());
-        assert_ne!(item.source_ref.as_str(),"source:project:display-name:README.md");
-        let path=primary.join("README.md").display().to_string();
-        let ledger=EntryLedger {schema:ENTRY_SCHEMA.into(),client:"native-test".into(),session:"source-return".into(),
-            concern:"Nativeentryneedle".into(),project:scope.project.clone(),checkout:scope.checkout.clone(),
-            rendered_digest:String::new(),prepared_version:None,
-            source_revisions:BTreeMap::from([(path.clone(),revision.clone())]),
-            source_refs:BTreeMap::from([(path.clone(),reference.clone())]),emitted_at_unix_ms:0,
-            redeliver_pending:false,selected:vec![reference.as_str().into()],refinement:None};
-        let state=world.join("owned-entry-state");
-        store_ledger(&state,&ledger);
-        let loaded=load_ledger(&state,"native-test","source-return").unwrap();
-        assert_eq!(loaded,ledger,"real persisted ledger retains issued identity");
-        assert!(current_ledger_changes(&world,&scope,&loaded).unwrap().is_empty());
-        let mut legacy=serde_json::to_value(&loaded).unwrap();
+        run(
+            "projectcentral.init",
+            json!({"project":"display-name","project_id":"native:a:b"}),
+        );
+        let bytes = b"# Exact entry source\nNativeentryneedle owner basis.\n";
+        std::fs::write(primary.join("README.md"), bytes).unwrap();
+        let scope = resolve_scope_current(&world, &primary).unwrap().unwrap();
+        assert_eq!(scope.project, "display-name");
+        assert_eq!(scope.project_id, "native:a:b");
+        let (provider, hits) = search_sources(
+            native_scope_project(&world, &scope).unwrap(),
+            "Nativeentryneedle",
+            8,
+        )
+        .unwrap();
+        let reference = work_file_source_ref("native:a:b", Path::new("README.md")).unwrap();
+        let hit = hits
+            .iter()
+            .find(|hit| hit.source == reference)
+            .expect("real native rg match");
+        assert_eq!(
+            relative_of(&scope.project_id, &hit.source)
+                .unwrap()
+                .as_deref(),
+            Some("README.md")
+        );
+        let revision = candidate_revision(&provider, &hit.source, hit.revision.as_ref()).unwrap();
+        assert_eq!(revision, format!("blake3:{}", blake3::hash(bytes).to_hex()));
+        let candidate = SourceCandidate {
+            project: scope.project.clone(),
+            source: hit.source.clone(),
+            path: "README.md".into(),
+            absolute: primary.join("README.md"),
+            revision: revision.clone(),
+            score: hit.score.unwrap_or(0.0),
+            snippet: hit.snippet.clone(),
+            line: None,
+            authored: true,
+            mandatory: false,
+        };
+        let item = work_candidate_item(&candidate).unwrap();
+        assert_eq!(
+            item.external_egress,
+            ExternalEgress::Denied,
+            "selected Work cannot gain egress during preparation"
+        );
+        assert_eq!(item.source_ref.as_str(), reference.as_str());
+        assert_ne!(
+            item.source_ref.as_str(),
+            "source:project:display-name:README.md"
+        );
+        let path = primary.join("README.md").display().to_string();
+        let ledger = EntryLedger {
+            schema: ENTRY_SCHEMA.into(),
+            client: "native-test".into(),
+            session: "source-return".into(),
+            concern: "Nativeentryneedle".into(),
+            project: scope.project.clone(),
+            checkout: scope.checkout.clone(),
+            rendered_digest: String::new(),
+            prepared_version: None,
+            source_revisions: BTreeMap::from([(path.clone(), revision.clone())]),
+            source_refs: BTreeMap::from([(path.clone(), reference.clone())]),
+            emitted_at_unix_ms: 0,
+            redeliver_pending: false,
+            selected: vec![reference.as_str().into()],
+            refinement: None,
+        };
+        let state = world.join("owned-entry-state");
+        store_ledger(&state, &ledger);
+        let loaded = load_ledger(&state, "native-test", "source-return").unwrap();
+        assert_eq!(
+            loaded, ledger,
+            "real persisted ledger retains issued identity"
+        );
+        assert!(current_ledger_changes(&world, &scope, &loaded)
+            .unwrap()
+            .is_empty());
+        let mut legacy = serde_json::to_value(&loaded).unwrap();
         legacy.as_object_mut().unwrap().remove("source_refs");
-        let old:EntryLedger=serde_json::from_value(legacy).unwrap();
+        let old: EntryLedger = serde_json::from_value(legacy).unwrap();
         assert!(old.source_refs.is_empty());
-        assert_eq!(old.source_revisions,ledger.source_revisions,"legacy observations survive without guessed native refs");
-        std::fs::write(primary.join("README.md"),b"changed current source\n").unwrap();
-        assert_eq!(candidate_revision(&provider,&hit.source,hit.revision.as_ref()).unwrap_err().code(),"development_entry.source_revision_conflict");
-        let changes=current_ledger_changes(&world,&scope,&loaded).unwrap();
-        assert_eq!(changes.len(),1);
-        assert_eq!(loaded.source_refs[&changes[0].0],reference);
-        assert_eq!(changes[0].2,format!("blake3:{}",blake3::hash(b"changed current source\n").to_hex()));
-        std::fs::write(primary.join(".no-agent-retrieval"),"withdraw\n").unwrap();
-        assert_eq!(current_ledger_changes(&world,&scope,&loaded).unwrap_err().code(),"work_repos.source_unauthorised");
-        assert_eq!(load_ledger(&state,"native-test","source-return").unwrap(),loaded,"refusal does not rewrite retained history");
+        assert_eq!(
+            old.source_revisions, ledger.source_revisions,
+            "legacy observations survive without guessed native refs"
+        );
+        std::fs::write(primary.join("README.md"), b"changed current source\n").unwrap();
+        assert_eq!(
+            candidate_revision(&provider, &hit.source, hit.revision.as_ref())
+                .unwrap_err()
+                .code(),
+            "development_entry.source_revision_conflict"
+        );
+        let changes = current_ledger_changes(&world, &scope, &loaded).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(loaded.source_refs[&changes[0].0], reference);
+        assert_eq!(
+            changes[0].2,
+            format!(
+                "blake3:{}",
+                blake3::hash(b"changed current source\n").to_hex()
+            )
+        );
+        std::fs::write(primary.join(".no-agent-retrieval"), "withdraw\n").unwrap();
+        assert_eq!(
+            current_ledger_changes(&world, &scope, &loaded)
+                .unwrap_err()
+                .code(),
+            "work_repos.source_unauthorised"
+        );
+        assert_eq!(
+            load_ledger(&state, "native-test", "source-return").unwrap(),
+            loaded,
+            "refusal does not rewrite retained history"
+        );
         std::fs::remove_file(primary.join(".no-agent-retrieval")).unwrap();
-        std::fs::write(primary.join("ProjectCentral/project.json"),"not json").unwrap();
-        assert_eq!(resolve_scope_current(&world,&primary).unwrap_err().code(),"projectcentral.manifest_invalid");
-        assert!(resolve_scope(&world,&primary).is_none(),"legacy projection cannot fabricate folder-name identity");
-        assert_eq!(std::fs::read(primary.join("README.md")).unwrap(),b"changed current source\n");
+        std::fs::write(primary.join("ProjectCentral/project.json"), "not json").unwrap();
+        assert_eq!(
+            resolve_scope_current(&world, &primary).unwrap_err().code(),
+            "projectcentral.manifest_invalid"
+        );
+        assert!(
+            resolve_scope(&world, &primary).is_none(),
+            "legacy projection cannot fabricate folder-name identity"
+        );
+        assert_eq!(
+            std::fs::read(primary.join("README.md")).unwrap(),
+            b"changed current source\n"
+        );
     }
-
 }

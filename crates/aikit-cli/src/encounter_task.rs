@@ -422,7 +422,9 @@ fn task_codex_runtime(
     // not provider.env, another credential home, or a Session identity. Native
     // Codex canonicalizes nonempty CODEX_HOME. Missing/default input refuses
     // here rather than granting creation in the ambient home.
-    let supplied_home = std::env::var("CODEX_HOME").ok().filter(|s| !s.is_empty())
+    let supplied_home = std::env::var("CODEX_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))
         .ok_or_else(|| error("Codex Task runtime needs the original native home input"))?;
@@ -438,9 +440,16 @@ fn task_codex_runtime(
     };
     let input_root = fs::canonicalize(&requested_input_root)
         .map_err(|failure| error(&failure).with_io_source(failure))?;
-    if !fs::symlink_metadata(&input_root).map_err(|failure| error(&failure).with_io_source(failure))?.is_dir()
-        || requested_input_root.to_str().is_none() || input_root.to_str().is_none() || now.to_str().is_none() {
-        return Err(error("Codex Task runtime needs an existing representable native input directory"));
+    if !fs::symlink_metadata(&input_root)
+        .map_err(|failure| error(&failure).with_io_source(failure))?
+        .is_dir()
+        || requested_input_root.to_str().is_none()
+        || input_root.to_str().is_none()
+        || now.to_str().is_none()
+    {
+        return Err(error(
+            "Codex Task runtime needs an existing representable native input directory",
+        ));
     }
     let projection = json!({"schema":"workcell.runtime-projection/v1",
         "requested_input_root":requested_input_root,"input_root":input_root,"runtime_root":now.join("native-codex-runtime"),
@@ -1030,22 +1039,49 @@ impl EncounterService {
         // Only nonsecret routing/type facts enter this private immutable launch
         // source. It lives with the existing requirements owner, outside Task T.
         let mut projection_file = if let Some(runtime) = codex_runtime.as_ref() {
-            let mut projection = tempfile::NamedTempFile::new_in(path(home, session).parent().expect("task parent"))
+            let mut projection =
+                tempfile::NamedTempFile::new_in(path(home, session).parent().expect("task parent"))
+                    .map_err(|failure| error(&failure).with_io_source(failure))?;
+            projection
+                .write_all(runtime.projection.to_string().as_bytes())
                 .map_err(|failure| error(&failure).with_io_source(failure))?;
-            projection.write_all(runtime.projection.to_string().as_bytes())
+            projection
+                .as_file()
+                .sync_all()
                 .map_err(|failure| error(&failure).with_io_source(failure))?;
-            projection.as_file().sync_all().map_err(|failure| error(&failure).with_io_source(failure))?;
             Some(projection)
-        } else { None };
+        } else {
+            None
+        };
         let mut command = Command::new(boundary_executable(&record)?);
-        command.arg(if projection_file.is_some() { "exec-runtime" } else { "exec" })
+        command
+            .arg(if projection_file.is_some() {
+                "exec-runtime"
+            } else {
+                "exec"
+            })
             .arg(file.path())
-            .arg(requirements["policy_revision"].as_str().expect("validated revision"))
-            .arg(inspection["requirements_digest"].as_str().expect("validated digest"));
-        if let (Some(projection), Some(runtime)) = (projection_file.as_ref(), codex_runtime.as_ref()) {
-            command.arg(projection.path()).arg(format!("sha256:{:x}", Sha256::digest(runtime.projection.to_string().as_bytes())));
+            .arg(
+                requirements["policy_revision"]
+                    .as_str()
+                    .expect("validated revision"),
+            )
+            .arg(
+                inspection["requirements_digest"]
+                    .as_str()
+                    .expect("validated digest"),
+            );
+        if let (Some(projection), Some(runtime)) =
+            (projection_file.as_ref(), codex_runtime.as_ref())
+        {
+            command.arg(projection.path()).arg(format!(
+                "sha256:{:x}",
+                Sha256::digest(runtime.projection.to_string().as_bytes())
+            ));
         }
-        command.arg("--").args(&model_argv)
+        command
+            .arg("--")
+            .args(&model_argv)
             .env_remove("CENTRAL_NATIVE_TOKEN")
             .env_remove("WORKCELL_CONTROL_TOKEN");
         if let Some(environment) = model_environment {
@@ -1064,8 +1100,14 @@ impl EncounterService {
         // Retain the immutable requirements path across exec. Its private owner
         // directory is outside every write aperture. History can inspect it.
         let (_file, _retained_path) = file.keep().map_err(error)?;
-        let _retained_projection = projection_file.take().map(|file| file.keep()).transpose()
-            .map_err(|failure| { let cause = failure.error; error(&cause).with_io_source(cause) })?;
+        let _retained_projection = projection_file
+            .take()
+            .map(|file| file.keep())
+            .transpose()
+            .map_err(|failure| {
+                let cause = failure.error;
+                error(&cause).with_io_source(cause)
+            })?;
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -1104,7 +1146,10 @@ mod owner_runner_native_tests {
         let owned = tempfile::tempdir().unwrap();
         for (stream, script) in [
             ("stdout", r#"printf effect > "$1"; printf '\377'; exit 7"#),
-            ("stderr", r#"printf effect > "$1"; printf '\377' >&2; exit 7"#),
+            (
+                "stderr",
+                r#"printf effect > "$1"; printf '\377' >&2; exit 7"#,
+            ),
         ] {
             let marker = owned.path().join(stream);
             let failure = OwnerRunner
@@ -1118,20 +1163,35 @@ mod owner_runner_native_tests {
                 .unwrap_err();
             assert_eq!(fs::read(marker).unwrap(), b"effect");
             assert_eq!(failure.code(), "encounter.runtime");
-            assert_eq!(failure.details()["native_runner_code"], "mux.command_utf8_invalid");
+            assert_eq!(
+                failure.details()["native_runner_code"],
+                "mux.command_utf8_invalid"
+            );
             assert_eq!(failure.details()["stream"], stream);
             assert_eq!(failure.details()["execution_started"], "true");
             assert_eq!(failure.details()["known_exit_status"], "7");
             assert_eq!(failure.details()["direct_child_reaped"], "true");
             assert_eq!(failure.details()["effects"], "unknown");
             assert_eq!(failure.details()["automatic_retry"], "false");
-            let actual = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+            let actual = failure
+                .source()
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap();
             assert_eq!(actual.kind(), std::io::ErrorKind::InvalidData);
-            let decoder = actual.get_ref().unwrap().downcast_ref::<std::str::Utf8Error>().unwrap();
+            let decoder = actual
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<std::str::Utf8Error>()
+                .unwrap();
             assert_eq!(decoder.valid_up_to(), 0);
             assert_eq!(decoder.error_len(), Some(1));
             let cloned = failure.clone();
-            let retained = cloned.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+            let retained = cloned
+                .source()
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap();
             assert!(std::ptr::eq(actual, retained));
         }
     }
@@ -1140,12 +1200,21 @@ mod owner_runner_native_tests {
     fn missing_actual_native_program_retains_not_started_and_original_io_cause() {
         let owned = tempfile::tempdir().unwrap();
         let missing = owned.path().join("missing-native-owner");
-        let failure = OwnerRunner.run(&[missing.to_str().unwrap().into()]).unwrap_err();
+        let failure = OwnerRunner
+            .run(&[missing.to_str().unwrap().into()])
+            .unwrap_err();
         assert_eq!(failure.code(), "encounter.runtime");
-        assert_eq!(failure.details()["native_runner_code"], "mux.command_spawn_failed");
+        assert_eq!(
+            failure.details()["native_runner_code"],
+            "mux.command_spawn_failed"
+        );
         assert_eq!(failure.details()["execution_started"], "false");
         assert_eq!(failure.details()["automatic_retry"], "false");
-        let actual = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        let actual = failure
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
         assert_eq!(actual.kind(), std::io::ErrorKind::NotFound);
         assert!(actual.raw_os_error().is_some());
     }
@@ -1174,7 +1243,10 @@ mod owner_runner_native_tests {
             ])
             .unwrap_err();
         assert_eq!(failure.code(), "encounter.runtime");
-        assert_eq!(failure.details()["native_runner_code"], "mux.command_utf8_invalid");
+        assert_eq!(
+            failure.details()["native_runner_code"],
+            "mux.command_utf8_invalid"
+        );
         assert_eq!(failure.details()["known_exit_status"], "0");
         assert_eq!(failure.details()["direct_child_reaped"], "true");
         assert_eq!(failure.details()["group_signal"], "not-needed");
@@ -1183,9 +1255,17 @@ mod owner_runner_native_tests {
         assert_eq!(failure.details()["stderr_eof"], "true");
         assert_eq!(failure.details()["effects"], "unknown");
         assert_eq!(failure.details()["automatic_retry"], "false");
-        let actual = failure.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        let actual = failure
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
         assert_eq!(actual.kind(), std::io::ErrorKind::InvalidData);
-        let decoder = actual.get_ref().unwrap().downcast_ref::<std::str::Utf8Error>().unwrap();
+        let decoder = actual
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<std::str::Utf8Error>()
+            .unwrap();
         assert_eq!(decoder.valid_up_to(), 0);
         assert_eq!(decoder.error_len(), Some(1));
     }
@@ -1211,8 +1291,10 @@ mod owner_runner_native_tests {
                 assert_eq!(failure.details()["stderr_eof"], "true");
             }
             "mux.command_capture_incomplete" => {
-                assert!(failure.details()["stdout_eof"] == "false"
-                    || failure.details()["stderr_eof"] == "false");
+                assert!(
+                    failure.details()["stdout_eof"] == "false"
+                        || failure.details()["stderr_eof"] == "false"
+                );
             }
             other => panic!("actual held native capture had an unrelated failure: {other}"),
         }

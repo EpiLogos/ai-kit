@@ -2425,11 +2425,16 @@ impl Service {
                     let (domains, mut load_warnings) =
                         crate::domain_activation::load_domains(project_root);
                     decision.warnings.append(&mut load_warnings);
-                    let native_world = self.knowledge_central_root.clone()
+                    let native_world = self
+                        .knowledge_central_root
+                        .clone()
                         .or_else(|| self.central_meta_root.clone())
                         .or_else(|| process_central_root(Some(project_root)));
                     let (objects, mut wiki_warnings) =
-                        crate::file_context::load_project_wiki_in_world(project_root, native_world.as_deref());
+                        crate::file_context::load_project_wiki_in_world(
+                            project_root,
+                            native_world.as_deref(),
+                        );
                     decision.warnings.append(&mut wiki_warnings);
                     let scope = crate::domain_activation::dedup_scope(event, Some(project_root));
                     let Some(scope) = scope else {

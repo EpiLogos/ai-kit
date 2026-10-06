@@ -370,6 +370,9 @@ pub struct GatewayServiceHooks {
     /// conversation turns and shuts down cleanly. `None` and only a shutdown
     /// command or a carrier failure stops the service.
     pub stop_signal: Option<Arc<AtomicBool>>,
+    /// This Workcell's encounter owner, reached on behalf of a peer gateway.
+    /// `None` and a relayed request is refused by name.
+    pub encounter_relay: Option<Arc<dyn GatewayEncounterRelay>>,
 }
 
 /// How the service builds its conversation engine.
@@ -613,6 +616,7 @@ pub fn run_gateway_service_with_ticks(
             conversation: None,
             coexistence: None,
             stop_signal: None,
+            encounter_relay: None,
         },
     )
 }
@@ -626,6 +630,9 @@ pub struct GatewayServiceRuntime {
     /// The conversation engine, present on every running service.
     pub engine: Option<Arc<crate::gateway_conversation_engine::GatewayConversationEngine>>,
     pub connections: ConnectionRegistry,
+    /// This Workcell's encounter owner behind relayed peer requests, when the
+    /// assembler wired one.
+    pub encounter: Option<Arc<dyn GatewayEncounterRelay>>,
 }
 
 /// One live carrier connection, closeable from the service's exit path.
@@ -729,7 +736,10 @@ pub fn run_gateway_service_on_websocket_listener(
         )
     })?;
     let declared = config.websocket_bind.as_deref().unwrap_or_default();
-    let declared_port = declared.rsplit(':').next().and_then(|p| p.parse::<u16>().ok());
+    let declared_port = declared
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok());
     let consistent = declared_port.is_some_and(|port| port != 0 && port == actual.port())
         || declared == actual.to_string();
     if !consistent {
@@ -758,6 +768,7 @@ fn serve_gateway_service(
         conversation,
         coexistence,
         stop_signal,
+        encounter_relay,
     } = hooks;
     config.validate()?;
     // Held until this function returns: the service is the only writer of its
@@ -800,6 +811,7 @@ fn serve_gateway_service(
         controls: Arc::clone(&controls),
         engine: Some(engine),
         connections: ConnectionRegistry::default(),
+        encounter: encounter_relay,
     });
 
     // Coexistence gate at serve startup: with the exclusive policy and a
@@ -1485,10 +1497,67 @@ fn execute_serialized_request(
             return Ok((response.to_string(), false, None));
         }
     };
-    if let GatewayCommand::NativeOwner { world_ref, expected_owner_generation, request: owner_request } = &request.command {
-        let result = runtime.native_owners.request(world_ref, expected_owner_generation.as_deref(), owner_request.as_ref()).map(|reading| GatewayResponse::NativeOwner { reading });
+    // A relayed Flow-conversation request is this Workcell's encounter
+    // owner's to answer, at the moment of asking and outside the state lock:
+    // a slow owner never stalls the journal, and nothing is cached.
+    if let GatewayCommand::EncounterRelay {
+        action,
+        request: body,
+    } = request.command.clone()
+    {
+        let result = if !crate::gateway_runtime::ENCOUNTER_RELAY_ACTIONS.contains(&action.as_str())
+        {
+            Err(AikitError::new(
+                "agency_gateway.encounter_relay_action_denied",
+                format!(
+                    "`{action}` is not relayed between Workcells; only {} are",
+                    crate::gateway_runtime::ENCOUNTER_RELAY_ACTIONS.join(", ")
+                ),
+            ))
+        } else if let Some(relay) = &runtime.encounter {
+            relay
+                .relay(&action, body)
+                .map(|response| GatewayResponse::EncounterRelayed { response })
+        } else {
+            Err(AikitError::new(
+                "agency_gateway.encounter_relay_not_served",
+                "this gateway has no encounter owner to relay to",
+            ))
+        };
+        let encoded = serde_json::to_string(&GatewayResponseEnvelope::from_result(
+            request.request_id,
+            result,
+        ))
+        .map_err(|error| {
+            AikitError::new(
+                "agency_gateway_service.response_encode",
+                format!("encode gateway response: {error}"),
+            )
+        })?;
+        return Ok((encoded, false, None));
+    }
+    if let GatewayCommand::NativeOwner {
+        world_ref,
+        expected_owner_generation,
+        request: owner_request,
+    } = &request.command
+    {
+        let result = runtime
+            .native_owners
+            .request(
+                world_ref,
+                expected_owner_generation.as_deref(),
+                owner_request.as_ref(),
+            )
+            .map(|reading| GatewayResponse::NativeOwner { reading });
         let response = GatewayResponseEnvelope::from_result(request.request_id, result);
-        return Ok((serde_json::to_string(&response).map_err(|e| AikitError::new("gateway.native_owner.response_encode", e.to_string()))?, false, None));
+        return Ok((
+            serde_json::to_string(&response).map_err(|e| {
+                AikitError::new("gateway.native_owner.response_encode", e.to_string())
+            })?,
+            false,
+            None,
+        ));
     }
     // An occupancy query is the Workcell owner's answer, not gateway state:
     // read it outside the state lock so a slow owner never stalls the journal.
@@ -1991,6 +2060,7 @@ mod tests {
     fn test_runtime() -> Arc<GatewayServiceRuntime> {
         Arc::new(GatewayServiceRuntime {
             native_owners: crate::gateway_native_owner::NativeOwnerRoutes::default(),
+            encounter: None,
             hub: Arc::new(SubscriptionHub::default()),
             queues: Arc::new(crate::gateway_connector_pump::ConnectorQueues::default()),
             controls: Arc::new(crate::gateway_connector_pump::ConnectorPumpControls::default()),
@@ -2469,6 +2539,7 @@ mod tests {
             conversation: None,
             coexistence: None,
             stop_signal: None,
+            encounter_relay: None,
         };
         let (done_tx, done_rx) = mpsc::channel();
         thread::spawn(move || {
@@ -2637,6 +2708,7 @@ mod tests {
             conversation: None,
             coexistence: None,
             stop_signal: None,
+            encounter_relay: None,
         };
         let (done_tx, done_rx) = mpsc::channel();
         thread::spawn(move || {

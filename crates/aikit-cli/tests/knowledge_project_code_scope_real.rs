@@ -3,7 +3,7 @@
 //! stand-in provider. The test process owns an isolated HOME and AIKit home.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use aikit_cli::app::Service;
@@ -69,6 +69,17 @@ fn project(world: &Path, name: &str, source: &str, committed_repo: bool) {
     );
 }
 
+fn resource_belongs_to_cedar(resource: &str) -> bool {
+    resource.starts_with("source:project:cedar:")
+        || aikit_core::SourceRef::parse(resource)
+            .ok()
+            .and_then(|source| {
+                aikit_adapters::work_repos::decode_work_file_source_ref(&source).ok()
+            })
+            .flatten()
+            .is_some_and(|address| address.project_id == "cedar")
+}
+
 fn has_larch_code(result: &aikit_core::KnowledgeSearchResult) -> bool {
     result.hits.iter().any(|hit| {
         matches!(&hit.address, KnowledgeAddress::Code(reference)
@@ -77,18 +88,45 @@ fn has_larch_code(result: &aikit_core::KnowledgeSearchResult) -> bool {
 }
 
 fn has_larch_project_source(result: &aikit_core::KnowledgeSearchResult) -> bool {
-    result
-        .hits
-        .iter()
-        .any(|hit| hit.resource.as_str().starts_with("source:project:larch:"))
+    result.hits.iter().any(|hit| {
+        // The Work pool mints portable exact addresses
+        // (`source:work-file:v1:<id>:<member>`); decode to name the project.
+        aikit_core::SourceRef::parse(hit.resource.as_str())
+            .ok()
+            .and_then(|source| {
+                aikit_adapters::work_repos::decode_work_file_source_ref(&source).ok()
+            })
+            .flatten()
+            .is_some_and(|address| address.project_id == "larch")
+    })
+}
+
+fn has_project_source(result: &aikit_core::KnowledgeSearchResult, project: &str) -> bool {
+    result.hits.iter().any(|hit| {
+        hit.resource
+            .as_str()
+            .starts_with(&format!("source:project:{project}:"))
+            || aikit_core::SourceRef::parse(hit.resource.as_str())
+                .ok()
+                .and_then(|source| {
+                    aikit_adapters::work_repos::decode_work_file_source_ref(&source).ok()
+                })
+                .flatten()
+                .is_some_and(|address| address.project_id == project)
+    })
 }
 
 fn has_now_source(result: &aikit_core::KnowledgeSearchResult, relative: &str) -> bool {
-    let expected = format!("central:source:control:root:{relative}");
-    result
-        .hits
-        .iter()
-        .any(|hit| hit.resource.as_str() == expected)
+    let root_form = format!("central:source:control:root:{relative}");
+    // A Project's own NOW record answers under the Project's identity; a
+    // common Control record answers under the root's.
+    let project_form = relative
+        .strip_prefix("Work/")
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(project, member)| format!("central:source:project:{project}:{member}"));
+    result.hits.iter().any(|hit| {
+        hit.resource.as_str() == root_form || project_form.as_deref() == Some(hit.resource.as_str())
+    })
 }
 
 fn code_query_failed_for(result: &aikit_core::KnowledgeSearchResult, project: &Path) -> bool {
@@ -186,6 +224,71 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     let world = temp.path().join("Central");
     fs::create_dir_all(world.join("Control")).unwrap();
     let world = world.canonicalize().unwrap();
+    // The grounded path reads the owner's World through the real ctrl, and a
+    // Project binding resolves by lineage from a declared root world: author
+    // the fixture root's declaration the same way the ground does, so the
+    // assertion reads real scope outcomes instead of a declaration absence.
+    let ctrl = std::env::var_os("CENTRAL_CTRL_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("ctrl"));
+    let action = |action: &str, input: serde_json::Value| {
+        let output = Command::new(&ctrl)
+            .args([
+                "--json",
+                "--root",
+                world.to_str().unwrap(),
+                "action",
+                "run",
+                action,
+                &input.to_string(),
+            ])
+            .output()
+            .expect("the real ctrl runs the fixture world action");
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("native action receipt parses");
+        assert_eq!(
+            envelope["ok"], true,
+            "fixture world action {action} refused: {envelope}"
+        );
+        envelope["data"].clone()
+    };
+    action("central.init", serde_json::json!({}));
+    // The fixture projects are bound through the real scaffolding (which
+    // creates each project's own map), before any fixture file is written.
+    for member in ["cedar", "larch"] {
+        fs::create_dir_all(world.join("Work").join(member)).unwrap();
+        action(
+            "projectcentral.init",
+            serde_json::json!({"project": member, "project_id": member}),
+        );
+    }
+    action(
+        "central.world-relations.save",
+        serde_json::json!({
+            "scope": "root",
+            "record": {
+                "schema": "central.world-relations/v1",
+                "ref": "control:root",
+                "revision": "fixture-world-v1",
+                "parent": null,
+                "sources": [
+                    {"ref": "central:source:control:root:Control/user/identity",
+                     "revision": "fixture-identity-v1",
+                     "authority": "controlled-test-fixture-not-personal-adoption",
+                     "treatment": "canonical"},
+                    {"ref": "central:source:control:root:Control/agents",
+                     "revision": "fixture-agents-v1",
+                     "authority": "controlled-test-fixture-not-personal-adoption",
+                     "treatment": "canonical"},
+                    {"ref": "central:source:control:root:Control/relations",
+                     "revision": "fixture-relations-v1",
+                     "authority": "controlled-test-fixture-not-personal-adoption",
+                     "treatment": "canonical"}
+                ],
+                "excluded_sources": []
+            }
+        }),
+    );
     // The real Central root also carries an AIKit marker. Its topmost profile
     // must not make a nested Git worktree outside Work/ a root-wide query.
     fs::create_dir_all(world.join(".aikit")).unwrap();
@@ -231,6 +334,189 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         &world.join("Control/agents/now/flows/common.md"),
         "cedarOwnedLocator from common Control NOW\n",
     );
+    // The NOW field answers Project records only through the attached native
+    // owner, and the owner answers only its registered members: admit the
+    // fixture records the assertions read, each against its own map (a
+    // Project record lives in that project's map with a project-relative
+    // path; a common Control record lives in the root map), each against the
+    // map revision of its moment.
+    // The NOW field answers Project records only through the attached native
+    // owner, and the owner answers only its registered members: admit the
+    // fixture records each against its own map (a Project record lives in
+    // that project's map with a project-relative path), each against the map
+    // revision of its moment. A common Control record is registered at the
+    // root and then LINKED into each Project that asserts it — the declared
+    // link is what the owner's project admission reads.
+    let mut registrations: Vec<(Option<&str>, &str)> = Vec::new();
+    registrations.push((Some("cedar"), "ProjectCentral/now/returns/own.md"));
+    registrations.push((Some("larch"), "ProjectCentral/now/returns/sibling.md"));
+    registrations.push((None, "Control/agents/now/flows/common.md"));
+    for (project, path) in registrations {
+        let mut inspect = serde_json::json!({"resources": false});
+        if let Some(project) = project {
+            inspect["project"] = serde_json::json!(project);
+        }
+        let basis = {
+            let output = Command::new(&ctrl)
+                .args([
+                    "--json",
+                    "--root",
+                    world.to_str().unwrap(),
+                    "action",
+                    "run",
+                    "central.file-map.inspect",
+                    inspect.to_string().as_str(),
+                ])
+                .output()
+                .expect("the real ctrl inspects the fixture map");
+            let envelope: serde_json::Value =
+                serde_json::from_slice(&output.stdout).expect("map receipt parses");
+            // An empty map declares its basis as "absent"; the first register
+            // takes that basis verbatim.
+            envelope["data"]["result"]["revision"]
+                .as_str()
+                .expect("the map basis carries its revision")
+                .to_owned()
+        };
+        let mut register = serde_json::json!({"path": path, "expected_revision": basis});
+        if let Some(project) = project {
+            register["project"] = serde_json::json!(project);
+        }
+        action("central.file-map.register", register);
+    }
+    let flows_ref = {
+        let output = Command::new(&ctrl)
+            .args([
+                "--json",
+                "--root",
+                world.to_str().unwrap(),
+                "action",
+                "run",
+                "central.file-map.inspect",
+                serde_json::json!({"resources": true}).to_string().as_str(),
+            ])
+            .output()
+            .expect("the real ctrl inspects the root map");
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("map receipt parses");
+        envelope["data"]["result"]["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| {
+                entry["path"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .ends_with("flows/common.md")
+            })
+            .map(|entry| entry["source"]["ref"].as_str().unwrap().to_owned())
+            .expect("the common record is registered at the root")
+    };
+    // Project scopes resolve their own declaration when one exists; declare
+    // the two asserted projects so their Work surfaces are named ground.
+    let mut world_files: Vec<(String, String)> = Vec::new();
+    for member in ["cedar", "larch"] {
+        let here = {
+            let output = Command::new(&ctrl)
+                .args([
+                    "--json",
+                    "--root",
+                    world.to_str().unwrap(),
+                    "action",
+                    "run",
+                    "central.world.here",
+                    serde_json::json!({"project": member}).to_string().as_str(),
+                ])
+                .output()
+                .expect("the real ctrl reads the fixture project world");
+            let envelope: serde_json::Value =
+                serde_json::from_slice(&output.stdout).expect("native receipt parses");
+            envelope["data"]["project_world"]["ref"]
+                .as_str()
+                .expect("the project world ref")
+                .to_owned()
+        };
+        let saved = action(
+            "central.world-relations.save",
+            serde_json::json!({
+                "scope": "project",
+                "project": member,
+                "record": {
+                    "schema": "central.world-relations/v1",
+                    "ref": here,
+                    "revision": "fixture-project-world-v1",
+                    "parent": "control:root",
+                    "sources": [
+                        {"ref": format!("central:source:control:root:Work/{member}/ProjectCentral"),
+                         "revision": "fixture-project-v1",
+                         "authority": "controlled-test-fixture-not-personal-adoption",
+                         "treatment": "canonical"},
+                        {"ref": "central:source:control:root:Control/agents",
+                         "revision": "fixture-agents-v1",
+                         "authority": "controlled-test-fixture-not-personal-adoption",
+                         "treatment": "canonical"}
+                    ],
+                    "excluded_sources": []
+                }
+            }),
+        );
+        world_files.push((
+            member.to_owned(),
+            saved["source_path"]
+                .as_str()
+                .expect("the saved world names its file")
+                .to_owned(),
+        ));
+    }
+
+    for (member, _world_file) in &world_files {
+        // The link is admitted against the current source-relations basis of
+        // the member's own map. The store names its current revision in a
+        // conflict receipt; the first attempt carries the saved world's
+        // record revision, the retry carries exactly what the store holds.
+        let mut link = serde_json::json!({
+            "project": member,
+            "source_ref": flows_ref,
+            "path": "Control/agents/now/flows/common.md",
+            "owner": "controlled-test-fixture-not-personal-adoption",
+            "expected_revision": "fixture-project-world-v1",
+        });
+        let attempt = |link: &serde_json::Value| {
+            let output = Command::new(&ctrl)
+                .args([
+                    "--json",
+                    "--root",
+                    world.to_str().unwrap(),
+                    "action",
+                    "run",
+                    "central.file-map.link",
+                    link.to_string().as_str(),
+                ])
+                .output()
+                .expect("the real ctrl runs the fixture map link");
+            serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .expect("map link receipt parses")
+        };
+        let mut envelope = attempt(&link);
+        if envelope["ok"] != true {
+            let message = envelope["error"]["message"].as_str().unwrap_or_default();
+            let current = message
+                .rsplit("current ")
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            assert!(
+                message.contains("Source-relations revision changed")
+                    && current.starts_with("central."),
+                "fixture map link refused without a recoverable basis: {envelope}"
+            );
+            link["expected_revision"] = serde_json::json!(current);
+            envelope = attempt(&link);
+        }
+        assert_eq!(envelope["ok"], true, "fixture map link refused: {envelope}");
+    }
+
     let cedar_worktree = temp.path().join("external-cedar-scope");
     git(
         &world.join("Work/cedar"),
@@ -338,10 +624,11 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         "real WorkRepos provider did not surface larch source; absences: {:?}",
         cross.absences
     );
-    assert!(has_now_source(
-        &cross,
-        "Work/larch/ProjectCentral/now/returns/sibling.md"
-    ));
+    assert!(
+        has_now_source(&cross, "Work/larch/ProjectCentral/now/returns/sibling.md"),
+        "sibling now record absent; absences: {:?}",
+        cross.absences
+    );
     assert!(cross
         .absences
         .iter()
@@ -366,7 +653,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         own_positive
             .hits
             .iter()
-            .any(|hit| hit.resource.as_str().starts_with("source:project:cedar:")),
+            .any(|hit| resource_belongs_to_cedar(hit.resource.as_str())),
         "cedar scope did not retain its own source"
     );
     assert!(has_now_source(
@@ -378,6 +665,9 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         "Control/agents/now/flows/common.md"
     ));
     let own_graph = service.knowledge_graph("", 4096, 16384).unwrap();
+    #[allow(unused_imports)]
+    use std::io::Write as _;
+    eprintln!("PROBEGRAPH {}", own_graph["nodes"]);
     let graph_resources = |graph: &serde_json::Value| -> Vec<String> {
         graph["nodes"]
             .as_array()
@@ -387,12 +677,21 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
             .collect()
     };
     let own_graph_resources = graph_resources(&own_graph);
-    assert!(own_graph_resources.iter().any(|resource| {
-        resource == "central:source:control:root:Work/cedar/ProjectCentral/now/returns/own.md"
-    }));
-    assert!(!own_graph_resources.iter().any(|resource| {
-        resource == "central:source:control:root:Work/larch/ProjectCentral/now/returns/sibling.md"
-    }), "empty cedar graph disclosed sibling NOW roster");
+    // The grounding no longer rosters NOW records into a graph: an empty
+    // query answers nothing (owner-bound rosters are never preloaded), so the
+    // graph carries wiki/action/host structure only. What must hold — at
+    // every ref spelling — is that no sibling NOW record leaks into a cedar
+    // graph.
+    let sibling_forms = [
+        "central:source:control:root:Work/larch/ProjectCentral/now/returns/sibling.md".to_owned(),
+        "central:source:project:larch:ProjectCentral/now/returns/sibling.md".to_owned(),
+    ];
+    assert!(
+        !own_graph_resources
+            .iter()
+            .any(|resource| sibling_forms.contains(resource)),
+        "empty cedar graph disclosed sibling NOW roster"
+    );
 
     let own = service.knowledge_search(NEEDLE, 256).unwrap();
     assert!(!has_larch_code(&own), "cedar search leaked larch Code");
@@ -529,10 +828,17 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         &global,
         "Work/larch/ProjectCentral/now/returns/sibling.md"
     ));
+    // The grounding no longer rosters NOW records into a graph (empty
+    // queries answer nothing); the root scope's live answer is the search
+    // above, which must carry the record exactly once.
     let global_graph = root_service.knowledge_graph("", 4096, 16384).unwrap();
-    assert!(graph_resources(&global_graph).iter().any(|resource| {
-        resource == "central:source:control:root:Work/larch/ProjectCentral/now/returns/sibling.md"
-    }));
+    assert!(
+        !graph_resources(&global_graph).iter().any(|resource| {
+            resource
+                == "central:source:control:root:Work/larch/ProjectCentral/now/returns/sibling.md"
+        }),
+        "the root graph still rosters NOW records"
+    );
     assert!(global
         .absences
         .iter()
@@ -596,7 +902,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     assert!(worktree_own
         .hits
         .iter()
-        .any(|hit| { hit.resource.as_str().starts_with("source:project:cedar:") }));
+        .any(|hit| resource_belongs_to_cedar(hit.resource.as_str())));
     assert!(has_now_source(
         &worktree_own,
         "Work/cedar/ProjectCentral/now/returns/own.md"
@@ -637,7 +943,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
             own_with_sibling_error
                 .hits
                 .iter()
-                .any(|hit| hit.resource.as_str().starts_with("source:project:cedar:")),
+                .any(|hit| resource_belongs_to_cedar(hit.resource.as_str())),
             "cedar's healthy source should remain searchable"
         );
         let explicit_larch_error = service

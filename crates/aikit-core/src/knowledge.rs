@@ -449,10 +449,16 @@ pub fn apply_text_span(
         .collect();
     let mut remaining = Vec::new();
     if start > 0 {
-        remaining.push(SpanRange { start: 0, end: start });
+        remaining.push(SpanRange {
+            start: 0,
+            end: start,
+        });
     }
     if end < total {
-        remaining.push(SpanRange { start: end, end: total });
+        remaining.push(SpanRange {
+            start: end,
+            end: total,
+        });
     }
     Ok(SpanSelection {
         unit: "text_span".to_owned(),

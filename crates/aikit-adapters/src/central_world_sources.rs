@@ -71,7 +71,9 @@ impl WorldProbe {
     fn new<R: CommandRunner>(runner: &R) -> Self {
         Self {
             started: Instant::now(),
-            timeout: runner.configured_timeout().unwrap_or(WORLD_PROBE_TIMEOUT)
+            timeout: runner
+                .configured_timeout()
+                .unwrap_or(WORLD_PROBE_TIMEOUT)
                 .min(WORLD_PROBE_TIMEOUT),
             remaining_bytes: WORLD_PROBE_BYTES,
         }
@@ -79,145 +81,255 @@ impl WorldProbe {
 
     fn require_live_allowance(&self) -> Result<()> {
         if self.started.elapsed() > self.timeout {
-            return Err(AikitError::new("central.world_probe_timeout",
-                "World observation allowance expired before acknowledgement"));
+            return Err(AikitError::new(
+                "central.world_probe_timeout",
+                "World observation allowance expired before acknowledgement",
+            ));
         }
         Ok(())
     }
 
     fn request<R: CommandRunner>(
-        &mut self, runner: &R, executable: &Path, central_root: &Path,
-        action: &str, input: Value,
+        &mut self,
+        runner: &R,
+        executable: &Path,
+        central_root: &Path,
+        action: &str,
+        input: Value,
     ) -> Result<Value> {
-        let timeout = self.timeout.checked_sub(self.started.elapsed()).ok_or_else(|| {
-            AikitError::new("central.world_probe_timeout", "World observation live allowance expired")
-                .with("execution_started", "false").with("native_action", action)
-        })?;
+        let timeout = self
+            .timeout
+            .checked_sub(self.started.elapsed())
+            .ok_or_else(|| {
+                AikitError::new(
+                    "central.world_probe_timeout",
+                    "World observation live allowance expired",
+                )
+                .with("execution_started", "false")
+                .with("native_action", action)
+            })?;
         if timeout.is_zero() || self.remaining_bytes < 2 {
-            return Err(AikitError::new("central.world_probe_budget",
-                "World observation has no remaining capture allowance")
-                .with("execution_started", "false").with("native_action", action));
+            return Err(AikitError::new(
+                "central.world_probe_budget",
+                "World observation has no remaining capture allowance",
+            )
+            .with("execution_started", "false")
+            .with("native_action", action));
         }
         // The existing transport takes text argv. Refuse an unrepresentable
         // physical coordinate rather than selecting a lossy replacement name.
         let coordinate = |path: &Path, name: &str| -> Result<String> {
             path.to_str().map(str::to_owned).ok_or_else(|| {
-                AikitError::new("central.world_transport_unsupported",
-                    "Native World text transport requires an exact UTF-8 coordinate")
-                    .with("coordinate", name).with("execution_started", "false")
+                AikitError::new(
+                    "central.world_transport_unsupported",
+                    "Native World text transport requires an exact UTF-8 coordinate",
+                )
+                .with("coordinate", name)
+                .with("execution_started", "false")
             })
         };
-        let argv = vec![coordinate(executable, "executable")?, "--json".into(),
-            "--root".into(), coordinate(central_root, "root")?, "action".into(),
-            "run".into(), action.into(), input.to_string()];
-        let output = runner.run_with_limits(&argv, timeout, self.remaining_bytes, true)
+        let argv = vec![
+            coordinate(executable, "executable")?,
+            "--json".into(),
+            "--root".into(),
+            coordinate(central_root, "root")?,
+            "action".into(),
+            "run".into(),
+            action.into(),
+            input.to_string(),
+        ];
+        let output = runner
+            .run_with_limits(&argv, timeout, self.remaining_bytes, true)
             .map_err(|error| error.with("native_action", action))?;
-        let captured = output.stdout.len().checked_add(output.stderr.len()).ok_or_else(|| {
-            AikitError::new("central.world_probe_budget", "World capture length overflowed")
-        })?;
+        let captured = output
+            .stdout
+            .len()
+            .checked_add(output.stderr.len())
+            .ok_or_else(|| {
+                AikitError::new(
+                    "central.world_probe_budget",
+                    "World capture length overflowed",
+                )
+            })?;
         self.remaining_bytes = self.remaining_bytes.checked_sub(captured).ok_or_else(|| {
-            AikitError::new("central.world_probe_budget", "Runner exceeded World capture allowance")
+            AikitError::new(
+                "central.world_probe_budget",
+                "Runner exceeded World capture allowance",
+            )
         })?;
         if self.started.elapsed() > self.timeout {
-            return Err(AikitError::new("central.world_probe_timeout",
-                "World observation exceeded its live allowance")
-                .with("native_action", action).with("status", output.status.to_string()));
+            return Err(AikitError::new(
+                "central.world_probe_timeout",
+                "World observation exceeded its live allowance",
+            )
+            .with("native_action", action)
+            .with("status", output.status.to_string()));
         }
         let envelope: Value = serde_json::from_str(&output.stdout).map_err(|error| {
             AikitError::new("central.world_sources_invalid", error.to_string())
-                .with("native_action", action).with("status", output.status.to_string())
-                .with("stdout", output.stdout.clone()).with("stderr", output.stderr.clone())
+                .with("native_action", action)
+                .with("status", output.status.to_string())
+                .with("stdout", output.stdout.clone())
+                .with("stderr", output.stderr.clone())
         })?;
         match envelope["ok"].as_bool() {
             Some(false) => {
-                let native_error = envelope.get("error").filter(|value| value.is_object())
-                    .ok_or_else(|| AikitError::new("central.world_sources_invalid",
-                        "Native World failure omitted its error envelope"))?;
+                let native_error = envelope
+                    .get("error")
+                    .filter(|value| value.is_object())
+                    .ok_or_else(|| {
+                        AikitError::new(
+                            "central.world_sources_invalid",
+                            "Native World failure omitted its error envelope",
+                        )
+                    })?;
                 let absent = action == "central.world.effective-sources"
                     && native_error["code"].as_str() == Some(WORLD_DECLARATION_ABSENT)
                     && native_error["details"]["state"].as_str() == Some("absent")
                     && native_error["details"]["world_ref"] == input["world_ref"]
                     && input["world_ref"].as_str().is_some();
-                Err(AikitError::new(if absent { WORLD_DECLARATION_ABSENT }
-                    else { "central.world_sources_unavailable" },
-                    native_error["message"].as_str().unwrap_or("Native World request failed"))
-                    .with("native_action", action)
-                    .with("native_code", native_error["code"].as_str().unwrap_or(""))
-                    .with("native_error", native_error.to_string())
-                    .with("native_status", envelope["status"].to_string())
-                    .with("status", output.status.to_string()))
+                Err(AikitError::new(
+                    if absent {
+                        WORLD_DECLARATION_ABSENT
+                    } else {
+                        "central.world_sources_unavailable"
+                    },
+                    native_error["message"]
+                        .as_str()
+                        .unwrap_or("Native World request failed"),
+                )
+                .with("native_action", action)
+                .with("native_code", native_error["code"].as_str().unwrap_or(""))
+                .with("native_error", native_error.to_string())
+                .with("native_status", envelope["status"].to_string())
+                .with("status", output.status.to_string()))
             }
             Some(true) if output.ok() => envelope.get("data").cloned().ok_or_else(|| {
-                AikitError::new("central.world_sources_invalid", "Native World success omitted data")
+                AikitError::new(
+                    "central.world_sources_invalid",
+                    "Native World success omitted data",
+                )
             }),
-            _ => Err(AikitError::new("central.world_sources_invalid",
-                "Native World receipt has no consistent success/failure state")
-                .with("native_action", action).with("status", output.status.to_string())),
+            _ => Err(AikitError::new(
+                "central.world_sources_invalid",
+                "Native World receipt has no consistent success/failure state",
+            )
+            .with("native_action", action)
+            .with("status", output.status.to_string())),
         }
     }
 }
 
 fn required_text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
-    value[key].as_str().filter(|text| !text.trim().is_empty()).ok_or_else(|| {
-        AikitError::new("central.world_sources_invalid", format!("Missing native {key}"))
-    })
+    value[key]
+        .as_str()
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| {
+            AikitError::new(
+                "central.world_sources_invalid",
+                format!("Missing native {key}"),
+            )
+        })
 }
 
 fn read_world_binding_in<R: CommandRunner>(
-    probe: &mut WorldProbe, runner: &R, executable: &Path, central_root: &Path,
-    scope: &str, project: Option<&str>, world_ref: &str,
+    probe: &mut WorldProbe,
+    runner: &R,
+    executable: &Path,
+    central_root: &Path,
+    scope: &str,
+    project: Option<&str>,
+    world_ref: &str,
 ) -> Result<WorldBinding> {
     let mut input = json!({"scope": scope, "world_ref": world_ref});
-    if let Some(project) = project { input["project"] = json!(project); }
-    let data = probe.request(runner, executable, central_root,
-        "central.world.effective-sources", input)?;
+    if let Some(project) = project {
+        input["project"] = json!(project);
+    }
+    let data = probe.request(
+        runner,
+        executable,
+        central_root,
+        "central.world.effective-sources",
+        input,
+    )?;
     if data["world_ref"].as_str() != Some(world_ref) {
-        return Err(AikitError::new("central.world_sources_invalid",
-            "Native World reading changed the requested identity"));
+        return Err(AikitError::new(
+            "central.world_sources_invalid",
+            "Native World reading changed the requested identity",
+        ));
     }
     let entries = data["sources"].as_array().ok_or_else(|| {
-        AikitError::new("central.world_sources_invalid", "Missing native source array")
+        AikitError::new(
+            "central.world_sources_invalid",
+            "Missing native source array",
+        )
     })?;
-    let mut binding = WorldBinding { world_ref: world_ref.into(),
-        inherited_root_lineage: false, sources: Vec::new() };
+    let mut binding = WorldBinding {
+        world_ref: world_ref.into(),
+        inherited_root_lineage: false,
+        sources: Vec::new(),
+    };
     let mut seen = BTreeSet::new();
     for entry in entries {
         let source = required_text(entry, "ref")?;
         let state = required_text(entry, "state")?;
         if !matches!(state, "available" | "excluded") || !seen.insert(source) {
-            return Err(AikitError::new("central.world_sources_invalid",
-                "Unsupported source state or duplicate effective source identity"));
+            return Err(AikitError::new(
+                "central.world_sources_invalid",
+                "Unsupported source state or duplicate effective source identity",
+            ));
         }
         let revision = required_text(entry, "effective_revision")?;
         required_text(entry, "effective_source_world")?;
         for key in ["authority", "source_treatment", "effective_treatment"] {
             if entry[key].as_str().is_none() {
-                return Err(AikitError::new("central.world_sources_invalid",
-                    format!("Missing native {key}")));
+                return Err(AikitError::new(
+                    "central.world_sources_invalid",
+                    format!("Missing native {key}"),
+                ));
             }
         }
         let path = entry["propagation_path"].as_array().ok_or_else(|| {
-            AikitError::new("central.world_sources_invalid", "Missing source propagation path")
+            AikitError::new(
+                "central.world_sources_invalid",
+                "Missing source propagation path",
+            )
         })?;
-        let propagation_path = path.iter().map(|hop| {
-            hop.as_str().filter(|text| !text.trim().is_empty()).map(str::to_owned)
-                .ok_or_else(|| AikitError::new("central.world_sources_invalid", "Invalid propagation hop"))
-        }).collect::<Result<Vec<_>>>()?;
+        let propagation_path = path
+            .iter()
+            .map(|hop| {
+                hop.as_str()
+                    .filter(|text| !text.trim().is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        AikitError::new("central.world_sources_invalid", "Invalid propagation hop")
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let provenance = entry["provenance"].as_array().ok_or_else(|| {
-            AikitError::new("central.world_sources_invalid", "Missing native provenance array")
+            AikitError::new(
+                "central.world_sources_invalid",
+                "Missing native provenance array",
+            )
         })?;
         for hop in provenance {
             required_text(hop, "world")?;
             for key in ["revision", "authority", "treatment"] {
                 if hop[key].as_str().is_none() {
-                    return Err(AikitError::new("central.world_sources_invalid",
-                        format!("Missing native provenance {key}")));
+                    return Err(AikitError::new(
+                        "central.world_sources_invalid",
+                        format!("Missing native provenance {key}"),
+                    ));
                 }
             }
         }
-        binding.sources.push(EffectiveSource { source_ref: source.into(), state: state.into(),
-            effective_revision: revision.into(), propagation_path,
-            native_relation: Some(entry.clone()) });
+        binding.sources.push(EffectiveSource {
+            source_ref: source.into(),
+            state: state.into(),
+            effective_revision: revision.into(),
+            propagation_path,
+            native_relation: Some(entry.clone()),
+        });
     }
     probe.require_live_allowance()?;
     Ok(binding)
@@ -225,44 +337,91 @@ fn read_world_binding_in<R: CommandRunner>(
 
 /// A bounded, strict native effective-source read. No manifest or prose fallback.
 pub fn read_world_binding<R: CommandRunner>(
-    runner: &R, executable: &Path, central_root: &Path, scope: &str,
-    project: Option<&str>, world_ref: &str,
+    runner: &R,
+    executable: &Path,
+    central_root: &Path,
+    scope: &str,
+    project: Option<&str>,
+    world_ref: &str,
 ) -> Result<WorldBinding> {
-    read_world_binding_in(&mut WorldProbe::new(runner), runner, executable,
-        central_root, scope, project, world_ref)
+    read_world_binding_in(
+        &mut WorldProbe::new(runner),
+        runner,
+        executable,
+        central_root,
+        scope,
+        project,
+        world_ref,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ProjectFacetIdentity { Present(String), ManifestAbsent }
+enum ProjectFacetIdentity {
+    Present(String),
+    ManifestAbsent,
+}
 
-struct ProjectFacet { identity: ProjectFacetIdentity, receipt: Value }
+struct ProjectFacet {
+    identity: ProjectFacetIdentity,
+    receipt: Value,
+}
 
 fn read_project_facet<R: CommandRunner>(
-    probe: &mut WorldProbe, runner: &R, executable: &Path, central_root: &Path, project: &str,
+    probe: &mut WorldProbe,
+    runner: &R,
+    executable: &Path,
+    central_root: &Path,
+    project: &str,
 ) -> Result<ProjectFacet> {
-    let data = probe.request(runner, executable, central_root,
-        "central.world.here", json!({"project": project}))?;
+    let data = probe.request(
+        runner,
+        executable,
+        central_root,
+        "central.world.here",
+        json!({"project": project}),
+    )?;
     if data["schema"].as_str() != Some("central.world-here/v1") {
-        return Err(AikitError::new("central.world_sources_invalid", "Unsupported native World here schema"));
+        return Err(AikitError::new(
+            "central.world_sources_invalid",
+            "Unsupported native World here schema",
+        ));
     }
     let facet = data.get("project_world").ok_or_else(|| {
-        AikitError::new("central.world_sources_invalid", "Native World here omitted selected Project facet")
+        AikitError::new(
+            "central.world_sources_invalid",
+            "Native World here omitted selected Project facet",
+        )
     })?;
     let identity = if facet["name"].as_str() != Some(project) {
         None
     } else {
         match facet["state"].as_str() {
-            Some("present") => Some(ProjectFacetIdentity::Present(required_text(facet, "ref")
-                .map_err(|error| error.with("project_facet", facet.to_string()))?.into())),
-            Some("absent") if facet["absence_kind"].as_str() == Some("projectcentral-manifest-absent")
-                && facet["work_member_present"] == true => Some(ProjectFacetIdentity::ManifestAbsent),
+            Some("present") => Some(ProjectFacetIdentity::Present(
+                required_text(facet, "ref")
+                    .map_err(|error| error.with("project_facet", facet.to_string()))?
+                    .into(),
+            )),
+            Some("absent")
+                if facet["absence_kind"].as_str() == Some("projectcentral-manifest-absent")
+                    && facet["work_member_present"] == true =>
+            {
+                Some(ProjectFacetIdentity::ManifestAbsent)
+            }
             _ => None,
         }
-    }.ok_or_else(|| AikitError::new("central.world_sources_unavailable",
-        "Native selected Project facet is absent, changed or unavailable")
-        .with("project_facet", facet.to_string()))?;
+    }
+    .ok_or_else(|| {
+        AikitError::new(
+            "central.world_sources_unavailable",
+            "Native selected Project facet is absent, changed or unavailable",
+        )
+        .with("project_facet", facet.to_string())
+    })?;
     probe.require_live_allowance()?;
-    Ok(ProjectFacet { identity, receipt: facet.clone() })
+    Ok(ProjectFacet {
+        identity,
+        receipt: facet.clone(),
+    })
 }
 
 /// Obtain the actual native Project World reference. This returns an error
@@ -271,46 +430,78 @@ fn read_project_facet<R: CommandRunner>(
 pub fn project_world_ref(central_root: &Path, project: &str) -> Result<String> {
     let runner = SystemRunner::new();
     let executable = super::central_file_map::executable();
-    let facet = read_project_facet(&mut WorldProbe::new(&runner), &runner,
-        &executable, central_root, project)?;
+    let facet = read_project_facet(
+        &mut WorldProbe::new(&runner),
+        &runner,
+        &executable,
+        central_root,
+        project,
+    )?;
     match facet.identity {
         ProjectFacetIdentity::Present(reference) => Ok(reference),
-        ProjectFacetIdentity::ManifestAbsent => Err(AikitError::new("central.project_world_absent",
-            "Existing Work member has no native Project World facet")
-            .with("project_facet", facet.receipt.to_string())),
+        ProjectFacetIdentity::ManifestAbsent => Err(AikitError::new(
+            "central.project_world_absent",
+            "Existing Work member has no native Project World facet",
+        )
+        .with("project_facet", facet.receipt.to_string())),
     }
 }
 
 fn read_project_binding_result<R: CommandRunner>(
-    runner: &R, executable: &Path, central_root: &Path, project: &str,
+    runner: &R,
+    executable: &Path,
+    central_root: &Path,
+    project: &str,
 ) -> Result<(WorldBinding, Option<String>)> {
     let mut probe = WorldProbe::new(runner);
     let before = read_project_facet(&mut probe, runner, executable, central_root, project)?;
     let (mut binding, inheritance) = match &before.identity {
         ProjectFacetIdentity::Present(reference) => match read_world_binding_in(
-            &mut probe, runner, executable, central_root, "project", Some(project), reference,
+            &mut probe,
+            runner,
+            executable,
+            central_root,
+            "project",
+            Some(project),
+            reference,
         ) {
             Ok(binding) => (binding, None),
             Err(error) if error.code() == WORLD_DECLARATION_ABSENT => {
-                let root = read_world_binding_in(&mut probe, runner, executable, central_root,
-                    "root", None, ROOT_WORLD_REF)?;
+                let root = read_world_binding_in(
+                    &mut probe,
+                    runner,
+                    executable,
+                    central_root,
+                    "root",
+                    None,
+                    ROOT_WORLD_REF,
+                )?;
                 (root, Some(format!("Project {project} declares no World relations; root lineage applies: {error}")))
             }
             Err(error) => return Err(error),
         },
         ProjectFacetIdentity::ManifestAbsent => {
-            let root = read_world_binding_in(&mut probe, runner, executable, central_root,
-                "root", None, ROOT_WORLD_REF)?;
+            let root = read_world_binding_in(
+                &mut probe,
+                runner,
+                executable,
+                central_root,
+                "root",
+                None,
+                ROOT_WORLD_REF,
+            )?;
             (root, Some(format!("Existing Work/{project} has no ProjectCentral manifest; root lineage applies (native facet {})", before.receipt)))
         }
     };
     let current = read_project_facet(&mut probe, runner, executable, central_root, project)
         .map_err(|error| error.with("project_facet_before", before.receipt.to_string()))?;
     if current.identity != before.identity {
-        return Err(AikitError::new("central.world_binding_changed",
-            "Native Project World identity changed during binding observation")
-            .with("project_facet_before", before.receipt.to_string())
-            .with("project_facet_current", current.receipt.to_string()));
+        return Err(AikitError::new(
+            "central.world_binding_changed",
+            "Native Project World identity changed during binding observation",
+        )
+        .with("project_facet_before", before.receipt.to_string())
+        .with("project_facet_current", current.receipt.to_string()));
     }
     binding.inherited_root_lineage = inheritance.is_some();
     probe.require_live_allowance()?;
@@ -320,12 +511,17 @@ fn read_project_binding_result<R: CommandRunner>(
 /// Read the actual native Project facet and current relations. An unavailable
 /// owner remains unavailable; only typed target absence permits root lineage.
 pub fn read_project_binding<R: CommandRunner>(
-    runner: &R, executable: &Path, central_root: &Path, project: &str,
+    runner: &R,
+    executable: &Path,
+    central_root: &Path,
+    project: &str,
     absences: &mut Vec<String>,
 ) -> Option<WorldBinding> {
     match read_project_binding_result(runner, executable, central_root, project) {
         Ok((binding, inheritance)) => {
-            if let Some(disclosure) = inheritance { absences.push(disclosure); }
+            if let Some(disclosure) = inheritance {
+                absences.push(disclosure);
+            }
             Some(binding)
         }
         Err(error) => {
@@ -857,5 +1053,4 @@ mod tests {
             "{absences:?}"
         );
     }
-
 }

@@ -2079,13 +2079,13 @@ pub struct GatewayAgentArgs {
 
 #[derive(Debug, Args)]
 pub struct GatewayNativeOwnerArgs {
-    #[arg(long, value_name="WORLD_REF")]
+    #[arg(long, value_name = "WORLD_REF")]
     pub world_ref: String,
     /// Incarnation returned by the owner's describe; required for operations.
-    #[arg(long, value_name="GENERATION_REF")]
+    #[arg(long, value_name = "GENERATION_REF")]
     pub expected_owner_generation: Option<String>,
     /// Native operation JSON file, or '-' for stdin. Omit to describe.
-    #[arg(long, value_name="PATH")]
+    #[arg(long, value_name = "PATH")]
     pub request_file: Option<std::path::PathBuf>,
     #[command(flatten)]
     pub carrier: GatewayQueryArgs,

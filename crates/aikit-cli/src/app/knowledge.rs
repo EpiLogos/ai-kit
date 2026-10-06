@@ -12,8 +12,8 @@ use aikit_adapters::gitnexus::GitNexusCodeIndexProvider;
 use aikit_adapters::now_field::{NowFieldScope, NowFieldSourcePoolProvider};
 use aikit_adapters::runner::SystemRunner;
 use aikit_adapters::work_repos::{
-    decode_work_file_source_ref, discover_native_work_projects,
-    NativeWorkProjectEntry, NativeWorkRepoProject, WorkRepoProject, WorkReposSourcePoolProvider,
+    decode_work_file_source_ref, discover_native_work_projects, NativeWorkProjectEntry,
+    NativeWorkRepoProject, WorkRepoProject, WorkReposSourcePoolProvider,
 };
 use aikit_core::knowledge::{KnowledgeContextPack, KnowledgeRelationView, KnowledgeRoute};
 use aikit_core::knowledge_code::CodeIndexProvider;
@@ -53,7 +53,9 @@ const NATIVE_SOURCE_INVOCATION_SECONDS: u64 = 60;
 
 fn native_source_runner() -> SystemRunner {
     SystemRunner::new()
-        .with_timeout(std::time::Duration::from_secs(NATIVE_SOURCE_INVOCATION_SECONDS))
+        .with_timeout(std::time::Duration::from_secs(
+            NATIVE_SOURCE_INVOCATION_SECONDS,
+        ))
         .with_output_limit_bytes(NATIVE_SOURCE_TRANSPORT_BYTES)
 }
 
@@ -139,17 +141,56 @@ mod project_scope_tests {
     fn work_scope_uses_decoded_literal_id_and_native_roots_use_exact_binding_keys() {
         use aikit_adapters::work_repos::work_file_source_ref;
         use std::path::Path;
-        let work = BTreeMap::from([("a:b".into(),"Work/left".into()),("a".into(),"Work/right".into())]);
-        let roots = BTreeMap::from([("source:project:a:b:root".into(),"Work/left".into())]);
+        let work = BTreeMap::from([
+            ("a:b".into(), "Work/left".into()),
+            ("a".into(), "Work/right".into()),
+        ]);
+        let roots = BTreeMap::from([("source:project:a:b:root".into(), "Work/left".into())]);
         let central = BTreeMap::new();
-        let left = work_file_source_ref("a:b",Path::new("c.md")).unwrap();
-        let right = work_file_source_ref("a",Path::new("b:c.md")).unwrap();
-        assert!(ref_belongs_to_project_scope(left.as_str(),"Work/left",&work,&roots,&central));
-        assert!(!ref_belongs_to_project_scope(left.as_str(),"Work/right",&work,&roots,&central));
-        assert!(ref_belongs_to_project_scope(right.as_str(),"Work/right",&work,&roots,&central));
-        assert!(!ref_belongs_to_project_scope("source:project:a:b:c.md","Work/right",&work,&roots,&central));
-        assert!(ref_belongs_to_project_scope("source:project:a:b:root","Work/left",&work,&roots,&central));
-        assert!(!ref_belongs_to_project_scope("source:project:a:root","Work/left",&work,&roots,&central));
+        let left = work_file_source_ref("a:b", Path::new("c.md")).unwrap();
+        let right = work_file_source_ref("a", Path::new("b:c.md")).unwrap();
+        assert!(ref_belongs_to_project_scope(
+            left.as_str(),
+            "Work/left",
+            &work,
+            &roots,
+            &central
+        ));
+        assert!(!ref_belongs_to_project_scope(
+            left.as_str(),
+            "Work/right",
+            &work,
+            &roots,
+            &central
+        ));
+        assert!(ref_belongs_to_project_scope(
+            right.as_str(),
+            "Work/right",
+            &work,
+            &roots,
+            &central
+        ));
+        assert!(!ref_belongs_to_project_scope(
+            "source:project:a:b:c.md",
+            "Work/right",
+            &work,
+            &roots,
+            &central
+        ));
+        assert!(ref_belongs_to_project_scope(
+            "source:project:a:b:root",
+            "Work/left",
+            &work,
+            &roots,
+            &central
+        ));
+        assert!(!ref_belongs_to_project_scope(
+            "source:project:a:root",
+            "Work/left",
+            &work,
+            &roots,
+            &central
+        ));
     }
 
     #[test]
@@ -171,13 +212,25 @@ mod project_scope_tests {
         // Explicit declared identity is an algorithm input here. The separate
         // native gate obtains these mappings from actual ctrl-created Projects.
         let central = BTreeMap::from([
-            ("central:source:project:editor-walk:".into(), "Work/Editor".into()),
+            (
+                "central:source:project:editor-walk:".into(),
+                "Work/Editor".into(),
+            ),
             ("central:source:project:editor:".into(), "Work/Other".into()),
-            ("central:source:project:team/editor:".into(), "Work/Team".into()),
+            (
+                "central:source:project:team/editor:".into(),
+                "Work/Team".into(),
+            ),
         ]);
-        let bound = |resource, display| ref_belongs_to_project_scope(
-            resource, display, &BTreeMap::new(), &BTreeMap::new(), &central,
-        );
+        let bound = |resource, display| {
+            ref_belongs_to_project_scope(
+                resource,
+                display,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &central,
+            )
+        };
         assert!(bound("central:wiki:project:editor-walk", "Work/Editor"));
         assert!(!bound("central:wiki:project:editor-walk", "Work/Other"));
         assert!(!bound("central:wiki:project:editor", "Work/Editor"));
@@ -255,13 +308,20 @@ fn ref_belongs_to_project_scope(
     if resource.starts_with("source:work-file:v1:") {
         return SourceRef::parse(resource)
             .and_then(|source| decode_work_file_source_ref(&source))
-            .ok().flatten()
-            .is_some_and(|address| work_repo_scopes.get(&address.project_id).is_some_and(|project| project == display));
+            .ok()
+            .flatten()
+            .is_some_and(|address| {
+                work_repo_scopes
+                    .get(&address.project_id)
+                    .is_some_and(|project| project == display)
+            });
     }
     if resource.starts_with("source:project:") {
         // Only an actual native binding attributes a Project-root Source.
         // Old Work-file addresses have no recoverable issuing tuple.
-        return native_root_source_scopes.get(resource).is_some_and(|project| project == display);
+        return native_root_source_scopes
+            .get(resource)
+            .is_some_and(|project| project == display);
     }
     if resource.starts_with("central:source:project:") {
         return central_project_source_scopes
@@ -468,7 +528,9 @@ impl KnowledgeRuntime {
             context,
             None,
             self.now_field.as_ref(),
-            self.work_repos.as_ref().map(|provider| provider as &dyn SourcePoolProvider),
+            self.work_repos
+                .as_ref()
+                .map(|provider| provider as &dyn SourcePoolProvider),
         )
     }
 
@@ -703,16 +765,40 @@ impl Service {
                     let scope = provider
                         .scope()
                         .for_project(discovered_project.map(|p| p.name.as_str()));
+                    // The native owner's admission is per-Project: a scoped
+                    // reply reads through the owner bound to THAT Project's
+                    // map (common Control records ride the root lineage), so
+                    // the invoking session's own binding never fences another
+                    // Project's records out of an explicitly scoped reply.
+                    let owner: Arc<CentralFileMapProvider<SystemRunner>> = match discovered_project
+                    {
+                        Some(project) => {
+                            match CentralFileMapProvider::connect(
+                                native_source_runner(),
+                                aikit_adapters::central_file_map::executable(),
+                                &scope.central_root,
+                                Some(project.name.as_str()),
+                            ) {
+                                Ok(rebound) => Arc::new(rebound),
+                                Err(error) => {
+                                    scoped_provider_absences.push(format!(
+                                        "NOW-field scoped owner unavailable: {error}"
+                                    ));
+                                    Arc::clone(owner)
+                                }
+                            }
+                        }
+                        None => Arc::clone(owner),
+                    };
                     match NowFieldSourcePoolProvider::connect(
                         aikit_adapters::now_field::default_runner(&scope.central_root),
                         aikit_adapters::ripgrep::executable(),
                         scope,
                     ) {
-                        Ok(provider) => Some(provider.with_native_owner(Arc::clone(owner))),
+                        Ok(provider) => Some(provider.with_native_owner(owner)),
                         Err(error) => {
-                            scoped_provider_absences.push(format!(
-                                "NOW-field scoped search unavailable: {error}"
-                            ));
+                            scoped_provider_absences
+                                .push(format!("NOW-field scoped search unavailable: {error}"));
                             None
                         }
                     }
@@ -733,15 +819,21 @@ impl Service {
                 match owner.for_project(&project.project_id) {
                     Ok(provider) => Some(provider),
                     Err(error) => {
-                        scoped_provider_absences.push(format!("Work source scope unavailable: {error}"));
+                        scoped_provider_absences
+                            .push(format!("Work source scope unavailable: {error}"));
                         None
                     }
                 }
             });
             let work_repos: Option<&dyn SourcePoolProvider> = if scoped_display.is_some() {
-                scoped_work_repos.as_ref().map(|provider| provider as &dyn SourcePoolProvider)
+                scoped_work_repos
+                    .as_ref()
+                    .map(|provider| provider as &dyn SourcePoolProvider)
             } else {
-                runtime.work_repos.as_ref().map(|provider| provider as &dyn SourcePoolProvider)
+                runtime
+                    .work_repos
+                    .as_ref()
+                    .map(|provider| provider as &dyn SourcePoolProvider)
             };
             let mut result = runtime
                 .application_with_project_scope(
@@ -806,16 +898,10 @@ impl Service {
                     if !runtime.source_belongs_to_scope(resource, display) {
                         return false;
                     }
-                    if attributed_to_other_project(
-                        &runtime.authored_edge_projects,
-                        resource,
-                    ) || attributed_to_other_project(
-                        &runtime.folder_subject_projects,
-                        resource,
-                    ) || attributed_to_other_project(
-                        &runtime.matrix_object_projects,
-                        resource,
-                    ) {
+                    if attributed_to_other_project(&runtime.authored_edge_projects, resource)
+                        || attributed_to_other_project(&runtime.folder_subject_projects, resource)
+                        || attributed_to_other_project(&runtime.matrix_object_projects, resource)
+                    {
                         return false;
                     }
                     match &hit.address {
@@ -969,22 +1055,27 @@ impl Service {
     }
 
     pub(super) fn knowledge_central_root<'a>(&'a self, root: &'a Path) -> Option<&'a Path> {
-        self.knowledge_central_root.as_deref()
-            .or(self.central_meta_root.as_deref()).or_else(|| {
-            root.ancestors().find(|candidate| {
-                candidate.join("Control").is_dir() && candidate.join("Work").is_dir()
+        self.knowledge_central_root
+            .as_deref()
+            .or(self.central_meta_root.as_deref())
+            .or_else(|| {
+                root.ancestors().find(|candidate| {
+                    candidate.join("Control").is_dir() && candidate.join("Work").is_dir()
+                })
             })
-        })
     }
 
     fn current_knowledge_central_root<'a>(&'a self, root: &'a Path) -> Result<Option<&'a Path>> {
         let candidate = self.knowledge_central_root(root);
         if let Some(candidate) = candidate {
             let canonical = std::fs::canonicalize(candidate).map_err(|error| {
-                aikit_core::AikitError::new("central.root_context_unavailable",
-                    format!("{} is unavailable: {error}", candidate.display()))
-                    .with("path", candidate.display().to_string())
-                    .with("observation_stage", "owner_root").with_io_source(error)
+                aikit_core::AikitError::new(
+                    "central.root_context_unavailable",
+                    format!("{} is unavailable: {error}", candidate.display()),
+                )
+                .with("path", candidate.display().to_string())
+                .with("observation_stage", "owner_root")
+                .with_io_source(error)
             })?;
             // Existing native binding owns this form check. It does not turn
             // a label or physical directory into a new semantic identity.
@@ -1057,24 +1148,37 @@ impl Service {
             return Ok(None);
         };
         let binding = NativeWorkRepoProject::inspect(project_root, "external checkout", None)
-            .map_err(|error| aikit_core::AikitError::new(
-                "knowledge.project_scope_unresolved", format!("cannot resolve ProjectCentral identity at {}: {error}",project_root.display()))
-                .with("native_code",error.code()).with_io_source_from(&error))?;
+            .map_err(|error| {
+                aikit_core::AikitError::new(
+                    "knowledge.project_scope_unresolved",
+                    format!(
+                        "cannot resolve ProjectCentral identity at {}: {error}",
+                        project_root.display()
+                    ),
+                )
+                .with("native_code", error.code())
+                .with_io_source_from(&error)
+            })?;
         let project_id = &binding.project().project_id;
         let mut matches = Vec::new();
         for entry in discover_native_work_projects(&central_root)? {
             match entry {
-                NativeWorkProjectEntry::Project(project) if project.project().project_id == *project_id => {
+                NativeWorkProjectEntry::Project(project)
+                    if project.project().project_id == *project_id =>
+                {
                     matches.push(project.project().name.clone());
                 }
-                NativeWorkProjectEntry::Absence { name,error } => {
+                NativeWorkProjectEntry::Absence { name, error } => {
                     // Unknown native declarations cannot be erased while proving
                     // unique attribution of an externally selected checkout.
-                    return Err(aikit_core::AikitError::new("knowledge.project_scope_unresolved",
-                        format!("Work/{name} native identity unavailable: {error}"))
-                        .with("native_code",error.code()).with_io_source_from(&error));
+                    return Err(aikit_core::AikitError::new(
+                        "knowledge.project_scope_unresolved",
+                        format!("Work/{name} native identity unavailable: {error}"),
+                    )
+                    .with("native_code", error.code())
+                    .with_io_source_from(&error));
                 }
-                _ => {},
+                _ => {}
             }
         }
         match matches.as_slice() {
@@ -1699,20 +1803,22 @@ impl Service {
             // manifest cannot be honoured is one named absence, never a
             // silent skip.
             match discover_native_work_projects(central_root) {
-                Ok(entries) => for entry in entries {
-                    match entry {
-                        NativeWorkProjectEntry::Project(native) => {
-                            work_projects.push(native.project().clone());
-                            native_work_projects.push(native);
-                        }
-                        NativeWorkProjectEntry::Absence { name, error } => {
-                            project_absences.push(ProjectOwnedAbsence {
-                                project: format!("Work/{name}"),
-                                message: format!("Work/{name} {error}"),
-                            });
+                Ok(entries) => {
+                    for entry in entries {
+                        match entry {
+                            NativeWorkProjectEntry::Project(native) => {
+                                work_projects.push(native.project().clone());
+                                native_work_projects.push(native);
+                            }
+                            NativeWorkProjectEntry::Absence { name, error } => {
+                                project_absences.push(ProjectOwnedAbsence {
+                                    project: format!("Work/{name}"),
+                                    message: format!("Work/{name} {error}"),
+                                });
+                            }
                         }
                     }
-                },
+                }
                 Err(error) => absences.push(format!("Native Work discovery unavailable: {error}")),
             }
             // Per-project anchor state, loud in status (Design D): a missing
@@ -1827,23 +1933,21 @@ impl Service {
         } else {
             match WorkReposSourcePoolProvider::connect_native(
                 native_source_runner().with_env_removed("RIPGREP_CONFIG_PATH"),
-                aikit_adapters::ripgrep::executable(), native_work_projects,
+                aikit_adapters::ripgrep::executable(),
+                native_work_projects,
             ) {
                 Ok(provider) => Some(provider),
                 Err(error) => {
-                    absences.push(format!("Native Work source attachment unavailable: {error}"));
+                    absences.push(format!(
+                        "Native Work source attachment unavailable: {error}"
+                    ));
                     None
                 }
             }
         };
         let work_repo_scopes: BTreeMap<String, String> = work_projects
             .iter()
-            .map(|project| {
-                (
-                    project.project_id.clone(),
-                    format!("Work/{}", project.name),
-                )
-            })
+            .map(|project| (project.project_id.clone(), format!("Work/{}", project.name)))
             .collect();
         let mut central_project_source_scopes = BTreeMap::new();
         let mut ambiguous_project_source_scopes = BTreeSet::new();
@@ -2314,14 +2418,18 @@ struct DiscoveryRootObservation {
 }
 
 fn discovery_io(error: std::io::Error) -> aikit_core::AikitError {
-    aikit_core::AikitError::new("knowledge.discovery_unavailable",
-        "Current discovery physical observation is unavailable")
-        .with_io_source(error)
+    aikit_core::AikitError::new(
+        "knowledge.discovery_unavailable",
+        "Current discovery physical observation is unavailable",
+    )
+    .with_io_source(error)
 }
 
 fn discovery_refusal() -> aikit_core::AikitError {
-    aikit_core::AikitError::new("knowledge.discovery_withheld",
-        "Current native discovery admission or physical affiliation was refused")
+    aikit_core::AikitError::new(
+        "knowledge.discovery_withheld",
+        "Current native discovery admission or physical affiliation was refused",
+    )
 }
 
 fn discovery_directory_identity(path: &Path) -> Result<(u64, u64)> {
@@ -2329,21 +2437,27 @@ fn discovery_directory_identity(path: &Path) -> Result<(u64, u64)> {
     {
         use std::os::unix::fs::MetadataExt;
         let metadata = fs::metadata(path).map_err(discovery_io)?;
-        if !metadata.is_dir() { return Err(discovery_refusal()); }
+        if !metadata.is_dir() {
+            return Err(discovery_refusal());
+        }
         Ok((metadata.dev(), metadata.ino()))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = path;
-        Err(aikit_core::AikitError::new("knowledge.discovery_observation_unsupported",
-            "Native bounded physical discovery is unavailable on this platform"))
+        Err(aikit_core::AikitError::new(
+            "knowledge.discovery_observation_unsupported",
+            "Native bounded physical discovery is unavailable on this platform",
+        ))
     }
 }
 
 impl DiscoveryRootObservation {
     fn capture(path: &Path) -> Result<Self> {
         let observation = Self {
-            requested: if path.is_absolute() { path.to_path_buf() } else {
+            requested: if path.is_absolute() {
+                path.to_path_buf()
+            } else {
                 std::env::current_dir().map_err(discovery_io)?.join(path)
             },
             canonical: fs::canonicalize(path).map_err(discovery_io)?,
@@ -2361,8 +2475,11 @@ impl DiscoveryRootObservation {
             if fs::canonicalize(ancestor).map_err(discovery_io)? == self.canonical {
                 // An in-World alias back to its root cannot erase earlier
                 // selected lexical ancestors; retain the outermost boundary.
-                observed_member = Some(path.strip_prefix(ancestor)
-                    .expect("an observed path ancestor is a lexical prefix").to_path_buf());
+                observed_member = Some(
+                    path.strip_prefix(ancestor)
+                        .expect("an observed path ancestor is a lexical prefix")
+                        .to_path_buf(),
+                );
             }
         }
         Ok(observed_member)
@@ -2371,7 +2488,9 @@ impl DiscoveryRootObservation {
     fn check(&self) -> Result<()> {
         if fs::canonicalize(&self.requested).map_err(discovery_io)? != self.canonical
             || discovery_directory_identity(&self.requested)? != self.identity
-        { return Err(discovery_refusal()); }
+        {
+            return Err(discovery_refusal());
+        }
         Ok(())
     }
 }
@@ -2428,7 +2547,9 @@ struct DirectoryBudget {
 }
 
 impl DirectoryBudget {
-    fn new(limit: usize) -> Self { Self { observed: 0, limit } }
+    fn new(limit: usize) -> Self {
+        Self { observed: 0, limit }
+    }
 }
 
 struct DiscoveryFrontier {
@@ -2444,29 +2565,46 @@ struct DiscoveryFrontier {
 
 impl DiscoveryFrontier {
     fn new(limits: DiscoveryLimits) -> Self {
-        Self { limits, queued: Vec::new(), seen: BTreeSet::new(), queued_bytes: 0,
-            seen_bytes: 0, max_queued: 0, max_seen: 0, max_path_bytes: 0 }
+        Self {
+            limits,
+            queued: Vec::new(),
+            seen: BTreeSet::new(),
+            queued_bytes: 0,
+            seen_bytes: 0,
+            max_queued: 0,
+            max_seen: 0,
+            max_path_bytes: 0,
+        }
     }
 
     fn path_charge(&self, path: &PathBuf) -> std::result::Result<usize, DiscoveryCapacity> {
         let charge = path.capacity();
         if charge > self.limits.single_path_bytes {
-            return Err(DiscoveryCapacity { dimension: "single_path_capacity_bytes",
-                limit: self.limits.single_path_bytes });
+            return Err(DiscoveryCapacity {
+                dimension: "single_path_capacity_bytes",
+                limit: self.limits.single_path_bytes,
+            });
         }
-        if self.queued_bytes.checked_add(self.seen_bytes)
+        if self
+            .queued_bytes
+            .checked_add(self.seen_bytes)
             .and_then(|bytes| bytes.checked_add(charge))
             .is_none_or(|bytes| bytes > self.limits.path_bytes)
         {
-            return Err(DiscoveryCapacity { dimension: "retained_path_capacity_bytes",
-                limit: self.limits.path_bytes });
+            return Err(DiscoveryCapacity {
+                dimension: "retained_path_capacity_bytes",
+                limit: self.limits.path_bytes,
+            });
         }
         Ok(charge)
     }
 
     fn enqueue(&mut self, path: PathBuf) -> std::result::Result<(), DiscoveryCapacity> {
         if self.queued.len() >= self.limits.queued {
-            return Err(DiscoveryCapacity { dimension: "queued_directories", limit: self.limits.queued });
+            return Err(DiscoveryCapacity {
+                dimension: "queued_directories",
+                limit: self.limits.queued,
+            });
         }
         let charge = self.path_charge(&path)?;
         self.queued.push(path);
@@ -2482,9 +2620,14 @@ impl DiscoveryFrontier {
     }
 
     fn admit_seen(&mut self, path: PathBuf) -> std::result::Result<bool, DiscoveryCapacity> {
-        if self.seen.contains(&path) { return Ok(false); }
+        if self.seen.contains(&path) {
+            return Ok(false);
+        }
         if self.seen.len() >= self.limits.seen {
-            return Err(DiscoveryCapacity { dimension: "seen_canonical_directories", limit: self.limits.seen });
+            return Err(DiscoveryCapacity {
+                dimension: "seen_canonical_directories",
+                limit: self.limits.seen,
+            });
         }
         let charge = self.path_charge(&path)?;
         self.seen.insert(path);
@@ -2507,18 +2650,37 @@ struct CanonicalPaths {
 }
 
 impl CanonicalPaths {
-    fn new(limits: DiscoveryLimits) -> Self { Self { paths: Vec::new(), bytes: 0, limits } }
+    fn new(limits: DiscoveryLimits) -> Self {
+        Self {
+            paths: Vec::new(),
+            bytes: 0,
+            limits,
+        }
+    }
 
     fn push(&mut self, path: PathBuf) -> std::result::Result<(), DiscoveryCapacity> {
         if self.paths.len() >= self.limits.canonical_paths {
-            return Err(DiscoveryCapacity { dimension: "canonical_register_paths", limit: self.limits.canonical_paths });
+            return Err(DiscoveryCapacity {
+                dimension: "canonical_register_paths",
+                limit: self.limits.canonical_paths,
+            });
         }
         let charge = path.capacity();
         if charge > self.limits.single_path_bytes {
-            return Err(DiscoveryCapacity { dimension: "single_path_capacity_bytes", limit: self.limits.single_path_bytes });
+            return Err(DiscoveryCapacity {
+                dimension: "single_path_capacity_bytes",
+                limit: self.limits.single_path_bytes,
+            });
         }
-        if self.bytes.checked_add(charge).is_none_or(|bytes| bytes > self.limits.canonical_path_bytes) {
-            return Err(DiscoveryCapacity { dimension: "canonical_path_capacity_bytes", limit: self.limits.canonical_path_bytes });
+        if self
+            .bytes
+            .checked_add(charge)
+            .is_none_or(|bytes| bytes > self.limits.canonical_path_bytes)
+        {
+            return Err(DiscoveryCapacity {
+                dimension: "canonical_path_capacity_bytes",
+                limit: self.limits.canonical_path_bytes,
+            });
         }
         self.paths.push(path);
         self.bytes += charge;
@@ -2527,8 +2689,14 @@ impl CanonicalPaths {
 }
 
 fn discovery_capacity_absence(
-    absences: &mut Vec<String>, phase: &str, capacity: DiscoveryCapacity,
-    observed: usize, candidates: usize, queued: usize, seen: usize, path_bytes: usize,
+    absences: &mut Vec<String>,
+    phase: &str,
+    capacity: DiscoveryCapacity,
+    observed: usize,
+    candidates: usize,
+    queued: usize,
+    seen: usize,
+    path_bytes: usize,
 ) {
     absences.push(format!(
         "Knowledge discovery {phase} capacity exhausted: {} limit {}; observed {observed} directory entries, \
@@ -2539,18 +2707,25 @@ fn discovery_capacity_absence(
 }
 
 fn directory_observation_failure(
-    error: aikit_core::AikitError, checkpoint: Result<()>,
+    error: aikit_core::AikitError,
+    checkpoint: Result<()>,
 ) -> aikit_core::AikitError {
     use std::error::Error;
     match checkpoint {
         Ok(()) => error,
         Err(cause) => {
-            let io = cause.source().and_then(|source| source.downcast_ref::<std::io::Error>());
-            error.with("directory_affiliation_failure", serde_json::json!({
-                "code": cause.code(), "details": cause.details(),
-                "io_kind": io.map(|io| format!("{:?}", io.kind())),
-                "raw_os_error": io.and_then(std::io::Error::raw_os_error),
-            }).to_string())
+            let io = cause
+                .source()
+                .and_then(|source| source.downcast_ref::<std::io::Error>());
+            error.with(
+                "directory_affiliation_failure",
+                serde_json::json!({
+                    "code": cause.code(), "details": cause.details(),
+                    "io_kind": io.map(|io| format!("{:?}", io.kind())),
+                    "raw_os_error": io.and_then(std::io::Error::raw_os_error),
+                })
+                .to_string(),
+            )
         }
     }
 }
@@ -2568,7 +2743,10 @@ impl DiscoveryBoundary {
                 // An unreadable supplied native root is unknown, never a
                 // reason to downgrade the selected source to standalone.
                 let observed = DiscoveryRootObservation::capture(root)?;
-                selected.canonical.starts_with(&observed.canonical).then_some(observed)
+                selected
+                    .canonical
+                    .starts_with(&observed.canonical)
+                    .then_some(observed)
             }
             None => None,
         };
@@ -2578,25 +2756,45 @@ impl DiscoveryBoundary {
     fn admit(&self, path: &Path, directory: bool) -> Result<PathBuf> {
         use aikit_adapters::projectcentral::path_agent_readability;
         self.selected.check()?;
-        let original = path.strip_prefix(&self.selected.requested).map_err(|_| discovery_refusal())?;
-        if original.components().any(|part| !matches!(part, std::path::Component::Normal(_))) {
+        let original = path
+            .strip_prefix(&self.selected.requested)
+            .map_err(|_| discovery_refusal())?;
+        if original
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
             return Err(discovery_refusal());
         }
         // The real marker member queries the directory's own native aperture
         // before listing. It is not read as material or assigned a SourceRef.
-        let original_policy = if directory { original.join(aikit_core::NO_AGENT_RETRIEVAL_MARKER) }
-            else { original.to_path_buf() };
-        if !path_agent_readability(&self.selected.requested, &original_policy).map_err(discovery_io)? {
+        let original_policy = if directory {
+            original.join(aikit_core::NO_AGENT_RETRIEVAL_MARKER)
+        } else {
+            original.to_path_buf()
+        };
+        if !path_agent_readability(&self.selected.requested, &original_policy)
+            .map_err(discovery_io)?
+        {
             return Err(discovery_refusal());
         }
         let canonical = fs::canonicalize(path).map_err(discovery_io)?;
-        let member = canonical.strip_prefix(&self.selected.canonical).map_err(|_| discovery_refusal())?;
-        if member.components().any(|part| !matches!(part, std::path::Component::Normal(_))) {
+        let member = canonical
+            .strip_prefix(&self.selected.canonical)
+            .map_err(|_| discovery_refusal())?;
+        if member
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
             return Err(discovery_refusal());
         }
-        let canonical_policy = if directory { member.join(aikit_core::NO_AGENT_RETRIEVAL_MARKER) }
-            else { member.to_path_buf() };
-        if !path_agent_readability(&self.selected.requested, &canonical_policy).map_err(discovery_io)? {
+        let canonical_policy = if directory {
+            member.join(aikit_core::NO_AGENT_RETRIEVAL_MARKER)
+        } else {
+            member.to_path_buf()
+        };
+        if !path_agent_readability(&self.selected.requested, &canonical_policy)
+            .map_err(discovery_io)?
+        {
             return Err(discovery_refusal());
         }
         if let Some(world) = &self.world {
@@ -2604,15 +2802,23 @@ impl DiscoveryBoundary {
             // Preserve an actual World-relative lexical route when supplied,
             // and always check the admitted physical target under that World.
             if let Some(relative) = world.declared_member(path)? {
-                let policy = if directory { relative.join(aikit_core::NO_AGENT_RETRIEVAL_MARKER) }
-                    else { relative.to_path_buf() };
+                let policy = if directory {
+                    relative.join(aikit_core::NO_AGENT_RETRIEVAL_MARKER)
+                } else {
+                    relative.to_path_buf()
+                };
                 if !path_agent_readability(&world.requested, &policy).map_err(discovery_io)? {
                     return Err(discovery_refusal());
                 }
             }
-            let relative = canonical.strip_prefix(&world.canonical).map_err(|_| discovery_refusal())?;
-            let policy = if directory { relative.join(aikit_core::NO_AGENT_RETRIEVAL_MARKER) }
-                else { relative.to_path_buf() };
+            let relative = canonical
+                .strip_prefix(&world.canonical)
+                .map_err(|_| discovery_refusal())?;
+            let policy = if directory {
+                relative.join(aikit_core::NO_AGENT_RETRIEVAL_MARKER)
+            } else {
+                relative.to_path_buf()
+            };
             if !path_agent_readability(&world.requested, &policy).map_err(discovery_io)? {
                 return Err(discovery_refusal());
             }
@@ -2623,7 +2829,9 @@ impl DiscoveryBoundary {
     }
 
     fn visit_entries<T>(
-        &self, path: &Path, budget: &mut DirectoryBudget,
+        &self,
+        path: &Path,
+        budget: &mut DirectoryBudget,
         mut observe: impl FnMut(fs::DirEntry) -> Result<T>,
         mut commit: impl FnMut(Result<T>) -> Result<DirectoryControl>,
     ) -> Result<DirectoryVisit> {
@@ -2632,13 +2840,14 @@ impl DiscoveryBoundary {
         let checkpoint = || -> Result<()> {
             if self.admit(path, true)? != original_mapping
                 || discovery_directory_identity(path)? != original_identity
-            { return Err(discovery_refusal()); }
+            {
+                return Err(discovery_refusal());
+            }
             Ok(())
         };
         checkpoint()?;
-        let mut entries = fs::read_dir(path).map_err(|error| {
-            directory_observation_failure(discovery_io(error), checkpoint())
-        })?;
+        let mut entries = fs::read_dir(path)
+            .map_err(|error| directory_observation_failure(discovery_io(error), checkpoint()))?;
         loop {
             checkpoint()?;
             if budget.observed >= budget.limit {
@@ -2646,7 +2855,8 @@ impl DiscoveryBoundary {
                 // remains. Exact-bound EOF is still unknown until observed.
                 checkpoint()?;
                 return Ok(DirectoryVisit::Stopped(DiscoveryCapacity {
-                    dimension: "observed_directory_entries", limit: budget.limit,
+                    dimension: "observed_directory_entries",
+                    limit: budget.limit,
                 }));
             }
             let Some(entry) = entries.next() else {
@@ -2664,9 +2874,9 @@ impl DiscoveryBoundary {
                     Ok(_) => cause,
                 });
             }
-            match commit(pending).map_err(|error| {
-                directory_observation_failure(error, checkpoint())
-            })? {
+            match commit(pending)
+                .map_err(|error| directory_observation_failure(error, checkpoint()))?
+            {
                 DirectoryControl::Continue => {}
                 DirectoryControl::Stop(capacity) => {
                     checkpoint()?;
@@ -2678,14 +2888,24 @@ impl DiscoveryBoundary {
 
     fn read(&self, path: &Path, limit: u64) -> Result<String> {
         let original_mapping = self.admit(path, false)?;
-        let member = original_mapping.strip_prefix(&self.selected.canonical)
+        let member = original_mapping
+            .strip_prefix(&self.selected.canonical)
             .map_err(|_| discovery_refusal())?;
         let bytes = aikit_adapters::projectcentral::publication::material_bytes_affiliated(
-            &self.selected.requested, self.selected.identity, member, limit,
+            &self.selected.requested,
+            self.selected.identity,
+            member,
+            limit,
         )?;
-        if self.admit(path, false)? != original_mapping { return Err(discovery_refusal()); }
-        String::from_utf8(bytes).map_err(|_| aikit_core::AikitError::new(
-            "knowledge.discovery_encoding", "Admitted discovery material is not UTF-8"))
+        if self.admit(path, false)? != original_mapping {
+            return Err(discovery_refusal());
+        }
+        String::from_utf8(bytes).map_err(|_| {
+            aikit_core::AikitError::new(
+                "knowledge.discovery_encoding",
+                "Admitted discovery material is not UTF-8",
+            )
+        })
     }
 }
 
@@ -2693,20 +2913,38 @@ fn discovery_absence(absences: &mut Vec<String>, error: &aikit_core::AikitError)
     use std::error::Error;
     // Availability keeps actual cause facts without exposing a denied member,
     // body, title, SourceRef or an inferred marker in the diagnostic surface.
-    let cause = error.source().and_then(|cause| cause.downcast_ref::<std::io::Error>());
+    let cause = error
+        .source()
+        .and_then(|cause| cause.downcast_ref::<std::io::Error>());
     absences.push(match cause {
-        Some(cause) => format!("Knowledge discovery unavailable ({}, IO {:?}, errno {:?})",
-            error.code(), cause.kind(), cause.raw_os_error()),
-        None => format!("Knowledge discovery withheld or unavailable ({})", error.code()),
+        Some(cause) => format!(
+            "Knowledge discovery unavailable ({}, IO {:?}, errno {:?})",
+            error.code(),
+            cause.kind(),
+            cause.raw_os_error()
+        ),
+        None => format!(
+            "Knowledge discovery withheld or unavailable ({})",
+            error.code()
+        ),
     });
 }
 
 fn discover_material(
-    root: &Path, home: &Path, absences: &mut Vec<String>,
-    discover_wiki: bool, native_world_root: Option<&Path>,
+    root: &Path,
+    home: &Path,
+    absences: &mut Vec<String>,
+    discover_wiki: bool,
+    native_world_root: Option<&Path>,
 ) -> Result<DiscoveredMaterial> {
-    discover_material_with_limits(root, home, absences, discover_wiki,
-        native_world_root, DiscoveryLimits::default())
+    discover_material_with_limits(
+        root,
+        home,
+        absences,
+        discover_wiki,
+        native_world_root,
+        DiscoveryLimits::default(),
+    )
 }
 
 fn discovery_file_exists(path: &Path) -> Result<bool> {
@@ -2718,21 +2956,30 @@ fn discovery_file_exists(path: &Path) -> Result<bool> {
 }
 
 fn read_canonical_discovery(
-    boundary: &DiscoveryBoundary, path: &Path, discovered: &mut DiscoveredMaterial,
-    seen: &mut BTreeSet<String>, absences: &mut Vec<String>,
+    boundary: &DiscoveryBoundary,
+    path: &Path,
+    discovered: &mut DiscoveredMaterial,
+    seen: &mut BTreeSet<String>,
+    absences: &mut Vec<String>,
 ) {
     let text = match boundary.read(path, 16 * 1024 * 1024) {
         Ok(text) => text,
-        Err(error) => { discovery_absence(absences, &error); return; }
+        Err(error) => {
+            discovery_absence(absences, &error);
+            return;
+        }
     };
     match parse_wiki_objects(&text) {
         Ok(objects) => {
             for object in objects {
-                if seen.insert(object.ref_id().as_str().to_owned()) { discovered.wiki.push(object); }
+                if seen.insert(object.ref_id().as_str().to_owned()) {
+                    discovered.wiki.push(object);
+                }
             }
         }
         Err(error) => absences.push(format!(
-            "Canonical wiki register {} is invalid: {error}", path.display(),
+            "Canonical wiki register {} is invalid: {error}",
+            path.display(),
         )),
     }
 }
@@ -2749,16 +2996,25 @@ enum PendingDiscovery {
 }
 
 fn discover_material_with_limits(
-    root: &Path, home: &Path, absences: &mut Vec<String>, discover_wiki: bool,
-    native_world_root: Option<&Path>, limits: DiscoveryLimits,
+    root: &Path,
+    home: &Path,
+    absences: &mut Vec<String>,
+    discover_wiki: bool,
+    native_world_root: Option<&Path>,
+    limits: DiscoveryLimits,
 ) -> Result<DiscoveredMaterial> {
     let mut discovered = DiscoveredMaterial::default();
     let boundary = match DiscoveryBoundary::capture(root, native_world_root) {
         Ok(boundary) => boundary,
-        Err(error) => { discovery_absence(absences, &error); return Ok(discovered); }
+        Err(error) => {
+            discovery_absence(absences, &error);
+            return Ok(discovered);
+        }
     };
     let root = boundary.selected.requested.as_path();
-    let home = if home.is_absolute() { home.to_path_buf() } else {
+    let home = if home.is_absolute() {
+        home.to_path_buf()
+    } else {
         std::env::current_dir().map_err(discovery_io)?.join(home)
     };
     let mut seen_wiki_refs = BTreeSet::new();
@@ -2768,10 +3024,23 @@ fn discover_material_with_limits(
         // Root Wiki is considered first and independently of both bounded
         // Work-register enumeration and the generic JSON candidate count.
         let root_wiki = root.join("Control/agents/wiki/wiki.json");
-        match boundary.selected.check().and_then(|_| discovery_file_exists(&root_wiki)) {
-            Ok(true) => read_canonical_discovery(&boundary, &root_wiki,
-                &mut discovered, &mut seen_wiki_refs, absences),
-            Ok(false) => { if let Err(error) = boundary.selected.check() { discovery_absence(absences, &error); } }
+        match boundary
+            .selected
+            .check()
+            .and_then(|_| discovery_file_exists(&root_wiki))
+        {
+            Ok(true) => read_canonical_discovery(
+                &boundary,
+                &root_wiki,
+                &mut discovered,
+                &mut seen_wiki_refs,
+                absences,
+            ),
+            Ok(false) => {
+                if let Err(error) = boundary.selected.check() {
+                    discovery_absence(absences, &error);
+                }
+            }
             Err(error) => discovery_absence(absences, &error),
         }
         let work = root.join("Work");
@@ -2779,11 +3048,14 @@ fn discover_material_with_limits(
         let mut budget = DirectoryBudget::new(limits.canonical_entries);
         let visit = match fs::metadata(&work) {
             Ok(metadata) if metadata.is_dir() => Some(boundary.visit_entries(
-                &work, &mut budget,
+                &work,
+                &mut budget,
                 |entry| {
                     let path = entry.path();
                     let metadata = fs::metadata(&path).map_err(discovery_io)?;
-                    if !metadata.is_dir() { return Ok(None); }
+                    if !metadata.is_dir() {
+                        return Ok(None);
+                    }
                     boundary.admit(&path, true)?;
                     let wiki = path.join("ProjectCentral/agents/wiki/wiki.json");
                     Ok(discovery_file_exists(&wiki)?.then_some(wiki))
@@ -2791,7 +3063,9 @@ fn discover_material_with_limits(
                 |pending| {
                     match pending {
                         Ok(Some(path)) => {
-                            if let Err(capacity) = canonical.push(path) { return Ok(DirectoryControl::Stop(capacity)); }
+                            if let Err(capacity) = canonical.push(path) {
+                                return Ok(DirectoryControl::Stop(capacity));
+                            }
                         }
                         Ok(None) => {}
                         Err(error) => discovery_absence(absences, &error),
@@ -2801,16 +3075,27 @@ fn discover_material_with_limits(
             )),
             Ok(_) => None,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if let Err(error) = boundary.selected.check() { discovery_absence(absences, &error); }
+                if let Err(error) = boundary.selected.check() {
+                    discovery_absence(absences, &error);
+                }
                 None
             }
-            Err(error) => { discovery_absence(absences, &discovery_io(error)); None }
+            Err(error) => {
+                discovery_absence(absences, &discovery_io(error));
+                None
+            }
         };
         if let Some(visit) = visit {
             match visit {
                 Ok(DirectoryVisit::Stopped(capacity)) => discovery_capacity_absence(
-                    absences, "canonical Work", capacity, budget.observed, 0,
-                    canonical.paths.len(), 0, canonical.bytes,
+                    absences,
+                    "canonical Work",
+                    capacity,
+                    budget.observed,
+                    0,
+                    canonical.paths.len(),
+                    0,
+                    canonical.bytes,
                 ),
                 Ok(DirectoryVisit::Complete) => {}
                 Err(error) => discovery_absence(absences, &error),
@@ -2819,8 +3104,13 @@ fn discover_material_with_limits(
         canonical.paths.sort();
         canonical.paths.dedup();
         for path in canonical.paths {
-            read_canonical_discovery(&boundary, &path,
-                &mut discovered, &mut seen_wiki_refs, absences);
+            read_canonical_discovery(
+                &boundary,
+                &path,
+                &mut discovered,
+                &mut seen_wiki_refs,
+                absences,
+            );
         }
     }
 
@@ -2836,18 +3126,30 @@ fn discover_material_with_limits(
     let mut budget = DirectoryBudget::new(limits.entries);
     let files = std::cell::Cell::new(0usize);
     while let Some(dir) = frontier.pop() {
-        if dir == home || is_ignored_dir(&dir) { continue; }
+        if dir == home || is_ignored_dir(&dir) {
+            continue;
+        }
         let canonical_directory = match boundary.admit(&dir, true) {
             Ok(directory) => directory,
-            Err(error) => { discovery_absence(absences, &error); continue; }
+            Err(error) => {
+                discovery_absence(absences, &error);
+                continue;
+            }
         };
         match frontier.admit_seen(canonical_directory) {
             Ok(true) => {}
             Ok(false) => continue,
             Err(capacity) => {
-                discovery_capacity_absence(absences, "generic", capacity, budget.observed,
-                    files.get(), frontier.queued.len(), frontier.seen.len(),
-                    frontier.queued_bytes + frontier.seen_bytes);
+                discovery_capacity_absence(
+                    absences,
+                    "generic",
+                    capacity,
+                    budget.observed,
+                    files.get(),
+                    frontier.queued.len(),
+                    frontier.seen.len(),
+                    frontier.queued_bytes + frontier.seen_bytes,
+                );
                 break;
             }
         }
@@ -2932,9 +3234,16 @@ fn discover_material_with_limits(
         match visit {
             Ok(DirectoryVisit::Complete) => {}
             Ok(DirectoryVisit::Stopped(capacity)) => {
-                discovery_capacity_absence(absences, "generic", capacity, budget.observed,
-                    files.get(), frontier.queued.len(), frontier.seen.len(),
-                    frontier.queued_bytes + frontier.seen_bytes);
+                discovery_capacity_absence(
+                    absences,
+                    "generic",
+                    capacity,
+                    budget.observed,
+                    files.get(),
+                    frontier.queued.len(),
+                    frontier.seen.len(),
+                    frontier.queued_bytes + frontier.seen_bytes,
+                );
                 break;
             }
             Err(error) => discovery_absence(absences, &error),
@@ -2952,20 +3261,30 @@ mod discovery_physical_tests {
     fn native_discovery_tempdir() -> tempfile::TempDir {
         let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
         fs::create_dir_all(&scratch).unwrap();
-        tempfile::Builder::new().prefix("knowledge-discovery-").tempdir_in(&scratch).unwrap()
+        tempfile::Builder::new()
+            .prefix("knowledge-discovery-")
+            .tempdir_in(&scratch)
+            .unwrap()
     }
 
     fn visited_entry_count(boundary: &DiscoveryBoundary, path: &Path) -> Result<usize> {
         let count = std::cell::Cell::new(0usize);
         let mut budget = DirectoryBudget::new(DiscoveryLimits::default().entries);
-        match boundary.visit_entries(path, &mut budget, |_| Ok(()), |pending| {
-            pending?;
-            count.set(count.get() + 1);
-            Ok(DirectoryControl::Continue)
-        })? {
+        match boundary.visit_entries(
+            path,
+            &mut budget,
+            |_| Ok(()),
+            |pending| {
+                pending?;
+                count.set(count.get() + 1);
+                Ok(DirectoryControl::Continue)
+            },
+        )? {
             DirectoryVisit::Complete => Ok(count.get()),
             DirectoryVisit::Stopped(_) => Err(aikit_core::AikitError::new(
-                "knowledge.discovery_capacity", "Entry-count proof exceeded its actual allowance")),
+                "knowledge.discovery_capacity",
+                "Entry-count proof exceeded its actual allowance",
+            )),
         }
     }
 
@@ -2974,7 +3293,8 @@ mod discovery_physical_tests {
             "profile":"okf-wiki/v1", "object":"node", "ref":source_ref,
             "type":"Module", "title":title, "source_refs":[],
             "provenance":[{"source_ref":"source:physical-enumeration-fixture"}],
-        }]})).unwrap()
+        }]}))
+        .unwrap()
     }
 
     #[test]
@@ -2983,24 +3303,40 @@ mod discovery_physical_tests {
         let neighbour = native_discovery_tempdir();
         let neighbour_source = neighbour.path().join("untouched.txt");
         fs::write(&neighbour_source, b"neighbour bytes").unwrap();
-        for n in 0..128 { fs::write(root.path().join(format!("entry-{n:03}.txt")), b"retained").unwrap(); }
+        for n in 0..128 {
+            fs::write(root.path().join(format!("entry-{n:03}.txt")), b"retained").unwrap();
+        }
         let boundary = DiscoveryBoundary::capture(root.path(), None).unwrap();
         let mut budget = DirectoryBudget::new(7);
         let observed = std::cell::Cell::new(0usize);
         let committed = std::cell::Cell::new(0usize);
-        let result = boundary.visit_entries(root.path(), &mut budget, |entry| {
-            assert_eq!(fs::read(entry.path()).unwrap(), b"retained");
-            observed.set(observed.get() + 1);
-            Ok(())
-        }, |pending| {
-            pending?;
-            committed.set(committed.get() + 1);
-            Ok(DirectoryControl::Continue)
-        }).unwrap();
-        assert!(matches!(result, DirectoryVisit::Stopped(DiscoveryCapacity {
-            dimension: "observed_directory_entries", limit: 7,
-        })));
-        assert_eq!((budget.observed, observed.get(), committed.get()), (7, 7, 7));
+        let result = boundary
+            .visit_entries(
+                root.path(),
+                &mut budget,
+                |entry| {
+                    assert_eq!(fs::read(entry.path()).unwrap(), b"retained");
+                    observed.set(observed.get() + 1);
+                    Ok(())
+                },
+                |pending| {
+                    pending?;
+                    committed.set(committed.get() + 1);
+                    Ok(DirectoryControl::Continue)
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            result,
+            DirectoryVisit::Stopped(DiscoveryCapacity {
+                dimension: "observed_directory_entries",
+                limit: 7,
+            })
+        ));
+        assert_eq!(
+            (budget.observed, observed.get(), committed.get()),
+            (7, 7, 7)
+        );
         assert_eq!(visited_entry_count(&boundary, root.path()).unwrap(), 128);
         assert_eq!(fs::read(neighbour_source).unwrap(), b"neighbour bytes");
     }
@@ -3009,48 +3345,84 @@ mod discovery_physical_tests {
     fn real_frontier_seen_and_actual_path_capacity_refuse_before_retention() {
         let root = native_discovery_tempdir();
         let boundary = DiscoveryBoundary::capture(root.path(), None).unwrap();
-        for n in 0..8 { fs::create_dir(root.path().join(format!("room-{n}"))).unwrap(); }
-        let limits = DiscoveryLimits { queued: 3, seen: 2, ..DiscoveryLimits::default() };
+        for n in 0..8 {
+            fs::create_dir(root.path().join(format!("room-{n}"))).unwrap();
+        }
+        let limits = DiscoveryLimits {
+            queued: 3,
+            seen: 2,
+            ..DiscoveryLimits::default()
+        };
         let mut frontier = DiscoveryFrontier::new(limits);
         let mut budget = DirectoryBudget::new(100);
-        let result = boundary.visit_entries(root.path(), &mut budget, |entry| {
-            let path = entry.path();
-            boundary.admit(&path, true)?;
-            Ok(path)
-        }, |pending| match frontier.enqueue(pending?) {
-            Ok(()) => Ok(DirectoryControl::Continue),
-            Err(capacity) => Ok(DirectoryControl::Stop(capacity)),
-        }).unwrap();
-        assert!(matches!(result, DirectoryVisit::Stopped(DiscoveryCapacity {
-            dimension: "queued_directories", limit: 3,
-        })));
+        let result = boundary
+            .visit_entries(
+                root.path(),
+                &mut budget,
+                |entry| {
+                    let path = entry.path();
+                    boundary.admit(&path, true)?;
+                    Ok(path)
+                },
+                |pending| match frontier.enqueue(pending?) {
+                    Ok(()) => Ok(DirectoryControl::Continue),
+                    Err(capacity) => Ok(DirectoryControl::Stop(capacity)),
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            result,
+            DirectoryVisit::Stopped(DiscoveryCapacity {
+                dimension: "queued_directories",
+                limit: 3,
+            })
+        ));
         assert_eq!((frontier.queued.len(), frontier.max_queued), (3, 3));
         assert_eq!(budget.observed, 4);
         let bytes = frontier.queued_bytes;
         let path = frontier.pop().unwrap();
         assert_eq!(frontier.queued_bytes, bytes - path.capacity());
-        frontier.admit_seen(fs::canonicalize(&path).unwrap()).unwrap();
+        frontier
+            .admit_seen(fs::canonicalize(&path).unwrap())
+            .unwrap();
         let second = frontier.pop().unwrap();
-        frontier.admit_seen(fs::canonicalize(&second).unwrap()).unwrap();
+        frontier
+            .admit_seen(fs::canonicalize(&second).unwrap())
+            .unwrap();
         symlink(&second, root.path().join("same-room-alias")).unwrap();
-        assert!(!frontier.admit_seen(fs::canonicalize(root.path().join("same-room-alias")).unwrap()).unwrap());
+        assert!(!frontier
+            .admit_seen(fs::canonicalize(root.path().join("same-room-alias")).unwrap())
+            .unwrap());
         let third = frontier.pop().unwrap();
-        assert_eq!(frontier.admit_seen(fs::canonicalize(&third).unwrap()).unwrap_err().dimension,
-            "seen_canonical_directories");
+        assert_eq!(
+            frontier
+                .admit_seen(fs::canonicalize(&third).unwrap())
+                .unwrap_err()
+                .dimension,
+            "seen_canonical_directories"
+        );
         assert_eq!((frontier.seen.len(), frontier.max_seen), (2, 2));
         assert_eq!(frontier.queued_bytes, 0);
         let actual = root.path().join("room-0");
         let retained = actual.clone();
         let mut paths = DiscoveryFrontier::new(DiscoveryLimits {
-            single_path_bytes: retained.capacity() - 1, ..DiscoveryLimits::default()
+            single_path_bytes: retained.capacity() - 1,
+            ..DiscoveryLimits::default()
         });
-        assert_eq!(paths.enqueue(retained).unwrap_err().dimension, "single_path_capacity_bytes");
+        assert_eq!(
+            paths.enqueue(retained).unwrap_err().dimension,
+            "single_path_capacity_bytes"
+        );
         assert!(paths.queued.is_empty());
         assert_eq!(paths.queued_bytes, 0);
         let mut paths = DiscoveryFrontier::new(DiscoveryLimits {
-            path_bytes: actual.capacity() - 1, ..DiscoveryLimits::default()
+            path_bytes: actual.capacity() - 1,
+            ..DiscoveryLimits::default()
         });
-        assert_eq!(paths.enqueue(actual).unwrap_err().dimension, "retained_path_capacity_bytes");
+        assert_eq!(
+            paths.enqueue(actual).unwrap_err().dimension,
+            "retained_path_capacity_bytes"
+        );
         assert!(paths.queued.is_empty());
         assert_eq!(paths.max_path_bytes, 0);
         assert!(root.path().join("room-0").is_dir());
@@ -3070,17 +3442,33 @@ mod discovery_physical_tests {
         let boundary = DiscoveryBoundary::capture(root.path(), None).unwrap();
         let mut budget = DirectoryBudget::new(10);
         let committed = std::cell::Cell::new(false);
-        let error = boundary.visit_entries(&alias, &mut budget, |entry| {
-            let text = boundary.read(&entry.path(), MAX_DISCOVERY_FILE_BYTES)?;
-            assert_eq!(text, "actual original bytes");
-            fs::remove_file(&alias).unwrap();
-            symlink(&foreign, &alias).unwrap();
-            Ok(text)
-        }, |_| { committed.set(true); Ok(DirectoryControl::Continue) }).unwrap_err();
+        let error = boundary
+            .visit_entries(
+                &alias,
+                &mut budget,
+                |entry| {
+                    let text = boundary.read(&entry.path(), MAX_DISCOVERY_FILE_BYTES)?;
+                    assert_eq!(text, "actual original bytes");
+                    fs::remove_file(&alias).unwrap();
+                    symlink(&foreign, &alias).unwrap();
+                    Ok(text)
+                },
+                |_| {
+                    committed.set(true);
+                    Ok(DirectoryControl::Continue)
+                },
+            )
+            .unwrap_err();
         assert_eq!(error.code(), "knowledge.discovery_withheld");
         assert!(!committed.get());
-        assert_eq!(fs::read(old.join("body.json")).unwrap(), b"actual original bytes");
-        assert_eq!(fs::read(foreign.join("body.json")).unwrap(), b"actual foreign bytes");
+        assert_eq!(
+            fs::read(old.join("body.json")).unwrap(),
+            b"actual original bytes"
+        );
+        assert_eq!(
+            fs::read(foreign.join("body.json")).unwrap(),
+            b"actual foreign bytes"
+        );
     }
 
     #[test]
@@ -3095,19 +3483,38 @@ mod discovery_physical_tests {
         let mut budget = DirectoryBudget::new(10);
         let committed = std::cell::Cell::new(false);
         let expected_errno = std::cell::Cell::new(None);
-        let error = boundary.visit_entries(&requested, &mut budget, |entry| {
-            fs::rename(&requested, &retained).unwrap();
-            let cause = fs::read(entry.path()).unwrap_err();
-            expected_errno.set(cause.raw_os_error());
-            Err::<(), _>(discovery_io(cause))
-        }, |_| { committed.set(true); Ok(DirectoryControl::Continue) }).unwrap_err();
-        let cause = error.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        let error = boundary
+            .visit_entries(
+                &requested,
+                &mut budget,
+                |entry| {
+                    fs::rename(&requested, &retained).unwrap();
+                    let cause = fs::read(entry.path()).unwrap_err();
+                    expected_errno.set(cause.raw_os_error());
+                    Err::<(), _>(discovery_io(cause))
+                },
+                |_| {
+                    committed.set(true);
+                    Ok(DirectoryControl::Continue)
+                },
+            )
+            .unwrap_err();
+        let cause = error
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
         assert_eq!(cause.kind(), std::io::ErrorKind::NotFound);
         assert_eq!(cause.raw_os_error(), expected_errno.get());
         assert!(cause.raw_os_error().is_some());
-        assert!(error.details().contains_key("directory_affiliation_failure"));
+        assert!(error
+            .details()
+            .contains_key("directory_affiliation_failure"));
         assert!(!committed.get());
-        assert_eq!(fs::read(retained.join("body.json")).unwrap(), b"retained source bytes");
+        assert_eq!(
+            fs::read(retained.join("body.json")).unwrap(),
+            b"retained source bytes"
+        );
         assert!(!requested.exists());
     }
 
@@ -3117,18 +3524,41 @@ mod discovery_physical_tests {
         let home = native_discovery_tempdir();
         let marked = root.path().join("marked");
         fs::create_dir(&marked).unwrap();
-        fs::write(marked.join(aikit_core::NO_AGENT_RETRIEVAL_MARKER), b"withheld").unwrap();
+        fs::write(
+            marked.join(aikit_core::NO_AGENT_RETRIEVAL_MARKER),
+            b"withheld",
+        )
+        .unwrap();
         let secret = enumeration_wiki("wiki:node:unselected-secret", "Unselected secret title");
         fs::write(marked.join("secret.json"), &secret).unwrap();
         let allowed = root.path().join("allowed");
         fs::create_dir(&allowed).unwrap();
-        fs::write(allowed.join("wiki.json"), enumeration_wiki("wiki:node:admitted-sibling", "Admitted sibling")).unwrap();
+        fs::write(
+            allowed.join("wiki.json"),
+            enumeration_wiki("wiki:node:admitted-sibling", "Admitted sibling"),
+        )
+        .unwrap();
         let mut absences = Vec::new();
-        let material = discover_material_with_limits(root.path(), home.path(), &mut absences,
-            true, None, DiscoveryLimits { queued: 1, ..DiscoveryLimits::default() }).unwrap();
+        let material = discover_material_with_limits(
+            root.path(),
+            home.path(),
+            &mut absences,
+            true,
+            None,
+            DiscoveryLimits {
+                queued: 1,
+                ..DiscoveryLimits::default()
+            },
+        )
+        .unwrap();
         assert_eq!(material.wiki.len(), 1);
-        assert_eq!(material.wiki[0].ref_id().as_str(), "wiki:node:admitted-sibling");
-        assert!(!absences.iter().any(|absence| absence.contains("capacity exhausted")));
+        assert_eq!(
+            material.wiki[0].ref_id().as_str(),
+            "wiki:node:admitted-sibling"
+        );
+        assert!(!absences
+            .iter()
+            .any(|absence| absence.contains("capacity exhausted")));
         assert!(!absences.join(" ").contains("Unselected secret title"));
         assert_eq!(fs::read(marked.join("secret.json")).unwrap(), secret);
     }
@@ -3141,25 +3571,61 @@ mod discovery_physical_tests {
         let body = enumeration_wiki("wiki:node:canonical-root-floor", "Whole canonical root");
         let path = root.path().join("Control/agents/wiki/wiki.json");
         fs::write(&path, &body).unwrap();
-        let project = root.path().join("Work/native-fixture/ProjectCentral/agents/wiki");
+        let project = root
+            .path()
+            .join("Work/native-fixture/ProjectCentral/agents/wiki");
         fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("wiki.json"), enumeration_wiki("wiki:node:canonical-project-floor", "Whole project register")).unwrap();
+        fs::write(
+            project.join("wiki.json"),
+            enumeration_wiki(
+                "wiki:node:canonical-project-floor",
+                "Whole project register",
+            ),
+        )
+        .unwrap();
         let candidates = root.path().join("many-candidates");
         fs::create_dir(&candidates).unwrap();
-        for n in 0..=MAX_DISCOVERY_FILES { fs::write(candidates.join(format!("{n:04}.json")), b"{}").unwrap(); }
+        for n in 0..=MAX_DISCOVERY_FILES {
+            fs::write(candidates.join(format!("{n:04}.json")), b"{}").unwrap();
+        }
         let mut absences = Vec::new();
-        let material = discover_material(root.path(), home.path(), &mut absences, true, None).unwrap();
-        assert!(material.wiki.iter().any(|object| object.ref_id().as_str() == "wiki:node:canonical-root-floor"));
-        assert!(material.wiki.iter().any(|object| object.ref_id().as_str() == "wiki:node:canonical-project-floor"));
-        assert!(absences.iter().any(|absence| absence.contains("generic_candidate_files")
-            && absence.contains("unseen remainder is unknown")));
+        let material =
+            discover_material(root.path(), home.path(), &mut absences, true, None).unwrap();
+        assert!(material
+            .wiki
+            .iter()
+            .any(|object| object.ref_id().as_str() == "wiki:node:canonical-root-floor"));
+        assert!(material
+            .wiki
+            .iter()
+            .any(|object| object.ref_id().as_str() == "wiki:node:canonical-project-floor"));
+        assert!(absences
+            .iter()
+            .any(|absence| absence.contains("generic_candidate_files")
+                && absence.contains("unseen remainder is unknown")));
         let mut absences = Vec::new();
-        let material = discover_material_with_limits(root.path(), home.path(), &mut absences,
-            true, None, DiscoveryLimits { candidates: 0, canonical_paths: 0, ..DiscoveryLimits::default() }).unwrap();
+        let material = discover_material_with_limits(
+            root.path(),
+            home.path(),
+            &mut absences,
+            true,
+            None,
+            DiscoveryLimits {
+                candidates: 0,
+                canonical_paths: 0,
+                ..DiscoveryLimits::default()
+            },
+        )
+        .unwrap();
         assert_eq!(material.wiki.len(), 1);
-        assert_eq!(material.wiki[0].ref_id().as_str(), "wiki:node:canonical-root-floor");
-        assert!(absences.iter().any(|absence| absence.contains("canonical_register_paths")
-            && absence.contains("unseen remainder is unknown")));
+        assert_eq!(
+            material.wiki[0].ref_id().as_str(),
+            "wiki:node:canonical-root-floor"
+        );
+        assert!(absences
+            .iter()
+            .any(|absence| absence.contains("canonical_register_paths")
+                && absence.contains("unseen remainder is unknown")));
         assert_eq!(fs::read(path).unwrap(), body);
     }
 
@@ -3175,23 +3641,33 @@ mod discovery_physical_tests {
             paths.push(path);
         }
         let mut canonical = CanonicalPaths::new(DiscoveryLimits {
-            canonical_paths: 2, ..DiscoveryLimits::default()
+            canonical_paths: 2,
+            ..DiscoveryLimits::default()
         });
         canonical.push(paths[0].clone()).unwrap();
         canonical.push(paths[1].clone()).unwrap();
         let before = canonical.bytes;
-        assert_eq!(canonical.push(paths[2].clone()).unwrap_err().dimension, "canonical_register_paths");
+        assert_eq!(
+            canonical.push(paths[2].clone()).unwrap_err().dimension,
+            "canonical_register_paths"
+        );
         assert_eq!((canonical.paths.len(), canonical.bytes), (2, before));
         canonical.paths.sort();
         assert_eq!(canonical.paths, vec![paths[1].clone(), paths[0].clone()]);
         let actual = paths[2].clone();
         let mut canonical = CanonicalPaths::new(DiscoveryLimits {
-            canonical_path_bytes: actual.capacity() - 1, ..DiscoveryLimits::default()
+            canonical_path_bytes: actual.capacity() - 1,
+            ..DiscoveryLimits::default()
         });
-        assert_eq!(canonical.push(actual).unwrap_err().dimension, "canonical_path_capacity_bytes");
+        assert_eq!(
+            canonical.push(actual).unwrap_err().dimension,
+            "canonical_path_capacity_bytes"
+        );
         assert!(canonical.paths.is_empty());
         assert_eq!(canonical.bytes, 0);
-        for path in paths { assert_eq!(fs::read(path).unwrap(), b"retained canonical bytes"); }
+        for path in paths {
+            assert_eq!(fs::read(path).unwrap(), b"retained canonical bytes");
+        }
     }
 
     #[test]
@@ -3200,19 +3676,42 @@ mod discovery_physical_tests {
         let home = native_discovery_tempdir();
         let marked = root.path().join("marked");
         fs::create_dir(&marked).unwrap();
-        fs::write(marked.join(aikit_core::NO_AGENT_RETRIEVAL_MARKER), b"withheld").unwrap();
-        fs::write(marked.join("unselected-secret.json"), b"malformed okf-wiki/v1 secret-body").unwrap();
+        fs::write(
+            marked.join(aikit_core::NO_AGENT_RETRIEVAL_MARKER),
+            b"withheld",
+        )
+        .unwrap();
+        fs::write(
+            marked.join("unselected-secret.json"),
+            b"malformed okf-wiki/v1 secret-body",
+        )
+        .unwrap();
         let boundary = DiscoveryBoundary::capture(root.path(), None).unwrap();
-        assert_eq!(visited_entry_count(&boundary, &marked).unwrap_err().code(), "knowledge.discovery_withheld");
-        assert_eq!(boundary.read(&marked.join("unselected-secret.json"), MAX_DISCOVERY_FILE_BYTES)
-            .unwrap_err().code(), "knowledge.discovery_withheld");
+        assert_eq!(
+            visited_entry_count(&boundary, &marked).unwrap_err().code(),
+            "knowledge.discovery_withheld"
+        );
+        assert_eq!(
+            boundary
+                .read(
+                    &marked.join("unselected-secret.json"),
+                    MAX_DISCOVERY_FILE_BYTES
+                )
+                .unwrap_err()
+                .code(),
+            "knowledge.discovery_withheld"
+        );
         let mut absences = Vec::new();
-        let material = discover_material(root.path(), home.path(), &mut absences, true, None).unwrap();
+        let material =
+            discover_material(root.path(), home.path(), &mut absences, true, None).unwrap();
         assert!(material.wiki.is_empty() && material.sources.is_empty());
         let diagnostic = absences.join("\n");
         assert!(diagnostic.contains("knowledge.discovery_withheld"));
         assert!(!diagnostic.contains("unselected-secret") && !diagnostic.contains("secret-body"));
-        assert!(!diagnostic.contains("invalid:"), "withheld material was never parsed as Wiki");
+        assert!(
+            !diagnostic.contains("invalid:"),
+            "withheld material was never parsed as Wiki"
+        );
     }
 
     #[test]
@@ -3224,12 +3723,27 @@ mod discovery_physical_tests {
         let path = project.join("body.json");
         fs::write(&path, b"actual-body").unwrap();
         let boundary = DiscoveryBoundary::capture(&project, Some(world.path())).unwrap();
-        assert_eq!(boundary.read(&path, MAX_DISCOVERY_FILE_BYTES).unwrap(), "actual-body");
-        fs::write(work.join(aikit_core::NO_AGENT_RETRIEVAL_MARKER), b"withheld").unwrap();
-        assert_eq!(boundary.read(&path, MAX_DISCOVERY_FILE_BYTES).unwrap_err().code(),
-            "knowledge.discovery_withheld");
+        assert_eq!(
+            boundary.read(&path, MAX_DISCOVERY_FILE_BYTES).unwrap(),
+            "actual-body"
+        );
+        fs::write(
+            work.join(aikit_core::NO_AGENT_RETRIEVAL_MARKER),
+            b"withheld",
+        )
+        .unwrap();
+        assert_eq!(
+            boundary
+                .read(&path, MAX_DISCOVERY_FILE_BYTES)
+                .unwrap_err()
+                .code(),
+            "knowledge.discovery_withheld"
+        );
         let fresh = DiscoveryBoundary::capture(&project, Some(world.path())).unwrap();
-        assert_eq!(visited_entry_count(&fresh, &project).unwrap_err().code(), "knowledge.discovery_withheld");
+        assert_eq!(
+            visited_entry_count(&fresh, &project).unwrap_err().code(),
+            "knowledge.discovery_withheld"
+        );
         assert_eq!(fs::read(&path).unwrap(), b"actual-body");
     }
 
@@ -3242,17 +3756,31 @@ mod discovery_physical_tests {
         fs::write(&path, b"external-body").unwrap();
         let external = DiscoveryBoundary::capture(selected.path(), Some(world.path())).unwrap();
         assert!(external.world.is_none());
-        assert_eq!(external.read(&path, MAX_DISCOVERY_FILE_BYTES).unwrap(), "external-body");
+        assert_eq!(
+            external.read(&path, MAX_DISCOVERY_FILE_BYTES).unwrap(),
+            "external-body"
+        );
         let missing = world.path().join("absent-native-root");
         let error = match DiscoveryBoundary::capture(selected.path(), Some(&missing)) {
             Ok(_) => panic!("unreadable supplied native root cannot become standalone"),
             Err(error) => error,
         };
-        let cause = error.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+        let cause = error
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
         assert_eq!(cause.kind(), std::io::ErrorKind::NotFound);
         assert!(cause.raw_os_error().is_some());
         let mut absences = Vec::new();
-        let material = discover_material(selected.path(), world.path(), &mut absences, false, Some(&missing)).unwrap();
+        let material = discover_material(
+            selected.path(),
+            world.path(),
+            &mut absences,
+            false,
+            Some(&missing),
+        )
+        .unwrap();
         assert!(material.sources.is_empty());
         assert!(absences.iter().any(|absence| absence.contains("NotFound")));
     }
@@ -3267,14 +3795,26 @@ mod discovery_physical_tests {
         symlink(&room, root.path().join("room-alias")).unwrap();
         symlink(root.path(), room.join("cycle")).unwrap();
         let boundary = DiscoveryBoundary::capture(root.path(), None).unwrap();
-        assert_eq!(boundary.read(&root.path().join("room-alias/plain.json"), MAX_DISCOVERY_FILE_BYTES)
-            .unwrap(), "{}");
-        assert_eq!(visited_entry_count(&boundary, &root.path().join("room-alias")).unwrap(), 2);
+        assert_eq!(
+            boundary
+                .read(
+                    &root.path().join("room-alias/plain.json"),
+                    MAX_DISCOVERY_FILE_BYTES
+                )
+                .unwrap(),
+            "{}"
+        );
+        assert_eq!(
+            visited_entry_count(&boundary, &root.path().join("room-alias")).unwrap(),
+            2
+        );
         let started = std::time::Instant::now();
         let mut absences = Vec::new();
         discover_material(root.path(), home.path(), &mut absences, false, None).unwrap();
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
-        assert!(!absences.iter().any(|absence| absence.contains("stopped after")));
+        assert!(!absences
+            .iter()
+            .any(|absence| absence.contains("stopped after")));
     }
 
     #[test]
@@ -3286,10 +3826,19 @@ mod discovery_physical_tests {
         symlink(&foreign, root.path().join("final.json")).unwrap();
         symlink(external.path(), root.path().join("external")).unwrap();
         let boundary = DiscoveryBoundary::capture(root.path(), None).unwrap();
-        assert_eq!(boundary.read(&root.path().join("final.json"), MAX_DISCOVERY_FILE_BYTES)
-            .unwrap_err().code(), "knowledge.discovery_withheld");
-        assert_eq!(visited_entry_count(&boundary, &root.path().join("external")).unwrap_err().code(),
-            "knowledge.discovery_withheld");
+        assert_eq!(
+            boundary
+                .read(&root.path().join("final.json"), MAX_DISCOVERY_FILE_BYTES)
+                .unwrap_err()
+                .code(),
+            "knowledge.discovery_withheld"
+        );
+        assert_eq!(
+            visited_entry_count(&boundary, &root.path().join("external"))
+                .unwrap_err()
+                .code(),
+            "knowledge.discovery_withheld"
+        );
         assert_eq!(fs::read(&foreign).unwrap(), b"unselected-foreign");
     }
 
@@ -3301,13 +3850,20 @@ mod discovery_physical_tests {
         fs::write(&ordinary, b"retained-original").unwrap();
         fs::hard_link(&ordinary, &alias).unwrap();
         let fifo = root.path().join("pipe.json");
-        let created = SystemRunner::new().with_timeout(std::time::Duration::from_secs(2))
-            .run(&["mkfifo".into(), fifo.display().to_string()]).unwrap();
+        let created = SystemRunner::new()
+            .with_timeout(std::time::Duration::from_secs(2))
+            .run(&["mkfifo".into(), fifo.display().to_string()])
+            .unwrap();
         assert_eq!(created.status, 0);
         let boundary = DiscoveryBoundary::capture(root.path(), None).unwrap();
         let started = std::time::Instant::now();
-        assert_eq!(boundary.read(&fifo, MAX_DISCOVERY_FILE_BYTES).unwrap_err().code(),
-            "knowledge.discovery_withheld");
+        assert_eq!(
+            boundary
+                .read(&fifo, MAX_DISCOVERY_FILE_BYTES)
+                .unwrap_err()
+                .code(),
+            "knowledge.discovery_withheld"
+        );
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
         assert!(boundary.read(&ordinary, MAX_DISCOVERY_FILE_BYTES).is_err());
         assert_eq!(fs::read(&ordinary).unwrap(), b"retained-original");
@@ -3321,18 +3877,36 @@ mod discovery_physical_tests {
         let bytes = vec![b'x'; MAX_DISCOVERY_FILE_BYTES as usize + 1];
         fs::write(&path, &bytes).unwrap();
         let boundary = DiscoveryBoundary::capture(root.path(), None).unwrap();
-        assert_eq!(boundary.read(&path, MAX_DISCOVERY_FILE_BYTES).unwrap_err().code(),
-            "knowledge.wiki_publication_budget");
-        assert_eq!(boundary.read(&path, 16 * 1024 * 1024).unwrap().as_bytes(), bytes.as_slice());
+        assert_eq!(
+            boundary
+                .read(&path, MAX_DISCOVERY_FILE_BYTES)
+                .unwrap_err()
+                .code(),
+            "knowledge.wiki_publication_budget"
+        );
+        assert_eq!(
+            boundary.read(&path, 16 * 1024 * 1024).unwrap().as_bytes(),
+            bytes.as_slice()
+        );
         assert_eq!(fs::read(&path).unwrap(), bytes);
         // This is mechanical capacity, not a fabricated canonical Wiki owner.
     }
 
     #[test]
     fn native_owner_constructor_keeps_one_finite_deadline_and_transport_capacity() {
-        assert_eq!(native_source_runner().timeout(), Some(std::time::Duration::from_secs(60)));
-        assert_eq!(native_source_runner().output_limit_bytes(), 128 * 1024 * 1024);
-        assert_eq!(SystemRunner::new().timeout(), None, "generic live-leader default is unchanged");
+        assert_eq!(
+            native_source_runner().timeout(),
+            Some(std::time::Duration::from_secs(60))
+        );
+        assert_eq!(
+            native_source_runner().output_limit_bytes(),
+            128 * 1024 * 1024
+        );
+        assert_eq!(
+            SystemRunner::new().timeout(),
+            None,
+            "generic live-leader default is unchanged"
+        );
     }
 
     #[test]
@@ -3341,13 +3915,31 @@ mod discovery_physical_tests {
         // test allowance; this does not fabricate a native owner's response.
         let runner = native_source_runner().with_timeout(std::time::Duration::from_millis(150));
         let started = std::time::Instant::now();
-        let error = runner.run(&["/bin/sh".into(), "-c".into(),
-            "printf 'actual-mechanical-native-command-entered'; exec /bin/sleep 30".into()]).unwrap_err();
+        let error = runner
+            .run(&[
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'actual-mechanical-native-command-entered'; exec /bin/sleep 30".into(),
+            ])
+            .unwrap_err();
         assert_eq!(error.code(), "mux.command_timeout");
-        assert_eq!(error.details().get("execution_started").map(String::as_str), Some("true"));
-        assert_eq!(error.details().get("effects").map(String::as_str), Some("unknown"));
-        assert_eq!(error.details().get("automatic_retry").map(String::as_str), Some("false"));
-        assert!(error.details().get("captured_stdout").unwrap().contains("actual-mechanical-native-command-entered"));
+        assert_eq!(
+            error.details().get("execution_started").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            error.details().get("effects").map(String::as_str),
+            Some("unknown")
+        );
+        assert_eq!(
+            error.details().get("automatic_retry").map(String::as_str),
+            Some("false")
+        );
+        assert!(error
+            .details()
+            .get("captured_stdout")
+            .unwrap()
+            .contains("actual-mechanical-native-command-entered"));
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
         // The deadline is a real clock observation, not an OS syscall failure;
         // no invented TimedOut errno/source is asserted. Actual IO paths retain
@@ -3359,7 +3951,9 @@ mod discovery_physical_tests {
         for (up, ancestor) in cwd.ancestors().enumerate() {
             if let Ok(member) = path.strip_prefix(ancestor) {
                 let mut relative = PathBuf::new();
-                for _ in 0..up { relative.push(".."); }
+                for _ in 0..up {
+                    relative.push("..");
+                }
                 relative.push(member);
                 return relative;
             }
@@ -3384,26 +3978,51 @@ mod discovery_physical_tests {
         symlink(&world, world.join("Work/withheld/world-alias")).unwrap();
         let world_relative = invocation_relative_route(&world);
         let marker = world.join("Work/withheld/.no-agent-retrieval");
-        for member in ["Work/withheld/alias", "Work/withheld/world-alias/Work/allowed/Project"] {
+        for member in [
+            "Work/withheld/alias",
+            "Work/withheld/world-alias/Work/allowed/Project",
+        ] {
             let selected = world.join(member);
             let selected_relative = invocation_relative_route(&selected);
-            let routes = [(&selected, &world), (&selected_relative, &world),
-                (&selected, &world_relative), (&selected_relative, &world_relative)];
+            let routes = [
+                (&selected, &world),
+                (&selected_relative, &world),
+                (&selected, &world_relative),
+                (&selected_relative, &world_relative),
+            ];
             for (selected, world) in routes {
                 let boundary = DiscoveryBoundary::capture(selected, Some(world)).unwrap();
                 let path = boundary.selected.requested.join("independent-wiki.json");
-                assert_eq!(boundary.read(&path, MAX_DISCOVERY_FILE_BYTES).unwrap().as_bytes(), body);
+                assert_eq!(
+                    boundary
+                        .read(&path, MAX_DISCOVERY_FILE_BYTES)
+                        .unwrap()
+                        .as_bytes(),
+                    body
+                );
                 let mut absences = Vec::new();
-                let material = discover_material(selected, home.path(), &mut absences, true, Some(world)).unwrap();
-                assert_eq!(material.wiki.len(), 1, "{selected:?} {world:?}: {absences:?}");
+                let material =
+                    discover_material(selected, home.path(), &mut absences, true, Some(world))
+                        .unwrap();
+                assert_eq!(
+                    material.wiki.len(),
+                    1,
+                    "{selected:?} {world:?}: {absences:?}"
+                );
             }
             fs::write(&marker, b"actual owner withheld original World ancestry").unwrap();
             for (selected, world) in routes {
                 let mut absences = Vec::new();
-                let material = discover_material(selected, home.path(), &mut absences, true, Some(world)).unwrap();
+                let material =
+                    discover_material(selected, home.path(), &mut absences, true, Some(world))
+                        .unwrap();
                 assert!(material.wiki.is_empty() && material.sources.is_empty());
-                assert!(absences.iter().any(|absence| absence.contains("knowledge.discovery_withheld")),
-                    "{selected:?} {world:?}: {absences:?}");
+                assert!(
+                    absences
+                        .iter()
+                        .any(|absence| absence.contains("knowledge.discovery_withheld")),
+                    "{selected:?} {world:?}: {absences:?}"
+                );
                 assert_eq!(fs::read(&source).unwrap(), body);
             }
             fs::remove_file(&marker).unwrap();
@@ -3416,16 +4035,28 @@ mod discovery_physical_tests {
         let fixture = native_discovery_tempdir();
         let first = fixture.path().join("first");
         let second = fixture.path().join("second");
-        fs::create_dir(&first).unwrap(); fs::create_dir(&second).unwrap();
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
         fs::write(first.join("body.json"), b"same-body").unwrap();
         fs::write(second.join("body.json"), b"same-body").unwrap();
         let selected = fixture.path().join("selected");
         symlink(&first, &selected).unwrap();
         let boundary = DiscoveryBoundary::capture(&selected, None).unwrap();
-        assert_eq!(boundary.read(&selected.join("body.json"), MAX_DISCOVERY_FILE_BYTES).unwrap(), "same-body");
-        fs::remove_file(&selected).unwrap(); symlink(&second, &selected).unwrap();
-        assert_eq!(boundary.read(&selected.join("body.json"), MAX_DISCOVERY_FILE_BYTES).unwrap_err().code(),
-            "knowledge.discovery_withheld");
+        assert_eq!(
+            boundary
+                .read(&selected.join("body.json"), MAX_DISCOVERY_FILE_BYTES)
+                .unwrap(),
+            "same-body"
+        );
+        fs::remove_file(&selected).unwrap();
+        symlink(&second, &selected).unwrap();
+        assert_eq!(
+            boundary
+                .read(&selected.join("body.json"), MAX_DISCOVERY_FILE_BYTES)
+                .unwrap_err()
+                .code(),
+            "knowledge.discovery_withheld"
+        );
         assert_eq!(fs::read(first.join("body.json")).unwrap(), b"same-body");
         assert_eq!(fs::read(second.join("body.json")).unwrap(), b"same-body");
     }

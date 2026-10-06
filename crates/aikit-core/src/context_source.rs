@@ -574,7 +574,6 @@ fn absent(kind: AbsenceKind, reason: &str) -> ContextSourceReadOutcome {
     ContextSourceReadOutcome::Absent(StructuredAbsence::new(kind, reason))
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RetrievalTarget {
@@ -634,17 +633,39 @@ mod payload_boundary_tests {
 
     #[test]
     fn specialised_payloads_share_the_existing_context_source_truth_table() {
-        for visibility in [AgentVisibility::Payload, AgentVisibility::MetadataOnly, AgentVisibility::Hidden] {
+        for visibility in [
+            AgentVisibility::Payload,
+            AgentVisibility::MetadataOnly,
+            AgentVisibility::Hidden,
+        ] {
             for egress in [ExternalEgress::Allowed, ExternalEgress::Denied] {
-                let privacy = ContextSourcePrivacy { agent_visibility: visibility, external_egress: egress };
+                let privacy = ContextSourcePrivacy {
+                    agent_visibility: visibility,
+                    external_egress: egress,
+                };
                 assert!(privacy.payload_boundary(RetrievalTarget::Human).is_none());
-                assert_eq!(privacy.payload_boundary(RetrievalTarget::LocalAgent).is_none(), visibility == AgentVisibility::Payload);
-                assert_eq!(privacy.payload_boundary(RetrievalTarget::ExternalProvider).is_none(),
-                    visibility == AgentVisibility::Payload && egress == ExternalEgress::Allowed);
+                assert_eq!(
+                    privacy
+                        .payload_boundary(RetrievalTarget::LocalAgent)
+                        .is_none(),
+                    visibility == AgentVisibility::Payload
+                );
+                assert_eq!(
+                    privacy
+                        .payload_boundary(RetrievalTarget::ExternalProvider)
+                        .is_none(),
+                    visibility == AgentVisibility::Payload && egress == ExternalEgress::Allowed
+                );
                 if let Some(bound) = privacy.payload_boundary(RetrievalTarget::ExternalProvider) {
                     assert_eq!(bound.kind, AbsenceKind::Bound);
-                    assert_eq!(bound.reason, if visibility != AgentVisibility::Payload { "payload is not agent-visible" }
-                        else { "payload is not eligible for external-provider egress" });
+                    assert_eq!(
+                        bound.reason,
+                        if visibility != AgentVisibility::Payload {
+                            "payload is not agent-visible"
+                        } else {
+                            "payload is not eligible for external-provider egress"
+                        }
+                    );
                 }
             }
         }

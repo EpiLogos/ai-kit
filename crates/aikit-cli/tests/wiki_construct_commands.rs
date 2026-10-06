@@ -50,7 +50,7 @@ fn fixture() -> (TempDir, PathBuf) {
     fs::create_dir_all(&temporary).unwrap();
     let temp = tempfile::Builder::new()
         .prefix("native-wiki-construction-")
-        .tempdir_in(&temporary)
+        .tempdir()
         .unwrap();
     let path = temp.path().join("wiki.json");
     fs::write(&path, initial().to_string()).unwrap();

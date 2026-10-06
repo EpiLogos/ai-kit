@@ -4,8 +4,8 @@
 //! unavailable World relations withhold owner-dependent material.
 
 use aikit_adapters::central_world_sources::{
-    bind_project_context, project_world_ref, read_project_binding, read_world_binding, EffectiveSource, WorldBinding,
-    BINDING_EXTENSION,
+    bind_project_context, project_world_ref, read_project_binding, read_world_binding,
+    EffectiveSource, WorldBinding, BINDING_EXTENSION,
 };
 use aikit_adapters::runner::{CommandRunner, Output, SystemRunner};
 use aikit_core::{
@@ -14,10 +14,10 @@ use aikit_core::{
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
+    fs,
     path::{Path, PathBuf},
     sync::Mutex,
     time::Duration,
-    fs,
 };
 
 fn resource_ref(value: &str) -> ResourceRef {
@@ -204,16 +204,29 @@ struct NativeWorld {
 
 impl NativeWorld {
     fn new() -> Self {
-        let executable = std::env::var_os("CENTRAL_CTRL_BIN").map(PathBuf::from)
-            .expect("Real native World qualification requires CENTRAL_CTRL_BIN for the composed owner cut");
-        assert!(executable.is_absolute(), "Native owner executable must be an explicit absolute path");
+        let executable = std::env::var_os("CENTRAL_CTRL_BIN")
+            .map(PathBuf::from)
+            .expect(
+            "Real native World qualification requires CENTRAL_CTRL_BIN for the composed owner cut",
+        );
+        assert!(
+            executable.is_absolute(),
+            "Native owner executable must be an explicit absolute path"
+        );
         let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
         fs::create_dir_all(&scratch).unwrap();
-        let owned = tempfile::Builder::new().prefix("aikit-native-world-").tempdir_in(&scratch).unwrap();
+        let owned = tempfile::Builder::new()
+            .prefix("aikit-native-world-")
+            .tempdir()
+            .unwrap();
         let root = owned.path().join("Central");
         fs::create_dir(&root).unwrap();
-        let world = Self { owned, root: fs::canonicalize(root).unwrap(), executable,
-            runner: SystemRunner::new().with_env_removed("CENTRAL_NATIVE_TOKEN") };
+        let world = Self {
+            owned,
+            root: fs::canonicalize(root).unwrap(),
+            executable,
+            runner: SystemRunner::new().with_env_removed("CENTRAL_NATIVE_TOKEN"),
+        };
         world.success("central.init", json!({}));
         world.save("root", None, "control:root", None, json!([
             {"ref":"central:source:control:root:identity", "revision":"identity-v1",
@@ -225,14 +238,30 @@ impl NativeWorld {
     }
 
     fn invoke(&self, action: &str, input: Value) -> Value {
-        let argv = vec![self.executable.to_str().unwrap().to_owned(), "--json".into(),
-            "--root".into(), self.root.to_str().unwrap().to_owned(), "action".into(),
-            "run".into(), action.into(), input.to_string()];
-        let output = self.runner.run_with_limits(&argv, Duration::from_secs(10), 1024 * 1024, true)
-            .unwrap_or_else(|error| panic!("Actual native {action} transport: {}: {error}", error.code()));
+        let argv = vec![
+            self.executable.to_str().unwrap().to_owned(),
+            "--json".into(),
+            "--root".into(),
+            self.root.to_str().unwrap().to_owned(),
+            "action".into(),
+            "run".into(),
+            action.into(),
+            input.to_string(),
+        ];
+        let output = self
+            .runner
+            .run_with_limits(&argv, Duration::from_secs(10), 1024 * 1024, true)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "Actual native {action} transport: {}: {error}",
+                    error.code()
+                )
+            });
         serde_json::from_str(&output.stdout).unwrap_or_else(|error| {
-            panic!("Actual native {action}: {error}; status={} stdout={} stderr={}",
-                output.status, output.stdout, output.stderr)
+            panic!(
+                "Actual native {action}: {error}; status={} stdout={} stderr={}",
+                output.status, output.stdout, output.stderr
+            )
         })
     }
 
@@ -244,25 +273,43 @@ impl NativeWorld {
 
     fn project(&self, member: &str, id: &str) -> String {
         fs::create_dir(self.root.join("Work").join(member)).unwrap();
-        self.success("projectcentral.init", json!({"project":member,"project_id":id}));
+        self.success(
+            "projectcentral.init",
+            json!({"project":member,"project_id":id}),
+        );
         let here = self.success("central.world.here", json!({"project":member}));
         assert_eq!(here["schema"], "central.world-here/v1", "{here}");
         assert_eq!(here["project_world"]["state"], "present", "{here}");
         here["project_world"]["ref"].as_str().unwrap().to_owned()
     }
 
-    fn save(&self, scope: &str, project: Option<&str>, reference: &str, parent: Option<&str>,
-        sources: Value, excluded: Value) {
+    fn save(
+        &self,
+        scope: &str,
+        project: Option<&str>,
+        reference: &str,
+        parent: Option<&str>,
+        sources: Value,
+        excluded: Value,
+    ) {
         let mut input = json!({"scope":scope, "record":{
             "schema":"central.world-relations/v1","ref":reference,"revision":"world-v1",
             "parent":parent,"sources":sources,"excluded_sources":excluded}});
-        if let Some(project) = project { input["project"] = json!(project); }
+        if let Some(project) = project {
+            input["project"] = json!(project);
+        }
         self.success("central.world-relations.save", input);
     }
 
     fn binding(&self, member: &str) -> (Option<WorldBinding>, Vec<String>) {
         let mut absences = Vec::new();
-        let result = read_project_binding(&self.runner, &self.executable, &self.root, member, &mut absences);
+        let result = read_project_binding(
+            &self.runner,
+            &self.executable,
+            &self.root,
+            member,
+            &mut absences,
+        );
         (result, absences)
     }
 }
@@ -279,20 +326,35 @@ fn tree_basis(root: &Path) -> BTreeMap<PathBuf, SourceBasis> {
         for item in fs::read_dir(path).unwrap() {
             let path = item.unwrap().path();
             let metadata = fs::symlink_metadata(&path).unwrap();
-            assert!(!metadata.is_symlink(), "Unexpected fixture alias {}", path.display());
-            if metadata.is_dir() { walk(root, &path, out); }
-            else if metadata.is_file() {
+            assert!(
+                !metadata.is_symlink(),
+                "Unexpected fixture alias {}",
+                path.display()
+            );
+            if metadata.is_dir() {
+                walk(root, &path, out);
+            } else if metadata.is_file() {
                 #[cfg(unix)]
                 use std::os::unix::fs::MetadataExt;
-                out.insert(path.strip_prefix(root).unwrap().to_path_buf(), SourceBasis {
-                    bytes: fs::read(&path).unwrap(),
-                    #[cfg(unix)]
-                    physical: (metadata.dev(), metadata.ino(), metadata.mtime(), metadata.mtime_nsec()),
-                });
+                out.insert(
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    SourceBasis {
+                        bytes: fs::read(&path).unwrap(),
+                        #[cfg(unix)]
+                        physical: (
+                            metadata.dev(),
+                            metadata.ino(),
+                            metadata.mtime(),
+                            metadata.mtime_nsec(),
+                        ),
+                    },
+                );
             }
         }
     }
-    let mut basis = BTreeMap::new(); walk(root, root, &mut basis); basis
+    let mut basis = BTreeMap::new();
+    walk(root, root, &mut basis);
+    basis
 }
 
 // This is a forwarding observer of real owner execution, not a native answer.
@@ -306,20 +368,35 @@ struct ObservedNative {
 
 impl ObservedNative {
     fn new(after_effective: Option<NativeCheckpoint>) -> Self {
-        Self { runner: SystemRunner::new().with_env_removed("CENTRAL_NATIVE_TOKEN"),
-            seen: Mutex::new(Vec::new()), after_effective: Mutex::new(after_effective) }
+        Self {
+            runner: SystemRunner::new().with_env_removed("CENTRAL_NATIVE_TOKEN"),
+            seen: Mutex::new(Vec::new()),
+            after_effective: Mutex::new(after_effective),
+        }
     }
 }
 
 impl CommandRunner for ObservedNative {
-    fn run(&self, argv: &[String]) -> aikit_core::Result<Output> { self.runner.run(argv) }
-    fn run_with_limits(&self, argv: &[String], timeout: Duration, bytes: usize, strict: bool)
-        -> aikit_core::Result<Output> {
+    fn run(&self, argv: &[String]) -> aikit_core::Result<Output> {
+        self.runner.run(argv)
+    }
+    fn run_with_limits(
+        &self,
+        argv: &[String],
+        timeout: Duration,
+        bytes: usize,
+        strict: bool,
+    ) -> aikit_core::Result<Output> {
         let action = argv.get(6).expect("Actual native Action argv").clone();
-        self.seen.lock().unwrap().push((action.clone(), timeout, bytes, strict));
+        self.seen
+            .lock()
+            .unwrap()
+            .push((action.clone(), timeout, bytes, strict));
         let output = self.runner.run_with_limits(argv, timeout, bytes, strict)?;
         if action == "central.world.effective-sources" {
-            if let Some(checkpoint) = self.after_effective.lock().unwrap().take() { checkpoint(); }
+            if let Some(checkpoint) = self.after_effective.lock().unwrap().take() {
+                checkpoint();
+            }
         }
         Ok(output)
     }
@@ -329,7 +406,11 @@ impl CommandRunner for ObservedNative {
 #[ignore = "requires real composed CENTRAL_CTRL_BIN; run explicitly in native owner qualification"]
 fn native_bare_prefixed_and_slash_ids_use_owner_ref_without_remint() {
     let world = NativeWorld::new();
-    for (member, id) in [("Bare", "alpha"), ("Prefixed", "project:alpha"), ("Slash", "domain/alpha")] {
+    for (member, id) in [
+        ("Bare", "alpha"),
+        ("Prefixed", "project:alpha"),
+        ("Slash", "domain/alpha"),
+    ] {
         let native = world.project(member, id);
         assert_eq!(native, format!("project:{id}"));
         let before = tree_basis(&world.root);
@@ -338,8 +419,14 @@ fn native_bare_prefixed_and_slash_ids_use_owner_ref_without_remint() {
         let binding = binding.unwrap_or_else(|| panic!("{disclosures:?}"));
         assert_eq!(binding.world_ref, "control:root");
         assert!(binding.inherited_root_lineage);
-        assert!(disclosures.iter().any(|line| line.contains("central.world_declaration_absent")));
-        assert_eq!(tree_basis(&world.root), before, "Read must not declare/adopt a World");
+        assert!(disclosures
+            .iter()
+            .any(|line| line.contains("central.world_declaration_absent")));
+        assert_eq!(
+            tree_basis(&world.root),
+            before,
+            "Read must not declare/adopt a World"
+        );
     }
 }
 
@@ -352,8 +439,10 @@ fn native_source_override_exclusion_and_every_provenance_hop_reach_context() {
         {"ref":"central:source:control:root:identity","revision":"identity-v2",
             "authority":"controlled-child-fixture-not-personal-adoption","treatment":"retain-native"}
     ]), json!(["central:source:control:root:sealed"]));
-    let expected = world.success("central.world.effective-sources",
-        json!({"scope":"project","project":"Alpha","world_ref":reference}));
+    let expected = world.success(
+        "central.world.effective-sources",
+        json!({"scope":"project","project":"Alpha","world_ref":reference}),
+    );
     let before = tree_basis(&world.root);
     let (binding, absences) = world.binding("Alpha");
     assert!(absences.is_empty(), "{absences:?}");
@@ -361,23 +450,49 @@ fn native_source_override_exclusion_and_every_provenance_hop_reach_context() {
     assert_eq!(binding.world_ref, reference);
     assert!(!binding.inherited_root_lineage);
     for entry in expected["sources"].as_array().unwrap() {
-        let actual = binding.sources.iter().find(|source| source.source_ref == entry["ref"].as_str().unwrap()).unwrap();
+        let actual = binding
+            .sources
+            .iter()
+            .find(|source| source.source_ref == entry["ref"].as_str().unwrap())
+            .unwrap();
         assert_eq!(actual.native_relation.as_ref(), Some(entry));
         assert!(!entry["provenance"].as_array().unwrap().is_empty());
     }
-    let identity = binding.sources.iter().find(|source| source.source_ref.ends_with(":identity")).unwrap();
+    let identity = binding
+        .sources
+        .iter()
+        .find(|source| source.source_ref.ends_with(":identity"))
+        .unwrap();
     assert_eq!(identity.effective_revision, "identity-v2");
-    assert_eq!(identity.native_relation.as_ref().unwrap()["provenance"].as_array().unwrap().len(), 2);
-    let mut objects = vec![WikiObject::Node(materialised(pasu_node("wiki:node:identity",
-        "central:pasu:nara:fixture", &["central:source:control:root:identity"]))),
-        WikiObject::Node(materialised(pasu_node("wiki:node:sealed", "central:pasu:nara:sealed",
-            &["central:source:control:root:sealed"])) )];
+    assert_eq!(
+        identity.native_relation.as_ref().unwrap()["provenance"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let mut objects = vec![
+        WikiObject::Node(materialised(pasu_node(
+            "wiki:node:identity",
+            "central:pasu:nara:fixture",
+            &["central:source:control:root:identity"],
+        ))),
+        WikiObject::Node(materialised(pasu_node(
+            "wiki:node:sealed",
+            "central:pasu:nara:sealed",
+            &["central:source:control:root:sealed"],
+        ))),
+    ];
     let mut output_absences = Vec::new();
     bind_project_context(&mut objects, &binding, &mut output_absences);
     assert_eq!(objects.len(), 1);
-    let WikiObject::Node(node) = &objects[0] else { panic!("Expected actual bound entity"); };
-    assert_eq!(node.extensions[BINDING_EXTENSION]["bindings"][0]["native_relation"],
-        identity.native_relation.as_ref().unwrap().clone());
+    let WikiObject::Node(node) = &objects[0] else {
+        panic!("Expected actual bound entity");
+    };
+    assert_eq!(
+        node.extensions[BINDING_EXTENSION]["bindings"][0]["native_relation"],
+        identity.native_relation.as_ref().unwrap().clone()
+    );
     assert_eq!(node.ref_id.as_str(), "wiki:node:identity");
     assert_eq!(tree_basis(&world.root), before);
 }
@@ -387,17 +502,43 @@ fn native_source_override_exclusion_and_every_provenance_hop_reach_context() {
 fn native_present_target_with_missing_ancestor_never_uses_root_fallback() {
     let world = NativeWorld::new();
     let reference = world.project("Broken", "broken");
-    world.save("project", Some("Broken"), &reference, Some("project:missing-parent"),
-        json!([]), json!(["central:source:control:root:identity"]));
+    world.save(
+        "project",
+        Some("Broken"),
+        &reference,
+        Some("project:missing-parent"),
+        json!([]),
+        json!(["central:source:control:root:identity"]),
+    );
     let before = tree_basis(&world.root);
     let observer = ObservedNative::new(None);
     let mut absences = Vec::new();
-    assert!(read_project_binding(&observer, &world.executable, &world.root, "Broken", &mut absences).is_none());
+    assert!(read_project_binding(
+        &observer,
+        &world.executable,
+        &world.root,
+        "Broken",
+        &mut absences
+    )
+    .is_none());
     let diagnostic = absences.join("\n");
-    assert!(diagnostic.contains("central.world_ancestry_unavailable"), "{diagnostic}");
-    assert!(diagnostic.contains("requested_declaration_present"), "{diagnostic}");
-    assert!(diagnostic.contains("project:missing-parent"), "{diagnostic}");
-    assert_eq!(observer.seen.lock().unwrap().len(), 2, "here + target only; no root fallback");
+    assert!(
+        diagnostic.contains("central.world_ancestry_unavailable"),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("requested_declaration_present"),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("project:missing-parent"),
+        "{diagnostic}"
+    );
+    assert_eq!(
+        observer.seen.lock().unwrap().len(),
+        2,
+        "here + target only; no root fallback"
+    );
     assert_eq!(tree_basis(&world.root), before);
 }
 
@@ -411,10 +552,16 @@ fn native_manifest_less_existing_member_differs_from_nonexistent_member() {
     let binding = binding.unwrap_or_else(|| panic!("{absences:?}"));
     assert_eq!(binding.world_ref, "control:root");
     assert!(binding.inherited_root_lineage);
-    assert!(project_world_ref(&world.root, "Bare").is_err(), "No fabricated Project World identity");
+    assert!(
+        project_world_ref(&world.root, "Bare").is_err(),
+        "No fabricated Project World identity"
+    );
     let (missing, absences) = world.binding("Missing");
     assert!(missing.is_none());
-    assert!(absences.join("\n").contains("work-member-absent"), "{absences:?}");
+    assert!(
+        absences.join("\n").contains("work-member-absent"),
+        "{absences:?}"
+    );
     assert_eq!(tree_basis(&world.root), before);
 }
 
@@ -425,7 +572,10 @@ fn native_malformed_wrong_form_and_missing_owner_do_not_become_declaration_absen
     world.project("Alpha", "alpha");
     let manifest = world.root.join("Work/Alpha/ProjectCentral/project.json");
     let original = fs::read(&manifest).unwrap();
-    for invalid in [b"{broken".as_slice(), br#"{"schema":"wrong","project_id":"alpha"}"#.as_slice()] {
+    for invalid in [
+        b"{broken".as_slice(),
+        br#"{"schema":"wrong","project_id":"alpha"}"#.as_slice(),
+    ] {
         fs::write(&manifest, invalid).unwrap();
         let before = tree_basis(&world.root);
         let (binding, absences) = world.binding("Alpha");
@@ -438,12 +588,25 @@ fn native_malformed_wrong_form_and_missing_owner_do_not_become_declaration_absen
     fs::rename(&manifest, &retained).unwrap();
     fs::create_dir(&manifest).unwrap();
     let (binding, absences) = world.binding("Alpha");
-    assert!(binding.is_none()); assert!(absences.join("\n").contains("io_error"), "{absences:?}");
-    fs::remove_dir(&manifest).unwrap(); fs::rename(&retained, &manifest).unwrap();
-    let error = read_world_binding(&world.runner, &world.owned.path().join("missing-ctrl"),
-        &world.root, "root", None, "control:root").unwrap_err();
+    assert!(binding.is_none());
+    assert!(absences.join("\n").contains("io_error"), "{absences:?}");
+    fs::remove_dir(&manifest).unwrap();
+    fs::rename(&retained, &manifest).unwrap();
+    let error = read_world_binding(
+        &world.runner,
+        &world.owned.path().join("missing-ctrl"),
+        &world.root,
+        "root",
+        None,
+        "control:root",
+    )
+    .unwrap_err();
     use std::error::Error;
-    let cause = error.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
+    let cause = error
+        .source()
+        .unwrap()
+        .downcast_ref::<std::io::Error>()
+        .unwrap();
     assert_eq!(cause.kind(), std::io::ErrorKind::NotFound);
     assert_ne!(error.code(), "central.world_declaration_absent");
     assert_eq!(fs::read(&manifest).unwrap(), original);
@@ -454,53 +617,105 @@ fn native_malformed_wrong_form_and_missing_owner_do_not_become_declaration_absen
 #[ignore = "requires real composed CENTRAL_CTRL_BIN and nonroot OS user; run explicitly"]
 fn native_manifest_eacces_retains_actual_owner_cause_and_never_assumes_root() {
     use std::os::unix::fs::PermissionsExt;
-    assert!(!rustix::process::geteuid().is_root(), "Actual EACCES qualification requires a nonroot OS user");
-    let world = NativeWorld::new(); world.project("Locked", "locked");
+    assert!(
+        !rustix::process::geteuid().is_root(),
+        "Actual EACCES qualification requires a nonroot OS user"
+    );
+    let world = NativeWorld::new();
+    world.project("Locked", "locked");
     let manifest = world.root.join("Work/Locked/ProjectCentral/project.json");
     let original = fs::read(&manifest).unwrap();
     struct Restore(PathBuf, fs::Permissions);
     impl Drop for Restore {
         fn drop(&mut self) {
             if let Err(error) = fs::set_permissions(&self.0, self.1.clone()) {
-                if std::thread::panicking() { eprintln!("Owned permission restoration failed: {error}"); }
-                else { panic!("Owned permission restoration failed: {error}"); }
+                if std::thread::panicking() {
+                    eprintln!("Owned permission restoration failed: {error}");
+                } else {
+                    panic!("Owned permission restoration failed: {error}");
+                }
             }
         }
     }
-    let restore = Restore(manifest.clone(), fs::metadata(&manifest).unwrap().permissions());
+    let restore = Restore(
+        manifest.clone(),
+        fs::metadata(&manifest).unwrap().permissions(),
+    );
     fs::set_permissions(&manifest, fs::Permissions::from_mode(0)).unwrap();
     let actual = fs::read(&manifest).unwrap_err();
-    let (binding, absences) = world.binding("Locked"); assert!(binding.is_none());
+    let (binding, absences) = world.binding("Locked");
+    assert!(binding.is_none());
     let diagnostic = absences.join("\n");
     assert!(diagnostic.contains("PermissionDenied"), "{diagnostic}");
-    assert!(diagnostic.contains(&actual.raw_os_error().unwrap().to_string()), "{diagnostic}");
+    assert!(
+        diagnostic.contains(&actual.raw_os_error().unwrap().to_string()),
+        "{diagnostic}"
+    );
     assert!(!diagnostic.contains("root lineage applies"));
-    drop(restore); assert_eq!(fs::read(&manifest).unwrap(), original);
+    drop(restore);
+    assert_eq!(fs::read(&manifest).unwrap(), original);
 }
 
 #[test]
 #[ignore = "requires real composed CENTRAL_CTRL_BIN; run explicitly in native owner qualification"]
 fn native_shared_probe_limits_and_final_identity_reobservation_are_operative() {
-    let world = NativeWorld::new(); world.project("Alpha", "alpha");
-    let observer = ObservedNative::new(None); let before = tree_basis(&world.root);
+    let world = NativeWorld::new();
+    world.project("Alpha", "alpha");
+    let observer = ObservedNative::new(None);
+    let before = tree_basis(&world.root);
     let mut absences = Vec::new();
-    assert!(read_project_binding(&observer, &world.executable, &world.root, "Alpha", &mut absences).is_some(), "{absences:?}");
-    let calls = observer.seen.lock().unwrap(); assert_eq!(calls.len(), 4);
-    for call in calls.iter() { assert!(call.1 <= Duration::from_secs(10)); assert!(call.2 <= 1024*1024); assert!(call.3); }
-    for pair in calls.windows(2) { assert!(pair[1].1 <= pair[0].1); assert!(pair[1].2 < pair[0].2); }
-    drop(calls); assert_eq!(tree_basis(&world.root), before);
+    assert!(
+        read_project_binding(
+            &observer,
+            &world.executable,
+            &world.root,
+            "Alpha",
+            &mut absences
+        )
+        .is_some(),
+        "{absences:?}"
+    );
+    let calls = observer.seen.lock().unwrap();
+    assert_eq!(calls.len(), 4);
+    for call in calls.iter() {
+        assert!(call.1 <= Duration::from_secs(10));
+        assert!(call.2 <= 1024 * 1024);
+        assert!(call.3);
+    }
+    for pair in calls.windows(2) {
+        assert!(pair[1].1 <= pair[0].1);
+        assert!(pair[1].2 < pair[0].2);
+    }
+    drop(calls);
+    assert_eq!(tree_basis(&world.root), before);
     let manifest = world.root.join("Work/Alpha/ProjectCentral/project.json");
-    let original = fs::read(&manifest).unwrap(); let changed_path = manifest.clone();
+    let original = fs::read(&manifest).unwrap();
+    let changed_path = manifest.clone();
     let change = ObservedNative::new(Some(Box::new(move || {
         let mut value: Value = serde_json::from_slice(&fs::read(&changed_path).unwrap()).unwrap();
         value["project_id"] = json!("changed-after-native-return");
         fs::write(&changed_path, serde_json::to_vec(&value).unwrap()).unwrap();
     })));
     let mut absences = Vec::new();
-    assert!(read_project_binding(&change, &world.executable, &world.root, "Alpha", &mut absences).is_none());
-    assert!(absences.join("\n").contains("central.world_binding_changed"), "{absences:?}");
+    assert!(read_project_binding(
+        &change,
+        &world.executable,
+        &world.root,
+        "Alpha",
+        &mut absences
+    )
+    .is_none());
+    assert!(
+        absences
+            .join("\n")
+            .contains("central.world_binding_changed"),
+        "{absences:?}"
+    );
     fs::write(&manifest, original).unwrap();
-    assert!(world.binding("Alpha").0.is_some(), "Fresh native inspection after fixture restoration");
+    assert!(
+        world.binding("Alpha").0.is_some(),
+        "Fresh native inspection after fixture restoration"
+    );
 }
 
 #[cfg(unix)]
@@ -508,19 +723,48 @@ fn native_shared_probe_limits_and_final_identity_reobservation_are_operative() {
 #[ignore = "requires real composed CENTRAL_CTRL_BIN; run explicitly in native owner qualification"]
 fn native_unchanged_root_alias_works_and_retargeted_owner_ref_is_refused() {
     use std::os::unix::fs::symlink;
-    let first = NativeWorld::new(); first.project("Alpha", "first");
-    let second = NativeWorld::new(); second.project("Alpha", "second");
-    let alias = first.owned.path().join("world-alias"); symlink(&first.root, &alias).unwrap();
+    let first = NativeWorld::new();
+    first.project("Alpha", "first");
+    let second = NativeWorld::new();
+    second.project("Alpha", "second");
+    let alias = first.owned.path().join("world-alias");
+    symlink(&first.root, &alias).unwrap();
     let mut absences = Vec::new();
-    assert!(read_project_binding(&first.runner, &first.executable, &alias, "Alpha", &mut absences).is_some(), "{absences:?}");
-    let second_root = second.root.clone(); let alias_for_change = alias.clone();
+    assert!(
+        read_project_binding(
+            &first.runner,
+            &first.executable,
+            &alias,
+            "Alpha",
+            &mut absences
+        )
+        .is_some(),
+        "{absences:?}"
+    );
+    let second_root = second.root.clone();
+    let alias_for_change = alias.clone();
     let change = ObservedNative::new(Some(Box::new(move || {
-        fs::remove_file(&alias_for_change).unwrap(); symlink(second_root, &alias_for_change).unwrap();
+        fs::remove_file(&alias_for_change).unwrap();
+        symlink(second_root, &alias_for_change).unwrap();
     })));
     let mut absences = Vec::new();
-    assert!(read_project_binding(&change, &first.executable, &alias, "Alpha", &mut absences).is_none());
-    assert!(absences.join("\n").contains("central.world_binding_changed"), "{absences:?}");
-    assert!(read_project_binding(&first.runner, &first.executable, &alias, "Alpha", &mut Vec::new()).is_some());
+    assert!(
+        read_project_binding(&change, &first.executable, &alias, "Alpha", &mut absences).is_none()
+    );
+    assert!(
+        absences
+            .join("\n")
+            .contains("central.world_binding_changed"),
+        "{absences:?}"
+    );
+    assert!(read_project_binding(
+        &first.runner,
+        &first.executable,
+        &alias,
+        "Alpha",
+        &mut Vec::new()
+    )
+    .is_some());
 }
 
 #[cfg(unix)]
@@ -528,12 +772,27 @@ fn native_unchanged_root_alias_works_and_retargeted_owner_ref_is_refused() {
 #[ignore = "requires real composed CENTRAL_CTRL_BIN; run explicitly in native owner qualification"]
 fn native_non_utf8_coordinate_refuses_before_selecting_lossy_owner() {
     use std::os::unix::ffi::OsStringExt;
-    let world = NativeWorld::new(); let before = tree_basis(&world.root);
+    let world = NativeWorld::new();
+    let before = tree_basis(&world.root);
     let root = PathBuf::from(std::ffi::OsString::from_vec(b"invalid-owner-\xff".to_vec()));
-    let error = read_world_binding(&world.runner, &world.executable, &root, "root", None, "control:root").unwrap_err();
+    let error = read_world_binding(
+        &world.runner,
+        &world.executable,
+        &root,
+        "root",
+        None,
+        "control:root",
+    )
+    .unwrap_err();
     assert_eq!(error.code(), "central.world_transport_unsupported");
-    assert_eq!(error.details().get("coordinate").map(String::as_str), Some("root"));
-    assert_eq!(error.details().get("execution_started").map(String::as_str), Some("false"));
+    assert_eq!(
+        error.details().get("coordinate").map(String::as_str),
+        Some("root")
+    );
+    assert_eq!(
+        error.details().get("execution_started").map(String::as_str),
+        Some("false")
+    );
     assert_eq!(tree_basis(&world.root), before);
 }
 
@@ -542,22 +801,36 @@ fn native_non_utf8_coordinate_refuses_before_selecting_lossy_owner() {
 #[ignore = "requires real composed CENTRAL_CTRL_BIN and mkfifo; run explicitly"]
 fn native_final_manifest_alias_and_fifo_refuse_without_opening_replacement() {
     use std::os::unix::fs::symlink;
-    let world = NativeWorld::new(); world.project("Alpha", "alpha");
+    let world = NativeWorld::new();
+    world.project("Alpha", "alpha");
     let manifest = world.root.join("Work/Alpha/ProjectCentral/project.json");
-    let retained = manifest.with_extension("original"); fs::rename(&manifest, &retained).unwrap();
+    let retained = manifest.with_extension("original");
+    fs::rename(&manifest, &retained).unwrap();
     let original = fs::read(&retained).unwrap();
     symlink(&retained, &manifest).unwrap();
-    let (binding, absences) = world.binding("Alpha"); assert!(binding.is_none());
+    let (binding, absences) = world.binding("Alpha");
+    assert!(binding.is_none());
     assert!(absences.join("\n").contains("io_error"), "{absences:?}");
     fs::remove_file(&manifest).unwrap();
-    let argv = vec!["mkfifo".into(), "-m".into(), "600".into(), manifest.to_str().unwrap().into()];
-    world.runner.run_with_limits(&argv, Duration::from_secs(2), 1024, true).unwrap()
-        .require(&argv, "test.mkfifo_failed").unwrap();
-    let (binding, absences) = world.binding("Alpha"); assert!(binding.is_none());
+    let argv = vec![
+        "mkfifo".into(),
+        "-m".into(),
+        "600".into(),
+        manifest.to_str().unwrap().into(),
+    ];
+    world
+        .runner
+        .run_with_limits(&argv, Duration::from_secs(2), 1024, true)
+        .unwrap()
+        .require(&argv, "test.mkfifo_failed")
+        .unwrap();
+    let (binding, absences) = world.binding("Alpha");
+    assert!(binding.is_none());
     assert!(absences.join("\n").contains("io_error"), "{absences:?}");
     assert!(!absences.join("\n").contains("root lineage applies"));
     assert_eq!(fs::read(&retained).unwrap(), original);
-    fs::remove_file(&manifest).unwrap(); fs::rename(retained, manifest).unwrap();
+    fs::remove_file(&manifest).unwrap();
+    fs::rename(retained, manifest).unwrap();
     assert!(world.binding("Alpha").0.is_some());
 }
 
@@ -566,22 +839,36 @@ fn native_final_manifest_alias_and_fifo_refuse_without_opening_replacement() {
 #[ignore = "requires real composed CENTRAL_CTRL_BIN; run explicitly in native owner qualification"]
 fn native_runner_decode_and_timeout_failures_never_become_absent_owner() {
     use std::os::unix::fs::PermissionsExt;
-    let world = NativeWorld::new(); world.project("Alpha", "alpha");
+    let world = NativeWorld::new();
+    world.project("Alpha", "alpha");
     let before = tree_basis(&world.root);
     let wrapper = world.owned.path().join("actual-native-wrapper");
     // Material adversary precedes a genuine native command. No native envelope
     // is scripted; the same runner owns finite capture and cancellation/reap.
-    fs::write(&wrapper, "#!/bin/sh\nprintf '\\377'\nexec \"$ACTUAL_CTRL\" \"$@\"\n").unwrap();
+    fs::write(
+        &wrapper,
+        "#!/bin/sh\nprintf '\\377'\nexec \"$ACTUAL_CTRL\" \"$@\"\n",
+    )
+    .unwrap();
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
-    let runner = SystemRunner::new().with_env("ACTUAL_CTRL", world.executable.to_str().unwrap())
+    let runner = SystemRunner::new()
+        .with_env("ACTUAL_CTRL", world.executable.to_str().unwrap())
         .with_env_removed("CENTRAL_NATIVE_TOKEN");
-    let error = read_world_binding(&runner, &wrapper, &world.root, "root", None, "control:root").unwrap_err();
+    let error = read_world_binding(&runner, &wrapper, &world.root, "root", None, "control:root")
+        .unwrap_err();
     assert_eq!(error.code(), "mux.command_utf8_invalid");
-    fs::write(&wrapper, "#!/bin/sh\nsleep 5\nexec \"$ACTUAL_CTRL\" \"$@\"\n").unwrap();
+    fs::write(
+        &wrapper,
+        "#!/bin/sh\nsleep 5\nexec \"$ACTUAL_CTRL\" \"$@\"\n",
+    )
+    .unwrap();
     let runner = runner.with_timeout(Duration::from_millis(120));
     let mut absences = Vec::new();
     assert!(read_project_binding(&runner, &wrapper, &world.root, "Alpha", &mut absences).is_none());
-    assert!(absences.join("\n").contains("mux.command_timeout"), "{absences:?}");
+    assert!(
+        absences.join("\n").contains("mux.command_timeout"),
+        "{absences:?}"
+    );
     assert!(!absences.join("\n").contains("root lineage applies"));
     assert_eq!(tree_basis(&world.root), before);
 }

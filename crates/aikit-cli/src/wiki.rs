@@ -24,7 +24,8 @@ use sha2::Digest;
 
 use aikit_adapters::projectcentral::ProjectCentralFilesystemBinding;
 use aikit_core::knowledge_ingest::{
-    corpus_content_revision, ingest_corpus_with_origins, CorpusSelection, CorpusSelector, IngestOriginBinding,
+    corpus_content_revision, ingest_corpus_with_origins, CorpusSelection, CorpusSelector,
+    IngestOriginBinding,
 };
 use aikit_core::knowledge_source_pool::{SourceMaterial, SourceOrigin, SourceVisibility};
 use aikit_core::knowledge_wiki::{
@@ -35,8 +36,8 @@ use aikit_core::knowledge_wiki_write::{
     WikiMutationLedger, WikiMutationOutcome, ROOT_WIKI_SPACE_REF,
 };
 use aikit_core::projectcentral::{
-    plan_agent_wiki_maintenance, AgentWikiMaintenancePlan, AgentWikiMaintenanceRequest, HumanSourceRevisionProposal,
-    CENTRAL_ROOT_WIKI_SOURCE, PROJECTCENTRAL_WIKI_SOURCE,
+    plan_agent_wiki_maintenance, AgentWikiMaintenancePlan, AgentWikiMaintenanceRequest,
+    HumanSourceRevisionProposal, CENTRAL_ROOT_WIKI_SOURCE, PROJECTCENTRAL_WIKI_SOURCE,
 };
 use aikit_core::resource::{ResourceRef, SourceRef};
 use aikit_core::{AikitError, Result, SemanticRevision, SemanticWikiIndex};
@@ -464,9 +465,8 @@ fn space_link(args: &WikiSpaceLinkArgs) -> Result<WikiOutcome> {
         Some(child_file) => {
             let parent_receipt = mutate_file_receipt(&args.file, link)?;
             let completed = parent_receipt.completed_effects();
-            let child_receipt = mutate_file_receipt(child_file, link).map_err(|error| {
-                extend_command_failure(error, &completed)
-            })?;
+            let child_receipt = mutate_file_receipt(child_file, link)
+                .map_err(|error| extend_command_failure(error, &completed))?;
             let parent_outcome = parent_receipt.outcome;
             let child_outcome = child_receipt.outcome;
             let mut warnings = parent_outcome.warnings.clone();
@@ -1233,54 +1233,88 @@ struct CorpusReadCapacity {
 
 impl CorpusReadCapacity {
     fn next_read_limit(&self) -> Result<usize> {
-        let used = self.observed_payload_bytes.checked_add(self.failed_payload_reserved_bytes)
-            .ok_or_else(|| corpus_capacity_error("initial_read_payload", WIKI_INGEST_READ_BYTES, usize::MAX))?;
+        let used = self
+            .observed_payload_bytes
+            .checked_add(self.failed_payload_reserved_bytes)
+            .ok_or_else(|| {
+                corpus_capacity_error("initial_read_payload", WIKI_INGEST_READ_BYTES, usize::MAX)
+            })?;
         let available = WIKI_INGEST_READ_BYTES.saturating_sub(used);
         if available == 0 {
             // Refuse before observing the next file: it may be empty. Known
             // payload and failed-attempt reservations exhaust the allowance,
             // but neither establishes an observed byte overage.
-            return Err(AikitError::new("knowledge.ingest_corpus_capacity",
-                "The initial payload read allowance is exhausted before observing the next Source")
-                .with("dimension", "initial_read_payload")
-                .with("capacity_limit", WIKI_INGEST_READ_BYTES.to_string())
-                .with("capacity_used", used.to_string())
-                .with("admission_reason", "initial_read_allowance_exhausted")
-                .with("remaining_read_allowance", "0")
-                .with("next_material", "unobserved")
-                .with("remaining_corpus", "unknown"));
+            return Err(AikitError::new(
+                "knowledge.ingest_corpus_capacity",
+                "The initial payload read allowance is exhausted before observing the next Source",
+            )
+            .with("dimension", "initial_read_payload")
+            .with("capacity_limit", WIKI_INGEST_READ_BYTES.to_string())
+            .with("capacity_used", used.to_string())
+            .with("admission_reason", "initial_read_allowance_exhausted")
+            .with("remaining_read_allowance", "0")
+            .with("next_material", "unobserved")
+            .with("remaining_corpus", "unknown"));
         }
         Ok(available.min(WIKI_INGEST_SOURCE_BYTES))
     }
 
     fn read_failure(&self, lower_bound: usize) -> AikitError {
         corpus_capacity_error("initial_read_payload", WIKI_INGEST_READ_BYTES, lower_bound)
-            .with("observed_payload_bytes", self.observed_payload_bytes.to_string())
-            .with("failed_payload_reserved_bytes", self.failed_payload_reserved_bytes.to_string())
-            .with("lower_bound_basis", "known_payload_and_bounded_attempt_reservations_plus_next_observation")
-            .with("failed_read_causes", jval!(self.failed_read_causes).to_string())
+            .with(
+                "observed_payload_bytes",
+                self.observed_payload_bytes.to_string(),
+            )
+            .with(
+                "failed_payload_reserved_bytes",
+                self.failed_payload_reserved_bytes.to_string(),
+            )
+            .with(
+                "lower_bound_basis",
+                "known_payload_and_bounded_attempt_reservations_plus_next_observation",
+            )
+            .with(
+                "failed_read_causes",
+                jval!(self.failed_read_causes).to_string(),
+            )
     }
 
     fn annotate_failure(&self, error: AikitError, files_read: usize) -> AikitError {
-        error.with("files_read", files_read.to_string())
-            .with("observed_payload_bytes", self.observed_payload_bytes.to_string())
-            .with("failed_payload_reserved_bytes", self.failed_payload_reserved_bytes.to_string())
+        error
+            .with("files_read", files_read.to_string())
+            .with(
+                "observed_payload_bytes",
+                self.observed_payload_bytes.to_string(),
+            )
+            .with(
+                "failed_payload_reserved_bytes",
+                self.failed_payload_reserved_bytes.to_string(),
+            )
             .with("selected_text_bytes", self.selected_text_bytes.to_string())
-            .with("failed_read_causes", jval!(self.failed_read_causes).to_string())
+            .with(
+                "failed_read_causes",
+                jval!(self.failed_read_causes).to_string(),
+            )
     }
 
     fn retain_selected(&mut self, text: &str) -> Result<()> {
-        let next = self.selected_text_bytes.checked_add(text.len()).ok_or_else(|| {
-            corpus_capacity_error("selected_text", WIKI_INGEST_SELECTED_BYTES, usize::MAX)
-        })?;
+        let next = self
+            .selected_text_bytes
+            .checked_add(text.len())
+            .ok_or_else(|| {
+                corpus_capacity_error("selected_text", WIKI_INGEST_SELECTED_BYTES, usize::MAX)
+            })?;
         if next > WIKI_INGEST_SELECTED_BYTES {
-            return Err(corpus_capacity_error("selected_text", WIKI_INGEST_SELECTED_BYTES, next));
+            return Err(corpus_capacity_error(
+                "selected_text",
+                WIKI_INGEST_SELECTED_BYTES,
+                next,
+            ));
         }
         self.selected_text_bytes = next;
         Ok(())
     }
 }
-
 
 /// Walk `root` into [`ingest_corpus`]'s input shape: `(relative path, text)`
 /// pairs, sorted lexicographically so ingestion never depends on filesystem
@@ -1309,7 +1343,10 @@ struct WalkedCorpus {
 fn corpus_io_error(error: std::io::Error) -> AikitError {
     AikitError::new("knowledge.ingest_corpus_unreadable", error.to_string())
         .with("cause_kind", format!("{:?}", error.kind()))
-        .with("cause_raw_os_error", jval!(error.raw_os_error()).to_string())
+        .with(
+            "cause_raw_os_error",
+            jval!(error.raw_os_error()).to_string(),
+        )
         .with_io_source(error)
 }
 
@@ -1322,19 +1359,22 @@ struct CorpusAdmission {
 
 impl CorpusAdmission {
     fn new(cwd: &Path, corpus: &Path) -> Result<Self> {
-        let invocation_cwd = if cwd.is_absolute() { cwd.to_path_buf() } else {
+        let invocation_cwd = if cwd.is_absolute() {
+            cwd.to_path_buf()
+        } else {
             std::env::current_dir().map_err(corpus_io_error)?.join(cwd)
         };
-        let physical = std::fs::canonicalize(corpus).map_err(|error| {
-            corpus_io_error(error)
-        })?;
+        let physical = std::fs::canonicalize(corpus).map_err(|error| corpus_io_error(error))?;
         let mut project = None;
         for root in physical.ancestors() {
             match std::fs::metadata(root.join(PROJECT_MANIFEST_SOURCE)) {
                 Ok(_) => {
                     // A present declaration is read by its native owner; an
                     // invalid or unreadable declaration cannot become absence.
-                    project = Some((root.to_path_buf(), ProjectCentralFilesystemBinding::inspect(root, None)?));
+                    project = Some((
+                        root.to_path_buf(),
+                        ProjectCentralFilesystemBinding::inspect(root, None)?,
+                    ));
                     break;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1343,12 +1383,22 @@ impl CorpusAdmission {
         }
         // This existing invocation binding supplies a route, not semantic Source
         // identity. Locate below is the native owner operation that supplies it.
-        let configured = std::env::var_os("CENTRAL_ROOT").filter(|value| !value.is_empty()).map(PathBuf::from);
-        let root = configured.clone().or_else(|| crate::temporal::process_central_root(Some(cwd)))
+        let configured = std::env::var_os("CENTRAL_ROOT")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let root = configured
+            .clone()
+            .or_else(|| crate::temporal::process_central_root(Some(cwd)))
             .or_else(|| crate::temporal::central_root_enclosing(Some(cwd)))
             // Native --root resolves relative to the actual invocation cwd.
             // Keep that lexical route, including its accepted root aliases.
-            .map(|root| if root.is_absolute() { root } else { invocation_cwd.join(root) });
+            .map(|root| {
+                if root.is_absolute() {
+                    root
+                } else {
+                    invocation_cwd.join(root)
+                }
+            });
         let explicitly_configured = configured.is_some();
         let central_root = match root {
             // The configured invocation route survives a missing or unreadable
@@ -1356,33 +1406,48 @@ impl CorpusAdmission {
             Some(root) if explicitly_configured => Some(root),
             Some(root) => match std::fs::metadata(root.join("Control/user")) {
                 Ok(metadata) if metadata.is_dir() => Some(root),
-                Ok(_) => return Err(AikitError::new("knowledge.ingest_origin_invalid",
-                    "The enclosing native user aperture is not a directory")),
+                Ok(_) => {
+                    return Err(AikitError::new(
+                        "knowledge.ingest_origin_invalid",
+                        "The enclosing native user aperture is not a directory",
+                    ))
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) => return Err(corpus_io_error(error)),
             },
             None => None,
         };
-        Ok(Self { project, central_root })
+        Ok(Self {
+            project,
+            central_root,
+        })
     }
 
     fn known_project_member(&self, physical: &Path) -> bool {
         self.project.as_ref().is_some_and(|(root, binding)| {
-            physical.strip_prefix(root).ok().is_some_and(|relative| binding.semantic.sources.iter().any(|source| {
-                source.kind != aikit_core::projectcentral::ProjectCentralSourceKind::NativeProjectRoot
-                    && source.exists
-                    && (relative == source.relative_path || (source.is_directory && relative.starts_with(&source.relative_path)))
-            }))
+            physical.strip_prefix(root).ok().is_some_and(|relative| {
+                binding.semantic.sources.iter().any(|source| {
+                    source.kind
+                        != aikit_core::projectcentral::ProjectCentralSourceKind::NativeProjectRoot
+                        && source.exists
+                        && (relative == source.relative_path
+                            || (source.is_directory && relative.starts_with(&source.relative_path)))
+                })
+            })
         })
     }
 
     fn known_native_member(&self, physical: &Path) -> Result<bool> {
-        if self.known_project_member(physical) { return Ok(true); }
-        let Some(root) = &self.central_root else { return Ok(false); };
-        let physical_root = std::fs::canonicalize(root).map_err(|error| {
-            corpus_io_error(error)
-        })?;
-        let Ok(relative) = physical.strip_prefix(&physical_root) else { return Ok(false); };
+        if self.known_project_member(physical) {
+            return Ok(true);
+        }
+        let Some(root) = &self.central_root else {
+            return Ok(false);
+        };
+        let physical_root = std::fs::canonicalize(root).map_err(|error| corpus_io_error(error))?;
+        let Ok(relative) = physical.strip_prefix(&physical_root) else {
+            return Ok(false);
+        };
         // These are the supplied Control root's native source apertures,
         // declared by Central source_horizon::CONTROL_TREE_BINDINGS. Their
         // tree-stamp relation is known even when the executable cannot be
@@ -1395,67 +1460,114 @@ impl CorpusAdmission {
             "Control/agents/profiles",
             "Control/agents/expressions",
             "Control/agents/agent-sets",
-        ].iter().any(|aperture| relative.starts_with(aperture)))
+        ]
+        .iter()
+        .any(|aperture| relative.starts_with(aperture)))
     }
 
     fn check_floor(&self, path: &Path) -> Result<()> {
-        let physical = std::fs::canonicalize(path).map_err(|error| {
-            corpus_io_error(error)
-        })?;
-        for floor in self.project.as_ref().map(|(root, _)| root).into_iter().chain(self.central_root.as_ref()) {
-            let root = std::fs::canonicalize(floor).map_err(|error| {
-                corpus_io_error(error)
-            })?;
+        let physical = std::fs::canonicalize(path).map_err(|error| corpus_io_error(error))?;
+        for floor in self
+            .project
+            .as_ref()
+            .map(|(root, _)| root)
+            .into_iter()
+            .chain(self.central_root.as_ref())
+        {
+            let root = std::fs::canonicalize(floor).map_err(|error| corpus_io_error(error))?;
             // Both routes participate. Choosing only a canonical fallback can
             // lose a marker above an in-World lexical member alias.
-            let lexical = path.strip_prefix(floor).or_else(|_| path.strip_prefix(&root)).ok();
+            let lexical = path
+                .strip_prefix(floor)
+                .or_else(|_| path.strip_prefix(&root))
+                .ok();
             let canonical = physical.strip_prefix(&root).ok();
-            for (route, relative) in lexical.map(|relative| (floor, relative)).into_iter()
+            for (route, relative) in lexical
+                .map(|relative| (floor, relative))
+                .into_iter()
                 .chain(canonical.map(|relative| (&root, relative)))
             {
-                if relative.as_os_str().is_empty() { continue; }
-                let admitted = aikit_adapters::projectcentral::path_agent_readability(route, relative)
-                    .map_err(corpus_io_error)?;
+                if relative.as_os_str().is_empty() {
+                    continue;
+                }
+                let admitted =
+                    aikit_adapters::projectcentral::path_agent_readability(route, relative)
+                        .map_err(corpus_io_error)?;
                 if !admitted {
-                    return Err(command_failure(AikitError::new("knowledge.ingest_corpus_withheld",
-                        "The actual native source floor withholds this selected member"),
-                        &[], "AIKit/SourcePool", path, "selection", "none"));
+                    return Err(command_failure(
+                        AikitError::new(
+                            "knowledge.ingest_corpus_withheld",
+                            "The actual native source floor withholds this selected member",
+                        ),
+                        &[],
+                        "AIKit/SourcePool",
+                        path,
+                        "selection",
+                        "none",
+                    ));
                 }
             }
         }
         Ok(())
     }
 
-    fn recheck_selected(&self, root: &Path, inputs: &[(String, String)], warnings: &mut Vec<String>, observations: &mut Vec<Value>) -> Result<()> {
+    fn recheck_selected(
+        &self,
+        root: &Path,
+        inputs: &[(String, String)],
+        warnings: &mut Vec<String>,
+        observations: &mut Vec<Value>,
+    ) -> Result<()> {
         for (relative, body) in inputs {
             let path = root.join(relative);
-            let failure = |error| command_failure(error, &[], "AIKit/SourcePool", &path, "origin-admission", "none");
-            if !aikit_adapters::projectcentral::path_agent_readability(root, Path::new(relative)).map_err(|error| {
-                failure(corpus_io_error(error))
-            })? {
-                return Err(failure(AikitError::new("knowledge.ingest_corpus_withheld", "Source admission changed after selection")));
+            let failure = |error| {
+                command_failure(
+                    error,
+                    &[],
+                    "AIKit/SourcePool",
+                    &path,
+                    "origin-admission",
+                    "none",
+                )
+            };
+            if !aikit_adapters::projectcentral::path_agent_readability(root, Path::new(relative))
+                .map_err(|error| failure(corpus_io_error(error)))?
+            {
+                return Err(failure(AikitError::new(
+                    "knowledge.ingest_corpus_withheld",
+                    "Source admission changed after selection",
+                )));
             }
             self.check_floor(&path)?;
             self.check_native_target(&path, warnings, observations)?;
-            let current = aikit_adapters::wiki_publication::material_bytes(&path, 16 * 1024 * 1024).map_err(failure)?;
+            let current = aikit_adapters::wiki_publication::material_bytes(&path, 16 * 1024 * 1024)
+                .map_err(failure)?;
             if current != body.as_bytes() {
-                return Err(failure(AikitError::new("knowledge.ingest_origin_revision_conflict",
-                    "Selected source content changed before publication; refresh explicitly")));
+                return Err(failure(AikitError::new(
+                    "knowledge.ingest_origin_revision_conflict",
+                    "Selected source content changed before publication; refresh explicitly",
+                )));
             }
             self.check_floor(&path)?;
-            if !aikit_adapters::projectcentral::path_agent_readability(root, Path::new(relative)).map_err(|error| {
-                failure(corpus_io_error(error))
-            })? {
-                return Err(failure(AikitError::new("knowledge.ingest_corpus_withheld", "Source admission changed during read")));
+            if !aikit_adapters::projectcentral::path_agent_readability(root, Path::new(relative))
+                .map_err(|error| failure(corpus_io_error(error)))?
+            {
+                return Err(failure(AikitError::new(
+                    "knowledge.ingest_corpus_withheld",
+                    "Source admission changed during read",
+                )));
             }
         }
         Ok(())
     }
 
-    fn check_native_target(&self, path: &Path, warnings: &mut Vec<String>, observations: &mut Vec<Value>) -> Result<()> {
-        let physical = std::fs::canonicalize(path).map_err(|error| {
-            corpus_io_error(error)
-        })?;
+    fn check_native_target(
+        &self,
+        path: &Path,
+        warnings: &mut Vec<String>,
+        observations: &mut Vec<Value>,
+    ) -> Result<()> {
+        let physical = std::fs::canonicalize(path).map_err(|error| corpus_io_error(error))?;
         let known = self.known_native_member(&physical)?;
         let Some(root) = &self.central_root else {
             if known {
@@ -1465,10 +1577,15 @@ impl CorpusAdmission {
             }
             return Ok(());
         };
-        let runner = aikit_adapters::runner::SystemRunner::new().with_timeout(std::time::Duration::from_secs(15));
-        match aikit_adapters::central_file_map::call(&runner, &aikit_adapters::central_file_map::executable(),
-            root, "locate", &jval!({"path": path, "content": false}))
-        {
+        let runner = aikit_adapters::runner::SystemRunner::new()
+            .with_timeout(std::time::Duration::from_secs(15));
+        match aikit_adapters::central_file_map::call(
+            &runner,
+            &aikit_adapters::central_file_map::executable(),
+            root,
+            "locate",
+            &jval!({"path": path, "content": false}),
+        ) {
             Ok(owner) => {
                 // Current selected local retrieval does not establish the
                 // destination World/Project publication relation. Team describes
@@ -1481,10 +1598,18 @@ impl CorpusAdmission {
                     &[], "AIKit/SourcePool", path, "target-admission", "none"))
             }
             Err(error) if error.code() == "central.file_map_not_found" && !known => Ok(()),
-            Err(error) if !known && error.code() == "central.file_map_unavailable"
-                && error.details().get("native_error_code").is_none_or(|code| code.is_empty()) => {
+            Err(error)
+                if !known
+                    && error.code() == "central.file_map_unavailable"
+                    && error
+                        .details()
+                        .get("native_error_code")
+                        .is_none_or(|code| code.is_empty()) =>
+            {
                 let warning = "Native participation could not be observed; only the explicitly selected standalone authored corpus contract is used";
-                if !warnings.iter().any(|held| held == warning) { warnings.push(warning.into()); }
+                if !warnings.iter().any(|held| held == warning) {
+                    warnings.push(warning.into());
+                }
                 // Local invocation depth only: the actual transport/native
                 // failure is not persisted in SourceBinding or Wiki provenance
                 // and is not proof of nonparticipation or an audience grant.
@@ -1493,10 +1618,19 @@ impl CorpusAdmission {
                     "owner_operation": "central.file-map.locate",
                     "original_error": {"code": error.code(), "message": error.message(), "details": error.details()},
                 });
-                if !observations.contains(&observation) { observations.push(observation); }
+                if !observations.contains(&observation) {
+                    observations.push(observation);
+                }
                 Ok(())
             }
-            Err(error) => Err(command_failure(error, &[], "AIKit/SourcePool", path, "origin-admission", "none")),
+            Err(error) => Err(command_failure(
+                error,
+                &[],
+                "AIKit/SourcePool",
+                path,
+                "origin-admission",
+                "none",
+            )),
         }
     }
 }
@@ -1515,12 +1649,21 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
     // A selected excluded root is a refusal, not an empty successful refresh:
     // an empty apply would otherwise prune material retained from an earlier run.
     let check_root = || {
-        let marker = match std::fs::metadata(root.join(aikit_core::projectcentral::NO_AGENT_RETRIEVAL_MARKER)) {
+        let marker = match std::fs::metadata(
+            root.join(aikit_core::projectcentral::NO_AGENT_RETRIEVAL_MARKER),
+        ) {
             Ok(metadata) => metadata.is_file(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(command_failure(
-                corpus_io_error(error),
-                &[], "AIKit/SourcePool", root, "selection", "none")),
+            Err(error) => {
+                return Err(command_failure(
+                    corpus_io_error(error),
+                    &[],
+                    "AIKit/SourcePool",
+                    root,
+                    "selection",
+                    "none",
+                ))
+            }
         };
         if marker {
             Err(command_failure(
@@ -1544,14 +1687,28 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
     // Reuse the native fallible policy at the explicit standalone boundary.
     // This does not introduce an above-root convention for an unbound corpus.
     let withheld = |path: &Path| -> Result<bool> {
-        if path == root { check_root()?; return Ok(false); }
+        if path == root {
+            check_root()?;
+            return Ok(false);
+        }
         let relative = path.strip_prefix(root).map_err(|_| {
-            AikitError::new("knowledge.ingest_corpus_unreadable", "Corpus walk escaped its selected boundary")
+            AikitError::new(
+                "knowledge.ingest_corpus_unreadable",
+                "Corpus walk escaped its selected boundary",
+            )
         })?;
         aikit_adapters::projectcentral::path_agent_readability(root, relative)
-            .map(|admitted| !admitted).map_err(|error| command_failure(
-                corpus_io_error(error),
-                &[], "AIKit/SourcePool", path, "selection", "none"))
+            .map(|admitted| !admitted)
+            .map_err(|error| {
+                command_failure(
+                    corpus_io_error(error),
+                    &[],
+                    "AIKit/SourcePool",
+                    path,
+                    "selection",
+                    "none",
+                )
+            })
     };
     let suffix = format!(".{extension}");
     let mut found: Vec<(String, PathBuf)> = Vec::new();
@@ -1559,18 +1716,29 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
     let mut participation_warnings = Vec::new();
     let mut participation_observations = Vec::new();
     let mut traversal_error = None;
-    let entries = walkdir::WalkDir::new(root).follow_links(false).into_iter().filter_entry(|entry| {
-        if traversal_error.is_some() { return false; }
-        match withheld(entry.path()) {
-            Ok(true) => false,
-            Err(error) => { traversal_error = Some(error); false }
-            Ok(false) => match admission.check_floor(entry.path()) {
-                Ok(()) => true,
-                Err(error) if error.code() == "knowledge.ingest_corpus_withheld" => false,
-                Err(error) => { traversal_error = Some(error); false }
-            },
-        }
-    });
+    let entries = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            if traversal_error.is_some() {
+                return false;
+            }
+            match withheld(entry.path()) {
+                Ok(true) => false,
+                Err(error) => {
+                    traversal_error = Some(error);
+                    false
+                }
+                Ok(false) => match admission.check_floor(entry.path()) {
+                    Ok(()) => true,
+                    Err(error) if error.code() == "knowledge.ingest_corpus_withheld" => false,
+                    Err(error) => {
+                        traversal_error = Some(error);
+                        false
+                    }
+                },
+            }
+        });
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -1578,10 +1746,14 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
                 if let Some(path) = error.path() {
                     // A marker may have arrived after entry admission. Its
                     // withheld name must not escape via traversal diagnostics.
-                    if withheld(path)? { continue; }
+                    if withheld(path)? {
+                        continue;
+                    }
                     match admission.check_floor(path) {
                         Ok(()) => {}
-                        Err(failure) if failure.code() == "knowledge.ingest_corpus_withheld" => continue,
+                        Err(failure) if failure.code() == "knowledge.ingest_corpus_withheld" => {
+                            continue
+                        }
                         Err(failure) => return Err(failure),
                     }
                 }
@@ -1622,7 +1794,10 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
             )
             .with("corpus", root.display().to_string())
             .with("file_limit", WIKI_INGEST_MAX_FILES.to_string())
-            .with("observed_files_lower_bound", (WIKI_INGEST_MAX_FILES + 1).to_string())
+            .with(
+                "observed_files_lower_bound",
+                (WIKI_INGEST_MAX_FILES + 1).to_string(),
+            )
             .with("remaining_roster", "unknown"));
         }
         let relative = path
@@ -1632,7 +1807,9 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
             .replace('\\', "/");
         found.push((relative, path.to_path_buf()));
     }
-    if let Some(error) = traversal_error { return Err(error); }
+    if let Some(error) = traversal_error {
+        return Err(error);
+    }
     found.sort_by(|left, right| left.0.cmp(&right.0));
 
     let mut selector = CorpusSelector::default();
@@ -1644,15 +1821,22 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
             continue;
         }
         admission.check_floor(&path)?;
-        admission.check_native_target(&path, &mut participation_warnings, &mut participation_observations)?;
-        let read_limit = capacity.next_read_limit()
+        admission.check_native_target(
+            &path,
+            &mut participation_warnings,
+            &mut participation_observations,
+        )?;
+        let read_limit = capacity
+            .next_read_limit()
             .map_err(|error| capacity.annotate_failure(error, files_read))?;
         match aikit_adapters::wiki_publication::material_bytes(&path, read_limit as u64) {
             Ok(bytes) => {
                 // Count every returned payload before decoding, including invalid
                 // UTF-8. The physical owner's consistency reread is not measured
                 // by this logical initial-payload counter.
-                capacity.observed_payload_bytes = capacity.observed_payload_bytes.checked_add(bytes.len())
+                capacity.observed_payload_bytes = capacity
+                    .observed_payload_bytes
+                    .checked_add(bytes.len())
                     .ok_or_else(|| capacity.read_failure(usize::MAX))?;
                 match String::from_utf8(bytes) {
                     Ok(text) => {
@@ -1660,7 +1844,10 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
                         admission.check_floor(&path)?;
                         if !withheld(&path)? {
                             files_read += 1;
-                            selector.push_owned_with(relative, text, |_, text| capacity.retain_selected(text))
+                            selector
+                                .push_owned_with(relative, text, |_, text| {
+                                    capacity.retain_selected(text)
+                                })
                                 .map_err(|error| capacity.annotate_failure(error, files_read))?;
                         }
                     }
@@ -1673,10 +1860,18 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
                 // A physical byte-limit refusal cannot become an IO skip and
                 // hence a falsely complete or empty refresh. Retain its cause.
                 let failure = if read_limit < WIKI_INGEST_SOURCE_BYTES {
-                    capacity.read_failure(capacity.observed_payload_bytes
-                        + capacity.failed_payload_reserved_bytes + read_limit + 1)
+                    capacity.read_failure(
+                        capacity.observed_payload_bytes
+                            + capacity.failed_payload_reserved_bytes
+                            + read_limit
+                            + 1,
+                    )
                 } else {
-                    corpus_capacity_error("source_payload", WIKI_INGEST_SOURCE_BYTES, read_limit + 1)
+                    corpus_capacity_error(
+                        "source_payload",
+                        WIKI_INGEST_SOURCE_BYTES,
+                        read_limit + 1,
+                    )
                 };
                 return Err(capacity.annotate_failure(failure.with("original_error", jval!({
                     "code":error.code(), "message":error.message(), "details":error.details(),
@@ -1686,13 +1881,17 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
                 // An unsuccessful physical observation has no byte-count receipt.
                 // Charge its bounded attempt conservatively; do not call this
                 // reservation observed bytes or erase the original IO failure.
-                capacity.failed_payload_reserved_bytes = capacity.failed_payload_reserved_bytes.checked_add(read_limit)
+                capacity.failed_payload_reserved_bytes = capacity
+                    .failed_payload_reserved_bytes
+                    .checked_add(read_limit)
                     .ok_or_else(|| capacity.read_failure(usize::MAX))?;
                 capacity.failed_read_causes.push(jval!({
                     "source_path":path.display().to_string(), "code":error.code(),
                     "message":error.message(), "details":error.details(),
                 }));
-                skipped.push(format!("{relative}: unreadable ({error}); set aside, not ingested"));
+                skipped.push(format!(
+                    "{relative}: unreadable ({error}); set aside, not ingested"
+                ));
             }
         }
     }
@@ -1720,20 +1919,47 @@ fn walk_corpus(root: &Path, extension: &str, admission: &CorpusAdmission) -> Res
 /// holds — ingest never silently overwrites an authored or previously
 /// ingested object.
 fn ingest(cwd: &Path, args: &WikiIngestArgs) -> Result<WikiOutcome> {
-    let supplied_corpus = if args.corpus.is_absolute() { args.corpus.clone() } else { cwd.join(&args.corpus) };
+    let supplied_corpus = if args.corpus.is_absolute() {
+        args.corpus.clone()
+    } else {
+        cwd.join(&args.corpus)
+    };
     // Keep the selected lexical route and its native floor on the same
     // invocation basis, including when -C itself is relative. Canonicalising
     // here would erase an alias's withheld lexical ancestor.
-    let invocation_cwd = if cwd.is_absolute() { cwd.to_path_buf() } else {
-        std::env::current_dir().map_err(|error| {
-            command_failure(corpus_io_error(error), &[], "AIKit/SourcePool", &supplied_corpus,
-                "selection", "none")
-        })?.join(cwd)
+    let invocation_cwd = if cwd.is_absolute() {
+        cwd.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| {
+                command_failure(
+                    corpus_io_error(error),
+                    &[],
+                    "AIKit/SourcePool",
+                    &supplied_corpus,
+                    "selection",
+                    "none",
+                )
+            })?
+            .join(cwd)
     };
-    let corpus_root = if args.corpus.is_absolute() { args.corpus.clone() } else { invocation_cwd.join(&args.corpus) };
+    let corpus_root = if args.corpus.is_absolute() {
+        args.corpus.clone()
+    } else {
+        invocation_cwd.join(&args.corpus)
+    };
     let preeffect = |error: AikitError| {
-        if error.details().contains_key("command_effect") { error } else {
-            command_failure(error, &[], "AIKit/SourcePool", &corpus_root, "selection", "none")
+        if error.details().contains_key("command_effect") {
+            error
+        } else {
+            command_failure(
+                error,
+                &[],
+                "AIKit/SourcePool",
+                &corpus_root,
+                "selection",
+                "none",
+            )
         }
     };
     let admission = CorpusAdmission::new(&invocation_cwd, &corpus_root).map_err(preeffect)?;
@@ -1741,15 +1967,31 @@ fn ingest(cwd: &Path, args: &WikiIngestArgs) -> Result<WikiOutcome> {
     let selection = walked.selection;
     let io_skipped = walked.skipped;
     let mut participation_observations = walked.participation_observations;
-    let origins = selection.records.iter().chain(&selection.sources).map(|(relative, body)| {
-        Ok((relative.clone(), IngestOriginBinding {
-            origin: SourceOrigin::declared_corpus(),
-            content_revision: aikit_core::SourceRevision::parse(corpus_content_revision(body.as_bytes()))?,
-            visibility: SourceVisibility::Team,
-            owners: Vec::new(),
-        }))
-    }).collect::<Result<BTreeMap<_, _>>>()?;
-    let compiled = ingest_corpus_with_origins(&selection.records, &selection.sources, args.room_depth, &origins).map_err(preeffect)?;
+    let origins = selection
+        .records
+        .iter()
+        .chain(&selection.sources)
+        .map(|(relative, body)| {
+            Ok((
+                relative.clone(),
+                IngestOriginBinding {
+                    origin: SourceOrigin::declared_corpus(),
+                    content_revision: aikit_core::SourceRevision::parse(corpus_content_revision(
+                        body.as_bytes(),
+                    ))?,
+                    visibility: SourceVisibility::Team,
+                    owners: Vec::new(),
+                },
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let compiled = ingest_corpus_with_origins(
+        &selection.records,
+        &selection.sources,
+        args.room_depth,
+        &origins,
+    )
+    .map_err(preeffect)?;
     let (objects, material, absences) = (compiled.objects, compiled.material, compiled.absences);
     let pool_dir = source_pool_dir(args);
 
@@ -1839,7 +2081,8 @@ fn ingest(cwd: &Path, args: &WikiIngestArgs) -> Result<WikiOutcome> {
     // Dry-run success must admit the same complete, discoverable next material
     // as apply; serialization capacity is settled before either can succeed.
     let rendered_material = render_source_pool(&material)?;
-    summary["rendered_material_bytes"] = jval!(rendered_material.iter().map(String::len).sum::<usize>());
+    summary["rendered_material_bytes"] =
+        jval!(rendered_material.iter().map(String::len).sum::<usize>());
     summary["prepared_source_pool_files"] = jval!(rendered_material.len());
     if !args.apply {
         let held = WikiDocument::parse(&read(&args.file)?)?;
@@ -1868,8 +2111,22 @@ fn ingest(cwd: &Path, args: &WikiIngestArgs) -> Result<WikiOutcome> {
             .with("skipped", jval!(io_skipped).to_string()), &[], "AIKit/SourcePool",
             &args.corpus, "read_corpus", "none"));
     }
-    admission.recheck_selected(&corpus_root, &selection.records, &mut warnings, &mut participation_observations).map_err(preeffect)?;
-    admission.recheck_selected(&corpus_root, &selection.sources, &mut warnings, &mut participation_observations).map_err(preeffect)?;
+    admission
+        .recheck_selected(
+            &corpus_root,
+            &selection.records,
+            &mut warnings,
+            &mut participation_observations,
+        )
+        .map_err(preeffect)?;
+    admission
+        .recheck_selected(
+            &corpus_root,
+            &selection.sources,
+            &mut warnings,
+            &mut participation_observations,
+        )
+        .map_err(preeffect)?;
     summary["native_participation"] = jval!(participation_observations);
     let mut unchanged = 0usize;
     let receipt = mutate_file_receipt(&args.file, |doc, ledger| {
@@ -1901,9 +2158,8 @@ fn ingest(cwd: &Path, args: &WikiIngestArgs) -> Result<WikiOutcome> {
         }
         Ok(())
     })?;
-    let written = write_source_pool(&pool_dir, &rendered_material).map_err(|error| {
-        extend_command_failure(error, &receipt.completed_effects())
-    })?;
+    let written = write_source_pool(&pool_dir, &rendered_material)
+        .map_err(|error| extend_command_failure(error, &receipt.completed_effects()))?;
     let outcome = receipt.outcome;
     summary["applied"] = jval!(true);
     summary["unchanged"] = jval!(unchanged);
@@ -1945,31 +2201,55 @@ impl std::io::Write for BoundedMaterialJson {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let Some(next) = self.bytes.len().checked_add(bytes.len()) else {
             self.refused_lower_bound = Some(usize::MAX);
-            return Err(std::io::Error::other("serialized Source material capacity arithmetic overflowed"));
+            return Err(std::io::Error::other(
+                "serialized Source material capacity arithmetic overflowed",
+            ));
         };
         if next > self.limit {
             self.refused_lower_bound = Some(next);
-            return Err(std::io::Error::other("serialized Source material exceeds its admitted capacity"));
+            return Err(std::io::Error::other(
+                "serialized Source material exceeds its admitted capacity",
+            ));
         }
         self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
     }
 
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
-fn append_rendered_fragment(buffer: &mut Vec<u8>, completed_bytes: usize, bytes: &[u8]) -> Result<()> {
-    let next = completed_bytes.checked_add(buffer.len()).and_then(|used| used.checked_add(bytes.len()))
-        .ok_or_else(|| corpus_capacity_error("rendered_material", WIKI_INGEST_RENDERED_BYTES, usize::MAX))?;
+fn append_rendered_fragment(
+    buffer: &mut Vec<u8>,
+    completed_bytes: usize,
+    bytes: &[u8],
+) -> Result<()> {
+    let next = completed_bytes
+        .checked_add(buffer.len())
+        .and_then(|used| used.checked_add(bytes.len()))
+        .ok_or_else(|| {
+            corpus_capacity_error("rendered_material", WIKI_INGEST_RENDERED_BYTES, usize::MAX)
+        })?;
     if next > WIKI_INGEST_RENDERED_BYTES {
-        return Err(corpus_capacity_error("rendered_material", WIKI_INGEST_RENDERED_BYTES, next));
+        return Err(corpus_capacity_error(
+            "rendered_material",
+            WIKI_INGEST_RENDERED_BYTES,
+            next,
+        ));
     }
     buffer.extend_from_slice(bytes);
     Ok(())
 }
 
-fn finish_rendered_shard(buffer: &mut Vec<u8>, completed_bytes: &mut usize, rendered: &mut Vec<String>) -> Result<()> {
-    if buffer.is_empty() { return Ok(()); }
+fn finish_rendered_shard(
+    buffer: &mut Vec<u8>,
+    completed_bytes: &mut usize,
+    rendered: &mut Vec<String>,
+) -> Result<()> {
+    if buffer.is_empty() {
+        return Ok(());
+    }
     append_rendered_fragment(buffer, *completed_bytes, b"\n]")?;
     let bytes = std::mem::take(buffer);
     *completed_bytes = completed_bytes.checked_add(bytes.len()).ok_or_else(|| {
@@ -1993,24 +2273,43 @@ fn render_source_pool(material: &[SourceMaterial]) -> Result<Vec<String>> {
         let mut completed_bytes = 0usize;
         for item in material {
             let mut singleton = BoundedMaterialJson {
-                bytes: Vec::new(), limit: SOURCE_POOL_DISCOVERY_BYTES, refused_lower_bound: None,
+                bytes: Vec::new(),
+                limit: SOURCE_POOL_DISCOVERY_BYTES,
+                refused_lower_bound: None,
             };
-            if let Err(error) = serde_json::to_writer_pretty(&mut singleton, std::slice::from_ref(item)) {
+            if let Err(error) =
+                serde_json::to_writer_pretty(&mut singleton, std::slice::from_ref(item))
+            {
                 let failure = match singleton.refused_lower_bound {
-                    Some(observed) => corpus_capacity_error("source_pool_material", SOURCE_POOL_DISCOVERY_BYTES, observed)
-                        .with("source", item.binding.source.to_string()),
-                    None => AikitError::new("knowledge.ingest_source_pool_unwritable",
-                        format!("SourcePool material could not be rendered: {error}")),
+                    Some(observed) => corpus_capacity_error(
+                        "source_pool_material",
+                        SOURCE_POOL_DISCOVERY_BYTES,
+                        observed,
+                    )
+                    .with("source", item.binding.source.to_string()),
+                    None => AikitError::new(
+                        "knowledge.ingest_source_pool_unwritable",
+                        format!("SourcePool material could not be rendered: {error}"),
+                    ),
                 };
-                return Err(failure.with("serialization_error", error.to_string())
+                return Err(failure
+                    .with("serialization_error", error.to_string())
                     .with_io_source(std::io::Error::other(error)));
             }
             // A nonempty singleton pretty array has exactly '[\n' and '\n]'.
             // Its own Source body and metadata remain serialized by serde.
             let interior = &singleton.bytes[2..singleton.bytes.len() - 2];
-            let next_shard_bytes = shard.len().checked_add(2).and_then(|used| used.checked_add(interior.len()))
-                .and_then(|used| used.checked_add(2)).ok_or_else(|| {
-                    corpus_capacity_error("rendered_material", WIKI_INGEST_RENDERED_BYTES, usize::MAX)
+            let next_shard_bytes = shard
+                .len()
+                .checked_add(2)
+                .and_then(|used| used.checked_add(interior.len()))
+                .and_then(|used| used.checked_add(2))
+                .ok_or_else(|| {
+                    corpus_capacity_error(
+                        "rendered_material",
+                        WIKI_INGEST_RENDERED_BYTES,
+                        usize::MAX,
+                    )
                 })?;
             if !shard.is_empty() && next_shard_bytes > SOURCE_POOL_SHARD_BYTES {
                 finish_rendered_shard(&mut shard, &mut completed_bytes, &mut rendered)?;
@@ -2025,14 +2324,27 @@ fn render_source_pool(material: &[SourceMaterial]) -> Result<Vec<String>> {
         finish_rendered_shard(&mut shard, &mut completed_bytes, &mut rendered)?;
         Ok(rendered)
     })();
-    prepared.map_err(|error| command_failure(error, &[], "AIKit/SourcePool", Path::new("corpus"), "render", "none"))
+    prepared.map_err(|error| {
+        command_failure(
+            error,
+            &[],
+            "AIKit/SourcePool",
+            Path::new("corpus"),
+            "render",
+            "none",
+        )
+    })
 }
 
 /// Recognise only the exact names emitted by the native shard writer. No lossy
 /// decoding or alternate zero padding may grant ownership of a foreign file.
 fn corpus_shard_index(name: &std::ffi::OsStr) -> Option<usize> {
     let name = name.to_str()?;
-    let index = name.strip_prefix("corpus-")?.strip_suffix(".json")?.parse::<usize>().ok()?;
+    let index = name
+        .strip_prefix("corpus-")?
+        .strip_suffix(".json")?
+        .parse::<usize>()
+        .ok()?;
     (name == format!("corpus-{index:03}.json")).then_some(index)
 }
 
@@ -2042,30 +2354,53 @@ fn corpus_shard_index(name: &std::ffi::OsStr) -> Option<usize> {
 /// failure retains its exact acknowledgements, never promises a transaction.
 fn write_source_pool(dir: &Path, rendered: &[String]) -> Result<usize> {
     let mut completed = Vec::new();
-    let io_failure = |path: &Path, phase: &str, error: std::io::Error, effects: &[Value], effect: &str| {
-        command_failure(AikitError::new("knowledge.ingest_source_pool_unwritable",
-            format!("{}: {error}", path.display()))
-            .with("cause_kind", format!("{:?}", error.kind()))
-            .with("cause_raw_os_error", jval!(error.raw_os_error()).to_string()),
-            effects, "AIKit/SourcePool", path, phase, effect)
-    };
+    let io_failure =
+        |path: &Path, phase: &str, error: std::io::Error, effects: &[Value], effect: &str| {
+            command_failure(
+                AikitError::new(
+                    "knowledge.ingest_source_pool_unwritable",
+                    format!("{}: {error}", path.display()),
+                )
+                .with("cause_kind", format!("{:?}", error.kind()))
+                .with(
+                    "cause_raw_os_error",
+                    jval!(error.raw_os_error()).to_string(),
+                ),
+                effects,
+                "AIKit/SourcePool",
+                path,
+                phase,
+                effect,
+            )
+        };
     if !dir.is_dir() {
         std::fs::create_dir_all(dir)
             .map_err(|error| io_failure(dir, "prepare_directory", error, &completed, "unknown"))?;
-        completed.push(jval!({"owner":"AIKit/SourcePool", "action":"prepare_directory",
-            "source_path":dir.display().to_string()}));
+        completed.push(
+            jval!({"owner":"AIKit/SourcePool", "action":"prepare_directory",
+            "source_path":dir.display().to_string()}),
+        );
     }
     let entries = std::fs::read_dir(dir)
         .map_err(|error| io_failure(dir, "inventory", error, &completed, "none"))?;
     let mut previous = BTreeMap::new();
     for entry in entries {
-        let entry = entry.map_err(|error| io_failure(dir, "inventory", error, &completed, "none"))?;
+        let entry =
+            entry.map_err(|error| io_failure(dir, "inventory", error, &completed, "none"))?;
         if let Some(index) = corpus_shard_index(&entry.file_name()) {
             let name = format!("corpus-{index:03}.json");
             let path = entry.path();
             let basis = aikit_adapters::projectcentral::publication::material_basis(&path)
-                .map_err(|error| command_failure(error, &completed, "AIKit/SourcePool",
-                    &path, "read_basis", "none"))?;
+                .map_err(|error| {
+                    command_failure(
+                        error,
+                        &completed,
+                        "AIKit/SourcePool",
+                        &path,
+                        "read_basis",
+                        "none",
+                    )
+                })?;
             previous.insert(name, basis);
         }
     }
@@ -2073,22 +2408,52 @@ fn write_source_pool(dir: &Path, rendered: &[String]) -> Result<usize> {
         let name = format!("corpus-{index:03}.json");
         let path = dir.join(&name);
         let changed = match previous.get(&name) {
-            Some(basis) => aikit_adapters::projectcentral::publication::publish_wiki(&path, text, basis),
-            None => aikit_adapters::projectcentral::publication::publish_absent_material(&path, text),
-        }.map_err(|error| command_failure(error, &completed, "AIKit/SourcePool", &path, "publication", "unknown"))?;
+            Some(basis) => {
+                aikit_adapters::projectcentral::publication::publish_wiki(&path, text, basis)
+            }
+            None => {
+                aikit_adapters::projectcentral::publication::publish_absent_material(&path, text)
+            }
+        }
+        .map_err(|error| {
+            command_failure(
+                error,
+                &completed,
+                "AIKit/SourcePool",
+                &path,
+                "publication",
+                "unknown",
+            )
+        })?;
         if changed {
-            completed.push(jval!({"owner":"AIKit/SourcePool", "action":"publish_material",
+            completed.push(
+                jval!({"owner":"AIKit/SourcePool", "action":"publish_material",
                 "source_path":path.display().to_string(), "base_hash":previous.get(&name),
-                "published_hash":content_hash(text.as_bytes())}));
+                "published_hash":content_hash(text.as_bytes())}),
+            );
         }
     }
     for (name, basis) in previous {
-        if (0..rendered.len()).any(|index| name == format!("corpus-{index:03}.json")) { continue; }
+        if (0..rendered.len()).any(|index| name == format!("corpus-{index:03}.json")) {
+            continue;
+        }
         let path = dir.join(&name);
-        aikit_adapters::projectcentral::publication::remove_material(&path, &basis)
-            .map_err(|error| command_failure(error, &completed, "AIKit/SourcePool", &path, "prune", "unknown"))?;
-        completed.push(jval!({"owner":"AIKit/SourcePool", "action":"remove_stale_material",
-            "source_path":path.display().to_string(), "base_hash":basis}));
+        aikit_adapters::projectcentral::publication::remove_material(&path, &basis).map_err(
+            |error| {
+                command_failure(
+                    error,
+                    &completed,
+                    "AIKit/SourcePool",
+                    &path,
+                    "prune",
+                    "unknown",
+                )
+            },
+        )?;
+        completed.push(
+            jval!({"owner":"AIKit/SourcePool", "action":"remove_stale_material",
+            "source_path":path.display().to_string(), "base_hash":basis}),
+        );
     }
     Ok(rendered.len())
 }
@@ -2352,37 +2717,56 @@ fn mutate_file_receipt<F>(path: &Path, mutate: F) -> Result<WikiFileReceipt>
 where
     F: FnOnce(&mut WikiDocument, &mut WikiMutationLedger) -> Result<()>,
 {
-    let before_publication = |error, phase| {
-        command_failure(error, &[], "AIKit/Wiki", path, phase, "none")
-    };
+    let before_publication =
+        |error, phase| command_failure(error, &[], "AIKit/Wiki", path, phase, "none");
     let input = read(path).map_err(|error| before_publication(error, "read"))?;
     let physical_path = std::fs::canonicalize(path).map_err(|error| {
-        before_publication(AikitError::new("knowledge.wiki_file_unreadable", error.to_string())
-            .with("path", path.display().to_string()), "resolve_source")
+        before_publication(
+            AikitError::new("knowledge.wiki_file_unreadable", error.to_string())
+                .with("path", path.display().to_string()),
+            "resolve_source",
+        )
     })?;
     let base_hash = content_hash(input.as_bytes());
-    let (rendered, outcome) = apply_wiki_mutation(&input, mutate)
-        .map_err(|error| before_publication(error, "plan"))?;
-    let changed = aikit_adapters::projectcentral::publication::publish_wiki(path, &rendered, &base_hash)
-        .map_err(|error| command_failure(error, &[], "AIKit/Wiki", path, "publication", "unknown"))?;
-    let publication = changed.then(|| jval!({
-        "owner": "AIKit/Wiki", "action": "publish_wiki",
-        "source_path": physical_path.display().to_string(),
-        "base_hash": base_hash, "published_hash": content_hash(rendered.as_bytes()),
-        "touched": &outcome.touched,
-    }));
-    Ok(WikiFileReceipt { outcome, publication })
+    let (rendered, outcome) =
+        apply_wiki_mutation(&input, mutate).map_err(|error| before_publication(error, "plan"))?;
+    let changed =
+        aikit_adapters::projectcentral::publication::publish_wiki(path, &rendered, &base_hash)
+            .map_err(|error| {
+                command_failure(error, &[], "AIKit/Wiki", path, "publication", "unknown")
+            })?;
+    let publication = changed.then(|| {
+        jval!({
+            "owner": "AIKit/Wiki", "action": "publish_wiki",
+            "source_path": physical_path.display().to_string(),
+            "base_hash": base_hash, "published_hash": content_hash(rendered.as_bytes()),
+            "touched": &outcome.touched,
+        })
+    });
+    Ok(WikiFileReceipt {
+        outcome,
+        publication,
+    })
 }
 
 /// Preserve the native cause verbatim while describing this invocation's
 /// phases. JSON-valued details remain strings in the public schema-1 envelope.
 fn command_failure(
-    error: AikitError, completed: &[Value], owner: &str, path: &Path,
-    phase: &str, failed_effect: &str,
+    error: AikitError,
+    completed: &[Value],
+    owner: &str,
+    path: &Path,
+    phase: &str,
+    failed_effect: &str,
 ) -> AikitError {
-    let original = error.details().get("original_error").cloned().unwrap_or_else(|| {
-        jval!({"code":error.code(), "message":error.message(), "details":error.details()}).to_string()
-    });
+    let original = error
+        .details()
+        .get("original_error")
+        .cloned()
+        .unwrap_or_else(|| {
+            jval!({"code":error.code(), "message":error.message(), "details":error.details()})
+                .to_string()
+        });
     let mut all_completed = completed.to_vec();
     if let Some(previous) = error.details().get("completed_effects") {
         if let Ok(effects) = serde_json::from_str::<Vec<Value>>(previous) {
@@ -2390,17 +2774,33 @@ fn command_failure(
         }
     }
     let uncertain = failed_effect != "none"
-        || error.details().get("published").is_some_and(|value| value == "true")
-        || error.details().get("outcome").is_some_and(|value| value == "unknown");
-    let effect = if uncertain { "unknown" } else if all_completed.is_empty() { "none" } else { "present" };
+        || error
+            .details()
+            .get("published")
+            .is_some_and(|value| value == "true")
+        || error
+            .details()
+            .get("outcome")
+            .is_some_and(|value| value == "unknown");
+    let effect = if uncertain {
+        "unknown"
+    } else if all_completed.is_empty() {
+        "none"
+    } else {
+        "present"
+    };
     let failure = jval!({"owner":owner, "source_path":path.display().to_string(),
         "phase":phase, "effect":failed_effect});
-    let error = error.with("original_error", original)
+    let error = error
+        .with("original_error", original)
         .with("command_effect", effect)
         .with("completed_effects", jval!(all_completed).to_string())
         .with("failed_effect", failure.to_string());
-    if effect == "none" { error } else {
-        error.with("outcome", if uncertain { "unknown" } else { "partial" })
+    if effect == "none" {
+        error
+    } else {
+        error
+            .with("outcome", if uncertain { "unknown" } else { "partial" })
             .with("automatic_retry", "false")
     }
 }
@@ -2416,11 +2816,21 @@ fn extend_command_failure(error: AikitError, completed: &[Value]) -> AikitError 
     }
     let child_effect = error.details().get("command_effect").map(String::as_str);
     let known = matches!(child_effect, Some("none") | Some("present"));
-    let effect = if !known { "unknown" } else if child_effect == Some("none") && all_completed.is_empty() { "none" } else { "present" };
-    let error = error.with("command_effect", effect)
+    let effect = if !known {
+        "unknown"
+    } else if child_effect == Some("none") && all_completed.is_empty() {
+        "none"
+    } else {
+        "present"
+    };
+    let error = error
+        .with("command_effect", effect)
         .with("completed_effects", jval!(all_completed).to_string());
-    if effect == "none" { error } else {
-        error.with("outcome", if known { "partial" } else { "unknown" })
+    if effect == "none" {
+        error
+    } else {
+        error
+            .with("outcome", if known { "partial" } else { "unknown" })
             .with("automatic_retry", "false")
     }
 }
@@ -2433,7 +2843,10 @@ fn read(path: &Path) -> Result<String> {
         )
         .with("path", path.display().to_string())
         .with("cause_kind", format!("{:?}", error.kind()))
-        .with("cause_raw_os_error", jval!(error.raw_os_error()).to_string())
+        .with(
+            "cause_raw_os_error",
+            jval!(error.raw_os_error()).to_string(),
+        )
     })
 }
 
@@ -2551,8 +2964,17 @@ struct WikiMaintenanceRequest {
 /// leaves the file exactly as a peer left it.
 fn maintenance(cwd: &Path, args: &WikiMaintenanceArgs) -> Result<WikiOutcome> {
     maintenance_command(cwd, args).map_err(|error| {
-        if error.details().contains_key("command_effect") { error } else {
-            command_failure(error, &[], "AIKit/Wiki", &cwd.join(PROJECTCENTRAL_WIKI_SOURCE), "prepare", "none")
+        if error.details().contains_key("command_effect") {
+            error
+        } else {
+            command_failure(
+                error,
+                &[],
+                "AIKit/Wiki",
+                &cwd.join(PROJECTCENTRAL_WIKI_SOURCE),
+                "prepare",
+                "none",
+            )
         }
     })
 }
@@ -2591,10 +3013,22 @@ fn maintenance_command(cwd: &Path, args: &WikiMaintenanceArgs) -> Result<WikiOut
         human_source_proposals: request.human_source_proposals,
     })?;
     let source_path = binding.project_root().join(PROJECTCENTRAL_WIKI_SOURCE);
-    let changed = binding.persist_agent_wiki(&plan, &base_hash).map_err(|error| {
-        let absent = error.details().get("command_effect").is_some_and(|value| value == "none");
-        command_failure(error, &[], "AIKit/Wiki", &source_path, "publication", if absent { "none" } else { "unknown" })
-    })?;
+    let changed = binding
+        .persist_agent_wiki(&plan, &base_hash)
+        .map_err(|error| {
+            let absent = error
+                .details()
+                .get("command_effect")
+                .is_some_and(|value| value == "none");
+            command_failure(
+                error,
+                &[],
+                "AIKit/Wiki",
+                &source_path,
+                "publication",
+                if absent { "none" } else { "unknown" },
+            )
+        })?;
     let completed = maintenance_completed(&binding, &plan, &base_hash, changed);
     let persisted = maintenance_readback(&binding, &plan, &completed)?;
     let stale_resources = plan
@@ -2602,9 +3036,17 @@ fn maintenance_command(cwd: &Path, args: &WikiMaintenanceArgs) -> Result<WikiOut
         .iter()
         .map(|resource| resource.to_string())
         .collect::<Vec<_>>();
-    let human_source_proposals = serde_json::to_value(&plan.human_source_proposals)
-        .map_err(|error| command_failure(AikitError::new("knowledge.wiki_write_failed", error.to_string()),
-            &completed, "AIKit/Wiki", &source_path, "return", "none"))?;
+    let human_source_proposals =
+        serde_json::to_value(&plan.human_source_proposals).map_err(|error| {
+            command_failure(
+                AikitError::new("knowledge.wiki_write_failed", error.to_string()),
+                &completed,
+                "AIKit/Wiki",
+                &source_path,
+                "return",
+                "none",
+            )
+        })?;
     Ok(WikiOutcome {
         data: jval!({
             "state": "maintained",
@@ -2621,38 +3063,56 @@ fn maintenance_command(cwd: &Path, args: &WikiMaintenanceArgs) -> Result<WikiOut
 }
 
 fn maintenance_completed(
-    binding: &ProjectCentralFilesystemBinding, plan: &AgentWikiMaintenancePlan, base_hash: &str, changed: bool,
+    binding: &ProjectCentralFilesystemBinding,
+    plan: &AgentWikiMaintenancePlan,
+    base_hash: &str,
+    changed: bool,
 ) -> Vec<Value> {
-    if changed { vec![jval!({
-        "owner":"AIKit/Wiki", "action":"publish_wiki",
-        "source_path":binding.project_root().join(PROJECTCENTRAL_WIKI_SOURCE).display().to_string(),
-        "source_ref":PROJECTCENTRAL_WIKI_SOURCE, "base_hash":base_hash,
-        "plan_index_revision":plan.current_index_revision,
-    })] } else { vec![] }
+    if changed {
+        vec![jval!({
+            "owner":"AIKit/Wiki", "action":"publish_wiki",
+            "source_path":binding.project_root().join(PROJECTCENTRAL_WIKI_SOURCE).display().to_string(),
+            "source_ref":PROJECTCENTRAL_WIKI_SOURCE, "base_hash":base_hash,
+            "plan_index_revision":plan.current_index_revision,
+        })]
+    } else {
+        vec![]
+    }
 }
 
 fn maintenance_readback(
-    binding: &ProjectCentralFilesystemBinding, plan: &AgentWikiMaintenancePlan, completed: &[Value],
+    binding: &ProjectCentralFilesystemBinding,
+    plan: &AgentWikiMaintenancePlan,
+    completed: &[Value],
 ) -> Result<Vec<WikiObject>> {
     let path = binding.project_root().join(PROJECTCENTRAL_WIKI_SOURCE);
-    let lost_readback = |error| command_failure(error, completed, "AIKit/Wiki", &path, "readback", "none");
+    let lost_readback =
+        |error| command_failure(error, completed, "AIKit/Wiki", &path, "readback", "none");
     let persisted = binding.load_project_wiki().map_err(lost_readback)?;
     // Container order is not object identity. Compare complete objects by
     // native ref while keeping every inner ordered value and extension exact.
-    let persisted_by_ref = persisted.iter()
-        .map(|object| (object.ref_id(), object)).collect::<BTreeMap<_, _>>();
-    let planned_by_ref = plan.next_objects.iter()
-        .map(|object| (object.ref_id(), object)).collect::<BTreeMap<_, _>>();
+    let persisted_by_ref = persisted
+        .iter()
+        .map(|object| (object.ref_id(), object))
+        .collect::<BTreeMap<_, _>>();
+    let planned_by_ref = plan
+        .next_objects
+        .iter()
+        .map(|object| (object.ref_id(), object))
+        .collect::<BTreeMap<_, _>>();
     if persisted.len() != plan.next_objects.len()
         || persisted_by_ref.len() != persisted.len()
         || planned_by_ref.len() != plan.next_objects.len()
         || persisted_by_ref != planned_by_ref
     {
-        return Err(lost_readback(AikitError::new(
-            "knowledge.wiki_concurrent_write",
-            "readback after persist does not match the committed plan; a peer write landed in \
+        return Err(lost_readback(
+            AikitError::new(
+                "knowledge.wiki_concurrent_write",
+                "readback after persist does not match the committed plan; a peer write landed in \
              the window between the write and the readback — re-read and reconcile",
-        ).with("wiki", PROJECTCENTRAL_WIKI_SOURCE)));
+            )
+            .with("wiki", PROJECTCENTRAL_WIKI_SOURCE),
+        ));
     }
     Ok(persisted)
 }
@@ -2814,15 +3274,21 @@ mod concurrency_tests {
         let leftovers: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_name() != "wiki.json"
-                && entry.file_name() != ".wiki.json.publication.lock")
+            .filter(|entry| {
+                entry.file_name() != "wiki.json"
+                    && entry.file_name() != ".wiki.json.publication.lock"
+            })
             .collect();
         assert!(
             leftovers.is_empty(),
             "a refused write must not leave a temp file behind: {leftovers:?}"
         );
-        assert!(fs::metadata(dir.path().join(".wiki.json.publication.lock")).unwrap().is_file(),
-            "the shared lock inode persists across publications and process restarts");
+        assert!(
+            fs::metadata(dir.path().join(".wiki.json.publication.lock"))
+                .unwrap()
+                .is_file(),
+            "the shared lock inode persists across publications and process restarts"
+        );
     }
 
     /// A rewrite that lands byte-identical content is not a peer's change —
@@ -2908,8 +3374,10 @@ mod maintenance_tests {
     fn fixture() -> (TempDir, PathBuf) {
         let temporary = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
         fs::create_dir_all(&temporary).unwrap();
-        let temp = tempfile::Builder::new().prefix("native-wiki-maintenance-")
-            .tempdir_in(&temporary).unwrap();
+        let temp = tempfile::Builder::new()
+            .prefix("native-wiki-maintenance-")
+            .tempdir_in(&temporary)
+            .unwrap();
         let project = temp.path().join("Work/demo");
         write(&project.join("ProjectCentral/project.json"), MANIFEST);
         write(
@@ -2922,8 +3390,10 @@ mod maintenance_tests {
     fn request_file(upserts_json: &str) -> (TempDir, PathBuf) {
         let temporary = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
         fs::create_dir_all(&temporary).unwrap();
-        let dir = tempfile::Builder::new().prefix("native-wiki-maintenance-request-")
-            .tempdir_in(&temporary).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("native-wiki-maintenance-request-")
+            .tempdir_in(&temporary)
+            .unwrap();
         let path = dir.path().join("request.json");
         write(&path, &format!(r#"{{"upserts":[{upserts_json}]}}"#));
         (dir, path)
@@ -2934,29 +3404,49 @@ mod maintenance_tests {
         let (_temp, project) = fixture();
         let binding = ProjectCentralFilesystemBinding::inspect(&project, None).unwrap();
         let (current_objects, basis) = binding.load_project_wiki_for_maintenance().unwrap();
-        let upsert = WikiObject::parse(&serde_json::from_str(&revision_two_upsert("Acknowledged owner plan")).unwrap()).unwrap();
+        let upsert = WikiObject::parse(
+            &serde_json::from_str(&revision_two_upsert("Acknowledged owner plan")).unwrap(),
+        )
+        .unwrap();
         let plan = plan_agent_wiki_maintenance(AgentWikiMaintenanceRequest {
-            current_objects, upserts: vec![upsert], observed_source_revisions: binding.observed_source_revisions(),
+            current_objects,
+            upserts: vec![upsert],
+            observed_source_revisions: binding.observed_source_revisions(),
             human_source_proposals: vec![],
-        }).unwrap();
+        })
+        .unwrap();
         let changed = binding.persist_agent_wiki(&plan, &basis).unwrap();
         assert!(changed);
         let completed = maintenance_completed(&binding, &plan, &basis, changed);
         let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
-        let peer = WikiObject::parse(&serde_json::from_str(&revision_two_upsert("Actual later peer")
-            .replace("\"revision\":2", "\"revision\":3")).unwrap()).unwrap();
+        let peer = WikiObject::parse(
+            &serde_json::from_str(
+                &revision_two_upsert("Actual later peer")
+                    .replace("\"revision\":2", "\"revision\":3"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         mutate_file(&path, |doc, ledger| {
             ledger.record(doc.update_object(peer)?);
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         let failure = maintenance_readback(&binding, &plan, &completed).unwrap_err();
         assert_eq!(failure.code(), "knowledge.wiki_concurrent_write");
         assert_eq!(failure.details()["command_effect"], "present");
         assert_eq!(failure.details()["outcome"], "partial");
-        let retained: Value = serde_json::from_str(&failure.details()["completed_effects"]).unwrap();
+        let retained: Value =
+            serde_json::from_str(&failure.details()["completed_effects"]).unwrap();
         assert_eq!(retained, jval!(completed));
         let index = SemanticWikiIndex::rebuild(binding.load_project_wiki().unwrap()).unwrap();
-        assert_eq!(index.node(&ResourceRef::parse("wiki:node:purpose").unwrap()).unwrap().revision, 3);
+        assert_eq!(
+            index
+                .node(&ResourceRef::parse("wiki:node:purpose").unwrap())
+                .unwrap()
+                .revision,
+            3
+        );
     }
 
     #[test]
@@ -2965,9 +3455,12 @@ mod maintenance_tests {
         let binding = ProjectCentralFilesystemBinding::inspect(&project, None).unwrap();
         let (current_objects, basis) = binding.load_project_wiki_for_maintenance().unwrap();
         let plan = plan_agent_wiki_maintenance(AgentWikiMaintenanceRequest {
-            current_objects, upserts: vec![], observed_source_revisions: binding.observed_source_revisions(),
+            current_objects,
+            upserts: vec![],
+            observed_source_revisions: binding.observed_source_revisions(),
             human_source_proposals: vec![],
-        }).unwrap();
+        })
+        .unwrap();
         let changed = binding.persist_agent_wiki(&plan, &basis).unwrap();
         assert!(!changed);
         let completed = maintenance_completed(&binding, &plan, &basis, changed);
@@ -3017,7 +3510,8 @@ mod maintenance_tests {
         let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
         let mut original: Value = serde_json::from_str(&wiki_document()).unwrap();
         original["owner_header"] = jval!({"retained": true});
-        original["objects"][1]["owner_extension"] = jval!({"ordered": ["first", "second"], "retained": true});
+        original["objects"][1]["owner_extension"] =
+            jval!({"ordered": ["first", "second"], "retained": true});
         write(&path, &serde_json::to_string(&original).unwrap());
         let before = fs::read(&path).unwrap();
         let before_metadata = fs::metadata(&path).unwrap();
@@ -3027,7 +3521,10 @@ mod maintenance_tests {
         assert_eq!(outcome.data["changed"], false);
         assert_eq!(fs::read(&path).unwrap(), before);
         let after_metadata = fs::metadata(&path).unwrap();
-        assert_eq!(after_metadata.modified().unwrap(), before_metadata.modified().unwrap());
+        assert_eq!(
+            after_metadata.modified().unwrap(),
+            before_metadata.modified().unwrap()
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -3038,8 +3535,13 @@ mod maintenance_tests {
         let persisted = binding_objects(&path);
         assert_eq!(persisted[0].ref_id().as_str(), "wiki:space:project");
         let index = SemanticWikiIndex::rebuild(persisted).unwrap();
-        let node = index.node(&ResourceRef::parse("wiki:node:purpose").unwrap()).unwrap();
-        assert_eq!(node.extensions["owner_extension"]["ordered"], jval!(["first", "second"]));
+        let node = index
+            .node(&ResourceRef::parse("wiki:node:purpose").unwrap())
+            .unwrap();
+        assert_eq!(
+            node.extensions["owner_extension"]["ordered"],
+            jval!(["first", "second"])
+        );
     }
 
     #[test]
@@ -3048,9 +3550,12 @@ mod maintenance_tests {
         let binding = ProjectCentralFilesystemBinding::inspect(&project, None).unwrap();
         let (current_objects, basis) = binding.load_project_wiki_for_maintenance().unwrap();
         let plan = plan_agent_wiki_maintenance(AgentWikiMaintenanceRequest {
-            current_objects, upserts: vec![], observed_source_revisions: binding.observed_source_revisions(),
+            current_objects,
+            upserts: vec![],
+            observed_source_revisions: binding.observed_source_revisions(),
             human_source_proposals: vec![],
-        }).unwrap();
+        })
+        .unwrap();
         let changed = binding.persist_agent_wiki(&plan, &basis).unwrap();
         assert!(!changed);
         let completed = maintenance_completed(&binding, &plan, &basis, changed);
@@ -3070,22 +3575,32 @@ mod maintenance_tests {
             let (_temp, project) = fixture();
             let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
             let mut original: Value = serde_json::from_str(&wiki_document()).unwrap();
-            original["objects"][1]["owner_extension"] = jval!({"ordered": ["first", "second"], "retained": true});
+            original["objects"][1]["owner_extension"] =
+                jval!({"ordered": ["first", "second"], "retained": true});
             write(&path, &serde_json::to_string(&original).unwrap());
             let binding = ProjectCentralFilesystemBinding::inspect(&project, None).unwrap();
             let (current_objects, basis) = binding.load_project_wiki_for_maintenance().unwrap();
             let plan = plan_agent_wiki_maintenance(AgentWikiMaintenanceRequest {
-                current_objects, upserts: vec![], observed_source_revisions: binding.observed_source_revisions(),
+                current_objects,
+                upserts: vec![],
+                observed_source_revisions: binding.observed_source_revisions(),
                 human_source_proposals: vec![],
-            }).unwrap();
+            })
+            .unwrap();
             let changed = binding.persist_agent_wiki(&plan, &basis).unwrap();
             assert!(!changed);
             let completed = maintenance_completed(&binding, &plan, &basis, changed);
-            let mut peer: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            let mut peer: Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
             match alteration {
-                "inner-order" => peer["objects"][1]["owner_extension"]["ordered"].as_array_mut().unwrap().reverse(),
+                "inner-order" => peer["objects"][1]["owner_extension"]["ordered"]
+                    .as_array_mut()
+                    .unwrap()
+                    .reverse(),
                 "extension" => peer["objects"][1]["owner_extension"]["retained"] = jval!(false),
-                "missing" => { peer["objects"].as_array_mut().unwrap().remove(1); }
+                "missing" => {
+                    peer["objects"].as_array_mut().unwrap().remove(1);
+                }
                 "duplicate" => {
                     let node = peer["objects"][1].clone();
                     peer["objects"][0] = node;
@@ -3095,12 +3610,24 @@ mod maintenance_tests {
             let actual_peer = serde_json::to_string(&peer).unwrap();
             write(&path, &actual_peer);
             let failure = maintenance_readback(&binding, &plan, &completed).unwrap_err();
-            assert_eq!(failure.code(), "knowledge.wiki_concurrent_write", "{alteration}");
+            assert_eq!(
+                failure.code(),
+                "knowledge.wiki_concurrent_write",
+                "{alteration}"
+            );
             assert_eq!(failure.details()["command_effect"], "none", "{alteration}");
             assert_eq!(failure.details()["completed_effects"], "[]", "{alteration}");
-            let original_error: Value = serde_json::from_str(&failure.details()["original_error"]).unwrap();
-            assert_eq!(original_error["code"], "knowledge.wiki_concurrent_write", "{alteration}");
-            assert_eq!(read(&path).unwrap(), actual_peer, "readback does not undo the actual peer's {alteration}");
+            let original_error: Value =
+                serde_json::from_str(&failure.details()["original_error"]).unwrap();
+            assert_eq!(
+                original_error["code"], "knowledge.wiki_concurrent_write",
+                "{alteration}"
+            );
+            assert_eq!(
+                read(&path).unwrap(),
+                actual_peer,
+                "readback does not undo the actual peer's {alteration}"
+            );
         }
     }
 
@@ -3146,29 +3673,44 @@ mod maintenance_tests {
     #[test]
     fn material_rendering_keeps_exact_pretty_array_and_metadata_escape_boundaries() {
         let input = vec![("actual-source.md".to_owned(), "---\nsource_id: actual-render-source\ntitle_full: Actual rendering source\n---\n\n# Actual source\n".to_owned())];
-        let mut material = aikit_core::knowledge_ingest::ingest_corpus(&[], &input, 0).unwrap().material;
-        material[0].binding.metadata.insert("actual_escaped_metadata".into(), jval!("\u{0}\t\n\"\\"));
+        let mut material = aikit_core::knowledge_ingest::ingest_corpus(&[], &input, 0)
+            .unwrap()
+            .material;
+        material[0]
+            .binding
+            .metadata
+            .insert("actual_escaped_metadata".into(), jval!("\u{0}\t\n\"\\"));
         let complete = serde_json::to_string_pretty(&material).unwrap();
         let rendered = render_source_pool(&material).unwrap();
         assert_eq!(rendered, vec![complete]);
         let decoded: Vec<SourceMaterial> = serde_json::from_str(&rendered[0]).unwrap();
-        assert_eq!(serde_json::to_value(decoded).unwrap(), serde_json::to_value(&material).unwrap());
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            serde_json::to_value(&material).unwrap()
+        );
 
         material[0].body.clear();
-        material[0].binding.revision = aikit_core::SourceRevision::parse(corpus_content_revision(b"")).unwrap();
+        material[0].binding.revision =
+            aikit_core::SourceRevision::parse(corpus_content_revision(b"")).unwrap();
         let overhead = serde_json::to_string_pretty(&material).unwrap().len();
         material[0].body = "x".repeat(SOURCE_POOL_DISCOVERY_BYTES - overhead);
-        material[0].binding.revision = aikit_core::SourceRevision::parse(corpus_content_revision(material[0].body.as_bytes())).unwrap();
+        material[0].binding.revision =
+            aikit_core::SourceRevision::parse(corpus_content_revision(material[0].body.as_bytes()))
+                .unwrap();
         let boundary = render_source_pool(&material).unwrap();
         assert_eq!(boundary[0].len(), SOURCE_POOL_DISCOVERY_BYTES);
-        assert_eq!(serde_json::to_string_pretty(&material).unwrap(), boundary[0]);
+        assert_eq!(
+            serde_json::to_string_pretty(&material).unwrap(),
+            boundary[0]
+        );
         material[0].body.push('x');
-        material[0].binding.revision = aikit_core::SourceRevision::parse(corpus_content_revision(material[0].body.as_bytes())).unwrap();
+        material[0].binding.revision =
+            aikit_core::SourceRevision::parse(corpus_content_revision(material[0].body.as_bytes()))
+                .unwrap();
         let error = render_source_pool(&material).unwrap_err();
         assert_eq!(error.code(), "knowledge.ingest_corpus_capacity");
         assert_eq!(error.details()["dimension"], "source_pool_material");
         assert_eq!(error.details()["command_effect"], "none");
         assert!(error.details().contains_key("serialization_error"));
     }
-
 }

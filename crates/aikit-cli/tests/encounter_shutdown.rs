@@ -305,17 +305,14 @@ impl Drop for IdleFixture {
     }
 }
 fn idle_fixture() -> IdleFixture {
-    let product = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
-    let scratch = product.join("ProjectCentral/now/tmp");
-    fs::create_dir_all(&scratch).unwrap();
+    // The owner binds a Unix socket inside this scratch; a Unix socket path
+    // must fit SUN_LEN (104 bytes on macOS), and a worktree checkout's
+    // ProjectCentral/now/tmp already spends most of that. The platform
+    // tempdir keeps every socket name representable.
     IdleFixture(Some(
         tempfile::Builder::new()
             .prefix("native-idle-ipc-")
-            .tempdir_in(scratch)
+            .tempdir()
             .unwrap(),
     ))
 }

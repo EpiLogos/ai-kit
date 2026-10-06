@@ -9,10 +9,27 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::Mutex};
 
 /// Answers `central.world.effective-sources` per invoked world_ref.
+/// One effective source, in the shape the native World binding parser reads.
+fn identity_source(world_ref: &str, state: &str) -> Value {
+    json!({
+        "ref": "central:source:control:root:Control/user/identity",
+        "state": state,
+        "effective_revision": "1",
+        "effective_source_world": world_ref,
+        "authority": "controlled-test-fixture-not-personal-adoption",
+        "source_treatment": "canonical",
+        "effective_treatment": "canonical",
+        "propagation_path": [world_ref],
+        "provenance": []
+    })
+}
+
 struct WorldRunner {
     answers: BTreeMap<String, Value>,
     fail_on: BTreeMap<String, ()>,
     unreadable_on: BTreeMap<String, String>,
+    /// Projects whose world facet reads present, with the ref the facet names.
+    present_projects: BTreeMap<String, String>,
     seen: Mutex<Vec<Vec<String>>>,
 }
 
@@ -22,8 +39,17 @@ impl WorldRunner {
             answers: BTreeMap::from([(world_ref.to_owned(), sources)]),
             fail_on: BTreeMap::new(),
             unreadable_on: BTreeMap::new(),
+            present_projects: BTreeMap::new(),
             seen: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The Project's own world declaration exists (its manifest is written),
+    /// so the facet probe reads present and the world read hits this ref.
+    fn with_project_world_present(mut self, project: &str, world_ref: &str) -> Self {
+        self.present_projects
+            .insert(project.to_owned(), world_ref.to_owned());
+        self
     }
 
     /// The world has no authored record at all — Central's `missing World`.
@@ -43,10 +69,41 @@ impl WorldRunner {
 impl CommandRunner for WorldRunner {
     fn run(&self, argv: &[String]) -> aikit_core::Result<Output> {
         self.seen.lock().unwrap().push(argv.to_vec());
-        let world_ref: String = argv
+        let run_position = argv.iter().position(|argument| argument == "run");
+        let action = run_position
+            .and_then(|position| argv.get(position + 1))
+            .cloned()
+            .unwrap_or_default();
+        let input: Value = argv
             .last()
             .and_then(|input| serde_json::from_str::<Value>(input).ok())
-            .and_then(|input| input["world_ref"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| Value::Null);
+        if action == "central.world.here" {
+            // The facet probe: a fixture Work member without its manifest
+            // reads manifest-absent and inherits the root lineage; a project
+            // configured present reads through its own world.
+            let project = input["project"].as_str().unwrap_or_default();
+            let project_world = if let Some(world_ref) = self.present_projects.get(project) {
+                json!({"name": project, "state": "present", "ref": world_ref})
+            } else {
+                json!({"name": project, "state": "absent",
+                       "absence_kind": "projectcentral-manifest-absent",
+                       "work_member_present": true})
+            };
+            return Ok(Output {
+                status: 0,
+                stdout: json!({
+                    "ok": true,
+                    "data": {"schema": "central.world-here/v1",
+                             "project_world": project_world}
+                })
+                .to_string(),
+                stderr: String::new(),
+            });
+        }
+        let world_ref: String = input["world_ref"]
+            .as_str()
+            .map(str::to_owned)
             .unwrap_or_default();
         Ok(Output {
             status: 0,
@@ -71,6 +128,18 @@ impl CommandRunner for WorldRunner {
             },
             stderr: String::new(),
         })
+    }
+
+    /// The World probe transports through the bounded-capture seam; a
+    /// scripted runner answers the same bytes either way.
+    fn run_with_limits(
+        &self,
+        argv: &[String],
+        _remaining_timeout: std::time::Duration,
+        _remaining_aggregate_bytes: usize,
+        _strict_utf8: bool,
+    ) -> aikit_core::Result<Output> {
+        self.run(argv)
     }
 }
 
@@ -139,9 +208,7 @@ fn disclosure_names_the_participants_present_in_a_project_context() {
     // The project declares no world: the root lineage applies by convention.
     let runner = WorldRunner::with_answer(
         "control:root",
-        json!([{"ref": "central:source:control:root:Control/user/identity",
-                "state": "available", "effective_revision": "1",
-                "propagation_path": ["control:root"]}]),
+        json!([identity_source("control:root", "available")]),
     )
     .failing_on("project:Alpha");
     let disclosure =
@@ -201,10 +268,9 @@ fn an_excluded_identity_source_withholds_the_nara_from_the_disclosure() {
     fs::create_dir_all(&project).unwrap();
     let runner = WorldRunner::with_answer(
         "project:Sealed",
-        json!([{"ref": "central:source:control:root:Control/user/identity",
-                "state": "excluded", "effective_revision": "1",
-                "propagation_path": ["project:Sealed", "control:root"]}]),
-    );
+        json!([identity_source("project:Sealed", "excluded")]),
+    )
+    .with_project_world_present("Sealed", "project:Sealed");
     let disclosure = entity_disclosure_in(&runner, Some(&root), Some(&project)).expect("fail-open");
     let disclosure = disclosure.expect("other participants remain");
     assert!(
@@ -248,21 +314,31 @@ fn an_unreadable_world_declaration_withholds_and_never_reads_root_lineage() {
     fs::create_dir_all(&project).unwrap();
     let runner = WorldRunner::with_answer(
         "control:root",
-        json!([{"ref": "central:source:control:root:Control/user/identity",
-                "state": "available", "effective_revision": "1",
-                "propagation_path": ["control:root"]}]),
+        json!([identity_source("control:root", "available")]),
     )
+    .with_project_world_present("Corrupt", "project:Corrupt")
     .unreadable_on("project:Corrupt", "world relation record is malformed");
     let error = entity_disclosure_in(&runner, Some(&root), Some(&project))
         .expect_err("malformed policy must not disclose uncontextualised participants");
     assert!(error.contains("participant context withheld"), "{error}");
     let seen = runner.seen.lock().unwrap();
+    assert!(
+        seen.iter().all(|argv| {
+            !argv
+                .iter()
+                .any(|argument| argument.contains("control:root"))
+        }),
+        "an unreadable project declaration must never read root lineage: {seen:?}"
+    );
     assert_eq!(
         seen.len(),
-        1,
+        2,
         "unreadable policy must never try root fallback"
     );
-    let request: Value = serde_json::from_str(seen[0].last().unwrap()).unwrap();
+    // The facet probe names the project; the world read names its ref.
+    let facet: Value = serde_json::from_str(seen[0].last().unwrap()).unwrap();
+    assert_eq!(facet["project"], "Corrupt");
+    let request: Value = serde_json::from_str(seen[1].last().unwrap()).unwrap();
     assert_eq!(request["world_ref"], "project:Corrupt");
     assert!(!error.contains("central:pasu:nara:local"), "{error}");
     assert!(!error.contains("central:pasu:agent:agent:x"), "{error}");
@@ -302,7 +378,13 @@ fn agents_disclose_when_no_human_identity_is_established() {
     .unwrap();
     let project = root.join("Work/Alpha");
     fs::create_dir_all(&project).unwrap();
-    let runner = WorldRunner::with_answer("control:root", json!([])).failing_on("project:Alpha");
+    // The project declares no world; the root lineage — with a named source
+    // — is what carries a Project-scoped disclosure.
+    let runner = WorldRunner::with_answer(
+        "control:root",
+        json!([identity_source("control:root", "available")]),
+    )
+    .failing_on("project:Alpha");
 
     let disclosure = entity_disclosure_in(&runner, Some(&root), Some(&project))
         .expect("fail-open")
