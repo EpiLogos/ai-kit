@@ -80,6 +80,7 @@ pub mod project_recency;
 pub mod projection_drift;
 pub mod projects;
 pub mod recognised_praxis;
+pub mod redis_service;
 pub mod refocus;
 pub mod route_launch;
 pub mod routine_cli;

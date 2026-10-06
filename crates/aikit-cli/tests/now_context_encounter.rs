@@ -70,7 +70,9 @@ fn prepared(
         dependency_revisions: BTreeMap::new(),
         disclosure_revision: "disclosure-1".into(),
         factory_revision: Some("factory-r1".into()),
-        decision_provider: None,
+        // The view was selected by an elected decision provider: the delivery
+        // receipt must say so, from the view's own basis.
+        decision_provider: Some("blake3:kev-provider-identity-proof".into()),
         change_cursor: 0,
     };
     PreparedNowContext {
@@ -97,7 +99,7 @@ fn prepared(
         factory: None,
         knowledge_frames: vec![],
         continuation: Some("continue from the exact prepared version".into()),
-        jev_invocation_ref: None,
+        jev_invocation_ref: Some(ResourceRef::parse("activity/decision/kev-proof").unwrap()),
         prepared_at_unix_ms: 1,
     }
 }
@@ -307,6 +309,50 @@ fn redis_prepared_now_is_delivered_before_turn_and_verifier_context_is_isolated(
     assert_eq!(receipt.prepared_version, 1);
     assert_eq!(receipt.change_cursor, 1);
     assert_eq!(store.ack_cursor(&session, None).unwrap(), 1);
+    // The delivery receipt names the decision provider and invocation behind
+    // the delivered view's selection.
+    assert_eq!(
+        receipt.decision_provider.as_deref(),
+        Some("blake3:kev-provider-identity-proof")
+    );
+    assert_eq!(
+        receipt.jev_invocation_ref.as_ref().map(|r| r.as_str()),
+        Some("activity/decision/kev-proof")
+    );
+    // And the same fact is observable through the encounter view itself: the
+    // prepared-context version actually delivered to this session's turn.
+    let observed = loop {
+        let view = service
+            .apply(EncounterRequest::View {
+                agent_session: session.clone(),
+                before: None,
+            })
+            .unwrap();
+        if let Some(entry) = view["now_context_receipts"]
+            .as_array()
+            .and_then(|all| all.iter().find(|e| e["kind"] == "now-context-delivered"))
+        {
+            break entry.clone();
+        }
+        assert!(
+            Instant::now() < deadline + Duration::from_secs(5),
+            "no now-context-delivered receipt in the encounter view: {view}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(observed["receipt"]["prepared_version"], 1);
+    assert_eq!(
+        observed["receipt"]["prepared_digest"],
+        receipt.prepared_digest
+    );
+    assert_eq!(
+        observed["receipt"]["decision_provider"],
+        "blake3:kev-provider-identity-proof"
+    );
+    assert_eq!(
+        observed["receipt"]["jev_invocation_ref"],
+        "activity/decision/kev-proof"
+    );
 
     store.revoke(&session, "disclosure-1", None).unwrap();
     let before = service

@@ -251,12 +251,12 @@ struct Provisioned {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProcessRecord {
-    pid: u32,
+pub(crate) struct ProcessRecord {
+    pub(crate) pid: u32,
     /// `ps -o lstart=` at spawn: a reused pid cannot reproduce it.
-    started_at: String,
-    argv: Vec<String>,
-    started_unix_ms: u64,
+    pub(crate) started_at: String,
+    pub(crate) argv: Vec<String>,
+    pub(crate) started_unix_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -328,21 +328,21 @@ impl Layout {
     }
 }
 
-fn io_fail(what: &str, path: &Path, error: impl std::fmt::Display) -> AikitError {
+pub(crate) fn io_fail(what: &str, path: &Path, error: impl std::fmt::Display) -> AikitError {
     fail(
         "decision_service.io",
         format!("{what} {}: {error}", path.display()),
     )
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|e| io_fail("create", parent, e))?;
     #[cfg(unix)]
@@ -431,7 +431,7 @@ fn check_port(port: u16) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, PartialEq, Eq)]
-enum Standing {
+pub(crate) enum Standing {
     /// The recorded process is alive and is the process we started.
     Ours,
     /// The recorded process is gone (or a zombie).
@@ -440,7 +440,7 @@ enum Standing {
     Reused,
 }
 
-fn ps_field(pid: u32, field: &str) -> Option<String> {
+pub(crate) fn ps_field(pid: u32, field: &str) -> Option<String> {
     let output = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", field])
         .stdin(Stdio::null())
@@ -454,6 +454,15 @@ fn ps_field(pid: u32, field: &str) -> Option<String> {
 }
 
 fn standing(record: &ProcessRecord, recipe: &ServiceRecipe, port: u16) -> Standing {
+    process_standing(
+        record,
+        &[recipe.serve_module.clone(), format!("--port {port}")],
+    )
+}
+
+/// Ownership of a recorded process: alive, same start time, and a command
+/// line carrying every needle. Shared by every AIKit-owned local service.
+pub(crate) fn process_standing(record: &ProcessRecord, needles: &[String]) -> Standing {
     // A zombie (we spawned it in this process and it has exited) is gone.
     match ps_field(record.pid, "stat=") {
         None => return Standing::Gone,
@@ -463,8 +472,7 @@ fn standing(record: &ProcessRecord, recipe: &ServiceRecipe, port: u16) -> Standi
     let started = ps_field(record.pid, "lstart=");
     let args = ps_field(record.pid, "args=").unwrap_or_default();
     let same_start = started.as_deref() == Some(record.started_at.as_str());
-    let same_command =
-        args.contains(&recipe.serve_module) && args.contains(&format!("--port {port}"));
+    let same_command = needles.iter().all(|needle| args.contains(needle.as_str()));
     if same_start && same_command {
         Standing::Ours
     } else {
@@ -472,7 +480,7 @@ fn standing(record: &ProcessRecord, recipe: &ServiceRecipe, port: u16) -> Standi
     }
 }
 
-fn signal(pid: u32, name: &str) -> bool {
+pub(crate) fn signal(pid: u32, name: &str) -> bool {
     Command::new("kill")
         .args([name, &pid.to_string()])
         .stdin(Stdio::null())
@@ -483,7 +491,11 @@ fn signal(pid: u32, name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn wait_until(deadline: Instant, interval: Duration, mut done: impl FnMut() -> bool) -> bool {
+pub(crate) fn wait_until(
+    deadline: Instant,
+    interval: Duration,
+    mut done: impl FnMut() -> bool,
+) -> bool {
     loop {
         if done() {
             return true;
@@ -495,7 +507,7 @@ fn wait_until(deadline: Instant, interval: Duration, mut done: impl FnMut() -> b
     }
 }
 
-fn log_tail(path: &Path, lines: usize) -> String {
+pub(crate) fn log_tail(path: &Path, lines: usize) -> String {
     let Ok(text) = std::fs::read_to_string(path) else {
         return String::new();
     };
@@ -604,7 +616,7 @@ fn warm(config: &DecisionProviderConfig, recipe: &ServiceRecipe, curl: &Path) ->
 // Provisioning.
 // ---------------------------------------------------------------------------
 
-fn sha256_file(path: &Path) -> Result<(String, u64)> {
+pub(crate) fn sha256_file(path: &Path) -> Result<(String, u64)> {
     let mut file = std::fs::File::open(path).map_err(|e| io_fail("open", path, e))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 1 << 20];

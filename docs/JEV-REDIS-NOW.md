@@ -50,6 +50,63 @@ aikit --json now-context revoke \
 automatic preparation path; a worker is not required to remember a planning
 tool call.
 
+## Local Redis without Workcell: `aikit now-context service`
+
+AIKit connected to Redis but never started it; the process, reference
+configuration and health came from Workcell's declared services. An
+installation without Workcell now has the lifecycle from AIKit, on the same
+core as `aikit decide service` (recorded process identity, identity-checked
+stop, foreign-listener refusal, rollback on upgrade). No verb discovers, runs
+or requires `workcell` or `factory`.
+
+```sh
+aikit now-context service provision [--port 6381] [--maxmemory-mb 256] [--redis-server ABS]
+aikit now-context service start | status | stop | restart
+aikit now-context service upgrade --redis-server ABS
+```
+
+- `provision` checks `redis-server --version` (reference series ≥ 8.10), hashes
+  the executable, and generates `redis.conf` (loopback, `appendonly yes`,
+  `appendfsync everysec`, finite `maxmemory`, `maxmemory-policy noeviction`) and
+  the `aikit.redis-now-config/v1` election `redis-now.json` in
+  `<AIKIT_HOME>/services/redis-now`.
+- `start` is ready only when PING answers **and** the live `INFO` reading
+  conforms to the profile (AOF on, finite maxmemory, noeviction, ≥ 8.10); a
+  non-conforming Redis is a named failure, not a success. A Redis this service
+  did not start on the same port is reported `foreign-listener`, never adopted.
+- `stop` sends TERM (Redis flushes its append-only file) and keeps the data;
+  `restart` and `upgrade` reuse the same data directory. `upgrade` refuses an
+  older-series executable before touching the running service, and returns to the
+  previous executable if the new one does not come up conforming.
+- Nothing flushes or deletes data.
+
+### Prepared context on provider rows, and what a turn actually received
+
+A configured provider row carries `now_context` only if something sets it.
+`aikit-session-space encounter-now-context-configure --provider-id ID
+--redis-config redis-now.json [--prepare-request REQ] [--required]` sets (or with
+`--withdraw` removes) that one field on any stored row (Pi, Prime, other),
+validates the preparation request against the Redis election at configuration,
+and reports what it elects (`selection.mode`: `none`, `all`, `jev`, `provider`).
+A request with `selection.mode = provider` and the `decision-provider.json`
+written by `aikit decide service` makes the local Kev rank the candidates before
+the first turn.
+
+Observability: each turn that carried prepared context appends a
+`now-context-delivered` journal event whose receipt records the prepared
+version, digest, basis digest and change cursor, **and** the decision-provider
+identity digest and decision invocation behind the view's selection (read from
+the delivered view's own basis). The encounter view returns the latest of these
+as `now_context_receipts` beside `prepared_context_receipts`, including
+`now-context-degraded` and the two `…-uncertain` kinds. A turn that carried none
+therefore shows none.
+
+Provider selection only offers Kev candidates whose `external_egress` is
+`allowed` and `agent_visibility` is `payload` (the Jev rule), even when the
+elected provider is a local loopback one. Central-read sources default to
+egress `denied`, so they are withheld from a local Kev as well; relaxing that
+for a `local-protocol` standing is a law change for the owner, not made here.
+
 ## Redis material configuration
 
 ```json
@@ -279,8 +336,7 @@ aikit decide service upgrade   [--recipe-file R] [--force]
   was running, when the new cut cannot be provisioned or does not come up
   healthy; the receipt says whether the rollback held.
 - The service process does not inherit `WORKCELL_*` variables.
-- Redis has the same gap and is not yet covered by this lifecycle: its process,
-  configuration and health still come from Workcell's declared services.
+- Redis has its own verbs on the same lifecycle core (below).
 
 ### Meaning, disclosure and evaluation
 

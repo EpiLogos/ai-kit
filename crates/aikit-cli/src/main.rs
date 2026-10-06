@@ -1287,6 +1287,14 @@ fn cmd_now_context(cwd: &std::path::Path, command: NowContextCmd) -> Result<Repl
         NowContextSub::PublishIntelligence(args) => {
             aikit_cli::contemplation_intel::now_publish_intelligence(*args)?
         }
+        NowContextSub::Service(service) => match service.command {
+            NowServiceSub::Provision(args) => aikit_cli::redis_service::service_provision(args)?,
+            NowServiceSub::Start(args) => aikit_cli::redis_service::service_start(args)?,
+            NowServiceSub::Status(args) => aikit_cli::redis_service::service_status(args)?,
+            NowServiceSub::Stop(args) => aikit_cli::redis_service::service_stop(args)?,
+            NowServiceSub::Restart(args) => aikit_cli::redis_service::service_restart(args)?,
+            NowServiceSub::Upgrade(args) => aikit_cli::redis_service::service_upgrade(args)?,
+        },
     };
     data_reply(data)
 }

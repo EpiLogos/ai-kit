@@ -122,7 +122,7 @@ pub use locks::{ContextLock, LockOptions};
 pub use now_context::{
     CursorChange, NowContextBasis, NowContextChange, NowContextItem, NowDeliveryReceipt,
     NowNeighbour, PreparedNowContext, RedisNowConfig, RedisNowStatus, RedisNowStore,
-    NOW_DELIVERY_SCHEMA, NOW_PREPARED_SCHEMA, NOW_REDIS_CONFIG_SCHEMA,
+    RedisProfileReading, NOW_DELIVERY_SCHEMA, NOW_PREPARED_SCHEMA, NOW_REDIS_CONFIG_SCHEMA,
 };
 pub use procedure::{plan_procedure, EditDiff, ProcedureDiff, ProcedureOutcome, ProcedureRunner};
 pub use procedure_history::procedure_history_evidence;

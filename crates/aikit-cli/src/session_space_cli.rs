@@ -174,6 +174,34 @@ enum Command {
         #[command(flatten)]
         args: Box<EpiPrimeConfigureArgs>,
     },
+    /// Set or withdraw the Redis-prepared NOW context of one configured
+    /// provider row (Pi, Prime, any other). Edits only that field of the
+    /// stored registration; validates the preparation request against the
+    /// Redis election now, and reports what the request elects.
+    EncounterNowContextConfigure {
+        #[arg(long)]
+        provider_id: String,
+        /// `aikit.redis-now-config/v1` file (for example the one written by
+        /// `aikit now-context service provision`).
+        #[arg(long, conflicts_with = "withdraw")]
+        redis_config: Option<PathBuf>,
+        /// Owner-authored `aikit.now-preparation-request/v1` prepared before
+        /// the first turn (for example one electing Kev with
+        /// `selection.mode = provider`).
+        #[arg(long, requires = "redis_config")]
+        prepare_request: Option<PathBuf>,
+        /// Refuse turns when no prepared view can be delivered (default:
+        /// record a degradation and proceed).
+        #[arg(long, requires = "redis_config")]
+        required: bool,
+        /// The provider is a hosted/external model (default for NOW delivery).
+        /// Pass --local-provider only for a model that never leaves the machine.
+        #[arg(long, requires = "redis_config")]
+        local_provider: bool,
+        /// Remove the NOW context from the provider.
+        #[arg(long)]
+        withdraw: bool,
+    },
     /// Derive (dry-run) the encounter provider a harness profile's connection
     /// facts produce. Prints the provider JSON and exits; no state changes.
     EncounterDerive {
@@ -453,6 +481,83 @@ fn run(cli: Cli) -> Result<()> {
                 parse_json_arg(&provider_json)?,
             )?;
             emit(&serde_json::json!({"configured":true}))
+        }
+        Command::EncounterNowContextConfigure {
+            provider_id,
+            redis_config,
+            prepare_request,
+            required,
+            local_provider,
+            withdraw,
+        } => {
+            let (now, described) = match (withdraw, redis_config) {
+                (true, _) | (false, None) => {
+                    if !withdraw {
+                        return Err(AikitError::new(
+                            "encounter.now_context_configuration",
+                            "give --redis-config to select prepared context, or --withdraw to remove it",
+                        ));
+                    }
+                    (None, serde_json::Value::Null)
+                }
+                (false, Some(path)) => {
+                    let redis: aikit_store::RedisNowConfig =
+                        serde_json::from_slice(&std::fs::read(&path).map_err(|e| {
+                            AikitError::new(
+                                "encounter.now_context_configuration",
+                                format!("read {}: {e}", path.display()),
+                            )
+                        })?)
+                        .map_err(|e| {
+                            AikitError::new(
+                                "encounter.now_context_configuration",
+                                format!("{}: {e}", path.display()),
+                            )
+                        })?;
+                    redis.validate()?;
+                    let external_provider = !local_provider;
+                    let prepare_request = prepare_request
+                        .map(|p| {
+                            std::fs::canonicalize(&p).map_err(|e| {
+                                AikitError::new(
+                                    "encounter.now_context_configuration",
+                                    format!("{}: {e}", p.display()),
+                                )
+                            })
+                        })
+                        .transpose()?;
+                    let described = match &prepare_request {
+                        Some(request) => crate::jev_now::describe_encounter_prepare_request(
+                            request,
+                            &redis,
+                            external_provider,
+                        )?,
+                        None => serde_json::json!({"selection": {"mode": "none"},
+                            "note": "no preparation request: only an already-published prepared view can be delivered"}),
+                    };
+                    (
+                        Some(crate::encounter_service::EncounterNowContextConfig {
+                            redis,
+                            prepare_request,
+                            required,
+                            external_provider,
+                        }),
+                        described,
+                    )
+                }
+            };
+            let provider = crate::encounter_service::EncounterService::configure_now_context(
+                service.home(),
+                &provider_id,
+                now,
+            )?;
+            emit(&serde_json::json!({
+                "configured": provider.now_context.is_some(),
+                "provider": provider.id,
+                "now_context": provider.now_context,
+                "preparation": described,
+                "standing": "configuration only; nothing was prepared or delivered",
+            }))
         }
         Command::EncounterDeconfigure { provider_id } => {
             crate::encounter_service::EncounterService::deconfigure(service.home(), &provider_id)?;

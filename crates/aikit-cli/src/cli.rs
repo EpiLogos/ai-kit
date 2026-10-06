@@ -1074,6 +1074,14 @@ fn now_context_route(command: &NowContextCmd) -> &'static str {
         NowContextSub::Contemplate(_) => "cmd_now_contemplate",
         NowContextSub::TestSelection(_) => "cmd_now_test_selection",
         NowContextSub::PublishIntelligence(_) => "cmd_now_publish_intelligence",
+        NowContextSub::Service(c) => match &c.command {
+            NowServiceSub::Provision(_) => "cmd_now_service_provision",
+            NowServiceSub::Start(_) => "cmd_now_service_start",
+            NowServiceSub::Status(_) => "cmd_now_service_status",
+            NowServiceSub::Stop(_) => "cmd_now_service_stop",
+            NowServiceSub::Restart(_) => "cmd_now_service_restart",
+            NowServiceSub::Upgrade(_) => "cmd_now_service_upgrade",
+        },
     }
 }
 
@@ -1749,6 +1757,107 @@ pub enum NowContextSub {
     /// into the participant's prepared view through the existing CAS publish
     /// path, and append one replayable change per published item.
     PublishIntelligence(Box<NowPublishIntelligenceArgs>),
+    /// Provision, start, inspect, stop, restart and upgrade the local Redis
+    /// NOW service through AIKit's own lifecycle — no Workcell involved.
+    Service(NowServiceCmd),
+}
+
+#[derive(Debug, Args)]
+pub struct NowServiceCmd {
+    #[command(subcommand)]
+    pub command: NowServiceSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NowServiceSub {
+    /// Verify a `redis-server` against the reference series, generate the
+    /// reference-profile configuration (loopback, AOF, finite maxmemory,
+    /// noeviction) and the `aikit.redis-now-config/v1` election.
+    Provision(NowServiceProvisionArgs),
+    /// Start the provisioned Redis (or adopt this service's own live process);
+    /// ready means PING answers and the live profile conforms.
+    Start(NowServiceStartArgs),
+    /// Report process identity and the live profile reading. A listener this
+    /// service did not start is reported as foreign, never adopted.
+    Status(NowServiceStatusArgs),
+    /// Stop this service's own process (identity-checked TERM, then KILL). Data
+    /// is kept.
+    Stop(NowServiceStopArgs),
+    /// Stop then start over the same data directory.
+    Restart(NowServiceRestartArgs),
+    /// Move to another `redis-server` executable over the same data; return to
+    /// the previous one if the new one does not come up conforming.
+    Upgrade(NowServiceUpgradeArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct NowServiceCommon {
+    /// Service directory. Default: `<AIKIT_HOME>/services/redis-now`.
+    #[arg(long = "service-dir", value_name = "DIR")]
+    pub service_dir: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct NowServiceProvisionArgs {
+    #[command(flatten)]
+    pub common: NowServiceCommon,
+    /// Loopback port Redis will bind.
+    #[arg(long, default_value_t = 6381)]
+    pub port: u16,
+    /// Finite memory bound in MiB (the reference profile forbids unbounded).
+    #[arg(long = "maxmemory-mb", default_value_t = 256)]
+    pub maxmemory_mb: u64,
+    /// Key prefix written into the `aikit.redis-now-config/v1` election.
+    #[arg(long = "key-prefix", default_value = "aikit-now")]
+    pub key_prefix: String,
+    /// Absolute path of the `redis-server` to use; default: first on PATH.
+    #[arg(long = "redis-server", value_name = "PATH")]
+    pub redis_server: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct NowServiceStartArgs {
+    #[command(flatten)]
+    pub common: NowServiceCommon,
+    #[arg(long = "ready-timeout-secs", default_value_t = 30)]
+    pub ready_timeout_secs: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct NowServiceStatusArgs {
+    #[command(flatten)]
+    pub common: NowServiceCommon,
+}
+
+#[derive(Debug, Args)]
+pub struct NowServiceStopArgs {
+    #[command(flatten)]
+    pub common: NowServiceCommon,
+    #[arg(long = "grace-secs", default_value_t = 15)]
+    pub grace_secs: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct NowServiceRestartArgs {
+    #[command(flatten)]
+    pub common: NowServiceCommon,
+    #[arg(long = "grace-secs", default_value_t = 15)]
+    pub grace_secs: u64,
+    #[arg(long = "ready-timeout-secs", default_value_t = 30)]
+    pub ready_timeout_secs: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct NowServiceUpgradeArgs {
+    #[command(flatten)]
+    pub common: NowServiceCommon,
+    /// The `redis-server` to move to (absolute path).
+    #[arg(long = "redis-server", value_name = "PATH")]
+    pub redis_server: std::path::PathBuf,
+    #[arg(long = "grace-secs", default_value_t = 15)]
+    pub grace_secs: u64,
+    #[arg(long = "ready-timeout-secs", default_value_t = 30)]
+    pub ready_timeout_secs: u64,
 }
 
 #[derive(Debug, Args)]
