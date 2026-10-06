@@ -1,4 +1,0 @@
-pid = 60617
-host = "localhost"
-purpose = "initialize SQLite index"
-since = "2026-10-06T01:05:29.601051Z"
