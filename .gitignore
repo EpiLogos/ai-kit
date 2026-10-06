@@ -15,3 +15,7 @@
 
 # Per-checkout scratch (native owner test material, session residue).
 /ProjectCentral/now/tmp/
+
+# Lane-decoupled build target and seat env
+/target-seat/
+.env-seat
