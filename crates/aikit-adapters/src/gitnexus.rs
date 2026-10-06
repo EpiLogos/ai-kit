@@ -400,17 +400,22 @@ impl<R: CommandRunner> CodeIndexProvider for GitNexusCodeIndexProvider<R> {
                 .root
                 .as_ref()
                 .map(|root| {
-                    let drift = version
+                    let drift_note = if version
                         .as_deref()
-                        .is_some_and(|value| value != GITNEXUS_TESTED_VERSION);
+                        .is_some_and(|value| value != GITNEXUS_TESTED_VERSION)
+                    {
+                        format!(
+                            "; version drift: installed {version:?}, tested {GITNEXUS_TESTED_VERSION} — \
+                             run the real suites and move the pin deliberately"
+                        )
+                    } else {
+                        String::new()
+                    };
                     format!(
                         "repo={} root={}{}{}",
                         self.repo_name,
                         root.display(),
-                        drift.then(|| format!(
-                            "; version drift: installed {version:?}, tested {GITNEXUS_TESTED_VERSION} — \
-                             run the real suites and move the pin deliberately"
-                        )).unwrap_or_default(),
+                        drift_note,
                         self.index_observation
                             .as_ref()
                             .map(|note| format!("; {note}"))
