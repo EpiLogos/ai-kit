@@ -122,7 +122,7 @@ jobs:
         run: cargo test --locked -p aikit-adapters --test bkmr_real -- --nocapture --test-threads=1
 
   gitnexus-real:
-    name: Real GitNexus 1.6.12 ProjectMap conformance
+    name: Real GitNexus 1.6.9 ProjectMap conformance
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -144,7 +144,7 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in 1 2 3; do
-            if npm install --global 'gitnexus@1.6.12'; then
+            if npm install --global 'gitnexus@1.6.9'; then
               exit 0
             fi
             if [ "$attempt" -eq 3 ]; then
