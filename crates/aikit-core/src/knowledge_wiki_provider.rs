@@ -190,6 +190,7 @@ impl<'a> SemanticWikiProvider<'a> {
             content: Some(content),
             evidence: self.index.sources(resource),
             why_selected: "selected from the canonical project SemanticWiki".into(),
+            span: None,
         })
     }
 

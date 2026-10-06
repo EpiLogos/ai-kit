@@ -21,6 +21,25 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+// The worker and owner census consume the same native selection relation.
+const OWNER_CONVERSATION_WORK_SQL: &str = "SELECT r.request, r.participant,
+                   CASE
+                     WHEN r.dispatch IN ('unsent','held') THEN 'dispatch'
+                     WHEN r.route IS NULL AND r.inclusion IN ('pending','failed','conflict') AND d.phase='returned' THEN 'incorporate'
+                     WHEN r.route IS NOT NULL AND r.dispatch='sent' AND r.inclusion IN ('pending','failed','conflict')
+                          AND json_extract(r.remote,'$.delivery.phase')='returned' THEN 'incorporate'
+                     WHEN r.route IS NOT NULL AND r.dispatch='sent' AND r.inclusion IN ('pending','failed','conflict')
+                          AND (r.remote IS NULL OR json_extract(r.remote,'$.delivery.phase') NOT IN ('returned','failed','cancelled','reconciled-no-replay')) THEN 'poll'
+                   END AS work
+                 FROM conversation_recipients r
+                 LEFT JOIN encounter_deliveries d ON d.session=r.session AND d.delivery=r.delivery AND r.route IS NULL
+                 ORDER BY r.rowid";
+
+// The worker and owner census consume the same native selection relation.
+const OWNER_CONVERSATION_QUEUED_SQL: &str = "SELECT DISTINCT d.session FROM encounter_deliveries d
+                 JOIN conversation_recipients r ON r.session=d.session AND r.delivery=d.delivery AND r.route IS NULL
+                 WHERE d.phase='queued' AND r.dispatch='sent' AND r.inclusion NOT IN ('included','refused') ORDER BY d.session";
+
 /// A reply is retained whole up to this bound; beyond it the reading discloses
 /// the continuation instead of truncating silently.
 pub const REPLY_LIMIT_BYTES: usize = 512 * 1024;
@@ -376,16 +395,31 @@ impl EncounterStore {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failure)?;
-        let held: Option<String> = tx
+        let held: Option<(String, String)> = tx
             .query_row(
-                "SELECT digest FROM conversation_requests WHERE request=?1",
+                "SELECT digest,body FROM conversation_requests WHERE request=?1",
                 [request.as_str()],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()
             .map_err(failure)?;
+        // Optional document basis participates in this existing transaction,
+        // separately from the unchanged legacy digest. Concurrent replays may
+        // not add, drop or substitute a pin under the same request identity.
+        if let Some((_, retained)) = &held {
+            let retained: Value = serde_json::from_str(retained).map_err(failure)?;
+            let retained_pin = retained
+                .pointer("/flow/document_id")
+                .filter(|value| !value.is_null());
+            let requested_pin = body
+                .pointer("/flow/document_id")
+                .filter(|value| !value.is_null());
+            if retained_pin != requested_pin {
+                return Err(AikitError::new("conversation.request_conflict", "This request identity is bound to a different document basis; no effect performed"));
+            }
+        }
         let fresh = match held {
-            Some(existing) if existing != digest => {
+            Some((existing, _)) if existing != digest => {
                 return Err(AikitError::new(
                     "conversation.request_conflict",
                     "This request identity is already bound to a different entry, target or basis; no effect performed",
@@ -565,20 +599,7 @@ impl EncounterStore {
     pub fn conversation_work(&self, limit: usize) -> Result<Vec<ConversationWork>> {
         let connection = self.connection.lock().map_err(failure)?;
         let mut query = connection
-            .prepare(
-                "SELECT r.request, r.participant,
-                   CASE
-                     WHEN r.dispatch IN ('unsent','held') THEN 'dispatch'
-                     WHEN r.route IS NULL AND r.inclusion IN ('pending','failed','conflict') AND d.phase='returned' THEN 'incorporate'
-                     WHEN r.route IS NOT NULL AND r.dispatch='sent' AND r.inclusion IN ('pending','failed','conflict')
-                          AND json_extract(r.remote,'$.delivery.phase')='returned' THEN 'incorporate'
-                     WHEN r.route IS NOT NULL AND r.dispatch='sent' AND r.inclusion IN ('pending','failed','conflict')
-                          AND (r.remote IS NULL OR json_extract(r.remote,'$.delivery.phase') NOT IN ('returned','failed','cancelled','reconciled-no-replay')) THEN 'poll'
-                   END AS work
-                 FROM conversation_recipients r
-                 LEFT JOIN encounter_deliveries d ON d.session=r.session AND d.delivery=r.delivery AND r.route IS NULL
-                 ORDER BY r.rowid",
-            )
+            .prepare(OWNER_CONVERSATION_WORK_SQL)
             .map_err(failure)?;
         let rows = query
             .query_map([], |row| {
@@ -614,6 +635,47 @@ impl EncounterStore {
             .map(Ok)
             .collect()
     }
+    /// Metadata only: current durable work remains in this journal across an
+    /// idle owner replacement. These counts do not create native occupancy or
+    /// claim that an uncertain delivery succeeded or may be replayed.
+    pub fn owner_work_standing(&self) -> Result<Value> {
+        let connection = self.connection.lock().map_err(failure)?;
+        let selectable: u64 = connection
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM ({OWNER_CONVERSATION_WORK_SQL}) WHERE work IS NOT NULL"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(failure)?;
+        let queued: u64 = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM ({OWNER_CONVERSATION_QUEUED_SQL})"),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(failure)?;
+        let (nonterminal, uncertain, unknown): (u64, u64, u64) = connection.query_row(
+            "SELECT COUNT(CASE WHEN phase IN ('dispatching','submitted','uncertain','queued') THEN 1 END),
+                    COUNT(CASE WHEN phase IN ('uncertain','reconciled-no-replay') THEN 1 END),
+                    COUNT(CASE WHEN phase NOT IN ('dispatching','submitted','uncertain','queued','returned','failed','cancelled','reconciled-no-replay') THEN 1 END)
+             FROM encounter_deliveries",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).map_err(failure)?;
+        if unknown != 0 {
+            return Err(AikitError::new("encounter.owner_census_invalid",
+                "The native delivery journal contains unrecognised standing; owner idleness is unknown"));
+        }
+        Ok(json!({
+            "worker_selectable_recipients":selectable,
+            "queued_conversation_sessions":queued,
+            "nonterminal_delivery_rows":nonterminal,
+            "uncertain_delivery_rows":uncertain,
+            "replacement_policy":"retained-for-successor; no implicit replay or native session continuity"
+        }))
+    }
+
     /// The conversation recipient a local delivery belongs to, if it belongs to
     /// one: the request and participant it was made for.
     pub fn conversation_recipient_for_delivery(
@@ -640,11 +702,7 @@ impl EncounterStore {
     pub fn conversation_queued_sessions(&self) -> Result<Vec<ResourceRef>> {
         let connection = self.connection.lock().map_err(failure)?;
         let mut query = connection
-            .prepare(
-                "SELECT DISTINCT d.session FROM encounter_deliveries d
-                 JOIN conversation_recipients r ON r.session=d.session AND r.delivery=d.delivery AND r.route IS NULL
-                 WHERE d.phase='queued' AND r.dispatch='sent' AND r.inclusion NOT IN ('included','refused') ORDER BY d.session",
-            )
+            .prepare(OWNER_CONVERSATION_QUEUED_SQL)
             .map_err(failure)?;
         let rows = query
             .query_map([], |r| r.get::<_, String>(0))
@@ -1270,5 +1328,146 @@ mod tests {
         assert_eq!(reading.recipients[0].dispatch, "refused");
         assert_eq!(reading.recipients[0].inclusion, "refused");
         assert!(store.conversation_work(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn document_pin_replay_is_atomic_and_survives_actual_store_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(root.path());
+        let request = r("conversation/document-pin-restart");
+        let recipients = [recipient(
+            "p-ada",
+            "agent-session/ada",
+            "delivery/document-pin",
+        )];
+        let body = json!({"flow":{"location":{"ref":"x"},"document_id":"5c347cc8-4926-42cf-919c-1e892681c6a8"}});
+        {
+            let store = EncounterStore::open(&home).unwrap();
+            assert!(
+                store
+                    .create_conversation(&request, "unchanged-legacy-digest", &body, &recipients)
+                    .unwrap()
+                    .0
+            );
+        }
+        let store = EncounterStore::open(&home).unwrap();
+        let retained = store.conversation(&request).unwrap().unwrap();
+        assert_eq!(retained.body, body);
+        assert!(
+            !store
+                .create_conversation(&request, "unchanged-legacy-digest", &body, &recipients)
+                .unwrap()
+                .0
+        );
+        for document_id in [Value::Null, json!("b3243d85-2e4b-43fa-9a23-69ad507d3487")] {
+            let mut changed = body.clone();
+            changed["flow"]["document_id"] = document_id;
+            let refused = store
+                .create_conversation(&request, "unchanged-legacy-digest", &changed, &recipients)
+                .unwrap_err();
+            assert_eq!(refused.code(), "conversation.request_conflict");
+            assert_eq!(store.conversation(&request).unwrap().unwrap().body, body);
+        }
+        let legacy = json!({"flow":{"location":{"ref":"legacy"}}});
+        let legacy_ref = r("conversation/legacy-document-pin");
+        assert!(
+            store
+                .create_conversation(&legacy_ref, "legacy-digest", &legacy, &recipients)
+                .unwrap()
+                .0
+        );
+        let mut added = legacy.clone();
+        added["flow"]["document_id"] = body["flow"]["document_id"].clone();
+        assert_eq!(
+            store
+                .create_conversation(&legacy_ref, "legacy-digest", &added, &recipients)
+                .unwrap_err()
+                .code(),
+            "conversation.request_conflict"
+        );
+        let mut null = legacy.clone();
+        null["flow"]["document_id"] = Value::Null;
+        assert!(
+            !store
+                .create_conversation(&legacy_ref, "legacy-digest", &null, &recipients)
+                .unwrap()
+                .0
+        );
+        assert_eq!(
+            store.conversation(&legacy_ref).unwrap().unwrap().body,
+            legacy
+        );
+    }
+
+    #[test]
+    fn concurrent_store_connections_cannot_swap_optional_pin_under_one_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(root.path());
+        drop(EncounterStore::open(&home).unwrap());
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let mut starters = Vec::new();
+        let mut handles = Vec::new();
+        for pin in [
+            "5c347cc8-4926-42cf-919c-1e892681c6a8",
+            "b3243d85-2e4b-43fa-9a23-69ad507d3487",
+        ] {
+            let path = root.path().to_path_buf();
+            let ready = ready_tx.clone();
+            let (start_tx, start_rx) = std::sync::mpsc::channel();
+            starters.push(start_tx);
+            handles.push(std::thread::spawn(move || {
+                let store = EncounterStore::open(&AikitHome::at(&path)).unwrap();
+                ready.send(()).unwrap();
+                start_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+                let body = json!({"flow":{"location":{"ref":"x"},"document_id":pin}});
+                let recipients = [recipient(
+                    "p-ada",
+                    "agent-session/ada",
+                    "delivery/document-pin-concurrent",
+                )];
+                (
+                    pin,
+                    store.create_conversation(
+                        &r("conversation/document-pin-concurrent"),
+                        "same-legacy-digest",
+                        &body,
+                        &recipients,
+                    ),
+                )
+            }));
+        }
+        for _ in 0..2 {
+            ready_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+        }
+        for start in starters {
+            start.send(()).unwrap();
+        }
+        let mut winner = None;
+        let mut refused = 0;
+        for handle in handles {
+            let (pin, result) = handle.join().unwrap();
+            match result {
+                Ok((fresh, _)) => {
+                    assert!(fresh);
+                    assert!(winner.replace(pin).is_none());
+                }
+                Err(error) => {
+                    assert_eq!(error.code(), "conversation.request_conflict");
+                    refused += 1;
+                }
+            }
+        }
+        assert_eq!(refused, 1);
+        let store = EncounterStore::open(&home).unwrap();
+        let reading = store
+            .conversation(&r("conversation/document-pin-concurrent"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(reading.body["flow"]["document_id"].as_str(), winner);
+        assert_eq!(reading.recipients.len(), 1);
     }
 }

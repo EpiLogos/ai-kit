@@ -37,6 +37,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: rustup component add rustfmt clippy
       - uses: Swatinem/rust-cache@v2
+      # The workspace suite now includes real-ripgrep source pools
+      # (now_field/work_repos): the suite requires the real binary, the same
+      # law the v2-crate job has always honoured.
+      - name: Ensure real ripgrep for the workspace suite
+        shell: bash
+        run: |
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y ripgrep
+          fi
+          rg --version
       - name: Exact source
         run: mkdir -p direct-agent-evidence && git rev-parse HEAD > direct-agent-evidence/source-revision.txt
       - name: Full regression suite

@@ -1226,13 +1226,9 @@ mod tests {
         let report = diagnose(&facts);
         let finding = report.findings.iter().find(|f| f.id == "disk.low").unwrap();
         assert_eq!(finding.severity, Severity::Warn);
-        let floor = format!(
-            "{} MiB",
-            crate::gateway_upgrade_system::install_min_free_kib() / 1024
-        );
         assert!(
-            finding.what.contains(&floor),
-            "the install floor ({floor}) is named: {}",
+            finding.what.contains("3072 MiB"),
+            "the install floor is named: {}",
             finding.what
         );
         facts.disk = Some(DiskFacts {

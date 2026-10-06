@@ -268,6 +268,8 @@ impl<R: CommandRunner> RipgrepSearcher<R> {
             return Ok(Vec::new());
         }
         let argv = request.count_argv(&self.executable);
+        #[allow(unused_imports)]
+        use std::io::Write as _;
         let output = match request.timeout {
             Some(budget) => self.runner.run_with_timeout(&argv, budget)?,
             None => self.runner.run(&argv)?,
@@ -282,6 +284,14 @@ impl<R: CommandRunner> RipgrepSearcher<R> {
         let mut counts = Vec::new();
         for line in output.stdout.lines() {
             let Some((path, count)) = line.split_once('\0') else {
+                // rg names paths only when it walks a scope; over a single
+                // file root it prints the bare count, and that count is that
+                // file's.
+                if request.roots.len() == 1 {
+                    if let Ok(count) = line.trim().parse::<u64>() {
+                        counts.push((request.roots[0].clone(), count));
+                    }
+                }
                 continue;
             };
             if let Ok(count) = count.trim().parse::<u64>() {

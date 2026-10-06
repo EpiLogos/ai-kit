@@ -604,7 +604,13 @@ where
     let mut ledger = WikiMutationLedger::default();
     mutate(&mut document, &mut ledger)?;
     document.validate()?;
-    Ok((document.render()?, ledger.finish()))
+    let outcome = ledger.finish();
+    let rendered = if outcome.changed {
+        document.render()?
+    } else {
+        input.to_string()
+    };
+    Ok((rendered, outcome))
 }
 
 /// The audit record of a multi-step mutation.
@@ -1083,6 +1089,16 @@ mod tests {
 
     fn root_ref() -> ResourceRef {
         ResourceRef::parse(ROOT).unwrap()
+    }
+
+    #[test]
+    fn unchanged_mutation_preserves_exact_source_bytes_and_unknown_header() {
+        let mut document: serde_json::Value = serde_json::from_str(&self_contained_text()).unwrap();
+        document["retained_owner_field"] = serde_json::json!({"meaning":"kept"});
+        let source = format!("  {}\n\n", serde_json::to_string(&document).unwrap());
+        let (rendered, outcome) = apply_wiki_mutation(&source, |_doc, _ledger| Ok(())).unwrap();
+        assert!(!outcome.changed);
+        assert_eq!(rendered, source);
     }
 
     #[test]

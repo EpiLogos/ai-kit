@@ -85,11 +85,41 @@ fn stub_ctrl(world: &Path) -> PathBuf {
     write(
         &bin,
         r#"#!/bin/sh
-# argv: --json --root <root> action run central.world.effective-sources '<input>'
+# argv: --json --root <root> action run <action> '<input>'
+action="$6"
 input="$7"
-case "$input" in
-  *'"scope":"root"'*)
-    printf '%s' '{"ok":true,"data":{"world_ref":"control:root","sources":[{"ref":"central:source:control:root:Control","state":"available","effective_revision":"stub-root-rev-1","propagation_path":["control:root"]}]}}'
+case "$action" in
+  central.world.here)
+    project=$(printf '%s' "$input" | sed -n 's/.*"project":"\([^"]*\)".*/\1/p')
+    printf '%s' "{\"ok\":true,\"data\":{\"schema\":\"central.world-here/v1\",\"project_world\":{\"name\":\"$project\",\"state\":\"absent\",\"absence_kind\":\"projectcentral-manifest-absent\",\"work_member_present\":true}}}"
+    exit 0
+    ;;
+  central.world.effective-sources)
+    case "$input" in
+      *'"scope":"root"'*)
+        printf '%s' '{"ok":true,"data":{"world_ref":"control:root","sources":[{"ref":"central:source:control:root:Control","state":"available","effective_revision":"stub-root-rev-1","effective_source_world":"control:root","authority":"stub-fixture","source_treatment":"canonical","effective_treatment":"canonical","propagation_path":["control:root"],"provenance":[]}]}}'
+        exit 0
+        ;;
+      *)
+        printf '%s' '{"ok":false,"error":{"code":"central.world_declaration_absent","message":"missing World project:stub"}}'
+        exit 2
+        ;;
+    esac
+    ;;
+  central.file-map.inspect)
+    printf '%s' '{"ok":true,"data":{"schema":"central.file-map/v1","operation":"inspect","result":{"revision":"stub-map-rev-1","resources":[]}}}'
+    exit 0
+    ;;
+  central.file-map.register)
+    printf '%s' '{"ok":true,"data":{"result":{"registered":true}}}'
+    exit 0
+    ;;
+  central.init)
+    printf '%s' '{"ok":true,"data":{}}'
+    exit 0
+    ;;
+  central.world-relations.save)
+    printf '%s' '{"ok":true,"data":{"created":true,"revision":"stub-relations-v1","source_path":"Control/relations/worlds/world-stub.json"}}'
     exit 0
     ;;
   *)

@@ -24,46 +24,28 @@
 //!   declaration is structurally non-existent (there is no project record to
 //!   read), not merely unreadable.
 
-use crate::runner::CommandRunner;
+use crate::runner::{CommandRunner, SystemRunner};
 use aikit_core::{AikitError, Result, WikiObject};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, collections::BTreeSet, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    time::{Duration, Instant},
+};
 
 pub const BINDING_PRODUCER_REF: &str = "aikit/central-world-binding/v1";
 pub const BINDING_EXTENSION: &str = "aikit.world-binding/v1";
 pub const ROOT_WORLD_REF: &str = "control:root";
-
-/// A world ref that has no authored record at all: the declaration is
-/// *absent*. This is the only case where the root lineage applies by
-/// convention. Distinct from "unreadable", which must never widen.
 pub const WORLD_DECLARATION_ABSENT: &str = "central.world_declaration_absent";
 
-/// The message Central uses for the absent case (`missing World <ref>`,
-/// ctrl/src/world.rs:583). Kept as a fallback only: Central now names absence
-/// in the error code, which is what a consumer should read.
-const MISSING_WORLD_MARKER: &str = "missing World ";
+// A composite observation shares one live allowance. The runner owns its
+// separate finite retirement allowance; this is not a bound on JSON heap use.
+const WORLD_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const WORLD_PROBE_BYTES: usize = 1024 * 1024;
 
-/// The message Central answers for a Work member with **no ProjectCentral
-/// manifest at all**: the io not-found error for the absent
-/// `ProjectCentral/project.json` (ctrl/src/projectcentral.rs
-/// `read_project_manifest`) wrapped as `Project does not expose a valid
-/// ProjectCentral source: ...` (ctrl/src/agent_set_actions.rs). This is
-/// structural non-existence — the world has no record because the project
-/// itself has no manifest — so by the one-world convention it is
-/// absence-equivalent and the root lineage applies. The marker includes the
-/// not-found text on purpose: a manifest that *exists* but cannot be read or
-/// parsed answers with the same prefix but a different cause (`<path> is not
-/// a valid ProjectCentral manifest: ...`, or another io error such as
-/// permission denied) — an unreadable declaration, which must still withhold.
-const MISSING_PROJECTCENTRAL_MARKER: &str =
-    "Project does not expose a valid ProjectCentral source: No such file or directory";
-
-/// The effective-source reading Central returned for one world.
 #[derive(Debug, Clone, Default)]
 pub struct WorldBinding {
     pub world_ref: String,
-    /// True when the project declared no relations and the root lineage was
-    /// applied by convention; disclosed, never silent.
     pub inherited_root_lineage: bool,
     pub sources: Vec<EffectiveSource>,
 }
@@ -71,17 +53,187 @@ pub struct WorldBinding {
 #[derive(Debug, Clone)]
 pub struct EffectiveSource {
     pub source_ref: String,
-    /// `available` | `excluded` (Central's EffectiveSourceState).
     pub state: String,
     pub effective_revision: String,
-    /// World refs from the requesting world up to the source's world.
     pub propagation_path: Vec<String>,
+    /// The actual owner relation, including authority, treatment, each
+    /// provenance hop and future fields. Pure local bindings have no receipt.
+    pub native_relation: Option<Value>,
 }
 
-/// Ask Central for a world's effective source relations. The input follows
-/// the Action contract: `scope` (`root`|`project`), optional `project`,
-/// required `world_ref`.
-pub fn read_world_binding<R: CommandRunner>(
+struct WorldProbe {
+    started: Instant,
+    timeout: Duration,
+    remaining_bytes: usize,
+}
+
+impl WorldProbe {
+    fn new<R: CommandRunner>(runner: &R) -> Self {
+        Self {
+            started: Instant::now(),
+            timeout: runner
+                .configured_timeout()
+                .unwrap_or(WORLD_PROBE_TIMEOUT)
+                .min(WORLD_PROBE_TIMEOUT),
+            remaining_bytes: WORLD_PROBE_BYTES,
+        }
+    }
+
+    fn require_live_allowance(&self) -> Result<()> {
+        if self.started.elapsed() > self.timeout {
+            return Err(AikitError::new(
+                "central.world_probe_timeout",
+                "World observation allowance expired before acknowledgement",
+            ));
+        }
+        Ok(())
+    }
+
+    fn request<R: CommandRunner>(
+        &mut self,
+        runner: &R,
+        executable: &Path,
+        central_root: &Path,
+        action: &str,
+        input: Value,
+    ) -> Result<Value> {
+        let timeout = self
+            .timeout
+            .checked_sub(self.started.elapsed())
+            .ok_or_else(|| {
+                AikitError::new(
+                    "central.world_probe_timeout",
+                    "World observation live allowance expired",
+                )
+                .with("execution_started", "false")
+                .with("native_action", action)
+            })?;
+        if timeout.is_zero() || self.remaining_bytes < 2 {
+            return Err(AikitError::new(
+                "central.world_probe_budget",
+                "World observation has no remaining capture allowance",
+            )
+            .with("execution_started", "false")
+            .with("native_action", action));
+        }
+        // The existing transport takes text argv. Refuse an unrepresentable
+        // physical coordinate rather than selecting a lossy replacement name.
+        let coordinate = |path: &Path, name: &str| -> Result<String> {
+            path.to_str().map(str::to_owned).ok_or_else(|| {
+                AikitError::new(
+                    "central.world_transport_unsupported",
+                    "Native World text transport requires an exact UTF-8 coordinate",
+                )
+                .with("coordinate", name)
+                .with("execution_started", "false")
+            })
+        };
+        let argv = vec![
+            coordinate(executable, "executable")?,
+            "--json".into(),
+            "--root".into(),
+            coordinate(central_root, "root")?,
+            "action".into(),
+            "run".into(),
+            action.into(),
+            input.to_string(),
+        ];
+        let output = runner
+            .run_with_limits(&argv, timeout, self.remaining_bytes, true)
+            .map_err(|error| error.with("native_action", action))?;
+        let captured = output
+            .stdout
+            .len()
+            .checked_add(output.stderr.len())
+            .ok_or_else(|| {
+                AikitError::new(
+                    "central.world_probe_budget",
+                    "World capture length overflowed",
+                )
+            })?;
+        self.remaining_bytes = self.remaining_bytes.checked_sub(captured).ok_or_else(|| {
+            AikitError::new(
+                "central.world_probe_budget",
+                "Runner exceeded World capture allowance",
+            )
+        })?;
+        if self.started.elapsed() > self.timeout {
+            return Err(AikitError::new(
+                "central.world_probe_timeout",
+                "World observation exceeded its live allowance",
+            )
+            .with("native_action", action)
+            .with("status", output.status.to_string()));
+        }
+        let envelope: Value = serde_json::from_str(&output.stdout).map_err(|error| {
+            AikitError::new("central.world_sources_invalid", error.to_string())
+                .with("native_action", action)
+                .with("status", output.status.to_string())
+                .with("stdout", output.stdout.clone())
+                .with("stderr", output.stderr.clone())
+        })?;
+        match envelope["ok"].as_bool() {
+            Some(false) => {
+                let native_error = envelope
+                    .get("error")
+                    .filter(|value| value.is_object())
+                    .ok_or_else(|| {
+                        AikitError::new(
+                            "central.world_sources_invalid",
+                            "Native World failure omitted its error envelope",
+                        )
+                    })?;
+                let absent = action == "central.world.effective-sources"
+                    && native_error["code"].as_str() == Some(WORLD_DECLARATION_ABSENT)
+                    && native_error["details"]["state"].as_str() == Some("absent")
+                    && native_error["details"]["world_ref"] == input["world_ref"]
+                    && input["world_ref"].as_str().is_some();
+                Err(AikitError::new(
+                    if absent {
+                        WORLD_DECLARATION_ABSENT
+                    } else {
+                        "central.world_sources_unavailable"
+                    },
+                    native_error["message"]
+                        .as_str()
+                        .unwrap_or("Native World request failed"),
+                )
+                .with("native_action", action)
+                .with("native_code", native_error["code"].as_str().unwrap_or(""))
+                .with("native_error", native_error.to_string())
+                .with("native_status", envelope["status"].to_string())
+                .with("status", output.status.to_string()))
+            }
+            Some(true) if output.ok() => envelope.get("data").cloned().ok_or_else(|| {
+                AikitError::new(
+                    "central.world_sources_invalid",
+                    "Native World success omitted data",
+                )
+            }),
+            _ => Err(AikitError::new(
+                "central.world_sources_invalid",
+                "Native World receipt has no consistent success/failure state",
+            )
+            .with("native_action", action)
+            .with("status", output.status.to_string())),
+        }
+    }
+}
+
+fn required_text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
+    value[key]
+        .as_str()
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| {
+            AikitError::new(
+                "central.world_sources_invalid",
+                format!("Missing native {key}"),
+            )
+        })
+}
+
+fn read_world_binding_in<R: CommandRunner>(
+    probe: &mut WorldProbe,
     runner: &R,
     executable: &Path,
     central_root: &Path,
@@ -93,77 +245,23 @@ pub fn read_world_binding<R: CommandRunner>(
     if let Some(project) = project {
         input["project"] = json!(project);
     }
-    let argv = vec![
-        executable.to_string_lossy().into_owned(),
-        "--json".into(),
-        "--root".into(),
-        central_root.to_string_lossy().into_owned(),
-        "action".into(),
-        "run".into(),
-        "central.world.effective-sources".into(),
-        input.to_string(),
-    ];
-    // This call *asks a question* Central answers with a structured envelope:
-    // the `central.world_declaration_absent` answer — the one case where the
-    // root lineage applies by convention — arrives as an `ok:false` envelope
-    // with a non-zero exit (ctrl maps `invalid_input` to exit 2,
-    // ctrl/src/cli.rs `exit_code`). `CommandRunner::run` returns `Ok` for a
-    // command that ran and failed, so the envelope is read first and only a
-    // command that could not run at all (or produced no envelope) is an
-    // unavailability. Demanding exit 0 before reading would turn Central's
-    // explicit "no authored record" into a source-level failure and withhold
-    // the inherited graph from every project that declares no world.
-    let output = runner.run(&argv)?;
-    let envelope: Value = serde_json::from_str(&output.stdout).map_err(|e| {
-        if output.ok() {
-            AikitError::new("central.world_sources_invalid", e.to_string())
-        } else {
-            AikitError::new(
-                "central.world_sources_unavailable",
-                format!(
-                    "`{}` exited with status {}: {e}",
-                    argv.join(" "),
-                    output.status
-                ),
-            )
-        }
-    })?;
-    if envelope["ok"] != true {
-        let code = envelope["error"]["code"].as_str().unwrap_or_default();
-        let message = envelope["error"]["message"].as_str().unwrap_or("unknown");
-        // Prefer the code: Central names absence explicitly. The marker checks
-        // stay for a Central that has not yet been rebuilt with it, and the
-        // answers must agree — a code that says absent on some other message
-        // would widen what a turn receives on a failure that is not absence.
-        // A member with no ProjectCentral manifest has no project record at
-        // all (MISSING_PROJECTCENTRAL_MARKER): its declaration is structurally
-        // absent, so the root lineage applies. A manifest that exists but
-        // cannot be read or parsed shares the prefix but not the not-found
-        // cause and stays unavailable.
-        let absent = code == WORLD_DECLARATION_ABSENT
-            || (code.ends_with("invalid_input")
-                && (message.contains(MISSING_WORLD_MARKER)
-                    || message.contains(MISSING_PROJECTCENTRAL_MARKER)));
-        return Err(AikitError::new(
-            if absent {
-                WORLD_DECLARATION_ABSENT
-            } else {
-                "central.world_sources_unavailable"
-            },
-            format!("central.world.effective-sources did not succeed: {message}"),
-        ));
-    }
-    let data = &envelope["data"];
+    let data = probe.request(
+        runner,
+        executable,
+        central_root,
+        "central.world.effective-sources",
+        input,
+    )?;
     if data["world_ref"].as_str() != Some(world_ref) {
         return Err(AikitError::new(
             "central.world_sources_invalid",
-            "Native World source reading changed or omitted the requested World identity",
+            "Native World reading changed the requested identity",
         ));
     }
     let entries = data["sources"].as_array().ok_or_else(|| {
         AikitError::new(
             "central.world_sources_invalid",
-            "Native World source reading omitted its source array",
+            "Missing native source array",
         )
     })?;
     let mut binding = WorldBinding {
@@ -173,32 +271,23 @@ pub fn read_world_binding<R: CommandRunner>(
     };
     let mut seen = BTreeSet::new();
     for entry in entries {
-        let source = entry["ref"]
-            .as_str()
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| {
-                AikitError::new("central.world_sources_invalid", "Missing source identity")
-            })?;
-        let state = entry["state"]
-            .as_str()
-            .filter(|s| matches!(*s, "available" | "excluded"))
-            .ok_or_else(|| {
-                AikitError::new(
-                    "central.world_sources_invalid",
-                    "Missing or unsupported native source state",
-                )
-            })?;
-        let revision = entry["effective_revision"]
-            .as_str()
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| {
-                AikitError::new("central.world_sources_invalid", "Missing source revision")
-            })?;
-        if !seen.insert(source) {
+        let source = required_text(entry, "ref")?;
+        let state = required_text(entry, "state")?;
+        if !matches!(state, "available" | "excluded") || !seen.insert(source) {
             return Err(AikitError::new(
                 "central.world_sources_invalid",
-                "Duplicate effective source identity",
+                "Unsupported source state or duplicate effective source identity",
             ));
+        }
+        let revision = required_text(entry, "effective_revision")?;
+        required_text(entry, "effective_source_world")?;
+        for key in ["authority", "source_treatment", "effective_treatment"] {
+            if entry[key].as_str().is_none() {
+                return Err(AikitError::new(
+                    "central.world_sources_invalid",
+                    format!("Missing native {key}"),
+                ));
+            }
         }
         let path = entry["propagation_path"].as_array().ok_or_else(|| {
             AikitError::new(
@@ -208,59 +297,219 @@ pub fn read_world_binding<R: CommandRunner>(
         })?;
         let propagation_path = path
             .iter()
-            .map(|p| {
-                p.as_str()
-                    .filter(|s| !s.trim().is_empty())
+            .map(|hop| {
+                hop.as_str()
+                    .filter(|text| !text.trim().is_empty())
                     .map(str::to_owned)
                     .ok_or_else(|| {
                         AikitError::new("central.world_sources_invalid", "Invalid propagation hop")
                     })
             })
             .collect::<Result<Vec<_>>>()?;
+        let provenance = entry["provenance"].as_array().ok_or_else(|| {
+            AikitError::new(
+                "central.world_sources_invalid",
+                "Missing native provenance array",
+            )
+        })?;
+        for hop in provenance {
+            required_text(hop, "world")?;
+            for key in ["revision", "authority", "treatment"] {
+                if hop[key].as_str().is_none() {
+                    return Err(AikitError::new(
+                        "central.world_sources_invalid",
+                        format!("Missing native provenance {key}"),
+                    ));
+                }
+            }
+        }
         binding.sources.push(EffectiveSource {
             source_ref: source.into(),
             state: state.into(),
             effective_revision: revision.into(),
             propagation_path,
+            native_relation: Some(entry.clone()),
         });
     }
+    probe.require_live_allowance()?;
     Ok(binding)
 }
 
-/// The project context for a Central-relative project name: the declared
-/// `project_id` from its ProjectCentral manifest when readable, else the
-/// `project:<name>` convention.
-pub fn project_world_ref(central_root: &Path, project: &str) -> String {
-    let manifest = central_root
-        .join("Work")
-        .join(project)
-        .join("ProjectCentral/project.json");
-    if let Ok(text) = fs::read_to_string(&manifest) {
-        if let Ok(value) = serde_json::from_str::<Value>(&text) {
-            if let Some(project_id) = value["project_id"].as_str() {
-                if !project_id.trim().is_empty() {
-                    return project_id.trim().to_owned();
-                }
-            }
-        }
-    }
-    format!("project:{project}")
+/// A bounded, strict native effective-source read. No manifest or prose fallback.
+pub fn read_world_binding<R: CommandRunner>(
+    runner: &R,
+    executable: &Path,
+    central_root: &Path,
+    scope: &str,
+    project: Option<&str>,
+    world_ref: &str,
+) -> Result<WorldBinding> {
+    read_world_binding_in(
+        &mut WorldProbe::new(runner),
+        runner,
+        executable,
+        central_root,
+        scope,
+        project,
+        world_ref,
+    )
 }
 
-/// Read a project's effective binding, inheriting the root lineage **only**
-/// when the project genuinely has no declaration of its own: Central answers
-/// `missing World <ref>` for a world ref with no authored record, or — for a
-/// Work member with no ProjectCentral manifest at all — `Project does not
-/// expose a valid ProjectCentral source: No such file or directory`. Both are
-/// structural non-existence: there is no project record to read.
-///
-/// The failure modes are kept apart deliberately. "No project-specific
-/// declaration" (including the manifest-less member) is convention: one
-/// world, one human, so the root lineage applies and is disclosed as
-/// inherited. "The declaration could not be read or validated" — a malformed
-/// or unreadable manifest — is a source-level failure, and the answer to it
-/// is *no binding*; an unreadable exclusion must never broaden what a turn
-/// receives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProjectFacetIdentity {
+    Present(String),
+    ManifestAbsent,
+}
+
+struct ProjectFacet {
+    identity: ProjectFacetIdentity,
+    receipt: Value,
+}
+
+fn read_project_facet<R: CommandRunner>(
+    probe: &mut WorldProbe,
+    runner: &R,
+    executable: &Path,
+    central_root: &Path,
+    project: &str,
+) -> Result<ProjectFacet> {
+    let data = probe.request(
+        runner,
+        executable,
+        central_root,
+        "central.world.here",
+        json!({"project": project}),
+    )?;
+    if data["schema"].as_str() != Some("central.world-here/v1") {
+        return Err(AikitError::new(
+            "central.world_sources_invalid",
+            "Unsupported native World here schema",
+        ));
+    }
+    let facet = data.get("project_world").ok_or_else(|| {
+        AikitError::new(
+            "central.world_sources_invalid",
+            "Native World here omitted selected Project facet",
+        )
+    })?;
+    let identity = if facet["name"].as_str() != Some(project) {
+        None
+    } else {
+        match facet["state"].as_str() {
+            Some("present") => Some(ProjectFacetIdentity::Present(
+                required_text(facet, "ref")
+                    .map_err(|error| error.with("project_facet", facet.to_string()))?
+                    .into(),
+            )),
+            Some("absent")
+                if facet["absence_kind"].as_str() == Some("projectcentral-manifest-absent")
+                    && facet["work_member_present"] == true =>
+            {
+                Some(ProjectFacetIdentity::ManifestAbsent)
+            }
+            _ => None,
+        }
+    }
+    .ok_or_else(|| {
+        AikitError::new(
+            "central.world_sources_unavailable",
+            "Native selected Project facet is absent, changed or unavailable",
+        )
+        .with("project_facet", facet.to_string())
+    })?;
+    probe.require_live_allowance()?;
+    Ok(ProjectFacet {
+        identity,
+        receipt: facet.clone(),
+    })
+}
+
+/// Obtain the actual native Project World reference. This returns an error
+/// for a manifest-less member; it never mints an identity from a directory name.
+/// Rust callers must now handle Result<String> rather than a fabricated String.
+pub fn project_world_ref(central_root: &Path, project: &str) -> Result<String> {
+    let runner = SystemRunner::new();
+    let executable = super::central_file_map::executable();
+    let facet = read_project_facet(
+        &mut WorldProbe::new(&runner),
+        &runner,
+        &executable,
+        central_root,
+        project,
+    )?;
+    match facet.identity {
+        ProjectFacetIdentity::Present(reference) => Ok(reference),
+        ProjectFacetIdentity::ManifestAbsent => Err(AikitError::new(
+            "central.project_world_absent",
+            "Existing Work member has no native Project World facet",
+        )
+        .with("project_facet", facet.receipt.to_string())),
+    }
+}
+
+fn read_project_binding_result<R: CommandRunner>(
+    runner: &R,
+    executable: &Path,
+    central_root: &Path,
+    project: &str,
+) -> Result<(WorldBinding, Option<String>)> {
+    let mut probe = WorldProbe::new(runner);
+    let before = read_project_facet(&mut probe, runner, executable, central_root, project)?;
+    let (mut binding, inheritance) = match &before.identity {
+        ProjectFacetIdentity::Present(reference) => match read_world_binding_in(
+            &mut probe,
+            runner,
+            executable,
+            central_root,
+            "project",
+            Some(project),
+            reference,
+        ) {
+            Ok(binding) => (binding, None),
+            Err(error) if error.code() == WORLD_DECLARATION_ABSENT => {
+                let root = read_world_binding_in(
+                    &mut probe,
+                    runner,
+                    executable,
+                    central_root,
+                    "root",
+                    None,
+                    ROOT_WORLD_REF,
+                )?;
+                (root, Some(format!("Project {project} declares no World relations; root lineage applies: {error}")))
+            }
+            Err(error) => return Err(error),
+        },
+        ProjectFacetIdentity::ManifestAbsent => {
+            let root = read_world_binding_in(
+                &mut probe,
+                runner,
+                executable,
+                central_root,
+                "root",
+                None,
+                ROOT_WORLD_REF,
+            )?;
+            (root, Some(format!("Existing Work/{project} has no ProjectCentral manifest; root lineage applies (native facet {})", before.receipt)))
+        }
+    };
+    let current = read_project_facet(&mut probe, runner, executable, central_root, project)
+        .map_err(|error| error.with("project_facet_before", before.receipt.to_string()))?;
+    if current.identity != before.identity {
+        return Err(AikitError::new(
+            "central.world_binding_changed",
+            "Native Project World identity changed during binding observation",
+        )
+        .with("project_facet_before", before.receipt.to_string())
+        .with("project_facet_current", current.receipt.to_string()));
+    }
+    binding.inherited_root_lineage = inheritance.is_some();
+    probe.require_live_allowance()?;
+    Ok((binding, inheritance))
+}
+
+/// Read the actual native Project facet and current relations. An unavailable
+/// owner remains unavailable; only typed target absence permits root lineage.
 pub fn read_project_binding<R: CommandRunner>(
     runner: &R,
     executable: &Path,
@@ -268,47 +517,15 @@ pub fn read_project_binding<R: CommandRunner>(
     project: &str,
     absences: &mut Vec<String>,
 ) -> Option<WorldBinding> {
-    let world_ref = project_world_ref(central_root, project);
-    match read_world_binding(
-        runner,
-        executable,
-        central_root,
-        "project",
-        Some(project),
-        &world_ref,
-    ) {
-        Ok(binding) => Some(binding),
-        Err(error) if error.code() == WORLD_DECLARATION_ABSENT => {
-            match read_world_binding(
-                runner,
-                executable,
-                central_root,
-                "root",
-                None,
-                ROOT_WORLD_REF,
-            ) {
-                Ok(mut binding) => {
-                    binding.inherited_root_lineage = true;
-                    absences.push(format!(
-                        "Project {project} declares no world relations; the root lineage applies ({})",
-                        error.message()
-                    ));
-                    Some(binding)
-                }
-                Err(root_error) => {
-                    absences.push(format!(
-                        "World relations unavailable; binding is uncontextualised: {}",
-                        root_error.message()
-                    ));
-                    None
-                }
+    match read_project_binding_result(runner, executable, central_root, project) {
+        Ok((binding, inheritance)) => {
+            if let Some(disclosure) = inheritance {
+                absences.push(disclosure);
             }
+            Some(binding)
         }
-        Err(project_error) => {
-            absences.push(format!(
-                "Project {project} world relations could not be read or validated; binding is uncontextualised and no root lineage is assumed: {}",
-                project_error.message()
-            ));
+        Err(error) => {
+            absences.push(format!("Project {project} World binding unavailable; no root lineage is assumed: {}: {error}", error.code()));
             None
         }
     }
@@ -559,12 +776,16 @@ fn annotate_entity(object: &mut WikiObject, binding: &WorldBinding) {
             .iter()
             .any(|source| governs(&declared.source_ref, source))
         {
-            bindings.push(json!({
+            let mut observed = json!({
                 "source_ref": declared.source_ref,
                 "state": declared.state,
                 "effective_revision": declared.effective_revision,
                 "propagation_path": declared.propagation_path,
-            }));
+            });
+            if let Some(relation) = &declared.native_relation {
+                observed["native_relation"] = relation.clone();
+            }
+            bindings.push(observed);
         }
     }
     if bindings.is_empty() {
@@ -592,7 +813,6 @@ mod tests {
     use aikit_core::resource::{ResourceRef, SourceRef};
 
     use crate::central_entities::{ENTITY_PRODUCER_REF, PASU_EXTENSION};
-    use crate::runner::{CommandRunner, Output};
 
     use super::*;
 
@@ -688,6 +908,7 @@ mod tests {
                     state: (*state).into(),
                     effective_revision: "rev-1".into(),
                     propagation_path: vec!["control:root".into(), world_ref.into()],
+                    native_relation: None,
                 })
                 .collect(),
         }
@@ -830,220 +1051,6 @@ mod tests {
                 .iter()
                 .any(|absence| absence.contains("re-declares entity subject")),
             "{absences:?}"
-        );
-    }
-
-    // --- the binding read (absence inherits, failure never widens) ---
-
-    /// Answers each `central.world.effective-sources` call from a canned
-    /// envelope keyed by the requested scope.
-    struct EnvelopeRunner {
-        project: String,
-        root: String,
-    }
-
-    impl CommandRunner for EnvelopeRunner {
-        fn run(&self, argv: &[String]) -> aikit_core::Result<Output> {
-            let input: Value = serde_json::from_str(argv.last().expect("argv has the input"))
-                .expect("the last argument is the Action input");
-            let stdout = if input["scope"] == "project" {
-                &self.project
-            } else {
-                &self.root
-            };
-            Ok(Output::success(stdout.clone()))
-        }
-    }
-
-    fn ok_envelope(world_ref: &str, sources: Value) -> String {
-        json!({
-            "ok": true,
-            "data": { "world_ref": world_ref, "sources": sources }
-        })
-        .to_string()
-    }
-
-    fn error_envelope(code: &str, message: &str) -> String {
-        json!({
-            "ok": false,
-            "error": { "code": code, "message": message }
-        })
-        .to_string()
-    }
-
-    fn root_sources() -> Value {
-        json!([{
-            "ref": "central:source:control:root:Control",
-            "state": "available",
-            "effective_revision": "root-rev-1",
-            "propagation_path": ["control:root"]
-        }])
-    }
-
-    #[test]
-    fn an_absent_project_declaration_inherits_the_root_lineage_and_discloses_it() {
-        let runner = EnvelopeRunner {
-            project: error_envelope(WORLD_DECLARATION_ABSENT, "missing World project:bare"),
-            root: ok_envelope(ROOT_WORLD_REF, root_sources()),
-        };
-        let mut absences = Vec::new();
-        let binding = read_project_binding(
-            &runner,
-            Path::new("ctrl"),
-            Path::new("/central"),
-            "bare",
-            &mut absences,
-        )
-        .expect("absence selects the documented root lineage");
-        assert!(binding.inherited_root_lineage);
-        assert_eq!(binding.world_ref, ROOT_WORLD_REF);
-        assert_eq!(binding.sources.len(), 1);
-        assert_eq!(binding.sources[0].state, "available");
-        assert_eq!(binding.sources[0].propagation_path, vec!["control:root"]);
-        assert!(
-            absences
-                .iter()
-                .any(|absence| absence.contains("declares no world relations")),
-            "{absences:?}"
-        );
-    }
-
-    #[test]
-    fn an_unreadable_project_declaration_never_widens_to_the_root_lineage() {
-        let runner = EnvelopeRunner {
-            project: error_envelope(
-                "central.world_sources_unavailable",
-                "the world relations file is corrupt",
-            ),
-            root: ok_envelope(ROOT_WORLD_REF, root_sources()),
-        };
-        let mut absences = Vec::new();
-        let binding = read_project_binding(
-            &runner,
-            Path::new("ctrl"),
-            Path::new("/central"),
-            "demo",
-            &mut absences,
-        );
-        assert!(
-            binding.is_none(),
-            "a source-level failure yields no binding"
-        );
-        assert!(
-            absences
-                .iter()
-                .any(|absence| absence.contains("no root lineage is assumed")),
-            "{absences:?}"
-        );
-    }
-
-    /// A Work member with no ProjectCentral manifest at all: the world has no
-    /// record because the project itself has no manifest — structural
-    /// non-existence, classified as absence, never as an unavailability.
-    #[test]
-    fn a_manifest_less_member_is_classified_absent_not_unavailable() {
-        let runner = EnvelopeRunner {
-            project: error_envelope(
-                "invalid_input",
-                "Project does not expose a valid ProjectCentral source: No such file or directory (os error 2)",
-            ),
-            root: ok_envelope(ROOT_WORLD_REF, root_sources()),
-        };
-        let error = read_world_binding(
-            &runner,
-            Path::new("ctrl"),
-            Path::new("/central"),
-            "project",
-            Some("bare"),
-            "project:bare",
-        )
-        .expect_err("the envelope is a structured absence");
-        assert_eq!(error.code(), WORLD_DECLARATION_ABSENT);
-    }
-
-    /// The distinction beside the marker: a manifest that exists but cannot
-    /// be parsed answers with the same prefix and a different cause — an
-    /// unreadable declaration, which stays unavailable and must withhold.
-    #[test]
-    fn a_malformed_manifest_stays_unavailable_not_absent() {
-        let runner = EnvelopeRunner {
-            project: error_envelope(
-                "invalid_input",
-                "Project does not expose a valid ProjectCentral source: /central/Work/demo/ProjectCentral/project.json is not a valid ProjectCentral manifest: expected ident at line 1 column 2",
-            ),
-            root: ok_envelope(ROOT_WORLD_REF, root_sources()),
-        };
-        let error = read_world_binding(
-            &runner,
-            Path::new("ctrl"),
-            Path::new("/central"),
-            "project",
-            Some("demo"),
-            "project:demo",
-        )
-        .expect_err("an unreadable declaration is not absence");
-        assert_eq!(error.code(), "central.world_sources_unavailable");
-    }
-
-    #[test]
-    fn a_readable_project_declaration_is_answered_as_declared() {
-        let runner = EnvelopeRunner {
-            // No ProjectCentral manifest in the fixture root, so the effective
-            // world ref is the `project:<name>` convention — the envelope must
-            // echo exactly the world that was asked about.
-            project: ok_envelope(
-                "project:demo",
-                json!([{
-                    "ref": "central:source:control:root:Control/user",
-                    "state": "excluded",
-                    "effective_revision": "proj-rev-1",
-                    "propagation_path": ["control:root", "project:demo"]
-                }]),
-            ),
-            root: ok_envelope(ROOT_WORLD_REF, root_sources()),
-        };
-        let mut absences = Vec::new();
-        let binding = read_project_binding(
-            &runner,
-            Path::new("ctrl"),
-            Path::new("/central"),
-            "demo",
-            &mut absences,
-        )
-        .expect("a readable declaration is a binding");
-        assert!(!binding.inherited_root_lineage);
-        assert_eq!(binding.world_ref, "project:demo");
-        assert_eq!(binding.sources[0].state, "excluded");
-        assert!(absences.is_empty(), "{absences:?}");
-    }
-
-    // --- the world ref convention (manifest id, else the Work name) ---
-
-    #[test]
-    fn the_world_ref_uses_the_manifest_project_id_and_falls_back_to_the_work_name() {
-        let temp = tempfile::tempdir().unwrap();
-        let manifest = temp.path().join("Work/demo/ProjectCentral/project.json");
-        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
-        std::fs::write(
-            &manifest,
-            r#"{"schema":"central.project/v1","project_id":"epilogos/demo"}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            project_world_ref(temp.path(), "demo"),
-            "epilogos/demo",
-            "a readable manifest supplies the declared project id"
-        );
-        assert_eq!(
-            project_world_ref(temp.path(), "bare"),
-            "project:bare",
-            "a member with no manifest scopes by its Work name"
-        );
-        std::fs::write(&manifest, "not json at all").unwrap();
-        assert_eq!(
-            project_world_ref(temp.path(), "demo"),
-            "project:demo",
-            "an unreadable manifest never invents an identity"
         );
     }
 }

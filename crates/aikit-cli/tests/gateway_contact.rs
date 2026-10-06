@@ -4,7 +4,7 @@
 //! two (two AIKit homes, two gateways, one relaying over the authenticated
 //! WebSocket carrier).
 //!
-//! The owners are fixtures behind the production seam: one script answers as
+//! The ordinary compatibility cases use owner protocol fixtures: one script answers as
 //! `ctrl`, `actuation` and `factory` over a JSON world file, speaking the
 //! pinned contract's shapes (`tests/fixtures/inhabitation_owners.py`). The
 //! gateway, its journal, its state file, its carriers and the hook dispatcher
@@ -15,6 +15,11 @@
 //! homes share Central's Position definitions and nothing else, so a Position
 //! occupied on B is vacant in A's ledger and A can only learn otherwise by
 //! asking B's gateway.
+//!
+//! The explicit `native_` cases below instead require pinned real Central,
+//! Actuation and Factory binaries. They allocate real Profile source and use
+//! real native tenure and journal stores. They prove contact and exact-tenure
+//! joins, never semantic Agency admission, model bodies or Factory Run completion.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -415,6 +420,1002 @@ fn state_file_communiques(home: &Path) -> Vec<Value> {
     state["communiques"].as_array().cloned().unwrap_or_default()
 }
 
+/// Actual owner processes and retained evidence, independent of `World` fixtures.
+struct NativeContactWorld {
+    retained: PathBuf,
+    root: PathBuf,
+    home: PathBuf,
+    store: PathBuf,
+    ctrl: PathBuf,
+    actuation: PathBuf,
+    factory: PathBuf,
+    workcell: String,
+    sequence: std::cell::Cell<usize>,
+}
+
+impl NativeContactWorld {
+    fn new() -> Self {
+        use sha2::{Digest, Sha256};
+        let retained = tempfile::Builder::new()
+            .prefix("gn-")
+            .tempdir()
+            .unwrap()
+            .keep();
+        let required = |name: &str| {
+            let selected = PathBuf::from(std::env::var_os(name).unwrap_or_else(|| {
+                panic!("native Gateway qualification requires explicit built/pinned {name}")
+            }));
+            assert!(selected.is_absolute(), "{name} must be absolute");
+            let selected = selected.canonicalize().unwrap();
+            let bytes = std::fs::read(&selected).unwrap();
+            assert!(
+                !bytes.starts_with(b"#!"),
+                "{name} must be a native executable, not an owner protocol script"
+            );
+            std::fs::write(
+                retained.join(format!("{name}.json")),
+                serde_json::to_vec_pretty(&json!({
+                    "selected_executable": selected,
+                    "sha256": format!("{:x}", Sha256::digest(&bytes)),
+                    "byte_length": bytes.len(),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            selected
+        };
+        let ctrl = required("AIKIT_CENTRAL_REAL_BIN");
+        let actuation = required("AIKIT_CAW_ACTUATION_BIN");
+        let factory = required("AIKIT_FACTORY_REAL_BIN");
+        let candidate = Path::new(env!("CARGO_BIN_EXE_aikit"))
+            .canonicalize()
+            .unwrap();
+        let bytes = std::fs::read(&candidate).unwrap();
+        std::fs::write(retained.join("AIKIT_CANDIDATE_BIN.json"), serde_json::to_vec_pretty(&json!({
+            "selected_executable":candidate, "sha256":format!("{:x}", Sha256::digest(&bytes)), "byte_length":bytes.len(),
+        })).unwrap()).unwrap();
+        let world = Self {
+            root: retained.join("root"),
+            home: retained.join("home"),
+            store: retained.join("occupancy"),
+            retained,
+            ctrl,
+            actuation,
+            factory,
+            sequence: std::cell::Cell::new(0),
+            workcell: "workcell:gateway-contact-native".into(),
+        };
+        std::fs::create_dir_all(&world.root).unwrap();
+        std::fs::create_dir_all(&world.home).unwrap();
+        eprintln!(
+            "Native Gateway evidence retained at {}",
+            world.retained.display()
+        );
+        let mut init = world.command(&world.ctrl);
+        init.args(["--json", "--root"]).arg(&world.root).arg("init");
+        let (ok, answer) = world.run(init);
+        assert!(ok && answer["ok"] == true, "{answer}");
+        world
+    }
+
+    fn command(&self, executable: &Path) -> Command {
+        let mut command = Command::new(executable);
+        // No personal credentials, model settings, body attribution or source roots.
+        command
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", &self.home)
+            .env("AIKIT_HOME", &self.home)
+            .env("AIKIT_CENTRAL_ROOT", &self.root)
+            .env("CENTRAL_ROOT", &self.root)
+            .env("CENTRAL_CTRL_BIN", &self.ctrl)
+            .env("ACTUATION_BIN", &self.actuation)
+            .env("FACTORY_BIN", &self.factory)
+            .env("ACTUATION_OCCUPANCY_STORE", &self.store)
+            .env("AIKIT_WORKCELL_REF", &self.workcell)
+            .env("AIKIT_GATEWAY_REF", "agency-gateway/native-contact")
+            .stdin(Stdio::null())
+            .current_dir(&self.root);
+        command
+    }
+
+    fn run(&self, mut command: Command) -> (bool, Value) {
+        let sequence = self.sequence.get();
+        self.sequence.set(sequence + 1);
+        let argv: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let program = command.get_program().to_string_lossy().into_owned();
+        let stem = self.retained.join(format!("command-{sequence:03}"));
+        // Preserve this actual configured command's env/cwd. The same native
+        // runner owns bounded capture, cancellation, reaping and uncertainty.
+        // No test-only supervisor or retry turns a partial effect into success.
+        const OUTPUT_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
+        std::fs::write(
+            stem.with_extension("request.json"),
+            serde_json::to_vec_pretty(&json!({
+                "program":program, "argv":argv, "cwd":command.get_current_dir(),
+                "deadline_seconds":30, "output_limit_bytes_per_stream":OUTPUT_LIMIT_BYTES,
+                "runner":"aikit_adapters::runner::SystemRunner::capture_command",
+                "strict_receipt_capture":true,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let output = aikit_adapters::runner::SystemRunner::new()
+            .with_timeout(Duration::from_secs(30))
+            .with_output_limit_bytes(OUTPUT_LIMIT_BYTES)
+            .with_strict_utf8()
+            .capture_command(&mut command)
+            .unwrap_or_else(|error| {
+                // The runner retains bounded partial diagnostics and actual
+                // cleanup results in details; retain the original IO cause too.
+                let cause = std::error::Error::source(&error)
+                    .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+                    .map(|cause| json!({
+                        "kind":format!("{:?}",cause.kind()),
+                        "raw_os_error":cause.raw_os_error(), "message":cause.to_string(),
+                    }));
+                let retained = std::fs::write(
+                    stem.with_extension("failure.json"),
+                    serde_json::to_vec_pretty(&json!({
+                        "program":program, "argv":argv, "code":error.code(),
+                        "message":error.message(), "details":error.details(), "io_cause":cause,
+                    }))
+                    .unwrap(),
+                );
+                panic!(
+                    "native command {sequence} runner failed: {error:?}; evidence_write={retained:?}; retained {}",
+                    self.retained.display()
+                );
+            });
+        std::fs::write(stem.with_extension("stdout"), &output.stdout).unwrap();
+        std::fs::write(stem.with_extension("stderr"), &output.stderr).unwrap();
+        std::fs::write(
+            stem.with_extension("json"),
+            serde_json::to_vec_pretty(&json!({
+                "program": program, "argv": argv, "exit_code": output.status,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let value = serde_json::from_str(&output.stdout).unwrap_or_else(|why| {
+            panic!(
+                "native command {sequence} JSON failed: {why}; retained {}",
+                self.retained.display()
+            )
+        });
+        (output.ok(), value)
+    }
+
+    fn action(&self, action: &str, input: Value) -> Value {
+        let mut command = self.command(&self.ctrl);
+        command
+            .args(["--json", "--root"])
+            .arg(&self.root)
+            .args(["action", "run", action])
+            .arg(input.to_string());
+        let (ok, answer) = self.run(command);
+        assert!(ok && answer["ok"] == true, "{answer}");
+        answer["data"].clone()
+    }
+
+    fn express_agent(&self) -> (String, String) {
+        let result = self.action("agent-profile.express", json!({
+            "scope":"root", "world_ref":"control:root", "ratified_world_refs":["control:root"],
+            "intent_expression":"Controlled source-only Gateway address regression; no worker execution or recognition.",
+        }));
+        assert_eq!(result["recognition"], "unrecognised");
+        assert_eq!(result["human_recognised"], false);
+        let agent = result["allocation"]["agent_ref"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let profile = result["allocation"]["profile_ref"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let read = self.action(
+            "agent-profile.read",
+            json!({"scope":"root", "profile_ref":profile}),
+        );
+        assert_eq!(read["profile"]["agent_ref"], agent);
+        assert_eq!(
+            read["profile"]["intent_provenance"]["authorship"],
+            "generated-proposal"
+        );
+        assert_eq!(
+            read["profile"]["intent_provenance"]["recognition"],
+            "unrecognised"
+        );
+        (agent, profile)
+    }
+
+    fn position(&self, slug: &str, agent: Option<(&str, &str)>) -> String {
+        let reference = format!("central:position:control:root:{slug}");
+        let mut source = json!({
+            "schema":"central.world-position/v1", "ref":reference, "revision":"r1",
+            "slug":slug, "label":"Controlled native contact position", "enclosing_world_ref":"control:root",
+            "purpose":"Controlled exact-tenure join; no Agency or model actualisation.",
+        });
+        if let Some((agent_ref, profile_ref)) = agent {
+            source["eligible_agent_refs"] = json!([agent_ref]);
+            source["profile_ref"] = json!(profile_ref);
+        }
+        let directory = self.root.join("Control/relations/positions");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join(format!("{slug}.json")),
+            serde_json::to_vec_pretty(&source).unwrap(),
+        )
+        .unwrap();
+        let listing = self.action("central.position.list", json!({}));
+        assert_eq!(listing["invalid"], json!([]));
+        let read = self.action("central.position.read", json!({"position_ref":reference}));
+        assert_eq!(read["record"]["ref"], reference);
+        reference
+    }
+
+    fn aikit(&self, args: &[&str]) -> (bool, Value) {
+        let mut command = self.command(Path::new(env!("CARGO_BIN_EXE_aikit")));
+        command
+            .args(args)
+            .arg("--json")
+            .arg("--unix")
+            .arg(self.retained.join("g.sock"));
+        self.run(command)
+    }
+
+    fn ok(&self, args: &[&str]) -> Value {
+        let (ok, answer) = self.aikit(args);
+        assert!(ok && answer["ok"] == true, "{answer}");
+        answer["data"].clone()
+    }
+
+    fn occupancy(&self, args: &[&str]) -> (bool, Value) {
+        let mut command = self.command(&self.actuation);
+        command
+            .arg("occupancy")
+            .args(args)
+            .arg("--store")
+            .arg(&self.store)
+            .arg("--json");
+        self.run(command)
+    }
+
+    fn configuration(&self, args: &[&str]) -> Value {
+        let mut command = self.command(Path::new(env!("CARGO_BIN_EXE_aikit")));
+        command.args(args).arg("--json");
+        let (ok, answer) = self.run(command);
+        assert!(ok && answer["ok"] == true, "{answer}");
+        answer["data"].clone()
+    }
+
+    fn verify_pins(&self) {
+        use sha2::{Digest, Sha256};
+        for name in [
+            "AIKIT_CENTRAL_REAL_BIN",
+            "AIKIT_CAW_ACTUATION_BIN",
+            "AIKIT_FACTORY_REAL_BIN",
+            "AIKIT_CANDIDATE_BIN",
+        ] {
+            let basis: Value = serde_json::from_slice(
+                &std::fs::read(self.retained.join(format!("{name}.json"))).unwrap(),
+            )
+            .unwrap();
+            let bytes = std::fs::read(basis["selected_executable"].as_str().unwrap()).unwrap();
+            let observed = format!("{:x}", Sha256::digest(&bytes));
+            std::fs::write(
+                self.retained.join(format!("{name}-end.json")),
+                serde_json::to_vec_pretty(
+                    &json!({"observed_sha256":observed, "byte_length":bytes.len()}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                observed,
+                basis["sha256"].as_str().unwrap(),
+                "native executable changed during qualification: {name}"
+            );
+        }
+    }
+
+    fn claim(&self, position: &str, agent: &str, agency: &str) -> String {
+        let (ok, answer) = self.occupancy(&[
+            "claim",
+            "--position",
+            position,
+            "--agent",
+            agent,
+            "--agency",
+            agency,
+            "--workcell",
+            &self.workcell,
+            "--expect-vacant",
+            "--reason",
+            "Controlled native tenure join; no Agency or model actualisation.",
+        ]);
+        assert!(ok && answer["ok"] == true, "{answer}");
+        assert_eq!(answer["tenure"]["agent_ref"], agent);
+        answer["generation"]["generation_ref"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+}
+
+/// A native ACK and bounded quiescence are required; no offline fallback or
+/// process disappearance may qualify a restart. Failed state is never deleted.
+struct NativeContactGateway {
+    runner: Option<std::thread::JoinHandle<aikit_core::Result<aikit_adapters::runner::Output>>>,
+    socket: PathBuf,
+    retained: PathBuf,
+    stem: PathBuf,
+    invocation: String,
+    deadline: Instant,
+    join_deadline: Instant,
+    shutdown_attempted: bool,
+    sequence: std::cell::Cell<usize>,
+}
+
+impl NativeContactGateway {
+    fn start(world: &NativeContactWorld) -> Self {
+        Self::start_with_websocket(world, None)
+    }
+
+    fn start_with_websocket(world: &NativeContactWorld, websocket: Option<(&str, &str)>) -> Self {
+        use sha2::{Digest, Sha256};
+        const LIFETIME: Duration = Duration::from_secs(45);
+        const CLEANUP_ALLOWANCE: Duration = Duration::from_secs(2);
+        const OUTPUT_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
+        let socket = world.retained.join("g.sock");
+        let sequence = world.sequence.get();
+        world.sequence.set(sequence + 1);
+        let mut command = world.command(Path::new(env!("CARGO_BIN_EXE_aikit")));
+        command
+            .args(["gateway", "serve", "--unix"])
+            .arg(&socket)
+            .arg("--state-file")
+            .arg(world.home.join("state/gateway.json"))
+            .args(["--gateway-ref", "agency-gateway/native-contact"]);
+        if let Some((bind, token_location)) = websocket {
+            command.args(["--ws", bind, "--ws-token-location", token_location]);
+        }
+        let argv: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let program = Path::new(command.get_program()).canonicalize().unwrap();
+        let program_sha256 = format!("{:x}", Sha256::digest(std::fs::read(&program).unwrap()));
+        let invocation = format!(
+            "native-contact-{sequence}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let thread_name = format!("gateway-{invocation}");
+        let stem = world.retained.join(format!("daemon-{sequence}"));
+        let deadline = Instant::now() + LIFETIME;
+        std::fs::write(
+            stem.with_extension("request.json"),
+            serde_json::to_vec_pretty(&json!({
+                "program": program, "program_sha256": program_sha256, "argv": argv,
+                "cwd": command.get_current_dir(), "fixture":world.retained,
+                "invocation_nonce":invocation, "owned_thread_name":thread_name,
+                "lifetime_seconds":LIFETIME.as_secs(),
+                "cleanup_allowance_seconds":CLEANUP_ALLOWANCE.as_secs(),
+                "raw_output_limit_bytes_per_stream":OUTPUT_LIMIT_BYTES,
+                "runner":"aikit_adapters::runner::SystemRunner::capture_command",
+                "strict_receipt_capture":true,
+                "spawned_pid_available":false,
+                "nonce_treatment":"request correlation only; not semantic authority",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut gateway = Self {
+            runner: None,
+            socket,
+            retained: world.retained.clone(),
+            stem,
+            invocation,
+            deadline,
+            join_deadline: deadline + CLEANUP_ALLOWANCE,
+            shutdown_attempted: false,
+            sequence: std::cell::Cell::new(0),
+        };
+        gateway.runner = Some(
+            std::thread::Builder::new()
+                .name(thread_name)
+                .spawn(move || {
+                    // SAME configured env/cwd; the existing runner exclusively
+                    // owns child/group cleanup, native reap and capture EOF.
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(aikit_core::AikitError::new(
+                            "native_gateway.lifetime_expired_before_launch",
+                            "Owned runner thread reached no remaining launch budget",
+                        )
+                        .with("execution_started", "false"));
+                    }
+                    aikit_adapters::runner::SystemRunner::new()
+                        .with_timeout(remaining)
+                        .with_output_limit_bytes(OUTPUT_LIMIT_BYTES)
+                        .with_strict_utf8()
+                        .capture_command(&mut command)
+                })
+                .unwrap_or_else(|cause| {
+                    let error = aikit_core::AikitError::new(
+                        "native_gateway.runner_thread_spawn_failed",
+                        "Owned daemon runner thread could not start",
+                    )
+                    .with("execution_started", "false")
+                    .with_io_source(cause);
+                    let error = gateway.retain_failure("thread-spawn", error);
+                    panic!("{error:?}");
+                }),
+        );
+        let startup_deadline = deadline.min(Instant::now() + Duration::from_secs(15));
+        loop {
+            gateway.assert_runner_running();
+            let cause = match UnixStream::connect(&gateway.socket) {
+                Ok(_) => break,
+                Err(cause) => cause,
+            };
+            if Instant::now() >= startup_deadline {
+                let error = gateway.retain_failure(
+                    "startup",
+                    aikit_core::AikitError::new(
+                        "native_gateway.startup_timeout",
+                        "Native socket did not bind within the startup budget",
+                    )
+                    .with_io_source(cause),
+                );
+                panic!("{error:?}; retained {}", gateway.retained.display());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        gateway.assert_live();
+        gateway
+    }
+
+    fn request(
+        &self,
+        command: aikit_adapters::GatewayCommand,
+        id: &str,
+    ) -> aikit_adapters::GatewayResponse {
+        self.try_request(command, id).unwrap_or_else(|error| {
+            panic!("{error:?}; retained {}", self.retained.display());
+        })
+    }
+
+    fn error_value(error: &aikit_core::AikitError) -> Value {
+        let cause = std::error::Error::source(error)
+            .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+            .map(|cause| {
+                json!({"kind":format!("{:?}",cause.kind()),
+                "raw_os_error":cause.raw_os_error(),"message":cause.to_string()})
+            });
+        json!({"code":error.code(),"message":error.message(),
+            "details":error.details(),"io_cause":cause})
+    }
+
+    fn write_evidence(&self, path: &Path, value: &Value) -> aikit_core::Result<()> {
+        let bytes = serde_json::to_vec_pretty(value).map_err(|cause| {
+            aikit_core::AikitError::new(
+                "native_gateway.evidence_encoding_failed",
+                cause.to_string(),
+            )
+            .with("path", path.display().to_string())
+        })?;
+        std::fs::write(path, bytes).map_err(|cause| {
+            aikit_core::AikitError::new(
+                "native_gateway.evidence_write_failed",
+                "Required native daemon evidence could not be retained",
+            )
+            .with("path", path.display().to_string())
+            .with_io_source(cause)
+        })
+    }
+
+    fn retain_failure(
+        &self,
+        phase: &str,
+        mut error: aikit_core::AikitError,
+    ) -> aikit_core::AikitError {
+        let sequence = self.sequence.get();
+        self.sequence.set(sequence + 1);
+        let path = self
+            .stem
+            .with_extension(format!("{phase}-{sequence}.failure.json"));
+        let value = json!({"fixture":self.retained,"invocation_nonce":self.invocation,
+            "phase":phase,"failure":Self::error_value(&error),
+            "automatic_retry":false,"native_quiescence_certified":false});
+        if let Err(secondary) = self.write_evidence(&path, &value) {
+            error = error.with(
+                "failure_evidence_secondary",
+                Self::error_value(&secondary).to_string(),
+            );
+        }
+        error
+    }
+
+    fn try_request(
+        &self,
+        command: aikit_adapters::GatewayCommand,
+        id: &str,
+    ) -> aikit_core::Result<aikit_adapters::GatewayResponse> {
+        let sequence = self.sequence.get();
+        self.sequence.set(sequence + 1);
+        let id = format!("{id}-{}-{sequence}", self.invocation);
+        let timeout = self
+            .deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_secs(5));
+        if timeout.is_zero() {
+            return Err(self.retain_failure(
+                "request-deadline",
+                aikit_core::AikitError::new(
+                    "native_gateway.lifetime_expired",
+                    "No native request budget remains",
+                ),
+            ));
+        }
+        self.write_evidence(
+            &self.retained.join(format!("{id}.request.json")),
+            &json!({"request_id":id,"command":command,"socket":self.socket,
+                "fixture":self.retained,"invocation_nonce":self.invocation,
+                "timeout_milliseconds":timeout.as_millis()}),
+        )
+        .map_err(|error| self.retain_failure("request-persistence", error))?;
+        let response = aikit_adapters::gateway_client::gateway_request_within(
+            &aikit_adapters::GatewayCarrierTarget::UnixSocket(self.socket.clone()),
+            command,
+            Some(id.clone()),
+            timeout,
+        )
+        .map_err(|error| self.retain_failure("native-request", error))?;
+        let observed = serde_json::to_value(&response).map_err(|cause| {
+            aikit_core::AikitError::new(
+                "native_gateway.response_encoding_failed",
+                cause.to_string(),
+            )
+        })?;
+        self.write_evidence(&self.retained.join(format!("{id}.json")), &observed)
+            .map_err(|error| {
+                self.retain_failure(
+                    "response-persistence",
+                    error.with("prior_owner_response", observed.to_string()),
+                )
+            })?;
+        if response.request_id.as_deref() != Some(id.as_str()) || !response.ok {
+            return Err(self.retain_failure(
+                "native-response",
+                aikit_core::AikitError::new(
+                    "native_gateway.response_refused",
+                    "Native response is refused or has a different request identity",
+                )
+                .with("prior_owner_response", observed.to_string()),
+            ));
+        }
+        response.response.ok_or_else(|| {
+            self.retain_failure(
+                "native-response",
+                aikit_core::AikitError::new(
+                    "native_gateway.response_missing",
+                    "Native response body is absent",
+                )
+                .with("prior_owner_response", observed.to_string()),
+            )
+        })
+    }
+
+    fn assert_runner_running(&mut self) {
+        if self
+            .runner
+            .as_ref()
+            .is_none_or(|runner| runner.is_finished())
+        {
+            let completion = self.finish_runner();
+            panic!(
+                "native daemon runner ended before live proof: {completion:?}; retained {}",
+                self.retained.display()
+            );
+        }
+    }
+
+    fn assert_live(&mut self) {
+        self.assert_runner_running();
+        assert!(matches!(
+            self.request(aikit_adapters::GatewayCommand::Status, "native-status"),
+            aikit_adapters::GatewayResponse::Status { .. }
+        ));
+        self.assert_runner_running();
+    }
+
+    fn finish_runner(&mut self) -> aikit_core::Result<()> {
+        let Some(runner) = self.runner.as_ref() else {
+            return Err(aikit_core::AikitError::new(
+                "native_gateway.runner_absent",
+                "Owned runner result is unavailable",
+            ));
+        };
+        while !runner.is_finished() && Instant::now() < self.join_deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if !runner.is_finished() {
+            return Err(self.retain_failure(
+                "runner-unresolved",
+                aikit_core::AikitError::new(
+                    "native_gateway.runner_unresolved",
+                    "Owned runner did not finish within lifetime and native cleanup allowance",
+                )
+                .with("joined", "false")
+                .with("quiescence", "unknown"),
+            ));
+        }
+        // is_finished was observed under the finite deadline; never join a
+        // still-running thread or substitute thread state for native reap.
+        let output = match self.runner.take().unwrap().join() {
+            Ok(result) => result.map_err(|error| self.retain_failure("runner", error))?,
+            Err(payload) => {
+                let message = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                    .unwrap_or_else(|| "non-string panic payload; native effects uncertain".into());
+                return Err(self.retain_failure(
+                    "runner-panic",
+                    aikit_core::AikitError::new("native_gateway.runner_panicked", message),
+                ));
+            }
+        };
+        let mut failure = (output.status != 0).then(|| {
+            aikit_core::AikitError::new(
+                "native_gateway.daemon_exit_failed",
+                format!("Native daemon exited with status {}", output.status),
+            )
+        });
+        let status = serde_json::to_vec_pretty(&json!({"exit_code":output.status,
+            "invocation_nonce":self.invocation,"runner_capture_succeeded":true,
+            "capture_representation":"existing public UTF-8-lossy Output; raw native stream bound8MiB",
+            "retirement_basis":"SystemRunner success contract requires native reap and both capture EOFs",
+            "spawned_pid_available":false})).unwrap();
+        for (label, bytes) in [
+            ("stdout", output.stdout.as_bytes()),
+            ("stderr", output.stderr.as_bytes()),
+            ("json", status.as_slice()),
+        ] {
+            let path = self.stem.with_extension(label);
+            if let Err(cause) = std::fs::write(&path, bytes) {
+                let secondary = aikit_core::AikitError::new(
+                    "native_gateway.capture_write_failed",
+                    "Required native daemon capture persistence failed",
+                )
+                .with("path", path.display().to_string())
+                .with_io_source(cause);
+                failure = Some(match failure {
+                    Some(primary) => primary.with(
+                        format!("evidence_secondary_{label}"),
+                        Self::error_value(&secondary).to_string(),
+                    ),
+                    None => secondary,
+                });
+            }
+        }
+        match failure {
+            Some(error) => Err(self.retain_failure("capture", error)),
+            None => Ok(()),
+        }
+    }
+
+    fn shutdown_and_finish(&mut self) -> aikit_core::Result<()> {
+        let shutdown = if self.shutdown_attempted {
+            Err(aikit_core::AikitError::new(
+                "native_gateway.shutdown_already_attempted",
+                "Prior shutdown remains unresolved; no implicit native retry",
+            ))
+        } else {
+            self.shutdown_attempted = true;
+            self.try_request(aikit_adapters::GatewayCommand::Shutdown, "native-shutdown")
+                .and_then(|response| match response {
+                    aikit_adapters::GatewayResponse::Shutdown => Ok(()),
+                    other => Err(aikit_core::AikitError::new(
+                        "native_gateway.shutdown_not_acknowledged",
+                        format!("Native shutdown returned {other:?}"),
+                    )),
+                })
+        };
+        let finished = self.finish_runner();
+        match (shutdown, finished) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(primary), Err(secondary)) => Err(self.retain_failure(
+                "shutdown",
+                primary.with(
+                    "runner_finalization_secondary",
+                    Self::error_value(&secondary).to_string(),
+                ),
+            )),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => {
+                Err(self.retain_failure("shutdown", error))
+            }
+        }
+    }
+
+    fn stop(mut self) {
+        self.shutdown_and_finish().unwrap_or_else(|error| {
+            panic!("{error:?}; retained {}", self.retained.display());
+        });
+    }
+}
+
+impl Drop for NativeContactGateway {
+    fn drop(&mut self) {
+        if self.runner.is_none() {
+            return;
+        }
+        // The existing runner remains the sole owned-process cleanup owner.
+        // No test kill, invented PID census, or second native shutdown request.
+        if let Err(error) = self.shutdown_and_finish() {
+            eprintln!(
+                "Native Gateway cleanup unresolved: {error:?}; preserved {}",
+                self.retained.display()
+            );
+            if !std::thread::panicking() {
+                panic!("Native Gateway cleanup failed: {error:?}");
+            }
+        }
+    }
+}
+
+fn native_agent(population: &Value, agent_ref: &str) -> Value {
+    population["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["agent_ref"] == agent_ref)
+        .unwrap()
+        .clone()
+}
+
+#[test]
+#[ignore = "explicit native gate requires pinned AIKIT_CENTRAL_REAL_BIN, AIKIT_CAW_ACTUATION_BIN and AIKIT_FACTORY_REAL_BIN"]
+fn native_pending_agent_mail_survives_acknowledged_gateway_restart_without_agency_alias() {
+    let world = NativeContactWorld::new();
+    let (agent, _) = world.express_agent();
+    let sender = world.position("native-sender", None);
+    let mut gateway = NativeContactGateway::start(&world);
+    let sent = world.ok(&[
+        "gateway",
+        "send",
+        "--from-position",
+        &sender,
+        "--to",
+        &agent,
+        "--body",
+        "Retain all partial bytes: α\nsecond line.",
+    ]);
+    gateway.assert_live();
+    assert_eq!(sent["recipient"]["identity_kind"], "agent");
+    assert_eq!(sent["recipient"]["agent_ref"], agent);
+    assert_eq!(sent["recipient"]["position_ref"], agent);
+    assert!(sent["recipient"]["agency_ref"].is_null());
+    let communique = sent["communique"].clone();
+    assert_eq!(communique["to_position_ref"], agent);
+    assert_eq!(communique["state"], "held");
+    let history_args = [
+        "gateway",
+        "conversation",
+        "--position",
+        &sender,
+        "--with",
+        &agent,
+        "--project-world",
+        "control:root",
+    ];
+    let before = world.ok(&history_args);
+    assert_eq!(before["communiques"], json!([communique.clone()]));
+    let population = world.ok(&["gateway", "who", "--project-world", "control:root"]);
+    assert_eq!(
+        native_agent(&population, &agent)["semantic_identity"]["state"],
+        "not-attempted"
+    );
+    gateway.assert_live();
+    gateway.stop();
+    let persisted = std::fs::read(world.home.join("state/gateway.json")).unwrap();
+    let mut gateway = NativeContactGateway::start(&world);
+    let after = world.ok(&history_args);
+    gateway.assert_live();
+    assert_eq!(after["communiques"], before["communiques"]);
+    let (ok, rejected) = world.aikit(&[
+        "gateway",
+        "send",
+        "--from-position",
+        &sender,
+        "--to",
+        "agency:controlled-native-test",
+        "--body",
+        "Must not append.",
+    ]);
+    assert!(!ok && rejected["ok"] == false, "{rejected}");
+    assert_eq!(rejected["error"]["code"], "gateway.invalid_recipient");
+    assert_eq!(
+        world.ok(&history_args)["communiques"],
+        before["communiques"]
+    );
+    gateway.assert_live();
+    gateway.stop();
+    assert_eq!(
+        std::fs::read(world.home.join("state/gateway.json")).unwrap(),
+        persisted
+    );
+    world.verify_pins();
+}
+
+#[test]
+#[ignore = "explicit native gate requires pinned AIKIT_CENTRAL_REAL_BIN, AIKIT_CAW_ACTUATION_BIN and AIKIT_FACTORY_REAL_BIN"]
+fn native_profile_eligibility_cannot_attribute_another_agents_actual_tenure() {
+    let world = NativeContactWorld::new();
+    let (agent_a, profile_a) = world.express_agent();
+    let (agent_b, _) = world.express_agent();
+    let position = world.position("eligible-a", Some((&agent_a, &profile_a)));
+    let generation_b = world.claim(&position, &agent_b, "agency:controlled-native-test-b");
+    let mut gateway = NativeContactGateway::start(&world);
+    let population = world.ok(&["gateway", "who", "--project-world", "control:root"]);
+    gateway.assert_live();
+    assert_eq!(
+        row(&population, &position)["occupancy"]["agent_ref"],
+        agent_b
+    );
+    let agent = native_agent(&population, &agent_a);
+    assert_eq!(agent["occupancy"]["state"], "not-currently-embodied");
+    assert_eq!(agent["semantic_identity"]["state"], "not-attempted");
+    let (ok, released) = world.occupancy(&[
+        "release",
+        "--position",
+        &position,
+        "--generation",
+        &generation_b,
+        "--reason",
+        "End owned controlled tenure.",
+    ]);
+    assert!(ok && released["ok"] == true, "{released}");
+    let generation_a = world.claim(&position, &agent_a, "agency:controlled-native-test-a");
+    let (ok, stale) = world.occupancy(&[
+        "verify",
+        "--position",
+        &position,
+        "--generation",
+        &generation_b,
+    ]);
+    assert!(!ok && stale["ok"] == false, "{stale}");
+    let population = world.ok(&["gateway", "who", "--project-world", "control:root"]);
+    gateway.assert_live();
+    let agent = native_agent(&population, &agent_a);
+    assert_eq!(agent["occupancy"]["state"], "embodied-here");
+    assert_eq!(agent["occupancy"]["agent_ref"], agent_a);
+    assert_eq!(
+        agent["occupancy"]["agency_ref"],
+        "agency:controlled-native-test-a"
+    );
+    assert_eq!(agent["occupancy"]["generation_ref"], generation_a);
+    assert_eq!(agent["semantic_identity"]["state"], "not-attempted");
+    let standing = world.action("central.world.here", json!({"cwd":world.root}));
+    assert_eq!(standing["workcells"], json!([]));
+    let mut unlocated = world.command(Path::new(env!("CARGO_BIN_EXE_aikit")));
+    unlocated
+        .env_remove("AIKIT_WORKCELL_REF")
+        .args([
+            "gateway",
+            "who",
+            "--project-world",
+            "control:root",
+            "--json",
+            "--unix",
+        ])
+        .arg(&gateway.socket);
+    let (ok, observation) = world.run(unlocated);
+    assert!(ok && observation["ok"] == true, "{observation}");
+    let unlocated = native_agent(&observation["data"], &agent_a);
+    assert_eq!(unlocated["occupancy"]["state"], "unavailable");
+    assert_eq!(
+        unlocated["occupancy"]["observed_tenures"][0]["tenure"]["generation_ref"],
+        generation_a
+    );
+    gateway.assert_live();
+    gateway.stop();
+    let mut gateway = NativeContactGateway::start(&world);
+    let population = world.ok(&["gateway", "who", "--project-world", "control:root"]);
+    gateway.assert_live();
+    assert_eq!(
+        native_agent(&population, &agent_a)["occupancy"],
+        agent["occupancy"]
+    );
+    gateway.stop();
+    world.verify_pins();
+}
+
+#[test]
+#[ignore = "explicit native gate requires pinned AIKIT_CENTRAL_REAL_BIN, AIKIT_CAW_ACTUATION_BIN and AIKIT_FACTORY_REAL_BIN"]
+fn native_remote_agent_observation_retains_unavailability_and_workcell_mismatch() {
+    let mut here = NativeContactWorld::new();
+    here.workcell = "workcell:native-contact-a".into();
+    let (agent, profile) = here.express_agent();
+    let position = here.position("native-remote", Some((&agent, &profile)));
+    let mut peer = NativeContactWorld::new();
+    // Same authored World source, distinct actual native stores and carriers.
+    // This is a two-home regression on one host, not a two-machine Run.
+    peer.root = here.root.clone();
+    peer.workcell = "workcell:native-contact-b".into();
+    let generation = peer.claim(&position, &agent, "agency:controlled-native-peer");
+    let bind = free_port();
+    let token = token_file(&here.retained, "native-contact-peer", TOKEN);
+    here.configuration(&[
+        "gateway",
+        "remote",
+        "add",
+        "--workcell",
+        &peer.workcell,
+        "--ws",
+        &bind,
+        "--token-location",
+        &token,
+    ]);
+    let mut local = NativeContactGateway::start(&here);
+    let mut remote = NativeContactGateway::start_with_websocket(&peer, Some((&bind, &token)));
+    let population = here.ok(&["gateway", "who", "--project-world", "control:root"]);
+    local.assert_live();
+    remote.assert_live();
+    let observed = native_agent(&population, &agent);
+    assert_eq!(observed["occupancy"]["state"], "embodied-elsewhere");
+    assert_eq!(observed["occupancy"]["via"][0]["agent_ref"], agent);
+    assert_eq!(
+        observed["occupancy"]["via"][0]["generation_ref"],
+        generation
+    );
+    assert_eq!(
+        observed["occupancy"]["via"][0]["workcell_ref"],
+        peer.workcell
+    );
+    remote.stop();
+    let unavailable = here.ok(&["gateway", "who", "--project-world", "control:root"]);
+    local.assert_live();
+    let observed = native_agent(&unavailable, &agent);
+    assert_eq!(observed["occupancy"]["state"], "unavailable");
+    assert!(!observed["occupancy"]["unanswered_remotes"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    // The actual peer now reports C, while its declared endpoint and retained
+    // exact tenure still name B. No fixture answer is substituted.
+    peer.workcell = "workcell:native-contact-c".into();
+    let mut remote = NativeContactGateway::start_with_websocket(&peer, Some((&bind, &token)));
+    let mismatch = here.ok(&["gateway", "who", "--project-world", "control:root"]);
+    local.assert_live();
+    remote.assert_live();
+    let observed = native_agent(&mismatch, &agent);
+    assert_eq!(observed["occupancy"]["state"], "unavailable");
+    assert_eq!(
+        observed["occupancy"]["observed_tenures"][0]["declared_workcell_ref"],
+        "workcell:native-contact-b"
+    );
+    assert_eq!(
+        observed["occupancy"]["observed_tenures"][0]["reported_workcell_ref"],
+        peer.workcell
+    );
+    assert_eq!(
+        observed["occupancy"]["observed_tenures"][0]["tenure"]["agent_ref"],
+        agent
+    );
+    remote.stop();
+    local.stop();
+    here.verify_pins();
+    peer.verify_pins();
+}
+
 // ---------------------------------------------------------------------------
 // Same Workcell
 // ---------------------------------------------------------------------------
@@ -711,13 +1712,15 @@ fn a_registered_profile_without_a_position_is_addressable_and_its_communique_hol
     assert_eq!(record["state"], "held");
     let basis = record["transitions"][0]["basis"].as_str().unwrap();
     assert!(
-        basis.contains("registered agent profile")
-            && basis.contains("not currently embodied")
-            && basis.contains("held for the agency"),
+        basis.contains("Central AgentProfile")
+            && basis.contains("held for the Agent address")
+            && basis.contains("admission are not established"),
         "{basis}"
     );
     assert_eq!(sent["recipient"]["source"], "agent-profile.list");
-    assert_eq!(sent["recipient"]["agency_ref"], "agent/anuttara");
+    assert_eq!(sent["recipient"]["identity_kind"], "agent");
+    assert_eq!(sent["recipient"]["agent_ref"], "agent/anuttara");
+    assert!(sent["recipient"]["agency_ref"].is_null());
     let delivery = &sent["delivery"];
     assert!(delivery["fact"]
         .as_str()
@@ -754,6 +1757,8 @@ fn a_registered_profile_without_a_position_is_addressable_and_its_communique_hol
     assert_eq!(agent["handle"], "@anuttara");
     assert_eq!(agent["label"], "M0 domain agent");
     assert_eq!(agent["occupancy"]["state"], "not-currently-embodied");
+    assert_eq!(agent["semantic_identity"]["state"], "not-attempted");
+    assert_eq!(agent["source_relation"]["kind"], "agent-profile");
     assert_eq!(agent["communiques"]["undelivered"], 2);
 }
 
@@ -785,6 +1790,7 @@ fn a_profile_joined_to_its_position_routes_by_that_positions_occupancy() {
         "central.position.list+agent-profile.list"
     );
     assert!(sent["recipient"]["agency_ref"].is_null());
+    assert_eq!(sent["recipient"]["identity_kind"], "position");
 
     // `@quill` joins to a vacant Position: the ordinary held law governs.
     let sent = base.ok(&["gateway", "send", "--to", "@quill", "--body", "hold this"]);
@@ -808,8 +1814,13 @@ fn a_profile_joined_to_its_position_routes_by_that_positions_occupancy() {
             .clone()
     };
     let pen = agent("agent/pen");
-    assert_eq!(pen["occupancy"]["state"], "embodied-here");
-    assert_eq!(pen["occupancy"]["position_ref"], GUARDIAN);
+    // The fixture owner reports agent/fixture at this eligible Position, not
+    // agent/pen. Eligibility cannot certify the other Agent's embodiment.
+    assert_eq!(pen["occupancy"]["state"], "not-currently-embodied");
+    assert!(pen["occupancy"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("exact AgentRef"));
     assert_eq!(
         pen["positions"],
         json!(["central:position:project:O-I:factory-guardian"])
@@ -1453,13 +2464,10 @@ fn the_population_reading_shows_occupancy_observed_through_a_remote_gateway() {
         .iter()
         .find(|agent| agent["agent_ref"] == "agent/veil")
         .unwrap();
-    assert_eq!(veil["occupancy"]["state"], "embodied-elsewhere");
-    assert_eq!(veil["occupancy"]["via"][0]["position_ref"], STEWARD);
-    assert_eq!(veil["occupancy"]["via"][0]["workcell_ref"], "workcell:b");
-    assert_eq!(
-        veil["occupancy"]["via"][0]["generation_ref"],
-        generation("steward-b")
-    );
+    // The remote's actual fixture tenure names agent/fixture. Its Position
+    // and generation remain visible above; it is not agent/veil's body.
+    assert_eq!(veil["occupancy"]["state"], "not-currently-embodied");
+    assert!(veil["occupancy"]["via"].is_null());
     assert_eq!(
         population["remotes"],
         json!([{

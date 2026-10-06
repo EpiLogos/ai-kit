@@ -4,6 +4,13 @@
 //! accepted source-relation ledger, and filesystem metadata. Human material and
 //! SemanticWiki payloads remain unloaded until an explicit ContextSource or Wiki
 //! read. `.no-agent-retrieval` prunes a subtree before any descendant is disclosed.
+//! Eager text and Wiki reads admit at most 16 MiB per source. Larger material
+//! needs a separately bounded reading through its owning native source/tool
+//! route; this adapter reports the budget refusal without truncating material.
+//! A retained binding also checks its admitted physical root on Linux/macOS.
+//! Retargeted or replaced roots require a fresh native inspect; other platforms
+//! disclose unevidenced physical affiliation as unavailable. Device/inode
+//! observations are material affiliation, never World, Project or Source identity.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -27,6 +34,12 @@ use aikit_core::{
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::Digest;
+
+// One module load: the publication machinery is declared once at the crate
+// root and re-exported here under the historical `publication` name.
+pub use crate::wiki_publication as publication;
+
+const EAGER_SOURCE_BUDGET: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct Manifest {
@@ -67,10 +80,313 @@ struct GroundRelation {
 }
 
 #[derive(Debug, Clone)]
+struct BoundSourcePath {
+    path: PathBuf,
+    owner_root: PathBuf,
+    root_affiliation: Option<RootAffiliation>,
+    is_directory: bool,
+    canonical_member: PathBuf,
+    enclosing_root: Option<(PathBuf, Option<RootAffiliation>)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RootAffiliation {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    device: u64,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    inode: u64,
+}
+
+fn root_affiliation(root: &Path) -> std::io::Result<Option<RootAffiliation>> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(root)?;
+        Ok(metadata.is_dir().then_some(RootAffiliation {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = root;
+        Ok(None)
+    }
+}
+
+fn require_root_affiliation(root: &Path, expected: Option<RootAffiliation>) -> Result<()> {
+    let current = root_affiliation(root).map_err(|error| {
+        source_read_error("projectcentral.source_unavailable", root, error)
+            .with("observation_stage", "owner_root")
+    })?;
+    if current != expected {
+        return Err(AikitError::new(
+            "projectcentral.source_binding_changed",
+            "the native root no longer matches this binding's admitted physical directory; inspect a fresh native binding",
+        )
+        .with("owner_root", root.display().to_string())
+        .with("expected_physical_root", format!("{expected:?}"))
+        .with("observed_physical_root", format!("{current:?}")));
+    }
+    Ok(())
+}
+
+fn canonical_member(root: &Path, path: &Path) -> Result<PathBuf> {
+    let root = fs::canonicalize(root).map_err(|error| {
+        source_read_error("projectcentral.source_unavailable", root, error)
+            .with("observation_stage", "owner_root")
+    })?;
+    let member = fs::canonicalize(path).map_err(|error| {
+        source_read_error("projectcentral.source_unavailable", path, error)
+            .with("observation_stage", "source_mapping")
+    })?;
+    let relative = member.strip_prefix(&root).map_err(|_| {
+        AikitError::new(
+            "projectcentral.source_binding_changed",
+            "the declared source no longer maps inside its admitted native root",
+        )
+        .with("path", path.display().to_string())
+    })?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(AikitError::new(
+            "projectcentral.source_escape",
+            "the admitted source requires a nonempty normal native member",
+        )
+        .with("path", path.display().to_string()));
+    }
+    Ok(relative.to_path_buf())
+}
+
+fn enclosing_readable(
+    enclosing: &Option<(PathBuf, Option<RootAffiliation>)>,
+    path: &Path,
+) -> Result<bool> {
+    let Some((root, affiliation)) = enclosing else {
+        return Ok(true);
+    };
+    require_root_affiliation(root, *affiliation)?;
+    let member = canonical_member(root, path)?;
+    let canonical_root = fs::canonicalize(root).map_err(|error| {
+        source_read_error("projectcentral.source_unavailable", root, error)
+            .with("observation_stage", "owner_root")
+    })?;
+    let mut declared_member = None;
+    for ancestor in path.ancestors() {
+        let canonical = fs::canonicalize(ancestor).map_err(|error| {
+            source_read_error("projectcentral.source_unavailable", ancestor, error)
+                .with("observation_stage", "read_admission")
+        })?;
+        if canonical == canonical_root {
+            // Keep the outermost actual World boundary. A nearer descendant
+            // alias back to World must not erase earlier lexical ancestors.
+            declared_member = Some(
+                path.strip_prefix(ancestor)
+                    .expect("a requested path ancestor is its lexical prefix")
+                    .to_path_buf(),
+            );
+        }
+    }
+    if let Some(declared_member) = declared_member {
+        if !path_agent_readability(root, &declared_member).map_err(|error| {
+            source_read_error("projectcentral.source_unavailable", path, error)
+                .with("observation_stage", "read_admission")
+        })? {
+            require_root_affiliation(root, *affiliation)?;
+            return Ok(false);
+        }
+    }
+    let readable = path_agent_readability(root, &member).map_err(|error| {
+        source_read_error("projectcentral.source_unavailable", path, error)
+            .with("observation_stage", "read_admission")
+    })?;
+    require_root_affiliation(root, *affiliation)?;
+    Ok(readable)
+}
+
+impl BoundSourcePath {
+    fn new(path: PathBuf, owner_root: PathBuf, is_directory: bool) -> Result<Self> {
+        let root_affiliation = root_affiliation(&owner_root).map_err(|error| {
+            source_read_error("projectcentral.source_unavailable", &owner_root, error)
+                .with("observation_stage", "owner_root")
+        })?;
+        let canonical_member = canonical_member(&owner_root, &path)?;
+        require_root_affiliation(&owner_root, root_affiliation)?;
+        Ok(Self {
+            path,
+            owner_root,
+            root_affiliation,
+            is_directory,
+            canonical_member,
+            enclosing_root: None,
+        })
+    }
+
+    fn require_owner(&self) -> Result<()> {
+        let Some(expected) = self.root_affiliation else {
+            return Err(AikitError::new(
+                "projectcentral.source_unavailable",
+                "native physical root affiliation cannot be evidenced on this platform",
+            )
+            .with("owner_root", self.owner_root.display().to_string())
+            .with("observation_stage", "owner_root"));
+        };
+        require_root_affiliation(&self.owner_root, Some(expected))
+    }
+
+    fn physical_root_identity(&self) -> Result<(u64, u64)> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(expected) = self.root_affiliation {
+            return Ok((expected.device, expected.inode));
+        }
+        Err(AikitError::new(
+            "projectcentral.source_unavailable",
+            "native physical root affiliation cannot be evidenced on this platform",
+        )
+        .with("owner_root", self.owner_root.display().to_string())
+        .with("observation_stage", "owner_root"))
+    }
+
+    fn material_bytes(&self) -> Result<Vec<u8>> {
+        publication::material_bytes_affiliated(
+            &self.owner_root,
+            self.physical_root_identity()?,
+            &self.canonical_member,
+            EAGER_SOURCE_BUDGET,
+        )
+        .map_err(|error| self.source_observation_error(error))
+    }
+
+    fn source_observation_error(&self, error: AikitError) -> AikitError {
+        // Preserve the first observation's actual cause. A current failed owner
+        // route is supplementary evidence, not evidence that the Source itself
+        // was deleted, and must not manufacture a replacement IO error.
+        let route = (|| -> Result<()> {
+            self.require_owner()?;
+            let root = fs::canonicalize(&self.owner_root).map_err(|cause| {
+                source_read_error("projectcentral.source_unavailable", &self.owner_root, cause)
+                    .with("observation_stage", "owner_root")
+            })?;
+            let parent = self.path.parent().ok_or_else(|| {
+                AikitError::new(
+                    "projectcentral.source_escape",
+                    "bound source has no native parent",
+                )
+                .with("observation_stage", "source_mapping")
+            })?;
+            let current = fs::canonicalize(parent).map_err(|cause| {
+                source_read_error("projectcentral.source_unavailable", parent, cause)
+                    .with("observation_stage", "owner_parent")
+            })?;
+            let expected = root.join(self.canonical_member.parent().unwrap_or(Path::new("")));
+            if current != expected {
+                return Err(AikitError::new(
+                    "projectcentral.source_binding_changed",
+                    "the original source parent no longer maps to this binding's admitted native parent",
+                ).with("observation_stage", "source_mapping")
+                    .with("expected_parent", expected.display().to_string())
+                    .with("observed_parent", current.display().to_string()));
+            }
+            self.require_owner()
+        })();
+        match route {
+            Ok(()) => error,
+            Err(cause) => {
+                let stage = cause
+                    .details()
+                    .get("observation_stage")
+                    .cloned()
+                    .unwrap_or_else(|| "owner_root".into());
+                let observation = serde_json::json!({
+                    "code": cause.code(), "message": cause.message(), "details": cause.details(),
+                })
+                .to_string();
+                error
+                    .with("observation_stage", stage)
+                    .with("binding_route_cause", observation)
+            }
+        }
+    }
+
+    fn require_mapping_and_form(&self) -> Result<()> {
+        self.require_owner()?;
+        let current = fs::symlink_metadata(&self.path).map_err(|error| {
+            self.source_observation_error(
+                source_read_error("projectcentral.source_unavailable", &self.path, error)
+                    .with("observation_stage", "source"),
+            )
+        })?;
+        if current.file_type().is_symlink()
+            || current.is_dir() != self.is_directory
+            || (!current.is_file() && !current.is_dir())
+        {
+            return Err(AikitError::new(
+                "projectcentral.source_binding_changed",
+                "the source no longer matches this binding's inspected physical form; inspect a fresh native binding",
+            )
+            .with("path", self.path.display().to_string())
+            .with("expected_is_directory", self.is_directory.to_string())
+            .with("observed_is_directory", current.is_dir().to_string()));
+        }
+        let member = canonical_member(&self.owner_root, &self.path)?;
+        if member != self.canonical_member {
+            return Err(AikitError::new(
+                "projectcentral.source_binding_changed",
+                "the declared source no longer maps to this binding's admitted native member; inspect a fresh native binding",
+            )
+            .with("path", self.path.display().to_string())
+            .with("expected_member", self.canonical_member.display().to_string())
+            .with("observed_member", member.display().to_string()));
+        }
+        self.require_owner()
+    }
+
+    fn readable(&self) -> Result<bool> {
+        self.require_owner()?;
+        let relative = self.path.strip_prefix(&self.owner_root).map_err(|_| {
+            AikitError::new(
+                "projectcentral.source_escape",
+                "bound ProjectCentral source escaped its native owner root",
+            )
+        })?;
+        if !path_agent_readability(&self.owner_root, relative).map_err(|error| {
+            source_read_error("projectcentral.source_unavailable", &self.path, error)
+                .with("observation_stage", "read_admission")
+        })? {
+            return Ok(false);
+        }
+        // Retained mapping/form is material continuity, not a read grant or a
+        // frozen source inode: native publication may legitimately replace it.
+        self.require_mapping_and_form()?;
+        if !enclosing_readable(&self.enclosing_root, &self.path)? {
+            return Ok(false);
+        }
+        self.require_mapping_and_form()?;
+        Ok(true)
+    }
+
+    fn require_readable(&self, source: &SourceRef) -> Result<()> {
+        match self.readable() {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(AikitError::new(
+                "projectcentral.source_withheld",
+                "ProjectCentral source is withheld from the current read",
+            )
+            .with("source", source.to_string())
+            .with("path", self.path.display().to_string())),
+            Err(error) => Err(error.with("source", source.to_string())),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ProjectCentralFilesystemBinding {
     pub semantic: ProjectCentralBinding,
     project_root: PathBuf,
-    paths: BTreeMap<ResourceRef, PathBuf>,
+    paths: BTreeMap<ResourceRef, BoundSourcePath>,
     standing: BTreeMap<ResourceRef, ProjectCentralStanding>,
 }
 
@@ -93,17 +409,71 @@ impl ProjectCentralFilesystemBinding {
     }
 
     pub fn inspect(project_root: impl AsRef<Path>, central_root: Option<&Path>) -> Result<Self> {
-        let project_root = project_root.as_ref().to_path_buf();
+        let requested_project = project_root.as_ref();
+        let invocation =
+            if requested_project.is_relative() || central_root.is_some_and(Path::is_relative) {
+                Some(std::env::current_dir().map_err(|error| {
+                    source_read_error(
+                        "projectcentral.source_unavailable",
+                        requested_project,
+                        error,
+                    )
+                    .with("observation_stage", "owner_root")
+                })?)
+            } else {
+                None
+            };
+        // Retain invocation coordinates, including the original alias spelling.
+        // A later cwd change cannot relocate this already inspected binding.
+        let at_invocation = |root: &Path| {
+            invocation
+                .as_ref()
+                .map_or_else(|| root.to_path_buf(), |cwd| cwd.join(root))
+        };
+        let project_root = at_invocation(requested_project);
+        let requested_central = central_root.map(at_invocation);
+        let central_root = requested_central.as_deref();
+        let project_affiliation = root_affiliation(&project_root).map_err(|error| {
+            source_read_error("projectcentral.source_unavailable", &project_root, error)
+                .with("observation_stage", "owner_root")
+        })?;
+        let central_affiliation = central_root
+            .map(|root| {
+                root_affiliation(root).map_err(|error| {
+                    source_read_error("projectcentral.source_unavailable", root, error)
+                        .with("observation_stage", "owner_root")
+                })
+            })
+            .transpose()?;
+        // A genuinely supplied enclosing World governs reads only when the
+        // Project's canonical physical membership is actually established.
+        // Failed canonical observation is unavailable, never external admission.
+        let enclosing_root =
+            if let (Some(root), Some(affiliation)) = (central_root, central_affiliation) {
+                let physical_project = fs::canonicalize(&project_root).map_err(|error| {
+                    source_read_error("projectcentral.source_unavailable", &project_root, error)
+                        .with("observation_stage", "owner_root")
+                })?;
+                let physical_central = fs::canonicalize(root).map_err(|error| {
+                    source_read_error("projectcentral.source_unavailable", root, error)
+                        .with("observation_stage", "owner_root")
+                })?;
+                physical_project
+                    .starts_with(&physical_central)
+                    .then(|| (root.to_path_buf(), affiliation))
+            } else {
+                None
+            };
         let manifest_path = project_root.join("ProjectCentral/project.json");
         let manifest_text = fs::read_to_string(&manifest_path)
             .map_err(|error| io_error("projectcentral.manifest_read", &manifest_path, error))?;
-        let manifest: Manifest = serde_json::from_str(&manifest_text).map_err(|error| {
-            AikitError::new(
-                "projectcentral.manifest_invalid",
-                format!("invalid ProjectCentral/project.json: {error}"),
-            )
-        })?;
-        validate_manifest(&manifest)?;
+        #[cfg(test)]
+        tests::after_manifest_read(&manifest_path);
+        require_root_affiliation(&project_root, project_affiliation)?;
+        if let (Some(root), Some(expected)) = (central_root, central_affiliation) {
+            require_root_affiliation(root, expected)?;
+        }
+        let manifest = parsed_manifest(manifest_text.as_bytes())?;
 
         let ground_relations_file = read_ground_relations(&project_root, &manifest.project_id)?;
         let mut relations_by_path = BTreeMap::<PathBuf, GroundRelation>::new();
@@ -194,8 +564,9 @@ impl ProjectCentralFilesystemBinding {
         };
 
         let human_path = project_root.join(PROJECTCENTRAL_HUMAN_ROOT);
-        let human_allowed =
-            human_path.exists() && !human_path.join(NO_AGENT_RETRIEVAL_MARKER).exists();
+        let human_allowed = human_path.exists()
+            && path_agent_readable(&project_root, Path::new(PROJECTCENTRAL_HUMAN_ROOT))
+            && enclosing_readable(&enclosing_root, &human_path)?;
         push_source(
             &mut sources,
             &mut paths,
@@ -227,8 +598,9 @@ impl ProjectCentralFilesystemBinding {
         }
 
         let governance_path = project_root.join(PROJECTCENTRAL_GOVERNANCE_ROOT);
-        let governance_allowed =
-            governance_path.exists() && !governance_path.join(NO_AGENT_RETRIEVAL_MARKER).exists();
+        let governance_allowed = governance_path.exists()
+            && path_agent_readable(&project_root, Path::new(PROJECTCENTRAL_GOVERNANCE_ROOT))
+            && enclosing_readable(&enclosing_root, &governance_path)?;
         push_source(
             &mut sources,
             &mut paths,
@@ -338,6 +710,8 @@ impl ProjectCentralFilesystemBinding {
             let root_ref = source("source:central:root:agent-wiki")?;
             let root_path = central_root.join(CENTRAL_ROOT_WIKI_SOURCE);
             let exists = root_path.is_file() && !is_symlink(&root_path);
+            let agent_readable =
+                exists && path_agent_readable(central_root, Path::new(CENTRAL_ROOT_WIKI_SOURCE));
             let descriptor = ProjectCentralSourceDescriptor {
                 source: root_ref.clone(),
                 relative_path: PathBuf::from(CENTRAL_ROOT_WIKI_SOURCE),
@@ -349,13 +723,16 @@ impl ProjectCentralFilesystemBinding {
                 treatment: ProjectCentralTreatment::GeneratedDerived,
                 recognition: None,
                 exists,
-                agent_readable: exists,
+                agent_readable,
                 is_directory: false,
                 revision: revision_for(&root_path),
             };
             let key = ResourceRef::parse(root_ref.as_str())?;
             if exists {
-                paths.insert(key.clone(), root_path);
+                paths.insert(
+                    key.clone(),
+                    BoundSourcePath::new(root_path, central_root.to_path_buf(), false)?,
+                );
             }
             standings.insert(key, ProjectCentralStanding::AgentMaintained);
             sources.push(descriptor);
@@ -382,6 +759,27 @@ impl ProjectCentralFilesystemBinding {
             revision: revision_for(&project_root),
         });
 
+        for bound in paths.values_mut() {
+            if bound.owner_root == project_root {
+                bound.enclosing_root = enclosing_root.clone();
+            }
+        }
+        for descriptor in &mut sources {
+            if descriptor.agent_readable {
+                let key = ResourceRef::parse(descriptor.source.as_str())?;
+                if let Some(bound) = paths.get(&key) {
+                    descriptor.agent_readable =
+                        enclosing_readable(&bound.enclosing_root, &bound.path)?;
+                }
+            }
+        }
+        // Coherence checkpoints retain the actual root admitted before reading
+        // native identity/relations. They do not exclude arbitrary external
+        // namespace changes between checkpoints.
+        require_root_affiliation(&project_root, project_affiliation)?;
+        if let (Some(root), Some(expected)) = (central_root, central_affiliation) {
+            require_root_affiliation(root, expected)?;
+        }
         Ok(Self {
             semantic: ProjectCentralBinding {
                 version: PROJECTCENTRAL_BINDING_VERSION.into(),
@@ -454,14 +852,27 @@ impl ProjectCentralFilesystemBinding {
         source: &SourceRef,
     ) -> Result<(String, Vec<aikit_core::WikiObject>)> {
         let key = ResourceRef::parse(source.as_str())?;
-        let path = self.paths.get(&key).ok_or_else(|| {
+        let bound = self.paths.get(&key).ok_or_else(|| {
             AikitError::new(
                 "projectcentral.source_unavailable",
                 format!("ProjectCentral source {source} is not available"),
             )
         })?;
-        let input = fs::read_to_string(path)
-            .map_err(|error| io_error("projectcentral.wiki_read", path, error))?;
+        bound.require_readable(source)?;
+        let path = &bound.path;
+        let bytes = bound
+            .material_bytes()
+            .map_err(|error| error.with("source", source.to_string()))?;
+        #[cfg(test)]
+        tests::after_source_read(path);
+        bound.require_readable(source)?;
+        let input = String::from_utf8(bytes).map_err(|error| {
+            source_read_error(
+                "projectcentral.wiki_read",
+                path,
+                std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+            )
+        })?;
         let objects = parse_wiki_objects(&input)?;
         Ok((input, objects))
     }
@@ -488,45 +899,115 @@ impl ProjectCentralFilesystemBinding {
     /// `base_hash` is the SHA-256 `load_project_wiki_for_maintenance` returned
     /// alongside the objects `plan` was built from. The wiki is agent-maintained,
     /// so concurrent writers are the normal case: this re-verifies that hash
-    /// against the file on disk immediately before the rename — mirroring the
-    /// gate `crates/aikit-cli/src/wiki.rs` runs on its own write paths — and
+    /// under the shared canonical publication lock through durable rename, and
     /// refuses with the same typed error rather than silently discarding a
-    /// peer's write that landed first. The refusal leaves the on-disk file
-    /// exactly as the peer left it and removes the temp file; nothing of this
-    /// mutation is applied. A rewrite that happens to land byte-identical
+    /// peer's write that landed first. A pre-publication refusal leaves the
+    /// on-disk source exactly as the peer left it. Failed stages stay unpromoted;
+    /// post-publication readback loss is returned as an uncertain effect.
+    /// A rewrite that happens to land byte-identical
     /// content is never treated as a conflict.
+    /// Returns the physical owner's actual changed acknowledgement: `false`
+    /// leaves the exact bytes and modification time untouched.
     pub fn persist_agent_wiki(
         &self,
         plan: &AgentWikiMaintenancePlan,
         base_hash: &str,
-    ) -> Result<()> {
-        let key = ResourceRef::parse(self.semantic.canonical_wiki.as_str())?;
-        let path = self.paths.get(&key).ok_or_else(|| {
-            AikitError::new(
-                "projectcentral.canonical_wiki_unavailable",
-                "canonical ProjectCentral Agent Wiki is unavailable",
-            )
+    ) -> Result<bool> {
+        let before_publication = |error: AikitError| {
+            error
+                .with("source", self.semantic.canonical_wiki.to_string())
+                .with("command_effect", "none")
+        };
+        let key = ResourceRef::parse(self.semantic.canonical_wiki.as_str())
+            .map_err(before_publication)?;
+        let bound = self
+            .paths
+            .get(&key)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "projectcentral.canonical_wiki_unavailable",
+                    "canonical ProjectCentral Agent Wiki is unavailable",
+                )
+            })
+            .map_err(before_publication)?;
+        let path = &bound.path;
+        // Physical affiliation/mapping is separate from read eligibility. This
+        // semantic writer does not acquire a marker-derived mutation gate.
+        bound
+            .require_mapping_and_form()
+            .map_err(before_publication)?;
+        let bytes = bound.material_bytes().map_err(before_publication)?;
+        bound
+            .require_mapping_and_form()
+            .map_err(before_publication)?;
+        let input = String::from_utf8(bytes).map_err(|error| {
+            before_publication(source_read_error(
+                "projectcentral.wiki_read",
+                path,
+                std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+            ))
         })?;
-        let rendered = render_wiki_objects(&plan.next_objects)?;
-        let temporary = path.with_extension("json.aikit-tmp");
-        fs::write(&temporary, &rendered)
-            .map_err(|error| io_error("projectcentral.wiki_write", &temporary, error))?;
-
-        if current_wiki_hash(path)?.as_deref() != Some(base_hash) {
-            let _ = fs::remove_file(&temporary);
-            return Err(AikitError::new(
-                "knowledge.wiki_concurrent_write",
-                format!(
-                    "{} changed since it was read; a peer write landed first. Re-read the file and re-apply this mutation.",
-                    path.display()
-                ),
-            )
-            .with("path", path.display().to_string()));
+        let rendered =
+            render_wiki_objects(&input, &plan.next_objects).map_err(before_publication)?;
+        bound
+            .require_mapping_and_form()
+            .map_err(before_publication)?;
+        let changed = publication::publish_wiki_affiliated(
+            &bound.owner_root,
+            bound.physical_root_identity().map_err(before_publication)?,
+            &bound.canonical_member,
+            &rendered,
+            base_hash,
+        )
+        .map_err(|error| {
+            let no_publication = error
+                .details()
+                .get("changed")
+                .is_some_and(|value| value == "false")
+                && error
+                    .details()
+                    .get("published")
+                    .is_some_and(|value| value == "false");
+            error
+                .with("source", self.semantic.canonical_wiki.to_string())
+                .with(
+                    "command_effect",
+                    if no_publication { "none" } else { "unknown" },
+                )
+        })?;
+        #[cfg(test)]
+        tests::after_wiki_publication(path);
+        if let Err(cause) = bound.require_mapping_and_form() {
+            let original = serde_json::json!({
+                "code": cause.code(), "message": cause.message(), "details": cause.details(),
+            })
+            .to_string();
+            if changed {
+                return Err(AikitError::new(
+                    "knowledge.wiki_publication_uncertain",
+                    "native Wiki publication completed, but its original binding route changed before acknowledgement",
+                )
+                .with_io_source_from(&cause)
+                .with("source", self.semantic.canonical_wiki.to_string())
+                .with("path", path.display().to_string())
+                .with("owner_root", bound.owner_root.display().to_string())
+                .with("canonical_member", bound.canonical_member.display().to_string())
+                .with("admitted_physical_root", format!("{:?}", bound.root_affiliation))
+                .with("published", "true")
+                .with("published_hash", content_hash(rendered.as_bytes()))
+                .with("base_hash", base_hash)
+                .with("changed", "true")
+                .with("command_effect", "unknown")
+                .with("cause", original));
+            }
+            return Err(cause
+                .with("source", self.semantic.canonical_wiki.to_string())
+                .with("changed", "false")
+                .with("published", "false")
+                .with("observed_basis", content_hash(rendered.as_bytes()))
+                .with("command_effect", "none"));
         }
-
-        fs::rename(&temporary, path)
-            .map_err(|error| io_error("projectcentral.wiki_replace", path, error))?;
-        Ok(())
+        Ok(changed)
     }
 
     pub fn project_root(&self) -> &Path {
@@ -537,7 +1018,7 @@ impl ProjectCentralFilesystemBinding {
 #[derive(Debug, Clone)]
 pub struct ProjectCentralFileProvider {
     provider: ProviderRef,
-    paths: BTreeMap<ResourceRef, PathBuf>,
+    paths: BTreeMap<ResourceRef, BoundSourcePath>,
     standing: BTreeMap<ResourceRef, ProjectCentralStanding>,
 }
 
@@ -560,27 +1041,33 @@ impl ContextSourceProvider for ProjectCentralFileProvider {
     }
 
     fn read(&mut self, request: &ContextSourceReadRequest) -> ProviderReadResult {
-        let Some(path) = self.paths.get(&request.resource) else {
+        let Some(bound) = self.paths.get(&request.resource) else {
             return ProviderReadResult::Absent(StructuredAbsence::new(
-                AbsenceKind::Missing,
-                "ProjectCentral source is not bound to a readable filesystem object",
+                AbsenceKind::Unknown,
+                "ProjectCentral source is not bound to a readable native filesystem object",
             ));
         };
-        if path.is_dir() {
+        if let Some(absence) = source_read_admission(bound) {
+            return ProviderReadResult::Absent(absence);
+        }
+        let path = &bound.path;
+        if bound.is_directory {
             return ProviderReadResult::Absent(StructuredAbsence::new(
                 AbsenceKind::Bound,
                 "ProjectCentral directory exists but has no eager aggregate payload",
             ));
         }
-        let bytes = match fs::read(path) {
+        let bytes = match bound.material_bytes() {
             Ok(bytes) => bytes,
             Err(error) => {
-                return ProviderReadResult::Absent(StructuredAbsence::new(
-                    AbsenceKind::Missing,
-                    format!("ProjectCentral source read failed: {error}"),
-                ));
+                return ProviderReadResult::Absent(source_read_absence(path, &error));
             }
         };
+        #[cfg(test)]
+        tests::after_source_read(path);
+        if let Some(absence) = source_read_admission(bound) {
+            return ProviderReadResult::Absent(absence);
+        }
         let payload = match String::from_utf8(bytes) {
             Ok(payload) => payload,
             Err(_) => {
@@ -597,18 +1084,43 @@ impl ContextSourceProvider for ProjectCentralFileProvider {
             .unwrap_or(ProjectCentralStanding::Unresolved);
         let source = SourceRef::parse(request.resource.as_str())
             .expect("ContextSource ResourceRef originated from a SourceRef");
+        let revision = revision_for(path);
         ProviderReadResult::Retrieved {
             payload,
-            revision: revision_for(path),
+            revision: revision.clone(),
             provenance: vec![ResourceSource {
                 source,
                 authority: standing.source_authority(),
-                revision: revision_for(path),
+                revision,
                 locator: Some(aikit_core::ResourceLocator::Path(path.clone())),
                 state: SourceState::Available,
             }],
         }
     }
+}
+
+/// Parse the existing native declaration without IO or a substitute identity.
+/// A caller must independently retain and reobserve its actual material basis.
+pub(crate) fn project_ref_from_manifest_bytes(bytes: &[u8]) -> Result<aikit_core::ProjectRef> {
+    let manifest = parsed_manifest(bytes)?;
+    aikit_core::ProjectRef::parse(&manifest.project_id).map_err(|error| {
+        if manifest.project_id.contains('\0') {
+            AikitError::new("projectcentral.project_transport_unsupported",
+                "The declared native Project ID cannot be represented by the existing AIKit ProjectRef profile")
+                .with("profile_error", error.code())
+        } else { error }
+    })
+}
+
+fn parsed_manifest(bytes: &[u8]) -> Result<Manifest> {
+    let manifest: Manifest = serde_json::from_slice(bytes).map_err(|error| {
+        AikitError::new(
+            "projectcentral.manifest_invalid",
+            format!("invalid ProjectCentral/project.json: {error}"),
+        )
+    })?;
+    validate_manifest(&manifest)?;
+    Ok(manifest)
 }
 
 fn validate_manifest(manifest: &Manifest) -> Result<()> {
@@ -705,7 +1217,7 @@ fn scan_human_tree(
     relations_by_path: &BTreeMap<PathBuf, GroundRelation>,
     consumed_relations: &mut BTreeSet<PathBuf>,
     sources: &mut Vec<ProjectCentralSourceDescriptor>,
-    paths: &mut BTreeMap<ResourceRef, PathBuf>,
+    paths: &mut BTreeMap<ResourceRef, BoundSourcePath>,
     standings: &mut BTreeMap<ResourceRef, ProjectCentralStanding>,
 ) -> Result<()> {
     if directory.join(NO_AGENT_RETRIEVAL_MARKER).exists() {
@@ -793,7 +1305,7 @@ fn scan_governance_tree(
     directory: &Path,
     project_id: &str,
     sources: &mut Vec<ProjectCentralSourceDescriptor>,
-    paths: &mut BTreeMap<ResourceRef, PathBuf>,
+    paths: &mut BTreeMap<ResourceRef, BoundSourcePath>,
     standings: &mut BTreeMap<ResourceRef, ProjectCentralStanding>,
 ) -> Result<()> {
     if directory.join(NO_AGENT_RETRIEVAL_MARKER).exists() {
@@ -869,7 +1381,11 @@ fn scan_governance_tree(
 pub fn root_governance_context_source_records(central_root: &Path) -> Result<Vec<ResourceRecord>> {
     let governance_path = central_root.join(CENTRAL_ROOT_GOVERNANCE_ROOT);
     let mut records = Vec::new();
-    if !governance_path.is_dir() || is_symlink(&governance_path) {
+    let readable = path_agent_readability(central_root, Path::new(CENTRAL_ROOT_GOVERNANCE_ROOT))
+        .map_err(|error| {
+            source_read_error("projectcentral.source_unavailable", &governance_path, error)
+        })?;
+    if !readable || !governance_path.is_dir() {
         return Ok(records);
     }
     scan_root_governance_tree(central_root, &governance_path, &mut records)?;
@@ -881,18 +1397,21 @@ fn scan_root_governance_tree(
     directory: &Path,
     records: &mut Vec<ResourceRecord>,
 ) -> Result<()> {
-    if directory.join(NO_AGENT_RETRIEVAL_MARKER).exists() {
+    let relative_directory = relative_path(central_root, directory)?;
+    if !path_agent_readability(central_root, &relative_directory)
+        .map_err(|error| source_read_error("projectcentral.source_unavailable", directory, error))?
+    {
         return Ok(());
     }
     let mut entries = fs::read_dir(directory)
-        .map_err(|error| io_error("projectcentral.directory_read", directory, error))?
+        .map_err(|error| source_read_error("projectcentral.directory_read", directory, error))?
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| io_error("projectcentral.directory_entry", directory, error))?;
+        .map_err(|error| source_read_error("projectcentral.directory_entry", directory, error))?;
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         let file_type = entry
             .file_type()
-            .map_err(|error| io_error("projectcentral.file_type", &entry.path(), error))?;
+            .map_err(|error| source_read_error("projectcentral.file_type", &entry.path(), error))?;
         if file_type.is_symlink() {
             continue;
         }
@@ -908,6 +1427,11 @@ fn scan_root_governance_tree(
             continue;
         }
         let relative = relative_path(central_root, &path)?;
+        if !path_agent_readability(central_root, &relative)
+            .map_err(|error| source_read_error("projectcentral.source_unavailable", &path, error))?
+        {
+            continue;
+        }
         let source_ref = source(&format!(
             "{CENTRAL_ROOT_SOURCE_REF_PREFIX}{}",
             relative.display()
@@ -945,7 +1469,7 @@ fn scan_root_governance_tree(
 #[allow(clippy::too_many_arguments)]
 fn push_source(
     sources: &mut Vec<ProjectCentralSourceDescriptor>,
-    paths: &mut BTreeMap<ResourceRef, PathBuf>,
+    paths: &mut BTreeMap<ResourceRef, BoundSourcePath>,
     standings: &mut BTreeMap<ResourceRef, ProjectCentralStanding>,
     project_root: &Path,
     source_ref: SourceRef,
@@ -968,6 +1492,11 @@ fn push_source(
         } else {
             absolute.is_file()
         };
+    // Retain the existing native path binding independently of this read's
+    // current disclosure. In particular, this does not create a new publication
+    // authority rule for the canonical Agent Wiki writer.
+    let bound_path_exists = agent_readable && exists;
+    let agent_readable = bound_path_exists && path_agent_readable(project_root, &relative_path);
     let descriptor = ProjectCentralSourceDescriptor {
         source: source_ref.clone(),
         relative_path,
@@ -984,8 +1513,11 @@ fn push_source(
         revision: revision_for(&absolute),
     };
     let key = ResourceRef::parse(source_ref.as_str())?;
-    if exists && agent_readable {
-        paths.insert(key.clone(), absolute);
+    if bound_path_exists {
+        paths.insert(
+            key.clone(),
+            BoundSourcePath::new(absolute, project_root.to_path_buf(), is_directory)?,
+        );
     }
     standings.insert(key, standing);
     sources.push(descriptor);
@@ -1003,30 +1535,154 @@ fn relative_path(project_root: &Path, path: &Path) -> Result<PathBuf> {
         })
 }
 
-/// Whether a project-relative path stays agent-readable under this Project:
-/// no symlink at the path itself, and no `.no-agent-retrieval` marker on the
-/// path or any directory between it and the project root. Crate-visible so
-/// the live Work-repos search pool enforces the very same withholding rule —
-/// one enforcement point, not a second reading.
-pub(crate) fn path_agent_readable(project_root: &Path, relative: &Path) -> bool {
-    let absolute = project_root.join(relative);
-    if is_symlink(&absolute) {
-        return false;
+/// Whether a nonescaping project-relative member stays agent-readable under
+/// the supplied native owner root. This is the same predicate used by native
+/// ProjectCentral reads and the live Work-repos pool. A selected descendant
+/// directory is not a replacement for its known native owner boundary.
+///
+/// The member's final symlink and non-regular/non-directory objects are refused;
+/// directory markers include the directory itself. Admission IO errors return
+/// `false` here, while native reads retain them through the fallible native
+/// form. This check grants no provider egress and is not atomic against arbitrary
+/// filesystem writers. The caller supplies the actual root, including accepted
+/// aliases; this function does not infer or canonicalise a semantic owner.
+pub fn path_agent_readable(project_root: &Path, relative: &Path) -> bool {
+    path_agent_readability(project_root, relative).unwrap_or(false)
+}
+
+/// The fallible form of [`path_agent_readable`]. `false` means current
+/// admission was refused (including markers, final aliases or escaped members),
+/// not proof of a particular marker. IO failures retain their actual cause.
+/// Neither `true` nor a missing final path establishes material existence or
+/// grants egress; the source reader must perform its own bounded physical read.
+pub fn path_agent_readability(project_root: &Path, relative: &Path) -> std::io::Result<bool> {
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Ok(false);
     }
-    let mut cursor = absolute.parent();
+    let member: PathBuf = relative
+        .components()
+        .filter(|component| !matches!(component, Component::CurDir))
+        .collect();
+    if member.as_os_str().is_empty() {
+        return Ok(false);
+    }
+    let absolute = project_root.join(member);
+    let metadata = match fs::symlink_metadata(&absolute) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    if metadata.as_ref().is_some_and(|metadata| {
+        metadata.file_type().is_symlink() || (!metadata.is_file() && !metadata.is_dir())
+    }) {
+        return Ok(false);
+    }
+    let is_directory = metadata.as_ref().is_some_and(|metadata| metadata.is_dir());
+    if !agent_readable_ancestors(project_root, &absolute, is_directory)? {
+        return Ok(false);
+    }
+    if metadata.is_some() {
+        // Resolve physical membership against the supplied native root, while
+        // preserving accepted aliases of that root. This does not infer an
+        // owner from a directory name or follow a final source symlink.
+        let root = fs::canonicalize(project_root)?;
+        let member = fs::canonicalize(&absolute)?;
+        if !member.starts_with(&root) {
+            return Ok(false);
+        }
+        return agent_readable_ancestors(&root, &member, is_directory);
+    }
+    Ok(true)
+}
+
+fn agent_readable_ancestors(
+    root: &Path,
+    member: &Path,
+    is_directory: bool,
+) -> std::io::Result<bool> {
+    let mut cursor = if is_directory {
+        Some(member)
+    } else {
+        member.parent()
+    };
     while let Some(directory) = cursor {
-        if !directory.starts_with(project_root) {
-            return false;
+        if !directory.starts_with(root) {
+            return Ok(false);
         }
-        if directory.join(NO_AGENT_RETRIEVAL_MARKER).is_file() {
-            return false;
+        match fs::metadata(directory.join(NO_AGENT_RETRIEVAL_MARKER)) {
+            Ok(marker) if marker.is_file() => return Ok(false),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
-        if directory == project_root {
+        if directory == root {
             break;
         }
         cursor = directory.parent();
     }
-    true
+    Ok(true)
+}
+
+fn source_read_admission(bound: &BoundSourcePath) -> Option<StructuredAbsence> {
+    match bound.readable() {
+        Ok(true) => None,
+        Ok(false) => Some(StructuredAbsence::new(
+            AbsenceKind::Bound,
+            "ProjectCentral source is withheld from the current read",
+        )),
+        Err(error) => Some(source_read_absence(&bound.path, &error)),
+    }
+}
+
+fn source_read_absence(path: &Path, error: &AikitError) -> StructuredAbsence {
+    let cause =
+        std::error::Error::source(error).and_then(|cause| cause.downcast_ref::<std::io::Error>());
+    let owner_route_unavailable = error
+        .details()
+        .get("observation_stage")
+        .is_some_and(|stage| {
+            matches!(
+                stage.as_str(),
+                "owner_root" | "owner_parent" | "source_mapping" | "read_admission"
+            )
+        });
+    let kind = if !owner_route_unavailable
+        && cause.is_some_and(|cause| cause.kind() == std::io::ErrorKind::NotFound)
+    {
+        AbsenceKind::Missing
+    } else {
+        AbsenceKind::Unknown
+    };
+    let mut reason = format!(
+        "ProjectCentral source {} is unavailable (native_code={}): {error}",
+        path.display(),
+        error.code(),
+    );
+    if let Some(cause) = cause {
+        reason.push_str(&format!(
+            " (cause_kind={:?}, cause_raw_os_error={:?})",
+            cause.kind(),
+            cause.raw_os_error(),
+        ));
+    }
+    StructuredAbsence::new(kind, reason)
+}
+
+fn source_read_error(code: &'static str, path: &Path, error: std::io::Error) -> AikitError {
+    let kind = format!("{:?}", error.kind());
+    let raw_os_error = serde_json::json!(error.raw_os_error()).to_string();
+    AikitError::new(code, format!("{}: {error}", path.display()))
+        .with("cause_kind", kind)
+        .with("cause_raw_os_error", raw_os_error)
+        .with_io_source(error)
 }
 
 fn is_symlink(path: &Path) -> bool {
@@ -1074,32 +1730,50 @@ fn content_hash(bytes: &[u8]) -> String {
     format!("{:x}", digest.finalize())
 }
 
-/// The current on-disk hash of the canonical Agent Wiki at `path`, or `None`
-/// when the file no longer exists — itself a change from whatever a caller
-/// read, so a base hash can never match it.
-fn current_wiki_hash(path: &Path) -> Result<Option<String>> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(content_hash(&bytes))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(io_error("projectcentral.wiki_read", path, error)),
-    }
-}
-
-fn render_wiki_objects(objects: &[aikit_core::WikiObject]) -> Result<String> {
+/// Preserve document headers and extension-bearing objects. An unchanged
+/// maintenance plan keeps its exact source bytes.
+fn render_wiki_objects(input: &str, objects: &[aikit_core::WikiObject]) -> Result<String> {
+    let current_document = aikit_core::WikiDocument::parse(input)?;
+    current_document.validate()?;
+    let mut document = serde_json::from_str::<Value>(input)
+        .map_err(|error| AikitError::new("projectcentral.wiki_serialize", error.to_string()))?;
     let objects = objects
         .iter()
         .map(wiki_object_value)
         .collect::<Result<Vec<_>>>()?;
-    serde_json::to_string_pretty(&serde_json::json!({
-        "profile": CENTRAL_WIKI_PROFILE,
-        "objects": objects
-    }))
-    .map_err(|error| {
+    document
+        .as_object_mut()
+        .ok_or_else(|| {
+            AikitError::new(
+                "projectcentral.wiki_serialize",
+                "Agent Wiki document is not an object",
+            )
+        })?
+        .insert("objects".into(), Value::Array(objects));
+    let rendered = serde_json::to_string_pretty(&document).map_err(|error| {
         AikitError::new(
             "projectcentral.wiki_serialize",
             format!("could not serialize Agent Wiki: {error}"),
         )
-    })
+    })?;
+    let next_document = aikit_core::WikiDocument::parse(&rendered)?;
+    next_document.validate()?;
+    // Native validation establishes unique identities before either map can
+    // collapse them. Object order alone does not require a new publication.
+    let current = current_document
+        .objects()
+        .iter()
+        .map(|object| (object.ref_id(), object))
+        .collect::<BTreeMap<_, _>>();
+    let next = next_document
+        .objects()
+        .iter()
+        .map(|object| (object.ref_id(), object))
+        .collect::<BTreeMap<_, _>>();
+    if current == next {
+        return Ok(input.to_string());
+    }
+    Ok(format!("{rendered}\n"))
 }
 
 fn wiki_object_value(object: &aikit_core::WikiObject) -> Result<Value> {
@@ -1145,6 +1819,91 @@ mod tests {
     const PURPOSE_REF: &str = "central:project-source:epilogos/demo:0000000000000001";
     const VISION_REF: &str = "central:project-source:epilogos/demo:0000000000000002";
 
+    type ReadObserver = Box<dyn FnOnce(&Path)>;
+    std::thread_local! {
+        static AFTER_SOURCE_READ: std::cell::RefCell<Option<ReadObserver>> =
+            const { std::cell::RefCell::new(None) };
+        static AFTER_MANIFEST_READ: std::cell::RefCell<Option<ReadObserver>> =
+            const { std::cell::RefCell::new(None) };
+        static AFTER_WIKI_PUBLICATION: std::cell::RefCell<Option<ReadObserver>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    struct ReadObservation;
+
+    impl Drop for ReadObservation {
+        fn drop(&mut self) {
+            AFTER_SOURCE_READ.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+
+    fn observe_source_read(observer: ReadObserver) -> ReadObservation {
+        AFTER_SOURCE_READ.with(|slot| {
+            assert!(slot.borrow().is_none());
+            *slot.borrow_mut() = Some(observer);
+        });
+        ReadObservation
+    }
+
+    pub(super) fn after_source_read(path: &Path) {
+        let observer = AFTER_SOURCE_READ.with(|slot| slot.borrow_mut().take());
+        if let Some(observer) = observer {
+            observer(path);
+        }
+    }
+
+    struct ManifestObservation;
+
+    impl Drop for ManifestObservation {
+        fn drop(&mut self) {
+            AFTER_MANIFEST_READ.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+
+    fn observe_manifest_read(observer: ReadObserver) -> ManifestObservation {
+        AFTER_MANIFEST_READ.with(|slot| {
+            assert!(slot.borrow().is_none());
+            *slot.borrow_mut() = Some(observer);
+        });
+        ManifestObservation
+    }
+
+    pub(super) fn after_manifest_read(path: &Path) {
+        let observer = AFTER_MANIFEST_READ.with(|slot| slot.borrow_mut().take());
+        if let Some(observer) = observer {
+            observer(path);
+        }
+    }
+
+    struct PublicationObservation;
+
+    impl Drop for PublicationObservation {
+        fn drop(&mut self) {
+            AFTER_WIKI_PUBLICATION.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+
+    fn observe_wiki_publication(observer: ReadObserver) -> PublicationObservation {
+        AFTER_WIKI_PUBLICATION.with(|slot| {
+            assert!(slot.borrow().is_none());
+            *slot.borrow_mut() = Some(observer);
+        });
+        PublicationObservation
+    }
+
+    pub(super) fn after_wiki_publication(path: &Path) {
+        let observer = AFTER_WIKI_PUBLICATION.with(|slot| slot.borrow_mut().take());
+        if let Some(observer) = observer {
+            observer(path);
+        }
+    }
+
     fn write(path: &Path, content: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).unwrap();
@@ -1168,7 +1927,20 @@ mod tests {
     }
 
     fn fixture() -> (TempDir, PathBuf, PathBuf) {
-        let temp = TempDir::new().unwrap();
+        fixture_in(TempDir::new().unwrap())
+    }
+
+    fn native_read_fixture() -> (TempDir, PathBuf, PathBuf) {
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
+        fs::create_dir_all(&scratch).unwrap();
+        let temp = tempfile::Builder::new()
+            .prefix("projectcentral-current-read-")
+            .tempdir_in(&scratch)
+            .unwrap();
+        fixture_in(temp)
+    }
+
+    fn fixture_in(temp: TempDir) -> (TempDir, PathBuf, PathBuf) {
         let central = temp.path().join("Central");
         let project = central.join("Work/demo");
         write(
@@ -1301,6 +2073,1501 @@ mod tests {
             fs::read_to_string(project.join("VISION.md")).unwrap(),
             "Retained native human vision"
         );
+    }
+
+    fn read_request(source: &str) -> ContextSourceReadRequest {
+        ContextSourceReadRequest {
+            resource: ResourceRef::parse(source).unwrap(),
+            provider: ProviderRef::parse(PROJECTCENTRAL_FILESYSTEM_PROVIDER).unwrap(),
+            target: RetrievalTarget::LocalAgent,
+        }
+    }
+
+    fn exact_provider_payload(
+        provider: &mut ProjectCentralFileProvider,
+        source: &str,
+        expected: &str,
+    ) {
+        match provider.read(&read_request(source)) {
+            ProviderReadResult::Retrieved {
+                payload,
+                revision,
+                provenance,
+            } => {
+                assert_eq!(payload, expected);
+                assert!(revision.is_some());
+                assert_eq!(provenance.len(), 1);
+                assert_eq!(provenance[0].source.as_str(), source);
+            }
+            other => panic!("expected actual native source {source}, received {other:?}"),
+        }
+    }
+
+    fn provider_withheld(provider: &mut ProjectCentralFileProvider, source: &str) {
+        match provider.read(&read_request(source)) {
+            ProviderReadResult::Absent(absence) => {
+                assert_eq!(absence.kind, AbsenceKind::Bound);
+                assert!(absence.reason.contains("withheld"));
+            }
+            other => panic!("withheld native source {source} was disclosed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn same_provider_rechecks_native_marker_and_restores_exact_source() {
+        let (_temp, central, project) = native_read_fixture();
+        let path = project.join("ProjectCentral/user/research/deep/purpose.md");
+        let original = fs::read(&path).unwrap();
+        let original_metadata = fs::metadata(&path).unwrap();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let mut provider = binding.file_provider().unwrap();
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+
+        let marker = project.join("ProjectCentral/user/research/.no-agent-retrieval");
+        fs::write(&marker, b"withheld by the fixture's source owner").unwrap();
+        provider_withheld(&mut provider, PURPOSE_REF);
+        exact_provider_payload(&mut provider, VISION_REF, "Retained native human vision");
+        exact_provider_payload(
+            &mut provider,
+            binding.semantic.root_wiki.as_ref().unwrap().as_str(),
+            &wiki_json("Root", None),
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(
+            fs::metadata(&path).unwrap().modified().unwrap(),
+            original_metadata.modified().unwrap(),
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let current = fs::metadata(&path).unwrap();
+            assert_eq!(current.dev(), original_metadata.dev());
+            assert_eq!(current.ino(), original_metadata.ino());
+        }
+
+        fs::remove_file(&marker).unwrap();
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn known_enclosing_world_withdrawal_preserves_external_and_inherited_boundaries() {
+        let (_temp, central, project) = native_read_fixture();
+        let (_external_temp, _external_central, external_project) = native_read_fixture();
+        let path = project.join("ProjectCentral/user/research/deep/purpose.md");
+        let original = fs::read(&path).unwrap();
+        let original_metadata = fs::metadata(&path).unwrap();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let external =
+            ProjectCentralFilesystemBinding::inspect(&external_project, Some(&central)).unwrap();
+        let mut provider = binding.file_provider().unwrap();
+        let mut external_provider = external.file_provider().unwrap();
+        let marker = central.join("Work/.no-agent-retrieval");
+        fs::write(
+            &marker,
+            b"known enclosing native World withdraws its Work subtree",
+        )
+        .unwrap();
+        provider_withheld(&mut provider, PURPOSE_REF);
+        provider_withheld(&mut provider, binding.semantic.canonical_wiki.as_str());
+        assert_eq!(
+            binding.load_project_wiki().unwrap_err().code(),
+            "projectcentral.source_withheld"
+        );
+        exact_provider_payload(&mut external_provider, PURPOSE_REF, "Human purpose");
+        exact_provider_payload(
+            &mut provider,
+            binding.semantic.root_wiki.as_ref().unwrap().as_str(),
+            &wiki_json("Root", None),
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+        let marked = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let descriptor = marked
+            .semantic
+            .sources
+            .iter()
+            .find(|source| source.source == binding.semantic.canonical_wiki)
+            .unwrap();
+        assert!(descriptor.exists);
+        assert!(!descriptor.agent_readable);
+        assert_eq!(descriptor.standing, ProjectCentralStanding::AgentMaintained);
+        fs::remove_file(&marker).unwrap();
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+
+        let observed_marker = marker.clone();
+        let _observation = observe_source_read(Box::new(move |_| {
+            fs::write(&observed_marker, b"late actual known native withdrawal").unwrap();
+        }));
+        provider_withheld(&mut provider, PURPOSE_REF);
+        AFTER_SOURCE_READ.with(|slot| assert!(slot.borrow().is_none()));
+        fs::remove_file(marker).unwrap();
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(
+            fs::metadata(&path).unwrap().modified().unwrap(),
+            original_metadata.modified().unwrap()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let current = fs::metadata(&path).unwrap();
+            assert_eq!(current.dev(), original_metadata.dev());
+            assert_eq!(current.ino(), original_metadata.ino());
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn enclosing_world_checks_original_alias_route_and_its_native_destination() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        let (_temp, central, project) = native_read_fixture();
+        let physical_project = central.join("retained-project-room/demo");
+        fs::create_dir_all(physical_project.parent().unwrap()).unwrap();
+        fs::rename(&project, &physical_project).unwrap();
+        symlink(&physical_project, &project).unwrap();
+        let path = physical_project.join("ProjectCentral/user/research/deep/purpose.md");
+        let original = fs::read(&path).unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let mut provider = binding.file_provider().unwrap();
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+        let lexical_marker = central.join("Work/.no-agent-retrieval");
+        fs::write(&lexical_marker, b"withdraw original native World route").unwrap();
+        assert!(path_agent_readability(
+            &project,
+            Path::new("ProjectCentral/user/research/deep/purpose.md")
+        )
+        .unwrap());
+        assert!(path_agent_readability(
+            &central,
+            Path::new("retained-project-room/demo/ProjectCentral/user/research/deep/purpose.md")
+        )
+        .unwrap());
+        provider_withheld(&mut provider, PURPOSE_REF);
+        assert_eq!(
+            binding.load_project_wiki().unwrap_err().code(),
+            "projectcentral.source_withheld"
+        );
+        fs::remove_file(&lexical_marker).unwrap();
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+        let physical_marker = physical_project
+            .parent()
+            .unwrap()
+            .join(NO_AGENT_RETRIEVAL_MARKER);
+        fs::write(
+            &physical_marker,
+            b"withdraw actual native World destination",
+        )
+        .unwrap();
+        provider_withheld(&mut provider, PURPOSE_REF);
+        fs::remove_file(physical_marker).unwrap();
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+        let current = fs::metadata(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(current.dev(), metadata.dev());
+        assert_eq!(current.ino(), metadata.ino());
+        assert_eq!(current.modified().unwrap(), metadata.modified().unwrap());
+        assert_eq!(
+            ProjectCentralFilesystemBinding::inspect(&project, Some(&central))
+                .unwrap()
+                .semantic
+                .canonical_wiki,
+            binding.semantic.canonical_wiki
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn invocation_relative_route(path: &Path) -> PathBuf {
+        let cwd = fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        for (up, ancestor) in cwd.ancestors().enumerate() {
+            if let Ok(member) = path.strip_prefix(ancestor) {
+                let mut relative = PathBuf::new();
+                for _ in 0..up {
+                    relative.push("..");
+                }
+                relative.push(member);
+                return relative;
+            }
+        }
+        panic!("actual Unix fixture and invocation require a common root");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn enclosing_world_retains_outermost_original_route_across_invocation_coordinates() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        let (temp, central, _project) = native_read_fixture();
+        let central = fs::canonicalize(central).unwrap();
+        let project = central.join("Work/demo");
+        let private_room = central.join("Work/withheld");
+        fs::create_dir(&private_room).unwrap();
+        symlink(&project, private_room.join("project-alias")).unwrap();
+        symlink(&central, private_room.join("world-alias")).unwrap();
+        let alternate_world = temp.path().join("alternate-world-root");
+        symlink(&central, &alternate_world).unwrap();
+        let path = project.join("ProjectCentral/user/research/deep/purpose.md");
+        let wiki = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+        let original = fs::read(&path).unwrap();
+        let original_wiki = fs::read(&wiki).unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let wiki_metadata = fs::metadata(&wiki).unwrap();
+        let direct = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let mut direct_provider = direct.file_provider().unwrap();
+        let marker = private_room.join(NO_AGENT_RETRIEVAL_MARKER);
+        for member in [
+            "Work/withheld/project-alias",
+            "Work/withheld/world-alias/Work/demo",
+        ] {
+            let selected = central.join(member);
+            let selected_relative = invocation_relative_route(&selected);
+            for world in [&central, &alternate_world] {
+                let world_relative = invocation_relative_route(world);
+                for (selected, world) in [
+                    (&selected, world),
+                    (&selected_relative, world),
+                    (&selected, &world_relative),
+                    (&selected_relative, &world_relative),
+                ] {
+                    let binding =
+                        ProjectCentralFilesystemBinding::inspect(selected, Some(world)).unwrap();
+                    assert!(binding.project_root.is_absolute());
+                    assert_eq!(binding.semantic.project, direct.semantic.project);
+                    assert_eq!(
+                        binding.semantic.canonical_wiki,
+                        direct.semantic.canonical_wiki
+                    );
+                    let mut provider = binding.file_provider().unwrap();
+                    exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+                    assert_eq!(binding.load_project_wiki().unwrap().len(), 2);
+                    fs::write(
+                        &marker,
+                        b"current source owner withdrew the original World route",
+                    )
+                    .unwrap();
+                    provider_withheld(&mut provider, PURPOSE_REF);
+                    provider_withheld(&mut provider, binding.semantic.canonical_wiki.as_str());
+                    assert_eq!(
+                        binding.load_project_wiki().unwrap_err().code(),
+                        "projectcentral.source_withheld"
+                    );
+                    exact_provider_payload(&mut direct_provider, PURPOSE_REF, "Human purpose");
+                    exact_provider_payload(
+                        &mut provider,
+                        binding.semantic.root_wiki.as_ref().unwrap().as_str(),
+                        &wiki_json("Root", None),
+                    );
+                    fs::remove_file(&marker).unwrap();
+                    exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+                    assert_eq!(binding.load_project_wiki().unwrap().len(), 2);
+                    assert_eq!(fs::read(&path).unwrap(), original);
+                    assert_eq!(fs::read(&wiki).unwrap(), original_wiki);
+                }
+            }
+        }
+        let current = fs::metadata(&path).unwrap();
+        let current_wiki = fs::metadata(&wiki).unwrap();
+        assert_eq!(
+            (current.dev(), current.ino()),
+            (metadata.dev(), metadata.ino())
+        );
+        assert_eq!(current.modified().unwrap(), metadata.modified().unwrap());
+        assert_eq!(
+            (current_wiki.dev(), current_wiki.ino()),
+            (wiki_metadata.dev(), wiki_metadata.ino())
+        );
+        assert_eq!(
+            current_wiki.modified().unwrap(),
+            wiki_metadata.modified().unwrap()
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn relative_binding_cwd_child_uses_actual_inspection_coordinates() {
+        if std::env::var_os("AIKIT_PROJECTCENTRAL_CWD_PROBE").is_none() {
+            return;
+        }
+        let original_cwd = std::env::current_dir().unwrap();
+        let central = original_cwd.join("Central");
+        let other = PathBuf::from(std::env::var_os("AIKIT_PROJECTCENTRAL_CWD_OTHER").unwrap());
+        let binding = ProjectCentralFilesystemBinding::inspect(
+            Path::new("Central/Work/demo"),
+            Some(Path::new("Central")),
+        )
+        .unwrap();
+        assert_eq!(binding.project_root, original_cwd.join("Central/Work/demo"));
+        let mut provider = binding.file_provider().unwrap();
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+        // This exact test runs alone in an owned child process. No parent test
+        // changes global cwd or lends another provider its invocation identity.
+        std::env::set_current_dir(&other).unwrap();
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+        exact_provider_payload(&mut provider, VISION_REF, "Retained native human vision");
+        assert_eq!(binding.load_project_wiki().unwrap().len(), 2);
+        let marker = central.join("Work/.no-agent-retrieval");
+        fs::write(
+            &marker,
+            b"withdraw original World after the child cwd changed",
+        )
+        .unwrap();
+        provider_withheld(&mut provider, PURPOSE_REF);
+        assert_eq!(
+            binding.load_project_wiki().unwrap_err().code(),
+            "projectcentral.source_withheld"
+        );
+        fs::remove_file(marker).unwrap();
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+        std::env::set_current_dir(original_cwd).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn relative_binding_keeps_inspection_coordinates_in_actual_cwd_child() {
+        use crate::runner::SystemRunner;
+        use std::os::unix::fs::MetadataExt;
+        use std::process::Command;
+        use std::time::Duration;
+        let (temp, central, project) = native_read_fixture();
+        let (other_temp, _other_central, other_project) = native_read_fixture();
+        let source = project.join("ProjectCentral/user/research/deep/purpose.md");
+        let foreign_source = other_project.join("ProjectCentral/user/research/deep/purpose.md");
+        fs::write(
+            &foreign_source,
+            b"foreign cwd source must never substitute the retained source",
+        )
+        .unwrap();
+        let original = fs::read(&source).unwrap();
+        let metadata = fs::metadata(&source).unwrap();
+        let other_before = fs::read(&foreign_source).unwrap();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "projectcentral::tests::relative_binding_cwd_child_uses_actual_inspection_coordinates", "--nocapture"])
+            .current_dir(temp.path()).env("AIKIT_PROJECTCENTRAL_CWD_PROBE", "1")
+            .env("AIKIT_PROJECTCENTRAL_CWD_OTHER", other_temp.path());
+        // The existing native runner owns capture, finite cleanup and any
+        // unresolved child/group outcome. This test never retries that child.
+        let output = SystemRunner::new()
+            .with_timeout(Duration::from_secs(5))
+            .with_output_limit_bytes(512 * 1024)
+            .capture_command(&mut command)
+            .unwrap_or_else(|error| {
+                panic!("actual native binding cwd child runner failed: {error:?}")
+            });
+        assert!(
+            output.stdout.len() + output.stderr.len() <= 1024 * 1024,
+            "actual child diagnostics exceeded their aggregate bound"
+        );
+        assert!(
+            output.ok(),
+            "actual native binding cwd child failed: {output:?}"
+        );
+        assert!(
+            output.stdout.contains("1 passed"),
+            "actual cwd child did not execute its proof: {output:?}"
+        );
+        assert_eq!(fs::read(&source).unwrap(), original);
+        assert_eq!(fs::metadata(&source).unwrap().ino(), metadata.ino());
+        assert_eq!(
+            fs::metadata(&source).unwrap().modified().unwrap(),
+            metadata.modified().unwrap()
+        );
+        assert_eq!(fs::read(&foreign_source).unwrap(), other_before);
+        assert!(!central.join("Work/.no-agent-retrieval").exists());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn removed_owner_alias_is_unknown_while_the_original_source_is_retained() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        let (temp, central, project) = native_read_fixture();
+        let alias = temp.path().join("retained-native-project-alias");
+        symlink(&project, &alias).unwrap();
+        let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+        let original = fs::read(&path).unwrap();
+        let original_metadata = fs::metadata(&path).unwrap();
+        let binding = ProjectCentralFilesystemBinding::inspect(&alias, Some(&central)).unwrap();
+        let mut provider = binding.file_provider().unwrap();
+        fs::remove_file(&alias).unwrap();
+        let actual = fs::metadata(&alias).unwrap_err();
+        assert_eq!(actual.kind(), std::io::ErrorKind::NotFound);
+        match provider.read(&read_request(binding.semantic.canonical_wiki.as_str())) {
+            ProviderReadResult::Absent(absence) => {
+                assert_eq!(absence.kind, AbsenceKind::Unknown);
+                assert!(absence.reason.contains("observation_stage=owner_root"));
+                assert!(absence.reason.contains(&actual.to_string()));
+                assert!(absence.reason.contains(&format!(
+                    "cause_raw_os_error={}",
+                    serde_json::json!(actual.raw_os_error())
+                )));
+            }
+            other => panic!("missing owner alias was treated as a current source: {other:?}"),
+        }
+        let failure = binding.load_project_wiki().unwrap_err();
+        assert_eq!(failure.details()["observation_stage"], "owner_root");
+        let cause = std::error::Error::source(&failure)
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        assert_eq!(cause.kind(), actual.kind());
+        assert_eq!(cause.raw_os_error(), actual.raw_os_error());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        let current = fs::metadata(&path).unwrap();
+        assert_eq!(current.dev(), original_metadata.dev());
+        assert_eq!(current.ino(), original_metadata.ino());
+        symlink(&project, &alias).unwrap();
+        exact_provider_payload(
+            &mut provider,
+            binding.semantic.canonical_wiki.as_str(),
+            &wiki_json("Purpose", Some(PURPOSE_REF)),
+        );
+        let fresh = ProjectCentralFilesystemBinding::inspect(&alias, Some(&central)).unwrap();
+        assert_eq!(
+            fresh.semantic.canonical_wiki,
+            binding.semantic.canonical_wiki
+        );
+    }
+
+    #[test]
+    fn retained_directory_source_cannot_deliver_replacement_file_contents() {
+        let (_temp, central, project) = native_read_fixture();
+        let human = project.join(PROJECTCENTRAL_HUMAN_ROOT);
+        let retained = project.join("ProjectCentral/retained-human-root");
+        let purpose = human.join("research/deep/purpose.md");
+        let original = fs::read(&purpose).unwrap();
+        let original_metadata = fs::metadata(&purpose).unwrap();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let source = binding.semantic.human_root.clone();
+        let descriptor = binding
+            .semantic
+            .sources
+            .iter()
+            .find(|descriptor| descriptor.source == source)
+            .unwrap()
+            .clone();
+        assert!(descriptor.is_directory);
+        let mut provider = binding.file_provider().unwrap();
+        match provider.read(&read_request(source.as_str())) {
+            ProviderReadResult::Absent(absence) => {
+                assert_eq!(absence.kind, AbsenceKind::Bound);
+                assert!(absence.reason.contains("no eager aggregate payload"));
+            }
+            other => panic!("native directory unexpectedly returned a body: {other:?}"),
+        }
+
+        fs::rename(&human, &retained).unwrap();
+        fs::write(
+            &human,
+            b"replacement ordinary file must not become directory source content",
+        )
+        .unwrap();
+        match provider.read(&read_request(source.as_str())) {
+            ProviderReadResult::Absent(absence) => {
+                assert_eq!(absence.kind, AbsenceKind::Unknown);
+                assert!(absence
+                    .reason
+                    .contains("projectcentral.source_binding_changed"));
+                assert!(absence.reason.contains("expected_is_directory=true"));
+                assert!(absence.reason.contains("observed_is_directory=false"));
+            }
+            other => panic!("captured directory disclosed replacement-file contents: {other:?}"),
+        }
+        assert_eq!(
+            ProjectCentralFilesystemBinding::inspect(&project, Some(&central))
+                .unwrap_err()
+                .code(),
+            "projectcentral.directory_read",
+        );
+        exact_provider_payload(&mut provider, VISION_REF, "Retained native human vision");
+        assert_eq!(
+            fs::read(retained.join("research/deep/purpose.md")).unwrap(),
+            original
+        );
+        assert_eq!(binding.semantic.human_root, source);
+        assert_eq!(
+            binding
+                .semantic
+                .sources
+                .iter()
+                .find(|item| item.source == source)
+                .unwrap()
+                .standing,
+            descriptor.standing,
+        );
+
+        fs::remove_file(&human).unwrap();
+        fs::rename(&retained, &human).unwrap();
+        let reopened = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        assert_eq!(reopened.semantic.human_root, source);
+        let reopened_descriptor = reopened
+            .semantic
+            .sources
+            .iter()
+            .find(|item| item.source == source)
+            .unwrap();
+        assert!(reopened_descriptor.exists && reopened_descriptor.is_directory);
+        assert_eq!(reopened_descriptor.standing, descriptor.standing);
+        exact_provider_payload(
+            &mut reopened.file_provider().unwrap(),
+            PURPOSE_REF,
+            "Human purpose",
+        );
+        assert_eq!(fs::read(&purpose).unwrap(), original);
+        assert_eq!(
+            fs::metadata(&purpose).unwrap().modified().unwrap(),
+            original_metadata.modified().unwrap()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let current = fs::metadata(&purpose).unwrap();
+            assert_eq!(current.dev(), original_metadata.dev());
+            assert_eq!(current.ino(), original_metadata.ino());
+        }
+    }
+
+    #[test]
+    fn inherited_root_and_adopted_sources_keep_their_actual_read_boundaries() {
+        let (_temp, central, project) = native_read_fixture();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let root = binding.semantic.root_wiki.as_ref().unwrap().as_str();
+        let adopted = binding.semantic.adopted_wikis[0].as_str();
+        let mut provider = binding.file_provider().unwrap();
+        exact_provider_payload(&mut provider, root, &wiki_json("Root", None));
+        exact_provider_payload(&mut provider, adopted, &wiki_json("Adopted", None));
+
+        let project_marker = project.join(NO_AGENT_RETRIEVAL_MARKER);
+        fs::write(&project_marker, b"project excluded").unwrap();
+        provider_withheld(&mut provider, adopted);
+        assert_eq!(
+            binding.load_adopted_wikis().unwrap_err().code(),
+            "projectcentral.source_withheld",
+        );
+        exact_provider_payload(&mut provider, root, &wiki_json("Root", None));
+        assert_eq!(binding.load_root_wiki().unwrap().unwrap().len(), 2);
+        fs::remove_file(project_marker).unwrap();
+        exact_provider_payload(&mut provider, adopted, &wiki_json("Adopted", None));
+        assert_eq!(binding.load_adopted_wikis().unwrap().len(), 1);
+
+        let root_marker = central.join("Control/agents/.no-agent-retrieval");
+        fs::write(&root_marker, b"root source excluded").unwrap();
+        provider_withheld(&mut provider, root);
+        assert_eq!(
+            binding.load_root_wiki().unwrap_err().code(),
+            "projectcentral.source_withheld"
+        );
+        exact_provider_payload(
+            &mut provider,
+            binding.semantic.canonical_wiki.as_str(),
+            &wiki_json("Purpose", Some(PURPOSE_REF)),
+        );
+        assert_eq!(binding.load_project_wiki().unwrap().len(), 2);
+        fs::remove_file(root_marker).unwrap();
+        exact_provider_payload(&mut provider, root, &wiki_json("Root", None));
+        assert_eq!(binding.load_root_wiki().unwrap().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn native_provider_retains_actual_unavailable_io_and_observed_missing_causes() {
+        let (_temp, central, project) = native_read_fixture();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let mut provider = binding.file_provider().unwrap();
+        let path = project.join("ProjectCentral/user/research/deep/purpose.md");
+        let room = path.parent().unwrap();
+        let retained_room = room.with_file_name("retained-deep");
+        fs::rename(room, &retained_room).unwrap();
+        fs::write(
+            room,
+            b"this existing path is now an ordinary file, not a source directory",
+        )
+        .unwrap();
+        let actual = fs::read(&path).unwrap_err();
+        assert_ne!(actual.kind(), std::io::ErrorKind::NotFound);
+        assert!(!path_agent_readable(
+            &project,
+            Path::new("ProjectCentral/user/research/deep/purpose.md"),
+        ));
+        match provider.read(&read_request(PURPOSE_REF)) {
+            ProviderReadResult::Absent(absence) => {
+                assert_eq!(absence.kind, AbsenceKind::Unknown);
+                assert!(absence.reason.contains(&actual.to_string()));
+                assert!(absence
+                    .reason
+                    .contains(&format!("cause_kind={:?}", actual.kind())));
+                assert!(absence
+                    .reason
+                    .contains(&format!("cause_raw_os_error={:?}", actual.raw_os_error(),)));
+            }
+            other => panic!("actual unavailable source was reported as a payload: {other:?}"),
+        }
+        fs::remove_file(room).unwrap();
+        fs::rename(retained_room, room).unwrap();
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+
+        let wiki = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+        let retained_wiki = wiki.with_file_name("retained-wiki.json");
+        fs::rename(&wiki, &retained_wiki).unwrap();
+        let actual_missing = fs::read(&wiki).unwrap_err();
+        assert_eq!(actual_missing.kind(), std::io::ErrorKind::NotFound);
+        match provider.read(&read_request(binding.semantic.canonical_wiki.as_str())) {
+            ProviderReadResult::Absent(absence) => {
+                assert_eq!(absence.kind, AbsenceKind::Missing);
+                assert!(absence.reason.contains(&actual_missing.to_string()));
+                assert!(absence.reason.contains(&format!(
+                    "cause_raw_os_error={:?}",
+                    actual_missing.raw_os_error(),
+                )));
+            }
+            other => panic!("missing native Wiki was reported as a payload: {other:?}"),
+        }
+        let error = binding.load_project_wiki().unwrap_err();
+        assert_eq!(error.code(), "projectcentral.source_unavailable");
+        assert_eq!(
+            error.details().get("cause_kind"),
+            Some(&format!("{:?}", actual_missing.kind())),
+        );
+        assert_eq!(
+            error.details().get("cause_raw_os_error"),
+            Some(&serde_json::json!(actual_missing.raw_os_error()).to_string()),
+        );
+        let cause = std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        assert_eq!(cause.kind(), actual_missing.kind());
+        assert_eq!(cause.raw_os_error(), actual_missing.raw_os_error());
+        fs::rename(retained_wiki, wiki).unwrap();
+        assert_eq!(binding.load_project_wiki().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn native_noop_wiki_read_and_publication_preserve_actual_source_identity() {
+        let (_temp, central, project) = native_read_fixture();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+        let original = fs::read(&path).unwrap();
+        let before = fs::metadata(&path).unwrap();
+        let (current_objects, basis) = binding.load_project_wiki_for_maintenance().unwrap();
+        let plan = plan_agent_wiki_maintenance(AgentWikiMaintenanceRequest {
+            current_objects,
+            upserts: vec![],
+            observed_source_revisions: binding.observed_source_revisions(),
+            human_source_proposals: vec![],
+        })
+        .unwrap();
+        assert!(!binding.persist_agent_wiki(&plan, &basis).unwrap());
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+        assert_eq!(after.permissions(), before.permissions());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(after.dev(), before.dev());
+            assert_eq!(after.ino(), before.ino());
+            assert_eq!(after.uid(), before.uid());
+            assert_eq!(after.gid(), before.gid());
+            assert_eq!(after.nlink(), before.nlink());
+        }
+    }
+
+    #[test]
+    fn native_eager_reads_refuse_actual_oversize_without_truncation_or_marker_claim() {
+        let (_temp, central, project) = native_read_fixture();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let mut provider = binding.file_provider().unwrap();
+        let path = project.join("ProjectCentral/user/research/deep/purpose.md");
+        let original = fs::read(&path).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(EAGER_SOURCE_BUDGET + 1)
+            .unwrap();
+        match provider.read(&read_request(PURPOSE_REF)) {
+            ProviderReadResult::Absent(absence) => {
+                assert_eq!(absence.kind, AbsenceKind::Unknown);
+                assert!(absence.reason.contains("knowledge.wiki_publication_budget"));
+                assert!(!absence.reason.contains("withheld"));
+            }
+            other => panic!("oversized native material returned as a payload: {other:?}"),
+        }
+        assert_eq!(fs::metadata(&path).unwrap().len(), EAGER_SOURCE_BUDGET + 1);
+        fs::write(&path, original).unwrap();
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+
+        let wiki = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+        let original_wiki = fs::read(&wiki).unwrap();
+        let (current, base_hash) = binding.load_project_wiki_for_maintenance().unwrap();
+        let plan = maintenance_plan(&binding, current, "wiki:node:oversize-refused");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&wiki)
+            .unwrap()
+            .set_len(EAGER_SOURCE_BUDGET + 1)
+            .unwrap();
+        let error = binding.load_project_wiki().unwrap_err();
+        assert_eq!(error.code(), "knowledge.wiki_publication_budget");
+        let write_error = binding.persist_agent_wiki(&plan, &base_hash).unwrap_err();
+        assert_eq!(write_error.code(), "knowledge.wiki_publication_budget");
+        assert_eq!(
+            write_error.details().get("command_effect"),
+            Some(&"none".to_string())
+        );
+        assert_eq!(fs::metadata(&wiki).unwrap().len(), EAGER_SOURCE_BUDGET + 1);
+        fs::write(wiki, original_wiki).unwrap();
+        assert_eq!(binding.load_project_wiki().unwrap().len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captured_wiki_writer_refuses_real_final_symlink_and_fifo_before_effect() {
+        use crate::runner::{CommandRunner, SystemRunner};
+        use std::os::unix::fs::{symlink, FileTypeExt};
+        use std::time::Duration;
+
+        let (_temp, central, project) = native_read_fixture();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let (current, base_hash) = binding.load_project_wiki_for_maintenance().unwrap();
+        let plan = maintenance_plan(&binding, current, "wiki:node:replacement-refused");
+        let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+        let retained = path.with_file_name("retained-original-wiki.json");
+        let original = fs::read(&path).unwrap();
+        let foreign = project.join("unselected-foreign-material");
+        fs::write(
+            &foreign,
+            b"unselected material which is not a Wiki document",
+        )
+        .unwrap();
+        fs::rename(&path, &retained).unwrap();
+        symlink(&foreign, &path).unwrap();
+        let error = binding.persist_agent_wiki(&plan, &base_hash).unwrap_err();
+        assert_eq!(error.code(), "projectcentral.source_binding_changed");
+        assert_eq!(
+            error.details().get("command_effect"),
+            Some(&"none".to_string())
+        );
+        assert_eq!(fs::read(&retained).unwrap(), original);
+        assert_eq!(
+            fs::read(&foreign).unwrap(),
+            b"unselected material which is not a Wiki document"
+        );
+        fs::remove_file(&path).unwrap();
+
+        let argv = vec![
+            "/usr/bin/mkfifo".to_string(),
+            "-m".to_string(),
+            "600".to_string(),
+            path.to_string_lossy().into_owned(),
+        ];
+        let created = SystemRunner::new()
+            .with_timeout(Duration::from_secs(3))
+            .run(&argv)
+            .unwrap();
+        assert!(created.ok(), "{}", created.stderr);
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sent.send(binding.persist_agent_wiki(&plan, &base_hash))
+                .unwrap();
+        });
+        let error = received
+            .recv_timeout(Duration::from_secs(3))
+            .expect("captured native Wiki writer must not wait for a FIFO producer")
+            .unwrap_err();
+        worker.join().unwrap();
+        assert_eq!(error.code(), "projectcentral.source_binding_changed");
+        assert_eq!(
+            error.details().get("command_effect"),
+            Some(&"none".to_string())
+        );
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_fifo());
+        assert_eq!(fs::read(&retained).unwrap(), original);
+        fs::remove_file(&path).unwrap();
+        fs::rename(retained, path).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn retained_writer_refuses_equal_basis_foreign_root_and_preserves_current_authority_split() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        let (temp, central, project) = native_read_fixture();
+        let (_other_temp, _other_central, other_project) = native_read_fixture();
+        let alias = temp.path().join("writer-native-root-alias");
+        symlink(&project, &alias).unwrap();
+        let binding = ProjectCentralFilesystemBinding::inspect(&alias, Some(&central)).unwrap();
+        let (current, basis) = binding.load_project_wiki_for_maintenance().unwrap();
+        let plan = maintenance_plan(&binding, current, "wiki:node:affiliated-writer");
+        let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+        let other_path = other_project.join(PROJECTCENTRAL_WIKI_SOURCE);
+        let original = fs::read(&path).unwrap();
+        let other = fs::read(&other_path).unwrap();
+        assert_eq!(
+            original, other,
+            "the content basis cannot distinguish native owner roots"
+        );
+        let other_metadata = fs::metadata(&other_path).unwrap();
+        fs::remove_file(&alias).unwrap();
+        symlink(&other_project, &alias).unwrap();
+        let refusal = binding.persist_agent_wiki(&plan, &basis).unwrap_err();
+        assert_eq!(refusal.code(), "projectcentral.source_binding_changed");
+        assert_eq!(refusal.details()["command_effect"], "none");
+        assert_eq!(
+            refusal.details()["source"],
+            binding.semantic.canonical_wiki.as_str()
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read(&other_path).unwrap(), other);
+        fs::remove_file(&alias).unwrap();
+        symlink(&project, &alias).unwrap();
+
+        // This is the fixture's authorised semantic maintenance route. Current
+        // read disclosure is separate and cannot become a new mutation gate.
+        let marker = project.join(NO_AGENT_RETRIEVAL_MARKER);
+        fs::write(&marker, b"retrieval is currently withheld").unwrap();
+        assert_eq!(
+            binding.load_project_wiki().unwrap_err().code(),
+            "projectcentral.source_withheld"
+        );
+        assert!(binding.persist_agent_wiki(&plan, &basis).unwrap());
+        fs::remove_file(marker).unwrap();
+        let index = SemanticWikiIndex::rebuild(binding.load_project_wiki().unwrap()).unwrap();
+        assert!(index
+            .node(&ResourceRef::parse("wiki:node:affiliated-writer").unwrap())
+            .is_some());
+        assert_eq!(fs::read(&other_path).unwrap(), other);
+        let after = fs::metadata(&other_path).unwrap();
+        assert_eq!(after.dev(), other_metadata.dev());
+        assert_eq!(after.ino(), other_metadata.ino());
+        assert_eq!(
+            after.modified().unwrap(),
+            other_metadata.modified().unwrap()
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_writer_completion_keeps_publication_or_noop_when_original_alias_disappears() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        for changed in [false, true] {
+            let (temp, central, project) = native_read_fixture();
+            let (_other_temp, _other_central, other_project) = native_read_fixture();
+            let alias = temp.path().join("actual-owner-completion-alias");
+            symlink(&project, &alias).unwrap();
+            let binding = ProjectCentralFilesystemBinding::inspect(&alias, Some(&central)).unwrap();
+            let (current, basis) = binding.load_project_wiki_for_maintenance().unwrap();
+            let plan = if changed {
+                maintenance_plan(&binding, current, "wiki:node:completed-before-alias-loss")
+            } else {
+                plan_agent_wiki_maintenance(AgentWikiMaintenanceRequest {
+                    current_objects: current,
+                    upserts: vec![],
+                    observed_source_revisions: binding.observed_source_revisions(),
+                    human_source_proposals: vec![],
+                })
+                .unwrap()
+            };
+            let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+            let original = fs::read(&path).unwrap();
+            let original_metadata = fs::metadata(&path).unwrap();
+            let other_path = other_project.join(PROJECTCENTRAL_WIKI_SOURCE);
+            let other = fs::read(&other_path).unwrap();
+            let removed = alias.clone();
+            let _observation = observe_wiki_publication(Box::new(move |path| {
+                assert!(path.ends_with(PROJECTCENTRAL_WIKI_SOURCE));
+                fs::remove_file(&removed).unwrap();
+            }));
+            let failure = binding.persist_agent_wiki(&plan, &basis).unwrap_err();
+            AFTER_WIKI_PUBLICATION.with(|slot| assert!(slot.borrow().is_none()));
+            let actual = fs::metadata(&alias).unwrap_err();
+            let cause = std::error::Error::source(&failure)
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap();
+            assert_eq!(cause.kind(), std::io::ErrorKind::NotFound);
+            assert_eq!(cause.raw_os_error(), actual.raw_os_error());
+            assert_eq!(
+                failure.details()["source"],
+                binding.semantic.canonical_wiki.as_str()
+            );
+            let after = fs::read(&path).unwrap();
+            if changed {
+                assert_eq!(failure.code(), "knowledge.wiki_publication_uncertain");
+                assert_eq!(failure.details()["changed"], "true");
+                assert_eq!(failure.details()["published"], "true");
+                assert_eq!(failure.details()["command_effect"], "unknown");
+                assert_eq!(failure.details()["base_hash"], basis);
+                assert_eq!(failure.details()["published_hash"], content_hash(&after));
+                assert_eq!(
+                    failure.details()["canonical_member"],
+                    PROJECTCENTRAL_WIKI_SOURCE
+                );
+                let original_cause: Value =
+                    serde_json::from_str(&failure.details()["cause"]).unwrap();
+                assert_eq!(original_cause["details"]["observation_stage"], "owner_root");
+                let index = SemanticWikiIndex::rebuild(
+                    parse_wiki_objects(std::str::from_utf8(&after).unwrap()).unwrap(),
+                )
+                .unwrap();
+                assert!(index
+                    .node(&ResourceRef::parse("wiki:node:completed-before-alias-loss").unwrap())
+                    .is_some());
+            } else {
+                assert_eq!(failure.details()["changed"], "false");
+                assert_eq!(failure.details()["published"], "false");
+                assert_eq!(failure.details()["command_effect"], "none");
+                assert_eq!(failure.details()["observed_basis"], content_hash(&original));
+                assert_eq!(after, original);
+                let metadata = fs::metadata(&path).unwrap();
+                assert_eq!(metadata.ino(), original_metadata.ino());
+                assert_eq!(
+                    metadata.modified().unwrap(),
+                    original_metadata.modified().unwrap()
+                );
+            }
+            assert_eq!(fs::read(&other_path).unwrap(), other);
+            symlink(&project, &alias).unwrap();
+            let fresh = ProjectCentralFilesystemBinding::inspect(&alias, Some(&central)).unwrap();
+            assert_eq!(
+                fresh.semantic.canonical_wiki,
+                binding.semantic.canonical_wiki
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_and_wiki_delegate_ordinary_material_identity_to_physical_owner() {
+        let (_temp, central, project) = native_read_fixture();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let mut provider = binding.file_provider().unwrap();
+        let path = project.join("VISION.md");
+        let alias = project.join("unselected-vision-hardlink.md");
+        fs::hard_link(&path, &alias).unwrap();
+        assert!(path_agent_readable(&project, Path::new("VISION.md")));
+        match provider.read(&read_request(VISION_REF)) {
+            ProviderReadResult::Absent(absence) => {
+                assert_eq!(absence.kind, AbsenceKind::Unknown);
+                assert!(absence
+                    .reason
+                    .contains("knowledge.wiki_publication_identity"));
+                assert!(!absence.reason.contains("withheld"));
+            }
+            other => panic!("material identity refusal bypassed by provider: {other:?}"),
+        }
+        fs::remove_file(alias).unwrap();
+        exact_provider_payload(&mut provider, VISION_REF, "Retained native human vision");
+
+        let wiki = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+        let original = fs::read(&wiki).unwrap();
+        let alias = project.join("unselected-wiki-hardlink.json");
+        fs::hard_link(&wiki, &alias).unwrap();
+        assert_eq!(
+            binding.load_project_wiki().unwrap_err().code(),
+            "knowledge.wiki_publication_identity"
+        );
+        assert_eq!(fs::read(&wiki).unwrap(), original);
+        fs::remove_file(alias).unwrap();
+        assert_eq!(binding.load_project_wiki().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn actual_source_and_wiki_body_reads_recheck_withdrawal_after_io() {
+        let (_temp, central, project) = native_read_fixture();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let mut provider = binding.file_provider().unwrap();
+        let path = project.join("ProjectCentral/user/research/deep/purpose.md");
+        let original = fs::read(&path).unwrap();
+        let marker = path.parent().unwrap().join(NO_AGENT_RETRIEVAL_MARKER);
+        let observed_marker = marker.clone();
+        let body_observation = observe_source_read(Box::new(move |read_path| {
+            assert_eq!(fs::read(read_path).unwrap(), original);
+            fs::write(observed_marker, b"withdrawn after the actual body read").unwrap();
+        }));
+        provider_withheld(&mut provider, PURPOSE_REF);
+        AFTER_SOURCE_READ.with(|slot| assert!(slot.borrow().is_none()));
+        drop(body_observation);
+        exact_provider_payload(&mut provider, VISION_REF, "Retained native human vision");
+        fs::remove_file(marker).unwrap();
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+
+        let root = central.join(CENTRAL_ROOT_WIKI_SOURCE);
+        let original_wiki = fs::read(&root).unwrap();
+        let marker = root.parent().unwrap().join(NO_AGENT_RETRIEVAL_MARKER);
+        let observed_marker = marker.clone();
+        let wiki_observation = observe_source_read(Box::new(move |read_path| {
+            assert_eq!(fs::read(read_path).unwrap(), original_wiki);
+            fs::write(observed_marker, b"withdrawn after the actual Wiki read").unwrap();
+        }));
+        assert_eq!(
+            binding.load_root_wiki().unwrap_err().code(),
+            "projectcentral.source_withheld"
+        );
+        AFTER_SOURCE_READ.with(|slot| assert!(slot.borrow().is_none()));
+        drop(wiki_observation);
+        exact_provider_payload(&mut provider, VISION_REF, "Retained native human vision");
+        fs::remove_file(marker).unwrap();
+        assert_eq!(binding.load_root_wiki().unwrap().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn public_native_read_predicate_rejects_escape_and_directory_self_marker() {
+        let (_temp, central, project) = native_read_fixture();
+        assert!(path_agent_readable(&project, Path::new("./VISION.md")));
+        assert!(!path_agent_readable(
+            &project,
+            Path::new("../demo/VISION.md")
+        ));
+        assert!(!path_agent_readable(
+            &project,
+            &central.join(CENTRAL_ROOT_WIKI_SOURCE)
+        ));
+        assert!(!path_agent_readable(&project, Path::new("")));
+        let directory = Path::new("ProjectCentral/user/research");
+        assert!(path_agent_readable(&project, directory));
+        let marker = project.join(directory).join(NO_AGENT_RETRIEVAL_MARKER);
+        fs::write(&marker, b"withheld native directory").unwrap();
+        assert!(!path_agent_readable(&project, directory));
+        assert!(!path_agent_readable(
+            &project,
+            &directory.join("deep/purpose.md")
+        ));
+        fs::remove_file(marker).unwrap();
+        assert!(path_agent_readable(&project, directory));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn retained_in_root_alias_mapping_requires_fresh_inspection_after_retarget() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        let (_temp, central, project) = native_read_fixture();
+        let human = project.join(PROJECTCENTRAL_HUMAN_ROOT);
+        let requested = human.join("research");
+        let admitted = human.join("admitted-room");
+        let changed = human.join("changed-room");
+        fs::rename(&requested, &admitted).unwrap();
+        symlink(&admitted, &requested).unwrap();
+        write(
+            &changed.join("deep/purpose.md"),
+            "Different actual in-root source room",
+        );
+        let original_path = admitted.join("deep/purpose.md");
+        let original = fs::read(&original_path).unwrap();
+        let original_metadata = fs::metadata(&original_path).unwrap();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let mut provider = binding.file_provider().unwrap();
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+        fs::remove_file(&requested).unwrap();
+        let actual = fs::symlink_metadata(requested.join("deep/purpose.md")).unwrap_err();
+        assert_eq!(actual.kind(), std::io::ErrorKind::NotFound);
+        match provider.read(&read_request(PURPOSE_REF)) {
+            ProviderReadResult::Absent(absence) => {
+                assert_eq!(absence.kind, AbsenceKind::Unknown);
+                assert!(absence.reason.contains("observation_stage=owner_parent"));
+                assert!(absence.reason.contains(&actual.to_string()));
+            }
+            other => panic!(
+                "lost original member alias was labelled as a missing retained source: {other:?}"
+            ),
+        }
+        assert_eq!(fs::read(&original_path).unwrap(), original);
+        let retained = fs::metadata(&original_path).unwrap();
+        assert_eq!(retained.dev(), original_metadata.dev());
+        assert_eq!(retained.ino(), original_metadata.ino());
+        assert_eq!(
+            retained.modified().unwrap(),
+            original_metadata.modified().unwrap()
+        );
+        symlink(&changed, &requested).unwrap();
+        assert!(path_agent_readability(
+            &project,
+            Path::new("ProjectCentral/user/research/deep/purpose.md")
+        )
+        .unwrap());
+        match provider.read(&read_request(PURPOSE_REF)) {
+            ProviderReadResult::Absent(absence) => {
+                assert_eq!(absence.kind, AbsenceKind::Unknown);
+                assert!(absence
+                    .reason
+                    .contains("projectcentral.source_binding_changed"));
+                assert!(absence.reason.contains("expected_member="));
+                assert!(absence.reason.contains("observed_member="));
+            }
+            other => panic!("retained native SourceRef disclosed a retargeted room: {other:?}"),
+        }
+        let fresh = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        exact_provider_payload(
+            &mut fresh.file_provider().unwrap(),
+            PURPOSE_REF,
+            "Different actual in-root source room",
+        );
+        assert_eq!(fresh.semantic.project, binding.semantic.project);
+        assert_eq!(
+            fresh.semantic.canonical_wiki,
+            binding.semantic.canonical_wiki
+        );
+        let current = fs::metadata(&original_path).unwrap();
+        assert_eq!(fs::read(&original_path).unwrap(), original);
+        assert_eq!(current.dev(), original_metadata.dev());
+        assert_eq!(current.ino(), original_metadata.ino());
+        assert_eq!(
+            current.modified().unwrap(),
+            original_metadata.modified().unwrap()
+        );
+        fs::remove_file(&requested).unwrap();
+        symlink(&admitted, &requested).unwrap();
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_publication_can_replace_source_inode_without_reminting_binding() {
+        use std::os::unix::fs::MetadataExt;
+        let (_temp, central, project) = native_read_fixture();
+        let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+        let original = fs::read(&path).unwrap();
+        let original_metadata = fs::metadata(&path).unwrap();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let source = binding.semantic.canonical_wiki.clone();
+        let mut provider = binding.file_provider().unwrap();
+        let next = wiki_json(
+            "Actual native publication replaces material",
+            Some(PURPOSE_REF),
+        );
+        assert!(publication::publish_wiki(&path, &next, &content_hash(&original)).unwrap());
+        let current = fs::metadata(&path).unwrap();
+        assert_eq!(current.dev(), original_metadata.dev());
+        assert_ne!(current.ino(), original_metadata.ino());
+        exact_provider_payload(&mut provider, source.as_str(), &next);
+        assert_eq!(binding.load_project_wiki().unwrap().len(), 2);
+        assert_eq!(binding.semantic.canonical_wiki, source);
+        assert_eq!(
+            binding
+                .semantic
+                .sources
+                .iter()
+                .find(|item| item.source == source)
+                .unwrap()
+                .standing,
+            ProjectCentralStanding::AgentMaintained
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_inspection_refuses_one_way_project_or_inherited_root_retarget() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        for inherited in [false, true] {
+            let (temp, central, project) = native_read_fixture();
+            let (_other_temp, other_central, other_project) = native_read_fixture();
+            let manifest = project.join("ProjectCentral/project.json");
+            let original_manifest = fs::read(&manifest).unwrap();
+            let original_metadata = fs::metadata(&manifest).unwrap();
+            let original_wiki = fs::read(project.join(PROJECTCENTRAL_WIKI_SOURCE)).unwrap();
+            let alias = temp.path().join("inspected-root-alias");
+            let (original_root, changed_root) = if inherited {
+                (&central, &other_central)
+            } else {
+                (&project, &other_project)
+            };
+            symlink(original_root, &alias).unwrap();
+            let requested_project = if inherited {
+                project.clone()
+            } else {
+                alias.clone()
+            };
+            let requested_central = if inherited {
+                alias.clone()
+            } else {
+                central.clone()
+            };
+            let initial = ProjectCentralFilesystemBinding::inspect(
+                &requested_project,
+                Some(&requested_central),
+            )
+            .unwrap();
+            let source = initial.semantic.canonical_wiki.clone();
+            let changed_root = changed_root.to_path_buf();
+            let observed_alias = alias.clone();
+            let _observation = observe_manifest_read(Box::new(move |path| {
+                assert!(path.ends_with("ProjectCentral/project.json"));
+                fs::remove_file(&observed_alias).unwrap();
+                symlink(&changed_root, &observed_alias).unwrap();
+            }));
+            let refusal = ProjectCentralFilesystemBinding::inspect(
+                &requested_project,
+                Some(&requested_central),
+            )
+            .unwrap_err();
+            AFTER_MANIFEST_READ.with(|slot| assert!(slot.borrow().is_none()));
+            assert_eq!(refusal.code(), "projectcentral.source_binding_changed");
+            assert_eq!(refusal.details()["owner_root"], alias.display().to_string());
+            assert_eq!(fs::read(&manifest).unwrap(), original_manifest);
+            assert_eq!(
+                fs::read(project.join(PROJECTCENTRAL_WIKI_SOURCE)).unwrap(),
+                original_wiki
+            );
+            let current = fs::metadata(&manifest).unwrap();
+            assert_eq!(current.dev(), original_metadata.dev());
+            assert_eq!(current.ino(), original_metadata.ino());
+            assert_eq!(
+                current.modified().unwrap(),
+                original_metadata.modified().unwrap()
+            );
+
+            fs::remove_file(&alias).unwrap();
+            symlink(original_root, &alias).unwrap();
+            let reopened = ProjectCentralFilesystemBinding::inspect(
+                &requested_project,
+                Some(&requested_central),
+            )
+            .unwrap();
+            assert_eq!(reopened.semantic.canonical_wiki, source);
+            assert_eq!(reopened.semantic.project, initial.semantic.project);
+            assert_eq!(reopened.load_project_wiki().unwrap().len(), 2);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_native_alias_retarget_requires_fresh_owner_binding() {
+        use std::os::unix::fs::symlink;
+
+        let (temp, central, project) = native_read_fixture();
+        let (_other_temp, other_central, other_project) = native_read_fixture();
+        let manifest_path = other_project.join("ProjectCentral/project.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["project_id"] = serde_json::json!("epilogos/other");
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let relations_path = other_project.join(PROJECTCENTRAL_GROUND_RELATIONS_SOURCE);
+        let mut relations: Value =
+            serde_json::from_slice(&fs::read(&relations_path).unwrap()).unwrap();
+        relations["project_id"] = serde_json::json!("epilogos/other");
+        fs::write(relations_path, serde_json::to_vec(&relations).unwrap()).unwrap();
+        write(
+            &other_project.join(PROJECTCENTRAL_WIKI_SOURCE),
+            &wiki_json("Other native root", None),
+        );
+
+        let alias = temp.path().join("actual-native-root-alias");
+        symlink(&central, &alias).unwrap();
+        let alias_project = alias.join("Work/demo");
+        let binding =
+            ProjectCentralFilesystemBinding::inspect(&alias_project, Some(&alias)).unwrap();
+        let mut provider = binding.file_provider().unwrap();
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+        let original = fs::read(project.join(PROJECTCENTRAL_WIKI_SOURCE)).unwrap();
+        let retarget = alias.clone();
+        let destination = other_central.clone();
+        let observation = observe_source_read(Box::new(move |_| {
+            fs::remove_file(&retarget).unwrap();
+            symlink(&destination, &retarget).unwrap();
+        }));
+        match provider.read(&read_request(PURPOSE_REF)) {
+            ProviderReadResult::Absent(absence) => {
+                assert_eq!(absence.kind, AbsenceKind::Unknown);
+                assert!(absence
+                    .reason
+                    .contains("projectcentral.source_binding_changed"));
+            }
+            other => panic!("retargeted native root returned under retained source: {other:?}"),
+        }
+        AFTER_SOURCE_READ.with(|slot| assert!(slot.borrow().is_none()));
+        drop(observation);
+        assert_eq!(
+            binding.load_project_wiki().unwrap_err().code(),
+            "projectcentral.source_binding_changed"
+        );
+        assert_eq!(
+            binding.load_root_wiki().unwrap_err().code(),
+            "projectcentral.source_binding_changed"
+        );
+        assert_eq!(
+            fs::read(project.join(PROJECTCENTRAL_WIKI_SOURCE)).unwrap(),
+            original
+        );
+
+        let fresh = ProjectCentralFilesystemBinding::inspect(&alias_project, Some(&alias)).unwrap();
+        assert_eq!(fresh.semantic.project_id, "epilogos/other");
+        assert_ne!(
+            fresh.semantic.canonical_wiki,
+            binding.semantic.canonical_wiki
+        );
+        let mut fresh_provider = fresh.file_provider().unwrap();
+        exact_provider_payload(
+            &mut fresh_provider,
+            fresh.semantic.canonical_wiki.as_str(),
+            &wiki_json("Other native root", None),
+        );
+        fs::remove_file(&alias).unwrap();
+        symlink(&central, &alias).unwrap();
+        let restored =
+            ProjectCentralFilesystemBinding::inspect(&alias_project, Some(&alias)).unwrap();
+        assert_eq!(
+            restored.semantic.canonical_wiki,
+            binding.semantic.canonical_wiki
+        );
+        assert_eq!(restored.load_project_wiki().unwrap().len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replaced_native_project_root_requires_fresh_material_affiliation() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (_temp, central, project) = native_read_fixture();
+        let (_other_temp, _other_central, other_project) = native_read_fixture();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let mut provider = binding.file_provider().unwrap();
+        let source = project.join("ProjectCentral/user/research/deep/purpose.md");
+        let original = fs::read(&source).unwrap();
+        let original_metadata = fs::metadata(&source).unwrap();
+        write(
+            &other_project.join("ProjectCentral/user/research/deep/purpose.md"),
+            "Replacement native material",
+        );
+        let retained_project = project.with_file_name("retained-original-demo");
+        fs::rename(&project, &retained_project).unwrap();
+        fs::rename(&other_project, &project).unwrap();
+        match provider.read(&read_request(PURPOSE_REF)) {
+            ProviderReadResult::Absent(absence) => {
+                assert_eq!(absence.kind, AbsenceKind::Unknown);
+                assert!(absence
+                    .reason
+                    .contains("projectcentral.source_binding_changed"));
+            }
+            other => {
+                panic!("replaced root returned under retained material affiliation: {other:?}")
+            }
+        }
+        let fresh = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        assert_eq!(fresh.semantic.project, binding.semantic.project);
+        let mut fresh_provider = fresh.file_provider().unwrap();
+        exact_provider_payload(
+            &mut fresh_provider,
+            PURPOSE_REF,
+            "Replacement native material",
+        );
+        let retained = retained_project.join("ProjectCentral/user/research/deep/purpose.md");
+        assert_eq!(fs::read(&retained).unwrap(), original);
+        let current = fs::metadata(&retained).unwrap();
+        assert_eq!(current.dev(), original_metadata.dev());
+        assert_eq!(current.ino(), original_metadata.ino());
+        fs::rename(&project, other_project).unwrap();
+        fs::rename(retained_project, &project).unwrap();
+        let restored = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        assert_eq!(restored.semantic.project, binding.semantic.project);
+        exact_provider_payload(
+            &mut restored.file_provider().unwrap(),
+            PURPOSE_REF,
+            "Human purpose",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn intermediate_native_alias_checks_membership_and_both_marker_routes() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+
+        let (temp, central, project) = native_read_fixture();
+        let path = project.join("ProjectCentral/user/research/deep/purpose.md");
+        let original = fs::read(&path).unwrap();
+        let original_metadata = fs::metadata(&path).unwrap();
+        let room = path.parent().unwrap();
+        let retained_room = project.join("retained-read-room");
+        fs::rename(room, &retained_room).unwrap();
+        symlink(&retained_room, room).unwrap();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let mut provider = binding.file_provider().unwrap();
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+
+        let destination_marker = retained_room.join(NO_AGENT_RETRIEVAL_MARKER);
+        fs::write(
+            &destination_marker,
+            b"the actual aliased source room is withheld",
+        )
+        .unwrap();
+        assert!(!path_agent_readable(
+            &project,
+            Path::new("ProjectCentral/user/research/deep/purpose.md"),
+        ));
+        provider_withheld(&mut provider, PURPOSE_REF);
+        exact_provider_payload(&mut provider, VISION_REF, "Retained native human vision");
+        fs::remove_file(destination_marker).unwrap();
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+
+        let lexical_marker = room.parent().unwrap().join(NO_AGENT_RETRIEVAL_MARKER);
+        fs::write(&lexical_marker, b"the lexical source room is withheld").unwrap();
+        provider_withheld(&mut provider, PURPOSE_REF);
+        fs::remove_file(lexical_marker).unwrap();
+
+        let outside = temp.path().join("outside-declared-native-root");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("purpose.md"), b"unselected external material").unwrap();
+        fs::remove_file(room).unwrap();
+        symlink(&outside, room).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"unselected external material");
+        assert!(!path_agent_readable(
+            &project,
+            Path::new("ProjectCentral/user/research/deep/purpose.md"),
+        ));
+        provider_withheld(&mut provider, PURPOSE_REF);
+        exact_provider_payload(&mut provider, VISION_REF, "Retained native human vision");
+
+        let retained_source = retained_room.join("purpose.md");
+        assert_eq!(fs::read(&retained_source).unwrap(), original);
+        let current_metadata = fs::metadata(&retained_source).unwrap();
+        assert_eq!(current_metadata.dev(), original_metadata.dev());
+        assert_eq!(current_metadata.ino(), original_metadata.ino());
+        assert_eq!(
+            current_metadata.modified().unwrap(),
+            original_metadata.modified().unwrap()
+        );
+        fs::remove_file(room).unwrap();
+        fs::rename(retained_room, room).unwrap();
+        let restored = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        assert_eq!(
+            restored.semantic.canonical_wiki,
+            binding.semantic.canonical_wiki
+        );
+        exact_provider_payload(
+            &mut restored.file_provider().unwrap(),
+            PURPOSE_REF,
+            "Human purpose",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_native_root_alias_and_final_source_symlink_keep_distinct_admission() {
+        use std::os::unix::fs::symlink;
+        let (temp, central, project) = native_read_fixture();
+        let alias = temp.path().join("accepted-native-root-alias");
+        symlink(&central, &alias).unwrap();
+        let alias_project = alias.join("Work/demo");
+        let binding =
+            ProjectCentralFilesystemBinding::inspect(&alias_project, Some(&alias)).unwrap();
+        let mut provider = binding.file_provider().unwrap();
+        exact_provider_payload(&mut provider, VISION_REF, "Retained native human vision");
+        exact_provider_payload(
+            &mut provider,
+            binding.semantic.root_wiki.as_ref().unwrap().as_str(),
+            &wiki_json("Root", None),
+        );
+        let path = project.join("VISION.md");
+        let retained = project.join("retained-vision.md");
+        fs::rename(&path, &retained).unwrap();
+        symlink(
+            project.join("ProjectCentral/user/research/deep/purpose.md"),
+            &path,
+        )
+        .unwrap();
+        provider_withheld(&mut provider, VISION_REF);
+        assert_eq!(
+            fs::read_to_string(&retained).unwrap(),
+            "Retained native human vision"
+        );
+        fs::remove_file(&path).unwrap();
+        fs::rename(retained, path).unwrap();
+        exact_provider_payload(&mut provider, VISION_REF, "Retained native human vision");
     }
 
     #[test]
@@ -1549,6 +3816,287 @@ mod tests {
             .is_some());
     }
 
+    #[test]
+    fn maintenance_preserves_header_extensions_and_exact_no_op_source() {
+        let (_temp, central, project) = fixture();
+        let path = project.join("ProjectCentral/agents/wiki/wiki.json");
+        let mut document: Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        document["retained_owner_field"] = serde_json::json!({"meaning":"kept", "revision":7});
+        let input = format!("  {}\n\n", serde_json::to_string(&document).unwrap());
+        fs::write(&path, &input).unwrap();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let (current, basis) = binding.load_project_wiki_for_maintenance().unwrap();
+        let unchanged = plan_agent_wiki_maintenance(AgentWikiMaintenanceRequest {
+            current_objects: current.clone(),
+            upserts: vec![],
+            observed_source_revisions: binding.observed_source_revisions(),
+            human_source_proposals: vec![],
+        })
+        .unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(!binding.persist_agent_wiki(&unchanged, &basis).unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), input);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        let plan = maintenance_plan(&binding, current, "wiki:node:retained-header");
+        assert!(binding.persist_agent_wiki(&plan, &basis).unwrap());
+        let after: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            after["retained_owner_field"],
+            document["retained_owner_field"]
+        );
+        assert!(
+            SemanticWikiIndex::rebuild(binding.load_project_wiki().unwrap())
+                .unwrap()
+                .node(&ResourceRef::parse("wiki:node:retained-header").unwrap())
+                .is_some()
+        );
+    }
+
+    fn unchanged_wiki_plan(
+        binding: &ProjectCentralFilesystemBinding,
+        current: Vec<WikiObject>,
+    ) -> AgentWikiMaintenancePlan {
+        plan_agent_wiki_maintenance(AgentWikiMaintenanceRequest {
+            current_objects: current,
+            upserts: vec![],
+            observed_source_revisions: binding.observed_source_revisions(),
+            human_source_proposals: vec![],
+        })
+        .unwrap()
+    }
+
+    fn assert_native_validation_refusal_retains_wiki(
+        binding: &ProjectCentralFilesystemBinding,
+        plan: &AgentWikiMaintenancePlan,
+        path: &Path,
+        expected: &AikitError,
+    ) {
+        let bytes = fs::read(path).unwrap();
+        let metadata = fs::metadata(path).unwrap();
+        let lock = path.parent().unwrap().join(".wiki.json.publication.lock");
+        assert!(!lock.exists());
+        let error = binding
+            .persist_agent_wiki(plan, &content_hash(&bytes))
+            .unwrap_err();
+        assert_eq!(error.code(), expected.code());
+        assert_eq!(error.message(), expected.message());
+        assert_eq!(
+            error.details().get("command_effect").map(String::as_str),
+            Some("none")
+        );
+        assert_eq!(
+            error.details().get("source").map(String::as_str),
+            Some(binding.semantic.canonical_wiki.as_str())
+        );
+        assert_eq!(fs::read(path).unwrap(), bytes);
+        let after = fs::metadata(path).unwrap();
+        assert_eq!(after.modified().unwrap(), metadata.modified().unwrap());
+        assert_eq!(after.permissions(), metadata.permissions());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                (after.dev(), after.ino(), after.uid(), after.gid()),
+                (
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.uid(),
+                    metadata.gid()
+                )
+            );
+        }
+        assert!(!lock.exists(), "invalid Wiki reached physical publication");
+    }
+
+    #[test]
+    fn bound_wiki_writer_refuses_duplicate_current_before_unchanged_acknowledgement() {
+        let (_temp, central, project) = native_read_fixture();
+        let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let (current, _) = binding.load_project_wiki_for_maintenance().unwrap();
+        let plan = unchanged_wiki_plan(&binding, current);
+        let mut document: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let duplicate = document["objects"][1].clone();
+        document["objects"].as_array_mut().unwrap().push(duplicate);
+        let malformed = serde_json::to_string(&document).unwrap();
+        let expected = aikit_core::WikiDocument::parse(&malformed)
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert_eq!(expected.code(), "knowledge.wiki_document_invalid");
+        fs::write(&path, malformed).unwrap();
+        assert_native_validation_refusal_retains_wiki(&binding, &plan, &path, &expected);
+    }
+
+    #[test]
+    fn bound_wiki_writer_refuses_duplicate_next_before_unchanged_acknowledgement() {
+        let (_temp, central, project) = native_read_fixture();
+        let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let (current, _) = binding.load_project_wiki_for_maintenance().unwrap();
+        let mut plan = unchanged_wiki_plan(&binding, current);
+        let duplicate = plan
+            .next_objects
+            .iter()
+            .find(|object| matches!(object, WikiObject::Node(_)))
+            .unwrap()
+            .clone();
+        plan.next_objects.push(duplicate);
+        let mut proposed: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let duplicate = proposed["objects"][1].clone();
+        proposed["objects"].as_array_mut().unwrap().push(duplicate);
+        let proposed = serde_json::to_string(&proposed).unwrap();
+        let expected = aikit_core::WikiDocument::parse(&proposed)
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert_eq!(expected.code(), "knowledge.wiki_document_invalid");
+        assert_native_validation_refusal_retains_wiki(&binding, &plan, &path, &expected);
+    }
+
+    #[test]
+    fn bound_wiki_writer_validates_topology_before_unchanged_or_changed_acknowledgement() {
+        for malformed_current in [false, true] {
+            let (_temp, central, project) = native_read_fixture();
+            let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+            let binding =
+                ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+            let (current, _) = binding.load_project_wiki_for_maintenance().unwrap();
+            let mut plan = unchanged_wiki_plan(&binding, current);
+            let mut proposed: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            let mut child = proposed["objects"][0].clone();
+            child["ref"] = Value::String("wiki:space:child".into());
+            child["node_refs"] = serde_json::json!([]);
+            // Both spaces exist, so this is a broken internal parent/child
+            // relation rather than a legitimate external federation reference.
+            proposed["objects"][0]["child_space_refs"] = serde_json::json!(["wiki:space:child"]);
+            proposed["objects"].as_array_mut().unwrap().push(child);
+            let malformed = serde_json::to_string(&proposed).unwrap();
+            let native = aikit_core::WikiDocument::parse(&malformed).unwrap();
+            assert!(native
+                .report()
+                .errors
+                .iter()
+                .any(|error| error.code == "knowledge.wiki_space_asymmetry"));
+            let expected = native.validate().unwrap_err();
+            plan.next_objects = native.objects().to_vec();
+            if malformed_current {
+                fs::write(&path, &malformed).unwrap();
+            }
+            assert_native_validation_refusal_retains_wiki(&binding, &plan, &path, &expected);
+        }
+    }
+
+    #[test]
+    fn bound_wiki_writer_validated_object_reorder_keeps_header_extensions_and_exact_bytes() {
+        let (_temp, central, project) = native_read_fixture();
+        let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+        let mut document: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        document["retained_owner_field"] = serde_json::json!({"meaning":"kept", "revision":7});
+        document["objects"][1]["producer_extension"] =
+            serde_json::json!({"ordered":["first","second"]});
+        document["objects"][1]["source_refs"] = serde_json::json!([PURPOSE_REF, VISION_REF]);
+        let input = format!("  {}\n\n", serde_json::to_string(&document).unwrap());
+        aikit_core::WikiDocument::parse(&input)
+            .unwrap()
+            .validate()
+            .unwrap();
+        fs::write(&path, &input).unwrap();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let (current, basis) = binding.load_project_wiki_for_maintenance().unwrap();
+        let plan = unchanged_wiki_plan(&binding, current);
+        let proposed_refs = plan
+            .next_objects
+            .iter()
+            .map(|object| object.ref_id().clone())
+            .collect::<Vec<_>>();
+        let current_refs = aikit_core::WikiDocument::parse(&input)
+            .unwrap()
+            .objects()
+            .iter()
+            .map(|object| object.ref_id().clone())
+            .collect::<Vec<_>>();
+        assert_ne!(proposed_refs, current_refs);
+        let before = fs::metadata(&path).unwrap();
+        assert!(!binding.persist_agent_wiki(&plan, &basis).unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), input);
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+        assert_eq!(after.permissions(), before.permissions());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                (after.dev(), after.ino(), after.uid(), after.gid()),
+                (before.dev(), before.ino(), before.uid(), before.gid())
+            );
+        }
+    }
+
+    #[test]
+    fn bound_wiki_writer_validated_inner_array_change_publishes_and_retains_extensions() {
+        let (_temp, central, project) = native_read_fixture();
+        let path = project.join(PROJECTCENTRAL_WIKI_SOURCE);
+        let mut document: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        document["retained_owner_field"] = serde_json::json!({"meaning":"kept", "revision":7});
+        document["objects"][1]["producer_extension"] =
+            serde_json::json!({"ordered":["first","second"]});
+        document["objects"][1]["source_refs"] = serde_json::json!([PURPOSE_REF, VISION_REF]);
+        let input = serde_json::to_string(&document).unwrap();
+        aikit_core::WikiDocument::parse(&input)
+            .unwrap()
+            .validate()
+            .unwrap();
+        fs::write(&path, &input).unwrap();
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let (current, basis) = binding.load_project_wiki_for_maintenance().unwrap();
+        let mut plan = unchanged_wiki_plan(&binding, current);
+        let node = plan
+            .next_objects
+            .iter_mut()
+            .find_map(|object| match object {
+                WikiObject::Node(node) => Some(node),
+                _ => None,
+            })
+            .unwrap();
+        node.source_refs.reverse();
+        assert!(binding.persist_agent_wiki(&plan, &basis).unwrap());
+        let after = fs::read_to_string(&path).unwrap();
+        assert_ne!(after, input);
+        let native = aikit_core::WikiDocument::parse(&after).unwrap();
+        native.validate().unwrap();
+        let node = native
+            .objects()
+            .iter()
+            .find_map(|object| match object {
+                WikiObject::Node(node) => Some(node),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            node.source_refs,
+            vec![
+                SourceRef::parse(VISION_REF).unwrap(),
+                SourceRef::parse(PURPOSE_REF).unwrap()
+            ]
+        );
+        let after: Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(
+            after["retained_owner_field"],
+            document["retained_owner_field"]
+        );
+        assert_eq!(
+            node.extensions["producer_extension"],
+            document["objects"][1]["producer_extension"]
+        );
+        assert!(path
+            .parent()
+            .unwrap()
+            .join(".wiki.json.publication.lock")
+            .is_file());
+    }
+
     /// The race this whole change exists for: writer A reads the canonical
     /// wiki and builds its maintenance plan from that snapshot; before A
     /// persists, writer B independently reads, plans and persists against the
@@ -1782,11 +4330,164 @@ mod tests {
     }
 
     #[test]
+    fn root_governance_discovery_rechecks_known_ancestor_and_branch_markers() {
+        let (_temp, central, project) = native_read_fixture();
+        let open = central.join("Control/agents/governance/open/notice.md");
+        let private = central.join("Control/agents/governance/withheld/secret.md");
+        write(&open, "allowed governance source");
+        write(&private, "retained excluded source");
+        let original = fs::read(&private).unwrap();
+        let original_metadata = fs::metadata(&private).unwrap();
+        let ids = |records: Vec<ResourceRecord>| {
+            records
+                .into_iter()
+                .map(|record| record.descriptor.id.to_string())
+                .collect::<Vec<_>>()
+        };
+        let original_ids = ids(root_governance_context_source_records(&central).unwrap());
+        assert_eq!(original_ids.len(), 2);
+        let binding = ProjectCentralFilesystemBinding::inspect(&project, Some(&central)).unwrap();
+        let mut provider = binding.file_provider().unwrap();
+
+        let ancestor_marker = central.join("Control/agents/.no-agent-retrieval");
+        fs::write(&ancestor_marker, b"known native ancestor is withheld").unwrap();
+        assert!(root_governance_context_source_records(&central)
+            .unwrap()
+            .is_empty());
+        exact_provider_payload(&mut provider, PURPOSE_REF, "Human purpose");
+        assert_eq!(binding.load_project_wiki().unwrap().len(), 2);
+        fs::remove_file(ancestor_marker).unwrap();
+        assert_eq!(
+            ids(root_governance_context_source_records(&central).unwrap()),
+            original_ids
+        );
+
+        let branch_marker = private.parent().unwrap().join(NO_AGENT_RETRIEVAL_MARKER);
+        fs::write(&branch_marker, b"only this branch is withheld").unwrap();
+        let visible = ids(root_governance_context_source_records(&central).unwrap());
+        assert_eq!(visible.len(), 1);
+        assert!(visible[0].ends_with("governance/open/notice.md"));
+        assert_eq!(fs::read(&private).unwrap(), original);
+        assert_eq!(
+            fs::metadata(&private).unwrap().modified().unwrap(),
+            original_metadata.modified().unwrap(),
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let current = fs::metadata(&private).unwrap();
+            assert_eq!(current.dev(), original_metadata.dev());
+            assert_eq!(current.ino(), original_metadata.ino());
+        }
+        fs::remove_file(branch_marker).unwrap();
+        assert_eq!(
+            ids(root_governance_context_source_records(&central).unwrap()),
+            original_ids
+        );
+    }
+
+    #[test]
+    fn root_governance_discovery_retains_real_unavailable_directory_cause() {
+        let (_temp, central, _project) = native_read_fixture();
+        let agents = central.join("Control/agents");
+        let retained = central.join("Control/retained-agents");
+        fs::rename(&agents, &retained).unwrap();
+        fs::write(
+            &agents,
+            b"the native ancestor is currently an ordinary file",
+        )
+        .unwrap();
+        let actual = fs::symlink_metadata(central.join(CENTRAL_ROOT_GOVERNANCE_ROOT)).unwrap_err();
+        assert_ne!(actual.kind(), std::io::ErrorKind::NotFound);
+        let error = root_governance_context_source_records(&central).unwrap_err();
+        assert_eq!(error.code(), "projectcentral.source_unavailable");
+        assert!(error.message().contains(&actual.to_string()));
+        assert_eq!(
+            error.details().get("cause_kind"),
+            Some(&format!("{:?}", actual.kind()))
+        );
+        assert_eq!(
+            error.details().get("cause_raw_os_error"),
+            Some(&serde_json::json!(actual.raw_os_error()).to_string()),
+        );
+        let cause = std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        assert_eq!(cause.kind(), actual.kind());
+        assert_eq!(cause.raw_os_error(), actual.raw_os_error());
+        fs::remove_file(&agents).unwrap();
+        fs::rename(retained, agents).unwrap();
+        assert!(root_governance_context_source_records(&central)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn root_governance_tree_is_a_valid_empty_reading_when_the_tree_is_absent() {
         let temp = TempDir::new().unwrap();
         let central = temp.path().join("Central");
         fs::create_dir_all(&central).unwrap();
         let records = root_governance_context_source_records(&central).unwrap();
         assert!(records.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod work_manifest_profile_tests {
+    use super::project_ref_from_manifest_bytes;
+    use serde_json::json;
+
+    fn declaration(id: &str) -> serde_json::Value {
+        json!({"schema":"central.project/v1","project_id":id,"human_source":"ProjectCentral/user",
+            "wiki":{"profile":"okf-wiki/v1","source":"ProjectCentral/agents/wiki/wiki.json","adopted_sources":[]}})
+    }
+
+    #[test]
+    fn pure_work_parser_reuses_complete_native_contract_without_reinterpreting_ids() {
+        for id in ["a:b", "project:delta", "native/名", "a::b", "%41"] {
+            assert_eq!(
+                project_ref_from_manifest_bytes(&serde_json::to_vec(&declaration(id)).unwrap())
+                    .unwrap()
+                    .as_str(),
+                id
+            );
+        }
+        let mut invalid = declaration("a:b");
+        invalid["human_source"] = json!("custom/user");
+        assert_eq!(
+            project_ref_from_manifest_bytes(&serde_json::to_vec(&invalid).unwrap())
+                .unwrap_err()
+                .code(),
+            "projectcentral.human_source_contract"
+        );
+        let mut invalid = declaration("a:b");
+        invalid["wiki"]["source"] = json!("elsewhere/wiki.json");
+        assert_eq!(
+            project_ref_from_manifest_bytes(&serde_json::to_vec(&invalid).unwrap())
+                .unwrap_err()
+                .code(),
+            "projectcentral.wiki_contract"
+        );
+        for id in [" native", "native "] {
+            let invalid = declaration(id);
+            assert_eq!(
+                project_ref_from_manifest_bytes(&serde_json::to_vec(&invalid).unwrap())
+                    .unwrap_err()
+                    .code(),
+                "project.invalid_ref"
+            );
+            assert_eq!(
+                invalid["project_id"], id,
+                "invalid native whitespace is refused without normalization"
+            );
+        }
+        let invalid = declaration("native\0id");
+        assert_eq!(
+            project_ref_from_manifest_bytes(&serde_json::to_vec(&invalid).unwrap())
+                .unwrap_err()
+                .code(),
+            "projectcentral.project_transport_unsupported"
+        );
     }
 }

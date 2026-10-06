@@ -8,16 +8,87 @@
 //! available to answer world-binding questions: the scoping decided here (the
 //! derived member, the lowered query scope, the per-scope rollup and edge
 //! attribution) is upstream of that read, and the withholding law itself is
-//! pinned in `project_scoped_withhold.rs` and the adapter tests.
+//! pinned in `project_scoped_withhold.rs` and the adapter tests. The native
+//! owner is stubbed (`CENTRAL_CTRL_BIN`) with the filesystem answer the real
+//! owner gives for these shapes — a manifest member is a present World facet,
+//! a manifest-less member is `projectcentral-manifest-absent` — so the
+//! manifest-absence disclosure is the same whether or not a real owner is
+//! installed.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aikit_cli::app::Service;
 use aikit_core::KnowledgeAddress;
 use aikit_store::AikitHome;
 use aikit_tui::backend::PaletteBackend;
 use tempfile::TempDir;
+
+/// The native owner stub: it answers `central.world.here` from the fixture
+/// filesystem exactly as the real owner does (present facet for a manifest
+/// member, `projectcentral-manifest-absent` for a manifest-less one), hands
+/// the root lineage for a root binding read, and refuses every other action
+/// with the declaration-absent envelope the product already treats as
+/// disclosure, never as guessable identity.
+///
+/// One stub per test process, outside any fixture temp dir: both tests
+/// install the same `CENTRAL_CTRL_BIN` value, so the parallel run is
+/// order-independent and no stub dies while another test still names it.
+fn stub_native_owner() -> PathBuf {
+    static STUB: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    STUB
+        .get_or_init(|| {
+            let bin = std::env::temp_dir().join(format!(
+                "aikit-project-scoped-ctrl-stub-{}",
+                std::process::id()
+            ));
+            fs::create_dir_all(bin.parent().unwrap()).unwrap();
+            write(
+                &bin,
+                r#"#!/bin/sh
+# argv: --json --root <root> action run <action> '<input>'
+root="$3"
+action="$6"
+input="$7"
+case "$action" in
+  central.world.here)
+    project=$(printf '%s' "$input" | sed -n 's/.*"project":"\([^"]*\)".*/\1/p')
+    if [ -f "$root/Work/$project/ProjectCentral/project.json" ]; then
+      id=$(sed -n 's/.*"project_id":"\([^"]*\)".*/\1/p' "$root/Work/$project/ProjectCentral/project.json")
+      printf '%s' "{\"ok\":true,\"data\":{\"schema\":\"central.world-here/v1\",\"project_world\":{\"name\":\"$project\",\"state\":\"present\",\"ref\":\"project:$id\",\"parent_ref\":\"control:root\",\"path\":\"Work/$project\",\"work_member_present\":true}}}"
+    else
+      printf '%s' "{\"ok\":true,\"data\":{\"schema\":\"central.world-here/v1\",\"project_world\":{\"name\":\"$project\",\"state\":\"absent\",\"absence_kind\":\"projectcentral-manifest-absent\",\"work_member_present\":true}}}"
+    fi
+    exit 0
+    ;;
+  central.world.effective-sources)
+    case "$input" in
+      *'"scope":"root"'*)
+        printf '%s' '{"ok":true,"data":{"world_ref":"control:root","sources":[{"ref":"central:source:control:root:Control","state":"available","effective_revision":"stub-root-rev-1","effective_source_world":"control:root","authority":"stub-fixture","source_treatment":"canonical","effective_treatment":"canonical","propagation_path":["control:root"],"provenance":[]}]}}'
+        exit 0
+        ;;
+      *)
+        printf '%s' '{"ok":false,"error":{"code":"central.world_declaration_absent","message":"missing World project:stub"}}'
+        exit 2
+        ;;
+    esac
+    ;;
+  *)
+    printf '%s' '{"ok":false,"error":{"code":"central.world_declaration_absent","message":"missing World project:stub"}}'
+    exit 2
+    ;;
+esac
+"#,
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            bin
+        })
+        .clone()
+}
 
 fn write(path: &Path, contents: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -161,6 +232,7 @@ fn pending_absences(service: &Service, query: &str) -> Vec<String> {
 fn the_discovery_matrix_scopes_by_directory_shape() {
     let temp = collapse_world();
     let root = temp.path();
+    std::env::set_var("CENTRAL_CTRL_BIN", stub_native_owner());
 
     // ProjectCentral only: rescued by the manifest; scoped to its own graph.
     let service = open_service(&temp, &root.join("Work/manifest"));
@@ -192,11 +264,14 @@ fn the_discovery_matrix_scopes_by_directory_shape() {
         "a scoped context keeps the sibling project's edges out"
     );
     let status = service.knowledge_status().unwrap();
+    // The manifest-less member's disclosure names the member and the native
+    // facet's manifest-absence — the retired `project:<name>` convention ref
+    // is no longer minted from a directory name.
     assert!(
         status.absences.iter().any(|absence| {
             absence.contains("Work/marked")
                 && absence.contains("has no ProjectCentral manifest")
-                && absence.contains("project:marked")
+                && absence.contains("projectcentral-manifest-absent")
         }),
         "{:?}",
         status.absences
@@ -210,11 +285,14 @@ fn the_discovery_matrix_scopes_by_directory_shape() {
     );
     assert!(authored_edge_hits(&service, "beta").is_empty());
     let status = service.knowledge_status().unwrap();
+    // Same retired-convention law as Work/marked above: the disclosure names
+    // the member and the native manifest-absence, never a minted ref.
     assert!(
         status
             .absences
             .iter()
-            .any(|absence| absence.contains("Work/bare") && absence.contains("project:bare")),
+            .any(|absence| absence.contains("Work/bare")
+                && absence.contains("projectcentral-manifest-absent")),
         "{:?}",
         status.absences
     );
@@ -288,6 +366,7 @@ fn the_discovery_matrix_scopes_by_directory_shape() {
 #[test]
 fn an_explicit_scope_in_the_query_overrides_the_derived_default() {
     let temp = collapse_world();
+    std::env::set_var("CENTRAL_CTRL_BIN", stub_native_owner());
     // Standing in manifest, the derived default is manifest; the explicit
     // `: both (…)` must win — manifest's own edge leaves the reply, exactly
     // as it would from inside both. The grammar is the surface; no flags.

@@ -21,6 +21,8 @@ struct ResidentTarget {
     socket: PathBuf,
     #[serde(default)]
     body: Option<String>,
+    #[serde(default)]
+    released_predecessor: Option<crate::encounter_service::NativeReleasedPredecessor>,
 }
 
 const EXPLICIT_SELECTION_SCHEMA: &str = "aikit.explicit-model-selection/v1";
@@ -268,16 +270,21 @@ pub(super) fn realise(
         .invocation_cwd
         .canonicalize()
         .map_err(|e| AikitError::new("model.cwd_unavailable", e.to_string()))?;
-    let request = crate::encounter_service::EncounterRequest::OpenModel {
-        request: Box::new(crate::encounter_service::EncounterModelOpen {
-            space: target.space.clone(),
-            agent_session: target.agent_session.clone(),
-            cwd,
-            model_ref: model_ref.clone(),
-            provider_ref,
-            body: body.map(str::to_owned).or(target.body.clone()),
-            expected_agency,
-        }),
+    let open = Box::new(crate::encounter_service::EncounterModelOpen {
+        space: target.space.clone(),
+        agent_session: target.agent_session.clone(),
+        cwd,
+        model_ref: model_ref.clone(),
+        provider_ref,
+        body: body.map(str::to_owned).or(target.body.clone()),
+        expected_agency,
+    });
+    let request = match target.released_predecessor.clone() {
+        Some(released_predecessor) => crate::encounter_service::EncounterRequest::ReplaceModel {
+            request: open,
+            released_predecessor,
+        },
+        None => crate::encounter_service::EncounterRequest::OpenModel { request: open },
     };
     let native = crate::encounter_service::request(&target.socket, &request)?;
     if native["ok"] != true

@@ -188,6 +188,13 @@ export function login(token: string): boolean {
     );
     let source_revision = revision(root);
 
+    // Isolate this process's GitNexus registry: concurrent test targets share
+    // the real HOME, and the fixture index name would collide with another
+    // target's analyse run.
+    std::env::set_var(
+        "GITNEXUS_HOME",
+        std::env::temp_dir().join(format!("gitnexus-home-{}", std::process::id())),
+    );
     let mut provider = GitNexusCodeIndexProvider::new(
         SystemRunner::new(),
         "aikit-gitnexus-fixture",

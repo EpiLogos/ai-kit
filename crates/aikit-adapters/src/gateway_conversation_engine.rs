@@ -79,14 +79,15 @@ use serde_json::{json, Value};
 use crate::agent_connection::{ConnectionSignalKind, SessionOpenMode, SessionOpenRequest};
 use crate::agent_session_host::{AgentSessionHost, AgentSessionHostLimits, HostEvent, TurnStop};
 use crate::gateway_communique::{
-    Communique, CommuniqueDraft, CommuniqueForwardOutcome, CommuniqueState, SenderAttribution,
+    Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForwardOutcome, CommuniqueState,
+    SenderAttribution,
 };
 use crate::gateway_connector::{ConnectorOperation, OutboundOperationKind};
 use crate::gateway_connector_pump::{ConnectorPumpControls, ConnectorQueues};
 use crate::gateway_runtime::{
-    execute_gateway_command, AgencyGateway, DrainReport, DrainedTurn, GatewayAgentReply,
-    GatewayAgentReplyFailure, GatewayBinding, GatewayCommand, GatewayConversationOperation,
-    GatewayResponse, GatewayStreamEvent,
+    execute_gateway_command, AgencyGateway, GatewayAgentReply, GatewayAgentReplyFailure,
+    GatewayBinding, GatewayCommand, GatewayConversationOperation, GatewayResponse,
+    GatewayStreamEvent,
 };
 use crate::gateway_service::{persist_gateway_state, SubscriptionHub};
 
@@ -1125,19 +1126,6 @@ pub fn parse_slash(text: &str) -> SlashParse {
         "new" | "reset" => SlashParse::Operation(GatewayConversationOperation::New),
         "sessions" => SlashParse::Operation(GatewayConversationOperation::Sessions),
         "restart" => SlashParse::Operation(GatewayConversationOperation::Restart),
-        // `/upgrade` reads the plan; changing anything takes the explicit
-        // word `apply`.
-        "upgrade" => match argument.map(str::to_ascii_lowercase).as_deref() {
-            None | Some("plan") => {
-                SlashParse::Operation(GatewayConversationOperation::Upgrade { apply: false })
-            }
-            Some("apply") => {
-                SlashParse::Operation(GatewayConversationOperation::Upgrade { apply: true })
-            }
-            Some(other) => SlashParse::Unknown(format!(
-                "/upgrade {other} (use /upgrade to read the plan, /upgrade apply to start it)"
-            )),
-        },
         "ask" => {
             let mut words = remainder.split_whitespace();
             let Some(recipient) = words.next() else {
@@ -1211,29 +1199,39 @@ struct EngineInner {
     draining: bool,
 }
 
-/// The conversation an upgrade was asked for from, so its receipt returns
-/// there. Only refs: the receipt is posted through the running gateway
-/// (`Announce`), never by reaching into a connector.
+/// One conversation turn a drain met.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UpgradeOrigin {
+pub struct DrainedTurn {
     pub binding_ref: String,
+    pub in_reply_to_sequence: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connector_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub in_reply_to_sequence: Option<u64>,
+    pub detail: Option<String>,
 }
 
-/// What a conversation's `/upgrade` asks of the machine's upgrade owner. The
-/// engine holds no installer and no service manager; the binary that owns
-/// them wires this once at service assembly. The upgrade itself runs in a
-/// worker that outlives the gateway process, because the gateway is what the
-/// upgrade restarts.
-pub trait GatewayUpgradeLauncher: Send + Sync + 'static {
-    /// The plan, as data and one plain-words line. Changes nothing.
-    fn plan(&self) -> Result<(Value, String)>;
-    /// Start the managed upgrade in a detached worker; the receipt returns to
-    /// `origin` once the new build is verified running.
-    fn start(&self, origin: UpgradeOrigin) -> Result<(Value, String)>;
+/// What a drain found and did, exact rather than counted: work that could not
+/// finish is named so nobody has to guess what a restart cost. Owned by the
+/// conversation engine since the gateway retired its upgrade surface.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DrainReport {
+    /// Whether a drain actually ran and counted. `false` means the counts
+    /// below are UNKNOWN, not zero.
+    #[serde(default)]
+    pub measured: bool,
+    pub reason: String,
+    pub started_at_unix_ms: u64,
+    pub finished_at_unix_ms: u64,
+    /// The bounded grace each in-flight turn was given before being
+    /// interrupted.
+    pub grace_ms: u64,
+    /// Turns that finished inside the grace.
+    pub turns_resolved: Vec<DrainedTurn>,
+    /// Turns interrupted because they did not finish. Whatever the model or
+    /// its tools did before the interrupt is an UNCERTAIN effect: it is
+    /// recorded, journaled as an interruption, and never replayed.
+    pub turns_interrupted: Vec<DrainedTurn>,
+    /// Communiques waiting at this gateway, by Position. They are in the
+    /// journal and survive the restart.
+    pub communiques: Vec<CommuniqueCount>,
 }
 
 /// What a canonical operation answered, and whether the service should now
@@ -1257,9 +1255,6 @@ pub struct GatewayConversationEngine {
     /// (`GatewayConversationHooks::ask_router`). Absent, `/ask` refuses
     /// honestly: no occupancy or recipient owners stand behind this gateway.
     ask: OnceLock<Arc<dyn GatewayAskRouter>>,
-    /// The managed-upgrade owner behind `/upgrade`, wired once at service
-    /// assembly. Absent, `/upgrade` says so and names the command to run.
-    upgrade: OnceLock<Arc<dyn GatewayUpgradeLauncher>>,
     inner: Mutex<EngineInner>,
 }
 
@@ -1283,7 +1278,6 @@ impl GatewayConversationEngine {
             resolver,
             policy,
             ask: OnceLock::new(),
-            upgrade: OnceLock::new(),
             inner: Mutex::new(EngineInner {
                 in_flight: BTreeMap::new(),
                 draining: false,
@@ -1298,17 +1292,6 @@ impl GatewayConversationEngine {
         if self.ask.set(router).is_err() {
             eprintln!(
                 "conversation engine: an ask router was already attached; the second was refused"
-            );
-        }
-    }
-
-    /// Wire the upgrade owner behind `/upgrade`. Called once at service
-    /// assembly; a second attach is refused on stderr, never silently replaced.
-    pub fn attach_upgrade_launcher(&self, launcher: Arc<dyn GatewayUpgradeLauncher>) {
-        if self.upgrade.set(launcher).is_err() {
-            eprintln!(
-                "conversation engine: an upgrade launcher was already attached; the second was \
-                 refused"
             );
         }
     }
@@ -1838,13 +1821,7 @@ impl GatewayConversationEngine {
             self.perform(&binding_ref, &operation)?;
         if let Some(line) = line {
             let target = surface_target.as_ref().unwrap_or(&binding_ref);
-            if matches!(operation, GatewayConversationOperation::Announce { .. }) {
-                // An announcement is a receipt somebody waits to be told: if it
-                // cannot be queued the caller learns it and tries again later.
-                self.queue_surface_line(target, line)?;
-            } else {
-                self.send_surface_line(target, line);
-            }
+            self.send_surface_line(target, line);
         }
         Ok(ConversationExecution {
             response: GatewayResponse::Conversation {
@@ -1892,10 +1869,6 @@ impl GatewayConversationEngine {
                 Ok((result, Some(line), None, false))
             }
             GatewayConversationOperation::Restart => self.restart(),
-            GatewayConversationOperation::Announce { text } => {
-                Ok((json!({"announced": true}), Some(text.clone()), None, false))
-            }
-            GatewayConversationOperation::Upgrade { apply } => self.upgrade(binding_ref, *apply),
             GatewayConversationOperation::PauseConnector { connector_ref } => {
                 self.set_paused(binding_ref, connector_ref.clone(), true)
             }
@@ -2046,17 +2019,31 @@ impl GatewayConversationEngine {
                 communique.communique_ref
             ),
             None => match communique.state {
-                CommuniqueState::Held => format!(
-                    "ask: {}{replay_note} held — {}; it is delivered to the next occupant that \
-                     claims {}{provenance}",
-                    communique.communique_ref,
-                    route
+                CommuniqueState::Held => {
+                    let fact = route
                         .delivery
                         .get("fact")
                         .and_then(Value::as_str)
-                        .unwrap_or("the recipient Position is vacant"),
-                    communique.to_position_ref
-                ),
+                        .unwrap_or("the recipient Position is vacant");
+                    // A held address can come from an AgentProfile without
+                    // Agency or occupancy proof. Keep the owner's consequence
+                    // rather than promising a Position claim for every address.
+                    let consequence = route
+                        .delivery
+                        .get("consequence")
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.trim().is_empty());
+                    let consequence = consequence.map(str::to_owned).unwrap_or_else(|| {
+                        format!(
+                            "it is delivered to the next occupant that claims {}",
+                            communique.to_position_ref
+                        )
+                    });
+                    format!(
+                        "ask: {}{replay_note} held — {fact}; {consequence}{provenance}",
+                        communique.communique_ref
+                    )
+                }
                 _ => format!(
                     "ask: {}{replay_note} queued for {}; delivered at the recipient occupant's \
                      next turn boundary{provenance}",
@@ -2503,8 +2490,8 @@ impl GatewayConversationEngine {
 
     /// The drain: stop admitting, resolve every in-flight turn under a bounded
     /// grace, record honestly, persist — and report exactly what it met. No
-    /// binding is needed: a restart asked for by an upgrade, a signal or an
-    /// operator drains the whole gateway the same way.
+    /// binding is needed: a restart asked for by a signal or an operator
+    /// drains the whole gateway the same way.
     ///
     /// A turn that does not finish inside the grace is interrupted, and what
     /// it did before then is an uncertain effect: the interruption is
@@ -2565,12 +2552,9 @@ impl GatewayConversationEngine {
             }
         }
         self.persist()?;
-        let (pending_operations, communiques) = {
+        let communiques = {
             let kernel = self.gateway.lock().map_err(|_| poisoned())?;
-            (
-                kernel.pending_operation_refs(),
-                kernel.communiques().counts(),
-            )
+            kernel.communiques().counts()
         };
         Ok(DrainReport {
             measured: true,
@@ -2580,7 +2564,6 @@ impl GatewayConversationEngine {
             grace_ms: grace.as_millis() as u64,
             turns_resolved,
             turns_interrupted,
-            pending_operations,
             communiques,
         })
     }
@@ -2604,72 +2587,6 @@ impl GatewayConversationEngine {
             )),
             None,
             true,
-        ))
-    }
-
-    /// `/upgrade` (plan) and `/upgrade apply` (start) for one conversation.
-    /// The worker that performs the upgrade is not a child of this process:
-    /// this gateway is what it restarts.
-    fn upgrade(
-        self: &Arc<Self>,
-        binding_ref: &ResourceRef,
-        apply: bool,
-    ) -> Result<(Value, Option<String>, Option<ResourceRef>, bool)> {
-        let Some(launcher) = self.upgrade.get() else {
-            let line = "no upgrade owner stands behind this gateway; run `aikit gateway upgrade \
-                        plan` on the machine it serves"
-                .to_owned();
-            return Ok((
-                json!({"upgrade": "unavailable", "reason": line}),
-                Some(line),
-                None,
-                false,
-            ));
-        };
-        if !apply {
-            let (plan, line) = launcher.plan()?;
-            return Ok((
-                json!({"upgrade": "plan", "plan": plan}),
-                Some(line),
-                None,
-                false,
-            ));
-        }
-        let origin = {
-            let kernel = self.gateway.lock().map_err(|_| poisoned())?;
-            let binding = kernel.binding(binding_ref).cloned();
-            // A group admits several senders under one binding, and a slash
-            // command carries a message's authority, not an owner's. Changing
-            // the machine is asked for in a direct conversation.
-            if binding
-                .as_ref()
-                .is_some_and(|b| b.address.scope_id.as_deref() == Some("group"))
-            {
-                let line = "/upgrade apply is refused in a group conversation: a group \
-                            admits several senders. Ask in a direct conversation with this \
-                            gateway, or run `aikit gateway upgrade apply` on the machine"
-                    .to_owned();
-                return Ok((
-                    json!({"upgrade": "refused", "reason": line}),
-                    Some(line),
-                    None,
-                    false,
-                ));
-            }
-            UpgradeOrigin {
-                binding_ref: binding_ref.to_string(),
-                connector_ref: binding.as_ref().map(|b| b.connector_ref.to_string()),
-                in_reply_to_sequence: None,
-            }
-        };
-        let (started, line) = launcher.start(origin)?;
-        // The gateway keeps serving: the worker drains it once the new build is
-        // installed, and the receipt comes back to this conversation.
-        Ok((
-            json!({"upgrade": "started", "started": started}),
-            Some(line),
-            None,
-            false,
         ))
     }
 

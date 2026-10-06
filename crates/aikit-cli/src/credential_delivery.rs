@@ -12,6 +12,7 @@
 //! journal or read model; it exists only in the spawned `Command`.
 
 use aikit_adapters::credential_provider::{EnvironmentImportProvider, NativeSecureStoreProvider};
+use aikit_adapters::PiHarnessAuthProvider;
 use aikit_core::credential::{
     resolve_credential, valid_credential_variable, CredentialRef, CredentialResolutionRequest,
     SecretMaterialisationClass, SecretProvider, SecretRequirement, SecretRequirementRef,
@@ -66,6 +67,17 @@ pub(crate) fn credential_resolved(
     materialise: bool,
     resolve_declared: &dyn Fn(&aikit_core::SecretRef) -> Result<SecretValue>,
 ) -> Result<(Value, Option<SecretValue>)> {
+    credential_resolved_with_origin(home, session, use_, materialise, resolve_declared, None)
+}
+
+fn credential_resolved_with_origin(
+    home: &AikitHome,
+    session: &ResourceRef,
+    use_: &ModelCredential,
+    materialise: bool,
+    resolve_declared: &dyn Fn(&aikit_core::SecretRef) -> Result<SecretValue>,
+    native_origin: Option<&std::path::Path>,
+) -> Result<(Value, Option<SecretValue>)> {
     if !valid_credential_variable(&use_.target_env)
         || use_
             .from_env
@@ -88,6 +100,56 @@ pub(crate) fn credential_resolved(
                 "Selected credential binding is revoked or expired; no environment bypass",
             ));
         }
+    }
+    if let Some(binding) = stored
+        .as_ref()
+        .filter(|binding| binding.is_session_scoped_harness_binding())
+    {
+        if use_.target_env != "ZAI_API_KEY" || use_.from_env.is_some() {
+            return Err(error("Named Pi/zai delivery requires the exact ZAI_API_KEY target and refuses environment fallback"));
+        }
+        let provider = match native_origin {
+            Some(origin) => PiHarnessAuthProvider::at(Some(binding), origin, &session.to_string())?,
+            None => PiHarnessAuthProvider::from_native(Some(binding), &session.to_string())?,
+        };
+        provider.revalidate(&use_.credential_ref)?;
+        let resolution = resolve_credential(CredentialResolutionRequest {
+            requirement: SecretRequirement {
+                requirement_ref: use_.requirement_ref.clone(),
+                credential_ref: use_.credential_ref.clone(),
+                consumer_ref: session.to_string(),
+                purpose: "Scoped model dispatch into the selected native resident".into(),
+                permitted_materialisation: [SecretMaterialisationClass::ProcessEnv].into(),
+            },
+            providers: vec![provider.descriptor(&use_.credential_ref)],
+            headless: true,
+            allow_from_env: false,
+        })?;
+        if !resolution.selected() {
+            return Err(error("Named Pi/zai provider is not currently eligible"));
+        }
+        let secret = if materialise {
+            Some(
+                provider
+                    .materialise(&use_.credential_ref, SecretMaterialisationClass::ProcessEnv)?
+                    .ok_or_else(|| error("Named Pi/zai provider returned no material"))?,
+            )
+        } else {
+            None
+        };
+        provider.revalidate(&use_.credential_ref)?;
+        if CredentialBindingStore::new(home).load(&use_.credential_ref)? != stored {
+            return Err(error(
+                "Credential binding changed during delivery; fresh preparation required",
+            ));
+        }
+        return Ok((
+            json!({
+                "resolution": resolution, "binding": stored,
+                "delivery": "process-env", "secret_persisted": false
+            }),
+            secret,
+        ));
     }
     // A declared reference materialises through the resolver suite straight
     // from the external store the operator named (1Password, varlock, pass,
@@ -198,6 +260,7 @@ mod tests {
             revoked: false,
             metadata: BTreeMap::new(),
             declared_secret_ref: None,
+            harness_auth_source: None,
             bound_at_unix_seconds: Some(1_700_000_000),
             last_rotated_at_unix_seconds: None,
             last_verified_at_unix_seconds: Some(1_700_000_001),
@@ -347,5 +410,113 @@ mod native_store_tests {
             delivered_secret.unwrap().expose() == secret.expose(),
             "native delivery must return the bound credential"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod pi_source_delivery_tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn actual_file_plan_delivery_restart_and_revocation_use_the_same_native_owner() {
+        let original = tempfile::tempdir().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(storage.path());
+        let path = original.path().join(".pi/agent/auth.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"zai":{"type":"api_key","key":"synthetic-child-only-key"}}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let credential_ref = CredentialRef::new("credential:z-ai").unwrap();
+        let session = ResourceRef::parse("agent-session/isolated-pi-delivery").unwrap();
+        let binding = PiHarnessAuthProvider::declare(
+            original.path(),
+            &credential_ref,
+            &session.to_string(),
+            "real native owner filesystem delivery",
+            "2099-01-01T00:00:00Z",
+        )
+        .unwrap();
+        let store = CredentialBindingStore::new(&home);
+        store.compare_and_save(None, &binding).unwrap();
+        let use_ = ModelCredential {
+            requirement_ref: SecretRequirementRef::new("secret-requirement:isolated-pi-delivery")
+                .unwrap(),
+            credential_ref: credential_ref.clone(),
+            target_env: "ZAI_API_KEY".into(),
+            from_env: None,
+        };
+        let never = |_reference: &aikit_core::SecretRef| -> Result<SecretValue> {
+            panic!("Pi backing must not invoke a foreign declared resolver")
+        };
+        let (plan, absent) = credential_resolved_with_origin(
+            &home,
+            &session,
+            &use_,
+            false,
+            &never,
+            Some(original.path()),
+        )
+        .unwrap();
+        assert!(absent.is_none());
+        assert!(!plan.to_string().contains("synthetic-child-only-key"));
+        let restarted = AikitHome::at(storage.path());
+        let (delivery, key) = credential_resolved_with_origin(
+            &restarted,
+            &session,
+            &use_,
+            true,
+            &never,
+            Some(original.path()),
+        )
+        .unwrap();
+        assert_eq!(plan, delivery);
+        assert_eq!(key.unwrap().expose(), "synthetic-child-only-key");
+        let other = ResourceRef::parse("agent-session/neighbor").unwrap();
+        assert!(credential_resolved_with_origin(
+            &home,
+            &other,
+            &use_,
+            true,
+            &never,
+            Some(original.path())
+        )
+        .is_err());
+        let wrong = ModelCredential {
+            target_env: "OPENAI_API_KEY".into(),
+            ..use_.clone()
+        };
+        assert!(credential_resolved_with_origin(
+            &home,
+            &session,
+            &wrong,
+            true,
+            &never,
+            Some(original.path())
+        )
+        .is_err());
+        let mut revoked = binding.clone();
+        revoked.revoked = true;
+        store.compare_and_save(Some(&binding), &revoked).unwrap();
+        assert!(credential_resolved_with_origin(
+            &home,
+            &session,
+            &use_,
+            true,
+            &never,
+            Some(original.path())
+        )
+        .is_err());
+        assert!(fs::read_dir(home.credentials())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .all(|e| !fs::read_to_string(e.path())
+                .unwrap_or_default()
+                .contains("synthetic-child-only-key")));
     }
 }

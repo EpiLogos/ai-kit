@@ -143,6 +143,12 @@ impl EncounterStore {
                 delivery: held,
             });
         }
+        if release_recovery(&tx, session)?.is_some() {
+            return Err(AikitError::new(
+                "encounter.native_release_uncertain",
+                "Native cleanup is pending or uncertain; no delivery admitted",
+            ));
+        }
         let pending: bool = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM encounter_deliveries WHERE session=?1 AND phase IN {ACTIVE_PHASES})"), [session.as_str()], |r|r.get(0)).map_err(failure)?;
         if pending {
             return Err(AikitError::new("encounter.delivery_pending", "This session has a queued, submitted or uncertain machine delivery; resolve or drain it before another effect"));
@@ -273,6 +279,160 @@ impl EncounterStore {
         connection.execute("UPDATE encounter_deliveries SET phase=?3,detail=?4 WHERE session=?1 AND delivery=?2 AND phase='dispatching'",params![session.as_str(),delivery.as_str(),if sent {"submitted"} else {"uncertain"},detail]).map_err(failure)?;
         get(&connection, session, delivery)?.ok_or_else(|| failure("No such delivery"))
     }
+    /// An owner-observed release is retained in the existing event journal.
+    /// Caller labels and an absent resident cannot substitute for this receipt.
+    pub fn native_release_receipt(
+        &self,
+        session: &ResourceRef,
+        native: &str,
+        generation: &str,
+    ) -> Result<Option<Value>> {
+        validate(session)?;
+        let connection = self.connection.lock().map_err(failure)?;
+        release_receipt(&connection, session, native, generation)
+    }
+
+    /// Reserve exact idle-body cleanup before the process effect. The same
+    /// SQLite writer transaction excludes new machine-delivery admission.
+    pub fn reserve_native_release(
+        &self,
+        session: &ResourceRef,
+        native: &str,
+        generation: &str,
+    ) -> Result<Value> {
+        validate(session)?;
+        if native.trim().is_empty() || generation.trim().is_empty() {
+            return Err(AikitError::new(
+                "encounter.native_release_basis",
+                "Native session and generation are required",
+            ));
+        }
+        let mut connection = self.connection.lock().map_err(failure)?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        if let Some(receipt) = release_receipt(&tx, session, native, generation)? {
+            return Ok(receipt);
+        }
+        let binding: Option<String> = tx.query_row(
+            "SELECT event FROM encounter_events WHERE session=?1 AND json_extract(event,'$.kind')='binding' ORDER BY cursor DESC LIMIT 1",
+            [session.as_str()], |row| row.get(0),
+        ).optional().map_err(failure)?;
+        let binding: Value = binding
+            .map(|body| serde_json::from_str(&body).map_err(failure))
+            .transpose()?
+            .ok_or_else(|| {
+                AikitError::new(
+                    "encounter.native_release_basis",
+                    "No actual retained native binding exists",
+                )
+            })?;
+        if binding["native_session_id"].as_str() != Some(native)
+            || binding["connection_generation"].as_str() != Some(generation)
+        {
+            return Err(AikitError::new(
+                "encounter.native_release_basis",
+                "The exact current native binding changed or has no generation",
+            ));
+        }
+        let pending: bool = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM encounter_deliveries WHERE session=?1 AND phase IN {ACTIVE_PHASES})"), [session.as_str()], |row| row.get(0)).map_err(failure)?;
+        if pending {
+            return Err(AikitError::new(
+                "encounter.delivery_pending",
+                "Queued, submitted or uncertain delivery prevents idle-body release",
+            ));
+        }
+        if release_recovery(&tx, session)?.is_some() {
+            return Err(AikitError::new(
+                "encounter.native_release_uncertain",
+                "A previous native release has no confirmed cleanup",
+            ));
+        }
+        let event = stamp_observed_at(
+            json!({"kind":"native-release-requested","native_session_id":native,"connection_generation":generation,"owner_pid":std::process::id(),"prior_native_binding":binding,"turn_replayed":false}),
+        );
+        tx.execute(
+            "INSERT INTO encounter_events(session,event) VALUES(?1,?2)",
+            params![session.as_str(), event.to_string()],
+        )
+        .map_err(failure)?;
+        let cursor = tx.last_insert_rowid() as u64;
+        tx.commit().map_err(failure)?;
+        Ok(json!({"state":"Releasing","request_cursor":cursor,"request":event}))
+    }
+
+    /// Retain the cleanup result of the exact owned host. This is process
+    /// cleanup, never model Return, effect verification or native resumption.
+    pub fn finish_native_release(
+        &self,
+        session: &ResourceRef,
+        native: &str,
+        generation: &str,
+        cleanup_confirmed: bool,
+        process_status: Option<String>,
+        cleanup_error: Option<String>,
+    ) -> Result<Value> {
+        validate(session)?;
+        let mut connection = self.connection.lock().map_err(failure)?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        if let Some(receipt) = release_receipt(&tx, session, native, generation)? {
+            return Ok(receipt);
+        }
+        let requested: Option<u64> = tx.query_row("SELECT cursor FROM encounter_events WHERE session=?1 AND json_extract(event,'$.kind')='native-release-requested' AND json_extract(event,'$.native_session_id')=?2 AND json_extract(event,'$.connection_generation')=?3 ORDER BY cursor DESC LIMIT 1",params![session.as_str(),native,generation],|row|row.get(0)).optional().map_err(failure)?;
+        let request_cursor = requested.ok_or_else(|| {
+            AikitError::new(
+                "encounter.native_release_basis",
+                "No exact release intent is retained",
+            )
+        })?;
+        let event = stamp_observed_at(
+            json!({"kind":"native-release-completed","agent_session":session,"native_session_id":native,"connection_generation":generation,"request_cursor":request_cursor,"cleanup_confirmed":cleanup_confirmed,"process_status":process_status,"cleanup_error":cleanup_error,"native_resume":false,"inference_observed":false,"turn_replayed":false}),
+        );
+        tx.execute(
+            "INSERT INTO encounter_events(session,event) VALUES(?1,?2)",
+            params![session.as_str(), event.to_string()],
+        )
+        .map_err(failure)?;
+        let terminal_cursor = tx.last_insert_rowid() as u64;
+        tx.commit().map_err(failure)?;
+        Ok(
+            json!({"state":if cleanup_confirmed {"Released"}else{"CleanupUncertain"},"request_cursor":request_cursor,"terminal_cursor":terminal_cursor,"receipt":event}),
+        )
+    }
+
+    /// One child file belongs only to this currently bound generation. Release
+    /// intent and replacement fence a late watcher in the same writer transaction.
+    pub fn append_child_message(
+        &self,
+        session: &ResourceRef,
+        generation: &str,
+        event: &Value,
+    ) -> Result<u64> {
+        validate(session)?;
+        let mut connection = self.connection.lock().map_err(failure)?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        let current: Option<String>=tx.query_row("SELECT json_extract(event,'$.connection_generation') FROM encounter_events WHERE session=?1 AND json_extract(event,'$.kind')='binding' ORDER BY cursor DESC LIMIT 1",[session.as_str()],|row|row.get(0)).optional().map_err(failure)?;
+        let released: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM encounter_events WHERE session=?1 AND json_extract(event,'$.kind')='native-release-requested' AND json_extract(event,'$.connection_generation')=?2)",params![session.as_str(),generation],|row|row.get(0)).map_err(failure)?;
+        if current.as_deref() != Some(generation) || released {
+            return Err(AikitError::new("encounter.child_message_generation_changed","The child message is retained on disk; its native generation was released or replaced"));
+        }
+        let mut event = stamp_observed_at(event.clone());
+        event["connection_generation"] = json!(generation);
+        tx.execute(
+            "INSERT INTO encounter_events(session,event) VALUES(?1,?2)",
+            params![session.as_str(), event.to_string()],
+        )
+        .map_err(failure)?;
+        let cursor = tx.last_insert_rowid() as u64;
+        super::project_block(&tx, session, &event)?;
+        tx.commit().map_err(failure)?;
+        Ok(cursor)
+    }
+
     /// Last observed native binding supports explicit reconnect. It never infers
     /// a WorldBinding from the session, provider or filesystem location.
     pub fn last_native_binding(&self, session: &ResourceRef) -> Result<Option<Value>> {
@@ -289,6 +449,9 @@ impl EncounterStore {
     pub fn native_open_recovery(&self, session: &ResourceRef) -> Result<Option<Value>> {
         validate(session)?;
         let connection = self.connection.lock().map_err(failure)?;
+        if let Some(recovery) = release_recovery(&connection, session)? {
+            return Ok(Some(recovery));
+        }
         let reserved: Option<(u64, String)> = connection
             .query_row(
                 "SELECT cursor,event FROM encounter_events WHERE session=?1 AND json_extract(event,'$.kind')='native-open-reserved' ORDER BY cursor DESC LIMIT 1",
@@ -431,4 +594,39 @@ pub(super) fn finish(
     };
     connection.execute("UPDATE encounter_deliveries SET phase=?3,terminal_cursor=?4,detail=?5 WHERE session=?1 AND delivery=?2 AND phase IN ('dispatching','submitted','uncertain')",params![session.as_str(),delivery,phase,cursor,stop.to_string()]).map_err(failure)?;
     Ok(())
+}
+
+fn release_receipt(
+    connection: &Connection,
+    session: &ResourceRef,
+    native: &str,
+    generation: &str,
+) -> Result<Option<Value>> {
+    let row: Option<(u64,String)> = connection.query_row("SELECT cursor,event FROM encounter_events WHERE session=?1 AND json_extract(event,'$.kind')='native-release-completed' AND json_extract(event,'$.native_session_id')=?2 AND json_extract(event,'$.connection_generation')=?3 ORDER BY cursor DESC LIMIT 1",params![session.as_str(),native,generation],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(failure)?;
+    row.map(|(cursor,body)| { let receipt: Value=serde_json::from_str(&body).map_err(failure)?; Ok(json!({"state":if receipt["cleanup_confirmed"]==true {"Released"}else{"CleanupUncertain"},"request_cursor":receipt["request_cursor"],"terminal_cursor":cursor,"receipt":receipt})) }).transpose()
+}
+
+fn release_recovery(connection: &Connection, session: &ResourceRef) -> Result<Option<Value>> {
+    let row: Option<(u64,String)> = connection.query_row("SELECT cursor,event FROM encounter_events WHERE session=?1 AND json_extract(event,'$.kind')='native-release-requested' ORDER BY cursor DESC LIMIT 1",[session.as_str()],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(failure)?;
+    let Some((cursor, body)) = row else {
+        return Ok(None);
+    };
+    let request: Value = serde_json::from_str(&body).map_err(failure)?;
+    let terminal = release_receipt(
+        connection,
+        session,
+        request["native_session_id"].as_str().unwrap_or_default(),
+        request["connection_generation"]
+            .as_str()
+            .unwrap_or_default(),
+    )?;
+    if terminal.as_ref().is_some_and(|value| {
+        value["receipt"]["cleanup_confirmed"] == true
+            && value["request_cursor"].as_u64() == Some(cursor)
+    }) {
+        return Ok(None);
+    }
+    Ok(Some(
+        json!({"state":if terminal.is_some(){"CleanupUncertain"}else{"RecoveryRequired"},"error":"Exact native release cleanup is not confirmed; no body ownership is reconstructed from retained history","opening":request,"terminal":terminal}),
+    ))
 }

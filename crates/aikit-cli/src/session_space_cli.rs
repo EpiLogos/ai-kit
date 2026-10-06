@@ -542,11 +542,11 @@ fn run(cli: Cli) -> Result<()> {
                 .map(|path| directory(path, "QL source root"))
                 .transpose()?;
             if central_ctrl_bin.is_some() != central_root.is_some()
-                || central_ctrl_bin.is_some() != central_project.is_some()
+                || (central_project.is_some() && central_ctrl_bin.is_none())
             {
                 return Err(AikitError::new(
                     "encounter.prime_configuration",
-                    "Central ctrl binary, root and project must be supplied together",
+                    "Central ctrl binary and root must be supplied together; project requires that pair",
                 ));
             }
             let central_ctrl_bin = central_ctrl_bin

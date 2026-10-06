@@ -94,11 +94,21 @@ impl Snapshot {
                 "owner index changed during snapshot; retry after indexing completes",
             ));
         }
-        fs::write(snapshot.join("gitnexus.json"), &metadata_bytes).map_err(failure)?;
+        // The storage self-identifies its repository and storage directory;
+        // current GitNexus validation refuses a registry entry whose storage
+        // metadata names another location. The isolated copy speaks for the
+        // same repository at this snapshot's paths.
+        let mut relocated = metadata.clone();
+        if let Some(object) = relocated.as_object_mut() {
+            object.insert("repoPath".into(), serde_json::json!(root));
+            object.insert("storagePath".into(), serde_json::json!(snapshot));
+        }
+        let relocated_bytes = serde_json::to_vec(&relocated).map_err(failure)?;
+        fs::write(snapshot.join("gitnexus.json"), &relocated_bytes).map_err(failure)?;
         let registry = serde_json::json!([{
             "name": root.to_string_lossy(), "path": root, "storagePath": snapshot,
-            "lastCommit": metadata.get("lastCommit"), "indexedAt": metadata.get("indexedAt"),
-            "stats": metadata.get("stats"), "branch": metadata.get("branch")
+            "lastCommit": relocated.get("lastCommit"), "indexedAt": relocated.get("indexedAt"),
+            "stats": relocated.get("stats"), "branch": relocated.get("branch")
         }]);
         fs::write(
             home.join("registry.json"),

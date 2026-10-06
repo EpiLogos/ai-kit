@@ -448,15 +448,18 @@ fn an_adapter_plans_one_item_per_active_capability_of_its_kind() {
         2,
         "the inactive script must not be projected"
     );
-    let destinations: Vec<String> = plan
+    let destinations: Vec<PathBuf> = plan
         .items
         .iter()
         .filter_map(|i| i.destination())
-        .map(|p| p.display().to_string())
+        .map(|p| p.to_path_buf())
         .collect();
     assert_eq!(
         destinations,
-        vec![".claude/skills/perf", ".claude/skills/review"]
+        vec![
+            PathBuf::from(".claude").join("skills").join("perf"),
+            PathBuf::from(".claude").join("skills").join("review"),
+        ]
     );
 }
 

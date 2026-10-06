@@ -16,13 +16,14 @@
 //! dispatch still passes. Foreign participants' words reach a recipient as
 //! attributed material in the prompt, never as that recipient's own earlier
 //! answer or as an instruction.
-use super::super::{error, EncounterService};
+use super::super::{error, EncounterService, Lifecycle};
 use super::{EncounterAddressedTurn, EncounterContextPacket};
 use crate::gateway_owners::{CtrlActionError, ProcessOwners};
 use aikit_core::{AikitError, ResourceRef, Result};
 use aikit_store::encounter::{
     ConversationReading, ConversationRecipientReading, ConversationWork, NewConversationRecipient,
 };
+use aikit_store::AikitHome;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -75,6 +76,9 @@ pub struct ConversationSendRequest {
     pub request_ref: ResourceRef,
     /// The Flow's native location (`central.path-ref/v1`).
     pub flow_location: Value,
+    /// Exact observed Flow UUID, retained through request recovery and inclusion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_document_id: Option<String>,
     /// Who is asking, as the owner's admission names them (`allowed_senders`).
     pub sender: ResourceRef,
     /// The actor the authored entry is committed as (declared, like every
@@ -86,6 +90,107 @@ pub struct ConversationSendRequest {
     pub author_session: Option<ResourceRef>,
     pub entry: ConversationEntry,
     pub recipients: Vec<ConversationRecipientSpec>,
+}
+// Match native uuid::Uuid::parse_str spellings without normalizing the basis.
+fn flow_document_uuid(value: &str) -> bool {
+    let inner = if let Some(urn) = value.strip_prefix("urn:uuid:") {
+        if value.len() != 45 {
+            return false;
+        }
+        urn
+    } else if let Some(braced) = value.strip_prefix('{').and_then(|v| v.strip_suffix('}')) {
+        if value.len() != 38 {
+            return false;
+        }
+        braced
+    } else {
+        value
+    };
+    if inner.len() == 32 {
+        return inner.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+    inner.len() == 36
+        && inner.bytes().enumerate().all(|(i, byte)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+/// Keep the qualified owner through its actual append. The descriptor and the
+/// effect must not independently follow a mutable installed-product selector.
+pub(super) fn owners_for_append(
+    body: &Value,
+    input: &mut Value,
+) -> std::result::Result<ProcessOwners, CtrlActionError> {
+    let owners = ProcessOwners::from_env();
+    let Some(expected) = body.pointer("/flow/document_id").and_then(Value::as_str) else {
+        return Ok(owners);
+    };
+    let owners = owners.resolved_ctrl()?;
+    let descriptor = owners.ctrl_action_descriptor("central.flow.append")?;
+    let capable = descriptor["inputs"].as_array().is_some_and(|inputs| {
+        inputs
+            .iter()
+            .any(|field| field["name"] == "expected_document_id" && field["type"] == "string")
+    });
+    if !capable {
+        return Err(CtrlActionError::Refused {
+            code: "document-pin-capability-absent".into(),
+            message: "Central does not declare expected_document_id; pinned Flow append is unavailable and no append was invoked".into(),
+        });
+    }
+    if descriptor["availability"]["available"] != true {
+        return Err(CtrlActionError::Unavailable(format!(
+            "Central document-pin append is currently unavailable: {}",
+            descriptor["availability"]
+        )));
+    }
+    input["expected_document_id"] = json!(expected);
+    Ok(owners)
+}
+/// A definite packet refusal and a temporarily unavailable owner have different
+/// durable dispatch standings. Both dispatch routes use this typed result.
+#[derive(Debug)]
+pub(super) enum ConversationPacketError {
+    Held(String),
+    Refused(String),
+}
+impl ConversationPacketError {
+    pub(super) fn standing(&self) -> &'static str {
+        match self {
+            Self::Held(_) => "held",
+            Self::Refused(_) => "refused",
+        }
+    }
+    pub(super) fn detail(&self) -> &str {
+        match self {
+            Self::Held(detail) | Self::Refused(detail) => detail,
+        }
+    }
+}
+/// Validate each native read that may admit a recipient or supply their packet.
+/// A preceding admission cannot certify a later read at the same locator.
+fn confirm_flow_identity(body: &Value, observed: Option<&str>) -> std::result::Result<(), String> {
+    if let Some(expected) = body.pointer("/flow/document_id").and_then(Value::as_str) {
+        if observed != Some(expected) {
+            return Err("conversation.document_mismatch: the Flow at this location differs from this request's retained document".into());
+        }
+    }
+    Ok(())
+}
+fn confirm_document_pin(body: &Value, done: &Value) -> std::result::Result<(), String> {
+    if let Some(expected) = body.pointer("/flow/document_id").and_then(Value::as_str) {
+        if done
+            .pointer("/entry/request/documentId")
+            .and_then(Value::as_str)
+            != Some(expected)
+        {
+            return Err("Central did not confirm this append's retained document pin; inclusion is unconfirmed".into());
+        }
+    }
+    Ok(())
 }
 fn human() -> String {
     "human".into()
@@ -142,32 +247,18 @@ fn shell_quote_path(path: &str) -> String {
     }
 }
 
-/// Run a command to completion within `limit`, killing it if it overruns. A
-/// hung remote must not hold the serialised conversation sweep.
-fn output_within(
+/// Capture the selected legacy command through the existing native process
+/// owner. No second route follows a possibly completed effect. The caller's
+/// existing delivery identity/owner reducer supplies explicit recovery.
+pub(super) fn output_within(
     mut command: std::process::Command,
     limit: std::time::Duration,
-) -> std::io::Result<std::process::Output> {
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let mut child = command.spawn()?;
-    let started = std::time::Instant::now();
-    loop {
-        if child.try_wait()?.is_some() {
-            return child.wait_with_output();
-        }
-        if started.elapsed() >= limit {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("did not answer within {} s", limit.as_secs()),
-            ));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+) -> aikit_core::Result<aikit_adapters::runner::Output> {
+    aikit_adapters::runner::SystemRunner::new()
+        .with_timeout(limit)
+        .with_strict_utf8()
+        .with_body_free_diagnostics()
+        .capture_command(&mut command)
 }
 
 /// Marks a remote owner that could not be reached (as opposed to one that refused).
@@ -181,6 +272,7 @@ const ROUTE_UNAVAILABLE: &str = "conversation.route_unavailable";
 /// other" (a request that might have reached the owner must not also be sent
 /// down a second path): see [`crate::gateway_encounter_relay`].
 fn remote_encounter(
+    home: &AikitHome,
     route: &Value,
     request: &Value,
 ) -> std::result::Result<Value, (String, String)> {
@@ -193,12 +285,7 @@ fn remote_encounter(
     // `exec` is an independently owned world on this host; it has no gateway.
     if kind != "exec" {
         if let Some(workcell) = route["workcell"].as_str() {
-            let home = aikit_store::home::AikitHome::discover().map_err(|error| {
-                unavailable(format!(
-                    "no AIKit home to read gateway endpoints from: {error}"
-                ))
-            })?;
-            match choose(&home, workcell) {
+            match choose(home, workcell) {
                 Choice::Native(remote) => {
                     let action = request["action"].as_str().unwrap_or_default();
                     return relay_native(&remote, action, request).map_err(
@@ -273,10 +360,11 @@ fn remote_encounter_legacy(
         }
         let output = output_within(command, LEGACY_ROUTE_TIMEOUT)
             .map_err(|e| unavailable(format!("owner client unavailable: {e}")))?;
-        let value: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+        let value: Value = serde_json::from_str(&output.stdout).map_err(|_| {
             unavailable(format!(
                 "no JSON answer: {}",
-                String::from_utf8_lossy(&output.stderr)
+                output
+                    .stderr
                     .lines()
                     .last()
                     .unwrap_or("")
@@ -354,10 +442,11 @@ fn remote_encounter_legacy(
     ]);
     let output =
         output_within(ssh, LEGACY_ROUTE_TIMEOUT).map_err(|e| unavailable(format!("ssh: {e}")))?;
-    let value: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+    let value: Value = serde_json::from_str(&output.stdout).map_err(|_| {
         unavailable(format!(
             "no JSON answer from {target}: {}",
-            String::from_utf8_lossy(&output.stderr)
+            output
+                .stderr
                 .lines()
                 .last()
                 .unwrap_or("")
@@ -387,6 +476,7 @@ fn remote_encounter_legacy(
 /// horizon). The private collections — notes, journal, packet, media — are
 /// never carried out of the read.
 pub(super) struct FlowFacts {
+    pub(super) document_id: Option<String>,
     pub(super) participants: Vec<Value>,
     pub(super) entry_ids: Vec<String>,
 }
@@ -427,6 +517,10 @@ fn flow_facts(location: &Value) -> std::result::Result<FlowFacts, String> {
     )
     .map_err(|e| unreadable(&format!("document island is not JSON: {e}")))?;
     Ok(FlowFacts {
+        document_id: doc
+            .pointer("/meta/documentId")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         participants: doc
             .pointer("/meta/participants")
             .and_then(Value::as_array)
@@ -659,6 +753,16 @@ impl EncounterService {
                 "An author does not ask themself; address another participant",
             ));
         }
+        if request
+            .expected_document_id
+            .as_deref()
+            .is_some_and(|pin| !flow_document_uuid(pin))
+        {
+            return Err(AikitError::new(
+                "conversation.invalid_document_id",
+                "expected_document_id must be an exact UUID string",
+            ));
+        }
         let request_digest = digest(&json!({
             "flow": request.flow_location.get("ref"), "sender": request.sender,
             "entry": request.entry,
@@ -669,7 +773,7 @@ impl EncounterService {
         // moved on since. Membership and seats are judged when it is first
         // recorded, and again at every dispatch and inclusion.
         let replay = self.store.conversation(&request.request_ref)?.is_some();
-        let facts = if replay {
+        let facts = if replay && request.expected_document_id.is_none() {
             None
         } else {
             Some(flow_facts(&request.flow_location).map_err(|why| {
@@ -679,6 +783,15 @@ impl EncounterService {
                 )
             })?)
         };
+        if let Some(expected) = request.expected_document_id.as_deref() {
+            if facts
+                .as_ref()
+                .and_then(|facts| facts.document_id.as_deref())
+                != Some(expected)
+            {
+                return Err(AikitError::new("conversation.document_mismatch", "The Flow at this location differs from the retained document; no request effect performed"));
+            }
+        }
         let mut recipients = Vec::new();
         for spec in &request.recipients {
             if let Some(route) = &spec.route {
@@ -689,9 +802,8 @@ impl EncounterService {
                 let exec = route["kind"] == "exec"
                     && route["aikit"].as_str().is_some_and(|a| a.starts_with('/'))
                     && route["cwd"].as_str().is_some_and(|c| c.starts_with('/'));
-                // A gateway route names only the Workcell that holds the
-                // session: the endpoint is the one both gateways already
-                // declare for each other, never carried in the request.
+                // The actual declared endpoint belongs to the named Workcell,
+                // never to arbitrary endpoint data carried by this request.
                 let gateway = route["kind"] == "gateway";
                 let usable = (ssh || exec || gateway)
                     && route["workcell"]
@@ -700,7 +812,7 @@ impl EncounterService {
                 if !usable {
                     return Err(AikitError::new(
                         "conversation.route",
-                        "A remote recipient's route needs kind `gateway` (the Workcell that holds the session, reached through the gateway endpoint declared for it), `ssh` (a target) or `exec` (an absolute client path and cwd), and the Workcell that holds the session",
+                        "A remote recipient's route needs kind `gateway` (a declared Workcell endpoint), `ssh` (a target) or `exec` (an absolute client path and cwd), and the Workcell that holds the session",
                     ));
                 }
             }
@@ -729,7 +841,7 @@ impl EncounterService {
                 }
                 held.or_else(|| spec.agent_ref.clone())
             };
-            if let Some(facts) = &facts {
+            if let Some(facts) = facts.as_ref().filter(|_| !replay) {
                 seat_check(
                     facts,
                     &spec.participant_key,
@@ -749,7 +861,7 @@ impl EncounterService {
                 route: spec.route.clone(),
             });
         }
-        let body = json!({
+        let mut body = json!({
             "schema": CONVERSATION_SCHEMA,
             "flow": {"location": request.flow_location},
             "sender": request.sender, "actor": request.actor, "actor_kind": request.actor_kind,
@@ -757,6 +869,9 @@ impl EncounterService {
             "entry": request.entry,
             "standing": "coordination-record; not human authorship, completed work or comprehension",
         });
+        if let Some(expected) = &request.expected_document_id {
+            body["flow"]["document_id"] = json!(expected);
+        }
         let (fresh, _) = self.store.create_conversation(
             &request.request_ref,
             &request_digest,
@@ -831,8 +946,13 @@ impl EncounterService {
         if let Some(session) = body.get("author_session").filter(|s| !s.is_null()) {
             input["agent_session_ref"] = session.clone();
         }
-        match Self::conversation_owners().run_ctrl_action("central.flow.append", &input) {
+        let owners = owners_for_append(body, &mut input).map_err(|why| match why {
+            CtrlActionError::Unavailable(reason) => format!("Central unavailable: {reason}"),
+            CtrlActionError::Refused { code, message } => format!("{code}: {message}"),
+        })?;
+        match owners.run_ctrl_action("central.flow.append", &input) {
             Ok(done) => {
+                confirm_document_pin(body, &done)?;
                 let source = json!({
                     "entry_id": done.pointer("/entry/id"), "revision": done.get("revision"),
                     "document_revision": done.get("document_revision"),
@@ -851,22 +971,27 @@ impl EncounterService {
 
     /// The prompt a recipient receives: small framing, the asked entry, and a
     /// bounded, attributed slice of what this participant may read.
-    fn conversation_packet_text(
+    pub(super) fn conversation_packet_text(
         &self,
         reading: &ConversationReading,
         recipient: &ConversationRecipientReading,
-    ) -> std::result::Result<String, String> {
-        let source = reading.source.as_ref().ok_or("entry not committed")?;
+    ) -> std::result::Result<String, ConversationPacketError> {
+        let source = reading
+            .source
+            .as_ref()
+            .ok_or_else(|| ConversationPacketError::Held("entry not committed".into()))?;
         let asked = source["entry_id"].as_str().unwrap_or_default();
         let flow = Self::conversation_owners()
             .run_ctrl_action(
                 "central.flow.read",
                 &json!({"location": reading.body["flow"]["location"], "participant_key": recipient.participant_key, "max_entries": CONTEXT_ENTRIES}),
             )
-            .map_err(|e| match e {
+            .map_err(|e| ConversationPacketError::Held(match e {
                 CtrlActionError::Refused { code, message } => format!("flow unreadable ({code}): {message}"),
                 CtrlActionError::Unavailable(reason) => format!("Central unavailable: {reason}"),
-            })?;
+            }))?;
+        confirm_flow_identity(&reading.body, flow["document_id"].as_str())
+            .map_err(ConversationPacketError::Refused)?;
         let me = flow["participants"]
             .as_array()
             .into_iter()
@@ -908,7 +1033,11 @@ impl EncounterService {
                     4 * CONTEXT_ENTRY_CHARS
                 )
             )),
-            None => return Err("the asked entry is not readable by this participant".into()),
+            None => {
+                return Err(ConversationPacketError::Refused(
+                    "the asked entry is not readable by this participant".into(),
+                ))
+            }
         }
         Ok(text)
     }
@@ -931,6 +1060,9 @@ impl EncounterService {
             Ok(facts) => facts,
             Err(why) => return Admission::Hold(why),
         };
+        if let Err(reason) = confirm_flow_identity(&reading.body, facts.document_id.as_deref()) {
+            return Admission::Refuse(reason);
+        }
         let asked = reading
             .source
             .as_ref()
@@ -1020,10 +1152,10 @@ impl EncounterService {
             .expect("remote recipient has a route");
         let text = match self.conversation_packet_text(reading, recipient) {
             Ok(text) => text,
-            Err(reason) if reason.contains("not readable") => return set("refused", Some(&reason)),
-            Err(reason) => return set("held", Some(&reason)),
+            Err(reason) => return set(reason.standing(), Some(reason.detail())),
         };
         let binding = match remote_encounter(
+            &self.home,
             route,
             &json!({"action": "agency-read", "agent_session": recipient.agent_session}),
         ) {
@@ -1050,7 +1182,7 @@ impl EncounterService {
                 },
             },
         });
-        match remote_encounter(route, &turn) {
+        match remote_encounter(&self.home, route, &turn) {
             Ok(result) => set(
                 "sent",
                 result
@@ -1092,13 +1224,14 @@ impl EncounterService {
             value["action"] = json!(action);
             value
         };
-        let Ok(delivery) = remote_encounter(route, &with_action("delivery")) else {
+        let Ok(delivery) = remote_encounter(&self.home, route, &with_action("delivery")) else {
             return Ok(());
         };
         if delivery.is_null() {
             return Ok(());
         }
-        let reply = remote_encounter(route, &with_action("delivery-reply")).unwrap_or(Value::Null);
+        let reply = remote_encounter(&self.home, route, &with_action("delivery-reply"))
+            .unwrap_or(Value::Null);
         self.store.conversation_record_remote(
             request,
             participant,
@@ -1147,8 +1280,7 @@ impl EncounterService {
         let text = match self.conversation_packet_text(reading, recipient) {
             Ok(text) => text,
             // A recipient that cannot read the asked entry never receives it.
-            Err(reason) if reason.contains("not readable") => return set("refused", Some(&reason)),
-            Err(reason) => return set("held", Some(&reason)),
+            Err(reason) => return set(reason.standing(), Some(reason.detail())),
         };
         let Ok(flow_ref) = ResourceRef::parse(
             reading.body["flow"]["location"]["ref"]
@@ -1192,6 +1324,35 @@ impl EncounterService {
                 Some(&format!("{}: {}", failure.code(), failure.message())),
             ),
         }
+    }
+
+    /// Preserve the actual append-owner refusal. A transport/capability reading
+    /// outage remains retryable within the existing inclusion budget.
+    pub(super) fn conversation_append_unavailable(
+        &self,
+        request: &ResourceRef,
+        recipient: &ConversationRecipientReading,
+        why: CtrlActionError,
+    ) -> Result<()> {
+        let (standing, detail) = match why {
+            CtrlActionError::Unavailable(reason) => (
+                if recipient.attempts + 1 >= MAX_INCLUSION_ATTEMPTS {
+                    "refused"
+                } else {
+                    "failed"
+                },
+                format!("Central unavailable: {reason}"),
+            ),
+            CtrlActionError::Refused { code, message } => ("refused", format!("{code}: {message}")),
+        };
+        self.store.conversation_record_inclusion(
+            request,
+            &recipient.participant_key,
+            standing,
+            None,
+            None,
+            Some(&detail),
+        )
     }
 
     /// Append one recipient's returned reply to the Flow, answering the entry
@@ -1281,17 +1442,26 @@ impl EncounterService {
         } else if let Ok(workcell) = std::env::var("AIKIT_WORKCELL_REF") {
             input["workcell"] = json!(workcell);
         }
-        match Self::conversation_owners().run_ctrl_action("central.flow.append", &input) {
-            Ok(done) => record(
-                "included",
-                done.pointer("/entry/id").and_then(Value::as_str),
-                done.get("revision").and_then(Value::as_str),
-                None,
-            ),
+        let owners = match owners_for_append(&reading.body, &mut input) {
+            Ok(owners) => owners,
+            Err(why) => return self.conversation_append_unavailable(request, recipient, why),
+        };
+        match owners.run_ctrl_action("central.flow.append", &input) {
+            Ok(done) => match confirm_document_pin(&reading.body, &done) {
+                Ok(()) => record(
+                    "included",
+                    done.pointer("/entry/id").and_then(Value::as_str),
+                    done.get("revision").and_then(Value::as_str),
+                    None,
+                ),
+                Err(why) => record("refused", None, None, Some(&why)),
+            },
             Err(CtrlActionError::Refused { code, message }) => {
                 let permanent = matches!(
                     code.as_str(),
                     "request-conflict"
+                        | "document-mismatch"
+                        | "invalid-expected-document-id"
                         | "participant-left"
                         | "observer-cannot-contribute"
                         | "impersonation"
@@ -1489,6 +1659,35 @@ pub(crate) fn spawn_worker(service: &Arc<EncounterService>) {
             }
             first = false;
             let Some(service) = weak.upgrade() else { break };
+            // The SAME owner fence covers background effects. Do not take a
+            // second read lease inside sweep: public requests already hold it.
+            let Ok(lifecycle) = service.lifecycle.read() else {
+                break;
+            };
+            if service
+                .shutdown_requested
+                .load(std::sync::atomic::Ordering::SeqCst)
+                || !matches!(*lifecycle, Lifecycle::Running)
+            {
+                break;
+            }
+            #[cfg(test)]
+            {
+                let barrier = service
+                    .native_worker_test_barrier
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.clone());
+                if let Some(barrier) = barrier {
+                    if barrier.reached.send(std::time::Instant::now()).is_err()
+                        || barrier.proceed.lock().map_or(true, |release| {
+                            release.recv_timeout(Duration::from_secs(5)).is_err()
+                        })
+                    {
+                        break;
+                    }
+                }
+            }
             let _ = service.conversation_sweep();
             // A delivery still waiting on a busy session is looked at again soon:
             // the turn boundary can land just after a wake.
