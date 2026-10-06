@@ -164,7 +164,7 @@ jobs:
           # The task runtime allocates its per-run native evidence directories
           # under an explicitly provided absolute root; the tests refuse to
           # invent one.
-          AIKIT_CAW_NATIVE_NPM_EVIDENCE_DIR: \${{ runner.temp }}/caw-npm-evidence
+          AIKIT_CAW_NATIVE_NPM_EVIDENCE_DIR: ${{ runner.temp }}/caw-npm-evidence
         run: |
           set -euo pipefail
           mkdir -p "$AIKIT_CAW_NATIVE_NPM_EVIDENCE_DIR"
