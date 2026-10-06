@@ -196,6 +196,8 @@ fn redis_prepared_now_is_delivered_before_turn_and_verifier_context_is_isolated(
         prepared_ttl_seconds: 3_600,
         coordination_retention_seconds: 3_600,
     };
+    let redis_file = temp.path().join("redis-now.json");
+    std::fs::write(&redis_file, serde_json::to_vec(&redis).unwrap()).unwrap();
     let store = RedisNowStore::new(redis.clone()).unwrap();
     store
         .publish(
@@ -270,7 +272,7 @@ fn redis_prepared_now_is_delivered_before_turn_and_verifier_context_is_isolated(
         },
     )
     .unwrap();
-    let service = EncounterService::new(home).unwrap();
+    let service = EncounterService::new(home.clone()).unwrap();
     service
         .apply(EncounterRequest::Open {
             space: space.clone(),
@@ -340,6 +342,35 @@ fn redis_prepared_now_is_delivered_before_turn_and_verifier_context_is_isolated(
         );
         thread::sleep(Duration::from_millis(20));
     };
+    // The actual-use reading over the same journal and Redis: the delivered
+    // version, the decision behind it and the selected sources, read back.
+    let reading = aikit_cli::encounter_use::read(
+        &home,
+        &aikit_cli::encounter_use::UseRequest {
+            agent_session: session.clone(),
+            turn: aikit_cli::encounter_use::TurnSelector::Last,
+            faculty_evidence: None,
+            redis_config: Some(redis_file.clone()),
+        },
+    )
+    .unwrap();
+    assert_eq!(reading["prepared_context"]["state"], "delivered");
+    let used = &reading["prepared_context"]["delivered"][0]["receipt"];
+    assert_eq!(used["prepared_version"], 1);
+    assert_eq!(used["prepared_digest"], receipt.prepared_digest);
+    assert_eq!(
+        reading["decision"]["from_delivery_receipt"]["decision_provider"],
+        "blake3:kev-provider-identity-proof"
+    );
+    assert_eq!(
+        reading["decision"]["selection_readback"]["view_is_the_delivered_one"], true,
+        "{}",
+        reading["decision"]["selection_readback"]
+    );
+    assert_eq!(
+        reading["decision"]["selection_readback"]["selected_source_refs"],
+        serde_json::json!(["context-source/proof"])
+    );
     assert_eq!(observed["receipt"]["prepared_version"], 1);
     assert_eq!(
         observed["receipt"]["prepared_digest"],

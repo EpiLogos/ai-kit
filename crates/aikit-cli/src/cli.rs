@@ -1689,8 +1689,9 @@ pub struct DecideServiceUpgradeArgs {
 #[derive(Debug, Args)]
 pub struct DecideStatusArgs {
     /// Decision-provider configuration (`aikit.decision-provider/v1`).
+    /// Omit to use the election (`ai-kit:local-services:decision.provider`).
     #[arg(long = "provider-file", value_name = "PATH")]
-    pub provider_file: std::path::PathBuf,
+    pub provider_file: Option<std::path::PathBuf>,
     /// Run one real bounded Noul diagnostic against the selected provider.
     #[arg(long = "probe")]
     pub probe: bool,
@@ -1704,8 +1705,9 @@ pub struct DecideStatusArgs {
 #[derive(Debug, Args)]
 pub struct DecideInvokeArgs {
     /// Decision-provider configuration (`aikit.decision-provider/v1`).
+    /// Omit to use the election (`ai-kit:local-services:decision.provider`).
     #[arg(long = "provider-file", value_name = "PATH")]
-    pub provider_file: std::path::PathBuf,
+    pub provider_file: Option<std::path::PathBuf>,
     #[arg(long = "request-file", value_name = "PATH")]
     pub request_file: std::path::PathBuf,
     #[arg(long = "invocation-ref", value_name = "RESOURCE_REF")]
@@ -2031,8 +2033,10 @@ pub struct NowFieldArgs {
 
 #[derive(Debug, Args)]
 pub struct NowStatusArgs {
+    /// Redis NOW configuration (`aikit.redis-now-config/v1`). Omit to use the
+    /// election (`ai-kit:local-services:now.redis`).
     #[arg(long = "config-file", value_name = "PATH")]
-    pub config_file: std::path::PathBuf,
+    pub config_file: Option<std::path::PathBuf>,
     #[arg(long = "allow-env-import")]
     pub allow_env_import: bool,
 }

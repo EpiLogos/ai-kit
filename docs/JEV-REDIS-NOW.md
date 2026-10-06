@@ -107,6 +107,38 @@ elected provider is a local loopback one. Central-read sources default to
 egress `denied`, so they are withheld from a local Kev as well; relaxing that
 for a `local-protocol` standing is a law change for the owner, not made here.
 
+### Electing the services through the configuration plane
+
+`aikit config-contribution` contributes two writable machine-scope settings in a
+`local-services` section: `ai-kit:local-services:decision.provider` and
+`ai-kit:local-services:now.redis`, each a `path` to the owner-native document
+(`aikit.decision-provider/v1`, `aikit.redis-now-config/v1`) that the service
+lifecycles above write. `config validate` parses the document with the owner's
+own law; `plan`/`apply` record the path **and the digest it was elected at**
+(`state/config/local-services.json`), never a copy; `reset` removes only the
+election. Electing starts, stops and provisions nothing. `aikit decide
+status|invoke` and `aikit now-context status` use the election when given no
+file, and refuse (`config.election_drifted`) when the document has changed since
+it was elected — for example after `aikit decide service upgrade` — until it is
+re-planned and re-applied. `aikit system --json` discloses each election: declared
+(path + digest), effective (document current / changed / unreadable) and active
+(a bounded read-only probe of the named service).
+
+### Reading what a turn actually used
+
+`aikit-session-space encounter-use --agent-session REF [--turn N | --cursor C]
+[--redis-config F] [--faculty-evidence DIR | --faculty-config F]` reads, without
+writing anything: the prepared-context version delivered to the turn (the
+journal's `now-context-delivered` receipt) and any degradation or uncertainty;
+the decision provider and invocation behind it, and — with `--redis-config` — the
+sources the decision selected, read back from the delivered view (verified by
+digest); and the QL operations the body made: `ql_*` tool calls and their
+results, `ql_relational.*` calls inside `ipython` calls, and the QL owner's own
+faculty receipts for the session in the turn's time window, reconciled by count.
+What could not be read is listed under `absences`; the decision receipt's body is
+not persisted by the prepare path, so only its ref and the provider identity
+digest are reported.
+
 ## Redis material configuration
 
 ```json

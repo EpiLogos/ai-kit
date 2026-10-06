@@ -64,6 +64,7 @@ pub mod jev_now;
 pub mod json;
 pub mod jump;
 pub mod knowledge_jev;
+pub mod local_services_election;
 pub mod model_defaults;
 pub mod model_roster;
 pub mod multicall;
@@ -119,6 +120,7 @@ pub mod encounter_mcp;
 pub mod encounter_native_projection;
 pub mod encounter_profile_provider;
 pub mod encounter_service;
+pub mod encounter_use;
 
 /// Self-invocation shape for session-space verbs. The main `aikit` binary
 /// takes them under the `session-space` subcommand; the standalone

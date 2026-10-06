@@ -372,8 +372,13 @@ pub fn invoke_selected(
 /// facts and (with `--probe`) one real bounded typed diagnostic. Mode `none`
 /// reports that ordinary operation uses no decision service.
 pub fn decide_status(args: DecideStatusArgs) -> Result<Value> {
+    let provider_file = crate::local_services_election::resolve_file(
+        &aikit_store::AikitHome::discover()?,
+        crate::local_services_election::Election::Decision,
+        args.provider_file.clone(),
+    )?;
     let config: DecisionProviderConfig =
-        read_json(&args.provider_file, "Decision provider config", 256 * 1024)?;
+        read_json(&provider_file, "Decision provider config", 256 * 1024)?;
     config.validate()?;
     let mut status = json!({
         "schema": "aikit.decision-status/v1",
@@ -518,8 +523,13 @@ fn diagnostic_probe(
 /// `aikit decide invoke`: one real typed invocation through the elected
 /// provider, returning its bounded receipt.
 pub fn decide_invoke(args: DecideInvokeArgs) -> Result<Value> {
+    let provider_file = crate::local_services_election::resolve_file(
+        &aikit_store::AikitHome::discover()?,
+        crate::local_services_election::Election::Decision,
+        args.provider_file.clone(),
+    )?;
     let config: DecisionProviderConfig =
-        read_json(&args.provider_file, "Decision provider config", 256 * 1024)?;
+        read_json(&provider_file, "Decision provider config", 256 * 1024)?;
     let request = JevRequest::parse(&read_bytes(
         &args.request_file,
         "Decision request",

@@ -59,6 +59,15 @@ struct EpiPrimeConfigureArgs {
     body_revision: String,
     #[arg(long)]
     skill_path: PathBuf,
+    /// The packaged binding extension (`ql-faculty-bindings.ts`) the launcher
+    /// loads explicitly with `-e` (discovery stays off).
+    #[arg(long)]
+    extension: PathBuf,
+    /// The QL binding file (`actuation.prime-faculty-installation/v1`) the
+    /// launcher verifies before Prime starts; installed by
+    /// `distribution/prime-epi/tools/epi-distribution.mjs install`.
+    #[arg(long)]
+    installation: PathBuf,
     #[arg(long)]
     research_bin: PathBuf,
     #[arg(long)]
@@ -201,6 +210,30 @@ enum Command {
         /// Remove the NOW context from the provider.
         #[arg(long)]
         withdraw: bool,
+    },
+    /// Read what one encounter turn actually received and did: the prepared
+    /// context version delivered, the decision provider and invocation behind
+    /// it, and the QL operations the body made (tool calls, Python faculty
+    /// calls, and the owner's own faculty receipts). Reads existing journals and
+    /// receipts; writes nothing.
+    EncounterUse {
+        #[arg(long)]
+        agent_session: String,
+        /// 1-based turn (the n-th user message). Default: the last turn.
+        #[arg(long, conflicts_with = "cursor")]
+        turn: Option<usize>,
+        /// The turn whose window contains this journal cursor.
+        #[arg(long)]
+        cursor: Option<u64>,
+        /// An Actuation faculty evidence directory (`actuation.prime-ql-operation/v1`).
+        #[arg(long, conflicts_with = "faculty_config")]
+        faculty_evidence: Option<PathBuf>,
+        /// An `actuation.prime-faculty/v1` configuration whose `evidence_root` to read.
+        #[arg(long)]
+        faculty_config: Option<PathBuf>,
+        /// `aikit.redis-now-config/v1`, to read the delivered view's selected sources back.
+        #[arg(long)]
+        redis_config: Option<PathBuf>,
     },
     /// Derive (dry-run) the encounter provider a harness profile's connection
     /// facts produce. Prints the provider JSON and exits; no state changes.
@@ -559,6 +592,48 @@ fn run(cli: Cli) -> Result<()> {
                 "standing": "configuration only; nothing was prepared or delivered",
             }))
         }
+        Command::EncounterUse {
+            agent_session,
+            turn,
+            cursor,
+            faculty_evidence,
+            faculty_config,
+            redis_config,
+        } => {
+            let faculty_evidence = match (faculty_evidence, faculty_config) {
+                (Some(dir), _) => Some(dir),
+                (None, Some(config)) => {
+                    let value: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(&config).map_err(|e| {
+                            AikitError::new(
+                                "encounter.use_reading",
+                                format!("{}: {e}", config.display()),
+                            )
+                        })?)
+                        .map_err(|e| {
+                            AikitError::new(
+                                "encounter.use_reading",
+                                format!("{}: {e}", config.display()),
+                            )
+                        })?;
+                    value["evidence_root"].as_str().map(PathBuf::from)
+                }
+                (None, None) => None,
+            };
+            emit(&crate::encounter_use::read(
+                service.home(),
+                &crate::encounter_use::UseRequest {
+                    agent_session: ResourceRef::parse(agent_session)?,
+                    turn: match (turn, cursor) {
+                        (Some(n), _) => crate::encounter_use::TurnSelector::Index(n),
+                        (None, Some(c)) => crate::encounter_use::TurnSelector::Cursor(c),
+                        (None, None) => crate::encounter_use::TurnSelector::Last,
+                    },
+                    faculty_evidence,
+                    redis_config,
+                },
+            )?)
+        }
         Command::EncounterDeconfigure { provider_id } => {
             crate::encounter_service::EncounterService::deconfigure(service.home(), &provider_id)?;
             emit(&serde_json::json!({"withdrawn":provider_id}))
@@ -584,6 +659,8 @@ fn run(cli: Cli) -> Result<()> {
                 ql_revision,
                 body_revision,
                 skill_path,
+                extension,
+                installation,
                 research_bin,
                 faculty_config,
                 ql_root,
@@ -641,6 +718,8 @@ fn run(cli: Cli) -> Result<()> {
             let prime_bin = file(prime_bin, "Prime Agent binary")?;
             let ql_bin = file(ql_bin, "QL binary")?;
             let skill_path = directory(skill_path, "Prime QL relational skill")?;
+            let extension = file(extension, "Prime Epi/QL binding extension")?;
+            let installation = file(installation, "Prime QL binding (installation) file")?;
             let research_bin = file(research_bin, "Actuation research binary")?;
             let faculty_config = file(faculty_config, "Actuation faculty configuration")?;
             let ql_root = ql_root
@@ -679,6 +758,10 @@ fn run(cli: Cli) -> Result<()> {
                 ql_revision.clone(),
                 "--skill-path".into(),
                 skill_path.display().to_string(),
+                "--extension".into(),
+                extension.display().to_string(),
+                "--installation".into(),
+                installation.display().to_string(),
                 "--research-bin".into(),
                 research_bin.display().to_string(),
                 "--faculty-config".into(),
@@ -1209,6 +1292,10 @@ mod epi_prime_cli_tests {
             "161b869740c54dc325ad1d6aef765dbf32920073",
             "--skill-path",
             "/opt/ql-relational",
+            "--extension",
+            "/opt/ql-faculty-bindings.ts",
+            "--installation",
+            "/opt/prime-epi/current.json",
             "--research-bin",
             "/opt/actuation-research",
             "--faculty-config",
@@ -1232,6 +1319,47 @@ mod epi_prime_cli_tests {
             "161b869740c54dc325ad1d6aef765dbf32920073"
         );
         assert_eq!(args.central_project.as_deref(), Some("O-I"));
+        assert_eq!(args.extension, PathBuf::from("/opt/ql-faculty-bindings.ts"));
+        assert_eq!(
+            args.installation,
+            PathBuf::from("/opt/prime-epi/current.json")
+        );
+    }
+
+    #[test]
+    fn omitting_the_extension_or_binding_is_a_parse_refusal() {
+        for omitted in ["--extension", "--installation"] {
+            let mut argv = vec![
+                "aikit-session-space",
+                "encounter-epi-prime-configure",
+                "--launcher",
+                "/o/l",
+                "--prime-bin",
+                "/o/p",
+                "--ql-bin",
+                "/o/q",
+                "--ql-revision",
+                "89ca4088ea47fe626c23c2b11efe2d38bdfcd1f7",
+                "--body-revision",
+                "161b869740c54dc325ad1d6aef765dbf32920073",
+                "--skill-path",
+                "/o/s",
+                "--extension",
+                "/o/e.ts",
+                "--installation",
+                "/o/c.json",
+                "--research-bin",
+                "/o/r",
+                "--faculty-config",
+                "/o/f",
+            ];
+            let at = argv.iter().position(|a| a == &omitted).unwrap();
+            argv.drain(at..at + 2);
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "{omitted} must be required"
+            );
+        }
     }
 }
 

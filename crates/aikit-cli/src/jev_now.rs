@@ -1514,7 +1514,12 @@ fn select_candidates(
 }
 
 pub fn now_status(args: NowStatusArgs) -> Result<Value> {
-    let config: RedisNowConfig = read_json(&args.config_file, "Redis NOW config", 256 * 1024)?;
+    let config_file = crate::local_services_election::resolve_file(
+        &aikit_store::AikitHome::discover()?,
+        crate::local_services_election::Election::Redis,
+        args.config_file.clone(),
+    )?;
+    let config: RedisNowConfig = read_json(&config_file, "Redis NOW config", 256 * 1024)?;
     let secret = resolve_secret(&config, args.allow_env_import)?;
     let status = RedisNowStore::new(config)?.status(secret.as_ref())?;
     serde_json::to_value(status).map_err(|e| fail("jev_now.encode", e.to_string()))

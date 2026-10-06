@@ -654,6 +654,14 @@ pub fn disclose(service: &Service) -> Result<Value> {
     } else {
         model_defaults_declared.clone()
     };
+    let decision_election = crate::local_services_election::disclosure(
+        service.home(),
+        crate::local_services_election::Election::Decision,
+    );
+    let redis_election = crate::local_services_election::disclosure(
+        service.home(),
+        crate::local_services_election::Election::Redis,
+    );
     let permission_modes_declared = crate::permission_defaults::declared(service.home())?
         .map(|modes| json!(modes))
         .unwrap_or(Value::Null);
@@ -951,6 +959,30 @@ pub fn disclose(service: &Service) -> Result<Value> {
                     "presence and refs only: the owner's authored model-catalogue entries and which authored facts each carries; never a secret and never the observed half",
                     "aikit model-catalogue show", "ai-kit:models:authored", observed_at,
                     materialisation_ref.clone(),
+                ),
+            ],
+        }),
+        json!({
+            "id": "local-services",
+            "title": "Local services / decision provider / Redis NOW",
+            "settings": [
+                setting(
+                    "decision.provider", "Decision provider election", "path",
+                    decision_election["declared"].clone(), "ai-kit:local-services:decision.provider:authored",
+                    decision_election["effective"].clone(), decision_election["active"].clone(),
+                    Value::Null, "none",
+                    "commands without --provider-file use the elected document; a document changed since it was elected is refused; nothing is started or stopped",
+                    "aikit config plan --setting ai-kit:local-services:decision.provider",
+                    "ai-kit:local-services:decision.provider", observed_at, materialisation_ref.clone(),
+                ),
+                setting(
+                    "now.redis", "Redis NOW election", "path",
+                    redis_election["declared"].clone(), "ai-kit:local-services:now.redis:authored",
+                    redis_election["effective"].clone(), redis_election["active"].clone(),
+                    Value::Null, "none",
+                    "now-context status without --config-file uses the elected document; a document changed since it was elected is refused; nothing is started or stopped",
+                    "aikit config plan --setting ai-kit:local-services:now.redis",
+                    "ai-kit:local-services:now.redis", observed_at, materialisation_ref.clone(),
                 ),
             ],
         }),
