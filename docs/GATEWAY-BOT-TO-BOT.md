@@ -41,20 +41,35 @@ operational architecture makes *one* is everything around them:
 * **One addressing model** (V0, below): a registered agent is addressable;
   occupancy decides where it is embodied.
 
-What stays separate on purpose, and what is still open:
+What stays separate on purpose, and what changed on 6 October 2026
+(ai-kit#481 close-out on `f99760c3`):
 
-* The three journals keep their own state machines. A Communique's sender copy
-  still does not learn that the remote copy was delivered (six such records
-  were observed on the Mac); closing that loop needs a delivery notice back
-  through `RecordCommuniqueStanding`.
-* Durable Position routing is decided in four places in `gateway_contact.rs`
-  (`route_to_occupancy`, `place_instance`, `forward_pass_via`, `relay_attempt`)
-  with slightly different answers for an unknown ledger. The relay pass and the
-  ask path should call one function; they do not yet.
-* The connector plane still has no durable outbound queue: restored
-  `pending_deliveries` are retained and reported at a drain but not re-sent,
-  because a send that might have reached the platform cannot be told from one
-  that did not.
+* **The sender copy now learns remote delivery.** Every relay pass reads each
+  forwarded Communique's fate back from the gateway it was relayed to
+  (`CommuniqueFate` over the carrier); when the remote has recorded the
+  delivery, the sender copy is re-stood `delivered` with a basis naming the
+  remote gateway and the readback. A record the remote does not know stays
+  exactly as it was, named unresolved — a readback never delivers on its own
+  authority. (Six such records on the Mac were the original evidence.)
+* **The connector plane now has durable attempt evidence.** Every outbound
+  operation carries `attempts` / `last_attempt_at_unix_ms`, written BEFORE
+  the connector is invoked: a crash mid-attempt leaves "attempted, outcome
+  unknown" rather than a silently vanished send. On restart and on every
+  reconnect the pump re-arms a connector's IDEMPOTENT pending operations
+  (typing, edit, delete, react — a re-attempt either succeeds or fails into
+  an honest receipt) and HOLDS outcome-unknown sends, which the owner
+  resolves by evidence (`aikit gateway recover --deliveries` lists them;
+  `recover --resolve <op> --state delivered|abandoned --evidence …` retires
+  one with a receipt). Nothing is ever blindly re-sent.
+* **A drain names what it did not serve.** A message admitted while a drain
+  holds the engine is journalled (retained), named in the `DrainReport`
+  (`admitted_unserved`), and named in the restart line and the upgrade
+  receipt. It is never replayed.
+* Durable Position routing is still decided in four places in
+  `gateway_contact.rs` (`route_to_occupancy`, `place_instance`,
+  `forward_pass_via`, `relay_attempt`) with slightly different answers for an
+  unknown ledger. The relay pass and the ask path should call one function;
+  they do not yet (ai-kit#481 item 1, open).
 * Communiques wait for a human prompt; nothing wakes an idle body.
 
 Laws that survive every face: **Position ≠ Agent ≠ AgentSession ≠ bot

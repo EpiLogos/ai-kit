@@ -1081,6 +1081,18 @@ pub fn uninstall_with(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// Process environment is global: the instance-name pin must not leak
+    /// into the other service tests running in parallel. Every test that
+    /// installs, uninstalls or renders under `ServiceOptions` takes this.
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     use super::*;
     use std::cell::RefCell;
 
@@ -1160,6 +1172,7 @@ mod tests {
 
     #[test]
     fn the_plist_serves_the_unix_socket_and_the_named_websocket_with_identity_in_its_environment() {
+        let _env = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let options = remote_options(dir.path());
         let plist = render_plist_for(
@@ -1224,6 +1237,7 @@ mod tests {
 
     #[test]
     fn a_named_instances_definition_carries_its_own_name_and_the_default_service_does_not() {
+        let _env = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let options = remote_options(dir.path());
         let named = options.environment_for_instance(Some("rehearsal-1".into()));
@@ -1248,6 +1262,7 @@ mod tests {
     /// The env var is process-global; the test removes it again on scope exit.
     #[test]
     fn environment_writes_the_instance_into_both_rendered_definitions() {
+        let _env = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let options = remote_options(dir.path());
         std::env::set_var(SERVICE_INSTANCE_ENV, "rehearsal-1");
@@ -1272,13 +1287,16 @@ mod tests {
         std::env::remove_var(SERVICE_INSTANCE_ENV);
         let default = options.environment();
         assert!(
-            default.iter().all(|(name, _)| *name != SERVICE_INSTANCE_ENV),
+            default
+                .iter()
+                .all(|(name, _)| *name != SERVICE_INSTANCE_ENV),
             "without the env var the default service names no instance: {default:?}"
         );
     }
 
     #[test]
     fn the_systemd_unit_serves_both_carriers_restarts_and_is_wanted_by_the_default_target() {
+        let _env = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let options = remote_options(dir.path());
         let unit = render_systemd_unit(Path::new("/home/me/.cargo/bin/aikit"), &owners(), &options);
@@ -1316,6 +1334,7 @@ mod tests {
 
     #[test]
     fn a_websocket_needs_an_owner_only_token_location_before_anything_is_written() {
+        let _env = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let control = Recorded::new();
         let home = home(dir.path());
@@ -1367,6 +1386,7 @@ mod tests {
 
     #[test]
     fn systemd_install_and_uninstall_are_exact_inverses() {
+        let _env = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let control = Recorded::new();
         let home = home(dir.path());
@@ -1425,6 +1445,7 @@ mod tests {
 
     #[test]
     fn launch_agent_install_bootstraps_into_the_gui_domain_and_uninstall_boots_it_out() {
+        let _env = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let control = Recorded::new();
         let home = home(dir.path());
@@ -1461,6 +1482,7 @@ mod tests {
 
     #[test]
     fn a_manager_that_refuses_leaves_no_definition_behind() {
+        let _env = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let control = Recorded {
             calls: RefCell::new(Vec::new()),

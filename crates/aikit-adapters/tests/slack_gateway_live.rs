@@ -55,6 +55,8 @@ fn proof_operation(channel: &str) -> OutboundOperation {
         agent_session_ref: None,
         actuation_stream_ref: None,
         provenance: vec!["live P-grade proof".into()],
+        attempts: 0,
+        last_attempt_at_unix_ms: None,
     }
 }
 

@@ -973,7 +973,10 @@ impl CommuniqueJournal {
     /// answer is the remote's own knowledge — whether its occupant has been
     /// recorded as having received it — and nothing more.
     pub fn fate(&self, communique_ref: &str) -> Option<CommuniqueFate> {
-        let record = self.records.iter().find(|r| r.communique_ref == communique_ref)?;
+        let record = self
+            .records
+            .iter()
+            .find(|r| r.communique_ref == communique_ref)?;
         Some(CommuniqueFate {
             state: record.state,
             delivered_at_unix_ms: record.delivered_at_unix_ms,

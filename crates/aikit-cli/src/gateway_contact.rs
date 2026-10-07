@@ -2756,9 +2756,12 @@ fn readback_forwarded(
             }));
             continue;
         };
-        let fate = match carrier(entry, GatewayCommand::CommuniqueFate {
-            communique_ref: record.communique_ref.clone(),
-        }) {
+        let fate = match carrier(
+            entry,
+            GatewayCommand::CommuniqueFate {
+                communique_ref: record.communique_ref.clone(),
+            },
+        ) {
             Ok(GatewayResponse::CommuniqueFate { fate, .. }) => fate,
             Ok(other) => {
                 unresolved.push(json!({
@@ -3852,17 +3855,13 @@ mod exact_instance_binding_tests {
                 }
                 GatewayCommand::CommuniqueFate { communique_ref } => {
                     Ok(GatewayResponse::CommuniqueFate {
-                        fate: self
-                            .fates
-                            .get(&communique_ref)
-                            .map(|fate| {
-                                fate.map(|state| aikit_adapters::CommuniqueFate {
-                                    state: CommuniqueState::Delivered,
-                                    delivered_at_unix_ms: Some(2),
-                                    delivered_to_generation_ref: Some("gen-there".into()),
-                                })
+                        fate: self.fates.get(&communique_ref).and_then(|fate| {
+                            fate.map(|_state| aikit_adapters::CommuniqueFate {
+                                state: CommuniqueState::Delivered,
+                                delivered_at_unix_ms: Some(2),
+                                delivered_to_generation_ref: Some("gen-there".into()),
                             })
-                            .flatten(),
+                        }),
                         communique_ref,
                     })
                 }
@@ -4136,7 +4135,10 @@ mod exact_instance_binding_tests {
         // record only, with the basis naming where delivery was read back.
         let delivered = local.delivered.borrow();
         assert_eq!(delivered.len(), 1, "{delivered:?}");
-        assert!(delivered[0].starts_with("communique:01fwd|"), "{delivered:?}");
+        assert!(
+            delivered[0].starts_with("communique:01fwd|"),
+            "{delivered:?}"
+        );
         assert!(delivered[0].contains("workcell:b"), "{delivered:?}");
         // And the remote was asked about the fate of both, never more.
         assert_eq!(

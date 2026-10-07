@@ -119,7 +119,9 @@ pub fn pending_deliveries(home: &AikitHome) -> Result<Value> {
     let target = owner_carrier(home);
     let response = aikit_adapters::gateway_command(
         &target,
-        GatewayCommand::PendingDeliveries { connector_ref: None },
+        GatewayCommand::PendingDeliveries {
+            connector_ref: None,
+        },
         None,
     )?;
     let GatewayResponse::PendingDeliveries { operations } = response else {
@@ -169,9 +171,7 @@ pub fn resolve_delivery(
         other => {
             return Err(AikitError::new(
                 "gateway.recover_state_invalid",
-                format!(
-                    "`{other}` is not a delivery resolution: use `delivered` or `abandoned`"
-                ),
+                format!("`{other}` is not a delivery resolution: use `delivered` or `abandoned`"),
             ))
         }
     };
@@ -182,19 +182,48 @@ pub fn resolve_delivery(
         )
     })?;
     let target = owner_carrier(home);
-    let mut provenance = vec![
-        "resolved by owner evidence through `aikit gateway recover --resolve`".to_owned(),
-    ];
+    // The evidence receipt rides the operation's own connector identity — the
+    // kernel refuses a receipt that changes connector identity — with the
+    // provenance naming the evidence resolution, so a read receipt is never
+    // mistaken for a send by the connector.
+    let operation = match aikit_adapters::gateway_command(
+        &target,
+        GatewayCommand::PendingDeliveries {
+            connector_ref: None,
+        },
+        None,
+    )? {
+        GatewayResponse::PendingDeliveries { operations } => operations
+            .into_iter()
+            .find(|operation| operation.operation_ref == reference)
+            .ok_or_else(|| {
+                AikitError::new(
+                    "gateway.recover_not_pending",
+                    format!(
+                        "{operation_ref} is not pending on this gateway; list with \
+                         `aikit gateway recover --deliveries`"
+                    ),
+                )
+            })?,
+        other => {
+            return Err(unexpected_pending_answer(&other));
+        }
+    };
+    let mut provenance =
+        vec!["resolved by owner evidence through `aikit gateway recover --resolve`".to_owned()];
     if let Some(evidence) = evidence {
         provenance.push(format!("evidence: {evidence}"));
     }
     let receipt = DeliveryReceipt {
         operation_ref: reference.clone(),
-        connector_ref: ResourceRef::parse("gateway-connector/resolved-by-evidence")
-            .expect("static ref parses"),
+        connector_ref: operation.connector_ref.clone(),
         state: delivery_state,
         native_message_id: None,
-        detail: Some(evidence.unwrap_or("the owner resolved it by evidence").to_owned()),
+        detail: Some(
+            evidence
+                .unwrap_or("the owner resolved it by evidence")
+                .to_owned(),
+        ),
         native: Default::default(),
         provenance: provenance.clone(),
     };
@@ -213,6 +242,13 @@ pub fn resolve_delivery(
 /// owner scope.
 fn owner_carrier(home: &AikitHome) -> GatewayCarrierTarget {
     GatewayCarrierTarget::UnixSocket(home.gateway_socket())
+}
+
+fn unexpected_pending_answer(other: &GatewayResponse) -> AikitError {
+    AikitError::new(
+        "gateway.recover_unexpected_answer",
+        format!("the gateway answered the pending-deliveries read unexpectedly: {other:?}"),
+    )
 }
 
 /// `aikit gateway recover`: state-file repair (the default), the delivery
@@ -321,10 +357,33 @@ mod tests {
     #[test]
     fn a_loadable_state_file_or_none_needs_no_recovery() {
         let (_dir, home) = home();
-        assert_eq!(recover(&home, false).unwrap()["status"], "no-state-file");
+        assert_eq!(
+            recover(
+                &home,
+                &GatewayRecoverArgs {
+                    apply: false,
+                    deliveries: false,
+                    resolve: None,
+                    resolve_state: None,
+                    evidence: None
+                }
+            )
+            .unwrap()["status"],
+            "no-state-file"
+        );
         std::fs::write(home.gateway_state(), snapshot_bytes("agency-gateway/a")).unwrap();
         assert_eq!(
-            recover(&home, true).unwrap()["status"],
+            recover(
+                &home,
+                &GatewayRecoverArgs {
+                    apply: true,
+                    deliveries: false,
+                    resolve: None,
+                    resolve_state: None,
+                    evidence: None
+                }
+            )
+            .unwrap()["status"],
             "nothing-to-recover"
         );
     }
@@ -347,7 +406,17 @@ mod tests {
             std::fs::write(dir.join("gateway.json"), snapshot_bytes(reference)).unwrap();
         }
         // A plan changes nothing and says what it would do.
-        let plan = recover(&home, false).unwrap();
+        let plan = recover(
+            &home,
+            &GatewayRecoverArgs {
+                apply: false,
+                deliveries: false,
+                resolve: None,
+                resolve_state: None,
+                evidence: None,
+            },
+        )
+        .unwrap();
         assert_eq!(plan["status"], "plan");
         assert_eq!(plan["damaged_file"]["deleted"], false);
         assert!(plan["restore_from"]["source"]
@@ -359,7 +428,17 @@ mod tests {
             .unwrap()
             .starts_with(b"{\"version\": \"aikit.agency-gate"));
 
-        let done = recover(&home, true).unwrap();
+        let done = recover(
+            &home,
+            &GatewayRecoverArgs {
+                apply: true,
+                deliveries: false,
+                resolve: None,
+                resolve_state: None,
+                evidence: None,
+            },
+        )
+        .unwrap();
         assert_eq!(done["status"], "recovered");
         let restored: GatewaySnapshot =
             serde_json::from_slice(&std::fs::read(home.gateway_state()).unwrap()).unwrap();
@@ -397,7 +476,17 @@ mod tests {
             snapshot_bytes("agency-gateway/newer"),
         )
         .unwrap();
-        let plan = recover(&home, false).unwrap();
+        let plan = recover(
+            &home,
+            &GatewayRecoverArgs {
+                apply: false,
+                deliveries: false,
+                resolve: None,
+                resolve_state: None,
+                evidence: None,
+            },
+        )
+        .unwrap();
         assert!(
             plan["restore_from"]["source"]
                 .as_str()
@@ -405,7 +494,17 @@ mod tests {
                 .contains("unfinished atomic write"),
             "{plan}"
         );
-        recover(&home, true).unwrap();
+        recover(
+            &home,
+            &GatewayRecoverArgs {
+                apply: true,
+                deliveries: false,
+                resolve: None,
+                resolve_state: None,
+                evidence: None,
+            },
+        )
+        .unwrap();
         let restored: GatewaySnapshot =
             serde_json::from_slice(&std::fs::read(home.gateway_state()).unwrap()).unwrap();
         assert_eq!(restored.gateway_ref.as_str(), "agency-gateway/newer");
@@ -415,10 +514,30 @@ mod tests {
     fn with_no_copy_the_gateway_starts_empty_and_the_plan_says_what_is_lost() {
         let (_dir, home) = home();
         std::fs::write(home.gateway_state(), b"not json").unwrap();
-        let plan = recover(&home, false).unwrap();
+        let plan = recover(
+            &home,
+            &GatewayRecoverArgs {
+                apply: false,
+                deliveries: false,
+                resolve: None,
+                resolve_state: None,
+                evidence: None,
+            },
+        )
+        .unwrap();
         assert!(plan["restore_from"].is_null());
         assert!(plan["lost"].as_str().unwrap().contains("starts empty"));
-        recover(&home, true).unwrap();
+        recover(
+            &home,
+            &GatewayRecoverArgs {
+                apply: true,
+                deliveries: false,
+                resolve: None,
+                resolve_state: None,
+                evidence: None,
+            },
+        )
+        .unwrap();
         assert!(
             !home.gateway_state().exists(),
             "an empty start, the quarantine holds the bytes"

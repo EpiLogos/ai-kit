@@ -161,8 +161,8 @@ pub use gateway_coexistence::{
     GatewayCoexistenceGate, GATEWAY_COEXISTENCE_FILE_NAME, GATEWAY_COEXISTENCE_SCHEMA,
 };
 pub use gateway_communique::{
-    Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForward, CommuniqueForwardOutcome,
-    CommuniqueFate, CommuniqueInstance, CommuniqueInstanceHold, CommuniqueJournal,
+    Communique, CommuniqueCount, CommuniqueDraft, CommuniqueFate, CommuniqueForward,
+    CommuniqueForwardOutcome, CommuniqueInstance, CommuniqueInstanceHold, CommuniqueJournal,
     CommuniqueRouting, CommuniqueState, CommuniqueTransition, SenderAttribution,
     COMMUNIQUE_REF_PREFIX, COMMUNIQUE_SCHEMA, MAX_COMMUNIQUE_BODY_BYTES,
 };

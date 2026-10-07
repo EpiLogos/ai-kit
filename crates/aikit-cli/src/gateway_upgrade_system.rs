@@ -969,9 +969,7 @@ pub fn apply_command(home: &AikitHome, options: ApplyOptions) -> Result<Value> {
         // The preflight reads the volume the installer will actually build on
         // and install into (the O:I data root), not `$HOME`'s volume: those
         // differ whenever the data root is mounted or overridden elsewhere.
-        let at = managed_install_root().or_else(|| {
-            std::env::var_os("HOME").map(PathBuf::from)
-        });
+        let at = managed_install_root().or_else(|| std::env::var_os("HOME").map(PathBuf::from));
         if let Some(at) = at {
             if let Some(free) = free_kib(&at) {
                 let floor = install_min_free_kib();
@@ -1045,7 +1043,8 @@ pub fn apply_command(home: &AikitHome, options: ApplyOptions) -> Result<Value> {
         "receipt": store.dir(&transaction.id).join("receipt.md").display().to_string(),
     });
     if options.wait {
-        let (waited, wait_note) = wait_for(&store, &transaction.id, Duration::from_secs(45 * 60 + 300));
+        let (waited, wait_note) =
+            wait_for(&store, &transaction.id, Duration::from_secs(45 * 60 + 300));
         reading["phase"] = json!(waited.phase);
         reading["outcome"] = json!(waited.outcome);
         if let Some(note) = wait_note {
@@ -1063,7 +1062,7 @@ fn wait_quiet() -> Duration {
     std::env::var("AIKIT_UPGRADE_WAIT_QUIET_SECS")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(|secs| Duration::from_secs(secs))
+        .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(120))
 }
 
@@ -1153,10 +1152,7 @@ pub fn worker_command(home: &AikitHome, id: &str) -> Result<Value> {
     // against the service definition's named image — the rehearsal fails when
     // a worker ran on a PATH-resolved `aikit` instead of the instance's build.
     if let Ok(worker_exe) = std::env::current_exe() {
-        let note = format!(
-            "worker executable: {}",
-            worker_exe.display()
-        );
+        let note = format!("worker executable: {}", worker_exe.display());
         if !transaction.steps.iter().any(|step| step.detail == note) {
             transaction.steps.push(crate::gateway_upgrade::Step {
                 at_unix_ms: aikit_adapters::gateway_posture::unix_ms_now(),
@@ -1665,8 +1661,11 @@ mod tests {
         assert_eq!(note["ended"], "nothing-is-driving", "{note}");
         let next = note["next"].as_array().unwrap();
         assert!(
-            next.iter().any(|step| step.as_str().unwrap().contains("resume upg-dead"))
-                && next.iter().any(|step| step.as_str().unwrap().contains("abandon upg-dead")),
+            next.iter()
+                .any(|step| step.as_str().unwrap().contains("resume upg-dead"))
+                && next
+                    .iter()
+                    .any(|step| step.as_str().unwrap().contains("abandon upg-dead")),
             "the finding names resume and abandon: {next:?}"
         );
 

@@ -559,12 +559,20 @@ fn a_message_admitted_during_a_drain_is_named_in_the_report_retained_and_never_s
     assert!(matches!(result, GatewayIngressResult::Appended { .. }));
 
     let report = harness.engine.drain("second drain", None).unwrap();
-    assert_eq!(report.admitted_unserved.len(), 1, "{report:#}");
+    assert_eq!(
+        report.admitted_unserved.len(),
+        1,
+        "{:#?}",
+        report.admitted_unserved
+    );
     let admission = &report.admitted_unserved[0];
     assert_eq!(admission.platform, "fixture");
     assert_eq!(admission.conversation_id, "chat-1");
     assert_eq!(admission.connector_ref, CONNECTOR_REF);
-    assert!(admission.preview.contains("while draining"), "{admission:?}");
+    assert!(
+        admission.preview.contains("while draining"),
+        "{admission:?}"
+    );
     assert!(admission.stream_ref.starts_with("actuation-stream/"));
 
     // The message is in its stream, retained — never deleted, never replayed.

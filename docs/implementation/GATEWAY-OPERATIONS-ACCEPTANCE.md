@@ -321,6 +321,63 @@ owner's `sudo` command only for the case where that queues or times out.
 * A real-`oi` `apply --install --candidate` transaction on the Mac (only the restart half has been run there).
 * The carried N5, N6 and N10 (ai-kit#481).
 
+## The everyday-conversation slice (6 October 2026, branch `feat/gateway-everyday-conversation-20261006`)
+
+Commission: make the existing Omarchy Gateway a complete everyday
+agent-conversation service (TUI + Mac + Telegram), closing the applicable
+ai-kit#481 items on current main (`1bf1f02a7a20e1892629504c38123a18606b12d5`).
+Machine ground truth when the slice began: the real `aikit-gateway.service`
+(systemd, supervised-systemd) ran `3ee08a9081c9` (pid 2747406) while the
+installed client was another lane's `ea4ff9c63f9f` cut — a live instance of
+item 11, reproduced and now named by `plan`/`doctor`.
+
+| #481 item | What closed it | Evidence now |
+|---|---|---|
+| 2 + 9 (durable outbound attempts; receipt_delivered ≠ delivered) | `OutboundOperation.attempts` / `last_attempt_at_unix_ms` written BEFORE the connector is invoked; a connector (re)connect re-arms its idempotent pending operations and HOLDS outcome-unknown sends; `aikit gateway recover --deliveries` and `--resolve … --state delivered\|abandoned --evidence …` resolve one by evidence (owner carrier) | D: `a_pending_send_is_held_on_reconnect_an_idempotent_operation_is_rearmed_and_attempts_are_durable` (pump) — restored kernel keeps both ops, the send is held and named, the typing pulse is re-queued, the attempt marker survives the restore, and an evidence receipt retires the send |
+| 10/N6 (drain admits unserved, unnamed) | `appended()` records admitted-during-drain messages; `DrainReport.admitted_unserved` names each (stream, sequence, conversation, preview); the restart line and the upgrade receipt name them; retained, never replayed | D: `a_message_admitted_during_a_drain_is_named_in_the_report_retained_and_never_served` (engine): the message is in its stream, no agent-message follows, `prompted_turns == 0` |
+| 3 (sender copy never learns remote delivery) | relay-pass readback: `CommuniqueFate` over the carrier to the forwarding target; a learned delivery re-stoods the sender copy `delivered` with the remote named in the basis; unknown stays put, named unresolved | D: `the_sender_copy_learns_remote_delivery_on_the_relay_pass_and_unknown_stays_unresolved` (contact): exactly one `RecordRemoteDelivery` on the sender journal, one unresolved entry, two fate asks |
+| TUI remote-target failure path | `AIKIT_GATEWAY_AT` set is a commitment: undeclared remote or unusable token resolves to `Absent { reason }` naming the remote — never the local socket; the aperture renders the reason | D: four `conversation_surface` unit tests (commitment, local fallback, token failure, rendered note) |
+| 12 (disk preflight reads $HOME's volume) | preflight reads the O:I data root (`OI_DATA_HOME`, XDG, platform default) — the volume the managed installer builds on and installs into | D: `the_managed_install_root_follows_the_data_root_not_the_home`; the live machine builds on `/mnt/hdd` under a `/home` volume — the exact mixed-volume case |
+| 13 (worker runs PATH's aikit, not the instance build) | `spawn_worker` uses `service_executable()` (the service definition's named executable); the worker records its own executable as a transaction step; rehearsal scenario 6 reads the step back and fails unless it equals the definition's image | D: step recorded (`worker_command`); rehearsal script extended (`worker_ran_the_definitions_executable` gate). M re-run pending a quiet machine |
+| 14 (`--wait` waits out a dead worker) | the wait loop ends early on a quiet, non-terminal transaction whose driver lock is free, with a `nothing-is-driving` finding naming `resume`/`abandon`; a held lock (live worker) keeps the wait honest. `AIKIT_UPGRADE_WAIT_QUIET_SECS` makes it testable | D: `a_quiet_transaction_nothing_is_driving_ends_the_wait_and_a_live_worker_holds_it` |
+| 15 (instance-name guard only in the rehearsal) | `environment()` itself is pinned through BOTH rendered definitions: a named instance's plist and systemd unit carry `AIKIT_GATEWAY_SERVICE_INSTANCE`; without the env var neither does the default | D: `environment_writes_the_instance_into_both_rendered_definitions` |
+| 11 (installed/running/peer oi versions invisible) | `GatewayBuildIdentity.oi_revision` (read once at process start from `oi --version`); `upgrade plan` carries `installed_oi`, probes carry the peer's; `plan` notes and `doctor` (`peer.oi_revision_differs`) name a mixed-oi fleet | D: unit-level derivation; the live split (installed `ea4ff9c63f9f` vs running `3ee08a9081c9` vs oi `17c22891e6c9`) is the reproduced case the reading names. Peer-side M pending both machines on the new build |
+
+Executed evidence (this slice, Omarchy, debug builds under load): `cargo check`
+`-p aikit-adapters -p aikit-cli -p aikit-tui` clean; adapters lib `gateway_` 82
+passed / 2 failed (below); TUI `conversation_surface` 5 passed. The Telegram
+lane was operated live against the real service:
+
+- **Telegram ingress → real harness turn → delegation → reply (P).** In the
+  bound private conversation (chat 6381957258, binding
+  `gateway-binding/telegram-frank-private/generation-2`, bot `@Ohisysbot`):
+  the owner's message (stream seq 4) was admitted by the running service, the
+  pi/GLM-5.3-flash harness turned, delegated to a child pi agent
+  non-interactively (setup 0's shared pi capability), which wrote
+  `T/findings/telegram-child-finding.md` carrying this lane's exact HEAD
+  `1bf1f02a…` and the crate count; the agent's substantive reply (seq 9)
+  landed in the same conversation. Exactly one ingress poller throughout (the
+  service's connector pump; no getUpdates conflicts).
+- **Local TUI conversation (the aperture)**: history, streaming, tool lines,
+  permissions/failure states, composition, stop and reconnect hold their
+  deterministic proofs (`gateway_conversation_v2`); the remote-commitment law
+  is new unit-tested behaviour. A live TUI session against the real gateway is
+  recorded in the slice Return when the machine was quiet enough to build the
+  binary.
+- **Access**: local IPC and the private tailnet were exercised with real
+  agents through the existing services (see the slice Return for the exact
+  commands); loopback remains deterministic-tests-only; Serve/Funnel stayed
+  untouched (no owner consent sought for a Serve change; Funnel never).
+
+Failed/honest rows: the two adapters failures at run time were (1) the
+posture digest test — environmental, the machine's other lanes held load ~10
+and the 60 s digest deadline on the HDD-resident test binary expired (the
+lane's own record documents a 285 s digest read under load); (2) a first
+defective assertion in the new pump test, repaired with the test kept. The
+item-1 convergence (one resolver, one attempt record across all three
+journals) and items 4–8 were **not** closed by this slice and stay with
+ai-kit#481.
+
 ## Owner-only steps this lane will not take
 
 * macOS application firewall allowance for a newly installed `aikit` binary

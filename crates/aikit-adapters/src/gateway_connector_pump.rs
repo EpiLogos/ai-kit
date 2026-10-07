@@ -48,11 +48,11 @@ use crate::gateway_connector::{
     InboundEvent, OutboundOperation,
 };
 use crate::gateway_connector_config::GatewayConnectorFactory;
+use crate::gateway_posture::unix_ms_now;
 use crate::gateway_runtime::{
     execute_gateway_command, AgencyGateway, GatewayCommand, GatewayIngressResult, GatewayResponse,
 };
 use crate::gateway_service::{persist_gateway_state, SubscriptionHub};
-use crate::gateway_posture::unix_ms_now;
 
 /// Error code a cooperative connector yields from `next_event` when no frame
 /// arrived within its poll window — a tick, not a failure. The worker services
@@ -1036,7 +1036,7 @@ pub mod tests {
         let mut gateway = AgencyGateway::new(ResourceRef::parse("agency-gateway/fixture").unwrap());
         seed_binding(&mut gateway);
         // Two pending operations from a previous life: a send (never
-        // blindly re-sent) and an edit (idempotent, re-attempted).
+        // blindly re-sent) and a typing pulse (idempotent, re-attempted).
         let send = gateway
             .prepare_operation(
                 &ResourceRef::parse(BINDING_REF).unwrap(),
@@ -1047,24 +1047,22 @@ pub mod tests {
                 },
             )
             .unwrap();
-        let edit = gateway
+        let typing = gateway
             .prepare_operation(
                 &ResourceRef::parse(BINDING_REF).unwrap(),
-                OutboundOperationKind::Edit {
-                    native_message_id: "fixture-message-1".into(),
-                    text: "edited".into(),
-                },
+                OutboundOperationKind::Typing { active: true },
             )
             .unwrap();
-        // Attempt evidence: the edit was mid-flight when the process died.
+        // Attempt evidence: the typing pulse was mid-flight when the process
+        // died.
         let attempts = gateway
-            .mark_delivery_attempt(&edit.operation_ref, unix_ms_now())
+            .mark_delivery_attempt(&typing.operation_ref, unix_ms_now())
             .unwrap();
         assert_eq!(attempts, 1);
         // The restart: state restored from the snapshot, the send still
         // pending, its attempt evidence intact.
         let snapshot = gateway.snapshot();
-        let mut restored = AgencyGateway::from_snapshot(snapshot).unwrap();
+        let restored = AgencyGateway::from_snapshot(snapshot).unwrap();
         assert_eq!(
             restored.pending_deliveries_for(None).len(),
             2,
@@ -1096,32 +1094,38 @@ pub mod tests {
         );
         assert!(
             context.queue.try_pop().is_some(),
-            "the idempotent edit is re-attempted onto the connector's queue"
+            "the idempotent typing pulse is re-attempted onto the connector's queue"
         );
 
         // An owner's evidence resolution retires a held send without sending
-        // anything: the receipt is recorded and the pending entry is gone.
+        // anything: the receipt rides the operation's own connector identity
+        // (the kernel refuses identity drift) with provenance naming the
+        // evidence, and the pending entry is gone.
         {
             let mut kernel = context.gateway.lock().unwrap();
             kernel
                 .record_delivery(DeliveryReceipt {
                     operation_ref: send.operation_ref.clone(),
-                    connector_ref: ResourceRef::parse("gateway-connector/resolved-by-evidence")
-                        .unwrap(),
+                    connector_ref: connector_ref.clone(),
                     state: DeliveryState::Delivered,
                     native_message_id: None,
                     detail: Some("the recipient's own word".into()),
                     native: Default::default(),
-                    provenance: vec!["resolved by owner evidence".into()],
+                    provenance: vec!["resolved by owner evidence (not sent by this gateway)"
+                        .into()],
                 })
                 .unwrap();
             let pending = kernel.pending_deliveries_for(None);
-            assert!(
-                pending.is_empty(),
-                "the evidence resolution retires the pending entry: {pending:?}"
+            assert_eq!(
+                pending.len(),
+                1,
+                "only the re-armed typing pulse is still pending: {pending:?}"
             );
+            assert_eq!(pending[0].operation_ref, typing.operation_ref);
             let receipts = kernel.snapshot().delivery_receipts;
-            assert!(receipts.iter().any(|r| r.operation_ref == send.operation_ref));
+            assert!(receipts
+                .iter()
+                .any(|r| r.operation_ref == send.operation_ref));
         }
     }
 

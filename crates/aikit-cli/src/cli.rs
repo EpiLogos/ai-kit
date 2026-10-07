@@ -2121,12 +2121,20 @@ pub struct GatewayRecoverArgs {
     #[arg(long = "deliveries", conflicts_with = "apply")]
     pub deliveries: bool,
     /// With `--resolve`: the pending operation to resolve by evidence.
-    #[arg(long = "resolve", value_name = "OPERATION_REF", requires = "resolve_state")]
+    #[arg(
+        long = "resolve",
+        value_name = "OPERATION_REF",
+        requires = "resolve_state"
+    )]
     pub resolve: Option<String>,
     /// With `--resolve`: the resolution — `delivered` (evidence shows it
     /// arrived) or `abandoned` (it did not, and never will through this
     /// gateway). Both record a receipt; neither re-sends anything.
-    #[arg(long = "state", value_name = "delivered|abandoned", requires = "resolve")]
+    #[arg(
+        long = "state",
+        value_name = "delivered|abandoned",
+        requires = "resolve"
+    )]
     pub resolve_state: Option<String>,
     /// With `--resolve`: what the evidence is (a native message link, a
     /// screenshot, the recipient's own word). Carried on the receipt.

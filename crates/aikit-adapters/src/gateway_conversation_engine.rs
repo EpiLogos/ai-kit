@@ -1308,7 +1308,6 @@ fn unserved_admission(kernel: &AgencyGateway, event: &GatewayStreamEvent) -> Uns
 }
 
 impl GatewayConversationEngine {
-
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         gateway: Arc<Mutex<AgencyGateway>>,
@@ -1368,9 +1367,7 @@ impl GatewayConversationEngine {
         // retained — and named here, so the drain report (and the receipt it
         // feeds) says what was left unserved. It is never replayed.
         let draining = self.inner.lock().expect("conversation engine").draining;
-        let admission = draining.then(|| {
-            unserved_admission(kernel, event)
-        });
+        let admission = draining.then(|| unserved_admission(kernel, event));
         if let Some(admission) = admission {
             let mut inner = self.inner.lock().expect("conversation engine");
             if inner.draining {
