@@ -19,3 +19,6 @@
 # Lane-decoupled build target and seat env
 /target-seat/
 .env-seat
+
+# Subagent restoration-lane build target
+/target-restore/
