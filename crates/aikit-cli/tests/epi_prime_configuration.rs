@@ -96,6 +96,9 @@ impl Fixture {
             "--ql-bin",
             "--research-bin",
             "--faculty-config",
+            // The launcher contract now requires the explicit QL binding extension and its verified installation (file witnesses here).
+            "--extension",
+            "--installation",
         ] {
             command.arg(flag).arg(binary);
         }
