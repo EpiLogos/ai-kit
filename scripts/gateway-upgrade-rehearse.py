@@ -154,10 +154,16 @@ try:
         data, r = aikit("gateway", "upgrade", "apply", *args)
         d = data.get("data", {}) if isinstance(data, dict) else {}
         after = wait_running(timeout=90)
+        if not isinstance(data, dict) or "data" not in data:
+            entry_note = {"raw_answer_keys": sorted(data.keys()) if isinstance(data, dict) else None,
+                          "stderr": (r.stderr or "")[-400:], "rc": getattr(r, "returncode", None)}
+        else:
+            entry_note = None
         entry = {"name": name, "seconds": round(time.time() - t0, 1), "status": (d.get("outcome") or {}).get("status"),
                  "summary": (d.get("outcome") or {}).get("summary"), "pid_before": before["pid"] if before else None,
                  "pid_after": after["pid"], "revision_after": after["revision"][:12], "service_pid": service_pid(),
-                 "expected": expect, "ok": (d.get("outcome") or {}).get("status") == expect}
+                 "expected": expect, "answer_note": entry_note,
+                 "ok": (d.get("outcome") or {}).get("status") == expect}
         evidence["scenarios"].append(entry); return entry
 
     # 1. the happy path: install succeeds, the service manager restarts onto the new image
@@ -254,19 +260,26 @@ try:
                 except OSError:
                     continue
                 import re as _re
-                m = _re.search(r"worker executable: (/[^\"\\n]+)", body)
+                m = _re.search(r'worker executable: (/[^"\\n]+)', body)
                 if m:
                     worker_exe = os.path.realpath(m.group(1))
                     break
         worker_matches_definition = bool(
             worker_exe and definition_named and worker_exe == definition_named
         )
+        if not definition_named:
+            entry_note = "the instance definition could not be read at its recorded path"
+        elif not worker_exe:
+            entry_note = "no worker-executable step was found in any transaction.json"
+        else:
+            entry_note = None
         entry = {"name": "asked-through-the-gateway", "seconds": round(time.time() - t0, 1),
                  "ask_accepted": bool(asked and asked.get("ok")),
                  "worker_under_service_manager": worker_seen, "pid_before": before["pid"],
                  "pid_after": after["pid"] if after else None, "revision_after": after["revision"][:12] if after else None,
                  "worker_executable": worker_exe, "definition_names": definition_named,
                  "worker_ran_the_definitions_executable": worker_matches_definition,
+                 "gate_note": entry_note,
                  "receipt_announced_into_the_conversation": len(told), "receipt": told[0][:200] if told else None,
                  "expected": "completed, announced once, worker under the service manager, worker running the definition's executable",
                  "ok": bool(after) and len(told) == 1 and bool(worker_seen) and worker_matches_definition}
