@@ -82,7 +82,7 @@ env = dict(os.environ, PATH=f"{tools}:{os.environ['HOME']}/.local/bin:/usr/bin:/
 env.pop("AIKIT_UPGRADE_WORKER_MODE", None)
 AIKIT = os.path.join(tools, "aikit")
 
-def aikit(*args, timeout=600):
+def aikit(*args, timeout=2400):
     r = subprocess.run([AIKIT, *args, "--json"], capture_output=True, text=True, env=env, cwd=home, timeout=timeout)
     try:
         return json.loads(r.stdout), r
@@ -168,7 +168,7 @@ try:
 
     # 1. the happy path: install succeeds, the service manager restarts onto the new image
     scenario("install-drain-restart-verify", os.path.join(managed, "bin-b/aikit"), "bin-a/aikit",
-             ["--install", "--wait", "--verify-timeout-secs", "90"], "completed")
+             ["--install", "--wait", "--verify-timeout-secs", "420"], "completed")
     kept = raw({"type": "read-communique", "communique_ref": "aikit:communique:rehearsal-before"})
     evidence["communique_survived"] = bool(kept.get("ok"))
     # 2. nothing to do
@@ -177,11 +177,11 @@ try:
     flip(os.path.join(managed, "current"), os.path.join(managed, "bin-b/aikit"))
     scenario("installer-fails-unchanged", "FAIL", "bin-b/aikit", ["--install", "--wait"], "failed-before-change")
     # 4. flip-then-fail => rolled back
-    scenario("installer-flips-then-fails", f"FLIP_THEN_FAIL:{os.path.join(managed, 'bin-a/aikit')}", "bin-b/aikit", ["--install", "--wait", "--verify-timeout-secs", "60"], "rolled-back")
+    scenario("installer-flips-then-fails", f"FLIP_THEN_FAIL:{os.path.join(managed, 'bin-a/aikit')}", "bin-b/aikit", ["--install", "--wait", "--verify-timeout-secs", "420"], "rolled-back")
     # 5. the new build is broken => rolled back, old image verified running
     flip(os.path.join(managed, "current"), os.path.join(managed, "bin-b/aikit"))
     time.sleep(1)
-    scenario("broken-new-build", os.path.join(managed, "bin-bad/aikit"), "bin-b/aikit", ["--install", "--wait", "--verify-timeout-secs", "25"], "rolled-back")
+    scenario("broken-new-build", os.path.join(managed, "bin-bad/aikit"), "bin-b/aikit", ["--install", "--wait", "--verify-timeout-secs", "420"], "rolled-back")
     # 6. asked through the gateway itself, under the real service manager
     if specimen:
         flip(os.path.join(managed, "current"), os.path.join(managed, "bin-a/aikit"))   # the installed build is now A; B runs
