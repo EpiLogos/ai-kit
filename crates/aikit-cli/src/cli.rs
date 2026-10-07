@@ -1456,6 +1456,19 @@ pub struct GatewayCmd {
     /// The answer names the gateway that produced it; nothing is implicit.
     #[arg(long = "at", value_name = "WORKCELL_REF", global = true)]
     pub at: Option<String>,
+    /// Present the OWNER token instead of the declared peer token for this
+    /// one `--at` invocation: the administrator's consent path. The value is
+    /// a token location (`file:/abs/path`, owner-only), named explicitly per
+    /// invocation — never ambient, never read from the remotes file. An
+    /// owner-scoped carrier may drain, stop and restore the remote gateway;
+    /// every answer warns that it ran with owner scope.
+    #[arg(
+        long = "owner",
+        value_name = "TOKEN_LOCATION",
+        global = true,
+        requires = "at"
+    )]
+    pub owner: Option<String>,
     #[command(subcommand)]
     pub command: GatewaySub,
 }

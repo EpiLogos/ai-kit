@@ -1399,6 +1399,7 @@ fn read_body_file(path: &std::path::Path) -> Result<String> {
 fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
     let mut command = command;
     let at = command.at.clone();
+    let owner = command.owner.clone();
     if let Some(reference) = &at {
         if !aikit_cli::gateway_ops::takes_carrier(&command.command) {
             return Err(AikitError::new(
@@ -1412,12 +1413,26 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
             ));
         }
         let home = AikitHome::discover()?;
-        let carrier = aikit_cli::gateway_ops::at_carrier(&home, reference)?;
+        let carrier = match &owner {
+            Some(location) => aikit_cli::gateway_ops::at_carrier_owner(&home, reference, location)?,
+            None => aikit_cli::gateway_ops::at_carrier(&home, reference)?,
+        };
         aikit_cli::gateway_ops::override_carriers(&mut command, carrier);
     }
     let reply = cmd_gateway_dispatch(command)?;
     Ok(match at {
-        Some(reference) => disclose_at(reply, &reference),
+        Some(reference) => {
+            let mut reply = disclose_at(reply, &reference);
+            if owner.is_some() {
+                if let Reply::Data { warnings, .. } = &mut reply {
+                    warnings.push(format!(
+                        "owner scope: this invocation presented --owner to {reference}; it could \
+                         drain, stop or restore that gateway"
+                    ));
+                }
+            }
+            reply
+        }
         None => reply,
     })
 }

@@ -182,6 +182,54 @@ pub fn at_carrier(home: &AikitHome, workcell_ref: &str) -> Result<GatewayQueryAr
     })
 }
 
+/// [`at_carrier`] presenting the OWNER token instead of the declared peer
+/// token: the administrator path (#481 item 7). Consent is the flag itself —
+/// the operator names the token location for this invocation alone; nothing
+/// ambient and nothing from the remotes file grants it. A file location is
+/// resolved through the same owner-only law as any credential.
+pub fn at_carrier_owner(
+    home: &AikitHome,
+    workcell_ref: &str,
+    owner_location: &str,
+) -> Result<GatewayQueryArgs> {
+    let declared = crate::gateway_contact::load_remotes(home)?
+        .remotes
+        .into_iter()
+        .find(|remote| remote.workcell_ref == workcell_ref);
+    let Some(remote) = declared else {
+        return Err(crate::gateway_contact::three_part(
+            "gateway.remote_undeclared",
+            format!(
+                "No gateway endpoint is declared for {workcell_ref}, so --at cannot route there."
+            ),
+            "Nothing was run.",
+            format!(
+                "Declare the endpoint first: aikit gateway remote add --workcell {workcell_ref} \
+                 --ws HOST:PORT --token-location file:/ABSOLUTE/PATH"
+            ),
+        ));
+    };
+    let token = crate::secret_location::SecretLocation::parse(owner_location)
+        .and_then(|location| location.resolve())
+        .map_err(|error| {
+            crate::gateway_contact::three_part(
+                "gateway.owner_token_unusable",
+                format!(
+                    "The owner token at {owner_location} cannot be used: {error}. Owner scope \
+                     was NOT granted; the command ran with no carrier."
+                ),
+                "Nothing was run.",
+                "Name an owner-only, non-empty token file (chmod 600) or a resolvable secret ref.",
+            )
+        })?;
+    Ok(GatewayQueryArgs {
+        unix_socket: None,
+        websocket_bind: Some(remote.websocket_bind.clone()),
+        websocket_path: remote.websocket_path.clone(),
+        websocket_token: Some(token.expose().to_owned()),
+    })
+}
+
 /// Whether this verb addresses a gateway carrier at all. The local-file and
 /// service-management verbs do not; `--at` on them is a refusal, not a silent
 /// no-op.
@@ -477,5 +525,93 @@ pub fn conversation_operation(args: &GatewayAgentArgs) -> Result<GatewayConversa
                  restart, pause, resume, model, harness or skills"
             ),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aikit_store::AikitHome;
+    use std::path::Path;
+
+    fn declare(home: &AikitHome, bind: &str, token_location: &str) {
+        let path = crate::gateway_contact::remotes_path(home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"schema":"aikit.gateway-remotes/v1","remotes":[{{"workcell_ref":"workcell:test","websocket_bind":"{bind}","token_location":"{token_location}"}}]}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    /// The administrator path (#481 item 7): `--owner` presents the named
+    /// owner token for one invocation — consent is the flag, the location is
+    /// resolved through the same owner-only law as any credential, and an
+    /// unusable location refuses before anything runs.
+    #[test]
+    fn at_carrier_owner_presents_the_named_owner_token_and_refuses_an_unusable_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        declare(&home, "100.64.0.9:7788", "file:/tmp/declared-peer-token");
+
+        let token_path = dir.path().join("owner.token");
+        std::fs::write(&token_path, "owner-secret").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let carrier = at_carrier_owner(
+            &home,
+            "workcell:test",
+            &format!("file:{}", token_path.display()),
+        )
+        .unwrap();
+        assert_eq!(carrier.websocket_token.as_deref(), Some("owner-secret"));
+        assert_eq!(carrier.websocket_bind.as_deref(), Some("100.64.0.9:7788"));
+
+        let refused = at_carrier_owner(&home, "workcell:test", "file:/tmp/no-such-owner-token")
+            .err()
+            .expect("an unreadable owner token refuses");
+        assert_eq!(refused.code(), "gateway.owner_token_unusable");
+
+        // A peer-token location that is too open is refused by the same law.
+        let loose = dir.path().join("loose.token");
+        std::fs::write(&loose, "secret").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let refused =
+            at_carrier_owner(&home, "workcell:test", &format!("file:{}", loose.display()))
+                .err()
+                .expect("a too-open owner token refuses");
+        assert_eq!(refused.code(), "gateway.owner_token_unusable");
+        let _ = Path::new("/"); // keep the import honest on non-unix
+    }
+
+    /// Without `--owner`, `--at` still presents the declared PEER token: the
+    /// administrator path is opt-in per invocation, never the default.
+    #[test]
+    fn at_carrier_keeps_presenting_the_declared_peer_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let token_path = dir.path().join("peer.token");
+        std::fs::write(&token_path, "peer-secret").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        declare(
+            &home,
+            "100.64.0.9:7788",
+            &format!("file:{}", token_path.display()),
+        );
+        let carrier = at_carrier(&home, "workcell:test").unwrap();
+        assert_eq!(carrier.websocket_token.as_deref(), Some("peer-secret"));
     }
 }
