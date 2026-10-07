@@ -655,6 +655,11 @@ pub struct GatewayServiceRuntime {
     /// What this process is and how each carrier is bound.
     pub process: Arc<GatewayProcessRecord>,
     pub encounter: Option<Arc<dyn GatewayEncounterRelay>>,
+    /// This gateway's Ed25519 public key (#481-8): advertised in the protocol
+    /// answer so a receiver can verify (and pin) the sender assertions this
+    /// gateway makes. `None` when no signing key could be established — the
+    /// protocol answer then simply does not advertise the feature's key.
+    pub attestation_key: Option<String>,
 }
 
 /// One live carrier connection, closeable from the service's exit path.
@@ -819,6 +824,22 @@ pub fn run_gateway_service_with_hooks(
     if let Some(launcher) = upgrade_launcher {
         engine.attach_upgrade_launcher(launcher);
     }
+    // The signing key is established at start, once: the protocol answer
+    // advertises its public half for the service's whole life.
+    let attestation_key = config
+        .state_file
+        .as_ref()
+        .and_then(|state_file| state_file.parent().map(|dir| dir.to_path_buf()))
+        .and_then(|dir| {
+            crate::gateway_attestation::load_or_create_signing_key(&dir)
+                .ok()
+                .map(|key| crate::gateway_attestation::public_key_hex(&key))
+        });
+    if attestation_key.is_none() {
+        eprintln!(
+            "gateway service: no sender-attestation signing key could be established; relays              carry no attestation until this is resolved"
+        );
+    }
     let runtime = Arc::new(GatewayServiceRuntime {
         hub,
         queues,
@@ -827,6 +848,7 @@ pub fn run_gateway_service_with_hooks(
         connections: ConnectionRegistry::default(),
         process: Arc::clone(&process),
         encounter: encounter_relay,
+        attestation_key,
     });
 
     // Coexistence gate at serve startup: with the exclusive policy and a
@@ -1727,8 +1749,13 @@ fn execute_serialized_request(
     // The kernel holds no process: what is running, and how it is bound, is
     // this service's own fact, added to the two readings that disclose it.
     match &mut result {
-        Ok(GatewayResponse::Protocol { build, .. }) => {
+        Ok(GatewayResponse::Protocol {
+            build,
+            sender_attestation_key,
+            ..
+        }) => {
             *build = Some(runtime.process.build());
+            *sender_attestation_key = runtime.attestation_key.clone();
         }
         Ok(GatewayResponse::Status { status }) => {
             status.build = Some(runtime.process.build());
@@ -2290,6 +2317,7 @@ mod tests {
 
     fn test_runtime() -> Arc<GatewayServiceRuntime> {
         Arc::new(GatewayServiceRuntime {
+            attestation_key: None,
             hub: Arc::new(SubscriptionHub::default()),
             queues: Arc::new(crate::gateway_connector_pump::ConnectorQueues::default()),
             controls: Arc::new(crate::gateway_connector_pump::ConnectorPumpControls::default()),
