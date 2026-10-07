@@ -645,8 +645,11 @@ mod tests {
         let image_bytes = std::fs::metadata(std::path::Path::new("/proc/self/exe"))
             .map(|meta| meta.len())
             .unwrap_or(0);
+        // The floor is a machine that does ~2 MB/s end to end under
+        // contention — observed, not invented — with a hard cap so a broken
+        // disk fails the test in minutes, not hours.
         let deadline = std::time::Instant::now()
-            + std::time::Duration::from_secs(60 + image_bytes / (8 * 1024 * 1024));
+            + std::time::Duration::from_secs(60 + (image_bytes / (2 * 1024 * 1024)).min(540));
         while identity.executable_sha256.is_none() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(50));
             identity = record.build();

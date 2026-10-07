@@ -573,8 +573,7 @@ mod tests {
         assert_eq!(carrier.websocket_bind.as_deref(), Some("100.64.0.9:7788"));
 
         let refused = at_carrier_owner(&home, "workcell:test", "file:/tmp/no-such-owner-token")
-            .err()
-            .expect("an unreadable owner token refuses");
+            .expect_err("an unreadable owner token refuses");
         assert_eq!(refused.code(), "gateway.owner_token_unusable");
 
         // A peer-token location that is too open is refused by the same law.
@@ -587,8 +586,7 @@ mod tests {
         }
         let refused =
             at_carrier_owner(&home, "workcell:test", &format!("file:{}", loose.display()))
-                .err()
-                .expect("a too-open owner token refuses");
+                .expect_err("a too-open owner token refuses");
         assert_eq!(refused.code(), "gateway.owner_token_unusable");
         let _ = Path::new("/"); // keep the import honest on non-unix
     }

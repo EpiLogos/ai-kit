@@ -3772,7 +3772,11 @@ fn a_real_in_flight_turn_is_drained_through_the_carrier_named_and_never_replayed
         "gateway-binding/specimen"
     );
     let unserved = report["admitted_unserved"].as_array().unwrap();
-    assert_eq!(unserved.len(), 1, "the mid-drain message is named: {report}");
+    assert_eq!(
+        unserved.len(),
+        1,
+        "the mid-drain message is named: {report}"
+    );
     assert!(
         unserved[0]["preview"]
             .as_str()
@@ -3787,7 +3791,10 @@ fn a_real_in_flight_turn_is_drained_through_the_carrier_named_and_never_replayed
         .unwrap_or_else(|error| format!("unreadable: {error}"));
     eprintln!("state file at exit: {raw_state}");
     let status = serve.wait().expect("serve should exit after the drain");
-    assert!(status.success(), "a drain with exit exits cleanly: {status}");
+    assert!(
+        status.success(),
+        "a drain with exit exits cleanly: {status}"
+    );
     let mut serve = spawn_serve(home.path());
     wait_for_socket(home.path());
 
@@ -3799,21 +3806,11 @@ fn a_real_in_flight_turn_is_drained_through_the_carrier_named_and_never_replayed
         identity_after["bindings"], identity_before["bindings"],
         "binding identity survives"
     );
-    let events_after = identity_after["streams"][0]["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    let events_before = identity_before["streams"][0]["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
+    let events_after = identity_after["streams"][0]["events"].as_array().unwrap();
+    let events_before = identity_before["streams"][0]["events"].as_array().unwrap();
     assert_eq!(
         &events_after[..events_before.len()],
-        &events_before[..],
+        events_before,
         "nothing journalled before the drain is lost or reordered"
     );
     assert!(
@@ -3828,9 +3825,9 @@ fn a_real_in_flight_turn_is_drained_through_the_carrier_named_and_never_replayed
         .flat_map(|stream| stream["events"].as_array().unwrap().iter())
         .cloned()
         .collect::<Vec<_>>();
-    let interrupted = events.iter().any(|event| {
-        event["event"]["metadata"]["failure"]["kind"] == json!("interrupted")
-    });
+    let interrupted = events
+        .iter()
+        .any(|event| event["event"]["metadata"]["failure"]["kind"] == json!("interrupted"));
     assert!(interrupted, "the interruption is journalled: {events:?}");
 
     // The interrupted turn and the admitted message are NEVER re-run: the
@@ -3840,7 +3837,9 @@ fn a_real_in_flight_turn_is_drained_through_the_carrier_named_and_never_replayed
         Duration::from_secs(30),
         || turn_log.exists(),
     );
-    let prompts_before = fs::read_to_string(&turn_log).unwrap().lines()
+    let prompts_before = fs::read_to_string(&turn_log)
+        .unwrap()
+        .lines()
         .filter(|line| line.contains("session/prompt"))
         .count();
     assert_eq!(
@@ -3864,7 +3863,9 @@ fn a_real_in_flight_turn_is_drained_through_the_carrier_named_and_never_replayed
                 .any(|event| event["event"]["kind"] == json!("agent-message"))
         },
     );
-    let prompts_after = fs::read_to_string(&turn_log).unwrap().lines()
+    let prompts_after = fs::read_to_string(&turn_log)
+        .unwrap()
+        .lines()
         .filter(|line| line.contains("session/prompt"))
         .count();
     assert_eq!(
@@ -3872,9 +3873,6 @@ fn a_real_in_flight_turn_is_drained_through_the_carrier_named_and_never_replayed
         "the fixture was prompted for the interrupted turn and the fresh one — never a replay"
     );
 
-    exchange(
-        &socket,
-        json!({"command": {"type": "shutdown"}}),
-    );
+    exchange(&socket, json!({"command": {"type": "shutdown"}}));
     serve.wait().unwrap();
 }
