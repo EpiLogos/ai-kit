@@ -236,11 +236,13 @@ try:
         # the transaction; read it back and hold it against the definition.
         worker_exe = None
         definition_named = None
+        definition_seen = None
         if system == "darwin":
             definition = os.path.expanduser(f"~/Library/LaunchAgents/{instance}.plist")
         else:
             definition = os.path.expanduser(f"~/.config/systemd/user/{instance}.service")
-        if os.path.exists(definition):
+        definition_seen = os.path.exists(definition)
+        if definition_seen:
             text = open(definition).read()
             import re as _re
             if system == "darwin":
@@ -260,7 +262,7 @@ try:
                 except OSError:
                     continue
                 import re as _re
-                m = _re.search(r'worker executable: (/[^"\\n]+)', body)
+                m = _re.search(r'worker executable: (/[^"\n]+)', body)
                 if m:
                     worker_exe = os.path.realpath(m.group(1))
                     break
@@ -268,7 +270,10 @@ try:
             worker_exe and definition_named and worker_exe == definition_named
         )
         if not definition_named:
-            entry_note = "the instance definition could not be read at its recorded path"
+            entry_note = (
+                "the instance definition could not be read: path "
+                f"{definition} exists={definition_seen} (system={system})"
+            )
         elif not worker_exe:
             entry_note = "no worker-executable step was found in any transaction.json"
         else:
@@ -289,6 +294,8 @@ try:
     findings = status.get("data", {}).get("findings", []) if isinstance(status, dict) else []
     evidence["doctor_findings"] = [{"id": f.get("id"), "severity": f.get("severity"), "what": (f.get("what") or "")[:160]}
                                    for f in findings if str(f.get("severity")).lower() not in ("ok", "info")]
+    if not all(x["ok"] for x in evidence["scenarios"]):
+        evidence["root_kept_for_inspection"] = True
     evidence["leftover_worker_definitions"] = []
     if system == "darwin":
         la = os.path.expanduser("~/Library/LaunchAgents")
@@ -296,7 +303,7 @@ try:
 finally:
     aikit("gateway", "uninstall-service")
     time.sleep(2)
-    if not keep:
+    if not keep and not evidence.get("root_kept_for_inspection"):
         shutil.rmtree(root, ignore_errors=True)
     evidence["root"] = root
 print(json.dumps(evidence, indent=1))
