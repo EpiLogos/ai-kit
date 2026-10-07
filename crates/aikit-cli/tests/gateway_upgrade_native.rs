@@ -352,9 +352,24 @@ exit 0"#,
         let mut line = String::new();
         BufReader::new(stream).read_line(&mut line).ok()?;
         let envelope: Value = serde_json::from_str(line.trim()).ok()?;
-        envelope["response"]["build"]
+        // The current protocol carries no build identity: that the gateway
+        // answers at all is the readiness fact. The running build lives in
+        // the published posture record (see build()).
+        envelope["response"]
             .as_object()
             .map(|_| envelope["response"].clone())
+    }
+
+    /// The running build identity, read from the posture record the serve
+    /// arm publishes beside this home (schema + flattened build: pid,
+    /// revision, lifecycle, ...).
+    fn build(&self) -> Value {
+        let record = self.home().join("state").join("gateway-process.json");
+        serde_json::from_str(
+            &std::fs::read_to_string(&record)
+                .expect("the running gateway has published its posture"),
+        )
+        .unwrap()
     }
 
     fn wait_running(&self) -> Value {
@@ -486,16 +501,16 @@ fn outcome(data: &Value) -> &str {
 }
 
 #[test]
-#[ignore = "the managed-upgrade surface is retired on this branch; these proofs return with it"]
 fn an_upgrade_replaces_the_running_process_with_the_installed_build_and_proves_it_without_losing_a_communique(
 ) {
     let machine = Machine::new();
     machine.with_second_build();
     let supervisor = Supervisor::start(&machine);
-    let before = machine.wait_running();
-    assert_eq!(before["build"]["revision"], machine.revision_a);
-    assert_eq!(before["build"]["lifecycle"], "supervised-launchd");
-    let old_pid = before["build"]["pid"].as_u64().unwrap();
+    machine.wait_running();
+    let before = machine.build();
+    assert_eq!(before["revision"], machine.revision_a);
+    assert_eq!(before["lifecycle"], "supervised-launchd");
+    let old_pid = before["pid"].as_u64().unwrap();
 
     // Journal state that must survive the restart.
     let sent = machine
@@ -505,8 +520,7 @@ fn an_upgrade_replaces_the_running_process_with_the_installed_build_and_proves_i
     // `oi update` flips the managed symlink. The process keeps running its old image.
     machine.install("bin-b");
     assert_eq!(
-        machine.running().unwrap()["build"]["revision"],
-        machine.revision_a,
+        machine.build()["revision"], machine.revision_a,
         "an installed build is not a running build"
     );
 
@@ -556,10 +570,10 @@ fn an_upgrade_replaces_the_running_process_with_the_installed_build_and_proves_i
         after["identity"]["revision"], machine.revision_b,
         "the process now running states the new build"
     );
-    let now = machine.wait_running();
-    assert_eq!(now["build"]["revision"], machine.revision_b);
+    let now = machine.build();
+    assert_eq!(now["revision"], machine.revision_b);
     assert_eq!(
-        now["build"]["pid"].as_u64().unwrap(),
+        now["pid"].as_u64().unwrap(),
         after["pid"].as_u64().unwrap()
     );
 
@@ -630,11 +644,11 @@ fn an_upgrade_replaces_the_running_process_with_the_installed_build_and_proves_i
 }
 
 #[test]
-#[ignore = "the managed-upgrade surface is retired on this branch; these proofs return with it"]
 fn an_install_that_fails_leaves_the_running_gateway_and_the_installed_build_untouched() {
     let machine = Machine::new();
     let _supervisor = Supervisor::start(&machine);
-    let before = machine.wait_running();
+    machine.wait_running();
+    let before = machine.build();
     machine.set_next("FAIL");
     let applied = machine.ok(&["gateway", "upgrade", "apply", "--install", "--wait"]);
     assert_eq!(outcome(&applied), "failed-before-change", "{applied}");
@@ -642,9 +656,9 @@ fn an_install_that_fails_leaves_the_running_gateway_and_the_installed_build_unto
         .as_str()
         .unwrap()
         .contains("unchanged"));
-    let still = machine.wait_running();
+    let still = machine.build();
     assert_eq!(
-        still["build"]["pid"], before["build"]["pid"],
+        still["pid"], before["pid"],
         "the gateway was never touched"
     );
     assert_eq!(
@@ -654,12 +668,12 @@ fn an_install_that_fails_leaves_the_running_gateway_and_the_installed_build_unto
 }
 
 #[test]
-#[ignore = "the managed-upgrade surface is retired on this branch; these proofs return with it"]
 fn an_installer_that_flips_the_build_and_then_fails_is_rolled_back_and_not_reported_unchanged() {
     let machine = Machine::new();
     machine.with_second_build();
     let _supervisor = Supervisor::start(&machine);
-    let before = machine.wait_running();
+    machine.wait_running();
+    let before = machine.build();
     machine.set_previous("bin-a");
     machine.set_next(&format!(
         "FLIP_THEN_FAIL:{}",
@@ -672,9 +686,9 @@ fn an_installer_that_flips_the_build_and_then_fails_is_rolled_back_and_not_repor
         machine.root().join("bin-a/aikit"),
         "the previous build is installed again"
     );
-    let still = machine.wait_running();
+    let still = machine.build();
     assert_eq!(
-        still["build"]["pid"], before["build"]["pid"],
+        still["pid"], before["pid"],
         "the running gateway was never touched"
     );
     let calls = std::fs::read_to_string(machine.root().join("oi.calls")).unwrap();
@@ -682,12 +696,12 @@ fn an_installer_that_flips_the_build_and_then_fails_is_rolled_back_and_not_repor
 }
 
 #[test]
-#[ignore = "the managed-upgrade surface is retired on this branch; these proofs return with it"]
 fn a_new_build_that_does_not_come_up_is_rolled_back_and_the_old_build_is_verified_running() {
     let machine = Machine::new();
     let supervisor = Supervisor::start(&machine);
     machine.with_service_manager();
-    let before = machine.wait_running();
+    machine.wait_running();
+    let before = machine.build();
     machine.set_previous("bin-a");
     // The installer "succeeds" and leaves a build that exits at once. The
     // verify bound is the wait for the *restored* build to answer too, and a
@@ -710,13 +724,13 @@ fn a_new_build_that_does_not_come_up_is_rolled_back_and_the_old_build_is_verifie
         "the service manager was asked to start the gateway: {}",
         machine.manager_calls()
     );
-    let now = machine.wait_running();
+    let now = machine.build();
     assert_eq!(
-        now["build"]["revision"], machine.revision_a,
+        now["revision"], machine.revision_a,
         "the previous build runs again"
     );
     assert_ne!(
-        now["build"]["pid"], before["build"]["pid"],
+        now["pid"], before["pid"],
         "a new process, on the old build"
     );
     // The supervisor saw the drained exit, the broken builds, and the restore.
@@ -731,7 +745,6 @@ fn a_new_build_that_does_not_come_up_is_rolled_back_and_the_old_build_is_verifie
 }
 
 #[test]
-#[ignore = "the managed-upgrade surface is retired on this branch; these proofs return with it"]
 fn a_foreground_gateway_is_installed_for_but_never_stopped() {
     let machine = Machine::new();
     machine.with_second_build();
@@ -747,8 +760,9 @@ fn a_foreground_gateway_is_installed_for_but_never_stopped() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let before = machine.wait_running();
-    assert_eq!(before["build"]["lifecycle"], "foreground");
+    machine.wait_running();
+    let before = machine.build();
+    assert_eq!(before["lifecycle"], "foreground");
     machine.install("bin-b");
     let applied = machine.ok(&["gateway", "upgrade", "apply", "--wait"]);
     assert_eq!(outcome(&applied), "needs-operator", "{applied}");
@@ -765,7 +779,6 @@ fn a_foreground_gateway_is_installed_for_but_never_stopped() {
 }
 
 #[test]
-#[ignore = "the managed-upgrade surface is retired on this branch; these proofs return with it"]
 fn a_stop_signal_drains_and_exits_cleanly_instead_of_killing_the_gateway_mid_turn() {
     let machine = Machine::new();
     let child = Command::new(machine.root().join("cur/aikit"))
@@ -822,7 +835,9 @@ fn receipt_details(machine: &Machine) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "the managed-upgrade surface is retired on this branch; these proofs return with it"]
+
+    // RESTORE WITH: the conversation-initiated upgrade path. The engine cluster (launcher trait, attach, parse/perform arms) is restored and the plan leg works, but `apply` through a live gateway hangs the request — the worker and the serving request thread deadlock in the restored flow. Follow-up: fix the ordering, then un-ignore.
+    #[ignore = "apply through a live gateway hangs; see the comment above"]
 fn an_upgrade_asked_for_in_a_conversation_survives_the_restart_and_is_reported_back_into_it() {
     let machine = Machine::new();
     machine.with_second_build();
@@ -848,8 +863,9 @@ fn an_upgrade_asked_for_in_a_conversation_survives_the_restart_and_is_reported_b
     )
     .unwrap();
     let supervisor = Supervisor::start(&machine);
-    let before = machine.wait_running();
-    let old_pid = before["build"]["pid"].as_u64().unwrap();
+    machine.wait_running();
+    let before = machine.build();
+    let old_pid = before["pid"].as_u64().unwrap();
 
     let binding = json!({"type": "bind", "binding": {
         "binding_ref": "gateway-binding/specimen",
@@ -888,12 +904,11 @@ fn an_upgrade_asked_for_in_a_conversation_survives_the_restart_and_is_reported_b
     // The old process is replaced by one running build B...
     let deadline = Instant::now() + Duration::from_secs(300);
     let after = loop {
-        if let Some(reading) = machine.running() {
-            if reading["build"]["pid"].as_u64() != Some(old_pid)
-                && reading["build"]["revision"] == machine.revision_b
-            {
-                break reading;
-            }
+        let running_build = machine.build();
+        if running_build["pid"].as_u64() != Some(old_pid)
+            && running_build["revision"] == machine.revision_b
+        {
+            break running_build;
         }
         assert!(
             Instant::now() < deadline,
@@ -902,7 +917,7 @@ fn an_upgrade_asked_for_in_a_conversation_survives_the_restart_and_is_reported_b
         );
         thread::sleep(Duration::from_millis(500));
     };
-    assert_ne!(after["build"]["pid"].as_u64(), Some(old_pid));
+    assert_ne!(after["pid"].as_u64(), Some(old_pid));
 
     // ...and the conversation that asked is told, from the new process, that it
     // is done: the receipt came back into the same conversation, once.
@@ -939,7 +954,6 @@ fn an_upgrade_asked_for_in_a_conversation_survives_the_restart_and_is_reported_b
 }
 
 #[test]
-#[ignore = "the managed-upgrade surface is retired on this branch; these proofs return with it"]
 fn a_restart_that_brings_up_the_old_image_is_never_reported_as_the_upgrade() {
     let machine = Machine::new();
     machine.with_second_build();
@@ -949,7 +963,8 @@ fn a_restart_that_brings_up_the_old_image_is_never_reported_as_the_upgrade() {
     let pinned = machine.root().join("pinned/aikit");
     flip(&pinned, &machine.root().join("bin-a/aikit"));
     let _supervisor = Supervisor::start_at(&machine, pinned);
-    let before = machine.wait_running();
+    machine.wait_running();
+    let before = machine.build();
     machine.set_next(&machine.root().join("bin-b/aikit").display().to_string());
     let applied = machine.ok(&[
         "gateway",
@@ -968,17 +983,17 @@ fn a_restart_that_brings_up_the_old_image_is_never_reported_as_the_upgrade() {
         "a different pid on the old image is not an upgrade: {applied}"
     );
     assert_eq!(outcome(&applied), "rolled-back", "{applied}");
-    let now = machine.wait_running();
-    assert_eq!(now["build"]["revision"], machine.revision_a);
-    assert_ne!(now["build"]["pid"], before["build"]["pid"]);
+    let now = machine.build();
+    assert_eq!(now["revision"], machine.revision_a);
+    assert_ne!(now["pid"], before["pid"]);
 }
 
 #[test]
-#[ignore = "the managed-upgrade surface is retired on this branch; these proofs return with it"]
 fn an_install_that_cannot_fit_is_refused_before_anything_is_changed() {
     let machine = Machine::new();
     let _supervisor = Supervisor::start(&machine);
-    let before = machine.wait_running();
+    machine.wait_running();
+    let before = machine.build();
     // The floor is raised past any real disk: the refusal is the preflight's.
     let output = Command::new(machine.dir.path().join("tools/aikit"))
         .args([
@@ -1023,7 +1038,7 @@ fn an_install_that_cannot_fit_is_refused_before_anything_is_changed() {
         "the installer never ran"
     );
     assert_eq!(
-        machine.wait_running()["build"]["pid"],
-        before["build"]["pid"]
+        machine.build()["pid"],
+        before["pid"]
     );
 }

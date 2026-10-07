@@ -39,7 +39,11 @@
 
 // pi's documented available imports include the Node built-ins; nothing else
 // is imported, so loading never depends on module resolution.
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+import { watch, openSync, fstatSync, readSync, closeSync, type FSWatcher } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 /** Environment override for the dispatcher binary; defaults to PATH's aikit. */
 const AIKIT_BIN = process.env.AIKIT_BIN || "aikit";
@@ -49,12 +53,153 @@ const DISPATCH_TIMEOUT_MS = 10_000;
 
 /** customType of the persistent message injected context rides on. */
 const INJECTED_MESSAGE_TYPE = "aikit-hook-carrier";
+const PEER_MESSAGE_TYPE = "aikit-native-peer-handoff";
+const HANDOFF_OFFER_TYPE = "aikit-native-handoff-offer";
+const MAX_AUTOMATIC_PEER_TURNS = 8;
+
+/** Native journals supply availability notifications; a bounded fallback
+ * reconciles missed notifications. Inspired by my-pi's CoordinationPoller
+ * (spences10/my-pi@261a9fd33109b79eafac98f08ec17bb14d1e2a16), without
+ * importing its mailbox/database or treating a delivery as completed work.
+ */
+export class NativePeerDelivery {
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private watcher: FSWatcher | undefined;
+  private context: any;
+  private epoch = 0;
+  private inFlight = false;
+  private stopped = true;
+  constructor(private readonly pi: any) {}
+
+  start(ctx: any) {
+    this.stop();
+    this.context = ctx;
+    this.stopped = false;
+    if (!process.env.OI_POSITION_REF || !process.env.OI_OCCUPANT_GENERATION) return;
+    const state = join(process.env.AIKIT_HOME || join(homedir(), ".aikit"), "state");
+    try { this.watcher = watch(state, () => { void this.poll(); }); } catch { /* fallback below */ }
+    this.timer = setInterval(() => { void this.poll(); }, 5_000);
+    this.timer.unref();
+    void this.poll();
+  }
+  stop() {
+    this.stopped = true;
+    this.epoch++;
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+    this.watcher?.close();
+    this.watcher = undefined;
+  }
+  update(ctx: any) { this.context = ctx; }
+  track(delivery: any) {
+    if (!delivery?.text || !sessionIdOf(this.context)) return;
+    // A native session offer records intent, never delivery. Only an actual
+    // retained user/custom message carrying the complete text commits it.
+    this.pi.appendEntry?.(HANDOFF_OFFER_TYPE,{schema:"aikit.pi-handoff-offer/v1",recipient_session_id:sessionIdOf(this.context),delivery});
+  }
+  private retainedOnDisk(entry: any): boolean {
+    const path=this.context.sessionManager?.getSessionFile?.();
+    if (!path || !entry?.id) return false;
+    let fd: number|undefined;
+    try {
+      fd=openSync(path,"r");
+      const size=fstatSync(fd).size;
+      // Native history remains complete. This focused confirmation refuses
+      // excess material rather than loading unbounded history into a turn.
+      if (size>32*1024*1024) return false;
+      const buffer=Buffer.alloc(64*1024);
+      const decoder=new StringDecoder("utf8");
+      let offset=0, line="",discard=false, validSession=false;
+      while (offset<size) {
+        const count=readSync(fd,buffer,0,Math.min(buffer.length,size-offset),offset);if(!count)break;offset+=count;
+        const chunk=decoder.write(buffer.subarray(0,count));
+        for(const part of chunk.split(/(?<=\n)/)) {
+          if (!discard) line+=part;
+          if(line.length>1024*1024){line="";discard=true;}
+          if(!part.endsWith("\n"))continue;
+          if(!discard) {
+            let record:any;try{record=JSON.parse(line);}catch{record=null;}
+            if(record?.type==="session") validSession=record.id===sessionIdOf(this.context);
+            if(validSession && record?.id===entry.id) return JSON.stringify(record)===JSON.stringify(entry);
+          }
+          line="";discard=false;
+        }
+      }
+    } catch { return false; }
+    finally {if(fd!==undefined)closeSync(fd);}
+    return false;
+  }
+  private call(commit?: unknown): Promise<any> {
+    return new Promise((resolve) => {
+      const child = execFile(AIKIT_BIN, ["--json", "gateway", "handoff", ...(commit ? ["--commit"] : [])], {
+        cwd: cwdOf(this.context), timeout: DISPATCH_TIMEOUT_MS, maxBuffer: 1024 * 1024, encoding: "utf8",
+      }, (error, stdout) => {
+        if (error) return resolve(null);
+        try { const reply = JSON.parse(stdout); resolve(reply.ok === true ? reply.data : null); } catch { resolve(null); }
+      });
+      if (commit) child.stdin?.end(JSON.stringify(commit));
+      else child.stdin?.end();
+    });
+  }
+  async poll(): Promise<void> {
+    if (this.stopped || this.inFlight) return;
+    this.inFlight = true;
+    const epoch = this.epoch;
+    const session = sessionIdOf(this.context);
+    try {
+      if (!session) return;
+      const entries = this.context.sessionManager?.getBranch?.() || this.context.sessionManager?.getEntries?.() || [];
+      const textOf = (content: any) => typeof content === "string" ? content : Array.isArray(content) ? content.filter((item: any)=>item.type==="text").map((item: any)=>item.text).join("\n") : "";
+      const offer = await this.call();
+      if (epoch !== this.epoch || this.stopped || session !== sessionIdOf(this.context)) return;
+      const delivery = offer?.delivery;
+      if (!delivery?.text || !Array.isArray(delivery.communique_refs) || delivery.communique_refs.length === 0) return;
+      // Reconcile only retained carrying that overlaps this pending offer.
+      // Historical committed entries must not cause repeated owner effects.
+      for (const entry of entries) {
+        const saved=entry.type==="custom" && entry.customType===HANDOFF_OFFER_TYPE ? entry.data : null;
+        if (saved?.recipient_session_id===session && saved.delivery?.text
+            && saved.delivery.communique_refs?.some((ref: string)=>delivery.communique_refs.includes(ref))
+            && entries.some((candidate: any)=>candidate.type==="message" && candidate.message?.role==="user" && textOf(candidate.message.content).includes(saved.delivery.text) && this.retainedOnDisk(candidate))) {
+          await this.call({delivery:saved.delivery,carried_text:saved.delivery.text});
+          return; // success or uncertainty: reread the retained owner next time
+        }
+      }
+      // Pi's actual session tree is the retained operation. Reconcile a crash
+      // after persistence/before acknowledgement, never send the turn again.
+      for (const entry of entries) {
+        const prior = entry.type === "custom_message" && entry.customType === PEER_MESSAGE_TYPE ? entry : entry.message;
+        const details = prior?.details;
+        if (prior?.customType === PEER_MESSAGE_TYPE && details?.recipient_session_id === session
+            && details.delivery?.communique_refs?.some((ref: string) => delivery.communique_refs.includes(ref))) {
+          if (!this.retainedOnDisk(entry)) return; // memory-only new-session entries cannot confirm durable carrying
+          const committed = await this.call({ delivery: details.delivery, carried_text: prior.content });
+          if (!committed) return; // unavailable/uncertain: retain the same operation
+          return; // obtain a fresh bounded offer after acknowledged material
+        }
+      }
+      if (this.context.isIdle?.() !== true || this.context.hasPendingMessages?.()) return;
+      const automaticTurns=entries.filter((entry:any)=>entry.type==="custom_message" && entry.customType===PEER_MESSAGE_TYPE && entry.details?.recipient_session_id===session).length;
+      if (automaticTurns>=MAX_AUTOMATIC_PEER_TURNS) return; // remaining records stay pending; no unlimited peer exchange
+      this.pi.sendMessage({
+        customType: PEER_MESSAGE_TYPE,
+        content: delivery.text, display: true,
+        details: { schema: "aikit.pi-peer-handoff/v1", source: "native-gateway", authority: "peer-only", direct_user_authority: false,
+          recipient_session_id: session, delivery },
+      }, { triggerTurn: true, deliverAs: "followUp" });
+      // The native message event/session tree confirms actual carrying before
+      // commit. A queued message or offer is never marked delivered here.
+    } catch { /* owner outage leaves the durable inbox pending */ }
+    finally { this.inFlight = false; }
+  }
+}
 
 /** One parsed dispatcher reply: the fields this carrier routes on. */
 interface AikitDecision {
   allowed: boolean;
   denial: string | null;
   injected: string;
+  communique_handoff?: unknown;
 }
 
 /**
@@ -99,6 +244,7 @@ function dispatchAikit(event: string, payload: unknown): AikitDecision | null {
       allowed: reply.allowed,
       denial: typeof reply.denial === "string" ? reply.denial : null,
       injected: typeof reply.injected === "string" ? reply.injected : "",
+      communique_handoff: reply.communique_handoff,
     };
   } catch {
     return null;
@@ -164,7 +310,10 @@ function notify(ctx: { hasUI?: boolean; ui?: { notify?: (message: string, level?
  */
 export default function (pi: {
   on: (event: string, handler: (eventObject: any, ctx: any) => unknown) => void;
+  sendMessage?: (message: any, options?: any) => void;
+  appendEntry?: (customType: string, data: any) => void;
 }) {
+  const peers = new NativePeerDelivery(pi);
   // Injected context waiting for pi's next content channel. Queued by events
   // that have no content channel of their own (session_start, tool_call) and
   // delivered as one persistent message at the next `before_agent_start`.
@@ -179,6 +328,7 @@ export default function (pi: {
   // --- session lifecycle -------------------------------------------------
 
   pi.on("session_start", async (eventObject: any, ctx: any) => {
+    peers.start(ctx);
     const decision = dispatchAikit("SessionStart", jsonSafe({ ...eventObject, cwd: cwdOf(ctx), session_id: sessionIdOf(ctx) }));
     if (decision) {
       queueInjection(decision.injected);
@@ -188,8 +338,12 @@ export default function (pi: {
   });
 
   pi.on("session_shutdown", async (eventObject: any, ctx: any) => {
+    peers.stop();
     dispatchAikit("SessionEnd", jsonSafe({ ...eventObject, cwd: cwdOf(ctx), session_id: sessionIdOf(ctx) }));
   });
+  pi.on("session_before_switch", async () => { peers.stop(); });
+  pi.on("agent_end", async (_event: any, ctx: any) => { peers.update(ctx); await peers.poll(); });
+  pi.on("message_end", async (_event: any, ctx: any) => { peers.update(ctx); await peers.poll(); });
 
   // --- context injection seam ---------------------------------------------
 
@@ -223,6 +377,8 @@ export default function (pi: {
       return { action: "handled" }; // pi's nearest stop for a prompt
     }
     if (decision.injected && decision.injected.trim()) {
+      peers.update(ctx);
+      peers.track(decision.communique_handoff);
       // The event's own transform channel: append after the user's text so
       // the leading token (the only one pi parses as a command) is untouched.
       return {

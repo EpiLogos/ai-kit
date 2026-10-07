@@ -215,7 +215,10 @@ pub fn override_carriers(command: &mut crate::cli::GatewayCmd, carrier: GatewayQ
         G::Delegate(a) => a.carrier = carrier,
         G::Agent(a) => a.carrier = carrier,
         G::NativeOwner(a) => a.carrier = carrier,
-        G::Serve(_)
+        G::Handoff { .. }
+        | G::Message { .. }
+        | G::Team { .. }
+        | G::Serve(_)
         | G::Tick
         | G::InstallService(_)
         | G::UninstallService
@@ -281,13 +284,7 @@ pub fn foreign_gateway_lines() -> Vec<String> {
     let foreign = detect(&probe_live());
     foreign
         .iter()
-        .map(|gateway| {
-            format!(
-                "{}: {}",
-                gateway.harness,
-                gateway.evidence.join("; ")
-            )
-        })
+        .map(|gateway| format!("{}: {}", gateway.harness, gateway.evidence.join("; ")))
         .collect()
 }
 
@@ -568,6 +565,20 @@ pub fn publish_process_record(
 ) -> Result<()> {
     let record = GatewayProcessRecord::new(this_process_identity());
     let path = process_record_path(home);
+    // The record is published before the carriers start — frequently before
+    // anything else has created the state directory on a fresh home.
+    std::fs::create_dir_all(path.parent().ok_or_else(|| {
+        AikitError::new(
+            "gateway.process_record_path",
+            "The posture record path has no parent directory",
+        )
+    })?)
+    .map_err(|error| {
+        AikitError::new(
+            "gateway.process_record_write",
+            format!("create the posture record directory: {error}"),
+        )
+    })?;
     let write = move |build: &GatewayBuildIdentity| -> Result<()> {
         let posture = GatewayProcessPosture {
             schema: PROCESS_RECORD_SCHEMA.into(),

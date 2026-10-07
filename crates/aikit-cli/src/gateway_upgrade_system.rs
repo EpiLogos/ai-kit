@@ -1256,6 +1256,30 @@ pub struct ConversationUpgradeLauncher {
     pub home: AikitHome,
 }
 
+/// The same launcher, speaking the conversation engine's trait: the serve
+/// arm attaches it so a conversation's `/upgrade` reaches this owner.
+impl aikit_adapters::gateway_conversation_engine::GatewayUpgradeLauncher
+    for ConversationUpgradeLauncher
+{
+    fn plan(&self) -> Result<(Value, String)> {
+        GatewayUpgradeLauncher::plan(self)
+    }
+
+    fn start(
+        &self,
+        origin: aikit_adapters::gateway_conversation_engine::UpgradeOrigin,
+    ) -> Result<(Value, String)> {
+        GatewayUpgradeLauncher::start(
+            self,
+            crate::gateway_upgrade::UpgradeOrigin {
+                binding_ref: origin.binding_ref,
+                connector_ref: origin.connector_ref,
+                in_reply_to_sequence: origin.in_reply_to_sequence,
+            },
+        )
+    }
+}
+
 impl GatewayUpgradeLauncher for ConversationUpgradeLauncher {
     fn plan(&self) -> Result<(Value, String)> {
         let plan = plan_command(&self.home, None, None, false)?;
@@ -1703,7 +1727,7 @@ mod tests {
 
     #[test]
     fn a_gateway_that_predates_build_identity_is_still_a_running_process_with_a_pid() {
-        let running = running_from_protocol(
+        let running = running_from_posture(
             vec!["communique-exact-instance".into()],
             None,
             Some(4242),
@@ -1713,6 +1737,6 @@ mod tests {
         assert_eq!(running.pid, 4242);
         assert_eq!(running.identity.revision, "unknown");
         assert_eq!(running.lifecycle, GatewayLifecycle::Foreground);
-        assert!(running_from_protocol(vec![], None, None, true).is_none());
+        assert!(running_from_posture(vec![], None, None, true).is_none());
     }
 }

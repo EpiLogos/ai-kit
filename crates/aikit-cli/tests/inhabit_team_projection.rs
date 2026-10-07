@@ -435,10 +435,81 @@ fn another_harness_is_launched_without_the_team_and_told_so() {
     assert!(output.status.success(), "{stdout}{stderr}");
     assert!(stdout.contains("LAUNCHED 0"));
     assert!(
-        stderr.contains("supported for Claude Code only") && stderr.contains("`sh`"),
+        stderr.contains("supported for Claude Code and Pi") && stderr.contains("`sh`"),
         "{stderr}"
     );
     assert!(!world.inhabitations().exists());
+}
+
+#[test]
+fn pi_receives_the_same_authored_team_through_native_tenure_extension_and_release() {
+    let world = world();
+    // Actual Central guardian profiles carry a plain authored intent rather
+    // than Claude frontmatter. Pi must resolve the same native profile basis.
+    let intent = world.central.join("Control/agents/expressions/nous/intent.md");
+    fs::create_dir_all(intent.parent().unwrap()).unwrap();
+    fs::write(&intent, "# Nous intent\n\nPerform only bounded attributed team work.\n").unwrap();
+    let profile_path = world.root.join("profiles.json");
+    let mut profiles: Value = serde_json::from_slice(&fs::read(&profile_path).unwrap()).unwrap();
+    let nous = profiles["data"]["profiles"].as_array_mut().unwrap().iter_mut()
+        .find(|entry| entry["profile"]["agent_ref"] == "agent/anima-nous").unwrap();
+    nous["profile"]["governance_refs"] = json!([
+        "central:source:control:root:Control/agents/expressions/nous/intent.md"
+    ]);
+    fs::write(profile_path, profiles.to_string()).unwrap();
+    script(
+        &world.root.join("bin/pi"),
+        "#!/bin/sh\nprintf '%s\\n' \"$@\"\n",
+    );
+    let pi = world.root.join("bin/pi").display().to_string();
+    let output = world.run(&[
+        "inhabit",
+        "--position",
+        POSITION,
+        "--reason",
+        "native Pi team",
+        "--",
+        &pi,
+        "-p",
+        "bounded work",
+    ]);
+    let (stdout, stderr) = text(&output);
+    assert!(output.status.success(), "{stdout}{stderr}");
+    let args = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(args[0], "--extension");
+    assert!(args[1].ends_with("/pi/anima-team/team.ts"));
+    assert_eq!(&args[2..], &["-p", "bounded work"]);
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(Path::new(args[1]).parent().unwrap().join("team.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["schema"], "aikit.pi-team/v1");
+    assert_eq!(manifest["orchestrator_agent_ref"], "agent/anima");
+    assert_eq!(manifest["members"].as_array().unwrap().len(), 2);
+    let native_member = manifest["members"].as_array().unwrap().iter()
+        .find(|member| member["agent_ref"] == "agent/anima-nous").unwrap();
+    assert_eq!(native_member["expression_ref"],
+        "central:source:control:root:Control/agents/expressions/nous/intent.md");
+    assert_eq!(native_member["expression_digest"],
+        format!("blake3:{}", blake3::hash(&fs::read(intent).unwrap()).to_hex()));
+    assert!(manifest["members"][0]["expression_digest"]
+        .as_str()
+        .unwrap()
+        .starts_with("blake3:"));
+    let extension = fs::read_to_string(args[1]).unwrap();
+    assert!(extension.contains("gateway\", \"team"));
+    assert!(!extension.contains("spawn(\"pi"));
+    let release = world.run(&[
+        "--json",
+        "inhabit",
+        "--release",
+        "--position",
+        POSITION,
+        "--generation",
+        CLAIMED,
+    ]);
+    assert!(release.status.success(), "{:?}", release);
+    assert!(!Path::new(args[1]).exists());
 }
 
 #[test]
