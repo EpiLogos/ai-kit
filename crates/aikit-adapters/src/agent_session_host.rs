@@ -213,7 +213,9 @@ pub struct SessionLane {
 }
 
 /// A live turn on a [`SessionLane`]: the streaming cursor and the handle that
-/// may interrupt the turn. Dropping it does not stop the turn.
+/// may interrupt the turn. Dropping it does not stop the turn. Cloning it is
+/// another cursor on the same turn, not a second turn.
+#[derive(Clone)]
 pub struct TurnHandle {
     shared: Arc<HostShared>,
     lane: Arc<LaneCore>,

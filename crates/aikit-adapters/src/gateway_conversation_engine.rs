@@ -41,6 +41,16 @@
 //! changes across the restart: the snapshot is the same one a crash would
 //! restore from.
 //!
+//! Steering and stopping: a plain message that arrives while the binding's
+//! turn plane is busy — a turn in flight, or one still starting — is queued
+//! and becomes the next turn in arrival order. Steering at the turn boundary;
+//! the message is never lost to the lane's one-turn-at-a-time guard. `/stop`
+//! interrupts the in-flight turn through the harness's own cancel and drops
+//! whatever was queued; the conversation's next message starts fresh. The
+//! plane stays one-turn-at-a-time on purpose: a backing lane carries one
+//! turn, and the queue is how the conversation steers it. `/new` is a hard
+//! cut: it drops the queue with the old context and names the drop.
+//!
 //! The engine is deterministic-testable: the turn source is a small trait with
 //! the scripted [`FixtureTurnSource`] for the deterministic suite, and the
 //! [`AgentHostTurnSource`] backed by [`AgentSessionHost`] for a connector
@@ -61,7 +71,7 @@
 //! off, tool lines are journalled but never sent.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -77,7 +87,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::agent_connection::{ConnectionSignalKind, SessionOpenMode, SessionOpenRequest};
-use crate::agent_session_host::{AgentSessionHost, AgentSessionHostLimits, HostEvent, TurnStop};
+use crate::agent_session_host::{
+    AgentSessionHost, AgentSessionHostLimits, HostEvent, InterruptReceipt, TurnHandle, TurnStop,
+};
 use crate::gateway_communique::{
     Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForwardOutcome, CommuniqueState,
     SenderAttribution,
@@ -857,6 +869,64 @@ impl AgentHostTurnSource {
     }
 }
 
+/// A host-backed live turn: the engine's waitable slot plus the real turn
+/// handle. An interrupt is the host's own interruption — the cancel commands
+/// go to the harness, the receipt is what the host actually issued, and the
+/// slot's outcome arrives from the turn's real end (completed, cancelled,
+/// failed), never invented locally.
+struct HostTurn {
+    slot: Arc<TurnSlot>,
+    handle: TurnHandle,
+}
+
+impl ConversationTurn for HostTurn {
+    fn wait(&self) -> ConversationTurnOutcome {
+        self.slot.wait()
+    }
+
+    fn wait_timeout(&self, timeout: Duration) -> Option<ConversationTurnOutcome> {
+        self.slot.wait_timeout(timeout)
+    }
+
+    fn interrupt(&self, reason: Option<String>) -> Result<String> {
+        match self.handle.interrupt(reason) {
+            Ok(receipt) => Ok(describe_interrupt_receipt(&receipt)),
+            // The turn ended before the cancel landed: its real outcome is
+            // already arriving on the slot, so there is honestly nothing to
+            // cancel. A second interrupt is likewise answered, not failed:
+            // the surface asked to stop, and a stop is under way.
+            Err(error) if error.code() == "agent_session_host.no_turn_in_flight" => {
+                Ok("the turn had already ended; no cancel was needed".into())
+            }
+            Err(error) if error.code() == "agent_session_host.interrupt_already_requested" => {
+                Ok("an interrupt is already in flight for this turn".into())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn finished(&self) -> bool {
+        self.slot.finished()
+    }
+
+    fn progress(&self) -> Option<Arc<TurnProgress>> {
+        self.slot.progress()
+    }
+}
+
+/// The plain-words receipt for a host interruption: what was issued, and why.
+fn describe_interrupt_receipt(receipt: &InterruptReceipt) -> String {
+    let what = if receipt.commands.is_empty() {
+        "interrupt issued".to_string()
+    } else {
+        format!("interrupt issued ({})", receipt.commands.join(", "))
+    };
+    match &receipt.reason {
+        Some(reason) => format!("{what}: {reason}"),
+        None => what,
+    }
+}
+
 impl ConversationTurnSource for AgentHostTurnSource {
     fn harness(&self) -> Option<String> {
         Some(self.harness_name.clone())
@@ -872,10 +942,11 @@ impl ConversationTurnSource for AgentHostTurnSource {
         let slot = Arc::new(TurnSlot::with_progress(Arc::new(TurnProgress::new())));
         let reader_slot = Arc::clone(&slot);
         let progress = slot.progress();
+        let reader_handle = handle.clone();
         thread::spawn(move || {
             let mut text = String::new();
             loop {
-                let outcome = match handle.recv() {
+                let outcome = match reader_handle.recv() {
                     Some(HostEvent::Signal(signal)) => {
                         match signal.kind {
                             // Fine-grained deltas accumulate the turn's final
@@ -920,7 +991,7 @@ impl ConversationTurnSource for AgentHostTurnSource {
                 return;
             }
         });
-        Ok(slot)
+        Ok(Arc::new(HostTurn { slot, handle }))
     }
 
     fn reset(&self, agent_session: &ResourceRef) -> Result<()> {
@@ -1178,6 +1249,17 @@ struct InFlightTurn {
     native_message_id: Option<String>,
 }
 
+/// One admitted message waiting for its binding's turn plane to free.
+struct QueuedPrompt {
+    prompt: String,
+    in_reply_to_sequence: u64,
+    native_message_id: Option<String>,
+}
+
+/// How many admitted messages may wait on one binding's turn plane. Bounded
+/// on purpose: a chat storm meets an honest refusal, not unbounded memory.
+const TURN_QUEUE_LIMIT: usize = 16;
+
 /// What a running turn already delivered as its own messages: the completed
 /// segments, in order. When the turn's reply equals what was delivered, the
 /// completion sends nothing more — the reply already arrived piece by piece.
@@ -1195,6 +1277,14 @@ impl StreamedReplies {
 struct EngineInner {
     /// Live turns per binding ref, interruptible by canonical Stop.
     in_flight: BTreeMap<ResourceRef, InFlightTurn>,
+    /// Bindings whose turn worker is between admission and its in-flight
+    /// registration — the harness may still be starting. The turn plane is
+    /// busy for these too, so a mid-turn message queues instead of racing
+    /// the registration.
+    starting: BTreeSet<ResourceRef>,
+    /// Admitted messages waiting for their binding's turn plane, in arrival
+    /// order. Each becomes the next turn when the plane frees.
+    queued: BTreeMap<ResourceRef, VecDeque<QueuedPrompt>>,
     /// Set when a restart was requested: no new work is admitted.
     draining: bool,
 }
@@ -1229,6 +1319,12 @@ pub struct DrainReport {
     /// its tools did before the interrupt is an UNCERTAIN effect: it is
     /// recorded, journaled as an interruption, and never replayed.
     pub turns_interrupted: Vec<DrainedTurn>,
+    /// Admitted messages that were still waiting for their turn plane when
+    /// the drain ran. They never started a turn, so nothing ran for them;
+    /// each is on its stream's journal as the inbound message it was, and is
+    /// not replayed.
+    #[serde(default)]
+    pub prompts_not_started: Vec<DrainedTurn>,
     /// Communiques waiting at this gateway, by Position. They are in the
     /// journal and survive the restart.
     pub communiques: Vec<CommuniqueCount>,
@@ -1280,6 +1376,8 @@ impl GatewayConversationEngine {
             ask: OnceLock::new(),
             inner: Mutex::new(EngineInner {
                 in_flight: BTreeMap::new(),
+                starting: BTreeSet::new(),
+                queued: BTreeMap::new(),
                 draining: false,
             }),
         })
@@ -1372,9 +1470,73 @@ impl GatewayConversationEngine {
                 };
                 let prompt = text.to_owned();
                 let sequence = event.sequence;
-                thread::spawn(move || {
-                    engine.run_turn(source, binding, prompt, sequence, native_message_id);
-                });
+                // A message that arrives while the binding's turn plane is
+                // busy — a turn in flight, or one still starting — steers the
+                // conversation: it queues and runs as the next turn in
+                // arrival order, instead of failing against the lane's
+                // one-turn-at-a-time guard.
+                let admitted = {
+                    let mut inner = self.inner.lock().expect("conversation engine");
+                    if inner.draining {
+                        return;
+                    }
+                    let busy = inner.in_flight.contains_key(&binding.binding_ref)
+                        || inner.starting.contains(&binding.binding_ref);
+                    if busy {
+                        let queue = inner.queued.entry(binding.binding_ref.clone()).or_default();
+                        if queue.len() >= TURN_QUEUE_LIMIT {
+                            None
+                        } else {
+                            queue.push_back(QueuedPrompt {
+                                prompt: prompt.clone(),
+                                in_reply_to_sequence: sequence,
+                                native_message_id: native_message_id.clone(),
+                            });
+                            Some(queue.len())
+                        }
+                    } else {
+                        inner.starting.insert(binding.binding_ref.clone());
+                        Some(0)
+                    }
+                };
+                match admitted {
+                    Some(0) => {
+                        let engine = Arc::clone(self);
+                        thread::spawn(move || {
+                            engine.run_turn(source, binding, prompt, sequence, native_message_id);
+                        });
+                    }
+                    // The engine runs under the caller's kernel lock, so the
+                    // acknowledgment lines queue from their own threads — the
+                    // same discipline as the command branches above.
+                    Some(position) => {
+                        let engine = Arc::clone(self);
+                        let binding_ref = binding.binding_ref.clone();
+                        thread::spawn(move || {
+                            engine.send_surface_line(
+                                &binding_ref,
+                                format!(
+                                    "queued: the agent is mid-turn; your message runs right \
+                                     after it (position {position})"
+                                ),
+                            );
+                        });
+                    }
+                    None => {
+                        let engine = Arc::clone(self);
+                        let binding_ref = binding.binding_ref.clone();
+                        thread::spawn(move || {
+                            engine.send_surface_line(
+                                &binding_ref,
+                                format!(
+                                    "the queue for this conversation is full \
+                                     ({TURN_QUEUE_LIMIT} messages waiting); send again once \
+                                     the current turn answers"
+                                ),
+                            );
+                        });
+                    }
+                }
             }
         }
     }
@@ -1408,6 +1570,9 @@ impl GatewayConversationEngine {
         let turn = match source.prompt(request) {
             Ok(turn) => turn,
             Err(error) => {
+                // The failed start releases the plane, and the next queued
+                // message takes it in the same locked step.
+                self.release_starting_and_advance(&binding.binding_ref);
                 self.record_outcome(
                     &binding,
                     ConversationTurnOutcome::Failed {
@@ -1425,6 +1590,7 @@ impl GatewayConversationEngine {
         // from the moment the restart was requested.
         let registered = {
             let mut inner = self.inner.lock().expect("conversation engine");
+            inner.starting.remove(&binding.binding_ref);
             if inner.draining {
                 None
             } else {
@@ -1488,7 +1654,93 @@ impl GatewayConversationEngine {
                 native_message_id,
                 streamed,
             );
+            // The plane is free: the next queued message, if any, becomes
+            // the next turn — the steering the conversation asked for.
+            self.advance_queue(&binding.binding_ref);
         }
+    }
+
+    /// Release a binding's starting claim after a failed start and, in the
+    /// same locked step, hand the turn plane to the next queued message. One
+    /// atomic transfer: queued order is never jumped by a message admitted
+    /// between the release and the pop.
+    fn release_starting_and_advance(self: &Arc<Self>, binding_ref: &ResourceRef) {
+        let next = {
+            let mut inner = self.inner.lock().expect("conversation engine");
+            inner.starting.remove(binding_ref);
+            Self::pop_next_claimed(&mut inner, binding_ref)
+        };
+        if let Some(next) = next {
+            self.spawn_turn_for(binding_ref, next);
+        }
+    }
+
+    /// The turn plane just freed (a turn's outcome was recorded). The next
+    /// queued message, if any, becomes the next turn.
+    fn advance_queue(self: &Arc<Self>, binding_ref: &ResourceRef) {
+        let next = {
+            let inner = &mut self.inner.lock().expect("conversation engine");
+            Self::pop_next_claimed(inner, binding_ref)
+        };
+        if let Some(next) = next {
+            self.spawn_turn_for(binding_ref, next);
+        }
+    }
+
+    /// Pop the binding's next queued prompt and claim its turn plane, when
+    /// the plane is free and no restart is draining. The claim and the pop
+    /// are one step under the engine lock.
+    fn pop_next_claimed(
+        inner: &mut EngineInner,
+        binding_ref: &ResourceRef,
+    ) -> Option<QueuedPrompt> {
+        if inner.draining
+            || inner.in_flight.contains_key(binding_ref)
+            || inner.starting.contains(binding_ref)
+        {
+            return None;
+        }
+        match inner.queued.get_mut(binding_ref) {
+            Some(queue) => {
+                let next = queue.pop_front();
+                if queue.is_empty() {
+                    inner.queued.remove(binding_ref);
+                }
+                if next.is_some() {
+                    inner.starting.insert(binding_ref.clone());
+                }
+                next
+            }
+            None => None,
+        }
+    }
+
+    /// Start one turn for a popped queued prompt, with its binding read
+    /// fresh from the kernel at the moment of the start.
+    fn spawn_turn_for(self: &Arc<Self>, binding_ref: &ResourceRef, next: QueuedPrompt) {
+        let binding = match self.gateway.lock() {
+            Ok(kernel) => kernel.binding(binding_ref).cloned(),
+            Err(_) => {
+                eprintln!("conversation engine could not read the binding to run a queued prompt");
+                None
+            }
+        };
+        let Some(binding) = binding else {
+            return;
+        };
+        let Some(source) = self.source_for(&binding) else {
+            return;
+        };
+        let engine = Arc::clone(self);
+        thread::spawn(move || {
+            engine.run_turn(
+                source,
+                binding,
+                next.prompt,
+                next.in_reply_to_sequence,
+                next.native_message_id,
+            );
+        });
     }
 
     /// Whether this binding's connector streams: it must declare the
@@ -2073,23 +2325,25 @@ impl GatewayConversationEngine {
                 resolver.turn_source_for(&binding.connector_ref, &binding.address.platform)
             })
             .and_then(|source| source.harness());
-        let in_flight = self
-            .inner
-            .lock()
-            .expect("conversation engine")
-            .in_flight
-            .contains_key(binding_ref);
+        let (in_flight, queued_prompts) = {
+            let inner = self.inner.lock().expect("conversation engine");
+            (
+                inner.in_flight.contains_key(binding_ref),
+                inner.queued.get(binding_ref).map_or(0, |queue| queue.len()),
+            )
+        };
         let connector_state = health
             .as_ref()
             .map(|health| format!("{:?}", health.state))
             .unwrap_or_else(|| "unknown".into());
         let line = format!(
-            "status: binding {}; stream {} at {} event(s); turn in flight: {}; backing: {}; \
-             connector: {}",
+            "status: binding {}; stream {} at {} event(s); turn in flight: {}; queued: {}; \
+             backing: {}; connector: {}",
             binding.binding_ref,
             binding.actuation_stream_ref,
             stream_position.map(|(_, count)| count).unwrap_or(0),
             if in_flight { "yes" } else { "no" },
+            queued_prompts,
             backing.as_deref().unwrap_or("none"),
             connector_state,
         );
@@ -2105,6 +2359,7 @@ impl GatewayConversationEngine {
                 "context_revision": binding.context_revision,
                 "forked_from": binding.forked_from,
                 "turn_in_flight": in_flight,
+                "queued_prompts": queued_prompts,
                 "agent_backing": backing,
                 "connector_health": health.map(|health| json!({
                     "state": health.state,
@@ -2124,26 +2379,55 @@ impl GatewayConversationEngine {
             .binding(binding_ref)
             .ok_or_else(|| unknown_binding(binding_ref))?;
         drop(kernel);
-        let turn = self
-            .inner
-            .lock()
-            .expect("conversation engine")
-            .in_flight
-            .get(binding_ref)
-            .map(|in_flight| Arc::clone(&in_flight.turn));
+        // A stop stops the conversation's work: the in-flight turn is
+        // interrupted, and whatever was queued to steer it is dropped — the
+        // next message starts fresh, not behind the messages it superseded.
+        let (turn, dropped_queued) = {
+            let mut inner = self.inner.lock().expect("conversation engine");
+            let turn = inner
+                .in_flight
+                .get(binding_ref)
+                .map(|in_flight| Arc::clone(&in_flight.turn));
+            let dropped = inner
+                .queued
+                .remove(binding_ref)
+                .map_or(0, |queue| queue.len());
+            (turn, dropped)
+        };
+        let dropped_note = if dropped_queued > 0 {
+            format!("; dropped {dropped_queued} queued message(s)")
+        } else {
+            String::new()
+        };
         match turn {
             Some(turn) => {
                 let receipt =
                     turn.interrupt(Some("stop requested from the conversation".into()))?;
                 Ok((
-                    json!({"stopped": true, "receipt": receipt}),
+                    json!({
+                        "stopped": true,
+                        "receipt": receipt,
+                        "dropped_queued": dropped_queued,
+                    }),
                     Some(format!(
-                        "stop: {receipt}; the interrupted turn is recorded on the stream"
+                        "stop: {receipt}{dropped_note}; the interrupted turn is recorded on the \
+                         stream"
                     )),
                     None,
                     false,
                 ))
             }
+            None if dropped_queued > 0 => Ok((
+                json!({
+                    "stopped": false,
+                    "dropped_queued": dropped_queued,
+                }),
+                Some(format!(
+                    "stop: dropped {dropped_queued} queued message(s); no turn was in flight"
+                )),
+                None,
+                false,
+            )),
             None => Ok((
                 json!({
                     "stopped": false,
@@ -2226,6 +2510,18 @@ impl GatewayConversationEngine {
         }
         persist_gateway_state(&kernel, self.state_file.as_deref())?;
         drop(kernel);
+        // A reset is a hard cut: queued messages were admitted against the
+        // context being abandoned, and carrying them would run an old
+        // question against a brand-new conversation. They are dropped and
+        // named — never silently lost; each is still on the old stream's
+        // journal as the inbound message it was.
+        let dropped_queued = {
+            let mut inner = self.inner.lock().expect("conversation engine");
+            inner
+                .queued
+                .remove(&previous.binding_ref)
+                .map_or(0, |queue| queue.len())
+        };
         if let Some(source) = self.source_for(&new_binding) {
             if let Err(error) = source.reset(&new_binding.agent_session_ref) {
                 eprintln!("conversation engine could not open the fresh turn context: {error}");
@@ -2242,10 +2538,19 @@ impl GatewayConversationEngine {
             "stream_ref": new_binding.actuation_stream_ref.to_string(),
             "forked_from": new_binding.forked_from,
             "context_revision": revision,
+            "queued_dropped": dropped_queued,
         });
+        let dropped_note = if dropped_queued > 0 {
+            format!(
+                "; {dropped_queued} queued message(s) dropped with the old context — send \
+                 them again here"
+            )
+        } else {
+            String::new()
+        };
         let line = format!(
             "conversation reset: new session {}; the previous session {} and stream {} are \
-             retained, {fork_note}; context revision {revision}",
+             retained, {fork_note}; context revision {revision}{dropped_note}",
             new_binding.agent_session_ref, old_session, old_stream,
         );
         Ok((
@@ -2502,14 +2807,37 @@ impl GatewayConversationEngine {
         let started_at_unix_ms = crate::gateway_posture::unix_ms_now();
         // The drain takes the in-flight turns out — removing each record is
         // what makes the drain its outcome's owner, so the turn's own worker
-        // stands down and exactly one of the two journals the outcome.
-        let taken: Vec<(ResourceRef, InFlightTurn)> = {
+        // stands down and exactly one of the two journals the outcome. The
+        // queued prompts it takes too: they never started a turn, so nothing
+        // ran for them — they are named in the report, not silently dropped.
+        let (taken, queued_taken) = {
             let mut inner = self.inner.lock().expect("conversation engine");
             inner.draining = true;
-            std::mem::take(&mut inner.in_flight).into_iter().collect()
+            let queued = std::mem::take(&mut inner.queued)
+                .into_iter()
+                .flat_map(|(binding_ref, queue)| {
+                    queue
+                        .into_iter()
+                        .map(move |prompt| (binding_ref.clone(), prompt))
+                })
+                .collect::<Vec<_>>();
+            (
+                std::mem::take(&mut inner.in_flight)
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                queued,
+            )
         };
         let mut turns_resolved = Vec::new();
         let mut turns_interrupted = Vec::new();
+        let mut prompts_not_started = Vec::new();
+        for (binding_ref, prompt) in queued_taken {
+            prompts_not_started.push(DrainedTurn {
+                binding_ref: binding_ref.to_string(),
+                in_reply_to_sequence: prompt.in_reply_to_sequence,
+                detail: Some("queued; the turn never started".into()),
+            });
+        }
         for (binding_ref, in_flight) in taken {
             let (outcome, was_interrupted, detail) = match in_flight.turn.wait_timeout(grace) {
                 Some(outcome) => (outcome, false, None),
@@ -2564,6 +2892,7 @@ impl GatewayConversationEngine {
             grace_ms: grace.as_millis() as u64,
             turns_resolved,
             turns_interrupted,
+            prompts_not_started,
             communiques,
         })
     }
@@ -2574,16 +2903,24 @@ impl GatewayConversationEngine {
         let report = self.drain("conversation restart", None)?;
         let resolved = report.turns_resolved.len();
         let interrupted = report.turns_interrupted.len();
+        let not_started = report.prompts_not_started.len();
         let summary = json!({
             "resolved": resolved,
             "interrupted": interrupted,
+            "prompts_not_started": not_started,
             "turn_grace_ms": report.grace_ms,
         });
+        let queued_note = if not_started > 0 {
+            format!(", {not_started} queued message(s) never started and are named in the report")
+        } else {
+            String::new()
+        };
         Ok((
             json!({"restarting": true, "drain": summary}),
             Some(format!(
-                "restarting: {resolved} turn(s) resolved, {interrupted} interrupted; the state \
-                 snapshot is persisted and the service manager will rematerialise the gateway"
+                "restarting: {resolved} turn(s) resolved, {interrupted} \
+                 interrupted{queued_note}; the state snapshot is persisted and the service \
+                 manager will rematerialise the gateway"
             )),
             None,
             true,
