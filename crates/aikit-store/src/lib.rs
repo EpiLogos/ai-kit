@@ -64,6 +64,7 @@ pub mod inbox;
 pub mod index;
 pub mod knowledge_application;
 pub mod knowledge_cache;
+pub mod knowledge_coverage;
 pub mod knowledge_wiki;
 pub mod locks;
 pub mod model_catalogue;
@@ -116,6 +117,10 @@ pub use index::{CapsuleFilter, CapsuleRow, Facets, Index, ProjectActivityEvidenc
 pub use knowledge_application::{
     KnowledgeApplicationReceipt, KnowledgeApplicationStore, KnowledgeHistoryOperation,
     KNOWLEDGE_APPLICATION_STORE_VERSION,
+};
+pub use knowledge_coverage::{
+    CoverageExtent, CoverageKind, CoverageReading, CoverageRow, KnowledgeCoverageStore,
+    KNOWLEDGE_COVERAGE_STORE_VERSION,
 };
 pub use knowledge_wiki::SqliteWikiProvider;
 pub use locks::{ContextLock, LockOptions};

@@ -22,8 +22,11 @@ jobs:
     timeout-minutes: 30
     env:
       ACTUATION_SHA: 4af495f6509bb0dd779112a225d71a9df8145b6e
-      CENTRAL_SHA: 5d1b8bf6692f9aca45b2fe39db54cbc378dda70e
-      WORKCELL_SHA: c6a55af47a6616e98203e6e946a1f70e6804de82
+      CENTRAL_SHA: 2a604574774c41921003ed99a2eed73b4c9f4266
+      # The placement conformance drives workcell-write-boundary inspect/exec:
+      # this pin carries the protected-placement basis in protected_objects and
+      # the covered-file hardlink/parent-identity fences those tests assert.
+      WORKCELL_SHA: 7bcedadca6ee3541fb369092f8622353993453bf
     steps:
       - uses: actions/checkout@v4
         with:
@@ -75,13 +78,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: EpiLogos/Central
-          ref: 5d1b8bf6692f9aca45b2fe39db54cbc378dda70e
+          # The placement conformance reads the owner's World through the real
+          # ctrl: this pin carries central.now.list and the world declaration
+          # surface those tests drive.
+          ref: 2a604574774c41921003ed99a2eed73b4c9f4266
           path: .caw-native/Central
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
           repository: EpiLogos/Workcell
-          ref: c6a55af47a6616e98203e6e946a1f70e6804de82
+          # Paired with WORKCELL_SHA above: the material write-boundary owner
+          # the placement conformance reads through the real binary.
+          ref: 7bcedadca6ee3541fb369092f8622353993453bf
           path: .caw-native/Workcell
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2.9.2
@@ -152,8 +160,20 @@ jobs:
           cargo test --locked -p aikit-adapters --test caw_native_placement -- --ignored --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/placement.log"
       - name: Actual task-bound resident protocol and dispatch
         shell: bash
+        env:
+          # The task runtime allocates its per-run native evidence directories
+          # under an explicitly provided absolute root; the tests refuse to
+          # invent one. The npm leg names the actual installed executable.
+          AIKIT_CAW_NATIVE_NPM_EVIDENCE_DIR: ${{ runner.temp }}/caw-npm-evidence
         run: |
           set -euo pipefail
+          AIKIT_CAW_NPM_BIN="$(command -v npm)"
+          test -x "$AIKIT_CAW_NPM_BIN"
+          export AIKIT_CAW_NPM_BIN
+          AIKIT_CAW_NPX_BIN="$(command -v npx)"
+          test -x "$AIKIT_CAW_NPX_BIN"
+          export AIKIT_CAW_NPX_BIN
+          mkdir -p "$AIKIT_CAW_NATIVE_NPM_EVIDENCE_DIR"
           cargo test --locked -p aikit-cli --test caw_task_dispatch -- --ignored --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
           grep -q TASK_NATIVE_PROTECTED_DISPATCH_EXECUTED "$RUNNER_TEMP/caw-evidence/task-dispatch.log"
           grep -q TASK_NATIVE_PERSISTENT_STORAGE_EXECUTED "$RUNNER_TEMP/caw-evidence/task-dispatch.log"

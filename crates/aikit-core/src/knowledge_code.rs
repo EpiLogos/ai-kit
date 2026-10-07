@@ -134,4 +134,4 @@ pub trait CodeIndexProvider {
 }
 
 /// Current upstream GitNexus CLI contract explicitly accepted by AIKit.
-pub const GITNEXUS_TESTED_VERSION: &str = "1.6.9";
+pub const GITNEXUS_TESTED_VERSION: &str = "1.6.12";

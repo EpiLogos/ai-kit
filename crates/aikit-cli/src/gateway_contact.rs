@@ -21,14 +21,11 @@
 //!   is `held` for its next occupant; an occupant on another Workcell is
 //!   relayed through the gateway's authenticated WebSocket carrier, and a
 //!   remote that is down leaves the record queued for the next relay pass.
-//! - **Agency identity is addressable by default** (the V0 reconciliation).
-//!   `who`, `send` and `/ask` resolve the recipient as agency identity first:
-//!   every registered agent profile (`agent-profile.list`, the registry the
-//!   minted Positions' `eligible_agent_refs` point into) answers at its
-//!   identity, joined with the Position that names it when one exists —
-//!   occupancy then routes exactly as for any Position. A profile with no
-//!   Position is **not currently embodied**, never nonexistent: the Communique
-//!   is recorded held for the agency, at the agency's identity. A handle with
+//! - **A Profile's Agent address remains addressable.** Central's source
+//!   relation names an AgentRef; it is neither an Agent registry nor an Agency
+//!   admission. A naming Position retains its ordinary occupancy route. With
+//!   no naming Position, mail is held at the same Agent address, without
+//!   inventing an Agency or claiming semantic identity or embodiment. A handle with
 //!   neither profile nor Position is refused as unknown, naming the listing
 //!   remedy. Position stays what it is: the occupancy projection — tenure,
 //!   succession, attribution verification.
@@ -57,10 +54,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use aikit_adapters::{
-    Communique, CommuniqueDraft, CommuniqueForward, CommuniqueForwardOutcome, CommuniqueInstance,
-    CommuniqueInstanceHold, CommuniqueRouting, CommuniqueState, GatewayAskRequest, GatewayAskRoute,
-    GatewayCarrierTarget, GatewayCommand, GatewayResponse, SenderAttribution,
-    COMMUNIQUE_REF_PREFIX, GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE,
+    gateway_command_within, Communique, CommuniqueDraft, CommuniqueForward,
+    CommuniqueForwardOutcome, CommuniqueInstance, CommuniqueInstanceHold, CommuniqueRouting,
+    CommuniqueState, GatewayAskRequest, GatewayAskRoute, GatewayCarrierTarget, GatewayCommand,
+    GatewayResponse, ListenerClass, SenderAttribution, COMMUNIQUE_REF_PREFIX,
+    GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE, GATEWAY_PROTOCOL_FEATURES,
 };
 use aikit_core::{AikitError, Result};
 use aikit_store::AikitHome;
@@ -325,6 +323,59 @@ fn store_remotes(home: &AikitHome, remotes: &GatewayRemotes) -> Result<()> {
     std::fs::rename(&tmp, &path).map_err(write)
 }
 
+/// Ask a not-yet-declared remote what it is, before this machine records it:
+/// reachability, protocol features, and the listener class its bind implies.
+/// The retired protocol carried a build identity that could name the remote's
+/// Workcell; today the probe answers what the wire answers, no more.
+fn probe_remote(remote: &GatewayRemote) -> Value {
+    let token =
+        SecretLocation::parse(&remote.token_location).and_then(|location| location.resolve());
+    let mut reading = json!({
+        "workcell_ref": remote.workcell_ref,
+        "endpoint": remote.websocket_bind,
+        "listener_class": ListenerClass::classify_bind(&remote.websocket_bind),
+    });
+    let token = match token {
+        Ok(token) => token,
+        Err(error) => {
+            reading["reachable"] = json!(false);
+            reading["detail"] = json!(format!("its token could not be read: {error}"));
+            return reading;
+        }
+    };
+    let target = GatewayCarrierTarget::WebSocket {
+        bind: remote.websocket_bind.clone(),
+        path: remote.websocket_path.clone(),
+        bearer_token: token.expose().to_owned(),
+    };
+    match gateway_command_within(
+        &target,
+        GatewayCommand::Protocol,
+        None,
+        Duration::from_secs(3),
+    ) {
+        Ok(GatewayResponse::Protocol { features, .. }) => {
+            let missing: Vec<&str> = GATEWAY_PROTOCOL_FEATURES
+                .iter()
+                .copied()
+                .filter(|wanted| !features.iter().any(|f| f == wanted))
+                .collect();
+            reading["reachable"] = json!(true);
+            reading["features"] = json!(features);
+            reading["missing_features"] = json!(missing);
+        }
+        Ok(_) => {
+            reading["reachable"] = json!(false);
+            reading["detail"] = json!("it answered, but not with a protocol reading");
+        }
+        Err(error) => {
+            reading["reachable"] = json!(false);
+            reading["detail"] = json!(error.to_string());
+        }
+    }
+    reading
+}
+
 pub fn remote_add(
     home: &AikitHome,
     workcell_ref: &str,
@@ -378,7 +429,7 @@ pub fn remote_add_probed(
                 websocket_path: websocket_path.into(),
                 token_location: location.render(),
             };
-            let reading = crate::gateway_upgrade_system::probe_remote(&candidate);
+            let reading = probe_remote(&candidate);
             if let Some(answers) = reading["answers_as_workcell"].as_str() {
                 if answers != workcell_ref {
                     return Err(three_part(
@@ -899,20 +950,29 @@ pub fn resolve_sender(
     }
 }
 
-/// The recipient as the contact plane addresses it: a Position (the occupancy
-/// projection) or — with no Position naming it — a registered agent profile,
-/// held at the agency's own identity.
+/// The native kind of the address, independent of source acceptance or admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecipientIdentityKind {
+    Position,
+    Agent,
+}
+
+/// A Position route or a source-named Agent address. Neither is an Agency grant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Recipient {
+    /// Retained address spelling for existing journal and conversation consumers.
+    /// For Agent mail this legacy field contains the AgentRef, not a Position.
     pub position_ref: String,
+    pub identity_kind: RecipientIdentityKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handle: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub source: String,
-    /// The agency identity (`agent/<slug>`) when the recipient is a registered
-    /// agent profile with no Position: the record's address and the body its
-    /// mail holds for. `None` for Position-resolved recipients.
+    /// Reserved for an actual native Agency reference. A Profile never supplies it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agency_ref: Option<String>,
 }
@@ -931,7 +991,7 @@ fn profile_entries(listing: &Value) -> impl Iterator<Item = &Value> {
 }
 
 /// The Positions (present and inherited) whose `eligible_agent_refs` name
-/// `agent_ref` — the occupancy seats the agency may be embodied in.
+/// `agent_ref` — source eligibility, distinct from a current tenure.
 fn positions_naming<'a>(position_listing: &'a Value, agent_ref: &str) -> Vec<&'a Value> {
     ["positions", "inherited"]
         .iter()
@@ -958,10 +1018,10 @@ fn positions_naming<'a>(position_listing: &'a Value, agent_ref: &str) -> Vec<&'a
 /// Join one matched profile with the Position that names it. Exactly one
 /// naming Position resolves the recipient to that Position — occupancy then
 /// routes exactly as for any directly-addressed Position. No naming Position
-/// resolves to the agency's own identity: not currently embodied, never
-/// nonexistent — the Communique holds for the agency. Several naming
+/// resolves to the source's Agent address; mail stays held without asserting
+/// native identity admission or embodiment. Several naming
 /// Positions are refused: the gateway does not choose between two addresses.
-fn resolve_agency(
+fn resolve_profile_agent(
     position_listing: &Value,
     profile: &Value,
     agent_ref: &str,
@@ -970,6 +1030,8 @@ fn resolve_agency(
     let eligible = positions_naming(position_listing, agent_ref);
     match eligible.as_slice() {
         [record] => Ok(Recipient {
+            identity_kind: RecipientIdentityKind::Position,
+            agent_ref: Some(agent_ref.to_owned()),
             position_ref: record
                 .get("ref")
                 .and_then(Value::as_str)
@@ -984,6 +1046,8 @@ fn resolve_agency(
             agency_ref: None,
         }),
         [] => Ok(Recipient {
+            identity_kind: RecipientIdentityKind::Agent,
+            agent_ref: Some(agent_ref.to_owned()),
             position_ref: agent_ref.to_owned(),
             handle,
             label: profile
@@ -991,7 +1055,7 @@ fn resolve_agency(
                 .and_then(Value::as_str)
                 .map(str::to_owned),
             source: "agent-profile.list".into(),
-            agency_ref: Some(agent_ref.to_owned()),
+            agency_ref: None,
         }),
         _ => Err(three_part(
             "gateway.ambiguous_position",
@@ -1042,6 +1106,8 @@ pub fn resolve_recipient(
             .collect();
         return match matches.as_slice() {
             [record] => Ok(Recipient {
+                identity_kind: RecipientIdentityKind::Position,
+                agent_ref: None,
                 position_ref: record
                     .get("ref")
                     .and_then(Value::as_str)
@@ -1055,8 +1121,8 @@ pub fn resolve_recipient(
                 source: "central.position.list".into(),
                 agency_ref: None,
             }),
-            // No Position carries this handle: the agency the system already
-            // names may still be addressable through its registered profile.
+            // No Position carries this handle: a source-named Agent address
+            // may still be addressable through its Profile relation.
             [] => {
                 let profiles = owners.agent_profiles().map_err(|unavailable| {
                     owner_unavailable_refusal("Central could not list agent profiles", &unavailable)
@@ -1073,7 +1139,7 @@ pub fn resolve_recipient(
                     .collect();
                 match matches.as_slice() {
                     [(profile, agent_ref)] => {
-                        resolve_agency(&listing, profile, agent_ref, Some(wanted))
+                        resolve_profile_agent(&listing, profile, agent_ref, Some(wanted))
                     }
                     [] => Err(three_part(
                         "gateway.unknown_position",
@@ -1091,7 +1157,7 @@ pub fn resolve_recipient(
                         "gateway.ambiguous_recipient",
                         format!("{} agent profiles answer to {wanted}.", matches.len()),
                         nothing_sent(),
-                        "List the registered agencies with `aikit gateway who --json`.",
+                        "List the source-named Agent addresses with `aikit gateway who --json`.",
                     )),
                 }
             }
@@ -1104,8 +1170,8 @@ pub fn resolve_recipient(
         };
     }
     if !to.starts_with("central:position:") {
-        // An agent identity (`agent/<slug>`, the registry's own spelling) is
-        // a recipient when the registry names it.
+        // A Profile source's exact AgentRef is an address. Resolving contact
+        // neither registers a semantic Agent nor grants Agency admission.
         let profiles = owners.agent_profiles().map_err(|unavailable| {
             owner_unavailable_refusal("Central could not list agent profiles", &unavailable)
         })?;
@@ -1124,22 +1190,22 @@ pub fn resolve_recipient(
                 let listing = owners.position_list(None).map_err(|unavailable| {
                     owner_unavailable_refusal("Central could not list Positions", &unavailable)
                 })?;
-                resolve_agency(&listing, profile, agent_ref, None)
+                resolve_profile_agent(&listing, profile, agent_ref, None)
             }
             [] => Err(three_part(
                 "gateway.invalid_recipient",
                 format!(
                     "{to:?} is neither a Position ref (central:position:<world>:<slug>), a \
-                     registered agent ref (agent/<slug>), nor an @handle."
+                     source-named Agent ref, nor an @handle."
                 ),
                 nothing_sent(),
-                "List the Positions and the registered agencies with `aikit gateway who --json`.",
+                "List the Positions and source-named Agent addresses with `aikit gateway who --json`.",
             )),
             _ => Err(three_part(
                 "gateway.ambiguous_recipient",
                 format!("{} agent profiles answer to {to}.", matches.len()),
                 nothing_sent(),
-                "List the registered agencies with `aikit gateway who --json`.",
+                "List the source-named Agent addresses with `aikit gateway who --json`.",
             )),
         };
     }
@@ -1149,6 +1215,8 @@ pub fn resolve_recipient(
         PositionLookup::Found(value) => {
             let record = position_record(&value);
             Ok(Recipient {
+                identity_kind: RecipientIdentityKind::Position,
+                agent_ref: None,
                 position_ref: record
                     .get("ref")
                     .and_then(Value::as_str)
@@ -1572,32 +1640,26 @@ pub(crate) fn route_to_occupancy(
     })
 }
 
-/// The recipient is a registered agent profile with no Position naming it:
-/// no Workcell embodies the agency, so there is no occupancy to read and no
-/// relay to survey. The record holds for the agency itself, at its identity —
-/// the existing held law, minus the false "does not exist" refusal.
-pub(crate) fn held_for_agency(recipient: &Recipient) -> OccupancyRouting {
-    let agency_ref = recipient
-        .agency_ref
-        .clone()
-        .unwrap_or_else(|| recipient.position_ref.clone());
+/// Keep mail at the Profile's Agent address without inferring Agency or admission.
+/// The legacy journal address is unchanged, so older held mail stays recoverable.
+pub(crate) fn held_for_agent(recipient: &Recipient) -> OccupancyRouting {
+    let agent_ref = &recipient.position_ref;
     OccupancyRouting {
         state: CommuniqueState::Held,
         state_basis: format!(
-            "{agency_ref} is a registered agent profile with no Position — not currently \
-             embodied; held for the agency"
+            "{agent_ref} is named by a Central AgentProfile with no Position; \
+             held for the Agent address; native identity and Agency admission are not established by that source"
         ),
         occupant_workcell: None,
         delivery_notice: Some(json!({
             "fact": format!(
-                "{agency_ref} is a registered agent profile and no Position names it: the \
-                 agency is not currently embodied, and there is no occupancy to read."
+                "A Central AgentProfile names {agent_ref} and no Position names it; \
+                 that source supplies no native Agency or occupancy proof."
             ),
-            "consequence": "The Communique is recorded held in this gateway's journal at the agency's identity; nothing has been delivered yet.",
+            "consequence": "The Communique is held at the same Agent address in this gateway's journal; nothing has been delivered and no admission is granted.",
             "action": format!(
-                "It stays held for the agency; follow it with `aikit gateway conversation \
-                 --with {agency_ref}`, and `aikit gateway who --json` shows its embodiment \
-                 state."
+                "Follow the held Agent mail with `aikit gateway conversation --with {agent_ref}`; \
+                 `aikit gateway who --json` reads the separate source and occupancy relations."
             ),
         })),
         remote: None,
@@ -1660,12 +1722,12 @@ pub fn send(
                 "Read the current instance with `aikit gateway who --json` (occupancy.generation_ref, occupancy.workcell_ref).",
             ));
         }
-        if recipient.agency_ref.is_some() {
+        if recipient.identity_kind == RecipientIdentityKind::Agent {
             return Err(three_part(
                 "gateway.instance_without_position",
-                "An exact-instance route binds a Position's occupancy generation, and the recipient resolves to an agency with no Position.",
+                "An exact-instance route binds a Position's occupancy generation, and the recipient resolves to a source-named Agent address with no Position.",
                 nothing_sent(),
-                "Send a durable route (omit --instance); it holds for the agency.",
+                "Send a durable route (omit --instance); it holds at the Agent address without granting Agency admission.",
             ));
         }
         let declared = load_remotes(home)?;
@@ -1780,9 +1842,11 @@ pub fn send(
         remote,
         routing,
         remotes_asked,
-    } = match &recipient.agency_ref {
-        Some(_) => held_for_agency(&recipient),
-        None => route_to_occupancy(home, owners, local_workcell.as_deref(), &recipient)?,
+    } = match recipient.identity_kind {
+        RecipientIdentityKind::Agent => held_for_agent(&recipient),
+        RecipientIdentityKind::Position => {
+            route_to_occupancy(home, owners, local_workcell.as_deref(), &recipient)?
+        }
     };
 
     let draft = CommuniqueDraft {
@@ -2275,9 +2339,11 @@ pub fn route_ask_with_owners(
         remote,
         routing,
         remotes_asked: _,
-    } = match &recipient.agency_ref {
-        Some(_) => held_for_agency(&recipient),
-        None => route_to_occupancy(home, owners, local_workcell.as_deref(), &recipient)?,
+    } = match recipient.identity_kind {
+        RecipientIdentityKind::Agent => held_for_agent(&recipient),
+        RecipientIdentityKind::Position => {
+            route_to_occupancy(home, owners, local_workcell.as_deref(), &recipient)?
+        }
     };
     let attribution_basis = format!(
         "{}; asked from connector conversation {} on {} (binding {}, agent session {}, agency \
@@ -3265,10 +3331,9 @@ pub fn who(
             }
         };
 
-    // Agency identities (Central's agent-profile registry): every registered
-    // profile is addressable by default, and its row says where — if
-    // anywhere — the agency is currently embodied, and which registry the row
-    // came from.
+    // Source-named Agent addresses, not a second Agent/Agency registry.
+    // Semantic admission is not queried here; occupancy must name the exact
+    // Agent before it can supply any observed situated Agency or embodiment.
     let mut agents = Vec::new();
     match owners.agent_profiles() {
         Ok(listing) => {
@@ -3284,8 +3349,21 @@ pub fn who(
                     "label": profile.get("role").cloned().unwrap_or(Value::Null),
                     "purpose": profile.get("purpose").cloned().unwrap_or(Value::Null),
                     "registry": "agent-profile.list",
+                    "source_relation": {
+                        "kind": "agent-profile",
+                        "profile_ref": profile.get("ref"),
+                        "revision": profile.get("revision"),
+                        "intent_provenance": profile.get("intent_provenance"),
+                    },
+                    "semantic_identity": {
+                        "state": "not-attempted",
+                        "source": "Actuation",
+                        "reason": "Central Profile source names an AgentRef; this reading does not query native semantic identity admission.",
+                    },
                     "positions": eligible,
-                    "occupancy": agency_occupancy(
+                    "occupancy": agent_occupancy(
+                        agent_ref,
+                        definitions_available,
                         eligibility.get(agent_ref).map(Vec::as_slice),
                         occupancy.as_ref(),
                         &survey,
@@ -3409,27 +3487,48 @@ pub fn who(
     }))
 }
 
-/// One agency's embodiment, joined from the occupancy its eligible Positions
+/// An Agent's observed embodiment, joined from exact native tenure subject refs.
+/// Eligibility and Profile source alone do not prove a current occupant.
+/// Occupancy at eligible Positions
 /// hold: `embodied-here` when this Workcell's ledger (or the reporting
 /// gateway) places a current occupant here, `embodied-elsewhere` when a
 /// declared Workcell reports one, `not-currently-embodied` when none does —
 /// and `unavailable` when occupancy could not be read at all.
-fn agency_occupancy(
+fn agent_occupancy(
+    agent_ref: &str,
+    definitions_available: bool,
     eligible: Option<&[String]>,
     occupancy: Option<&BTreeMap<String, Value>>,
     survey: &RemoteSurvey,
     local_workcell: Option<&str>,
 ) -> Value {
+    if !definitions_available {
+        return json!({ "state": "unavailable", "reason": "Central Position definitions could not be read; the Agent's eligible Positions are unknown." });
+    }
     let Some(occupancy) = occupancy else {
         return json!({ "state": "unavailable" });
     };
-    // No Position naming the agency is the unembodied case itself, not an
-    // absence: with an empty eligibility the agency is simply nowhere.
     let eligible = eligible.unwrap_or(&[]);
     let mut elsewhere: Vec<Value> = Vec::new();
+    let mut uncertain: Vec<Value> = Vec::new();
     for reference in eligible {
-        if let Some(tenure) = occupancy.get(reference).and_then(current_tenure) {
+        // A Position can name several eligible Agents or change its occupant.
+        // Its current body cannot stand in for another Agent. A different local
+        // subject also cannot suppress an exact matching remote observation.
+        if let Some(tenure) = occupancy
+            .get(reference)
+            .and_then(current_tenure)
+            .filter(|tenure| tenure.get("agent_ref").and_then(Value::as_str) == Some(agent_ref))
+        {
             let workcell = tenure.get("workcell_ref").and_then(Value::as_str);
+            if workcell.is_some() && local_workcell.is_none() {
+                uncertain.push(json!({
+                    "position_ref": reference, "tenure": tenure,
+                    "source": "actuation occupancy list",
+                    "reason": "The tenure names a Workcell, but this Workcell's identity could not be read; local placement is unproven.",
+                }));
+                continue;
+            }
             let embodied_here = match (workcell, local_workcell) {
                 (Some(workcell), Some(local)) => workcell == local,
                 // A tenure naming no Workcell is this ledger's own.
@@ -3440,26 +3539,70 @@ fn agency_occupancy(
                     "state": "embodied-here",
                     "position_ref": reference,
                     "generation_ref": tenure.get("generation_ref"),
+                    "agent_ref": tenure.get("agent_ref"),
+                    "agency_ref": tenure.get("agency_ref"),
                     "workcell_ref": tenure.get("workcell_ref"),
                 });
             }
             elsewhere.push(json!({
                 "position_ref": reference,
                 "generation_ref": tenure.get("generation_ref"),
+                "agent_ref": tenure.get("agent_ref"),
+                "agency_ref": tenure.get("agency_ref"),
                 "workcell_ref": workcell,
             }));
             continue;
         }
-        if let Some(claim) = survey.claims(reference).first() {
+        for claim in survey.claims(reference).into_iter().filter(|claim| {
+            claim.tenure.get("agent_ref").and_then(Value::as_str) == Some(agent_ref)
+        }) {
+            let reported_workcell = survey.answers.iter().find_map(|(remote, outcome)| {
+                if remote.workcell_ref != claim.remote.workcell_ref {
+                    return None;
+                }
+                match outcome {
+                    RemoteOutcome::Answered(reading) => reading.workcell_ref.as_deref(),
+                    _ => None,
+                }
+            });
+            let tenure_workcell = claim.tenure.get("workcell_ref").and_then(Value::as_str);
+            if [reported_workcell, tenure_workcell]
+                .into_iter()
+                .flatten()
+                .any(|observed| observed != claim.remote.workcell_ref)
+            {
+                uncertain.push(json!({
+                    "position_ref": reference, "tenure": claim.tenure,
+                    "declared_workcell_ref": claim.remote.workcell_ref,
+                    "reported_workcell_ref": reported_workcell,
+                    "gateway_ref": claim.gateway_ref,
+                    "reason": "The observed remote Workcell does not match the declared endpoint; placement is unproven.",
+                }));
+                continue;
+            }
             elsewhere.push(json!({
                 "position_ref": reference,
                 "generation_ref": claim.generation_ref,
+                "agent_ref": claim.tenure.get("agent_ref"),
+                "agency_ref": claim.tenure.get("agency_ref"),
                 "workcell_ref": claim.remote.workcell_ref,
             }));
         }
     }
+    if !uncertain.is_empty() {
+        return json!({ "state": "unavailable", "positions": eligible,
+            "observed_tenures": uncertain, "observed_elsewhere": elsewhere,
+            "reason": "Exact Agent tenures were observed, but their physical placement could not be qualified." });
+    }
     if elsewhere.is_empty() {
-        json!({ "state": "not-currently-embodied", "positions": eligible })
+        let unanswered = survey.unanswered();
+        if !eligible.is_empty() && !unanswered.is_empty() {
+            return json!({ "state": "unavailable", "positions": eligible,
+                "unanswered_remotes": unanswered,
+                "reason": "No exact Agent tenure was observed, but declared remote occupancy could not be read; absence is unproven." });
+        }
+        json!({ "state": "not-currently-embodied", "positions": eligible,
+            "reason": "No observed current tenure at the eligible Positions names this exact AgentRef; Profile source is not native identity or Agency admission." })
     } else {
         json!({ "state": "embodied-elsewhere", "via": elsewhere })
     }
@@ -3557,11 +3700,9 @@ impl aikit_adapters::GatewayTick for GatewayServiceTick {
     fn tick(&self) -> Result<Value> {
         let dispatcher = self.dispatcher.as_ref().map(|tick| tick.tick());
         let relay = self.relay.run();
-        // An upgrade whose worker died (or whose receipt could not be announced
-        // because this gateway was still coming up) is finished by a fresh
-        // worker. The worker is its own process: this tick only starts it.
-        let upgrade = crate::gateway_upgrade_system::adopt_orphans(&self.relay.home)
-            .map_err(|error| error.to_string());
+        // The upgrade-worker surface is retired with the managed-upgrade lane;
+        // no worker ever resumes here, and the tick keeps naming the slot so
+        // readers of the tick document stay stable.
         match (&dispatcher, &relay) {
             (Some(Err(error)), _) | (None, Err(error)) => Err(AikitError::new(
                 "gateway.service_tick_failed",
@@ -3570,11 +3711,7 @@ impl aikit_adapters::GatewayTick for GatewayServiceTick {
             _ => Ok(json!({
                 "dispatcher": dispatcher.and_then(|result| result.ok()),
                 "relay": relay.unwrap_or_else(|error| json!({ "error": error.to_string() })),
-                "upgrade": match upgrade {
-                    Ok(Some(worker)) => json!({ "resumed_by": worker }),
-                    Ok(None) => Value::Null,
-                    Err(error) => json!({ "error": error }),
-                },
+                "upgrade": Value::Null,
             })),
         }
     }
@@ -3652,7 +3789,6 @@ mod exact_instance_binding_tests {
             connector_wire_version: "x".into(),
             actuation_stream_schema: "x".into(),
             features: features.iter().map(|f| (*f).to_owned()).collect(),
-            build: None,
         }
     }
 
@@ -3708,8 +3844,6 @@ mod exact_instance_binding_tests {
                         pending_delivery_count: 0,
                         delivery_receipt_count: 0,
                         connector_health: Vec::new(),
-                        build: None,
-                        listeners: Vec::new(),
                     },
                 }),
                 GatewayCommand::SendCommunique { draft } => {

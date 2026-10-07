@@ -1,0 +1,146 @@
+#!/bin/sh
+# Seat guard — the floor's seat law, enforced at commit time.
+#
+# The law (Control/agents/governance/world/shape-of-the-world.md):
+#   workcells are the persistent shared tracks named in the machine's
+#   register (Control/machines/workcells.register.json); a project's
+#   primary checkout (Work/<Name>) stands on main; lanes join registered
+#   seats (`seat join`) and release them when they land. Owner ruling
+#   2026-09-29: this machine works in three env trees (env-1, env-2,
+#   env-3) — no per-lane worktrees, anywhere. Legacy registered lanes may
+#   commit until they land and retire; nothing new is admitted.
+#
+# OFF switch (easy, reversible):
+#   git config --global central.seatguard off     # everywhere
+#   git config central.seatguard off              # this repo only
+# Turn back on:
+#   git config --global --unset central.seatguard
+# Installed by Control/user/seat-guard/on — see ../status.
+
+[ "$(git config --get central.seatguard)" = "off" ] && exit 0
+[ "$(git config --global --get central.seatguard)" = "off" ] && exit 0
+
+# Ground root = three levels up from this script (<root>/Control/user/seat-guard).
+SELF_DIR=$(cd "$(dirname "$0")" && pwd) || exit 0
+ROOT=$(cd "$SELF_DIR/../../../.." && pwd) || exit 0
+
+TOP=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null)
+
+case "$TOP" in
+  "$ROOT"/Work/*)
+    rest=${TOP#"$ROOT"/Work/}
+    case "$rest" in
+      */*) SEAT=lane ;;   # a nested repository inside a project — its own seat
+      *)   SEAT=primary ;;
+    esac
+    ;;
+  "$ROOT"/worktrees/*)
+    SEAT=lane
+    rest=${TOP#"$ROOT"/worktrees/}
+    LANE=${rest%%/*}
+    ;;
+  *)
+    # Outside the ground: still ours if it is a worktree of a ground repo
+    # (`git worktree add /tmp/...` from Work/<Name> or an env seat).
+    COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+    case "$COMMON" in
+      "$ROOT"/Work/*|"$ROOT"/worktrees/*)
+        echo "seat-guard: $TOP is a stray worktree of $COMMON." >&2
+        echo "  This machine works in three env trees only: worktrees/env-1, env-2, env-3." >&2
+        echo "  Join one: seat join env-N <product> (attach to the standing lane, or --new-lane)." >&2
+        echo "  Commit refused. (Off switch: git config --global central.seatguard off)" >&2
+        exit 1 ;;
+    esac
+    exit 0 ;;             # outside this ground — not our law
+esac
+
+if [ -z "$BRANCH" ]; then
+  echo "seat-guard: detached HEAD in $TOP — name your lane branch before committing (git switch -c <lane>)." >&2
+  exit 1
+fi
+
+if [ "$SEAT" = "primary" ] && [ "$BRANCH" != "main" ]; then
+  echo "seat-guard: $TOP is the project's primary checkout — it stands on main." >&2
+  echo "  The running application and the ground read their world here; it is not a lane's desk." >&2
+  echo "  Lane work joins a registered workcell seat: seat join <workcell> <product> (Control/user/workcell/)." >&2
+  echo "  There are no per-lane worktrees: the seats are env-1, env-2, env-3." >&2
+  echo "  Commit refused. (Off switch: git config --global central.seatguard off)" >&2
+  exit 1
+fi
+
+# A checkout under worktrees/ must BE a registered seat checkout: exactly
+# worktrees/env-N/<product path> (or a legacy registered lane finishing its
+# landing). A second checkout inside an env (env-2/ai-kit-foo) or any
+# unregistered directory is a stray worktree.
+if [ "$SEAT" = "lane" ] && [ -n "$LANE" ]; then
+  if python3 - "$ROOT/Control/machines/workcells.register.json" "$TOP" <<'PY_GUARD'
+import json, os, stat, sys
+
+def unavailable(message):
+    print("seat-guard: cannot qualify registration: " + message, file=sys.stderr)
+    sys.exit(2)
+
+try:
+    descriptor = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            unavailable("register is not a regular file")
+        with os.fdopen(descriptor, encoding="utf-8") as source:
+            descriptor = None  # fdopen owns and closes it even if JSON fails.
+            register = json.load(source)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+except (OSError, UnicodeError, json.JSONDecodeError) as error:
+    unavailable(type(error).__name__ + ": " + str(error))
+
+if not isinstance(register, dict) or register.get("schema") != "central.workcell-register/v1":
+    unavailable("register requires schema central.workcell-register/v1")
+workcells = register.get("workcells")
+if not isinstance(workcells, list):
+    unavailable("register workcells must be an array")
+
+# Validate every authority-bearing row before admitting any matching seat.
+# Claim/state/name fields are not live Git or authority to repurpose a lane.
+seats = []
+for index, workcell in enumerate(workcells):
+    if not isinstance(workcell, dict):
+        unavailable("workcells[%d] must be an object" % index)
+    workcell_path = workcell.get("path")
+    products = workcell.get("products")
+    if not isinstance(workcell_path, str) or not workcell_path.strip():
+        unavailable("workcells[%d].path must be nonempty text" % index)
+    if not isinstance(products, dict):
+        unavailable("workcells[%d].products must be an object" % index)
+    for name, product in products.items():
+        if not isinstance(product, dict):
+            unavailable("workcells[%d].products[%r] must be an object" % (index, name))
+        product_path = product.get("path")
+        if not isinstance(product_path, str) or not product_path.strip():
+            unavailable("workcells[%d].products[%r].path must be nonempty text" % (index, name))
+        seats.append(os.path.join(workcell_path, product_path))
+try:
+    top = os.path.realpath(sys.argv[2])
+    observed_seats = [os.path.realpath(seat) for seat in seats]
+except (OSError, ValueError) as error:
+    unavailable(type(error).__name__ + ": " + str(error))
+sys.exit(0 if top in observed_seats else 1)
+PY_GUARD
+  then
+    :
+  else
+    admission_status=$?
+    if [ "$admission_status" = "1" ]; then
+      echo "seat-guard: $TOP is not a registered seat checkout." >&2
+    else
+      echo "seat-guard: registration is unavailable or malformed; $TOP has not been qualified." >&2
+    fi
+    echo "  This machine works in three env trees only: worktrees/env-1, env-2, env-3, one checkout per product." >&2
+    echo "  Join one: seat join env-N <product> (attach to the standing lane, or --new-lane)." >&2
+    echo "  Commit refused. (Off switch: git config --global central.seatguard off)" >&2
+    exit 1
+  fi
+fi
+
+exit 0

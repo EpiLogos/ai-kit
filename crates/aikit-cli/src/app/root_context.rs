@@ -20,26 +20,45 @@ pub(super) fn discover<F>(
     cwd: &Path,
     env: &F,
     discovered: Option<DiscoveredProject>,
-) -> Result<(Option<DiscoveredProject>, Option<PathBuf>)>
+) -> Result<(Option<DiscoveredProject>, Option<PathBuf>, Option<PathBuf>)>
 where
     F: Fn(&str) -> Option<String>,
 {
     let explicit = env("CENTRAL_ROOT").filter(|s| !s.is_empty());
-    let candidate = explicit.as_ref().map(PathBuf::from).or_else(|| {
+    // Capture the configured locator once. Environment-relative paths keep
+    // their process-invocation interpretation; selected -C never changes cwd.
+    let configured = explicit
+        .as_ref()
+        .map(|value| {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                Ok(path)
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(&path))
+                    .map_err(|error| invalid_io(&path, error))
+            }
+        })
+        .transpose()?;
+    let candidate = configured.clone().or_else(|| {
         env("HOME")
             .or_else(|| env("USERPROFILE"))
             .filter(|s| !s.is_empty())
             .map(|home| PathBuf::from(home).join("Central"))
     });
     let Some(candidate) = candidate else {
-        return Ok((discovered, None));
+        return Ok((discovered, None, configured));
     };
-    let Ok(root) = candidate.canonicalize() else {
-        return Ok((discovered, None));
+    let root = match candidate.canonicalize() {
+        Ok(root) => root,
+        Err(error) if configured.is_none() && error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((discovered, None, configured));
+        }
+        Err(error) => return Err(invalid_io(&candidate, error)),
     };
-    let current = cwd.canonicalize().map_err(|e| invalid(e.to_string()))?;
+    let current = cwd.canonicalize().map_err(|error| invalid_io(cwd, error))?;
     if !current.starts_with(&root) {
-        return Ok((discovered, None));
+        return Ok((discovered, None, configured));
     }
 
     // Discovery can arrive through an alias while Central's root is canonical.
@@ -64,7 +83,7 @@ where
         || current.starts_with(root.join("Control"));
     if at_root {
         if explicit.is_none() && !root.join("Control").exists() && !root.join("Work").exists() {
-            return Ok((discovered, None));
+            return Ok((discovered, None, configured));
         }
         // Reuse the published filesystem relation; absence of a Profile is not
         // absence of this World. Source readability is checked by its owner later.
@@ -85,6 +104,7 @@ where
                     .unwrap_or_default(),
             }),
             Some(root),
+            configured,
         ));
     }
 
@@ -101,7 +121,7 @@ where
                         .as_ref()
                         .is_some_and(|p| p.root.starts_with(&child))
                     {
-                        return Ok((discovered, None));
+                        return Ok((discovered, None, configured));
                     }
                     let chain = scope_chain(&child, discovered.as_ref());
                     return Ok((
@@ -112,6 +132,7 @@ where
                             skill_sets: Vec::new(),
                         }),
                         None,
+                        configured,
                     ));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -129,9 +150,9 @@ where
         .as_ref()
         .is_some_and(|project| project.root == root)
     {
-        return Ok((discovered, Some(root)));
+        return Ok((discovered, Some(root), configured));
     }
-    Ok((discovered, None))
+    Ok((discovered, None, configured))
 }
 
 fn scope_chain(root: &Path, discovered: Option<&DiscoveredProject>) -> Vec<ProjectLayer> {
@@ -155,12 +176,16 @@ fn scope_chain(root: &Path, discovered: Option<&DiscoveredProject>) -> Vec<Proje
 /// Revalidate location before returning a binding. A removed/redirected root is
 /// not converted to an ungrounded successful context. No source body is read.
 pub(super) fn binding(root: &Path) -> Result<ProjectBinding> {
-    if root.canonicalize().map_err(|e| invalid(e.to_string()))? != root {
+    if root
+        .canonicalize()
+        .map_err(|error| invalid_io(root, error))?
+        != root
+    {
         return Err(invalid("Central root changed location"));
     }
     for member in ["Control", "Work"] {
         let metadata = std::fs::symlink_metadata(root.join(member))
-            .map_err(|e| invalid(format!("Central {member} is unavailable: {e}")))?;
+            .map_err(|error| invalid_io(&root.join(member), error))?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             return Err(invalid(format!(
                 "Central {member} must be a native directory"
@@ -177,6 +202,13 @@ pub(super) fn binding(root: &Path) -> Result<ProjectBinding> {
     binding.provider = Some(ProviderRef::parse("central")?);
     binding.source = Some(SourceRef::parse("central:source:control:root:Control")?);
     Ok(binding)
+}
+
+fn invalid_io(path: &Path, error: std::io::Error) -> AikitError {
+    invalid(format!("{} is unavailable: {error}", path.display()))
+        .with("path", path.display().to_string())
+        .with("observation_stage", "owner_root")
+        .with_io_source(error)
 }
 
 fn invalid(message: impl Into<String>) -> AikitError {
@@ -201,7 +233,7 @@ mod tests {
             std::fs::create_dir_all(path).unwrap();
         }
         let discovered = crate::discover::discover_project(&checkout).unwrap();
-        let (project, meta_root) = discover(
+        let (project, meta_root, configured) = discover(
             &checkout,
             &|key| (key == "CENTRAL_ROOT").then(|| root.display().to_string()),
             Some(discovered),
@@ -209,6 +241,10 @@ mod tests {
         .unwrap();
         let canonical = root.canonicalize().unwrap();
         assert_eq!(meta_root.as_ref(), Some(&canonical));
+        assert!(
+            configured.is_some(),
+            "actual explicit root locator remains retained"
+        );
         let project = project.unwrap();
         assert_eq!(project.root, canonical);
         assert_eq!(project.chain.len(), 2);
@@ -233,7 +269,7 @@ mod tests {
         let mut existing = crate::discover::discover_project(&cwd).unwrap();
         existing.specification = Some("root-spec".into());
         existing.skill_sets = vec!["root-skills".into()];
-        let (project, meta_root) = discover(
+        let (project, meta_root, configured) = discover(
             &cwd,
             &|key| (key == "CENTRAL_ROOT").then(|| alias.display().to_string()),
             Some(existing),
@@ -242,6 +278,10 @@ mod tests {
         let project = project.unwrap();
         let canonical = root.canonicalize().unwrap();
         assert_eq!(meta_root.as_ref(), Some(&canonical));
+        assert!(
+            configured.is_some(),
+            "actual explicit root locator remains retained"
+        );
         assert_eq!(project.root, canonical);
         assert_eq!(project.specification.as_deref(), Some("root-spec"));
         assert_eq!(project.skill_sets, vec!["root-skills"]);

@@ -80,6 +80,8 @@ impl SecretRequirement {
 pub enum SecretProviderTier {
     OsSecureStore,
     BrokeredSecureProvider,
+    /// Explicitly declared existing harness auth file; never an OS-secure store.
+    NamedHarnessAuthStore,
     ExplicitEncryptedFallback,
     FederatedOrDynamic,
     ExplicitEnvironmentImport,
@@ -326,6 +328,41 @@ impl fmt::Debug for SecretValue {
     }
 }
 
+/// One supported original harness auth origin. This is not a generic file resolver.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessAuthProvider {
+    PiZai,
+}
+
+/// Public object basis only. No bytes or secret-derived digest may enter this record.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessAuthSourceObject {
+    pub device: u64,
+    pub inode: u64,
+    pub byte_len: u64,
+    pub modified_seconds: i64,
+    pub modified_nanoseconds: i64,
+    pub changed_seconds: i64,
+    pub changed_nanoseconds: i64,
+    pub owner: u32,
+    pub mode: u32,
+}
+
+/// A typed declaration of the native Pi origin and the one authorized consumer.
+/// Adapters derive and revalidate source_path; no caller-provided path selector exists.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessAuthSource {
+    pub provider: HarnessAuthProvider,
+    pub native_home: std::path::PathBuf,
+    pub source_path: std::path::PathBuf,
+    pub object: HarnessAuthSourceObject,
+    pub consumer_ref: String,
+    pub purpose: String,
+}
+
 /// Safe binding state. Rotation/replacement changes provider state while `CredentialRef` stays stable.
 /// This is intentionally descriptive metadata only; secret material is never a field of this type.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -346,6 +383,9 @@ pub struct CredentialBindingState {
     /// the setup seam, mirroring the `--from-env` law.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declared_secret_ref: Option<crate::secret_ref::SecretRef>,
+    /// Named existing harness backing. Mutually exclusive with declared_secret_ref.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_auth_source: Option<HarnessAuthSource>,
     /// Unix seconds when this credential was first bound. Absent for records
     /// that predate lifecycle tracking; never backfilled by inference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -363,6 +403,13 @@ pub struct CredentialBindingState {
     pub last_verified_at_unix_seconds: Option<u64>,
 }
 impl CredentialBindingState {
+    /// A retained named harness binding belongs to one actual session. It
+    /// cannot supply a global credential fact or be replaced by plain setup.
+    pub fn is_session_scoped_harness_binding(&self) -> bool {
+        self.harness_auth_source.is_some()
+            || self.provider_tier == SecretProviderTier::NamedHarnessAuthStore
+    }
+
     /// Stamp the lifecycle facts a binding flow owns onto a freshly produced
     /// provider state. The first bind sets `bound_at`; a rotation preserves
     /// the original `bound_at` and marks `last_rotated_at`. The credential
@@ -599,6 +646,7 @@ mod tests {
             expires_at: None,
             revoked: false,
             metadata: BTreeMap::new(),
+            harness_auth_source: None,
             declared_secret_ref: None,
             bound_at_unix_seconds: None,
             last_rotated_at_unix_seconds: None,
@@ -628,6 +676,7 @@ mod tests {
             expires_at: None,
             revoked: false,
             metadata: BTreeMap::new(),
+            harness_auth_source: None,
             declared_secret_ref: None,
             bound_at_unix_seconds: None,
             last_rotated_at_unix_seconds: None,
@@ -643,6 +692,7 @@ mod tests {
             expires_at: None,
             revoked: false,
             metadata: BTreeMap::new(),
+            harness_auth_source: None,
             declared_secret_ref: None,
             bound_at_unix_seconds: None,
             last_rotated_at_unix_seconds: None,
@@ -666,6 +716,7 @@ mod tests {
             expires_at: None,
             revoked: false,
             metadata: BTreeMap::new(),
+            harness_auth_source: None,
             declared_secret_ref: None,
             bound_at_unix_seconds: None,
             last_rotated_at_unix_seconds: None,

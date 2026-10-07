@@ -1297,6 +1297,249 @@ fn stop_interrupts_a_running_turn_and_the_surface_is_told() {
 }
 
 #[test]
+fn a_message_sent_mid_turn_queues_and_answers_at_the_turn_boundary() {
+    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
+    harness.source.script_park();
+
+    harness.admit(fixture_inbound("long running question", "q1"));
+    harness.wait_until(
+        "the first turn registers in flight",
+        Duration::from_secs(30),
+        |harness| {
+            let execution = harness
+                .engine
+                .execute(
+                    harness.binding_ref.clone(),
+                    aikit_adapters::GatewayConversationOperation::Status,
+                )
+                .unwrap();
+            let GatewayResponse::Conversation { result, .. } = execution.response else {
+                return false;
+            };
+            result["turn_in_flight"] == json!(true)
+        },
+    );
+
+    // A message sent while the turn runs is steering, not a second turn: it
+    // queues, the surface is told, and no lane guard is ever tripped.
+    harness.admit(fixture_inbound("actually, change course", "q2"));
+    harness.wait_until(
+        "the mid-turn message is acknowledged as queued",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| text.contains("queued: the agent is mid-turn"))
+        },
+    );
+    let execution = harness
+        .engine
+        .execute(
+            harness.binding_ref.clone(),
+            aikit_adapters::GatewayConversationOperation::Status,
+        )
+        .unwrap();
+    let GatewayResponse::Conversation { result, .. } = execution.response else {
+        panic!("status answers with a conversation response");
+    };
+    assert_eq!(result["queued_prompts"], json!(1), "{result}");
+    assert_eq!(
+        harness.source.prompted_turns(),
+        1,
+        "the queued message did not race the running turn"
+    );
+
+    // The running turn answers; the queued message becomes the next turn,
+    // in order, and its own reply lands on the same conversation.
+    harness.source.respond("first answer");
+    harness.wait_until(
+        "the queued message becomes the second turn",
+        Duration::from_secs(30),
+        |harness| harness.source.prompted_turns() == 2,
+    );
+    harness.source.respond("second answer");
+    harness.wait_until(
+        "both answers arrive in order",
+        Duration::from_secs(30),
+        |harness| {
+            let sends = harness.executed_sends();
+            let first = sends.iter().position(|text| text == "first answer");
+            let second = sends.iter().position(|text| text == "second answer");
+            matches!((first, second), (Some(f), Some(s)) if f < s)
+        },
+    );
+    // No turn ever met the lane's one-turn guard: every prompt started.
+    assert_eq!(harness.source.prompted_turns(), 2);
+}
+
+#[test]
+fn stop_interrupts_the_turn_drops_the_queue_and_the_next_message_starts_fresh() {
+    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
+    harness.source.script_park();
+
+    harness.admit(fixture_inbound("long running question", "s1"));
+    harness.wait_until(
+        "the turn registers in flight",
+        Duration::from_secs(30),
+        |harness| {
+            let execution = harness
+                .engine
+                .execute(
+                    harness.binding_ref.clone(),
+                    aikit_adapters::GatewayConversationOperation::Status,
+                )
+                .unwrap();
+            let GatewayResponse::Conversation { result, .. } = execution.response else {
+                return false;
+            };
+            result["turn_in_flight"] == json!(true)
+        },
+    );
+    harness.admit(fixture_inbound("queued while thinking", "s2"));
+    harness.wait_until(
+        "the second message queues behind the turn",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| text.contains("queued: the agent is mid-turn"))
+        },
+    );
+
+    // The stop interrupts the turn AND drops the queue: whatever the
+    // conversation says next starts fresh, not behind the dropped messages.
+    let execution = harness
+        .engine
+        .execute(
+            harness.binding_ref.clone(),
+            aikit_adapters::GatewayConversationOperation::Stop,
+        )
+        .unwrap();
+    let GatewayResponse::Conversation { result, .. } = execution.response else {
+        panic!("stop answers with a conversation response");
+    };
+    assert_eq!(result["stopped"], json!(true), "{result}");
+    assert_eq!(result["dropped_queued"], json!(1), "{result}");
+
+    // The dropped message never becomes a turn, and the interrupted turn is
+    // recorded. Then the conversation's next message runs as a fresh turn —
+    // the exact flow that used to die on the lane's one-turn guard.
+    harness.wait_until(
+        "the interrupted turn is recorded and the dropped message never runs",
+        Duration::from_secs(30),
+        |harness| harness.stream_events().len() == 2 && harness.source.prompted_turns() == 1,
+    );
+    harness.source.script_reply("fresh answer");
+    harness.admit(fixture_inbound("start over with this", "s3"));
+    harness.wait_until(
+        "the post-stop message runs a fresh turn and answers",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| text.contains("fresh answer"))
+        },
+    );
+    assert_eq!(
+        harness.source.prompted_turns(),
+        2,
+        "exactly one new turn started for the post-stop message"
+    );
+    let events = harness.stream_events();
+    let fresh = events
+        .iter()
+        .find(|event| event["content"] == json!("fresh answer"))
+        .expect("the fresh turn's reply is journalled");
+    assert_eq!(
+        fresh["metadata"]["failure"],
+        Value::Null,
+        "the fresh turn succeeded, it did not inherit the interruption"
+    );
+}
+
+#[test]
+fn a_new_reset_carries_queued_messages_to_the_fresh_context() {
+    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
+    harness.source.script_park();
+    harness.admit(fixture_inbound("long running question", "n1"));
+    harness.wait_until(
+        "the turn registers in flight",
+        Duration::from_secs(30),
+        |harness| {
+            let execution = harness
+                .engine
+                .execute(
+                    harness.binding_ref.clone(),
+                    aikit_adapters::GatewayConversationOperation::Status,
+                )
+                .unwrap();
+            let GatewayResponse::Conversation { result, .. } = execution.response else {
+                return false;
+            };
+            result["turn_in_flight"] == json!(true)
+        },
+    );
+    harness.admit(fixture_inbound("asked while thinking", "n2"));
+    harness.wait_until("the message queues", Duration::from_secs(30), |harness| {
+        harness
+            .executed_sends()
+            .iter()
+            .any(|text| text.contains("queued: the agent is mid-turn"))
+    });
+
+    // /new is a hard cut: the queued message was admitted against the old
+    // context, so it is dropped and named — never silently lost, never run
+    // against the fresh conversation.
+    let execution = harness
+        .engine
+        .execute(
+            harness.binding_ref.clone(),
+            aikit_adapters::GatewayConversationOperation::New,
+        )
+        .unwrap();
+    let GatewayResponse::Conversation { result, .. } = execution.response else {
+        panic!("new answers with a conversation response");
+    };
+    assert_eq!(result["queued_dropped"], json!(1), "{result}");
+    harness.wait_until(
+        "the reset line names the dropped queue",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| text.contains("1 queued message(s) dropped"))
+        },
+    );
+
+    // The dropped message never becomes a turn: the reset's own receipt
+    // names it, and the only turns ever prompted are the old one and the
+    // fresh conversation's first.
+    harness.source.script_reply("fresh-context answer");
+    // The route keeps its connector conversation across the reset, so the
+    // next inbound message routes straight to the fresh binding.
+    harness.admit(fixture_inbound("the fresh question", "n3"));
+    harness.wait_until(
+        "the fresh context answers its first message",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| text.contains("fresh-context answer"))
+        },
+    );
+    assert_eq!(
+        harness.source.prompted_turns(),
+        2,
+        "the dropped message never became a turn"
+    );
+}
+
+#[test]
 fn canonical_new_forks_a_fresh_stream_retains_the_old_one_and_continues_the_conversation() {
     let harness = Harness::new(aikit_adapters::EnginePolicy::default());
     harness.source.script_reply("first answer");
@@ -1611,7 +1854,32 @@ fn connector_pause_and_resume_stop_ingress_and_show_in_health() {
         .lock()
         .unwrap()
         .push_back(Some(fixture_inbound("while paused", "pause-1")));
-    thread::sleep(Duration::from_millis(300));
+    let mut last_paused_health: Option<Option<ConnectorHealth>> = None;
+    poll_until(
+        "pump-recorded paused health",
+        Duration::from_secs(10),
+        || {
+            let health = gateway
+                .lock()
+                .unwrap()
+                .status()
+                .connector_health
+                .into_iter()
+                .find(|health| health.connector_ref == r(CONNECTOR_REF));
+            let paused = health.as_ref().is_some_and(|health| {
+                health
+                    .detail
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("paused by gateway command")
+            });
+            if last_paused_health.as_ref() != Some(&health) {
+                eprintln!("actual paused connector health observation: {health:?}");
+                last_paused_health = Some(health);
+            }
+            paused
+        },
+    );
     let paused_gateway = gateway.lock().unwrap();
     let health = paused_gateway
         .status()
@@ -1627,22 +1895,58 @@ fn connector_pause_and_resume_stop_ingress_and_show_in_health() {
             .contains("paused by gateway command"),
         "health reflects the pause: {health:?}"
     );
+    assert_eq!(
+        paused_gateway
+            .snapshot()
+            .streams
+            .iter()
+            .map(|stream| stream.events.len())
+            .sum::<usize>(),
+        0,
+        "the paused event has not entered any journal"
+    );
     drop(paused_gateway);
+    let pending = recording.events.lock().unwrap();
+    assert_eq!(pending.len(), 1, "the paused event remains pending");
+    assert_eq!(
+        pending.front().and_then(Option::as_ref).unwrap().event_ref,
+        r("gateway-ingress/fixture/pause-1")
+    );
+    drop(pending);
 
     // Resume: the held event is admitted.
     controls.set_paused(&r(CONNECTOR_REF), false);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        let gateway = gateway.lock().unwrap();
-        if gateway.status().stream_count == 1 {
-            break;
-        }
-        drop(gateway);
-        thread::sleep(Duration::from_millis(10));
-    }
+    poll_until(
+        "the resumed event's journal append",
+        Duration::from_secs(10),
+        || {
+            gateway
+                .lock()
+                .unwrap()
+                .snapshot()
+                .streams
+                .iter()
+                .any(|stream| !stream.events.is_empty())
+        },
+    );
     let gateway = gateway.lock().unwrap();
     assert_eq!(gateway.status().stream_count, 1, "the held event landed");
+    let snapshot = gateway.snapshot();
+    let events = snapshot
+        .streams
+        .iter()
+        .flat_map(|stream| &stream.events)
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 1, "the held event was appended exactly once");
+    assert_eq!(snapshot.streams[0].stream_ref, r(STREAM_REF));
+    assert_eq!(events[0].sequence, 1);
+    assert_eq!(
+        events[0].event["metadata"]["connector_event_ref"],
+        "gateway-ingress/fixture/pause-1"
+    );
+    assert_eq!(events[0].event["content"], "while paused");
     drop(gateway);
+    assert!(recording.events.lock().unwrap().is_empty());
 
     shutdown.store(true, Ordering::SeqCst);
     for worker in workers.drain(..) {
@@ -2514,7 +2818,7 @@ fn a_held_ask_answers_with_the_vacancy_notice() {
 }
 
 #[test]
-fn an_ask_to_a_registered_profile_without_a_position_holds_for_the_agency() {
+fn an_ask_to_a_registered_profile_without_a_position_holds_at_the_agent_address() {
     let dir = TempDir::new().unwrap();
     let router = Arc::new(ProductionResolution {
         home: AikitHome::at(dir.path()),
@@ -2527,14 +2831,14 @@ fn an_ask_to_a_registered_profile_without_a_position_holds_for_the_agency() {
         "a7",
     ));
     harness.wait_until(
-        "the ask to the unembodied agency appends its held Communique and answers the chat",
+        "the ask to the Agent address appends its held Communique and answers the chat",
         Duration::from_secs(30),
         |harness| !harness.executed_sends().is_empty(),
     );
 
-    // The journal holds one Communique addressed to the agency at its own
-    // identity, held for it — the registry answered, and no Position gates
-    // the contact.
+    // The profile supplies an Agent address. The journal retains the mail
+    // there without inferring native Agency, occupancy or admission from
+    // that source; the held address stays recoverable.
     let records = harness
         .gateway
         .lock()
@@ -2548,9 +2852,9 @@ fn an_ask_to_a_registered_profile_without_a_position_holds_for_the_agency() {
     assert_eq!(record.state, CommuniqueState::Held);
     let basis = &record.transitions[0].basis;
     assert!(
-        basis.contains("registered agent profile")
-            && basis.contains("not currently embodied")
-            && basis.contains("held for the agency"),
+        basis.contains("Central AgentProfile with no Position")
+            && basis.contains("held for the Agent address")
+            && basis.contains("native identity and Agency admission are not established"),
         "{basis}"
     );
     // Origin provenance still rides the attribution basis.
@@ -2570,13 +2874,15 @@ fn an_ask_to_a_registered_profile_without_a_position_holds_for_the_agency() {
         record.attribution_basis
     );
 
-    // The chat is answered with the held-for-agency notice.
+    // The notice reports held mail and the source's lack of Agency proof.
     let sends = harness.executed_sends();
     assert!(
-        sends
-            .iter()
-            .any(|text| text.contains("held") && text.contains("not currently embodied")),
-        "the answer carries the held-for-agency fact: {sends:?}"
+        sends.iter().any(|text| {
+            text.contains("held at the same Agent address")
+                && text.contains("no native Agency or occupancy proof")
+                && text.contains("nothing has been delivered")
+        }),
+        "the answer retains the held Agent address without claiming delivery: {sends:?}"
     );
     assert_eq!(harness.source.parked_turns(), 0);
 
@@ -2876,163 +3182,6 @@ fn a_drain_needs_no_binding_and_names_each_interrupted_turn_and_never_replays_it
         "the interrupted turn is finished, not parked"
     );
     assert_eq!(harness.stream_events().len(), 3);
-}
-
-#[test]
-fn an_announcement_that_cannot_be_queued_is_an_error_the_caller_sees_not_a_line_lost_on_stderr() {
-    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
-    // A binding the gateway does not hold: the line has nowhere to go.
-    let missing = r("gateway-binding/never-bound");
-    let announced = harness.engine.execute(
-        missing.clone(),
-        aikit_adapters::GatewayConversationOperation::Announce {
-            text: "gateway upgrade upg-x — completed".into(),
-        },
-    );
-    assert!(
-        announced.is_err(),
-        "an announcement that was not queued must say so, so the sender can try again"
-    );
-    // The same announcement to the bound conversation is queued and answered.
-    let delivered = harness.engine.execute(
-        harness.binding_ref.clone(),
-        aikit_adapters::GatewayConversationOperation::Announce {
-            text: "gateway upgrade upg-x — completed".into(),
-        },
-    );
-    assert!(delivered.is_ok());
-}
-
-/// What a conversation's `/upgrade` asks of the machine's upgrade owner.
-struct RecordingUpgrade {
-    plans: Mutex<usize>,
-    starts: Mutex<Vec<aikit_adapters::UpgradeOrigin>>,
-}
-
-impl aikit_adapters::GatewayUpgradeLauncher for RecordingUpgrade {
-    fn plan(&self) -> aikit_core::Result<(Value, String)> {
-        *self.plans.lock().unwrap() += 1;
-        Ok((json!({"action": "restart"}), "the gateway is stale".into()))
-    }
-    fn start(&self, origin: aikit_adapters::UpgradeOrigin) -> aikit_core::Result<(Value, String)> {
-        self.starts.lock().unwrap().push(origin);
-        Ok((json!({"upgrade": "upg-x"}), "upgrade upg-x started".into()))
-    }
-}
-
-#[test]
-fn upgrade_is_planned_on_request_started_only_by_apply_and_never_from_a_group() {
-    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
-    // The edge parses the two spellings and refuses a third.
-    assert!(matches!(
-        parse_slash("/upgrade"),
-        SlashParse::Operation(aikit_adapters::GatewayConversationOperation::Upgrade {
-            apply: false
-        })
-    ));
-    assert!(matches!(
-        parse_slash("/upgrade apply"),
-        SlashParse::Operation(aikit_adapters::GatewayConversationOperation::Upgrade {
-            apply: true
-        })
-    ));
-    assert!(matches!(
-        parse_slash("/upgrade now"),
-        SlashParse::Unknown(_)
-    ));
-
-    // No upgrade owner wired: it says so and names the command.
-    let execution = harness
-        .engine
-        .execute(
-            harness.binding_ref.clone(),
-            aikit_adapters::GatewayConversationOperation::Upgrade { apply: true },
-        )
-        .unwrap();
-    let GatewayResponse::Conversation { result, .. } = execution.response else {
-        panic!()
-    };
-    assert_eq!(result["upgrade"], "unavailable");
-    assert!(!execution.restart_requested);
-
-    let launcher = Arc::new(RecordingUpgrade {
-        plans: Mutex::new(0),
-        starts: Mutex::new(Vec::new()),
-    });
-    harness.engine.attach_upgrade_launcher(
-        launcher.clone() as Arc<dyn aikit_adapters::GatewayUpgradeLauncher>
-    );
-    let ask = |apply: bool, binding: &ResourceRef| {
-        let execution = harness
-            .engine
-            .execute(
-                binding.clone(),
-                aikit_adapters::GatewayConversationOperation::Upgrade { apply },
-            )
-            .unwrap();
-        // The gateway keeps serving: the upgrade runs in a worker that drains
-        // it when the new build is installed.
-        assert!(!execution.restart_requested);
-        let GatewayResponse::Conversation { result, .. } = execution.response else {
-            panic!()
-        };
-        result
-    };
-    // Reading the plan starts nothing.
-    let planned = ask(false, &harness.binding_ref);
-    assert_eq!(planned["upgrade"], "plan");
-    assert_eq!(*launcher.plans.lock().unwrap(), 1);
-    assert!(launcher.starts.lock().unwrap().is_empty());
-    // `apply` starts it, carrying the conversation the receipt returns to.
-    let started = ask(true, &harness.binding_ref);
-    assert_eq!(started["upgrade"], "started");
-    let starts = launcher.starts.lock().unwrap();
-    assert_eq!(starts.len(), 1);
-    assert_eq!(starts[0].binding_ref, BINDING_REF);
-    assert_eq!(starts[0].connector_ref.as_deref(), Some(CONNECTOR_REF));
-    drop(starts);
-
-    // A group conversation admits several senders and a slash command carries
-    // a message's authority: changing the machine is refused there.
-    let group = r("gateway-binding/fixture-group");
-    {
-        let mut kernel = harness.gateway.lock().unwrap();
-        kernel
-            .bind(GatewayBinding {
-                binding_ref: group.clone(),
-                connector_ref: r(CONNECTOR_REF),
-                address: ConversationAddress {
-                    platform: "fixture".into(),
-                    scope_id: Some("group".into()),
-                    conversation_id: "chat-group".into(),
-                    thread_id: None,
-                },
-                agent_session_ref: r("agent-session/fixture-group"),
-                agency_ref: r("agency/fixture"),
-                actuation_ref: r("actuation/fixture"),
-                actuation_stream_ref: r("actuation-stream/fixture-group"),
-                agent_ref: None,
-                harness_ref: None,
-                surface_ref: None,
-                forked_from: None,
-                context_revision: 1,
-                ingress: GatewayIngressPolicy {
-                    default: GatewayIngressDecision::Allow,
-                    sender_overrides: Default::default(),
-                },
-                provenance: Vec::new(),
-            })
-            .unwrap();
-    }
-    let refused = ask(true, &group);
-    assert_eq!(refused["upgrade"], "refused");
-    assert_eq!(
-        launcher.starts.lock().unwrap().len(),
-        1,
-        "no second upgrade started"
-    );
-    // Reading the plan in a group is harmless and still answers.
-    assert_eq!(ask(false, &group)["upgrade"], "plan");
 }
 
 // ---------------------------------------------------------------------------

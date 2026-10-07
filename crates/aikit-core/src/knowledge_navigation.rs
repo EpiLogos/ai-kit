@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::context_source::{ContextSourcePrivacy, RetrievalTarget};
 use crate::familiarity::{AccessibilityAssessment, FamiliarityContext};
 use crate::knowledge::{
     KnowledgeContextPack, KnowledgeReading, KnowledgeRelationView, KnowledgeRoute,
@@ -11,7 +12,8 @@ use crate::knowledge::{
 };
 use crate::knowledge_code::{CodeIndexProvider, CodeReference};
 use crate::knowledge_source_pool::{
-    SourceMaterial, SourcePoolProvider, SourceProviderStatus, SourceSearchMode,
+    SourceHit, SourceMaterial, SourcePoolProvider, SourcePoolReading, SourceProviderStatus,
+    SourceSearchMode,
 };
 use crate::knowledge_wiki_index::WikiSearchAddress;
 use crate::knowledge_wiki_provider::{SemanticWikiProviderStatus, WikiProvider};
@@ -231,6 +233,102 @@ pub struct SourcePoolBinding<'a> {
     pub material: &'a [SourceMaterial],
 }
 
+/// One current-origin and target admission for selected Source payloads.
+/// Independent already-authorised held memory material keeps local compatibility.
+fn current_source_material(
+    binding: &SourcePoolBinding<'_>,
+    source: &SourceRef,
+    held: Option<&SourceMaterial>,
+    target: RetrievalTarget,
+) -> Result<SourceMaterial> {
+    let origin_required = held
+        .map(|material| material.binding.requires_live_origin_read())
+        .transpose()?
+        .unwrap_or(false);
+    let live = binding.provider.read_for(source, target)?;
+    if origin_required && live.is_none() {
+        return Err(AikitError::new(
+            "knowledge.source_origin_unavailable",
+            "The originating source needs a current owner read; held material is not a fallback",
+        )
+        .with("source", source.to_string()));
+    }
+    let current = match live {
+        Some(reading) => reading.admit(target)?,
+        None => {
+            SourcePoolReading::check_target(ContextSourcePrivacy::default(), target)?;
+            held.cloned().ok_or_else(|| {
+                AikitError::new(
+                    "knowledge.source_missing",
+                    "Selected Source payload is not materialised by its provider",
+                )
+                .with("source", source.to_string())
+            })?
+        }
+    };
+    validate_current_source(source, held, current)
+}
+
+fn validate_current_source(
+    source: &SourceRef,
+    held: Option<&SourceMaterial>,
+    current: SourceMaterial,
+) -> Result<SourceMaterial> {
+    let current_origin = current.binding.source_origin()?;
+    let origin_required = held
+        .map(|material| material.binding.requires_live_origin_read())
+        .transpose()?
+        .unwrap_or(false);
+    let held_origin = held
+        .map(|material| material.binding.source_origin())
+        .transpose()?
+        .flatten();
+    if &current.binding.source != source
+        || held.is_some_and(|material| {
+            origin_required
+                && (current.binding.revision != material.binding.revision
+                    || current.body != material.body
+                    || current_origin != held_origin)
+        })
+    {
+        return Err(AikitError::new(
+            "knowledge.source_origin_revision_conflict",
+            "Current origin does not match the retained material basis; refresh explicitly",
+        )
+        .with("source", source.to_string()));
+    }
+    Ok(current)
+}
+
+/// Keep a provider's query evidence attached to the Source basis that
+/// produced it. A later current read cannot relabel an old match.
+fn validate_source_hit_basis(
+    hit: &SourceHit,
+    held: Option<&SourceMaterial>,
+    current: &SourceMaterial,
+) -> Result<()> {
+    match &hit.revision {
+        Some(revision) if revision == &current.binding.revision => Ok(()),
+        Some(_) => Err(AikitError::new(
+            "knowledge.source_origin_revision_conflict",
+            "Search evidence no longer matches the selected current Source basis",
+        )
+        .with("source", hit.source.to_string())),
+        // This pure API supplies already-authorised immutable material. It
+        // cannot stand in for an unheld or native live Source basis.
+        None if held.is_some_and(|material| material == current)
+            && !current.binding.requires_live_origin_read()? =>
+        {
+            Ok(())
+        }
+        None => Err(AikitError::new(
+            "knowledge.source_search_basis_unavailable",
+            "Selected live search evidence has no exact Source revision basis",
+        )
+        .with("source", hit.source.to_string())),
+    }
+}
+
 /// One project-scoped application field over independent Knowledge providers.
 ///
 /// This is federation, not a universal graph: providers retain their relation,
@@ -239,6 +337,7 @@ pub struct SourcePoolBinding<'a> {
 /// Context projection.
 pub struct KnowledgeApplication<'a> {
     context: FamiliarityContext,
+    retrieval_target: RetrievalTarget,
     wiki: Option<Box<dyn WikiProvider + 'a>>,
     sources: Vec<SourcePoolBinding<'a>>,
     /// One code-index provider per declared project; each answers only its
@@ -298,12 +397,24 @@ impl<'a> KnowledgeApplication<'a> {
     pub fn new(context: FamiliarityContext) -> Self {
         Self {
             context,
+            retrieval_target: RetrievalTarget::LocalAgent,
             wiki: None,
             sources: Vec::new(),
             code: Vec::new(),
             project_map: None,
             project_attribution: None,
         }
+    }
+
+    /// This operation's actual delivery target; no reusable audience grant.
+    #[must_use]
+    pub fn with_retrieval_target(mut self, target: RetrievalTarget) -> Self {
+        self.retrieval_target = target;
+        self
+    }
+
+    pub fn retrieval_target(&self) -> RetrievalTarget {
+        self.retrieval_target
     }
 
     #[must_use]
@@ -694,27 +805,58 @@ impl<'a> KnowledgeApplication<'a> {
                 .provider
                 .search(&source_query, mode, &tag_filter, limit)
             {
-                Ok(provider_hits) => hits.extend(provider_hits.into_iter().map(|hit| {
-                    let resource = ResourceRef::parse(hit.source.as_str())
-                        .expect("SourceRef is a valid ResourceRef");
-                    KnowledgeSearchHit {
-                        address: KnowledgeAddress::Source(hit.source),
-                        resource,
-                        kind: ResourceKind::KnowledgeSource,
-                        label: hit.title,
-                        score: hit.score.unwrap_or(0.5),
-                        snippet: hit.snippet,
-                        provider: hit.provider,
-                        authority: SourceAuthority::Observed,
-                        corroborated_by: Vec::new(),
-                        ranking: None,
+                Ok(provider_hits) => {
+                    for hit in provider_hits {
+                        let held = binding
+                            .material
+                            .iter()
+                            .find(|material| material.binding.source == hit.source);
+                        let admitted = current_source_material(
+                            binding,
+                            &hit.source,
+                            held,
+                            self.retrieval_target,
+                        )
+                        .and_then(|current| validate_source_hit_basis(&hit, held, &current));
+                        if let Err(error) = admitted {
+                            // No denied title, path, SourceRef or query-match
+                            // detail is an absence. Selected reads retain the
+                            // full native cause through the same validator.
+                            let absence = format!(
+                                "SourcePool current origin unavailable or withheld ({})",
+                                error.code()
+                            );
+                            if !absences.contains(&absence) {
+                                absences.push(absence);
+                            }
+                            continue;
+                        }
+                        let resource = ResourceRef::parse(hit.source.as_str())
+                            .expect("SourceRef is a valid ResourceRef");
+                        hits.push(KnowledgeSearchHit {
+                            address: KnowledgeAddress::Source(hit.source),
+                            resource,
+                            kind: ResourceKind::KnowledgeSource,
+                            label: hit.title,
+                            score: hit.score.unwrap_or(0.5),
+                            snippet: hit.snippet,
+                            provider: hit.provider,
+                            authority: SourceAuthority::Observed,
+                            corroborated_by: Vec::new(),
+                            ranking: None,
+                        });
                     }
-                })),
-                Err(error) => absences.push(format!(
-                    "SourcePool search degraded for {}: {}",
-                    status.provider,
-                    error.message()
-                )),
+                }
+                Err(error) => {
+                    let absence = format!(
+                        "SourcePool search degraded for {}: {}",
+                        status.provider,
+                        error.message()
+                    );
+                    if !absences.contains(&absence) {
+                        absences.push(absence);
+                    }
+                }
             }
         }
 
@@ -789,6 +931,38 @@ impl<'a> KnowledgeApplication<'a> {
         hits
     }
 
+    /// Read an exact selected span of a resource. The full body is fetched
+    /// through the ordinary read path, then sliced by the declared selector;
+    /// the reading carries the applied span with the uncovered ranges so a
+    /// bounded read continues into the complete material.
+    pub fn read_selected(
+        &self,
+        address: &KnowledgeAddress,
+        selector: &crate::knowledge_facets::SourceSelector,
+    ) -> Result<KnowledgeReading> {
+        let mut reading = self.read(address)?;
+        let crate::knowledge_facets::SourceSelector::TextSpan {
+            start,
+            end,
+            anchor_ref,
+        } = selector
+        else {
+            return Err(AikitError::new(
+                "knowledge.span_unit_unsupported",
+                "only text_span selection is applied on reads; other units are returned verbatim by the owning provider",
+            ));
+        };
+        let body = reading.content.clone().ok_or_else(|| {
+            AikitError::new(
+                "knowledge.span_without_body",
+                "the selected resource has no text body to slice",
+            )
+        })?;
+        let selection = crate::knowledge::apply_text_span(&body, *start, *end, anchor_ref.clone())?;
+        reading.span = Some(selection);
+        Ok(reading)
+    }
+
     pub fn read(&self, address: &KnowledgeAddress) -> Result<KnowledgeReading> {
         match address {
             KnowledgeAddress::Wiki(resource) => self
@@ -798,8 +972,12 @@ impl<'a> KnowledgeApplication<'a> {
                 .read(resource),
             KnowledgeAddress::Source(source) => {
                 if let Some((binding, material)) = self.source_material(source) {
-                    let live = binding.provider.read(source)?;
-                    let material = live.as_ref().unwrap_or(material);
+                    let material = current_source_material(
+                        binding,
+                        source,
+                        Some(material),
+                        self.retrieval_target,
+                    )?;
                     return Ok(KnowledgeReading {
                         resource: ResourceRef::parse(source.as_str())?,
                         provider: Some(binding.provider.status().provider),
@@ -810,27 +988,27 @@ impl<'a> KnowledgeApplication<'a> {
                         content: Some(material.body.clone()),
                         evidence: vec![source.clone()],
                         why_selected: "selected from the eligible project SourcePool".into(),
+                        span: None,
                     });
                 }
                 // Search can surface a source no attached source set declared:
                 // a live pool over a large owner ground cannot enumerate every
-                // file it might ever match. The SourcePoolProvider::read
-                // contract is the live owner read, so the owning pool is asked
+                // file it might ever match. The SourcePoolProvider::read_for
+                // contract is the current target-aware read, so the owning pool is asked
                 // directly; a pool that declines the ref simply passes.
-                for binding in &self.sources {
-                    if let Some(material) = binding.provider.read(source).ok().flatten() {
-                        return Ok(KnowledgeReading {
-                            resource: ResourceRef::parse(source.as_str())?,
-                            provider: Some(binding.provider.status().provider),
-                            lens: Some("source-pool".into()),
-                            revision: Some(material.binding.revision.to_string()),
-                            freshness: None,
-                            authority: SourceAuthority::Observed,
-                            content: Some(material.body.clone()),
-                            evidence: vec![source.clone()],
-                            why_selected: "read live from the owning SourcePool".into(),
-                        });
-                    }
+                if let Some((binding, material)) = self.live_source_material(source)? {
+                    return Ok(KnowledgeReading {
+                        resource: ResourceRef::parse(source.as_str())?,
+                        provider: Some(binding.provider.status().provider),
+                        lens: Some("source-pool".into()),
+                        revision: Some(material.binding.revision.to_string()),
+                        freshness: None,
+                        authority: SourceAuthority::Observed,
+                        content: Some(material.body),
+                        evidence: vec![source.clone()],
+                        why_selected: "read live from the owning SourcePool".into(),
+                        span: None,
+                    });
                 }
                 // This horizon cannot materialise it, say which citation
                 // it came from rather than reporting it simply missing.
@@ -874,6 +1052,7 @@ impl<'a> KnowledgeApplication<'a> {
                                 evidence: vec![reference.source.clone()],
                                 why_selected: "selected from derived ProjectMap code intelligence"
                                     .into(),
+                                span: None,
                             });
                         }
                         Err(error) => last_error = Some(error),
@@ -904,6 +1083,7 @@ impl<'a> KnowledgeApplication<'a> {
                     content: endpoint.label.clone(),
                     evidence: Vec::new(),
                     why_selected: "selected from an explicit ProjectMap federation endpoint".into(),
+                    span: None,
                 })
             }
         }
@@ -959,7 +1139,22 @@ impl<'a> KnowledgeApplication<'a> {
                 })
             }
             KnowledgeAddress::Source(source) => {
-                let Some((binding, material)) = self.source_material(source) else {
+                let selected = match self.source_material(source) {
+                    Some((binding, material)) => Some((
+                        binding,
+                        current_source_material(
+                            binding,
+                            source,
+                            Some(material),
+                            self.retrieval_target,
+                        )?,
+                    )),
+                    // An unmaterialised authored citation remains Wiki-owned;
+                    // it projects none of the Source's copied payload metadata.
+                    None if !self.wiki_citations(source).is_empty() => None,
+                    None => self.live_source_material(source)?,
+                };
+                let Some((binding, material)) = selected else {
                     // Explaining is not reading. When a curated node cites a
                     // source this horizon cannot materialise, the Wiki still
                     // holds the one fact worth having — that the citation is
@@ -1010,7 +1205,7 @@ impl<'a> KnowledgeApplication<'a> {
                         material.binding.visibility, material.binding.media_type
                     ),
                     sources: vec![source.clone()],
-                    detail: serde_json::to_value(&material.binding).ok(),
+                    detail: Some(material.binding.disclosure_projection()?),
                 })
             }
             KnowledgeAddress::Code(reference) => {
@@ -1204,6 +1399,22 @@ impl<'a> KnowledgeApplication<'a> {
             ),
         )
         .with("source", source.as_str())
+    }
+
+    fn live_source_material(
+        &self,
+        source: &SourceRef,
+    ) -> Result<Option<(&SourcePoolBinding<'a>, SourceMaterial)>> {
+        for binding in &self.sources {
+            // None declines ownership. A native denial/error cannot be
+            // answered by another provider's retained copy.
+            if let Some(reading) = binding.provider.read_for(source, self.retrieval_target)? {
+                let material =
+                    validate_current_source(source, None, reading.admit(self.retrieval_target)?)?;
+                return Ok(Some((binding, material)));
+            }
+        }
+        Ok(None)
     }
 
     fn source_material(
@@ -1655,7 +1866,22 @@ impl<'a> KnowledgeApplication<'a> {
                 ))
             }
             KnowledgeAddress::Source(source) => {
-                let Some((binding, material)) = self.source_material(source) else {
+                let selected = match self.source_material(source) {
+                    Some((binding, material)) => Some((
+                        binding,
+                        current_source_material(
+                            binding,
+                            source,
+                            Some(material),
+                            self.retrieval_target,
+                        )?,
+                    )),
+                    // An unmaterialised authored citation remains Wiki-owned;
+                    // it projects none of the Source's copied payload metadata.
+                    None if !self.wiki_citations(source).is_empty() => None,
+                    None => self.live_source_material(source)?,
+                };
+                let Some((binding, material)) = selected else {
                     // A cited source routes through the Wiki that cites it.
                     // It carries no revision here — the Wiki knows the
                     // citation, not the material's version — and saying so
@@ -1719,10 +1945,14 @@ impl<'a> KnowledgeApplication<'a> {
 /// both name material with even less claim to being the thing a query asked
 /// about than a structural code reading.
 fn authority_rank(authority: SourceAuthority) -> u8 {
+    // Authored ground answers a documentation query ahead of observed source
+    // material even when the source pool's native score is higher: within a
+    // tier the score decides, across tiers the authority does (addendum A-6).
     match authority {
-        SourceAuthority::Authored | SourceAuthority::Observed => 0,
-        SourceAuthority::Derived => 1,
-        SourceAuthority::Learned | SourceAuthority::Generated => 2,
+        SourceAuthority::Authored => 0,
+        SourceAuthority::Observed => 1,
+        SourceAuthority::Derived => 2,
+        SourceAuthority::Learned | SourceAuthority::Generated => 3,
     }
 }
 
@@ -1793,9 +2023,12 @@ fn code_string(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option
 mod tests {
     use std::collections::BTreeMap;
 
+    use crate::knowledge::SpanRange;
+    use crate::knowledge_facets::SourceSelector;
+
     use crate::knowledge_source_pool::{
-        NativeSourcePoolProvider, SourceBinding, SourceHit, SourcePoolProvider,
-        SourceProviderCapabilities, SourceSearchMode, SourceVisibility,
+        NativeSourcePoolProvider, SourceBinding, SourcePoolProvider, SourceSearchMode,
+        SourceVisibility,
     };
     use crate::knowledge_wiki::{parse_wiki_objects, WikiObject};
     use crate::knowledge_wiki_index::SemanticWikiIndex;
@@ -1826,54 +2059,15 @@ mod tests {
         SourceRef::parse("source:spec").unwrap()
     }
 
-    /// A scripted pool that answers every query with many high-scored hits
-    /// under one provider ref — the shape of a vast indexed pool whose
-    /// native scores sit above the shared default.
-    struct FloodProvider {
-        provider: ProviderRef,
-        count: usize,
-        score: f64,
-    }
-
-    impl SourcePoolProvider for FloodProvider {
-        fn capabilities(&self) -> SourceProviderCapabilities {
-            SourceProviderCapabilities {
-                provider: self.provider.clone(),
-                version: None,
-                fulltext: true,
-                fuzzy_interactive: false,
-                semantic: false,
-                hybrid: false,
-                tags: true,
-                structured_output: false,
-                reasons: BTreeMap::new(),
-            }
-        }
-
-        fn rebuild(&mut self, _material: &[SourceMaterial]) -> Result<()> {
-            Ok(())
-        }
-
-        fn search(
-            &self,
-            _query: &str,
-            _mode: SourceSearchMode,
-            _tags: &[String],
-            _limit: usize,
-        ) -> Result<Vec<SourceHit>> {
-            Ok((0..self.count)
-                .map(|index| SourceHit {
-                    source: SourceRef::parse(format!("source:flood:{index}")).unwrap(),
-                    provider: self.provider.clone(),
-                    score: Some(self.score),
-                    title: format!("flood {index}"),
-                    snippet: String::new(),
-                    tags: Vec::new(),
-                    provider_binding: None,
-                    retrieval_mode: SourceSearchMode::Fulltext,
-                })
-                .collect())
-        }
+    /// Compile an actual independent authorised corpus, then exercise the
+    /// production native index and candidate limits rather than scripted hits.
+    fn indexed_corpus(count: usize, body: &str) -> Vec<SourceMaterial> {
+        let records = (0..count).map(|index| (format!("record-{index}.md"),
+            format!("---\nrecord_id: flood-{index}\nrecord_type: note\n---\n\n# Authentication concept {index}\n{body}\n")))
+            .collect::<Vec<_>>();
+        crate::knowledge_ingest::ingest_corpus(&records, &[], 0)
+            .unwrap()
+            .material
     }
 
     fn material() -> SourceMaterial {
@@ -1972,29 +2166,31 @@ mod tests {
     /// faculty must keep first-class (addendum A-5).
     #[test]
     fn no_single_pool_fills_the_surfaced_limit() {
-        let flood = FloodProvider {
-            provider: ProviderRef::parse("provider/source-pool/flood").unwrap(),
-            count: 40,
-            score: 0.9,
-        };
-        let material = vec![material()];
+        let material = indexed_corpus(40, "Authentication sessions rotate tokens.");
         let mut native = NativeSourcePoolProvider::new();
         native.rebuild(&material).unwrap();
-        let app = KnowledgeApplication::new(FamiliarityContext {
-            project: None,
-            actor: None,
-            agency: None,
-            focus: None,
-        })
-        .with_source_pool(&flood, &[])
-        .with_source_pool(&native, &material);
+        let index = wiki();
+        let app = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_wiki(SemanticWikiProvider::new(&index))
+            .with_source_pool(&native, &material);
+        assert_eq!(
+            native
+                .search("Authentication", SourceSearchMode::Fulltext, &[], 40)
+                .unwrap()
+                .len(),
+            40
+        );
 
         let matched = app.search("Authentication", 10);
         let flood_hits = matched
             .hits
             .iter()
-            .filter(|hit| hit.provider.as_str() == "provider/source-pool/flood")
+            .filter(|hit| hit.provider.as_str() == "provider/source-pool/native")
             .count();
+        assert_eq!(
+            flood_hits, 5,
+            "the real corpus has enough eligible hits to exercise the cap"
+        );
         assert!(
             flood_hits <= 5,
             "one provider is capped at half the limit, its best hits first: \
@@ -2005,8 +2201,8 @@ mod tests {
             matched
                 .hits
                 .iter()
-                .any(|hit| hit.resource.as_str() == "source:spec"),
-            "the shared-floor native hit surfaces beside the flood: {:#?}",
+                .any(|hit| hit.resource.as_str() == "wiki:node:auth"),
+            "the authored Wiki match surfaces beside the actual native corpus: {:#?}",
             matched
                 .hits
                 .iter()
@@ -2213,17 +2409,15 @@ mod tests {
     /// knowledge competitive in the merged band where the authority sort
     /// actually decides.
     #[test]
-    fn a_multi_token_wiki_match_is_not_buried_by_default_scored_source_hits() {
+    fn a_multi_token_wiki_match_is_not_buried_by_actual_native_source_hits() {
         let index = wiki();
         let wiki_provider = SemanticWikiProvider::new(&index);
-        let flood = FloodProvider {
-            provider: ProviderRef::parse("provider/source-pool/flood").unwrap(),
-            count: 8,
-            score: 0.5,
-        };
+        let material = indexed_corpus(8, "Authentication concept documentation.");
+        let mut native = NativeSourcePoolProvider::new();
+        native.rebuild(&material).unwrap();
         let app = KnowledgeApplication::new(FamiliarityContext::default())
             .with_wiki(wiki_provider)
-            .with_source_pool(&flood, &[]);
+            .with_source_pool(&native, &material);
 
         let result = app.search("authentication concept", 10);
         let wiki_hit = result
@@ -2241,9 +2435,17 @@ mod tests {
             .hits
             .iter()
             .enumerate()
-            .filter(|(_, hit)| hit.resource.as_str().starts_with("source:flood:"))
+            .filter(|(_, hit)| {
+                hit.resource
+                    .as_str()
+                    .starts_with("central:source:corpus:flood-")
+            })
             .map(|(index, _)| index)
             .collect();
+        assert!(
+            !source_positions.is_empty(),
+            "real source matches must participate in the ordering check"
+        );
         let wiki_position = result
             .hits
             .iter()
@@ -2254,7 +2456,7 @@ mod tests {
                 .iter()
                 .all(|&position| wiki_position < position),
             "the authored match at {wiki_position} must rank ahead of every \
-             default-scored source hit at {source_positions:?}: {:#?}",
+             actual native source hit at {source_positions:?}: {:#?}",
             result.hits
         );
     }
@@ -2684,5 +2886,220 @@ mod tests {
         // other, and the authored source is dispatchable through the same
         // `source=REF` CLI form as any other Source address.
         assert_ne!(curated.address, authored_source.address);
+    }
+
+    #[test]
+    fn a_selected_read_slices_exactly_and_discloses_the_remainder() {
+        let material = vec![material()];
+        let mut native = NativeSourcePoolProvider::new();
+        native.rebuild(&material).unwrap();
+        let app = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_source_pool(&native, &material);
+
+        let reading = app
+            .read_selected(
+                &KnowledgeAddress::Source(spec()),
+                &SourceSelector::TextSpan {
+                    start: 0,
+                    end: 15,
+                    anchor_ref: None,
+                },
+            )
+            .unwrap();
+        let span = reading.span.expect("a span reading carries its selection");
+        assert_eq!(span.start, 0);
+        assert_eq!(span.end, 15);
+        assert_eq!(span.content, "Authentication ");
+        assert_eq!(span.remaining, vec![SpanRange { start: 15, end: 38 }]);
+        // The full body stays available through the ordinary read; the span
+        // never silently stands in for it.
+        let full = app.read(&KnowledgeAddress::Source(spec())).unwrap();
+        assert_eq!(
+            full.content.as_deref(),
+            Some("Authentication sessions rotate tokens.")
+        );
+    }
+
+    #[test]
+    fn a_span_outside_the_body_is_refused_not_clamped() {
+        let material = vec![material()];
+        let mut native = NativeSourcePoolProvider::new();
+        native.rebuild(&material).unwrap();
+        let app = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_source_pool(&native, &material);
+        let error = app
+            .read_selected(
+                &KnowledgeAddress::Source(spec()),
+                &SourceSelector::TextSpan {
+                    start: 0,
+                    end: 999,
+                    anchor_ref: None,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "knowledge.span_out_of_bounds");
+    }
+
+    #[test]
+    fn spans_cut_on_char_boundaries_not_bytes() {
+        // Devanagari + emoji: multi-byte scalars every few chars.
+        let body = "snowdrops \u{0938}\u{094D}\u{0928} \u{1F331} crocuses";
+        let selection = crate::knowledge::apply_text_span(body, 0, 12, None).unwrap();
+        // Char count (24), not byte count (~34): offsets are scalar indices.
+        assert_eq!(selection.total, 24u64);
+        assert_eq!(selection.content.chars().count(), 12);
+        assert_eq!(selection.remaining, vec![SpanRange { start: 12, end: 24 }]);
+    }
+}
+
+#[cfg(test)]
+mod origin_read_contract_tests {
+    use super::*;
+    use crate::knowledge_ingest::{
+        corpus_content_revision, ingest_corpus, ingest_corpus_with_origins, IngestOriginBinding,
+    };
+    use crate::knowledge_source_pool::{NativeSourcePoolProvider, SourceOrigin, SourceVisibility};
+    use crate::SourceRevision;
+
+    #[test]
+    fn actual_native_memory_provider_retains_pure_api_but_cannot_substitute_for_a_missing_origin() {
+        let records = vec![(
+            "record.md".into(),
+            "---\nrecord_id: required-origin\nrecord_type: note\n---\n\n# Required origin\n".into(),
+        )];
+        let pure = ingest_corpus(&records, &[], 0).unwrap().material;
+        let mapped = BTreeMap::from([(
+            records[0].0.clone(),
+            IngestOriginBinding {
+                origin: SourceOrigin::declared_corpus(),
+                content_revision: SourceRevision::parse(corpus_content_revision(
+                    records[0].1.as_bytes(),
+                ))
+                .unwrap(),
+                visibility: SourceVisibility::Team,
+                owners: vec![],
+            },
+        )]);
+        let derived = ingest_corpus_with_origins(&records, &[], 0, &mapped)
+            .unwrap()
+            .material;
+        let mut provider = NativeSourcePoolProvider::new();
+        provider.rebuild(&derived).unwrap();
+        let address = KnowledgeAddress::Source(pure[0].binding.source.clone());
+        let old = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_source_pool(&provider, &pure);
+        assert_eq!(
+            old.read(&address).unwrap().content.as_deref(),
+            Some(records[0].1.as_str())
+        );
+        let bound = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_source_pool(&provider, &derived);
+        assert_eq!(
+            bound.read(&address).unwrap_err().code(),
+            "knowledge.source_origin_unavailable"
+        );
+        assert_eq!(
+            bound.explain(&address).unwrap_err().code(),
+            "knowledge.source_origin_unavailable"
+        );
+        assert_eq!(
+            bound
+                .route(None, std::slice::from_ref(&address))
+                .unwrap_err()
+                .code(),
+            "knowledge.source_origin_unavailable"
+        );
+        // The real native memory index has a matching copied body, while its
+        // production live-read contract provides no origin route. The hit must
+        // be withheld before any title/snippet/ref is projected.
+        assert!(!old.search("Required origin", 8).hits.is_empty());
+        let withheld = bound.search("Required origin", 8);
+        assert!(withheld.hits.is_empty());
+        let absences = withheld.absences.join("\n");
+        assert!(absences.contains("knowledge.source_origin_unavailable"));
+        assert!(!absences.contains(address.resource_ref().as_str()));
+        assert!(!absences.contains("Required origin"));
+        assert_eq!(
+            derived[0].body, records[0].1,
+            "withholding retains the source material"
+        );
+    }
+    #[test]
+    fn actual_compiler_and_native_index_keep_local_payload_but_do_not_grant_external_egress() {
+        let records = vec![("record.md".into(), "---\nrecord_id: target-boundary\nrecord_type: note\n---\n\n# Selected payload\nActual independent authored body.\n".into())];
+        let material = ingest_corpus(&records, &[], 0).unwrap().material;
+        let original = material.clone();
+        let mut provider = NativeSourcePoolProvider::new();
+        provider.rebuild(&material).unwrap();
+        let address = KnowledgeAddress::Source(material[0].binding.source.clone());
+        for target in [RetrievalTarget::Human, RetrievalTarget::LocalAgent] {
+            let app = KnowledgeApplication::new(FamiliarityContext::default())
+                .with_source_pool(&provider, &material)
+                .with_retrieval_target(target);
+            assert_eq!(
+                app.read(&address).unwrap().content.as_deref(),
+                Some(records[0].1.as_str())
+            );
+            assert!(app.explain(&address).is_ok());
+            assert!(app.route(None, std::slice::from_ref(&address)).is_ok());
+            assert!(app
+                .search("Selected payload", 8)
+                .hits
+                .iter()
+                .any(|hit| hit.address == address));
+            assert_eq!(
+                app.context_pack(None, std::slice::from_ref(&address))
+                    .readings
+                    .len(),
+                1
+            );
+        }
+        let external = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_source_pool(&provider, &material)
+            .with_retrieval_target(RetrievalTarget::ExternalProvider);
+        assert_eq!(
+            external.read(&address).unwrap_err().code(),
+            "knowledge.source_target_withheld"
+        );
+        assert_eq!(
+            external.explain(&address).unwrap_err().code(),
+            "knowledge.source_target_withheld"
+        );
+        assert_eq!(
+            external
+                .route(None, std::slice::from_ref(&address))
+                .unwrap_err()
+                .code(),
+            "knowledge.source_target_withheld"
+        );
+        let selector = crate::knowledge_facets::SourceSelector::TextSpan {
+            start: 0,
+            end: 8,
+            anchor_ref: None,
+        };
+        assert_eq!(
+            external
+                .read_selected(&address, &selector)
+                .unwrap_err()
+                .code(),
+            "knowledge.source_target_withheld"
+        );
+        let pack = external.context_pack(None, std::slice::from_ref(&address));
+        assert!(pack.readings.is_empty() && pack.routes.is_empty() && pack.explanations.is_empty());
+        let denied = external.search("Selected payload", 8);
+        assert!(denied.hits.is_empty());
+        let absence = denied.absences.join("\n");
+        assert!(absence.contains("knowledge.source_target_withheld"));
+        assert!(!absence.contains(address.resource_ref().as_str()));
+        assert!(!absence.contains("Selected payload"));
+        assert_eq!(
+            material, original,
+            "denial preserves authorised source data"
+        );
+        // An index-only unheld hit is not a current selected read. The actual
+        // native index remains searchable, but its body is not disclosed.
+        let unheld = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_source_pool(&provider, &[]);
+        assert!(unheld.search("Selected payload", 8).hits.is_empty());
     }
 }

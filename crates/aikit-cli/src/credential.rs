@@ -23,6 +23,7 @@ use aikit_adapters::runner::CommandRunner;
 use aikit_adapters::secret_resolver::SuiteSecretResolver;
 use aikit_adapters::{
     EnvironmentImportProvider, NativeSecureStoreProvider, NativeSecureStoreStatus,
+    PiHarnessAuthProvider,
 };
 use aikit_core::credential::{
     resolve_registered_credential, CredentialBindingState, CredentialProviderRejection,
@@ -53,6 +54,68 @@ pub struct CredentialRequest {
     /// terminal prompt — the path for a caller that hands the key over a
     /// pipe. Never implied; refused when stdin is a terminal.
     pub stdin: bool,
+}
+
+/// A global model reader cannot borrow a retained session's source. This
+/// predicate reads metadata only; actual scoped delivery uses its provider.
+pub fn global_model_credential_binding(binding: &CredentialBindingState) -> bool {
+    !binding.revoked
+        && !binding.is_session_scoped_harness_binding()
+        && binding.expires_at.as_deref().is_none_or(|expiry| {
+            expiry
+                .parse::<jiff::Timestamp>()
+                .is_ok_and(|expiry| expiry > jiff::Timestamp::now())
+        })
+}
+
+/// The route join uses the same retained-binding eligibility as the app.
+/// Reading the store may fail; an unreadable store never supplies success.
+pub fn global_model_credential_evidence(
+    home: &AikitHome,
+) -> Result<aikit_adapters::actuation_model_routes::CredentialEvidence> {
+    let bindings = CredentialBindingStore::new(home).list()?;
+    Ok(
+        aikit_adapters::actuation_model_routes::CredentialEvidence::from_binding_refs(
+            bindings
+                .iter()
+                .filter(|binding| global_model_credential_binding(binding))
+                .map(|binding| binding.credential_ref.as_str().to_string()),
+        ),
+    )
+}
+
+/// Palette setup needs an eligible global binding, not record existence.
+/// Preserve the unresolved requirement and its consumer for the setup flow.
+pub fn unresolved_global_credential_requirements(
+    home: &AikitHome,
+    requirements: &[SecretRequirement],
+) -> Result<Vec<SecretRequirement>> {
+    let store = CredentialBindingStore::new(home);
+    let mut unresolved = Vec::new();
+    for requirement in requirements {
+        let binding = store.load(&requirement.credential_ref)?;
+        if !binding
+            .as_ref()
+            .is_some_and(global_model_credential_binding)
+        {
+            unresolved.push(requirement.clone());
+        }
+    }
+    Ok(unresolved)
+}
+
+fn scoped_setup_rotation_required() -> AikitError {
+    AikitError::new(
+        "credential.harness_auth_rotation_required",
+        "retained session-scoped source requires explicit rotation; plain setup cannot replace or reopen it",
+    )
+}
+
+fn refuse_scoped_setup_replacement(previous: Option<&CredentialBindingState>) -> Result<()> {
+    if previous.is_some_and(CredentialBindingState::is_session_scoped_harness_binding) {
+        return Err(scoped_setup_rotation_required());
+    }
+    Ok(())
 }
 
 pub fn now_unix_seconds() -> u64 {
@@ -117,8 +180,17 @@ pub fn inspect(home: &AikitHome, request: &CredentialRequest) -> Result<Credenti
         })
         .transpose()?;
 
-    let mut providers: Vec<&dyn SecretProvider> = vec![&native];
-    if let Some(env) = env.as_ref() {
+    let harness = persisted_binding
+        .as_ref()
+        .filter(|binding| binding.is_session_scoped_harness_binding())
+        .map(|binding| PiHarnessAuthProvider::from_native(Some(binding), &request.consumer_ref))
+        .transpose()?;
+    let mut providers: Vec<&dyn SecretProvider> = if let Some(harness) = harness.as_ref() {
+        vec![harness]
+    } else {
+        vec![&native]
+    };
+    if let Some(env) = env.as_ref().filter(|_| harness.is_none()) {
         providers.push(env);
     }
     let resolution = resolve_registered_credential(
@@ -145,7 +217,126 @@ pub fn inspect(home: &AikitHome, request: &CredentialRequest) -> Result<Credenti
     })
 }
 
+/// Explicit named backing options; no arbitrary file source or secret value.
+pub struct HarnessAuthDeclaration {
+    pub harness: String,
+    pub provider: String,
+    pub expires_at: String,
+    pub expected_binding: String,
+}
+
+pub fn declare_harness_auth(
+    home: &AikitHome,
+    request: &CredentialRequest,
+    declaration: &HarnessAuthDeclaration,
+    rotation: bool,
+) -> Result<CredentialSetupOutcome> {
+    declare_harness_auth_at(
+        home,
+        request,
+        declaration,
+        rotation,
+        &aikit_adapters::pi_harness_auth::native_home()?,
+    )
+}
+
+fn declare_harness_auth_at(
+    home: &AikitHome,
+    request: &CredentialRequest,
+    declaration: &HarnessAuthDeclaration,
+    rotation: bool,
+    native_home: &Path,
+) -> Result<CredentialSetupOutcome> {
+    if declaration.harness != "pi"
+        || declaration.provider != "zai"
+        || request.declared_ref.is_some()
+        || request.from_env
+        || request.stdin
+        || request.env_var.is_some()
+        || request.project_env.is_some()
+    {
+        return Err(AikitError::new(
+            "credential.harness_auth_source_invalid",
+            "named backing supports explicit pi/zai only and conflicts with other sources",
+        ));
+    }
+    let store = CredentialBindingStore::new(home);
+    let previous = store.load(&request.credential)?;
+    let fresh = PiHarnessAuthProvider::declare(
+        native_home,
+        &request.credential,
+        &request.consumer_ref,
+        &request.purpose,
+        &declaration.expires_at,
+    )?;
+    // Retry of exactly the same declaration retains its actual original
+    // lifecycle. Revoked/different bindings are never silently reopened.
+    let same = previous.as_ref().is_some_and(|old| {
+        !old.revoked
+            && old.harness_auth_source == fresh.harness_auth_source
+            && old.provider_ref == fresh.provider_ref
+            && old.expires_at == fresh.expires_at
+    });
+    if !same {
+        if CredentialBindingStore::revision(previous.as_ref())? != declaration.expected_binding {
+            return Err(AikitError::new(
+                "credential.binding_stale",
+                "named backing expected binding differs; reread before declaring or rotating",
+            ));
+        }
+        if previous.is_some() && !rotation {
+            return Err(AikitError::new(
+                "credential.harness_auth_rotation_required",
+                "an existing different binding requires explicit rotation",
+            ));
+        }
+        if rotation && previous.is_none() {
+            return Err(AikitError::new(
+                "credential.binding_missing",
+                "rotation requires an existing binding",
+            ));
+        }
+    }
+    let binding = if same {
+        previous.clone().expect("same existing declaration")
+    } else {
+        fresh.with_lifecycle(previous.as_ref(), rotation, now_unix_seconds())
+    };
+    let provider = PiHarnessAuthProvider::at(Some(&binding), native_home, &request.consumer_ref)?;
+    provider.revalidate(&request.credential)?;
+    let resolution =
+        resolve_registered_credential(requirement(request)?, &[&provider], true, false)?;
+    // Even idempotent retry CAS-checks the actually read current record.
+    store.compare_and_save(previous.as_ref(), &binding)?;
+    Ok(CredentialSetupOutcome {
+        resolution,
+        binding,
+        newly_bound: !same,
+    })
+}
+
 pub fn setup(home: &AikitHome, request: &CredentialRequest) -> Result<CredentialSetupOutcome> {
+    let previous = CredentialBindingStore::new(home).load(&request.credential)?;
+    if previous
+        .as_ref()
+        .is_some_and(CredentialBindingState::is_session_scoped_harness_binding)
+    {
+        // Refuse before reading stdin, importing an environment value or
+        // prompting. Exact eligible bare reuse may retain the same source.
+        if request.declared_ref.is_some()
+            || request.stdin
+            || request.from_env
+            || request.env_var.is_some()
+            || request.project_env.is_some()
+        {
+            return Err(scoped_setup_rotation_required());
+        }
+        let inspection = inspect(home, request)?;
+        if !inspection.resolution.selected() {
+            return Err(scoped_setup_rotation_required());
+        }
+        return selected_outcome(home, request, inspection.resolution, false);
+    }
     if let Some(secret_ref) = request.declared_ref.clone() {
         return declare_ref(home, request, secret_ref);
     }
@@ -225,6 +416,7 @@ fn declared_ref_binding(
         expires_at: None,
         revoked: false,
         metadata,
+        harness_auth_source: None,
         declared_secret_ref: Some(secret_ref),
         bound_at_unix_seconds: None,
         last_rotated_at_unix_seconds: None,
@@ -242,6 +434,9 @@ fn declare_ref(
 ) -> Result<CredentialSetupOutcome> {
     let store = CredentialBindingStore::new(home);
     let previous = store.load(&request.credential)?;
+    // Recheck the native owner at the mutation seam: a concurrent named
+    // declaration after setup's early read must remain fenced as well.
+    refuse_scoped_setup_replacement(previous.as_ref())?;
     if let Some(existing) = &previous {
         if !existing.revoked
             && existing.provider_tier == SecretProviderTier::BrokeredSecureProvider
@@ -264,7 +459,7 @@ fn declare_ref(
         previous.is_some(),
         now_unix_seconds(),
     );
-    store.save(&binding)?;
+    store.compare_and_save(previous.as_ref(), &binding)?;
     let resolution = resolve_registered_credential(
         requirement(request)?,
         &[&NativeSecureStoreProvider::new()],
@@ -382,7 +577,7 @@ pub fn rotate(home: &AikitHome, request: &CredentialRequest) -> Result<Credentia
              --from-env --env-var NAME to import fresh material into the OS secure store",
         ));
     };
-    store.save(&binding)?;
+    store.compare_and_save(previous.as_ref(), &binding)?;
     Ok(CredentialRotationOutcome { binding, notes })
 }
 
@@ -400,8 +595,9 @@ pub fn revoke(home: &AikitHome, credential: &CredentialRef) -> Result<Credential
             ),
         )
     })?;
+    let previous = binding.clone();
     binding.revoked = true;
-    store.save(&binding)?;
+    store.compare_and_save(Some(&previous), &binding)?;
     Ok(binding)
 }
 
@@ -459,10 +655,14 @@ pub fn verify(
              not bypass revocation",
         ));
     }
-    let provider = credential
-        .as_str()
-        .strip_prefix("credential:")
-        .unwrap_or(credential.as_str());
+    let provider = if binding.harness_auth_source.is_some() {
+        "zai"
+    } else {
+        credential
+            .as_str()
+            .strip_prefix("credential:")
+            .unwrap_or(credential.as_str())
+    };
     known_check(provider).ok_or_else(|| {
         AikitError::new(
             "credential.verify_provider_unknown",
@@ -480,10 +680,14 @@ pub fn verify(
     let material = materialise_bound(&binding)?;
     let outcome = check_provider_key(runner, provider, &material)?;
     let checked_at_unix_seconds = now_unix_seconds();
+    if let Some(source) = &binding.harness_auth_source {
+        PiHarnessAuthProvider::from_native(Some(&binding), &source.consumer_ref)?
+            .revalidate(&binding.credential_ref)?;
+    }
     let updated = stamp_verification(&binding, &outcome, checked_at_unix_seconds);
     let recorded = updated.is_some();
     if let Some(updated) = updated {
-        store.save(&updated)?;
+        store.compare_and_save(Some(&binding), &updated)?;
     }
     let notes = match (outcome.verdict, outcome.definitive) {
         (CredentialVerdict::Working, _) => vec![
@@ -519,6 +723,19 @@ pub fn verify(
 /// uses: a declared ref resolves straight from the external store the
 /// operator named; otherwise the OS secure store answers for its own binding.
 fn materialise_bound(binding: &CredentialBindingState) -> Result<SecretValue> {
+    if let Some(source) = &binding.harness_auth_source {
+        return PiHarnessAuthProvider::from_native(Some(binding), &source.consumer_ref)?
+            .materialise(
+                &binding.credential_ref,
+                SecretMaterialisationClass::ProcessEnv,
+            )?
+            .ok_or_else(|| {
+                AikitError::new(
+                    "credential.verify_no_material",
+                    "Pi backing returned no material",
+                )
+            });
+    }
     if let Some(secret_ref) = &binding.declared_secret_ref {
         return SuiteSecretResolver::default().resolve(secret_ref);
     }
@@ -795,8 +1012,21 @@ fn selected_outcome(
         )
     })?;
     let stored_binding = CredentialBindingStore::new(home).load(&request.credential)?;
+    if selected.as_str() != "provider:named-harness-auth/pi/zai" {
+        refuse_scoped_setup_replacement(stored_binding.as_ref())?;
+    }
     let native = NativeSecureStoreProvider::with_binding(stored_binding.as_ref());
-    let binding = if selected.as_str().starts_with("provider:os-secure-store/") {
+    let binding = if selected.as_str() == "provider:named-harness-auth/pi/zai" {
+        let stored = stored_binding.as_ref().ok_or_else(|| {
+            AikitError::new(
+                "credential.binding_missing",
+                "selected Pi binding is missing",
+            )
+        })?;
+        PiHarnessAuthProvider::from_native(Some(stored), &request.consumer_ref)?
+            .revalidate(&request.credential)?
+            .clone()
+    } else if selected.as_str().starts_with("provider:os-secure-store/") {
         native.binding_state(&request.credential)?.ok_or_else(|| {
             AikitError::new(
                 "credential.binding_missing",
@@ -835,7 +1065,7 @@ fn selected_outcome(
     if binding.provider_tier
         != aikit_core::credential::SecretProviderTier::ExplicitEnvironmentImport
     {
-        CredentialBindingStore::new(home).save(&binding)?;
+        CredentialBindingStore::new(home).compare_and_save(stored_binding.as_ref(), &binding)?;
     }
     Ok(CredentialSetupOutcome {
         resolution,
@@ -863,6 +1093,9 @@ fn bind_native_material(
     request: &CredentialRequest,
     secret: SecretValue,
 ) -> Result<CredentialSetupOutcome> {
+    let store = CredentialBindingStore::new(home);
+    let previous = store.load(&request.credential)?;
+    refuse_scoped_setup_replacement(previous.as_ref())?;
     let native = NativeSecureStoreProvider::new();
     if native.status(&request.credential) == NativeSecureStoreStatus::Unavailable {
         return Err(AikitError::new(
@@ -870,8 +1103,12 @@ fn bind_native_material(
             "the OS secure store is unavailable; declare where the key lives (--ref) instead",
         ));
     }
-    let binding = native.bind(&request.credential, &secret)?;
-    CredentialBindingStore::new(home).save(&binding)?;
+    let binding = native.bind(&request.credential, &secret)?.with_lifecycle(
+        previous.as_ref(),
+        previous.is_some(),
+        now_unix_seconds(),
+    );
+    store.compare_and_save(previous.as_ref(), &binding)?;
     let rebound_native = NativeSecureStoreProvider::with_binding(Some(&binding));
     let resolution =
         resolve_registered_credential(requirement(request)?, &[&rebound_native], false, false)?;
@@ -883,6 +1120,8 @@ fn bind_native_material(
 }
 
 fn explicit_env(home: &AikitHome, request: &CredentialRequest) -> Result<CredentialSetupOutcome> {
+    let previous = CredentialBindingStore::new(home).load(&request.credential)?;
+    refuse_scoped_setup_replacement(previous.as_ref())?;
     let env_var = request.env_var.as_ref().ok_or_else(|| {
         AikitError::new(
             "credential.env_var_required",
@@ -912,6 +1151,9 @@ fn bind_encrypted_fallback(
 ) -> Result<CredentialSetupOutcome> {
     use aikit_adapters::LinuxEncryptedFallbackProvider;
 
+    let store = CredentialBindingStore::new(home);
+    let previous = store.load(&request.credential)?;
+    refuse_scoped_setup_replacement(previous.as_ref())?;
     let native = NativeSecureStoreProvider::new();
     if native.status(&request.credential) != NativeSecureStoreStatus::Unavailable {
         return Err(AikitError::new(
@@ -929,8 +1171,12 @@ fn bind_encrypted_fallback(
         passphrase,
         false,
     );
-    let binding = provider.bind(&request.credential, &secret)?;
-    CredentialBindingStore::new(home).save(&binding)?;
+    let binding = provider.bind(&request.credential, &secret)?.with_lifecycle(
+        previous.as_ref(),
+        previous.is_some(),
+        now_unix_seconds(),
+    );
+    store.compare_and_save(previous.as_ref(), &binding)?;
     let resolution =
         resolve_registered_credential(requirement(request)?, &[&provider], false, false)?;
     Ok(CredentialSetupOutcome {
@@ -1314,5 +1560,191 @@ mod tests {
         assert!(!is_candidate_variable("X_API_KEY"));
         assert!(!is_candidate_variable("PATH"));
         assert!(!is_candidate_variable("AIKIT_GATEWAY_TOKEN"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod pi_declaration_owner_tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn explicit_declaration_retry_rotation_revoke_and_restart_retain_actual_source_basis() {
+        let original = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(state.path());
+        let path = original.path().join(".pi/agent/auth.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"zai":{"type":"api_key","key":"synthetic-original"}}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let before = fs::read(&path).unwrap();
+        let request = CredentialRequest {
+            credential: CredentialRef::new("credential:z-ai").unwrap(),
+            consumer_ref: "agent-session/declared-pi-owner-test".into(),
+            purpose: "bounded real file declaration and rotation".into(),
+            env_var: None,
+            project_env: None,
+            from_env: false,
+            headless: true,
+            declared_ref: None,
+            stdin: false,
+        };
+        let declaration = HarnessAuthDeclaration {
+            harness: "pi".into(),
+            provider: "zai".into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            expected_binding: "absent".into(),
+        };
+        let first =
+            declare_harness_auth_at(&home, &request, &declaration, false, original.path()).unwrap();
+        assert!(first.newly_bound && first.resolution.selected());
+        let restarted = AikitHome::at(state.path());
+        let retried =
+            declare_harness_auth_at(&restarted, &request, &declaration, false, original.path())
+                .unwrap();
+        assert!(!retried.newly_bound);
+        assert_eq!(retried.binding, first.binding);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        // Source writer changes its own original file, never an AIKit source
+        // copy. Old declaration must refuse; rotation binds the actual new basis.
+        fs::write(
+            &path,
+            r#"{"zai":{"type":"api_key","key":"synthetic-rotated-longer"}}"#,
+        )
+        .unwrap();
+        assert!(
+            !PiHarnessAuthProvider::at(
+                Some(&first.binding),
+                original.path(),
+                &request.consumer_ref
+            )
+            .unwrap()
+            .descriptor(&request.credential)
+            .available
+        );
+        assert_eq!(
+            declare_harness_auth_at(&home, &request, &declaration, true, original.path())
+                .unwrap_err()
+                .code(),
+            "credential.binding_stale"
+        );
+        let current = HarnessAuthDeclaration {
+            expected_binding: CredentialBindingStore::revision(Some(&first.binding)).unwrap(),
+            ..declaration
+        };
+        let rotated =
+            declare_harness_auth_at(&home, &request, &current, true, original.path()).unwrap();
+        assert_eq!(rotated.binding.credential_ref, first.binding.credential_ref);
+        assert_eq!(
+            rotated.binding.bound_at_unix_seconds,
+            first.binding.bound_at_unix_seconds
+        );
+        assert!(rotated.binding.last_rotated_at_unix_seconds.is_some());
+        assert_ne!(
+            rotated.binding.harness_auth_source,
+            first.binding.harness_auth_source
+        );
+        let revoked = revoke(&home, &request.credential).unwrap();
+        assert!(revoked.revoked);
+        assert_eq!(
+            CredentialBindingStore::new(&home).list().unwrap(),
+            vec![revoked.clone()]
+        );
+        assert!(
+            !PiHarnessAuthProvider::at(Some(&revoked), original.path(), &request.consumer_ref)
+                .unwrap()
+                .descriptor(&request.credential)
+                .available
+        );
+        for entry in fs::read_dir(home.credentials())
+            .unwrap()
+            .filter_map(|e| e.ok())
+        {
+            let text = fs::read_to_string(entry.path()).unwrap_or_default();
+            assert!(
+                !text.contains("synthetic-original") && !text.contains("synthetic-rotated-longer")
+            );
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod scoped_pi_setup_mutation_tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn late_scoped_declaration_is_refused_at_the_plain_mutation_seams() {
+        let root = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(root.path().join("owner-state"));
+        let original = root.path().join("native-home");
+        let source = original.join(".pi/agent/auth.json");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"unparsed synthetic source at mutation seam").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+        let request = CredentialRequest {
+            credential: CredentialRef::new("credential:z-ai").unwrap(),
+            consumer_ref: "agent-session/late-source-reader".into(),
+            purpose: "actual late owner mutation seam regression".into(),
+            env_var: None,
+            project_env: None,
+            from_env: false,
+            headless: true,
+            declared_ref: None,
+            stdin: false,
+        };
+        let store = CredentialBindingStore::new(&home);
+        assert!(store.load(&request.credential).unwrap().is_none());
+        // The native declaration arrives after that ordinary setup read.
+        // Invoke the real mutation seams; no provider output is invented.
+        let binding = PiHarnessAuthProvider::declare(
+            &original,
+            &request.credential,
+            "agent-session/late-source-writer",
+            "actual native source",
+            "2099-01-01T00:00:00Z",
+        )
+        .unwrap();
+        store.compare_and_save(None, &binding).unwrap();
+        assert_eq!(
+            declare_ref(
+                &home,
+                &request,
+                SecretRef::parse("pass://different-source").unwrap()
+            )
+            .unwrap_err()
+            .code(),
+            "credential.harness_auth_rotation_required"
+        );
+        assert_eq!(
+            bind_native_material(
+                &home,
+                &request,
+                SecretValue::new("synthetic-never-sent-to-keyring").unwrap()
+            )
+            .unwrap_err()
+            .code(),
+            "credential.harness_auth_rotation_required"
+        );
+        let env_request = CredentialRequest {
+            env_var: Some("ZAI_API_KEY".into()),
+            from_env: true,
+            ..request
+        };
+        assert_eq!(
+            explicit_env(&home, &env_request).unwrap_err().code(),
+            "credential.harness_auth_rotation_required"
+        );
+        assert_eq!(store.load(&binding.credential_ref).unwrap(), Some(binding));
+        assert_eq!(
+            fs::read(source).unwrap(),
+            b"unparsed synthetic source at mutation seam"
+        );
     }
 }

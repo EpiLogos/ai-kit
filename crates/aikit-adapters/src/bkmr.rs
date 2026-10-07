@@ -163,6 +163,7 @@ impl<R: CommandRunner> BkmrSourcePoolProvider<R> {
 
         Some(SourceHit {
             source,
+            revision: Some(binding.revision.clone()),
             provider: self.provider.clone(),
             score,
             title: bookmark
@@ -909,6 +910,12 @@ impl<R: CommandRunner> BkmrStoreSearchProvider<R> {
         tags.push(store.name.to_lowercase());
         Some(SourceHit {
             source,
+            revision: ["content", "url", "description"]
+                .iter()
+                .find_map(|key| bookmark.get(*key).and_then(Value::as_str))
+                .map(|body| SourceRevision::parse(content_revision(body.as_bytes())))
+                .transpose()
+                .ok()?,
             provider: self.provider.clone(),
             score,
             title: bookmark
@@ -968,10 +975,7 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrStoreSearchProvider<R> {
         let raw = source.as_str();
         let prefix = "source:bkmr:";
         let Some(rest) = raw.strip_prefix(prefix) else {
-            return Err(AikitError::new(
-                "knowledge.bkmr_stores_out_of_scope",
-                format!("{raw} is not a bkmr store ref"),
-            ));
+            return Ok(None);
         };
         let Some((store_name, id)) = rest.split_once(':') else {
             return Err(AikitError::new(
@@ -979,12 +983,9 @@ impl<R: CommandRunner> SourcePoolProvider for BkmrStoreSearchProvider<R> {
                 format!("{raw} carries no store and id"),
             ));
         };
-        let store = self.store_for(store_name).ok_or_else(|| {
-            AikitError::new(
-                "knowledge.bkmr_stores_out_of_scope",
-                format!("store {store_name:?} is not configured"),
-            )
-        })?;
+        let Some(store) = self.store_for(store_name) else {
+            return Ok(None);
+        };
         if !id.chars().all(|ch| ch.is_ascii_digit()) {
             return Err(AikitError::new(
                 "knowledge.bkmr_stores_out_of_scope",
@@ -1533,7 +1534,12 @@ mod tests {
 
     #[test]
     fn store_reads_and_writes_stay_on_their_sides_of_the_fence() {
-        let directory = tempfile::tempdir().unwrap();
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ProjectCentral/now/tmp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("bkmr-owner-route-")
+            .tempdir_in(scratch)
+            .unwrap();
         let runner = store_cli_scripted().on(
             "--db",
             r#"[{"bookmark":{"id":41,"title":"A","description":"human bookmark","tags":[],"content":"the body"}}]"#,
@@ -1553,10 +1559,26 @@ mod tests {
             content_revision(b"the body")
         );
 
-        let error = provider
+        // These ownership decisions require no bookmark response. Use the
+        // real runner with an actually absent binary; absence is never a
+        // participating owner's successful native read.
+        let unrelated = BkmrStoreSearchProvider::connect(
+            crate::runner::SystemRunner::probe(),
+            directory
+                .path()
+                .join("absent-owner")
+                .to_string_lossy()
+                .into_owned(),
+            vec![store("books", &directory.path().join("books.db"))],
+        );
+        assert!(unrelated
             .read(&SourceRef::parse("source:bkmr:other:41").unwrap())
-            .unwrap_err();
-        assert_eq!(error.code(), "knowledge.bkmr_stores_out_of_scope");
+            .unwrap()
+            .is_none());
+        assert!(unrelated
+            .read(&SourceRef::parse("central:source:control:root:Control/user/note.md").unwrap())
+            .unwrap()
+            .is_none());
         let error = provider
             .read(&SourceRef::parse("source:bkmr:books:not-an-id").unwrap())
             .unwrap_err();

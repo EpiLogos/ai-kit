@@ -1,0 +1,10 @@
+schema = 1
+id = "skill/aikit/personal-history-methodology"
+kind = "skill"
+name = "Personal-History Contemplation Methodology"
+description = "METHOD: Bring a person's earlier writing through Central adoption into source-grounded knowledge and delivered personal context — collection intake, whole-entry episode reading, cross-period comparison, constellation construction, and correction. Select this method before any journal/notebook intake or personal-history question; near-miss: knowledge-navigation answers recorded-knowledge questions, this method generates and maintains personal knowledge from adopted history without flattening the person into a profile."
+maturity = "stable"
+tags = ["aikit", "personal-history", "methodology", "coverage", "constellation"]
+
+[skill]
+root = "payload"

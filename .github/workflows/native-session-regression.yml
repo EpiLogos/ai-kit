@@ -49,5 +49,16 @@ jobs:
         run: cargo test --locked -p aikit-cli --test agent_session_protocol --test encounter_context_admission --test encounter_shutdown
       - name: Full native lint
         run: cargo clippy --all-targets --locked -- -D warnings
+      # The full suite now includes real-ripgrep source pools
+      # (now_field/work_repos): the suite requires the real binary, the same
+      # law direct-agent-session's workspace suite honours.
+      - name: Ensure real ripgrep for the workspace suite
+        shell: bash
+        run: |
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y ripgrep
+          fi
+          rg --version
       - name: Full repository regressions
         run: cargo test --all-targets --locked

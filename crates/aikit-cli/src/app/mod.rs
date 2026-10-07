@@ -89,7 +89,6 @@ use crate::temporal::process_central_root;
 mod development_field;
 mod flow_cognition;
 mod knowledge;
-mod knowledge_cache;
 mod model_resident;
 mod root_context;
 
@@ -274,7 +273,6 @@ pub struct Service {
     policy: ManagedPolicy,
     view: ResolvedView,
     invocation_cwd: PathBuf,
-    knowledge_runtime: std::cell::RefCell<Option<knowledge::KnowledgeRuntime>>,
     factory_executable: PathBuf,
     factory_state: Option<PathBuf>,
     factory_project_ref: Option<String>,
@@ -429,11 +427,8 @@ impl Service {
         let additional_stores: Vec<&Path> = default_store.as_deref().into_iter().collect();
         let project =
             discover::discover_project_with_home_excluding(&home, cwd, &additional_stores)?;
-        let (project, central_meta_root) = root_context::discover(cwd, &env, project)?;
-        let knowledge_central_root = env("CENTRAL_ROOT")
-            .filter(|value| !value.is_empty())
-            .and_then(|value| PathBuf::from(value).canonicalize().ok())
-            .filter(|root| root.join("Control").is_dir() && root.join("Work").is_dir());
+        let (project, central_meta_root, knowledge_central_root) =
+            root_context::discover(cwd, &env, project)?;
         let project_root = project.as_ref().map(|p| p.root.clone());
 
         let descriptor = match &project_root {
@@ -473,7 +468,6 @@ impl Service {
             policy,
             view,
             invocation_cwd: cwd.to_path_buf(),
-            knowledge_runtime: std::cell::RefCell::new(None),
             factory_executable,
             factory_state,
             factory_project_ref,
@@ -780,7 +774,6 @@ impl Service {
             &self.layers,
             &self.policy,
         )?;
-        self.invalidate_knowledge_runtime();
         Ok(())
     }
 
@@ -1034,7 +1027,7 @@ impl Service {
                     aikit_adapters::actuation_model_routes::CredentialEvidence::from_binding_refs(
                         bindings
                             .into_iter()
-                            .filter(|binding| !binding.revoked)
+                            .filter(global_model_credential_binding)
                             .map(|binding| {
                                 aikit_adapters::actuation_model_routes::qualified_credential_ref(
                                     binding.credential_ref.as_str(),
@@ -1430,21 +1423,23 @@ impl Service {
 
         let actor_bootstrap = if self.descriptor.project_root.is_some() {
             // Compose the live actor inputs from the Actuation instantiation
-            // receipt and the Central-authored profile. Absent or ambiguous
-            // projections resolve to defaults — never guessed; a fetch failure
-            // is fail-soft (no projection), never a resolution failure.
+            // receipt and the Central-authored profile. The native adapter's
+            // Ok(None) is legitimate absence. A known source failure or
+            // ambiguity must refuse this projection, not become empty context.
             let central_root = self.descriptor.project_root.as_deref().and_then(|root| {
                 self.central_meta_root
                     .clone()
                     .or_else(|| process_central_root(Some(root)))
             });
             let composed = match self.descriptor.project_root.as_deref() {
-                Some(root) => central_root.as_deref().and_then(|central| {
-                    let runner = SystemRunner::probe();
-                    compose_live_actor_inputs(&runner, central, root)
-                        .ok()
-                        .flatten()
-                }),
+                Some(root) => central_root
+                    .as_deref()
+                    .map(|central| {
+                        let runner = SystemRunner::probe();
+                        compose_live_actor_inputs(&runner, central, root)
+                    })
+                    .transpose()?
+                    .flatten(),
                 None => None,
             };
 
@@ -2134,41 +2129,6 @@ impl Service {
                 decision.injected.push(commit.text.clone());
             }
         }
-        // Development entry: the work this body carries, prepared from its
-        // Run. It rides the lean entry at fresh occupancy and Refocus's own
-        // triggers (compaction, work transition, sustained work), and exists
-        // only when the body carries exactly one current work. A failure is
-        // named to the body; ordinary operation continues.
-        if let (Some(work), true) = (&inhabitation.work, decision.allowed) {
-            let id = CapsuleId::parse(crate::development_entry::CAPABILITY)?;
-            if let Some(active) = self.view.active.get(&id) {
-                let session = crate::refocus::hook_session(&event.payload).unwrap_or_default();
-                let cwd = event
-                    .cwd
-                    .clone()
-                    .unwrap_or_else(|| self.invocation_cwd.clone());
-                let roots = self.catalog.capsule_roots();
-                let outcome = crate::development_entry::EntryConfig::from_table(&active.config)
-                    .and_then(|config| {
-                        crate::development_entry::deliver(
-                            work,
-                            &cwd,
-                            &event.client,
-                            &session,
-                            &config,
-                            &roots,
-                        )
-                    });
-                decision.injected.push(match outcome {
-                    Ok(text) => text,
-                    Err(error) => format!(
-                        "[Development entry unavailable] {}: {} — the work above stands; nothing was prepared for it this turn.",
-                        error.code(),
-                        error.message()
-                    ),
-                });
-            }
-        }
         Ok((decision, refocus))
     }
 
@@ -2260,6 +2220,45 @@ impl Service {
                     Err(error) => decision
                         .warnings
                         .push(format!("Wiki projection unavailable: {}", error.message())),
+                }
+            }
+        }
+
+        // Development entry: the concern-selected operative context for a body
+        // entered directly into a Project checkout or seat. Operative only when
+        // the composition selects its capsule; a failure is named in the
+        // body's context (ordinary operation continues) and never gates.
+        if matches!(
+            event.kind,
+            aikit_core::hooks::HookEventKind::SessionStart
+                | aikit_core::hooks::HookEventKind::UserPromptSubmit
+                | aikit_core::hooks::HookEventKind::PreCompact
+        ) {
+            let id = CapsuleId::parse(crate::development_entry::CAPABILITY)?;
+            if let Some(active) = self.view.active.get(&id) {
+                let central = crate::temporal::central_root_enclosing(event.cwd.as_deref());
+                let roots = self.catalog.capsule_roots();
+                let state = self.home.state();
+                let outcome = crate::development_entry::EntryConfig::from_table(&active.config)
+                    .and_then(|config| {
+                        crate::development_entry::deliver(&crate::development_entry::EntryRequest {
+                            event,
+                            client: &event.client,
+                            config: &config,
+                            state: &state,
+                            central: central.as_deref(),
+                            view: &self.view,
+                            capsule_roots: &roots,
+                        })
+                    });
+                match outcome {
+                    Ok(Some(text)) => decision.injected.push(text),
+                    Ok(None) => {}
+                    Err(error) => decision.injected.push(format!(
+                        "[Development entry unavailable] {}: {} — nothing was prepared for this turn; ordinary operation continues.",
+                        error.code(),
+                        error.message()
+                    )),
                 }
             }
         }
@@ -2426,8 +2425,16 @@ impl Service {
                     let (domains, mut load_warnings) =
                         crate::domain_activation::load_domains(project_root);
                     decision.warnings.append(&mut load_warnings);
+                    let native_world = self
+                        .knowledge_central_root
+                        .clone()
+                        .or_else(|| self.central_meta_root.clone())
+                        .or_else(|| process_central_root(Some(project_root)));
                     let (objects, mut wiki_warnings) =
-                        crate::file_context::load_project_wiki(project_root);
+                        crate::file_context::load_project_wiki_in_world(
+                            project_root,
+                            native_world.as_deref(),
+                        );
                     decision.warnings.append(&mut wiki_warnings);
                     let scope = crate::domain_activation::dedup_scope(event, Some(project_root));
                     let Some(scope) = scope else {
@@ -3070,7 +3077,6 @@ impl AikitApplication for Service {
             &self.layers,
             &self.policy,
         )?;
-        self.invalidate_knowledge_runtime();
 
         // 3. Build and commit a generation. A failed build never replaces the
         //    live one — that guarantee lives in the store; here we honour the
@@ -3368,22 +3374,11 @@ impl PaletteBackend for Service {
             .clone()
             .or_else(|| process_central_root(Some(project)));
         let mut records = if let Some(central) = central_root.as_deref() {
-            match compose_live_actor_inputs(&SystemRunner::probe(), central, project) {
-                Ok(composed) => composed
-                    .map(|inputs| inputs.source_resources)
-                    .unwrap_or_default(),
-                Err(error) => {
-                    // The same fail-soft law as projection_context_for: actor
-                    // context decorates a reading, it never gates one. The
-                    // failure is disclosed, not swallowed.
-                    self.context_composition_notes.borrow_mut().push(format!(
-                        "context composition skipped ({}): {}",
-                        error.code(),
-                        error.message()
-                    ));
-                    Vec::new()
-                }
-            }
+            // Share the projection's native absence/error distinction: only
+            // Ok(None) contributes no actor sources. Preserve any source error.
+            compose_live_actor_inputs(&SystemRunner::probe(), central, project)?
+                .map(|inputs| inputs.source_resources)
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -3971,9 +3966,25 @@ impl PaletteBackend for Service {
 /// A world whose routes declare no credential need probes nothing and reports an
 /// observed, empty roster — a confirmed "this world needs none", never the
 /// "nobody looked" the disclosure's own `not_attempted` default carries.
+/// A protected session declaration is not an operator/global Model-route
+/// capability. The actual session's delivery seam validates it independently.
+fn global_model_credential_binding(
+    binding: &aikit_core::credential::CredentialBindingState,
+) -> bool {
+    crate::credential::global_model_credential_binding(binding)
+}
+
 fn observe_credential_roster(
     home: &AikitHome,
     requirements: &[aikit_core::credential::SecretRequirement],
+) -> Result<aikit_core::credential_world::ProviderRosterKnowledge> {
+    observe_credential_roster_with_origin(home, requirements, None)
+}
+
+fn observe_credential_roster_with_origin(
+    home: &AikitHome,
+    requirements: &[aikit_core::credential::SecretRequirement],
+    native_origin: Option<&Path>,
 ) -> Result<aikit_core::credential_world::ProviderRosterKnowledge> {
     use aikit_adapters::NativeSecureStoreProvider;
     use aikit_core::credential::{SecretProvider, SecretProviderDescriptor};
@@ -3983,6 +3994,7 @@ fn observe_credential_roster(
     let store = aikit_store::credentials::CredentialBindingStore::new(home);
     let mut supported = BTreeSet::new();
     let mut descriptor: Option<SecretProviderDescriptor> = None;
+    let mut harness_descriptors = Vec::new();
 
     for requirement in requirements {
         let binding = store.load(&requirement.credential_ref)?;
@@ -3990,15 +4002,36 @@ fn observe_credential_roster(
         let observed = native.descriptor(&requirement.credential_ref);
         supported.extend(observed.supported_credentials.iter().cloned());
         descriptor.get_or_insert(observed);
+        if let Some(binding) = binding
+            .as_ref()
+            .filter(|binding| binding.is_session_scoped_harness_binding())
+        {
+            let provider = match native_origin {
+                Some(origin) => aikit_adapters::PiHarnessAuthProvider::at(
+                    Some(binding),
+                    origin,
+                    &requirement.consumer_ref,
+                )?,
+                None => aikit_adapters::PiHarnessAuthProvider::from_native(
+                    Some(binding),
+                    &requirement.consumer_ref,
+                )?,
+            };
+            // A descriptor honestly remains unavailable to this global
+            // consumer; the source value is never parsed by a World reading.
+            harness_descriptors.push(provider.descriptor(&requirement.credential_ref));
+        }
     }
 
-    let providers = match descriptor {
+    let mut providers = match descriptor {
         Some(mut native) => {
             native.supported_credentials = supported;
             vec![native]
         }
         None => Vec::new(),
     };
+
+    providers.extend(harness_descriptors);
 
     Ok(ProviderRosterKnowledge::Observed { providers })
 }
@@ -4511,5 +4544,81 @@ mod roster_gate_tests {
             Some(&book),
         );
         assert!(!excluded.authorised && !excluded.policy_allowed);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod scoped_pi_world_consumer_tests {
+    use super::*;
+    use aikit_core::credential::{
+        CredentialRef, SecretMaterialisationClass, SecretRequirement, SecretRequirementRef,
+    };
+    use aikit_core::credential_world::disclose_credential_world;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn real_owner_binding_is_visible_but_cannot_create_global_model_route_success() {
+        let original = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(state.path());
+        let path = original.path().join(".pi/agent/auth.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Intentionally unparsable: metadata-only observation must not read
+        // private bytes or claim a live provider check.
+        std::fs::write(&path, b"unparsed synthetic-private-origin").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let credential = CredentialRef::new("credential:z-ai").unwrap();
+        let binding = aikit_adapters::PiHarnessAuthProvider::declare(
+            original.path(),
+            &credential,
+            "agent-session/scoped-world-consumer-test",
+            "bounded owner/consumer regression",
+            "2099-01-01T00:00:00Z",
+        )
+        .unwrap();
+        aikit_store::CredentialBindingStore::new(&home)
+            .compare_and_save(None, &binding)
+            .unwrap();
+        let retained = aikit_store::CredentialBindingStore::new(&home)
+            .load(&credential)
+            .unwrap()
+            .unwrap();
+        assert!(!global_model_credential_binding(&retained));
+        let requirement = |consumer: &str| SecretRequirement {
+            requirement_ref: SecretRequirementRef::new("secret-requirement:scoped-world-test")
+                .unwrap(),
+            credential_ref: credential.clone(),
+            consumer_ref: consumer.into(),
+            purpose: "actual consumer scope observation".into(),
+            permitted_materialisation: [SecretMaterialisationClass::ProcessEnv].into(),
+        };
+        let global = [requirement("aikit:model-routes")];
+        let roster =
+            observe_credential_roster_with_origin(&home, &global, Some(original.path())).unwrap();
+        let descriptors = roster.providers().unwrap();
+        assert!(descriptors
+            .iter()
+            .any(|p| p.provider_kind == "named-native-pi-auth-source" && !p.available));
+        let disclosure = disclose_credential_world(roster, &global, true, false);
+        assert!(disclosure.fully_observed());
+        assert!(!disclosure
+            .status(&global[0].requirement_ref)
+            .unwrap()
+            .is_selected());
+        let scoped = [requirement("agent-session/scoped-world-consumer-test")];
+        let roster =
+            observe_credential_roster_with_origin(&home, &scoped, Some(original.path())).unwrap();
+        let disclosure = disclose_credential_world(roster, &scoped, true, false);
+        assert!(disclosure
+            .status(&scoped[0].requirement_ref)
+            .unwrap()
+            .is_selected());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"unparsed synthetic-private-origin"
+        );
+        assert!(!serde_json::to_string(&disclosure)
+            .unwrap()
+            .contains("synthetic-private-origin"));
     }
 }

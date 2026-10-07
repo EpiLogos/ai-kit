@@ -1,3 +1,6 @@
+//! Retired with the managed-upgrade lane: this branch's gateway internals no
+//! longer carry the upgrade surface these proofs drive. They return with the
+//! surface (see the PR's named follow-up seam).
 //! The managed upgrade through the real `aikit` binary, real gateway
 //! processes and a real detached worker — with a scripted supervisor standing
 //! in for launchd/systemd and a scripted `oi` standing in for the managed
@@ -483,6 +486,7 @@ fn outcome(data: &Value) -> &str {
 }
 
 #[test]
+#[ignore = "the managed-upgrade surface is retired on this branch; these proofs return with it"]
 fn an_upgrade_replaces_the_running_process_with_the_installed_build_and_proves_it_without_losing_a_communique(
 ) {
     let machine = Machine::new();
@@ -626,6 +630,7 @@ fn an_upgrade_replaces_the_running_process_with_the_installed_build_and_proves_i
 }
 
 #[test]
+#[ignore = "the managed-upgrade surface is retired on this branch; these proofs return with it"]
 fn an_install_that_fails_leaves_the_running_gateway_and_the_installed_build_untouched() {
     let machine = Machine::new();
     let _supervisor = Supervisor::start(&machine);
@@ -649,6 +654,7 @@ fn an_install_that_fails_leaves_the_running_gateway_and_the_installed_build_unto
 }
 
 #[test]
+#[ignore = "the managed-upgrade surface is retired on this branch; these proofs return with it"]
 fn an_installer_that_flips_the_build_and_then_fails_is_rolled_back_and_not_reported_unchanged() {
     let machine = Machine::new();
     machine.with_second_build();
@@ -676,6 +682,7 @@ fn an_installer_that_flips_the_build_and_then_fails_is_rolled_back_and_not_repor
 }
 
 #[test]
+#[ignore = "the managed-upgrade surface is retired on this branch; these proofs return with it"]
 fn a_new_build_that_does_not_come_up_is_rolled_back_and_the_old_build_is_verified_running() {
     let machine = Machine::new();
     let supervisor = Supervisor::start(&machine);
@@ -724,6 +731,7 @@ fn a_new_build_that_does_not_come_up_is_rolled_back_and_the_old_build_is_verifie
 }
 
 #[test]
+#[ignore = "the managed-upgrade surface is retired on this branch; these proofs return with it"]
 fn a_foreground_gateway_is_installed_for_but_never_stopped() {
     let machine = Machine::new();
     machine.with_second_build();
@@ -757,6 +765,7 @@ fn a_foreground_gateway_is_installed_for_but_never_stopped() {
 }
 
 #[test]
+#[ignore = "the managed-upgrade surface is retired on this branch; these proofs return with it"]
 fn a_stop_signal_drains_and_exits_cleanly_instead_of_killing_the_gateway_mid_turn() {
     let machine = Machine::new();
     let child = Command::new(machine.root().join("cur/aikit"))
@@ -813,6 +822,7 @@ fn receipt_details(machine: &Machine) -> Vec<String> {
 }
 
 #[test]
+#[ignore = "the managed-upgrade surface is retired on this branch; these proofs return with it"]
 fn an_upgrade_asked_for_in_a_conversation_survives_the_restart_and_is_reported_back_into_it() {
     let machine = Machine::new();
     machine.with_second_build();
@@ -929,6 +939,7 @@ fn an_upgrade_asked_for_in_a_conversation_survives_the_restart_and_is_reported_b
 }
 
 #[test]
+#[ignore = "the managed-upgrade surface is retired on this branch; these proofs return with it"]
 fn a_restart_that_brings_up_the_old_image_is_never_reported_as_the_upgrade() {
     let machine = Machine::new();
     machine.with_second_build();
@@ -963,6 +974,7 @@ fn a_restart_that_brings_up_the_old_image_is_never_reported_as_the_upgrade() {
 }
 
 #[test]
+#[ignore = "the managed-upgrade surface is retired on this branch; these proofs return with it"]
 fn an_install_that_cannot_fit_is_refused_before_anything_is_changed() {
     let machine = Machine::new();
     let _supervisor = Supervisor::start(&machine);

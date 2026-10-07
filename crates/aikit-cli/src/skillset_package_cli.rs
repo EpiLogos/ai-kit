@@ -8,7 +8,7 @@
 //! it proves that by hashing both before and after an export.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -591,11 +591,59 @@ fn write_tree(out: &Path, files: &[RenderedFile]) -> Result<()> {
                 .map_err(|e| io_err("skillset.package.write_failed", parent, e))?;
         }
         match &file.content {
-            RenderedContent::Bytes(bytes) => std::fs::write(&path, bytes)
-                .map_err(|e| io_err("skillset.package.write_failed", &path, e))?,
-            RenderedContent::Copy { source } => {
-                std::fs::copy(source, &path)
+            RenderedContent::Bytes(bytes) => {
+                if sha256_hex(bytes) != file.sha256 {
+                    return Err(AikitError::new(
+                        "skillset.package.payload_drift",
+                        format!("Rendered payload `{}` differs from its digest", file.path),
+                    ));
+                }
+                std::fs::write(&path, bytes)
                     .map_err(|e| io_err("skillset.package.write_failed", &path, e))?;
+            }
+            RenderedContent::Copy { source } => {
+                // Qualify the exact opened Source bytes before replacing the
+                // exported file. Stream into a private sibling, preserving
+                // bounded memory and the Source's executable/permission bits.
+                let mut input = std::fs::File::open(source)
+                    .map_err(|e| io_err("skillset.package.write_failed", source, e))?;
+                let permissions = input
+                    .metadata()
+                    .map_err(|e| io_err("skillset.package.write_failed", source, e))?
+                    .permissions();
+                let mut pending =
+                    tempfile::NamedTempFile::new_in(path.parent().expect("payload parent"))
+                        .map_err(|e| io_err("skillset.package.write_failed", &path, e))?;
+                let mut digest = pkgsdk::digest::Sha256::new();
+                let mut buffer = [0u8; 8192];
+                loop {
+                    let count = input
+                        .read(&mut buffer)
+                        .map_err(|e| io_err("skillset.package.write_failed", source, e))?;
+                    if count == 0 {
+                        break;
+                    }
+                    digest.update(&buffer[..count]);
+                    pending
+                        .write_all(&buffer[..count])
+                        .map_err(|e| io_err("skillset.package.write_failed", &path, e))?;
+                }
+                if digest.finish_hex() != file.sha256 {
+                    return Err(AikitError::new(
+                        "skillset.package.payload_drift",
+                        format!(
+                            "Source payload `{}` changed after resolution",
+                            source.display()
+                        ),
+                    ));
+                }
+                pending
+                    .as_file()
+                    .set_permissions(permissions)
+                    .map_err(|e| io_err("skillset.package.write_failed", &path, e))?;
+                pending
+                    .persist(&path)
+                    .map_err(|e| io_err("skillset.package.write_failed", &path, e.error))?;
             }
         }
         #[cfg(unix)]
@@ -754,6 +802,45 @@ fn pi_discover(
     pkg: &PortableSkillPackage,
     plan: &PackagePlan,
 ) -> (NativeValidation, Option<Discovery>) {
+    for tool in pkg.native_tools.iter().filter(|t| t.target == TargetId::Pi) {
+        let qualified = (|| -> Result<()> {
+            let path = pkgsdk::native_tool_module_path(pkg, tool)?;
+            let member = pkg
+                .members
+                .iter()
+                .find(|m| m.id == tool.member_id)
+                .expect("qualified owner");
+            let file = member
+                .files
+                .iter()
+                .find(|f| f.path == tool.module)
+                .expect("qualified module");
+            let full = dir.join(path);
+            let bytes = std::fs::read(&full)
+                .map_err(|e| io_err("skillset.package.native_tool_drift", &full, e))?;
+            if bytes.len() as u64 != file.bytes || sha256_hex(&bytes) != file.sha256 {
+                return Err(AikitError::new(
+                    "skillset.package.native_tool_drift",
+                    format!(
+                        "native tool `{}` module changed after source resolution",
+                        tool.name
+                    ),
+                ));
+            }
+            Ok(())
+        })();
+        if let Err(e) = qualified {
+            return (
+                NativeValidation {
+                    status: CheckStatus::Failed,
+                    command: None,
+                    exit: None,
+                    summary: e.to_string(),
+                },
+                None,
+            );
+        }
+    }
     let Some(cmd) = target.native_validation(dir) else {
         return (unavailable(None, "no native validator".into()), None);
     };
@@ -770,9 +857,51 @@ fn pi_discover(
         Ok(h) => h,
         Err(e) => return (unavailable(Some(cmd.display()), e.to_string()), None),
     };
-    let display = format!("HOME=<disposable> {}", cmd.display());
+    let expected_tools: Vec<_> = pkg
+        .native_tools
+        .iter()
+        .filter(|t| t.target == TargetId::Pi)
+        .collect();
+    let mut args = cmd.args.clone();
+    if !expected_tools.is_empty() {
+        let probe = home.path().join("aikit-inspect-tools.ts");
+        if let Err(e) = std::fs::write(
+            &probe,
+            r#"import { writeSync } from "node:fs";
+export default function (pi) {
+  pi.on("session_start", () => {
+    writeSync(1, JSON.stringify({id:"aikit-tools",type:"aikit_native_tools",tools:pi.getAllTools().map(t=>({name:t.name,sourceInfo:t.sourceInfo}))})+"\n");
+  });
+}
+"#,
+        ) {
+            return (
+                unavailable(
+                    Some(cmd.display()),
+                    format!("could not prepare Pi discovery: {e}"),
+                ),
+                None,
+            );
+        }
+        args.extend(["-e".into(), probe.display().to_string()]);
+    }
+    // Disable ambient resources and isolate the native harness' working field.
+    // Explicit -e package/probe paths remain eligible in Pi's actual loader.
+    args.extend([
+        "--no-extensions".into(),
+        "--no-skills".into(),
+        "--no-prompt-templates".into(),
+        "--no-themes".into(),
+    ]);
+    let display = format!(
+        "HOME=<disposable> {} (native tool inspection={})",
+        cmd.display(),
+        !expected_tools.is_empty()
+    );
     let mut child = match Command::new(&cmd.program)
-        .args(&cmd.args)
+        .args(&args)
+        .current_dir(home.path())
+        .env("PI_CODING_AGENT_DIR", home.path().join(".pi/agent"))
         .env("HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -784,7 +913,7 @@ fn pi_discover(
             return (
                 unavailable(Some(display), format!("could not run: {e}")),
                 None,
-            )
+            );
         }
     };
     let mut stdin = child.stdin.take().expect("piped stdin");
@@ -801,12 +930,18 @@ fn pi_discover(
     });
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut response: Option<Value> = None;
+    let mut tools_response: Option<Value> = None;
     while Instant::now() < deadline {
         match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(line) => {
                 if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                    if v["id"] == "1" && v["type"] == "response" {
+                    if v["id"] == "aikit-tools" && v["type"] == "aikit_native_tools" {
+                        tools_response = Some(v);
+                    } else if v["id"] == "1" && v["type"] == "response" {
                         response = Some(v);
+                    }
+                    if response.is_some() && (expected_tools.is_empty() || tools_response.is_some())
+                    {
                         break;
                     }
                 }
@@ -817,13 +952,13 @@ fn pi_discover(
     }
     drop(stdin);
     let _ = child.kill();
-    let status = child.wait().ok();
+    let exit_status = child.wait().ok();
     let Some(response) = response else {
         return (
             NativeValidation {
                 status: CheckStatus::Failed,
                 command: Some(display),
-                exit: status.and_then(|s| s.code()),
+                exit: exit_status.and_then(|s| s.code()),
                 summary: "pi returned no get_commands response within 45s".into(),
             },
             None,
@@ -866,7 +1001,31 @@ fn pi_discover(
         .map(|c| c.name.clone())
         .filter(|n| !extension_commands.contains(n))
         .collect();
-    let passed = response["success"] == true && missing.is_empty() && missing_commands.is_empty();
+    let native_tools: Vec<Value> = tools_response
+        .as_ref()
+        .and_then(|v| v["tools"].as_array())
+        .cloned()
+        .unwrap_or_default();
+    let missing_tools: Vec<String> = expected_tools
+        .iter()
+        .filter(|tool| {
+            let Ok(module) = pkgsdk::native_tool_module_path(pkg, tool) else {
+                return true;
+            };
+            let expected_path = canonical_or_self(&dir.join(module));
+            !native_tools.iter().any(|native| {
+                native["name"] == tool.name
+                    && native["sourceInfo"]["path"]
+                        .as_str()
+                        .is_some_and(|p| canonical_or_self(Path::new(p)) == expected_path)
+            })
+        })
+        .map(|t| t.name.clone())
+        .collect();
+    let passed = response["success"] == true
+        && missing.is_empty()
+        && missing_commands.is_empty()
+        && missing_tools.is_empty();
     let status = if passed {
         CheckStatus::Passed
     } else {
@@ -876,18 +1035,36 @@ fn pi_discover(
         NativeValidation {
             status,
             command: Some(display),
-            exit: Some(0),
+            exit: exit_status.and_then(|s| s.code()),
             summary: format!(
-                "get_commands success={}; package skills {:?}; package extension commands {:?}; missing skills {:?}; missing commands {:?}",
-                response["success"], discovered, extension_commands, missing, missing_commands
+                "get_commands success={}; package skills {:?}; package extension commands {:?}; missing skills {:?}; missing commands {:?}; missing native tools {:?}; registered native tools={}",
+                response["success"],
+                discovered,
+                extension_commands,
+                missing,
+                missing_commands,
+                missing_tools,
+                native_tools.len()
             ),
         },
         Some(Discovery {
             status,
-            method: "pi --mode rpc get_commands (disposable HOME)".into(),
+            method: "Pi RPC get_commands + native getAllTools on session_start (disposable HOME)"
+                .into(),
             discovered_skills: discovered,
             missing_skills: missing,
-            evidence: format!("{} commands reported", commands.len()),
+            discovered_native_tools: expected_tools
+                .iter()
+                .filter(|t| !missing_tools.contains(&t.name))
+                .map(|t| t.name.clone())
+                .collect(),
+            missing_native_tools: missing_tools.clone(),
+            evidence: format!(
+                "{} commands reported; {} registered tools inspected; missing native tools {:?}; execution is not claimed",
+                commands.len(),
+                native_tools.len(),
+                missing_tools
+            ),
         }),
     )
 }
@@ -1020,6 +1197,8 @@ fn codex_discover(
                     method: method.into(),
                     discovered_skills: discovered,
                     missing_skills: missing,
+                    discovered_native_tools: Vec::new(),
+                    missing_native_tools: Vec::new(),
                     evidence,
                 }),
             )
@@ -1052,3 +1231,7 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "skillset_package_native_tools_tests.rs"]
+mod native_package_tools_tests;

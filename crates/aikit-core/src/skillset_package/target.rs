@@ -400,7 +400,7 @@ pub(crate) fn render_members(
                     return Err(AikitError::new(
                         "skillset.package.missing_bytes",
                         format!("{} has no source bytes for {}", member.id, file.path),
-                    ))
+                    ));
                 }
             };
             out.push(RenderedFile {
@@ -434,6 +434,7 @@ pub fn provenance(pkg: &PortableSkillPackage, plan: &PackagePlan) -> Value {
         })).collect::<Vec<_>>(),
         "unresolved": pkg.unresolved.iter().map(|u| json!({"id": u.id, "reason": u.reason})).collect::<Vec<_>>(),
         "tool_dependencies": pkg.tool_dependencies,
+        "native_tools": pkg.native_tools,
         "environment": pkg.environment.iter().map(|e| json!({
             "name": e.name, "purpose": e.purpose, "required": e.required
         })).collect::<Vec<_>>(),
@@ -452,6 +453,21 @@ pub(crate) fn plan_provenance(plan: &mut PackagePlan) {
 /// Tool dependencies and environment names have no manifest analogue in any
 /// current target; they stay visible in the provenance file.
 pub(crate) fn plan_requirements(plan: &mut PackagePlan, pkg: &PortableSkillPackage, target: &str) {
+    for tool in &pkg.native_tools {
+        if target != "pi" || tool.target != TargetId::Pi {
+            plan.push(
+                PlanEntry::unsupported(
+                    format!("native-tool:{}:{}", tool.target.as_str(), tool.name),
+                    format!(
+                        "{target} does not admit this {} native module contribution",
+                        tool.target.as_str()
+                    ),
+                )
+                .at(PROVENANCE_FILE)
+                .detail("exact contribution retained in provenance"),
+            );
+        }
+    }
     for tool in &pkg.tool_dependencies {
         plan.push(
             PlanEntry::unsupported(

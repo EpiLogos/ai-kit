@@ -137,17 +137,32 @@ fn setting(
 /// Compose the provider roster and credential statuses from the persisted
 /// binding records. Presence and refs only — never a secret value.
 fn credential_world(service: &Service) -> Result<CredentialWorldDisclosure> {
-    use aikit_adapters::NativeSecureStoreProvider;
+    credential_world_from_home(service.home(), None)
+}
+
+fn credential_world_from_home(
+    home: &aikit_store::AikitHome,
+    native_origin: Option<&std::path::Path>,
+) -> Result<CredentialWorldDisclosure> {
+    use aikit_adapters::{NativeSecureStoreProvider, PiHarnessAuthProvider};
     use aikit_core::credential::{
         SecretMaterialisationClass, SecretProviderDescriptor, SecretProviderTier,
         SecretRequirement, SecretRequirementRef,
     };
 
-    let bindings = aikit_store::CredentialBindingStore::new(service.home()).list()?;
+    let bindings = aikit_store::CredentialBindingStore::new(home).list()?;
     let mut providers = Vec::new();
     let mut requirements = Vec::new();
     for binding in &bindings {
-        let descriptor = if binding.provider_tier == SecretProviderTier::OsSecureStore {
+        let descriptor = if binding.is_session_scoped_harness_binding() {
+            let provider = match native_origin {
+                Some(origin) => {
+                    PiHarnessAuthProvider::at(Some(binding), origin, "operator:aikit-system")?
+                }
+                None => PiHarnessAuthProvider::from_native(Some(binding), "operator:aikit-system")?,
+            };
+            provider.descriptor(&binding.credential_ref)
+        } else if binding.provider_tier == SecretProviderTier::OsSecureStore {
             NativeSecureStoreProvider::with_binding(Some(binding))
                 .descriptor(&binding.credential_ref)
         } else {
@@ -170,7 +185,7 @@ fn credential_world(service: &Service) -> Result<CredentialWorldDisclosure> {
                             .to_string()
                     }),
                 tier: binding.provider_tier,
-                available: !binding.revoked,
+                available: crate::credential::global_model_credential_binding(binding),
                 headless_capable: true,
                 assurance: "persisted binding record; the material is retained by the named provider"
                     .into(),
@@ -179,7 +194,7 @@ fn credential_world(service: &Service) -> Result<CredentialWorldDisclosure> {
                         "environment import is the lowest-assurance credential tier and is never promoted"
                             .to_string()
                     }),
-                supported_credentials: (!binding.revoked)
+                supported_credentials: crate::credential::global_model_credential_binding(binding)
                     .then(|| binding.credential_ref.clone())
                     .into_iter()
                     .collect(),
@@ -323,7 +338,7 @@ fn credential_inventory(service: &Service) -> Result<Value> {
     let rows: Vec<Value> = bindings
         .iter()
         .map(|binding| {
-            json!({
+            let mut row = json!({
                 "credential": binding.credential_ref.as_str(),
                 "provider": binding.provider_ref.as_str(),
                 "tier": binding.provider_tier,
@@ -336,7 +351,12 @@ fn credential_inventory(service: &Service) -> Result<Value> {
                 "last_rotated_at_unix_seconds": binding.last_rotated_at_unix_seconds,
                 "revoked": binding.revoked,
                 "provenance": binding.binding_provenance,
-            })
+            });
+            if binding.is_session_scoped_harness_binding() {
+                row["harness_auth_source"] = json!(binding.harness_auth_source);
+                row["expires_at"] = json!(binding.expires_at);
+            }
+            row
         })
         .collect();
     Ok(json!(rows))
@@ -1281,5 +1301,61 @@ mod tests {
             .expect("explain is disclosed");
         assert_eq!(explain["availability"], "disclosed");
         assert_eq!(explain["exposure"]["headless"], true);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod scoped_pi_system_projection_tests {
+    use super::*;
+    use aikit_adapters::PiHarnessAuthProvider;
+    use aikit_core::credential::{CredentialRef, SecretProvider, SecretRequirementRef};
+    use aikit_store::{AikitHome, CredentialBindingStore};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn actual_scoped_native_source_stays_visible_and_unavailable_to_system_operator() {
+        let root = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(root.path().join("owner-state"));
+        let original = root.path().join("native-home");
+        let source = original.join(".pi/agent/auth.json");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"unparsed synthetic private system origin").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let binding = PiHarnessAuthProvider::declare(
+            &original,
+            &CredentialRef::new("credential:z-ai").unwrap(),
+            "agent-session/system-query",
+            "bounded actual system consumer regression",
+            "2099-01-01T00:00:00Z",
+        )
+        .unwrap();
+        let store = CredentialBindingStore::new(&home);
+        store.compare_and_save(None, &binding).unwrap();
+        // The exact session is genuinely metadata-eligible before the
+        // global reading; System must not borrow that consumer identity.
+        let session =
+            PiHarnessAuthProvider::at(Some(&binding), &original, "agent-session/system-query")
+                .unwrap();
+        assert!(session.descriptor(&binding.credential_ref).available);
+        let world = credential_world_from_home(&home, Some(&original)).unwrap();
+        assert!(world.fully_observed());
+        assert!(!world
+            .status(&SecretRequirementRef::new("secret-requirement:credential:z-ai").unwrap())
+            .unwrap()
+            .is_selected());
+        let native = world
+            .providers
+            .providers()
+            .unwrap()
+            .iter()
+            .find(|provider| provider.provider_kind == "named-native-pi-auth-source")
+            .unwrap();
+        assert!(!native.available);
+        assert!(native.degradation.as_deref().unwrap().contains("consumer"));
+        assert_eq!(store.load(&binding.credential_ref).unwrap(), Some(binding));
+        assert_eq!(
+            std::fs::read(source).unwrap(),
+            b"unparsed synthetic private system origin"
+        );
     }
 }

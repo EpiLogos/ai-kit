@@ -192,6 +192,7 @@ fn a_bound_credential_resolves_to_the_native_provider() {
         expires_at: None,
         revoked: false,
         metadata: BTreeMap::new(),
+        harness_auth_source: None,
         declared_secret_ref: None,
         bound_at_unix_seconds: Some(1_700_000_000),
         last_rotated_at_unix_seconds: None,

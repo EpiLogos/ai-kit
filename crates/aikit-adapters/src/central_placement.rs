@@ -84,18 +84,110 @@ impl<R: CommandRunner> NativeCentralPlacement<R> {
             .ok_or_else(|| failure("owner_response", "Native ActionResult has no object data"))
     }
 
+    /// Reuse immutable relationships only from the actual owner of this exact
+    /// Task and scope. A legacy client request has no relationship declaration;
+    /// it must not erase an already-allocated child NOW's native ancestry.
+    /// This is a read, not a new allocation or an amendment of the request.
+    fn existing_now_basis(
+        &self,
+        request: &CentralTaskRequest,
+        policy: &Value,
+    ) -> Result<Option<Value>> {
+        let listing = self.call(request, "central.now.list", json!({}))?;
+        if listing["schema"] != "central.now-listing/v1" {
+            return Err(failure(
+                "owner_response",
+                "Central did not return a NOW listing",
+            ));
+        }
+        let rows = listing["records"]
+            .as_array()
+            .ok_or_else(|| failure("owner_response", "Central NOW listing has no record array"))?;
+        let mut matches = rows
+            .iter()
+            .filter(|row| row["task_ref"] == json!(request.task_ref));
+        let Some(row) = matches.next() else {
+            return Ok(None);
+        };
+        if matches.next().is_some() || row["scope_ref"] != policy["scope_ref"] {
+            return Err(failure(
+                "allocation_mismatch",
+                "Task NOW is ambiguous or outside the selected World",
+            ));
+        }
+        let now_ref = text(row, "/now_ref")?;
+        let current = self.call(request, "central.now.read", json!({"now_ref": now_ref}))?;
+        let record = &current["record"];
+        if current["schema"] != "central.now-reading/v1"
+            || record["now_ref"] != row["now_ref"]
+            || record["scope_ref"] != policy["scope_ref"]
+            || record["task_ref"] != json!(request.task_ref)
+            || record["purpose"] != request.purpose
+            || record["participant_refs"] != json!(request.participant_refs)
+            || record["source_refs"] != json!(request.source_refs)
+            || record["lifecycle"] != "active"
+            || record["source_ref"] != current["source"]["ref"]
+            || current["source"]["ref"] != row["source_ref"]
+            || current["revision"]["revision"] != row["revision"]["revision"]
+        {
+            return Err(failure("allocation_mismatch", "Existing NOW does not retain this exact Task intent, scope, source and active basis"));
+        }
+        // The native allocate operation derives child from parent_now_ref.
+        // A Workcell root belongs to central.now.workcell-root and cannot be
+        // replayed as an ordinary Task allocation by this consumer.
+        let expected_horizon = if record["parent_now_ref"].is_null() {
+            Value::Null
+        } else {
+            json!("child")
+        };
+        if record["horizon"] != expected_horizon {
+            return Err(failure(
+                "allocation_mismatch",
+                "Existing NOW requires a different native horizon owner operation",
+            ));
+        }
+        text(&current, "/source/ref")?;
+        text(&current, "/revision/revision")?;
+        if record.get("work_refs").is_some_and(|refs| !refs.is_array()) {
+            return Err(failure(
+                "owner_response",
+                "Native NOW work_refs is not an array",
+            ));
+        }
+        Ok(Some(current))
+    }
+
     pub fn allocate(&self, request: &CentralTaskRequest) -> Result<AllocatedCentralTask> {
         let policy = self.call(request, "central.work.policy", json!({}))?;
         check_policy(&policy)?;
-        let allocation = self.call(
-            request,
-            "central.now.allocate",
-            json!({
-                "task_ref": request.task_ref, "purpose": request.purpose,
-                "participant_refs": request.participant_refs, "source_refs": request.source_refs,
-                "expected_policy_revision": policy["revision"],
-            }),
-        )?;
+        let existing = self.existing_now_basis(request, &policy)?;
+        let mut input = json!({
+            "task_ref": request.task_ref, "purpose": request.purpose,
+            "participant_refs": request.participant_refs, "source_refs": request.source_refs,
+            "expected_policy_revision": policy["revision"],
+        });
+        if let Some(current) = &existing {
+            // Retain this owner's immutable relationship facts. Never infer a
+            // parent or material placement from participant names or a path.
+            for key in ["work_refs", "parent_now_ref", "workcell_ref"] {
+                if let Some(value) = current["record"].get(key) {
+                    input[key] = value.clone();
+                }
+            }
+        }
+        let allocation = self.call(request, "central.now.allocate", input)?;
+        if let Some(current) = &existing {
+            if allocation["created"] != false
+                || allocation["now_ref"] != current["record"]["now_ref"]
+                || allocation["source"]["ref"] != current["source"]["ref"]
+                || allocation["revision"]["revision"] != current["revision"]["revision"]
+                || ["work_refs", "parent_now_ref", "workcell_ref", "horizon"]
+                    .iter()
+                    .any(|key| allocation["record"][*key] != current["record"][*key])
+            {
+                return Err(failure("allocation_mismatch", "Task NOW changed between read and native allocation replay; retain the pending Task"));
+            }
+        }
         if allocation["schema"] != "central.now-allocation/v1"
             || allocation["record"]["task_ref"] != json!(request.task_ref)
             || allocation["record"]["purpose"] != request.purpose
@@ -294,6 +386,24 @@ impl<R: CommandRunner> NativeCentralPlacement<R> {
         authority: &ResourceRef,
         selected_directories: &[PathBuf],
     ) -> Result<Value> {
+        self.write_boundary_requirements_with_additional_protection(
+            task,
+            authority,
+            selected_directories,
+            &[],
+        )
+    }
+
+    /// Explicit exclusions narrow this caller's material aperture; they do
+    /// not author Central policy. Native rows/order/coverage stay intact, and
+    /// the empty list retains the legacy requirements exactly.
+    pub fn write_boundary_requirements_with_additional_protection(
+        &self,
+        task: &AllocatedCentralTask,
+        authority: &ResourceRef,
+        selected_directories: &[PathBuf],
+        additional_protected_directories: &[PathBuf],
+    ) -> Result<Value> {
         self.revalidate(task)?;
         if selected_directories.len() > 63 {
             return Err(failure(
@@ -321,6 +431,55 @@ impl<R: CommandRunner> NativeCentralPlacement<R> {
             }
         }
         let policy = &task.allocation["policy"];
+        let mut protected = policy["protected_paths"]
+            .as_array()
+            .ok_or_else(|| {
+                failure(
+                    "owner_response",
+                    "Native policy has no protected-path array",
+                )
+            })?
+            .clone();
+        if additional_protected_directories.len() > 64 {
+            return Err(failure(
+                "material_bounds",
+                "At most 64 explicit protected directories",
+            ));
+        }
+        for directory in additional_protected_directories {
+            let metadata = std::fs::symlink_metadata(directory).map_err(io_error)?;
+            if !directory.is_absolute()
+                || !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || directory.canonicalize().map_err(io_error)? != *directory
+            {
+                return Err(failure(
+                    "material_bounds",
+                    "Additional protected directory must exist with its exact canonical identity",
+                ));
+            }
+            if writable
+                .iter()
+                .any(|root| directory.starts_with(root) || root.starts_with(directory))
+            {
+                return Err(failure(
+                    "material_bounds",
+                    "Additional protected directory must be disjoint from every writable root",
+                ));
+            }
+            let value = json!(directory);
+            if !protected.contains(&value) {
+                protected.push(value);
+            }
+        }
+        // The empty list preserves the legacy API, including native policy
+        // rows. Any augmented request must fit the material owner's bound.
+        if !additional_protected_directories.is_empty() && protected.len() > 64 {
+            return Err(failure(
+                "material_bounds",
+                "At most 64 total native and additional protected paths",
+            ));
+        }
         let policy_source = policy["sources"]
             .as_array()
             .and_then(|s| s.last())
@@ -344,7 +503,7 @@ impl<R: CommandRunner> NativeCentralPlacement<R> {
             "schema": "workcell.write-boundary/v1",
             "policy_ref": policy_ref, "policy_revision": policy["revision"],
             "authority_ref": authority, "writable_paths": writable,
-            "protected_paths": policy["protected_paths"],
+            "protected_paths": protected,
             "required_coverage": policy["required_coverage"],
             "expires_at_unix_ms": expiry,
         }))

@@ -43,6 +43,7 @@ pub(crate) mod speech;
 
 #[path = "encounter_task.rs"]
 mod task;
+
 #[path = "encounter_task_expectation.rs"]
 mod task_expectation;
 pub use task_expectation::EncounterTaskExpectation;

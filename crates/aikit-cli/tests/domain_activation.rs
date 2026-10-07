@@ -207,3 +207,20 @@ fn the_prompt_is_read_from_the_submit_payload() {
     );
     assert!(prompt_of(&empty).is_none());
 }
+
+#[test]
+fn a_pi_carrier_prompt_travels_as_text_and_reaches_the_reader() {
+    // The exact payload shape the pi carrier dispatches on `input`:
+    // { text, source, cwd, session_id } — no `prompt` field anywhere.
+    let event = HookEvent::new(
+        "pi",
+        HookEventKind::UserPromptSubmit,
+        serde_json::json!({
+            "text": "prepare this release",
+            "source": "user",
+            "cwd": "/c/Work/demo",
+            "session_id": "pi-session-1"
+        }),
+    );
+    assert_eq!(prompt_of(&event).as_deref(), Some("prepare this release"));
+}

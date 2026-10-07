@@ -33,12 +33,20 @@ struct World {
     home: AikitHome,
     socket: PathBuf,
     child: Option<Child>,
+    selected_native_driver: Option<PathBuf>,
 }
 impl World {
     fn new(allowed: bool) -> Self {
         Self::with_model_action(allowed, false)
     }
     fn with_model_action(allowed: bool, model_action: bool) -> Self {
+        Self::with_model_action_and_driver(allowed, model_action, None)
+    }
+    fn with_model_action_and_driver(
+        allowed: bool,
+        model_action: bool,
+        selected_native_driver: Option<PathBuf>,
+    ) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let home = AikitHome::at(root.join("home"));
@@ -49,6 +57,7 @@ impl World {
             home,
             socket,
             child: None,
+            selected_native_driver,
         };
         for p in [
             "Control/user",
@@ -162,8 +171,13 @@ impl World {
         ]);
         world
     }
+    fn native_driver(&self) -> &Path {
+        self.selected_native_driver
+            .as_deref()
+            .unwrap_or_else(|| Path::new(env!("CARGO_BIN_EXE_aikit-session-space")))
+    }
     fn command(&self, args: &[String]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
+        Command::new(self.native_driver())
             .env("AIKIT_HOME", self.home.root())
             .env("WORKCELL_CONTROL_TOKEN", "controlled-caw-material-token")
             .arg("-C")
@@ -1119,6 +1133,12 @@ fn first_pending_preparation_remains_bound_to_same_native_request() {
 #[path = "support/caw_task_material.rs"]
 mod material;
 
+#[path = "support/caw_task_request_native.rs"]
+mod request_native;
+
+#[path = "support/caw_task_npm_runtime.rs"]
+mod npm_runtime;
+
 #[test]
 #[ignore = "requires exact native Central, Actuation and Workcell executables; mandatory prepared-run lane"]
 fn native_prepared_run_preserves_authority_and_existing_worktree() {
@@ -1224,7 +1244,21 @@ fn native_prepared_run_preserves_authority_and_existing_worktree() {
         .as_object_mut()
         .unwrap()
         .remove("workcell_boundary_bin");
-    let mut paths = vec![binary.parent().unwrap().to_path_buf()];
+    // Exercise native publication through the activated primary executable.
+    // Its companion remains beside the canonical owner, outside this PATH.
+    // An unrelated, real executable with the same name must not select it.
+    let activated = w.root.join("activated-owner");
+    let unrelated = w.root.join("unrelated-owner");
+    fs::create_dir_all(&activated).unwrap();
+    fs::create_dir_all(&unrelated).unwrap();
+    let boundary_binary = binary.parent().unwrap().join("workcell-write-boundary");
+    assert!(boundary_binary.is_file(), "native companion required");
+    fs::copy(&boundary_binary, unrelated.join("workcell-write-boundary")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&binary, activated.join("workcell")).unwrap();
+    #[cfg(not(unix))]
+    fs::copy(&binary, activated.join("workcell")).unwrap();
+    let mut paths = vec![activated, unrelated];
     paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
     let configure = |world: &World, request: &Value| {
         Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
@@ -1296,6 +1330,11 @@ fn native_prepared_run_preserves_authority_and_existing_worktree() {
     );
     let record: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(record["ready"], true);
+    assert_eq!(
+        record["prepared_run"]["boundary_executable"],
+        json!(boundary_binary.canonicalize().unwrap()),
+        "native preparation must retain the selected owner's actual sibling"
+    );
     assert_eq!(record["request"]["cwd"], json!(worktree));
     assert_eq!(
         record["prepared_run"]["scope"]["prepared_write_boundary"],

@@ -13,6 +13,7 @@ use crate::method::{praxis_form, PraxisForm};
 use crate::{AikitError, Result};
 
 use super::digest::{sha256_hex, Sha256};
+use super::target::TargetId;
 
 pub const PORTABLE_PACKAGE_SCHEMA: &str = "aikit.portable-skill-package/v1";
 
@@ -46,6 +47,10 @@ pub struct PackageMetadata {
     /// `[skill].tools`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
+    /// Native target tools contributed by exact member-owned extension modules.
+    /// These are distinct from `tools`, which declares host dependencies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_tools: Vec<NativeToolContribution>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpDependency>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -91,6 +96,17 @@ impl PackageMetadata {
     pub fn validate(&self) -> Result<()> {
         if let Some(name) = &self.name {
             validate_package_name(name)?;
+        }
+        let mut native_names = BTreeSet::new();
+        for tool in &self.native_tools {
+            tool.validate()?;
+            if !native_names.insert((tool.target, &tool.name)) {
+                return Err(malformed(format!(
+                    "duplicate native tool `{}` for {}",
+                    tool.name,
+                    tool.target.as_str()
+                )));
+            }
         }
         for dep in &self.mcp {
             dep.validate()?;
@@ -159,7 +175,7 @@ impl McpDependency {
                 return Err(malformed(format!(
                     "MCP dependency `{}` must declare exactly one of `command` or `url`",
                     self.name
-                )))
+                )));
             }
             _ => {}
         }
@@ -223,6 +239,138 @@ pub struct CommandContribution {
     #[serde(default)]
     pub description: String,
     pub command: String,
+}
+
+/// A target-native module contributes this named tool. Its bytes belong to an
+/// existing member capsule; the package never translates the tool into a shell
+/// command. Multiple tools may reference the same module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeToolContribution {
+    pub name: String,
+    pub target: TargetId,
+    pub member_id: String,
+    /// Normal relative `/`-separated path inside the member payload.
+    pub module: String,
+}
+
+impl NativeToolContribution {
+    pub fn validate(&self) -> Result<()> {
+        let first = self.name.bytes().next();
+        if self.name.len() > 128
+            || !first.is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            || !self
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(malformed(format!(
+                "invalid native tool name `{}`",
+                self.name
+            )));
+        }
+        if self.member_id.trim().is_empty() {
+            return Err(malformed("a native tool needs a member_id".into()));
+        }
+        if self.module.is_empty()
+            || self.module.contains('\\')
+            || self
+                .module
+                .split('/')
+                .any(|p| p.is_empty() || p == "." || p == ".." || p.contains(':'))
+            || self.module.chars().any(char::is_control)
+        {
+            return Err(malformed(format!(
+                "native tool module `{}` must be a normal relative payload path",
+                self.module
+            )));
+        }
+        if self.target == TargetId::Pi
+            && ![".ts", ".js", ".mts", ".mjs"]
+                .iter()
+                .any(|ext| self.module.ends_with(ext))
+        {
+            return Err(malformed(
+                "a Pi native tool module must be TypeScript or JavaScript".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Resolve the exact member-owned module. Missing or ambiguous payloads are
+/// errors, including when the source member is unresolved in the catalogue.
+pub fn native_tool_module_path(
+    pkg: &PortableSkillPackage,
+    tool: &NativeToolContribution,
+) -> Result<String> {
+    let member = native_tool_member(&pkg.members, tool)?;
+    Ok(format!("skills/{}/{}", member.name, tool.module))
+}
+
+fn native_tool_member<'a>(
+    members: &'a [PackageMember],
+    tool: &NativeToolContribution,
+) -> Result<&'a PackageMember> {
+    tool.validate()?;
+    let matches: Vec<_> = members.iter().filter(|m| m.id == tool.member_id).collect();
+    if matches.len() != 1 {
+        return Err(malformed(format!(
+            "native tool `{}` requires exactly one resolved member `{}`",
+            tool.name, tool.member_id
+        )));
+    }
+    let member = matches[0];
+    if member.name.is_empty()
+        || member.name == "."
+        || member.name == ".."
+        || member.name.contains(['/', '\\'])
+    {
+        return Err(malformed(format!(
+            "native tool `{}` member has an unusable payload directory",
+            tool.name
+        )));
+    }
+    if member
+        .files
+        .iter()
+        .filter(|f| f.path == tool.module)
+        .count()
+        != 1
+    {
+        return Err(malformed(format!(
+            "native tool `{}` requires exactly one payload file `{}`",
+            tool.name, tool.module
+        )));
+    }
+    let file = member
+        .files
+        .iter()
+        .find(|f| f.path == tool.module)
+        .expect("unique module");
+    if file.sha256.len() != 64
+        || !file.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        || file.bytes == 0
+    {
+        return Err(malformed(format!(
+            "native tool `{}` needs an exact nonempty module digest",
+            tool.name
+        )));
+    }
+    if let Some(bytes) = &file.inline {
+        if sha256_hex(bytes) != file.sha256 || bytes.len() as u64 != file.bytes {
+            return Err(malformed(format!(
+                "native tool `{}` payload differs from its digest",
+                tool.name
+            )));
+        }
+    } else if file.source.is_none() {
+        return Err(malformed(format!(
+            "native tool `{}` has no module source bytes",
+            tool.name
+        )));
+    }
+    Ok(member)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,12 +483,15 @@ pub struct PortableSkillPackage {
     pub version: String,
     pub description: String,
     pub skillset_ref: String,
-    /// sha256 over the sorted member `id` + `revision` pairs.
+    /// sha256 over member revisions and, when present, native contributions
+    /// with their exact module digests.
     pub source_revision: String,
     pub members: Vec<PackageMember>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolved: Vec<UnresolvedMember>,
     pub tool_dependencies: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_tools: Vec<NativeToolContribution>,
     pub mcp_dependencies: Vec<McpDependency>,
     pub hook_requirements: Vec<HookRequirement>,
     pub commands: Vec<CommandContribution>,
@@ -414,7 +565,37 @@ impl PortableSkillPackage {
                 }
             });
 
-        let source_revision = source_revision(&members, &unresolved);
+        let mut native_tools = metadata.native_tools.clone();
+        native_tools.sort_by(|a, b| {
+            (a.target, &a.name, &a.member_id, &a.module).cmp(&(
+                b.target,
+                &b.name,
+                &b.member_id,
+                &b.module,
+            ))
+        });
+        let member_revision = source_revision(&members, &unresolved);
+        let source_revision = if native_tools.is_empty() {
+            member_revision
+        } else {
+            let mut hasher = Sha256::new();
+            hasher.update(b"aikit-portable-skill-package-native-tools-v1\n");
+            hasher.update(member_revision.as_bytes());
+            for tool in &native_tools {
+                let member = native_tool_member(&members, tool)?;
+                let file = member
+                    .files
+                    .iter()
+                    .find(|f| f.path == tool.module)
+                    .expect("validated module");
+                hasher.update(b"\n");
+                hasher.update(
+                    &serde_json::to_vec(&(tool, &file.sha256, file.bytes))
+                        .expect("native contribution"),
+                );
+            }
+            format!("sha256:{}", hasher.finish_hex())
+        };
         Ok(Self {
             schema: PORTABLE_PACKAGE_SCHEMA.to_string(),
             identity: PackageIdentity {
@@ -431,6 +612,7 @@ impl PortableSkillPackage {
             members,
             unresolved,
             tool_dependencies: tools.into_iter().collect(),
+            native_tools,
             mcp_dependencies: metadata.mcp,
             hook_requirements: metadata.hooks,
             commands: metadata.commands,

@@ -13,6 +13,7 @@ EXPECTED_SKILLS = {
     "skill/aikit/skill-authoring",
     "skill/aikit/wayfinder-atomisation",
     "skill/aikit/knowledge-navigation",
+    "skill/aikit/personal-history-methodology",
     "skill/aikit/product-understanding",
     "skill/aikit/structured-account-authoring",
     "skill/aikit/projection-authoring",
