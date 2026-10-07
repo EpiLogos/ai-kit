@@ -543,6 +543,45 @@ impl Harness {
     }
 }
 
+/// The everyday law the live Telegram lane exposed: a message typed while
+/// the agent is still answering waits for its predecessor and is answered
+/// after it — it never fails with "the session already has a turn in
+/// flight", and the harness is never asked for two turns at once.
+#[test]
+fn a_message_sent_while_a_turn_runs_waits_and_is_answered_after_it_not_rejected() {
+    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
+    harness.source.script_park();
+
+    // The first message starts a turn and parks it: the agent is answering.
+    let first = harness.admit(fixture_inbound("first question", "q1"));
+    assert!(matches!(first, GatewayIngressResult::Appended { .. }));
+    harness.wait_until(
+        "the first turn is in flight",
+        Duration::from_secs(30),
+        |harness| harness.source.parked_turns() == 1,
+    );
+
+    // The second message arrives while the first turn still runs. It is
+    // admitted to the stream (the journal is durable) and waits.
+    let second = harness.admit(fixture_inbound("second question", "q2"));
+    assert!(matches!(second, GatewayIngressResult::Appended { .. }));
+
+    // The fixture never refused a prompt: the second turn is only started
+    // after the first completes. Release the first; the second must run.
+    harness.source.respond("first answer");
+    harness.source.script_reply("second answer");
+    harness.wait_until(
+        "the queued second turn runs after the first completes",
+        Duration::from_secs(30),
+        |harness| harness.source.prompted_turns() == 2,
+    );
+    assert_eq!(
+        harness.source.prompted_turns(),
+        2,
+        "both messages were prompted, one at a time"
+    );
+}
+
 #[test]
 fn a_message_admitted_during_a_drain_is_named_in_the_report_retained_and_never_served() {
     let harness = Harness::new(aikit_adapters::EnginePolicy::default());

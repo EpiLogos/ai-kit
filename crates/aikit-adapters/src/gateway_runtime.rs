@@ -1086,6 +1086,18 @@ impl AgencyGateway {
             .collect()
     }
 
+    /// Which stream holds that sequence — borrowed, no journal clone. The
+    /// admission path calls this for every inbound message.
+    pub fn stream_holding_sequence(&self, sequence: u64) -> Option<ResourceRef> {
+        self.streams.values().find_map(|stream| {
+            stream
+                .events
+                .iter()
+                .any(|event| event.sequence == sequence)
+                .then(|| stream.stream_ref.clone())
+        })
+    }
+
     pub fn set_connector_health(&mut self, health: ConnectorHealth) -> Result<()> {
         if !self.connectors.contains_key(&health.connector_ref) {
             return Err(AikitError::new(

@@ -1212,6 +1212,15 @@ struct EngineInner {
     /// Messages admitted while `draining` held: named for the drain report,
     /// never served, never replayed.
     unserved: Vec<UnservedAdmission>,
+    /// One ordered lock per binding: a conversation's turns run one at a
+    /// time, in arrival order. A message typed while the agent is still
+    /// answering waits here instead of failing with "the session already has
+    /// a turn in flight" — the everyday quality a chat expects.
+    binding_turns: BTreeMap<ResourceRef, Arc<Mutex<()>>>,
+    /// Turns waiting behind another on their binding. Named by a drain that
+    /// takes the engine while they wait: they are admitted, unserved,
+    /// retained — and each removes itself here if it does get to run.
+    waiting: Vec<UnservedAdmission>,
 }
 
 /// The conversation an upgrade was asked for from, so its receipt returns
@@ -1281,14 +1290,11 @@ fn unserved_admission(kernel: &AgencyGateway, event: &GatewayStreamEvent) -> Uns
     if text.chars().count() > 80 {
         preview.push('…');
     }
-    // Which stream holds this sequence: the journal is small, and the drain
-    // path is cold — a linear read is honest and cheap here.
+    // Which stream holds this sequence: the journal is small, and the lookup
+    // is a borrowed scan, not a snapshot clone.
     let stream_ref = kernel
-        .snapshot()
-        .streams
-        .into_iter()
-        .find(|stream| stream.events.iter().any(|e| e.sequence == event.sequence))
-        .map(|stream| stream.stream_ref.to_string())
+        .stream_holding_sequence(event.sequence)
+        .map(|stream_ref| stream_ref.to_string())
         .unwrap_or_else(|| "unknown".to_owned());
     let field = |name: &str| {
         metadata
@@ -1332,6 +1338,8 @@ impl GatewayConversationEngine {
                 in_flight: BTreeMap::new(),
                 draining: false,
                 unserved: Vec::new(),
+                binding_turns: BTreeMap::new(),
+                waiting: Vec::new(),
             }),
         })
     }
@@ -1363,12 +1371,12 @@ impl GatewayConversationEngine {
     /// lookup reads the same state the append just wrote. Turn work is
     /// spawned, never run inline.
     pub fn appended(self: &Arc<Self>, kernel: &AgencyGateway, event: &GatewayStreamEvent) {
-        // A message admitted while a drain holds the engine is journalled and
-        // retained — and named here, so the drain report (and the receipt it
-        // feeds) says what was left unserved. It is never replayed.
-        let draining = self.inner.lock().expect("conversation engine").draining;
-        let admission = draining.then(|| unserved_admission(kernel, event));
-        if let Some(admission) = admission {
+        // The named record for this message, computed once: a drain that has
+        // taken the engine names it admitted-and-unserved; otherwise it
+        // travels with the turn so a wait behind another turn is nameable
+        // too. Never replayed either way.
+        let admission = unserved_admission(kernel, event);
+        if self.inner.lock().expect("conversation engine").draining {
             let mut inner = self.inner.lock().expect("conversation engine");
             if inner.draining {
                 // Re-check under the write lock: the drain may have ended
@@ -1446,8 +1454,16 @@ impl GatewayConversationEngine {
                 };
                 let prompt = text.to_owned();
                 let sequence = event.sequence;
+                let admission = unserved_admission(kernel, event);
                 thread::spawn(move || {
-                    engine.run_turn(source, binding, prompt, sequence, native_message_id);
+                    engine.run_turn(
+                        source,
+                        binding,
+                        prompt,
+                        sequence,
+                        native_message_id,
+                        admission,
+                    );
                 });
             }
         }
@@ -1468,7 +1484,47 @@ impl GatewayConversationEngine {
         prompt: String,
         in_reply_to_sequence: u64,
         native_message_id: Option<String>,
+        admission: UnservedAdmission,
     ) {
+        // One turn at a time per conversation, in arrival order: a message
+        // typed while the agent is still answering waits for its predecessor
+        // instead of failing with "the session already has a turn in
+        // flight". While it waits it is named, so a drain that takes the
+        // engine meanwhile reports it as admitted-and-unserved, not dropped.
+        let turn_lock = {
+            let mut inner = self.inner.lock().expect("conversation engine");
+            inner
+                .binding_turns
+                .entry(binding.binding_ref.clone())
+                .or_default()
+                .clone()
+        };
+        let already_running = turn_lock.try_lock().is_err();
+        let admission_sequence = admission.sequence;
+        if already_running {
+            self.inner
+                .lock()
+                .expect("conversation engine")
+                .waiting
+                .push(admission);
+        }
+        let _order = turn_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if already_running {
+            self.inner
+                .lock()
+                .expect("conversation engine")
+                .waiting
+                .retain(|entry| entry.sequence != admission_sequence);
+        }
+        // The wait may have spanned a restart drain: the drain owns the turn
+        // plane from the moment it started, so this turn is not served. The
+        // message stays in its stream — named by the drain if it was waiting,
+        // already answered-otherwise — and is never replayed.
+        if self.inner.lock().expect("conversation engine").draining {
+            return;
+        }
         // The typing indicator begins at admission: the turn worker's first
         // act, before the turn source spawns any harness process. The sender
         // sees "responding…" while the harness is still starting.
@@ -2625,10 +2681,14 @@ impl GatewayConversationEngine {
         let (pending_operations, communiques, admitted_unserved) = {
             let kernel = self.gateway.lock().map_err(|_| poisoned())?;
             let mut inner = self.inner.lock().expect("conversation engine");
+            let mut admitted_unserved = std::mem::take(&mut inner.unserved);
+            // Turns that were waiting behind another when the drain took the
+            // engine: admitted, never served, named exactly like the rest.
+            admitted_unserved.extend(std::mem::take(&mut inner.waiting));
             (
                 kernel.pending_operation_refs(),
                 kernel.communiques().counts(),
-                std::mem::take(&mut inner.unserved),
+                admitted_unserved,
             )
         };
         Ok(DrainReport {
