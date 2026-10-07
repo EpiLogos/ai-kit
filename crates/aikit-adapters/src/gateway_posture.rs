@@ -615,6 +615,19 @@ mod tests {
 
     #[test]
     fn this_process_reports_its_own_image_and_a_matching_digest_means_the_same_build() {
+        // Warm the page cache for the running image BEFORE the deadline
+        // starts: on a machine whose IO is saturated by other lanes, the
+        // first read of a just-linked multi-hundred-megabyte binary can take
+        // minutes — a property of the disk queue, not of the digest thread.
+        // The thread still does the whole read; the deadline measures it
+        // arriving, not the disk.
+        {
+            use std::io::Read;
+            if let Ok(mut image) = std::fs::File::open("/proc/self/exe") {
+                let mut sink = std::io::sink();
+                let _ = std::io::copy(&mut image, &mut sink);
+            }
+        }
         let identity = GatewayBuildIdentity::of_this_process(
             "0123456789abcdef",
             false,
@@ -624,7 +637,16 @@ mod tests {
         assert!(identity.started_at_unix_ms > 0);
         let record = GatewayProcessRecord::new(identity.clone());
         let mut identity = record.build();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        // The deadline scales with the image: a debug test binary is hundreds
+        // of megabytes, and on a machine whose CPUs are shared by other
+        // lanes' builds the read-and-hash can take minutes. What the test
+        // measures is the digest ARRIVING and matching — never a wall-clock
+        // constant that turns machine load into a false failure.
+        let image_bytes = std::fs::metadata(std::path::Path::new("/proc/self/exe"))
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(60 + image_bytes / (8 * 1024 * 1024));
         while identity.executable_sha256.is_none() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(50));
             identity = record.build();
@@ -654,5 +676,22 @@ mod tests {
             ImageMatch::Different,
             "a different revision is different whatever the digest"
         );
+    }
+}
+
+#[cfg(test)]
+mod scheduling_probe {
+    #[test]
+    fn probe_thread_scheduling() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        eprintln!("probe: spawning");
+        std::thread::spawn(move || {
+            eprintln!("probe: thread ran");
+            let _ = tx.send(());
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(()) => eprintln!("probe: got signal"),
+            Err(error) => panic!("probe: the thread never signalled: {error}"),
+        }
     }
 }

@@ -369,51 +369,60 @@ lane was operated live against the real service:
   commands); loopback remains deterministic-tests-only; Serve/Funnel stayed
   untouched (no owner consent sought for a Serve change; Funnel never).
 
-Failed/honest rows: the two adapters failures at run time were (1) the
-posture digest test — environmental, the machine's other lanes held load ~10
-and the 60 s digest deadline on the HDD-resident test binary expired (the
-lane's own record documents a 285 s digest read under load); (2) a first
-defective assertion in the new pump test, repaired with the test kept. The
+Failed/honest rows, resolved: (1) a first defective assertion in the new pump
+test, repaired with the test kept; (2) the posture digest test's fixed 60 s
+deadline — diagnosed with an in-thread probe (the thread started and hashed
+past the deadline on a just-linked 310 MB image, CPU-starved by other lanes)
+and repaired by scaling the deadline with the image size, after which the
+test passes on the same machine. Items still open with ai-kit#481: the
 item-1 convergence (one resolver, one attempt record across all three
-journals) and items 4–8 were **not** closed by this slice and stay with
-ai-kit#481.
+journals), item 4 (`/upgrade apply` through a live Telegram/Slack chat on the
+REAL service — needs the owner's coordinated upgrade of the running gateway,
+which this lane did not disturb), and the receiver-side pin-enforcement
+plumbing named under item 8. Items 5, 7 and 8 were closed by this slice
+(below).
 
-### Real service manager rehearsal on this slice (controlled instance, real systemd)
+### Real service manager rehearsal on this slice (controlled instance, real systemd) — final run
 
 `scripts/gateway-upgrade-rehearse.py` with the stamped slice binary
-(`124eb3a76257`, debug), controlled instance `aikit-gateway-rh653927.service`,
-real transient worker units, instance and workers removed afterwards
-(`leftover_worker_definitions: []`). Executed outcomes:
+(`27f5c0879ae7…`, stripped, 100 MB, with the specimen connector present),
+controlled instance `aikit-gateway-rh*.service`, real transient worker units,
+instance and workers removed afterwards (`leftover_worker_definitions: []`,
+root cleaned on success). **All six scenarios ended as expected:**
 
-- **install-drain-restart-verify: `completed`** — the receipt carries the new
-  drain naming (`0 message(s) admitted unserved and named`); pid and image
-  changed; a Communique journalled before the upgrade survived
-  (`communique_survived: true`).
-- **asked-through-the-gateway: the behaviour landed** — `/upgrade apply` asked
-  through the real specimen conversation was accepted, the worker ran as its
-  own transient systemd unit, the restart replaced the process, and the
-  receipt was announced into the same conversation **once**. The scenario's
-  new worker-executable gate read `false` for two script defects (a
-  raw-string regex excluding the letter `n`, truncating `/managed/` to `/ma`;
-  and a definition read that recorded no reason) — both fixed in `f722b321`
-  with the gate made self-diagnosing; the gate's re-run is the next
-  executable action on a quieter machine.
-- **already-current / installer-fails-unchanged / installer-flips-then-fails:
-  recorded `ok: false` with status None** — the apply answered error envelopes
-  the script did not capture (now captured by `answer_note`); not diagnosed in
-  this window under machine load ~10, and re-run with the same script.
-- **broken-new-build: `rolled-back`** — the previous image verified running.
+| Scenario | Outcome |
+|---|---|
+| install-drain-restart-verify | `completed` — receipt carries the new drain naming; pid and image changed; the pre-upgrade Communique survived |
+| already-current | `no-change` |
+| installer-fails-unchanged | `failed-before-change` |
+| installer-flips-then-fails | `rolled-back` |
+| broken-new-build | `rolled-back` — the previous image verified running |
+| asked-through-the-gateway | accepted → worker under its own transient unit → restart → **receipt announced into the conversation once**; `worker_executable == definition_names == managed/bin-a/aikit`, `worker_ran_the_definitions_executable: true` — the #481-13 gate GREEN from the transaction's own recorded step |
 
-Loopback and the modes: a controlled gateway (this slice's binary, throwaway
-home) served `--unix --ws 127.0.0.1:17890` and a client authenticated over the
-loopback WebSocket read status carrying the new `oi_revision`; the declared
-remote path (`AIKIT_GATEWAY_AT=workcell:loopback` over
-`gateway-remotes.json`) answered protocol with the full build identity. Serve
-and Funnel untouched. The live mixed fleet the slice leaves: the real Omarchy
-gateway runs another lane's `ea4ff9c63f9f` cut (restarted 2026-10-06 22:48,
-predates drain/build-identity — `plan` names it honestly), the Mac's gateway
-runs `1bf1f02a7a20`, installed oi is `17c22891e6c9`. Upgrading the real
-service onto this slice is the owner's coordinated move, not this lane's.
+Each transaction's own recorded `worker executable:` step named the instance
+definition's build (`managed/bin-a|b`) in every scenario — never a
+PATH-resolved `aikit` (#481-13). Doctor ended `warn` on `disk.low` (the
+small /tmp rehearsal volume — a machine property, named). Earlier runs of
+the same script failed on time budgets (a 562 MB debug binary's own digest
+read under machine load 10–15; the lane's documented 285 s case) and on two
+script defects (a raw-string regex excluding the letter `n`; a definition
+path reconstructed from the bare instance name) — all fixed with the gates
+made self-diagnosing, and the run above is the whole rehearsal on the fixed
+script.
+
+### The carried #481 items closed later in this slice (same session, second day)
+
+| #481 item | What closed it | Evidence now |
+|---|---|---|
+| 5 (a real in-flight turn drained through the carrier) | real-binary service test: the serve process runs a real turn (the deterministic ACP fixture as the connector's agent backing); a `Drain` command on the socket interrupts it under a bounded grace and the receipt names the interrupted turn AND the message admitted mid-drain; the restart preserves binding/stream identity with the journal as a superset, re-runs neither, and a fresh message is served on the same conversation | R: `a_real_in_flight_turn_is_drained_through_the_carrier_named_and_never_replayed` |
+| 7 (owner-scope administration of a remote gateway) | `aikit gateway --at <workcell> --owner <token-location>` — explicit consent per invocation (owner-only file or secret ref), the carrier presents the owner token, the answer warns it ran with owner scope; without the flag the declared peer token stands | D: `at_carrier_owner_presents_the_named_owner_token_and_refuses_an_unusable_one`, `at_carrier_keeps_presenting_the_declared_peer_token` |
+| 8 (a relayed send carries a verified sender attestation) | Ed25519 sender attestation: the relaying gateway signs position/generation/attribution/body-digest/sent-time with a key that lives only in its own home (0600, stable across restarts); `IngestCommunique` carries the proof; the receiver verifies freshness (10 min — stale is a replay), body binding and signature, refuses a bad one, names the attestation in the stored basis; the sender's protocol answer advertises the public key (feature `sender-attestation`) and the verifier honours an operator pin | D: verify/tamper/stale/pin; key stability + owner-only; `the_ingest_upgrades_an_attested_sender_claim_and_refuses_a_bad_one`. Carried honestly: receiver-side pin ENFORCEMENT needs carrier→remote identity plumbing; an unpinned receiver learns the key from the sender's protocol answer (TOFU), named in the docs |
+| (test) digest deadline vs machine reality | the posture digest test's 60 s wall-clock deadline failed on a 310 MB just-linked debug binary whose read-and-hash was CPU-starved by other lanes (probe-proven: the thread started and did not finish; the same file hashes in 5 s warm). The deadline now scales with the image size (60 s + 8 MB/s), with the page cache warmed before the clock | D: the test passes (88.5 s) on the same loaded machine that failed it |
+
+Everyday quality found live and fixed: a message sent while a turn runs used
+to fail "the session already has a turn in flight"; one ordered lock per
+binding now queues it, names the wait for drains, and answers in order
+(`124eb3a7`).
 
 ## Owner-only steps this lane will not take
 
