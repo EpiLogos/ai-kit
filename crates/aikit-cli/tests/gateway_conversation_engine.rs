@@ -1297,6 +1297,249 @@ fn stop_interrupts_a_running_turn_and_the_surface_is_told() {
 }
 
 #[test]
+fn a_message_sent_mid_turn_queues_and_answers_at_the_turn_boundary() {
+    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
+    harness.source.script_park();
+
+    harness.admit(fixture_inbound("long running question", "q1"));
+    harness.wait_until(
+        "the first turn registers in flight",
+        Duration::from_secs(30),
+        |harness| {
+            let execution = harness
+                .engine
+                .execute(
+                    harness.binding_ref.clone(),
+                    aikit_adapters::GatewayConversationOperation::Status,
+                )
+                .unwrap();
+            let GatewayResponse::Conversation { result, .. } = execution.response else {
+                return false;
+            };
+            result["turn_in_flight"] == json!(true)
+        },
+    );
+
+    // A message sent while the turn runs is steering, not a second turn: it
+    // queues, the surface is told, and no lane guard is ever tripped.
+    harness.admit(fixture_inbound("actually, change course", "q2"));
+    harness.wait_until(
+        "the mid-turn message is acknowledged as queued",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| text.contains("queued: the agent is mid-turn"))
+        },
+    );
+    let execution = harness
+        .engine
+        .execute(
+            harness.binding_ref.clone(),
+            aikit_adapters::GatewayConversationOperation::Status,
+        )
+        .unwrap();
+    let GatewayResponse::Conversation { result, .. } = execution.response else {
+        panic!("status answers with a conversation response");
+    };
+    assert_eq!(result["queued_prompts"], json!(1), "{result}");
+    assert_eq!(
+        harness.source.prompted_turns(),
+        1,
+        "the queued message did not race the running turn"
+    );
+
+    // The running turn answers; the queued message becomes the next turn,
+    // in order, and its own reply lands on the same conversation.
+    harness.source.respond("first answer");
+    harness.wait_until(
+        "the queued message becomes the second turn",
+        Duration::from_secs(30),
+        |harness| harness.source.prompted_turns() == 2,
+    );
+    harness.source.respond("second answer");
+    harness.wait_until(
+        "both answers arrive in order",
+        Duration::from_secs(30),
+        |harness| {
+            let sends = harness.executed_sends();
+            let first = sends.iter().position(|text| text == "first answer");
+            let second = sends.iter().position(|text| text == "second answer");
+            matches!((first, second), (Some(f), Some(s)) if f < s)
+        },
+    );
+    // No turn ever met the lane's one-turn guard: every prompt started.
+    assert_eq!(harness.source.prompted_turns(), 2);
+}
+
+#[test]
+fn stop_interrupts_the_turn_drops_the_queue_and_the_next_message_starts_fresh() {
+    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
+    harness.source.script_park();
+
+    harness.admit(fixture_inbound("long running question", "s1"));
+    harness.wait_until(
+        "the turn registers in flight",
+        Duration::from_secs(30),
+        |harness| {
+            let execution = harness
+                .engine
+                .execute(
+                    harness.binding_ref.clone(),
+                    aikit_adapters::GatewayConversationOperation::Status,
+                )
+                .unwrap();
+            let GatewayResponse::Conversation { result, .. } = execution.response else {
+                return false;
+            };
+            result["turn_in_flight"] == json!(true)
+        },
+    );
+    harness.admit(fixture_inbound("queued while thinking", "s2"));
+    harness.wait_until(
+        "the second message queues behind the turn",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| text.contains("queued: the agent is mid-turn"))
+        },
+    );
+
+    // The stop interrupts the turn AND drops the queue: whatever the
+    // conversation says next starts fresh, not behind the dropped messages.
+    let execution = harness
+        .engine
+        .execute(
+            harness.binding_ref.clone(),
+            aikit_adapters::GatewayConversationOperation::Stop,
+        )
+        .unwrap();
+    let GatewayResponse::Conversation { result, .. } = execution.response else {
+        panic!("stop answers with a conversation response");
+    };
+    assert_eq!(result["stopped"], json!(true), "{result}");
+    assert_eq!(result["dropped_queued"], json!(1), "{result}");
+
+    // The dropped message never becomes a turn, and the interrupted turn is
+    // recorded. Then the conversation's next message runs as a fresh turn —
+    // the exact flow that used to die on the lane's one-turn guard.
+    harness.wait_until(
+        "the interrupted turn is recorded and the dropped message never runs",
+        Duration::from_secs(30),
+        |harness| harness.stream_events().len() == 2 && harness.source.prompted_turns() == 1,
+    );
+    harness.source.script_reply("fresh answer");
+    harness.admit(fixture_inbound("start over with this", "s3"));
+    harness.wait_until(
+        "the post-stop message runs a fresh turn and answers",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| text.contains("fresh answer"))
+        },
+    );
+    assert_eq!(
+        harness.source.prompted_turns(),
+        2,
+        "exactly one new turn started for the post-stop message"
+    );
+    let events = harness.stream_events();
+    let fresh = events
+        .iter()
+        .find(|event| event["content"] == json!("fresh answer"))
+        .expect("the fresh turn's reply is journalled");
+    assert_eq!(
+        fresh["metadata"]["failure"],
+        Value::Null,
+        "the fresh turn succeeded, it did not inherit the interruption"
+    );
+}
+
+#[test]
+fn a_new_reset_carries_queued_messages_to_the_fresh_context() {
+    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
+    harness.source.script_park();
+    harness.admit(fixture_inbound("long running question", "n1"));
+    harness.wait_until(
+        "the turn registers in flight",
+        Duration::from_secs(30),
+        |harness| {
+            let execution = harness
+                .engine
+                .execute(
+                    harness.binding_ref.clone(),
+                    aikit_adapters::GatewayConversationOperation::Status,
+                )
+                .unwrap();
+            let GatewayResponse::Conversation { result, .. } = execution.response else {
+                return false;
+            };
+            result["turn_in_flight"] == json!(true)
+        },
+    );
+    harness.admit(fixture_inbound("asked while thinking", "n2"));
+    harness.wait_until("the message queues", Duration::from_secs(30), |harness| {
+        harness
+            .executed_sends()
+            .iter()
+            .any(|text| text.contains("queued: the agent is mid-turn"))
+    });
+
+    // /new is a hard cut: the queued message was admitted against the old
+    // context, so it is dropped and named — never silently lost, never run
+    // against the fresh conversation.
+    let execution = harness
+        .engine
+        .execute(
+            harness.binding_ref.clone(),
+            aikit_adapters::GatewayConversationOperation::New,
+        )
+        .unwrap();
+    let GatewayResponse::Conversation { result, .. } = execution.response else {
+        panic!("new answers with a conversation response");
+    };
+    assert_eq!(result["queued_dropped"], json!(1), "{result}");
+    harness.wait_until(
+        "the reset line names the dropped queue",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| text.contains("1 queued message(s) dropped"))
+        },
+    );
+
+    // The dropped message never becomes a turn: the reset's own receipt
+    // names it, and the only turns ever prompted are the old one and the
+    // fresh conversation's first.
+    harness.source.script_reply("fresh-context answer");
+    // The route keeps its connector conversation across the reset, so the
+    // next inbound message routes straight to the fresh binding.
+    harness.admit(fixture_inbound("the fresh question", "n3"));
+    harness.wait_until(
+        "the fresh context answers its first message",
+        Duration::from_secs(30),
+        |harness| {
+            harness
+                .executed_sends()
+                .iter()
+                .any(|text| text.contains("fresh-context answer"))
+        },
+    );
+    assert_eq!(
+        harness.source.prompted_turns(),
+        2,
+        "the dropped message never became a turn"
+    );
+}
+
+#[test]
 fn canonical_new_forks_a_fresh_stream_retains_the_old_one_and_continues_the_conversation() {
     let harness = Harness::new(aikit_adapters::EnginePolicy::default());
     harness.source.script_reply("first answer");
