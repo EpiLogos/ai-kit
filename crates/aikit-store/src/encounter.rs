@@ -128,7 +128,7 @@ impl EncounterStore {
         blocks.truncate(16);
         blocks.reverse();
         Ok(
-            serde_json::json!({"agent_session":session,"blocks":blocks,"more":more,"draft":draft_in(&connection,session)?,"prepared_context_receipts":context::receipts_in(&connection,session)?}),
+            serde_json::json!({"agent_session":session,"blocks":blocks,"more":more,"draft":draft_in(&connection,session)?,"prepared_context_receipts":context::receipts_in(&connection,session)?,"now_context_receipts":now_context_receipts_in(&connection,session)?}),
         )
     }
 
@@ -389,6 +389,48 @@ impl EncounterStore {
         })
     }
 }
+/// The Redis-prepared NOW context actually delivered to (or withheld from)
+/// this session's turns, newest last: the version/digest the provider accepted,
+/// the decision provider and invocation behind its selection, and every
+/// degradation or uncertainty. Read from the canonical journal — a derived
+/// view, never a second store.
+fn now_context_receipts_in(connection: &Connection, session: &ResourceRef) -> Result<Vec<Value>> {
+    let mut q = connection
+        .prepare(
+            "SELECT cursor,event FROM encounter_events WHERE session=?1 AND event LIKE '%\"kind\":\"now-context-%' ORDER BY cursor DESC LIMIT 64",
+        )
+        .map_err(failure)?;
+    let rows = q
+        .query_map(params![session.as_str()], |r| {
+            Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(failure)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (cursor, text) = row.map_err(failure)?;
+        let Ok(event) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let kind = event["kind"].as_str().unwrap_or_default();
+        if matches!(
+            kind,
+            "now-context-delivered"
+                | "now-context-degraded"
+                | "now-context-delivery-uncertain"
+                | "now-context-cursor-uncertain"
+        ) {
+            let mut entry = event.clone();
+            entry["cursor"] = serde_json::json!(cursor);
+            out.push(entry);
+        }
+        if out.len() == 16 {
+            break;
+        }
+    }
+    out.reverse();
+    Ok(out)
+}
+
 fn journal_events(connection: &Connection, session: &ResourceRef) -> Result<Vec<EncounterEvent>> {
     let mut q = connection
         .prepare("SELECT cursor,event FROM encounter_events WHERE session=?1 ORDER BY cursor")

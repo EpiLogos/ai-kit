@@ -1077,6 +1077,42 @@ impl EncounterService {
             _ => error(format!("withdraw {}: {e}", path.display())),
         })
     }
+    /// Set (or, with `None`, withdraw) the Redis-prepared NOW context of one
+    /// already-configured provider row — Pi, Prime or any other — by editing
+    /// only that field of its stored registration. The raw stored provider is
+    /// read, not the resolved one, so a profile-derived row keeps its
+    /// `from_profile` and no connection fact is frozen into it. Explicit native
+    /// operation, never IPC input.
+    pub fn configure_now_context(
+        home: &AikitHome,
+        provider_id: &str,
+        now_context: Option<EncounterNowContextConfig>,
+    ) -> Result<EncounterProvider> {
+        if provider_id.is_empty()
+            || provider_id.len() > 128
+            || !provider_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(error(
+                "NOW context configuration requires the exact safe provider id given at configuration",
+            ));
+        }
+        let path = home
+            .state()
+            .join("encounter-providers")
+            .join(format!("{provider_id}.json"));
+        let bytes = std::fs::read(&path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => error(format!(
+                "No configured encounter provider named {provider_id}; configure it first"
+            )),
+            _ => error(format!("read {}: {e}", path.display())),
+        })?;
+        let mut provider: EncounterProvider = serde_json::from_slice(&bytes).map_err(error)?;
+        provider.now_context = now_context;
+        Self::configure(home, provider.clone())?;
+        Ok(provider)
+    }
     pub(crate) fn providers(&self) -> Result<Vec<EncounterProvider>> {
         let root = self.home.state().join("encounter-providers");
         if !root.exists() {

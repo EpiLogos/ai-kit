@@ -529,9 +529,11 @@ impl EncounterService {
                 agent_session: session.clone(),
                 prepared_version: view.version,
                 prepared_digest,
-                basis_digest: view.basis_digest,
+                basis_digest: view.basis_digest.clone(),
                 change_cursor: delivered_cursor,
                 delivered_at_unix_ms: 0,
+                decision_provider: view.basis.decision_provider.clone(),
+                jev_invocation_ref: view.jev_invocation_ref.clone(),
             };
             Ok(Some((
                 output,

@@ -493,6 +493,16 @@ pub struct NowDeliveryReceipt {
     pub basis_digest: String,
     pub change_cursor: u64,
     pub delivered_at_unix_ms: u64,
+    /// Identity digest of the decision provider behind the model-assisted
+    /// selection of the delivered view, when one was used. Read from the
+    /// delivered view's own basis, so the receipt says which provider's
+    /// determinations the turn actually carried — not which one was elected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_provider: Option<String>,
+    /// The decision invocation behind that selection (the Kev/Jev answer the
+    /// delivered view was selected by).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev_invocation_ref: Option<ResourceRef>,
 }
 impl NowDeliveryReceipt {
     pub fn validate(&self) -> Result<()> {
@@ -720,6 +730,53 @@ pub struct RedisNowStatus {
     pub key_prefix: String,
 }
 
+/// What the running Redis actually reports about the reference profile
+/// (persistence, memory bound, eviction), read from `INFO`, never assumed from
+/// a configuration file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisProfileReading {
+    pub redis_version: Option<String>,
+    pub aof_enabled: bool,
+    pub maxmemory: u64,
+    pub maxmemory_policy: String,
+}
+
+impl RedisProfileReading {
+    /// Departures from the reference profile (AOF on, finite maxmemory,
+    /// `noeviction`, at least the minimum series). Empty means conforming.
+    pub fn violations(&self, minimum_series: (u32, u32)) -> Vec<String> {
+        let mut out = Vec::new();
+        if !self.aof_enabled {
+            out.push("append-only persistence is not enabled".to_owned());
+        }
+        if self.maxmemory == 0 {
+            out.push("maxmemory is unbounded".to_owned());
+        }
+        if self.maxmemory_policy != "noeviction" {
+            out.push(format!(
+                "maxmemory-policy is {} (must be noeviction)",
+                self.maxmemory_policy
+            ));
+        }
+        let series = self.redis_version.as_deref().and_then(|v| {
+            let mut parts = v.split('.');
+            Some((
+                parts.next()?.parse::<u32>().ok()?,
+                parts.next()?.parse::<u32>().ok()?,
+            ))
+        });
+        match series {
+            Some(found) if found >= minimum_series => {}
+            Some((major, minor)) => out.push(format!(
+                "Redis {major}.{minor} is older than the {}.{} reference series",
+                minimum_series.0, minimum_series.1
+            )),
+            None => out.push("Redis did not report a version".to_owned()),
+        }
+        out
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RedisNowStore {
     config: RedisNowConfig,
@@ -832,6 +889,29 @@ impl RedisNowStore {
             address: self.config.address.clone(),
             database: self.config.database,
             key_prefix: self.config.key_prefix.clone(),
+        })
+    }
+    /// The live reference-profile reading (`INFO server|persistence|memory`).
+    pub fn profile_reading(&self, secret: Option<&SecretValue>) -> Result<RedisProfileReading> {
+        let mut info = String::new();
+        for section in ["server", "persistence", "memory"] {
+            info.push_str(&bulk_utf8(self.command(
+                secret,
+                vec![b"INFO".to_vec(), section.as_bytes().to_vec()],
+            )?)?);
+            info.push('\n');
+        }
+        let field = |name: &str| {
+            info.lines()
+                .find_map(|line| line.strip_prefix(name).map(|v| v.trim().to_owned()))
+        };
+        Ok(RedisProfileReading {
+            redis_version: field("redis_version:"),
+            aof_enabled: field("aof_enabled:").as_deref() == Some("1"),
+            maxmemory: field("maxmemory:")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            maxmemory_policy: field("maxmemory_policy:").unwrap_or_default(),
         })
     }
     pub fn current_version(
