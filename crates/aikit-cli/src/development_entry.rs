@@ -1543,6 +1543,9 @@ fn mark_emitted(
             basis_digest: basis.to_owned(),
             change_cursor: 0,
             delivered_at_unix_ms: now_ms(),
+            // The development-entry hook delivers a view it did not select; no decision stands behind it here.
+            decision_provider: None,
+            jev_invocation_ref: None,
         };
         let _ = store.mark_delivered(&receipt, None);
     }
