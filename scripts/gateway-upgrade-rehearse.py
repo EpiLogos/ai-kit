@@ -237,11 +237,12 @@ try:
         worker_exe = None
         definition_named = None
         definition_seen = None
-        if system == "darwin":
-            definition = os.path.expanduser(f"~/Library/LaunchAgents/{instance}.plist")
-        else:
-            definition = os.path.expanduser(f"~/.config/systemd/user/{instance}.service")
-        definition_seen = os.path.exists(definition)
+        # The recorded unit path is the truth — never a reconstructed label.
+        definition = ((evidence.get("install") or {}).get("unit") if system != "darwin"
+                      else (evidence.get("install") or {}).get("label"))
+        if definition and system == "darwin":
+            definition = os.path.expanduser(f"~/Library/LaunchAgents/{definition}.plist")
+        definition_seen = bool(definition) and os.path.exists(definition)
         if definition_seen:
             text = open(definition).read()
             import re as _re
