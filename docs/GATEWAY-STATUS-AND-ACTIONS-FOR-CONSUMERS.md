@@ -65,10 +65,15 @@ Laws the actions keep (consumers may rely on all of them):
    receipt that cannot be queued is an error the driver retries.
 4. **Delivery**: an unreceipted operation is re-attempted only when idempotent;
    a send with unknown outcome is held for `recover --resolve` evidence.
-5. **Sender attribution**: a relayed send carries its self-declared sender
-   authenticated by the machine-level peer token; conversation /ask attribution
-   comes from occupancy (`verified`), agency identity (`claimed`), or is
-   labelled `<unknown sender>`.
+5. **Sender attribution**: a relayed send carries its sender claim SIGNED by
+   the relaying gateway's Ed25519 key (`sender-attestation` feature; the
+   public key rides the sender's protocol answer). The receiver verifies
+   freshness, body binding and signature — a bad proof refuses the ingest —
+   and the stored basis names the attestation. An unattested relay keeps
+   today's basis, named ("self-declared sender, authenticated only by the
+   machine-level peer token"). Conversation /ask attribution comes from
+   occupancy (`verified`), agency identity (`claimed`), or is labelled
+   `<unknown sender>`.
 6. **Remote targeting**: an addressed remote that cannot be resolved stays a
    remote connection error (TUI Absent-with-reason, CLI
    `gateway.remote_undeclared`), never a quiet local conversation.

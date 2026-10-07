@@ -51,6 +51,14 @@ What stays separate on purpose, and what changed on 6 October 2026
   remote gateway and the readback. A record the remote does not know stays
   exactly as it was, named unresolved — a readback never delivers on its own
   authority. (Six such records on the Mac were the original evidence.)
+* **The sender claim on a relay is now SIGNED (#481-8).** The relaying
+  gateway signs what it asserts (position, generation, attribution, the
+  body's digest, sent time) with an Ed25519 key that lives only in its own
+  home; the receiver verifies freshness, body binding and signature, refuses
+  a bad proof, and names the attestation in the stored basis. The public key
+  rides the sender's protocol answer; a receiver-side carrier-identity
+  plumbing to enforce operator PINs automatically is the carried remainder
+  (the verifier already honours a pin when it can name the expected key).
 * **The connector plane now has durable attempt evidence.** Every outbound
   operation carries `attempts` / `last_attempt_at_unix_ms`, written BEFORE
   the connector is invoked: a crash mid-attempt leaves "attempted, outcome
