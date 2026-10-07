@@ -68,6 +68,9 @@ pub struct ChildNow {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WorkcellField {
     pub workcell_ref: Option<String>,
+    /// `None` for a declared remote Workcell: its root NOW lives on its own
+    /// ground and is never mirrored here.
+    pub root_present: bool,
     pub purpose: Option<String>,
     pub lifecycle: Option<String>,
     pub children: Vec<ChildNow>,
@@ -120,6 +123,7 @@ impl NowFieldReading {
                 let gateway = &workcell["gateway"];
                 WorkcellField {
                     workcell_ref: workcell["workcell_ref"].as_str().map(str::to_owned),
+                    root_present: !workcell["root"].is_null(),
                     purpose: workcell["root"]["purpose"].as_str().map(str::to_owned),
                     lifecycle: workcell["root"]["lifecycle"].as_str().map(str::to_owned),
                     children: workcell["children"]
@@ -211,14 +215,20 @@ pub fn now_field_lines(reading: &NowFieldReading, glyphs: Glyphs, now: u64) -> V
     lines.push(String::new());
     for workcell in &reading.workcells {
         let reference = workcell.workcell_ref.as_deref().unwrap_or("workcell:?");
-        let lifecycle = workcell.lifecycle.as_deref().unwrap_or("?");
-        lines.push(format!(
-            "{reference} {sep} root NOW {}",
-            match lifecycle {
-                "active" => "active".to_string(),
-                other => format!("lifecycle {other}"),
-            }
-        ));
+        if !workcell.root_present {
+            lines.push(format!(
+                "{reference} {sep} declared remote {sep} its NOW plane lives on its own ground"
+            ));
+        } else {
+            let lifecycle = workcell.lifecycle.as_deref().unwrap_or("?");
+            lines.push(format!(
+                "{reference} {sep} root NOW {}",
+                match lifecycle {
+                    "active" => "active".to_string(),
+                    other => format!("lifecycle {other}"),
+                }
+            ));
+        }
         if let Some(purpose) = &workcell.purpose {
             let mut one_line = purpose.split_whitespace().collect::<Vec<_>>().join(" ");
             if one_line.len() > 96 {
@@ -228,7 +238,9 @@ pub fn now_field_lines(reading: &NowFieldReading, glyphs: Glyphs, now: u64) -> V
             lines.push(format!("  purpose  {one_line}"));
         }
         if workcell.children.is_empty() {
-            lines.push("  children  none allocated under this root".to_string());
+            if workcell.root_present {
+                lines.push("  children  none allocated under this root".to_string());
+            }
         } else {
             for child in &workcell.children {
                 let condition = child
@@ -254,7 +266,7 @@ pub fn now_field_lines(reading: &NowFieldReading, glyphs: Glyphs, now: u64) -> V
                 // Unreachable is not empty: the reason says what failed, and
                 // the note says the work may still be live where hosted.
                 let scope = workcell.material_scope.as_deref().unwrap_or("local");
-                if scope == "remote" {
+                if scope == "remote" || scope == "remote-ground" {
                     lines.push(format!("  material  not observed here {sep} {reason}"));
                 } else {
                     lines.push(format!("  material  UNAVAILABLE {sep} {reason}"));
@@ -434,6 +446,47 @@ mod tests {
         assert!(
             !text.contains("UNAVAILABLE"),
             "a remote Workcell is not this cell's failure"
+        );
+    }
+
+    #[test]
+    fn a_declared_remote_is_an_availability_reading_never_a_mirror() {
+        let mut value = canned_field();
+        value["workcells"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "workcell_ref": "workcell:mac",
+                "root": null,
+                "children": [],
+                "children_count": 0,
+                "material": {
+                    "available": false,
+                    "observation_scope": "remote-ground",
+                    "reason": "this Workcell's NOW plane and material census live on their own ground and are not mirrored here; its Gateway is the addressable part",
+                },
+                "gateway": {
+                    "available": true,
+                    "observation_scope": "remote-declared",
+                    "status": {"available": true, "reading": {"data": {"status": {
+                        "gateway_ref": "agency-gateway/mac",
+                        "connector_health": []
+                    }}, "warnings": ["routed via workcell:mac"]}}
+                }
+            }));
+        let reading = NowFieldReading::parse(&value).expect("schema matches");
+        assert_eq!(reading.workcells.len(), 2);
+        let mac = &reading.workcells[1];
+        assert!(!mac.root_present, "a remote block carries no root NOW");
+        assert_eq!(mac.material_scope.as_deref(), Some("remote-ground"));
+        let lines = now_field_lines(&reading, glyphs(), 1_000);
+        let text = lines.join("\n");
+        assert!(text.contains("declared remote"));
+        assert!(text.contains("its NOW plane lives on its own ground"));
+        assert!(text.contains("not observed here"));
+        assert!(
+            !text.contains("none allocated under this root"),
+            "a remote block has no children section to offer"
         );
     }
 }
