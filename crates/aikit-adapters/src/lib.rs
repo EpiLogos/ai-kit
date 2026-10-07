@@ -51,6 +51,7 @@ pub mod herdr;
 pub mod home_agent_profile;
 pub mod hook_sources;
 pub mod hyprland;
+pub mod identity_composition;
 pub mod interactive_connection;
 pub mod jev;
 pub mod layers;

@@ -922,6 +922,8 @@ fn idempotent_open_rechecks_a_withdrawn_agency_before_returning_resident() {
         allowed_senders: [ResourceRef::parse("human:owner").unwrap()].into(),
         allowed_packet_sources: Default::default(),
         context: None,
+        central_profile_ref: None,
+        central_identity_world: None,
     };
     EncounterService::configure_agency(&rig.home, &rig.session, &binding, None).unwrap();
     let failure = rig.service.apply(rig.open(false)).unwrap_err();

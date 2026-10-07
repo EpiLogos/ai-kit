@@ -190,6 +190,8 @@ impl World {
                 projection: None,
                 activation: None,
             }),
+            central_profile_ref: None,
+            central_identity_world: None,
         };
         self.cli(&[
             "encounter-agency-configure".into(),

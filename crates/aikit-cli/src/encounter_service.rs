@@ -38,6 +38,7 @@ pub use agency::mint::{
     mint_from_cli, mint_per_project_agency, mint_request_document, mint_task_from_cli,
     REQUIRED_MINTED_ACTIONS,
 };
+pub use agency::{compose_agency_identity, EncounterCentralIdentityWorld};
 pub use agency::model::EncounterModelOpen;
 pub(crate) use agency::model::PreparedModel;
 pub use agency::speech::{
@@ -2812,13 +2813,15 @@ impl EncounterService {
                 let _agency_lock = self.lock_agency(&agent_session)?;
                 self.check_resident_context(&agent_session, &resident, "before-prompt")?;
                 let mut now_context = None;
+                let mut identity_evidence = None;
                 let cleared = self.store.submit_context(
                     &agent_session,
                     draft_revision,
                     Some(&context),
                     |text| {
-                        let text = self.prepare_agency_text(&agent_session, text)?;
-                        let prepared = self.prepare_now_context(&agent_session, text)?;
+                        let agency = self.prepare_agency_text(&agent_session, text)?;
+                        identity_evidence = agency.identity_evidence;
+                        let prepared = self.prepare_now_context(&agent_session, agency.text)?;
                         let handle = resident
                             .lane
                             .prompt(resident.prompt_payload(&prepared.text))?;
@@ -2830,6 +2833,7 @@ impl EncounterService {
                 if let Some(prepared) = now_context {
                     self.finish_now_context(&agent_session, prepared)?;
                 }
+                self.journal_identity_evidence(&agent_session, identity_evidence.as_ref())?;
                 Ok(
                     json!({"accepted":true,"draft":cleared,"context_revision":context.revision,"context_digest":context.digest}),
                 )
@@ -3294,15 +3298,17 @@ impl EncounterService {
                 let mut context_evidence = None;
                 let mut now_context = None;
                 let cleared = self.store.submit(&agent_session, draft_revision, |text| {
-                    let text = self.prepare_agency_text(&agent_session, text)?;
-                    let prepared = self.prepare_now_context(&agent_session, text)?;
+                    let agency = self.prepare_agency_text(&agent_session, text)?;
+                    let prepared = self.prepare_now_context(&agent_session, agency.text)?;
                     let (text, evidence) = crate::direct_agent_session::prompt(
                         &self.home,
                         &agent_session,
                         &prepared.text,
                     )?;
                     let handle = resident.lane.prompt(resident.prompt_payload(&text))?;
-                    context_evidence = evidence;
+                    // A Direct binding and an Agency binding never coexist on
+                    // one session, so at most one context evidence is present.
+                    context_evidence = evidence.or(agency.identity_evidence);
                     now_context = Some(prepared);
                     drop(handle);
                     Ok(())

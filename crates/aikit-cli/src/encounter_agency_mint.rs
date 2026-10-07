@@ -43,7 +43,7 @@ use aikit_core::{AikitError, ProjectRef, ResourceRef, Result, SourceRevision};
 use aikit_store::AikitHome;
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -266,6 +266,22 @@ fn load_template(project_cwd: &Path) -> Result<Value> {
     })
 }
 
+/// The agent identity the mint provisions with: the resolved ref, the
+/// resolution source's own attribution, and — when the identity came from an
+/// accepted Central AgentProfile — the exact profile basis (its ref and the
+/// Central world it was read against) the minted binding carries so later
+/// turns can compose the accepted self orientation.
+struct ResolvedAgentIdentity {
+    agent_ref: ResourceRef,
+    source: &'static str,
+    central: Option<CentralProfileBasis>,
+}
+struct CentralProfileBasis {
+    profile_ref: String,
+    central_root: PathBuf,
+    project: String,
+}
+
 /// The agent identity: explicit ref wins; else exactly one Central
 /// AgentProfile in the project's scope; else a derived, clearly-attributed
 /// project agent. The human requester is never fabricated here.
@@ -274,46 +290,91 @@ fn resolve_agent_identity(
     project_cwd: &Path,
     world: &ProjectRef,
     explicit: Option<ResourceRef>,
-) -> Result<(ResourceRef, &'static str)> {
+) -> Result<ResolvedAgentIdentity> {
     if let Some(agent_ref) = explicit {
-        return Ok((agent_ref, "explicit"));
+        return Ok(ResolvedAgentIdentity {
+            agent_ref,
+            source: "explicit",
+            central: None,
+        });
     }
-    let derived = |world: &ProjectRef| -> Result<(ResourceRef, &'static str)> {
-        Ok((
-            ResourceRef::parse(format!("agent/{}-chat", project_slug(world.as_str())))?,
-            "derived-project-agent",
-        ))
+    let derived = |world: &ProjectRef| -> Result<ResolvedAgentIdentity> {
+        Ok(ResolvedAgentIdentity {
+            agent_ref: ResourceRef::parse(format!(
+                "agent/{}-chat",
+                project_slug(world.as_str())
+            ))?,
+            source: "derived-project-agent",
+            central: None,
+        })
     };
-    if let Some(declared) = project_scope_agent_profile(runner, project_cwd)? {
-        return match declared.len() {
-            // An empty but successful lookup declares no agent: the derived
-            // project agent is the honest fallback, not an ambiguity.
-            0 => derived(world),
-            1 => Ok((
-                ResourceRef::parse(declared.first().expect("exactly one"))?,
-                "central-agent-profile",
-            )),
-            _ => Err(mint_error(
+    let Some(declared) = project_scope_profiles(runner, project_cwd)? else {
+        return derived(world);
+    };
+    match declared.agents.len() {
+        // An empty but successful lookup declares no agent: the derived
+        // project agent is the honest fallback, not an ambiguity.
+        0 => derived(world),
+        1 => {
+            let (agent_ref, profile_refs) =
+                declared.agents.into_iter().next().expect("exactly one");
+            if profile_refs.len() > 1 {
+                let named: Vec<String> = profile_refs.into_iter().collect();
+                return Err(mint_error(
+                    "agency_mint.agent_ambiguous",
+                    format!(
+                        "the Central project scope declares {} profiles for {agent_ref} ({}); \
+                         pass --agent-ref to choose one",
+                        named.len(),
+                        named.join(", ")
+                    ),
+                ));
+            }
+            let profile_ref = profile_refs.into_iter().next().expect("exactly one");
+            Ok(ResolvedAgentIdentity {
+                agent_ref: ResourceRef::parse(&agent_ref)?,
+                source: "central-agent-profile",
+                // A listing record without a ref cannot be re-read later: the
+                // identity is still the profile's, but nothing is invented.
+                central: (!profile_ref.is_empty()).then_some(CentralProfileBasis {
+                    profile_ref,
+                    central_root: declared.central_root,
+                    project: declared.project,
+                }),
+            })
+        }
+        _ => {
+            let named: Vec<String> = declared.agents.keys().cloned().collect();
+            Err(mint_error(
                 "agency_mint.agent_ambiguous",
                 format!(
                     "the Central project scope declares {} AgentProfiles ({}); pass \
                      --agent-ref to choose one",
-                    declared.len(),
-                    declared.join(", ")
+                    named.len(),
+                    named.join(", ")
                 ),
-            )),
-        };
+            ))
+        }
     }
-    derived(world)
+}
+
+/// One project scope's Central AgentProfile listing: the Central root and
+/// Work member it was read against, and each distinct agent ref with the set
+/// of profile refs that name it. A listing record without a profile ref is
+/// carried as the empty string and stays absent — never invented.
+struct ProjectScopeProfiles {
+    central_root: PathBuf,
+    project: String,
+    agents: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// Ask Central's `agent-profile.list` for the project scope. `None` means the
 /// lookup is unavailable (no Central root, no ctrl, refusing scope) — an
 /// absence, never an invented agent.
-fn project_scope_agent_profile(
+fn project_scope_profiles(
     runner: &dyn CommandRunner,
     project_cwd: &Path,
-) -> Result<Option<Vec<String>>> {
+) -> Result<Option<ProjectScopeProfiles>> {
     let Some(central_root) = project_cwd
         .ancestors()
         .find(|candidate| candidate.join("Control").is_dir() && candidate.join("Work").is_dir())
@@ -359,13 +420,22 @@ fn project_scope_agent_profile(
     let Some(profiles) = envelope["data"]["profiles"].as_array() else {
         return Ok(None);
     };
-    let mut agent_refs = BTreeSet::new();
+    let mut agents: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for entry in profiles {
-        if let Some(agent_ref) = entry["profile"]["agent_ref"].as_str() {
-            agent_refs.insert(agent_ref.to_owned());
-        }
+        let Some(agent_ref) = entry["profile"]["agent_ref"].as_str() else {
+            continue;
+        };
+        let profile_ref = entry["profile"]["ref"].as_str().unwrap_or("").to_owned();
+        agents
+            .entry(agent_ref.to_owned())
+            .or_default()
+            .insert(profile_ref);
     }
-    Ok(Some(agent_refs.into_iter().collect()))
+    Ok(Some(ProjectScopeProfiles {
+        central_root: central_root.to_path_buf(),
+        project,
+        agents,
+    }))
 }
 
 /// `project:Factory` and `central/native-context` become `factory` and
@@ -501,8 +571,26 @@ fn mint_per_project_agency_with_intent(
     }
     let world = resolve_project(home, project_cwd)?;
     let world_ref = ResourceRef::parse(world.as_str())?;
-    let (agent_ref, identity_source) =
-        resolve_agent_identity(runner, project_cwd, &world, explicit_agent_ref)?;
+    let ResolvedAgentIdentity {
+        agent_ref,
+        source: identity_source,
+        central: central_profile_basis,
+    } = resolve_agent_identity(runner, project_cwd, &world, explicit_agent_ref)?;
+    // The profile basis pins the Central world the accepted definition was
+    // read against, so turn-time identity composition resolves the exact
+    // accepted sources instead of re-discovering a world.
+    let (central_profile_ref, central_identity_world) = match central_profile_basis {
+        Some(basis) => (
+            Some(basis.profile_ref),
+            Some(super::EncounterCentralIdentityWorld {
+                central_root: basis.central_root,
+                project_cwd: std::fs::canonicalize(project_cwd).map_err(super::error)?,
+                scope: "project".to_owned(),
+                project: Some(basis.project),
+            }),
+        ),
+        None => (None, None),
+    };
 
     let template = load_template(project_cwd)?;
     let (mut request, tag) =
@@ -584,6 +672,8 @@ fn mint_per_project_agency_with_intent(
         .into(),
         allowed_packet_sources: BTreeSet::new(),
         context: None,
+        central_profile_ref,
+        central_identity_world,
     };
     super::EncounterService::configure_agency(home, session, &binding, expected_revision.as_ref())?;
 
@@ -603,6 +693,7 @@ fn mint_per_project_agency_with_intent(
             "receipt_ref": receipt["receipt_ref"],
             "source_path": source_path.display().to_string(),
             "agent_identity_source": identity_source,
+            "central_profile_ref": binding.central_profile_ref.clone(),
             "idempotency": "re-minting the same session+project re-runs actualise and CAS-bumps the revision; the request bytes and source path are deterministic per agent+project",
         }
     }))

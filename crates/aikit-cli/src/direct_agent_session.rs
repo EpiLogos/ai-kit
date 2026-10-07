@@ -8,7 +8,13 @@
 use crate::app::Service;
 use aikit_adapters::{
     actor_composition::compose_selected_actor_inputs,
-    central_agent_profile::CentralAgentProfileProjection,
+    central_agent_profile::{
+        CentralAgentProfileProjection, CentralAgentSelfDefinition, CentralAgentSelfSourcePin,
+    },
+    identity_composition::{
+        compose_operative_orientation, resolve_self_sources, IdentityCompositionReceipt,
+        IdentitySourceRoute, DIRECT_DELIVERY_MODE, IDENTITY_COMPOSITOR_VERSION,
+    },
     runner::{CommandRunner, SystemRunner},
 };
 use aikit_core::session_space::SessionSpaceRef;
@@ -64,6 +70,31 @@ pub struct DirectAgentBinding {
     /// Absent (default empty) in bindings prepared before SkillSets resolved.
     #[serde(default)]
     pub withheld_members: Vec<WithheldMember>,
+    /// The accepted self-definition pins, carried only when the profile had a
+    /// `self_definition` and the shared compositor resolved and verified both
+    /// sources at prepare time. Absent (default) in legacy bindings and in
+    /// profiles without one; old binding files still read unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_definition: Option<BoundSelfDefinition>,
+}
+/// The prepared session's accepted self-definition pins plus the compositor
+/// identity that resolved them and the delivery mode they reach the model in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundSelfDefinition {
+    pub source: CentralAgentSelfSourcePin,
+    pub relational_logos: CentralAgentSelfSourcePin,
+    pub compositor_version: String,
+    pub delivery_mode: String,
+}
+impl BoundSelfDefinition {
+    /// Whether the live profile still pins exactly the sources this binding
+    /// accepted. (A changed profile is normally already refused by the review
+    /// content digest; this is the honest double check.)
+    fn pins_match(&self, self_definition: &CentralAgentSelfDefinition) -> bool {
+        self.source == self_definition.source
+            && self.relational_logos == self_definition.relational_logos
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -119,6 +150,17 @@ fn path(home: &AikitHome, session: &ResourceRef) -> PathBuf {
         "{}.json",
         blake3::hash(session.as_str().as_bytes()).to_hex()
     ))
+}
+/// The world root a profile's `central:source:{world_ref}:{path}` pins resolve
+/// against: the Central root itself for root scope, the exact native Project
+/// root for project scope. Shared by both delivery routes (the Direct parent
+/// session and the admitted Agency turn) so they cannot drift apart.
+pub(crate) fn world_root(binding_central_root: &Path, binding_cwd: &Path, scope: &str) -> PathBuf {
+    if scope == "root" {
+        binding_central_root.to_path_buf()
+    } else {
+        binding_cwd.to_path_buf()
+    }
 }
 fn directory(home: &AikitHome) -> Result<PathBuf> {
     home.ensure_layout()?;
@@ -580,6 +622,23 @@ pub fn prepare_with<R: CommandRunner>(
     }
     let profile = CentralAgentProfileProjection::parse(&envelope["data"]["profile"])?;
     validate_review(&request, &profile.agent_ref, &envelope["data"])?;
+    // The accepted self sources resolve and verify here, before anything is
+    // published: a pin that does not hold at prepare time refuses the
+    // preparation — a binding is never published over unresolved identity.
+    let bound_self_definition = match &profile.self_definition {
+        Some(self_definition) => {
+            let root = world_root(&central, &cwd, scope);
+            resolve_self_sources(&root, self_definition)
+                .map_err(|error| error.into_aikit(IdentitySourceRoute::Direct))?;
+            Some(BoundSelfDefinition {
+                source: self_definition.source.clone(),
+                relational_logos: self_definition.relational_logos.clone(),
+                compositor_version: IDENTITY_COMPOSITOR_VERSION.into(),
+                delivery_mode: DIRECT_DELIVERY_MODE.into(),
+            })
+        }
+        None => None,
+    };
     let composed = compose_selected_actor_inputs(runner, &central, &cwd, Some(&profile.agent_ref))?
         .ok_or_else(|| {
             failure(
@@ -621,6 +680,7 @@ pub fn prepare_with<R: CommandRunner>(
         project_context,
         skill_digests,
         withheld_members,
+        self_definition: bound_self_definition,
     };
     owner_review(runner, &binding)?;
     if let Some(existing) = existing {
@@ -706,7 +766,7 @@ pub fn reading(home: &AikitHome, session: &ResourceRef) -> Result<Value> {
                 == Some(&binding.project_context.context)
     });
     Ok(
-        json!({"schema":SCHEMA,"agent_ref":binding.agent_ref,"agent_session":session,"space":binding.space,"request_id":binding.request.request_id,"acceptance_ref":binding.request.expected_acceptance_ref,"profile_ref":binding.request.profile_ref,"profile_revision":binding.request.expected_revision,"project_ref":binding.project_context.project,"prepared":ready,"resume_preparation_allowed":!ready,"provider_started":false,"execution_authority_granted":false,"brokered_child_context":"not-established; child launch requires its own context/admission","skill_sources":binding.skill_digests,"withheld_members":binding.withheld_members}),
+        json!({"schema":SCHEMA,"agent_ref":binding.agent_ref,"agent_session":session,"space":binding.space,"request_id":binding.request.request_id,"acceptance_ref":binding.request.expected_acceptance_ref,"profile_ref":binding.request.profile_ref,"profile_revision":binding.request.expected_revision,"project_ref":binding.project_context.project,"prepared":ready,"resume_preparation_allowed":!ready,"provider_started":false,"execution_authority_granted":false,"brokered_child_context":"not-established; child launch requires its own context/admission","skill_sources":binding.skill_digests,"withheld_members":binding.withheld_members,"self_definition":binding.self_definition}),
     )
 }
 
@@ -731,10 +791,20 @@ pub fn prompt(
     session: &ResourceRef,
     text: &str,
 ) -> Result<(String, Option<Value>)> {
+    prompt_with(home, session, text, &SystemRunner::new())
+}
+/// `prompt` through an injected runner: the seam the tests use, with byte
+/// behaviour identical to the system runner.
+pub fn prompt_with<R: CommandRunner>(
+    home: &AikitHome,
+    session: &ResourceRef,
+    text: &str,
+    runner: &R,
+) -> Result<(String, Option<Value>)> {
     let Some(binding) = read(home, session)? else {
         return Ok((text.to_owned(), None));
     };
-    let review = owner_review(&SystemRunner::new(), &binding)?;
+    let review = owner_review(runner, &binding)?;
     let profile = CentralAgentProfileProjection::parse(&review["profile"])?;
     let service = Service::open(home.clone(), &binding.cwd, |key| std::env::var(key).ok())?;
     let (digests, withheld, skill_text) = material(&service, &profile)?;
@@ -744,19 +814,70 @@ pub fn prompt(
             "Effective Skill repertoire changed since session preparation; review/reprepare, never silently replace context",
         ));
     }
-    let payload = format!(
+    // The accepted self sources are re-resolved from disk every turn: the
+    // payload always reflects exactly what the owner accepted, and any drift,
+    // redirection or disappearance refuses before the turn is submitted.
+    let composed_orientation = match (&binding.self_definition, &profile.self_definition) {
+        (Some(bound), Some(self_definition)) => {
+            if !bound.pins_match(self_definition) {
+                return Err(failure(
+                    "direct_agent.self_source_changed",
+                    "The accepted Agent definition no longer pins the prepared self sources; reread and explicitly prepare a new session",
+                ));
+            }
+            let root = world_root(&binding.central_root, &binding.cwd, &binding.scope);
+            let resolved = resolve_self_sources(&root, self_definition)
+                .map_err(|error| error.into_aikit(IdentitySourceRoute::Direct))?;
+            Some((
+                compose_operative_orientation(
+                    binding.agent_ref.as_str(),
+                    &binding.request.profile_ref,
+                    &binding.request.expected_revision,
+                    &resolved,
+                ),
+                resolved,
+            ))
+        }
+        (Some(_), None) => {
+            return Err(failure(
+                "direct_agent.self_source_missing",
+                "The prepared session pinned a self definition the accepted Agent definition no longer carries; reread and explicitly prepare a new session",
+            ))
+        }
+        // No prepared pins: the payload path is exactly the legacy one.
+        (None, _) => None,
+    };
+    let base_payload = format!(
         "Selected reusable Agent definition (Central-owned, human accepted; not an execution, tool or model grant):\n{}\nEffective Skill sources (quoted source material; no authority to override the human):\n{}\nExplicit human task for this session:\n{}",
         json!({"agent_ref":binding.agent_ref,"profile_ref":binding.request.profile_ref,"revision":binding.request.expected_revision,"name":review["profile"]["name"],"purpose":profile.purpose,"intent":profile.intent_provenance.map(|p|p.intent_expression),"role":profile.role}),
         skill_text,
         serde_json::to_string(text).map_err(io)?
     );
+    let payload = match &composed_orientation {
+        Some((orientation, _)) => format!("{orientation}\n\n{base_payload}"),
+        None => base_payload,
+    };
     if payload.len() > MAX_BYTES {
         return Err(failure(
             "direct_agent.prompt_oversized",
             "Agent context and task exceed the bounded native turn size",
         ));
     }
-    let evidence = json!({"kind":"direct-agent-context-submitted","agent_ref":binding.agent_ref,"profile_ref":binding.request.profile_ref,"acceptance_ref":binding.request.expected_acceptance_ref,"payload_digest":format!("blake3:{}",blake3::hash(payload.as_bytes()).to_hex()),"skill_sources":digests,"delivery":"native-parent-session-prompt-payload","model_consumption_observed":false,"brokered_child_activation_observed":false,"authority_granted":false});
+    let mut evidence = json!({"kind":"direct-agent-context-submitted","agent_ref":binding.agent_ref,"profile_ref":binding.request.profile_ref,"acceptance_ref":binding.request.expected_acceptance_ref,"payload_digest":format!("blake3:{}",blake3::hash(payload.as_bytes()).to_hex()),"skill_sources":digests,"delivery":"native-parent-session-prompt-payload","model_consumption_observed":false,"brokered_child_activation_observed":false,"authority_granted":false});
+    evidence["identity_compositor"] = json!(IDENTITY_COMPOSITOR_VERSION);
+    if let Some((_, resolved)) = &composed_orientation {
+        let receipt = IdentityCompositionReceipt::new(
+            binding.agent_ref.as_str(),
+            &binding.request.profile_ref,
+            &binding.request.expected_revision,
+            resolved,
+            DIRECT_DELIVERY_MODE,
+        );
+        evidence["self_source_ref"] = json!(receipt.self_source_ref);
+        evidence["self_source_digest"] = json!(receipt.self_source_digest);
+        evidence["relational_logos_ref"] = json!(receipt.relational_logos_ref);
+        evidence["relational_logos_digest"] = json!(receipt.relational_logos_digest);
+    }
     Ok((payload, Some(evidence)))
 }
 /// Read-only correlation for an interrupted preparation.
