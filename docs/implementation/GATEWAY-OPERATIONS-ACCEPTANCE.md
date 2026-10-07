@@ -378,6 +378,43 @@ item-1 convergence (one resolver, one attempt record across all three
 journals) and items 4–8 were **not** closed by this slice and stay with
 ai-kit#481.
 
+### Real service manager rehearsal on this slice (controlled instance, real systemd)
+
+`scripts/gateway-upgrade-rehearse.py` with the stamped slice binary
+(`124eb3a76257`, debug), controlled instance `aikit-gateway-rh653927.service`,
+real transient worker units, instance and workers removed afterwards
+(`leftover_worker_definitions: []`). Executed outcomes:
+
+- **install-drain-restart-verify: `completed`** — the receipt carries the new
+  drain naming (`0 message(s) admitted unserved and named`); pid and image
+  changed; a Communique journalled before the upgrade survived
+  (`communique_survived: true`).
+- **asked-through-the-gateway: the behaviour landed** — `/upgrade apply` asked
+  through the real specimen conversation was accepted, the worker ran as its
+  own transient systemd unit, the restart replaced the process, and the
+  receipt was announced into the same conversation **once**. The scenario's
+  new worker-executable gate read `false` for two script defects (a
+  raw-string regex excluding the letter `n`, truncating `/managed/` to `/ma`;
+  and a definition read that recorded no reason) — both fixed in `f722b321`
+  with the gate made self-diagnosing; the gate's re-run is the next
+  executable action on a quieter machine.
+- **already-current / installer-fails-unchanged / installer-flips-then-fails:
+  recorded `ok: false` with status None** — the apply answered error envelopes
+  the script did not capture (now captured by `answer_note`); not diagnosed in
+  this window under machine load ~10, and re-run with the same script.
+- **broken-new-build: `rolled-back`** — the previous image verified running.
+
+Loopback and the modes: a controlled gateway (this slice's binary, throwaway
+home) served `--unix --ws 127.0.0.1:17890` and a client authenticated over the
+loopback WebSocket read status carrying the new `oi_revision`; the declared
+remote path (`AIKIT_GATEWAY_AT=workcell:loopback` over
+`gateway-remotes.json`) answered protocol with the full build identity. Serve
+and Funnel untouched. The live mixed fleet the slice leaves: the real Omarchy
+gateway runs another lane's `ea4ff9c63f9f` cut (restarted 2026-10-06 22:48,
+predates drain/build-identity — `plan` names it honestly), the Mac's gateway
+runs `1bf1f02a7a20`, installed oi is `17c22891e6c9`. Upgrading the real
+service onto this slice is the owner's coordinated move, not this lane's.
+
 ## Owner-only steps this lane will not take
 
 * macOS application firewall allowance for a newly installed `aikit` binary
