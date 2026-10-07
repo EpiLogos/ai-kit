@@ -19,6 +19,13 @@ pub struct CentralTaskRequest {
     pub participant_refs: Vec<ResourceRef>,
     #[serde(default)]
     pub source_refs: Vec<ResourceRef>,
+    /// Explicit native ancestry; absent fields preserve legacy owner relations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_now_ref: Option<ResourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workcell_ref: Option<ResourceRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub work_refs: Vec<ResourceRef>,
 }
 
 /// Retains the complete native reading, including source/authority bases,
@@ -27,6 +34,22 @@ pub struct CentralTaskRequest {
 pub struct AllocatedCentralTask {
     pub request: CentralTaskRequest,
     pub allocation: Value,
+}
+
+fn validate_declared_relations(request: &CentralTaskRequest, record: &Value) -> Result<()> {
+    if request
+        .parent_now_ref
+        .as_ref()
+        .is_some_and(|parent| record["parent_now_ref"] != json!(parent))
+        || request
+            .workcell_ref
+            .as_ref()
+            .is_some_and(|workcell| record["workcell_ref"] != json!(workcell))
+        || (!request.work_refs.is_empty() && record["work_refs"] != json!(request.work_refs))
+    {
+        return Err(failure("allocation_mismatch", "Native NOW does not retain the explicitly selected parent, Workcell and work relations"));
+    }
+    Ok(())
 }
 
 pub struct NativeCentralPlacement<R> {
@@ -132,6 +155,7 @@ impl<R: CommandRunner> NativeCentralPlacement<R> {
         {
             return Err(failure("allocation_mismatch", "Existing NOW does not retain this exact Task intent, scope, source and active basis"));
         }
+        validate_declared_relations(request, record)?;
         // The native allocate operation derives child from parent_now_ref.
         // A Workcell root belongs to central.now.workcell-root and cannot be
         // replayed as an ordinary Task allocation by this consumer.
@@ -175,7 +199,17 @@ impl<R: CommandRunner> NativeCentralPlacement<R> {
                 }
             }
         }
+        if let Some(parent) = &request.parent_now_ref {
+            input["parent_now_ref"] = json!(parent);
+        }
+        if let Some(workcell) = &request.workcell_ref {
+            input["workcell_ref"] = json!(workcell);
+        }
+        if !request.work_refs.is_empty() {
+            input["work_refs"] = json!(request.work_refs);
+        }
         let allocation = self.call(request, "central.now.allocate", input)?;
+        validate_declared_relations(request, &allocation["record"])?;
         if let Some(current) = &existing {
             if allocation["created"] != false
                 || allocation["now_ref"] != current["record"]["now_ref"]

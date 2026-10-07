@@ -601,11 +601,9 @@ fn cmd_inhabit(cwd: &std::path::Path, args: InhabitArgs, json_mode: bool) -> Res
                 ))
             });
         }
-        let argv = match (&team, HarnessTarget::from_argv(&args.command)) {
-            (Some(team), HarnessTarget::ClaudeCode) => {
-                inhabit_team::with_plugin_dirs(&args.command, &inhabit_team::plugin_dirs(team))
-            }
-            _ => args.command.clone(),
+        let argv = match &team {
+            Some(team) => inhabit_team::with_team_projection(&args.command, team),
+            None => args.command.clone(),
         };
         eprintln!(
             "aikit inhabit: continuing {} as generation {} (verified current) — launching `{}`",
@@ -701,7 +699,7 @@ fn cmd_inhabit(cwd: &std::path::Path, args: InhabitArgs, json_mode: bool) -> Res
         } else {
             let team = match (&team, claimed.team.disclosure()) {
                 (Some(team), _) => format!(
-                    "\n# its agent-set team, for Claude Code: {}",
+                    "\n# its Central-authored team projection: {}",
                     inhabit_team::plugin_dirs(team)
                         .iter()
                         .map(|dir| format!("--plugin-dir {dir}"))
@@ -719,9 +717,22 @@ fn cmd_inhabit(cwd: &std::path::Path, args: InhabitArgs, json_mode: bool) -> Res
     }
     let argv = match &team {
         Some(team) => {
-            let dirs = inhabit_team::plugin_dirs(team);
+            let carrier_args: Vec<String> = team["plugins"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|plugin| {
+                    if let Some(extension) = plugin["extension"].as_str() {
+                        Some(format!("--extension {extension}"))
+                    } else {
+                        plugin["dir"]
+                            .as_str()
+                            .map(|dir| format!("--plugin-dir {dir}"))
+                    }
+                })
+                .collect();
             eprintln!(
-                "aikit inhabit: {} as Claude Code subagents ({})",
+                "aikit inhabit: {} through its native team projection ({})",
                 team["plugins"]
                     .as_array()
                     .into_iter()
@@ -737,10 +748,7 @@ fn cmd_inhabit(cwd: &std::path::Path, args: InhabitArgs, json_mode: bool) -> Res
                     ))
                     .collect::<Vec<_>>()
                     .join(", "),
-                dirs.iter()
-                    .map(|dir| format!("--plugin-dir {dir}"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
+                carrier_args.join(" ")
             );
             for plugin in team["plugins"].as_array().into_iter().flatten() {
                 let missing: Vec<&str> = plugin["skills_missing"]
@@ -757,7 +765,7 @@ fn cmd_inhabit(cwd: &std::path::Path, args: InhabitArgs, json_mode: bool) -> Res
                     );
                 }
             }
-            inhabit_team::with_plugin_dirs(&args.command, &dirs)
+            inhabit_team::with_team_projection(&args.command, team)
         }
         None => {
             if let Some(disclosure) = claimed.team.disclosure() {
@@ -1625,9 +1633,18 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                                 cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
                             },
                         )),
+                        // `/upgrade` behind a connector conversation: the
+                        // plan on request, and on `apply` a worker that
+                        // outlives this process and reports back into that
+                        // conversation.
+                        upgrade_launcher: Some(std::sync::Arc::new(
+                            aikit_cli::gateway_upgrade_system::ConversationUpgradeLauncher {
+                                home: home.clone(),
+                            },
+                        )),
                     }),
                     coexistence: coexistence.gate,
-                    stop_signal,
+                    stop_signal: None,
                     // A peer's Flow request is answered by this Workcell's
                     // own encounter owner, at the moment of asking.
                     encounter_relay: Some(std::sync::Arc::new(
@@ -1739,6 +1756,48 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 a.position.as_deref(),
                 a.ack,
             )?)
+        }
+        GatewaySub::Handoff { commit } => {
+            let committed = if commit {
+                let text =
+                    std::io::read_to_string(std::io::Read::take(std::io::stdin(), 1024 * 1024 + 1))
+                        .map_err(|error| {
+                            AikitError::new("gateway.handoff_unreadable", error.to_string())
+                        })?;
+                if text.len() > 1024 * 1024 {
+                    return Err(AikitError::new(
+                        "gateway.handoff_too_large",
+                        "The retained handoff exceeds the input budget",
+                    ));
+                }
+                Some(serde_json::from_str(&text).map_err(|error| {
+                    AikitError::new("gateway.handoff_invalid", error.to_string())
+                })?)
+            } else {
+                None
+            };
+            gateway_data(aikit_cli::communique_turn::handoff_current(
+                &aikit_cli::gateway_owners::ProcessOwners::from_env(),
+                &aikit_cli::gateway_contact::LocalGateway::default_for(&home),
+                committed,
+            )?)
+        }
+        GatewaySub::Message { communique_ref } => {
+            gateway_data(aikit_cli::communique_turn::message_current(
+                &aikit_cli::gateway_owners::ProcessOwners::from_env(),
+                &aikit_cli::gateway_contact::LocalGateway::default_for(&home),
+                &communique_ref,
+            )?)
+        }
+        GatewaySub::Team { request_json } => {
+            // The inhabit-team operation surface is mid-restoration on its own
+            // lane (inhabit_team_native); the dispatch keeps the input contract
+            // and answers honestly until that lane lands.
+            let _ = request_json;
+            return Err(AikitError::new(
+                "gateway.team_unavailable",
+                "team operations are mid-restoration; this gateway build does not serve them yet",
+            ));
         }
         GatewaySub::Conversation(a) => {
             let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
@@ -1885,7 +1944,9 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                         format!("--peer takes WORKCELL=HOST:PORT; got `{peer}`"),
                     )
                 })?;
-                inputs.peers.push((workcell.to_owned(), endpoint.to_owned()));
+                inputs
+                    .peers
+                    .push((workcell.to_owned(), endpoint.to_owned()));
             }
             let plan = modes::plan_setup(&inputs)?;
             let data = if a.apply {
@@ -1931,13 +1992,13 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                         install: a.install,
                         channel: a.channel,
                         candidate: a.candidate,
-                        origin: a
-                            .origin_binding
-                            .map(|binding_ref| aikit_cli::gateway_upgrade::UpgradeOrigin {
+                        origin: a.origin_binding.map(|binding_ref| {
+                            aikit_cli::gateway_upgrade::UpgradeOrigin {
                                 binding_ref,
                                 connector_ref: None,
                                 in_reply_to_sequence: None,
-                            }),
+                            }
+                        }),
                         requested_by: "cli".into(),
                         auto_rollback: !a.no_rollback,
                         drain_grace_secs: a.drain_grace_secs,
@@ -1978,6 +2039,9 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Who(_)
                 | GatewaySub::Send(_)
                 | GatewaySub::Inbox(_)
+                | GatewaySub::Handoff { .. }
+                | GatewaySub::Message { .. }
+                | GatewaySub::Team { .. }
                 | GatewaySub::Conversation(_)
                 | GatewaySub::Delegate(_)
                 | GatewaySub::Forward(_)
@@ -2006,6 +2070,9 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Who(_)
                 | GatewaySub::Send(_)
                 | GatewaySub::Inbox(_)
+                | GatewaySub::Handoff { .. }
+                | GatewaySub::Message { .. }
+                | GatewaySub::Team { .. }
                 | GatewaySub::Conversation(_)
                 | GatewaySub::Delegate(_)
                 | GatewaySub::Forward(_)
@@ -5786,6 +5853,9 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd, json_mode: bool) -> Result<Reply>
     let staged_communiques = aikit_cli::communique_turn::take_staged_delivery();
 
     if json_mode {
+        let mut data = data;
+        data["communique_handoff"] = serde_json::to_value(&staged_communiques)
+            .map_err(|error| AikitError::new("gateway.handoff_invalid", error.to_string()))?;
         Ok(Reply::Data {
             context: EnvelopeContext::from_descriptor(service.descriptor()),
             data,

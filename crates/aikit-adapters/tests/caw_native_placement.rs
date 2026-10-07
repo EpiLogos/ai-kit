@@ -43,6 +43,9 @@ fn world() -> (tempfile::TempDir, CentralTaskRequest) {
         purpose: "Controlled native joined placement".into(),
         participant_refs: vec![ResourceRef::parse("agent:no-profile").unwrap()],
         source_refs: vec![],
+        parent_now_ref: None,
+        workcell_ref: None,
+        work_refs: vec![],
     };
     (dir, request)
 }

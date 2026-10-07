@@ -1151,6 +1151,9 @@ fn gateway_route(command: &GatewaySub) -> &'static str {
         GatewaySub::Who(_) => "cmd_gateway_who",
         GatewaySub::Send(_) => "cmd_gateway_send",
         GatewaySub::Inbox(_) => "cmd_gateway_inbox",
+        GatewaySub::Handoff { .. } => "cmd_gateway_handoff",
+        GatewaySub::Message { .. } => "cmd_gateway_message",
+        GatewaySub::Team { .. } => "cmd_gateway_team",
         GatewaySub::Conversation(_) => "cmd_gateway_conversation",
         GatewaySub::Delegate(_) => "cmd_gateway_delegate",
         GatewaySub::Forward(_) => "cmd_gateway_forward",
@@ -2039,6 +2042,20 @@ pub enum GatewaySub {
     /// The Communiques waiting for an occupant; `--ack` marks them delivered
     /// to this body's verified occupant generation.
     Inbox(GatewayInboxArgs),
+    /// Offer a bounded handoff to the current occupant; commit the exact
+    /// retained delivery from stdin after its peer turn has been persisted.
+    Handoff {
+        #[arg(long)]
+        commit: bool,
+    },
+    /// Retrieve one complete Communique addressed to this verified occupant.
+    Message { communique_ref: String },
+    /// Prepare, delegate to, read or cancel an admitted Central team member.
+    Team {
+        /// Bounded native operation JSON; prefix a file path with @.
+        #[arg(long)]
+        request_json: String,
+    },
     /// Both directions between this Position and another, from the journal.
     Conversation(GatewayConversationArgs),
     /// Cross a Communique into obligation-bearing work: Factory assigns custody

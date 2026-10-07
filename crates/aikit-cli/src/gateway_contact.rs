@@ -2008,6 +2008,80 @@ fn carrier_call(remote: &GatewayRemote, command: GatewayCommand) -> Result<Gatew
     aikit_adapters::gateway_command(&target, command, None)
 }
 
+/// Read delivery from the actual gateway that accepted this exact forwarded
+/// record. This is a qualified observation, never a second delivery or journal.
+/// Only the occupant-facing message owner calls it after sender admission.
+pub fn forwarded_readback(home: &AikitHome, communique: &Communique) -> Result<Option<Value>> {
+    let Some(CommuniqueForward::Forwarded {
+        workcell_ref,
+        remote_gateway_ref,
+        ..
+    }) = &communique.forward
+    else {
+        return Ok(None);
+    };
+    let remotes = load_remotes(home)?;
+    let remote = remotes
+        .remotes
+        .iter()
+        .find(|remote| &remote.workcell_ref == workcell_ref)
+        .ok_or_else(|| {
+            three_part(
+                "gateway.remote_undeclared",
+                "The original forwarding Workcell has no declared route here.",
+                "Delivery remains observed at its native gateway.",
+                remote_command(workcell_ref),
+            )
+        })?;
+    forwarded_readback_via(communique, remote, remote_gateway_ref, &carrier_call).map(Some)
+}
+fn forwarded_readback_via(
+    communique: &Communique,
+    remote: &GatewayRemote,
+    expected_gateway: &str,
+    carrier: RemoteCarrier<'_>,
+) -> Result<Value> {
+    let GatewayResponse::Status { status } = carrier(remote, GatewayCommand::Status)? else {
+        return Err(AikitError::new(
+            "gateway.remote_readback_unreadable",
+            "Remote gateway identity could not be observed",
+        ));
+    };
+    if status.gateway_ref.as_str() != expected_gateway {
+        return Err(AikitError::new(
+            "gateway.remote_readback_changed",
+            "The recorded accepting gateway differs from the current remote owner",
+        ));
+    }
+    let observed = expect_record(carrier(
+        remote,
+        GatewayCommand::ReadCommunique {
+            communique_ref: communique.communique_ref.clone(),
+        },
+    )?)?;
+    if observed.communique_ref != communique.communique_ref
+        || observed.from_position_ref != communique.from_position_ref
+        || observed.from_generation_ref != communique.from_generation_ref
+        || observed.attribution != communique.attribution
+        || observed.attribution_basis != communique.attribution_basis
+        || observed.to_position_ref != communique.to_position_ref
+        || observed.to_instance != communique.to_instance
+        || observed.body != communique.body
+        || observed.sent_at_unix_ms != communique.sent_at_unix_ms
+        || observed.reply_to != communique.reply_to
+    {
+        return Err(AikitError::new(
+            "gateway.remote_readback_changed",
+            "Remote readback does not carry the exact original attributed message",
+        ));
+    }
+    Ok(
+        json!({"schema":"aikit.remote-communique-readback/v1","workcell_ref":remote.workcell_ref,"gateway_ref":expected_gateway,
+        "communique_ref":observed.communique_ref,"state":observed.state,"delivered_to_generation_ref":observed.delivered_to_generation_ref,
+        "delivered_at_unix_ms":observed.delivered_at_unix_ms,"transitions":observed.transitions,"completed_work":false}),
+    )
+}
+
 /// Whether a gateway keeps exact-instance bindings, from its `protocol`
 /// answer.
 enum ExactSupport {
@@ -4106,5 +4180,134 @@ mod exact_instance_binding_tests {
         assert_eq!(skipped.len(), 1, "{pass:#}");
         assert_eq!(skipped[0]["communique_ref"], "communique:01first");
         assert_eq!(skipped[0]["code"], "agency_gateway.unknown_command");
+    }
+}
+
+#[cfg(test)]
+mod forwarded_readback_tests {
+    use super::*;
+    #[test]
+    fn readback_observes_exact_remote_delivery_without_another_effect() {
+        let sender_dir = tempfile::tempdir().unwrap();
+        let recipient_dir = tempfile::tempdir().unwrap();
+        let sender = LocalGateway::default_for(&AikitHome::at(sender_dir.path()));
+        let recipient = LocalGateway::default_for(&AikitHome::at(recipient_dir.path()));
+        let original = expect_accepted(
+            sender
+                .call(GatewayCommand::SendCommunique {
+                    draft: Box::new(CommuniqueDraft {
+                        communique_ref: "aikit:communique:remote-readback".into(),
+                        from_position_ref: Some("position:parent".into()),
+                        from_generation_ref: Some("generation:parent".into()),
+                        attribution: SenderAttribution::Verified,
+                        attribution_basis: "actual native sender generation".into(),
+                        to_position_ref: "position:child".into(),
+                        to_workcell_ref: None,
+                        to_instance: Some(CommuniqueInstance {
+                            generation_ref: "generation:child".into(),
+                            required_workcell_ref: Some("workcell:second".into()),
+                            agent_session_ref: None,
+                            agency_ref: None,
+                        }),
+                        instance_hold: None,
+                        body: "Substantive retained source and artifact:exact-change".into(),
+                        sent_at_unix_ms: 123,
+                        state: CommuniqueState::Pending,
+                        state_basis: "Awaiting native addressed carrying".into(),
+                        reply_to: None,
+                        forward_to_workcell_ref: None,
+                        routing: None,
+                    }),
+                })
+                .unwrap(),
+        )
+        .unwrap()
+        .0;
+        let remote = GatewayRemote {
+            workcell_ref: "workcell:second".into(),
+            websocket_bind: "127.0.0.1:1".into(),
+            websocket_path: "/".into(),
+            token_location: "env:TEST_GATEWAY_TOKEN".into(),
+        };
+        let (forwarded, _) = forward_one_via(
+            &sender,
+            &original,
+            &remote,
+            &sender.gateway_ref,
+            None,
+            &|_, command| recipient.call(command),
+        )
+        .unwrap();
+        let before = forwarded_readback_via(
+            &forwarded,
+            &remote,
+            &recipient.gateway_ref,
+            &|_, command| recipient.call(command),
+        )
+        .unwrap();
+        assert_eq!(before["state"], "pending");
+        recipient
+            .call(GatewayCommand::AcknowledgeCommuniques {
+                position_ref: "position:child".into(),
+                generation_ref: "generation:child".into(),
+                workcell_ref: Some("workcell:second".into()),
+                communique_refs: vec![original.communique_ref.clone()],
+                delivered_at_unix_ms: 456,
+                via: "actual native retained peer message".into(),
+            })
+            .unwrap();
+        let delivered = forwarded_readback_via(
+            &forwarded,
+            &remote,
+            &recipient.gateway_ref,
+            &|_, command| recipient.call(command),
+        )
+        .unwrap();
+        assert_eq!(delivered["state"], "delivered");
+        assert_eq!(delivered["delivered_to_generation_ref"], "generation:child");
+        assert_eq!(delivered["completed_work"], false);
+        let restarted = LocalGateway::default_for(&AikitHome::at(recipient_dir.path()));
+        assert_eq!(
+            forwarded_readback_via(
+                &forwarded,
+                &remote,
+                &restarted.gateway_ref,
+                &|_, command| restarted.call(command)
+            )
+            .unwrap(),
+            delivered
+        );
+        assert_eq!(
+            expect_record(
+                sender
+                    .call(GatewayCommand::ReadCommunique {
+                        communique_ref: original.communique_ref.clone()
+                    })
+                    .unwrap()
+            )
+            .unwrap(),
+            forwarded
+        );
+        let mut changed = forwarded.clone();
+        changed.body.push_str(" changed material");
+        assert_eq!(
+            forwarded_readback_via(&changed, &remote, &recipient.gateway_ref, &|_, command| {
+                recipient.call(command)
+            })
+            .unwrap_err()
+            .code(),
+            "gateway.remote_readback_changed"
+        );
+        assert_eq!(
+            forwarded_readback_via(
+                &forwarded,
+                &remote,
+                "agency-gateway/replacement",
+                &|_, command| recipient.call(command)
+            )
+            .unwrap_err()
+            .code(),
+            "gateway.remote_readback_changed"
+        );
     }
 }

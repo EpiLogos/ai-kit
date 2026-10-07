@@ -22,3 +22,6 @@
 
 # Subagent restoration-lane build target
 /target-restore/
+
+# Restoration-lane decoupled build target
+/target-restore/

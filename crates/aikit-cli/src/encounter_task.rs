@@ -740,7 +740,39 @@ fn prepare_published(
     Ok(record)
 }
 
+/// Child runtime scope derives from the actual retained AgentSession, not an
+/// inherited parent overlay or a fabricated Position tenure.
+fn task_session_id(session: &ResourceRef) -> aikit_core::SessionId {
+    aikit_core::SessionId::parse(&format!(
+        "ses_{}",
+        &blake3::hash(session.as_str().as_bytes()).to_hex()[..24]
+    ))
+    .expect("canonical derived SessionId")
+}
+fn isolate_task_identity(
+    command: &mut Command,
+    session: &ResourceRef,
+    context: Option<&aikit_core::ContextId>,
+) {
+    for name in [
+        "OI_POSITION_REF",
+        "OI_OCCUPANT_GENERATION",
+        "AIKIT_CONTEXT_ID",
+        "AIKIT_SESSION_ID",
+        "AIKIT_VIEW",
+        "AIKIT_CONTEXT_ROOT",
+    ] {
+        command.env_remove(name);
+    }
+    command.env("AIKIT_SESSION_ID", task_session_id(session).as_str());
+    if let Some(context) = context {
+        command.env("AIKIT_CONTEXT_ID", context.as_str());
+    }
+}
 impl EncounterService {
+    pub fn task_repertoire_session_id(session: &ResourceRef) -> aikit_core::SessionId {
+        task_session_id(session)
+    }
     /// Owner-only CAS. A pending record is durable before allocating NOW; any
     /// failed preparation remains blocking, not an unconfined fallback.
     pub fn configure_task(
@@ -1109,6 +1141,9 @@ impl EncounterService {
         if let Some(environment) = model_environment {
             environment.apply(&mut command);
         }
+        // Credential/profile delivery may reconstruct its safe allowlist;
+        // identity isolation therefore follows it, at the final child owner.
+        isolate_task_identity(&mut command, session, None);
         if let Some(runtime) = codex_runtime {
             command.env("npm_config_cache", runtime.npm_cache);
             // Task-owned native material placement follows the credential
@@ -1420,5 +1455,46 @@ mod profile_task_tests {
             launcher.argv, resolved.argv,
             "Codex is not launched outside Workcell"
         );
+    }
+}
+
+#[cfg(test)]
+mod task_identity_tests {
+    use super::*;
+    #[test]
+    fn actual_child_process_receives_distinct_native_runtime_scope() {
+        let first = ResourceRef::parse("agent-session/first-child").unwrap();
+        let second = ResourceRef::parse("agent-session/second-child").unwrap();
+        let context = aikit_core::ContextId::parse("ctx_selected-child").unwrap();
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c","test -z \"$OI_POSITION_REF\" && test -z \"$OI_OCCUPANT_GENERATION\" && test -z \"$AIKIT_VIEW\" && printf '%s\\n%s\\n%s' \"$AIKIT_SESSION_ID\" \"$AIKIT_CONTEXT_ID\" \"$CENTRAL_NATIVE_TOKEN\""]);
+        for name in [
+            "OI_POSITION_REF",
+            "OI_OCCUPANT_GENERATION",
+            "AIKIT_CONTEXT_ID",
+            "AIKIT_SESSION_ID",
+            "AIKIT_VIEW",
+        ] {
+            command.env(name, "parent-only");
+        }
+        command.env("CENTRAL_NATIVE_TOKEN", "explicit-owner-grant");
+        isolate_task_identity(&mut command, &first, Some(&context));
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!(
+                "{}\n{}\nexplicit-owner-grant",
+                task_session_id(&first),
+                context
+            )
+        );
+        assert_ne!(task_session_id(&first), task_session_id(&second));
+        let mut unselected = Command::new("/bin/sh");
+        unselected
+            .args(["-c", "test -z \"$AIKIT_CONTEXT_ID\""])
+            .env("AIKIT_CONTEXT_ID", "parent-only");
+        isolate_task_identity(&mut unselected, &second, None);
+        assert!(unselected.status().unwrap().success());
     }
 }

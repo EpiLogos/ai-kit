@@ -389,6 +389,12 @@ pub struct GatewayConversationHooks {
     /// remotes) and relays what the engine appends. `None` leaves `/ask`
     /// refusing honestly on this gateway.
     pub ask_router: Option<Arc<dyn crate::gateway_conversation_engine::GatewayAskRouter>>,
+    /// The managed-upgrade owner behind a conversation's `/upgrade`: the
+    /// plan on request, and on `apply` a worker that outlives this process,
+    /// whose receipt returns to that conversation. `None` leaves `/upgrade`
+    /// naming the CLI on this gateway.
+    pub upgrade_launcher:
+        Option<Arc<dyn crate::gateway_conversation_engine::GatewayUpgradeLauncher>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -791,6 +797,7 @@ fn serve_gateway_service(
         turn_sources,
         policy,
         ask_router,
+        upgrade_launcher,
     } = conversation.unwrap_or_default();
     let engine = crate::gateway_conversation_engine::GatewayConversationEngine::new(
         Arc::clone(&gateway),
@@ -803,6 +810,9 @@ fn serve_gateway_service(
     );
     if let Some(ask_router) = ask_router {
         engine.attach_ask_router(ask_router);
+    }
+    if let Some(launcher) = upgrade_launcher {
+        engine.attach_upgrade_launcher(launcher);
     }
     let runtime = Arc::new(GatewayServiceRuntime {
         native_owners: crate::gateway_native_owner::NativeOwnerRoutes::from_env(),

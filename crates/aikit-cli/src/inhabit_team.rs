@@ -49,7 +49,8 @@ use std::path::{Component, Path, PathBuf};
 
 use aikit_adapters::clients::claude_team::{
     claude_skill_name, parse_member_expression, render_plugin_manifest, render_subagent_with,
-    subagent_name, team_plugin_name, TeamMember, MAX_MEMBER_EXPRESSION_BYTES,
+    subagent_name, team_plugin_name, MemberExpression, MemberFrontmatter, TeamMember,
+    MAX_MEMBER_EXPRESSION_BYTES,
 };
 use aikit_core::{AikitError, Result};
 use aikit_store::home::AikitHome;
@@ -57,6 +58,10 @@ use serde_json::{json, Value};
 
 use crate::inhabit::refusal;
 use crate::inhabitation::{pick, Owners};
+
+#[path = "inhabit_team_native.rs"]
+mod native;
+pub use native::team_operation;
 
 pub const TEAM_PROJECTION_SCHEMA: &str = "aikit.inhabitation-team-projection/v1";
 const CENTRAL_ROOT_SOURCE_PREFIX: &str = "central:source:control:root:";
@@ -66,6 +71,8 @@ const CENTRAL_ROOT_SOURCE_PREFIX: &str = "central:source:control:root:";
 pub enum HarnessTarget {
     /// `claude …`: session subagents are projected.
     ClaudeCode,
+    /// Pi's native extension delegates through the existing encounter owner.
+    Pi,
     /// Another harness: the team is disclosed as not supported.
     Other(String),
     /// No argv (the claim prints exports): the team is written and reported
@@ -84,6 +91,8 @@ impl HarnessTarget {
                     .unwrap_or(program);
                 if name == "claude" {
                     Self::ClaudeCode
+                } else if name == "pi" {
+                    Self::Pi
                 } else {
                     Self::Other(name.to_owned())
                 }
@@ -95,6 +104,7 @@ impl HarnessTarget {
 /// One set's members, rendered in memory before anything is claimed.
 #[derive(Debug, Clone)]
 pub struct SetProjection {
+    pub harness: HarnessTarget,
     pub agent_set_ref: String,
     pub agent_set_revision: String,
     pub plugin_name: String,
@@ -277,7 +287,7 @@ pub fn resolve(
         .join(", ");
     if let HarnessTarget::Other(program) = target {
         return Ok(TeamOutcome::Disclosed(format!(
-            "{agent} orchestrates agent set {named}, but projecting its members as subagents is supported for Claude Code only; `{program}` is launched without them"
+            "{agent} orchestrates agent set {named}, but projecting its members as subagents is supported for Claude Code and Pi; `{program}` is launched without them"
         )));
     }
 
@@ -343,17 +353,42 @@ pub fn resolve(
     for (set, revision, members) in members_by_set {
         let mut team = Vec::new();
         for member in &members {
-            match team_member(member, by_agent.get(member), central_root) {
+            match team_member(
+                member,
+                by_agent.get(member),
+                central_root,
+                *target == HarnessTarget::Pi,
+            ) {
                 Ok(member) => team.push(member),
                 Err(problem) => problems.push(problem),
             }
         }
         let plugin_name = team_plugin_name(&set);
-        let mut files = vec![(
-            PathBuf::from(".claude-plugin/plugin.json"),
-            render_plugin_manifest(&set, &revision, agent, &team),
-            json!({ "agent_set_ref": set, "agent_set_revision": revision }),
-        )];
+        let is_pi = *target == HarnessTarget::Pi;
+        let mut files = if is_pi {
+            vec![(
+            PathBuf::from("team.json"),
+            serde_json::to_string_pretty(&json!({
+                "schema":"aikit.pi-team/v1", "agent_set_ref":set, "agent_set_revision":revision,
+                "orchestrator_agent_ref":agent,
+                "members":team.iter().map(|member| json!({
+                    "agent_ref":member.agent_ref, "profile_ref":member.profile_ref,
+                    "expression_ref":member.expression_ref, "description":member.expression.frontmatter.description,
+                    "expression_digest": central_root.and_then(|root| member.expression_ref.strip_prefix(CENTRAL_ROOT_SOURCE_PREFIX).and_then(|relative| std::fs::read(root.join(relative)).ok())).map(|bytes|format!("blake3:{}",blake3::hash(&bytes).to_hex())),
+                    "skill_refs":member.skill_refs(), "governance_refs":member.governance_refs,
+                    "governance_digests":member.governance_refs.iter().filter_map(|reference| central_root.and_then(|root|reference.strip_prefix(CENTRAL_ROOT_SOURCE_PREFIX).and_then(|relative|std::fs::read(root.join(relative)).ok())).map(|bytes|(reference.clone(),format!("blake3:{}",blake3::hash(&bytes).to_hex())))).collect::<BTreeMap<_,_>>(),
+                    "instructions":format!("agents/{}.md", subagent_name(&member.agent_ref).unwrap_or_default()),
+                })).collect::<Vec<_>>()
+            })).map_err(|error| AikitError::new("inhabit.team_encode_failed",error.to_string()))?,
+            json!({ "agent_set_ref":set, "agent_set_revision":revision }),
+        ), (PathBuf::from("team.ts"), include_str!("pi_team_extension.ts").into(), json!({"native_owner":"aikit.encounter"}))]
+        } else {
+            vec![(
+                PathBuf::from(".claude-plugin/plugin.json"),
+                render_plugin_manifest(&set, &revision, agent, &team),
+                json!({ "agent_set_ref": set, "agent_set_revision": revision }),
+            )]
+        };
         // The team's skills travel with it, named as Claude Code names a
         // plugin skill. A skill the catalogue cannot supply keeps its bare
         // name and is disclosed.
@@ -405,6 +440,7 @@ pub fn resolve(
             }
         }
         sets.push(SetProjection {
+            harness: target.clone(),
             agent_set_ref: set,
             agent_set_revision: revision,
             plugin_name,
@@ -439,6 +475,7 @@ fn team_member(
     agent_ref: &str,
     profiles: Option<&Vec<Value>>,
     central_root: Option<&Path>,
+    native_expression: bool,
 ) -> std::result::Result<TeamMember, String> {
     let profile = match profiles.map(Vec::as_slice).unwrap_or_default() {
         [profile] => profile,
@@ -466,7 +503,7 @@ fn team_member(
             .collect()
     };
     let governance_refs = strings("governance_refs");
-    let expressions: Vec<&String> = governance_refs
+    let mut expressions: Vec<&String> = governance_refs
         .iter()
         .filter(|reference| {
             reference.starts_with(CENTRAL_ROOT_SOURCE_PREFIX)
@@ -474,6 +511,16 @@ fn team_member(
                 && reference.ends_with(".md")
         })
         .collect();
+    if expressions.is_empty() && native_expression {
+        expressions = governance_refs
+            .iter()
+            .filter(|reference| {
+                reference.starts_with(CENTRAL_ROOT_SOURCE_PREFIX)
+                    && reference.contains("/expressions/")
+                    && reference.ends_with("/intent.md")
+            })
+            .collect();
+    }
     let expression_ref = match expressions.as_slice() {
         [one] => (*one).clone(),
         [] => {
@@ -524,8 +571,35 @@ fn team_member(
             ))
         }
     };
-    let expression = parse_member_expression(&text)
-        .map_err(|error| format!("{}: {}", path.display(), error.message()))?;
+    let expression = if native_expression && !text.trim_start_matches('\u{feff}').starts_with("---")
+    {
+        let purpose = pick(profile, &["purpose"])
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                format!("{profile_ref} has no source-backed purpose for its native expression")
+            })?;
+        if text.trim().is_empty() {
+            return Err(format!(
+                "{} has no native operating expression",
+                path.display()
+            ));
+        }
+        MemberExpression {
+            frontmatter: MemberFrontmatter {
+                name: subagent_name(agent_ref).map_err(|error| error.to_string())?,
+                team: None,
+                cf: None,
+                description: purpose,
+                tools: vec![],
+                skills: vec![],
+                source: None,
+            },
+            body: text.clone(),
+        }
+    } else {
+        parse_member_expression(&text)
+            .map_err(|error| format!("{}: {}", path.display(), error.message()))?
+    };
     Ok(TeamMember {
         agent_ref: agent_ref.to_owned(),
         profile_ref,
@@ -575,7 +649,13 @@ pub fn write(
     let mut plugin_dirs = Vec::new();
     let mut files = Vec::new();
     for set in sets {
-        let plugin_dir = dir.join("claude").join(&set.plugin_name);
+        let plugin_dir = dir
+            .join(if set.harness == HarnessTarget::Pi {
+                "pi"
+            } else {
+                "claude"
+            })
+            .join(&set.plugin_name);
         for (relative, text, provenance) in &set.files {
             let path = plugin_dir.join(relative);
             if let Some(parent) = path.parent() {
@@ -596,6 +676,7 @@ pub fn write(
             "agent_set_ref": set.agent_set_ref,
             "agent_set_revision": set.agent_set_revision,
             "plugin_dir": plugin_dir.display().to_string(),
+            "extension": if set.harness == HarnessTarget::Pi { Some(plugin_dir.join("team.ts").display().to_string()) } else { None },
             "members": set.members,
             "skills_bundled": set.skills_bundled,
             "skills_missing": set.skills_missing,
@@ -606,7 +687,7 @@ pub fn write(
         "position_ref": position_ref,
         "generation_ref": generation_ref,
         "orchestrator_agent_ref": orchestrator_agent_ref,
-        "harness": "claude-code",
+        "harness": if sets.first().is_some_and(|set| set.harness == HarnessTarget::Pi) { "pi" } else { "claude-code" },
         "directory": dir.display().to_string(),
         "plugins": plugin_dirs,
         "files": files,
@@ -678,6 +759,24 @@ pub fn with_plugin_dirs(argv: &[String], dirs: &[String]) -> Vec<String> {
     for dir in dirs {
         out.push("--plugin-dir".into());
         out.push(dir.clone());
+    }
+    out.extend(rest.iter().cloned());
+    out
+}
+
+/// Continue or launch the same tenure with its actual harness carrier.
+pub fn with_team_projection(argv: &[String], receipt: &Value) -> Vec<String> {
+    if HarnessTarget::from_argv(argv) != HarnessTarget::Pi {
+        return with_plugin_dirs(argv, &plugin_dirs(receipt));
+    }
+    let Some((program, rest)) = argv.split_first() else {
+        return argv.to_vec();
+    };
+    let mut out = vec![program.clone()];
+    for plugin in receipt["plugins"].as_array().into_iter().flatten() {
+        if let Some(extension) = plugin["extension"].as_str() {
+            out.extend(["--extension".into(), extension.into()]);
+        }
     }
     out.extend(rest.iter().cloned());
     out
