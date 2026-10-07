@@ -31,12 +31,24 @@ fn executable(path: &Path, body: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// A port that was free a moment ago, drawn from a pid- and time-seeded range instead of the OS's ephemeral allocator. Binding :0 and
+/// dropping hands the SAME port to the next bind(0) of a concurrently running test binary (the allocator is sequential on macOS), which
+/// raced two service tests on a CI runner ("Address already in use"). A random pick over 25,000 ports makes that collision negligible.
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    let mut seed = u64::from(std::process::id())
+        ^ std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+    loop {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let port = 30_000 + ((seed >> 33) % 25_000) as u16;
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 fn alive(pid: u64) -> bool {
