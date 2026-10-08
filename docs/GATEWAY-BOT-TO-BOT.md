@@ -73,11 +73,15 @@ What stays separate on purpose, and what changed on 6 October 2026
   holds the engine is journalled (retained), named in the `DrainReport`
   (`admitted_unserved`), and named in the restart line and the upgrade
   receipt. It is never replayed.
-* Durable Position routing is still decided in four places in
-  `gateway_contact.rs` (`route_to_occupancy`, `place_instance`,
-  `forward_pass_via`, `relay_attempt`) with slightly different answers for an
-  unknown ledger. The relay pass and the ask path should call one function;
-  they do not yet (ai-kit#481 item 1, open).
+* Durable Position routing converged (`fe58f59b`): send-time routing
+  (`route_to_occupancy`) and the relay pass (`ledger_placement` inside
+  `forward_pass_via`) read the ledger through ONE `TenureReading` and resolve
+  a vacant ledger through ONE `VacantResolution`, and both routes are offered
+  through the same injected carrier seam. What remains open under #481-1 is
+  the exact-instance decider (`place_instance` — a different route kind with
+  its own verification law) and the single outbound-attempt RECORD spanning
+  all three journals (the Communique journal, the connector plane and the
+  Flow encounter ledger each keep their own attempt state today).
 * Communiques wait for a human prompt; nothing wakes an idle body.
 
 Laws that survive every face: **Position ≠ Agent ≠ AgentSession ≠ bot
