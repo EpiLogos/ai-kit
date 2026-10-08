@@ -42,7 +42,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use aikit_adapters::{DrainReport, GatewayLifecycle, UpgradeOrigin};
+use aikit_adapters::GatewayLifecycle;
 use aikit_core::{AikitError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -50,6 +50,51 @@ use serde_json::{json, Value};
 pub const TRANSACTION_SCHEMA: &str = "aikit.gateway-upgrade/v1";
 pub const RECEIPT_SCHEMA: &str = "aikit.gateway-upgrade-receipt/v1";
 pub const PLAN_SCHEMA: &str = "aikit.gateway-upgrade-plan/v1";
+
+/// The conversation an upgrade was asked for from, so its receipt returns
+/// there. Only refs: the receipt is posted through the running gateway (an
+/// outbound send on the binding, which its connector delivers into the
+/// conversation), never by reaching into a connector. The current engine keeps
+/// no `/upgrade` parse arm, so an origin is named at the CLI (`apply
+/// --origin-binding`) and carried through the transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpgradeOrigin {
+    pub binding_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to_sequence: Option<u64>,
+}
+
+/// What the predecessor's stop did, as this transaction can know it. The
+/// gateway drains itself for a stop (the serve signal handler drains, then
+/// exits; each unresolved turn is journaled on its own stream by the gateway
+/// that met it). What the transaction records is what it witnessed: that the
+/// stop was asked, and — when the predecessor's own drain reading could be
+/// asked for and answered — what it counted. What a turn or its tools did
+/// before an interrupt is never known here, and nothing is replayed from it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DrainRecord {
+    /// Whether a drain was measured and its reading kept. `false` means the
+    /// counts below are UNKNOWN, not zero.
+    #[serde(default)]
+    pub measured: bool,
+    pub reason: String,
+    #[serde(default)]
+    pub turns_resolved: u64,
+    #[serde(default)]
+    pub turns_interrupted: u64,
+    #[serde(default)]
+    pub prompts_not_started: u64,
+    #[serde(default)]
+    pub grace_ms: u64,
+}
+
+impl DrainRecord {
+    pub fn was_measured(&self) -> bool {
+        self.measured
+    }
+}
 
 // ---------------------------------------------------------------------------
 // The transaction
@@ -220,11 +265,11 @@ pub struct Transaction {
     pub before: Option<Running>,
     #[serde(default)]
     pub recovery: Recovery,
-    /// The drain report: every interrupted turn and unreceipted operation,
-    /// named. Uncertain effects live here and in the receipt; nothing is
-    /// replayed from it.
+    /// The drain: what the predecessor's stop reported, so far as this
+    /// transaction witnessed. Uncertain effects live here and in the receipt;
+    /// nothing is replayed from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub drain: Option<DrainReport>,
+    pub drain: Option<DrainRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<Running>,
     /// The build the installed executable turned out to be.
@@ -391,15 +436,17 @@ pub trait UpgradeEnv {
         log: &Path,
     ) -> Result<CommandOutcome>;
     /// Ask the running gateway (named by `expected_pid`) to drain and, with
-    /// `exit`, stop. A predecessor that predates the drain is stopped with its
-    /// clean shutdown instead, and the report says so.
+    /// `exit`, stop. The platform's own stop is what is asked (a SIGTERM, which
+    /// the gateway's serve signal handler answers with a drained, persisted,
+    /// clean exit). A predecessor that cannot be asked so is stopped with its
+    /// clean shutdown instead, and the record says the drain was not measured.
     fn drain(
         &self,
         expected_pid: u32,
         reason: &str,
         grace: Duration,
         exit: bool,
-    ) -> Result<DrainReport>;
+    ) -> Result<DrainRecord>;
     /// Start the gateway when the supervisor has not.
     fn start_service(&self, lifecycle: GatewayLifecycle) -> Result<StartAction>;
     /// Copy the gateway's state somewhere the recovery can find it.
@@ -495,15 +542,15 @@ impl<E: UpgradeEnv> Driver<'_, E> {
     /// stopped driving: every phase is re-entrant.
     pub fn drive(&self, transaction: &mut Transaction) -> Result<()> {
         loop {
-            match transaction.phase {
-                Phase::Planned => self.begin(transaction)?,
-                Phase::Installing => self.install(transaction)?,
-                Phase::Installed => self.decide(transaction)?,
-                Phase::Draining => self.drain(transaction)?,
-                Phase::Restarting => self.restart(transaction)?,
-                Phase::Verifying => self.verify(transaction)?,
-                Phase::Resuming => self.finish(transaction)?,
-                Phase::RollingBack => self.roll_back(transaction)?,
+            let step = match transaction.phase {
+                Phase::Planned => self.begin(transaction),
+                Phase::Installing => self.install(transaction),
+                Phase::Installed => self.decide(transaction),
+                Phase::Draining => self.drain(transaction),
+                Phase::Restarting => self.restart(transaction),
+                Phase::Verifying => self.verify(transaction),
+                Phase::Resuming => self.finish(transaction),
+                Phase::RollingBack => self.roll_back(transaction),
                 Phase::Completed
                 | Phase::FailedBeforeChange
                 | Phase::RolledBack
@@ -511,8 +558,56 @@ impl<E: UpgradeEnv> Driver<'_, E> {
                     self.deliver_receipt(transaction)?;
                     return Ok(());
                 }
+            };
+            if let Err(error) = step {
+                return self.step_failed(transaction, error);
             }
         }
+    }
+
+    /// A step that could not run. The cause is written into the transaction (it
+    /// was only ever on stderr before), and a transaction that had changed nothing
+    /// yet ends here, so it cannot sit in `planned` blocking every later apply.
+    /// Later phases stay resumable: another driver can take them up.
+    fn step_failed(&self, transaction: &mut Transaction, error: AikitError) -> Result<()> {
+        let phase = transaction.phase;
+        self.note(
+            transaction,
+            false,
+            format!("the {phase:?} step could not run: {error}"),
+        );
+        if phase == Phase::Planned {
+            self.finalize(
+                transaction,
+                Phase::FailedBeforeChange,
+                "failed-before-change",
+                format!(
+                    "nothing was changed: the upgrade could not begin ({})",
+                    error.message().trim_end_matches('.')
+                ),
+                vec!["fix that, then run `aikit gateway upgrade apply` again".into()],
+            )?;
+            return Ok(());
+        }
+        let _ = self.save(transaction);
+        Err(error)
+    }
+
+    /// End a transaction an operator has decided to give up on: its worker is gone
+    /// and cannot be resumed. It changes nothing on disk or in the running gateway —
+    /// the receipt says what was known when it stopped.
+    pub fn abandon(&self, transaction: &mut Transaction, reason: &str) -> Result<()> {
+        self.finalize(
+            transaction,
+            Phase::NeedsOperator,
+            "abandoned",
+            format!(
+                "abandoned by the operator ({reason}) in phase {:?}: nothing further was done; \
+                 what runs and what is installed are as they were when it stopped",
+                transaction.phase
+            ),
+            vec!["read `aikit gateway upgrade plan` for what runs and what is installed".into()],
+        )
     }
 
     fn begin(&self, transaction: &mut Transaction) -> Result<()> {
@@ -750,14 +845,42 @@ impl<E: UpgradeEnv> Driver<'_, E> {
         let Some(before) = transaction.before.clone() else {
             return self.enter(transaction, Phase::Restarting);
         };
-        // A re-entered drain finds the old process already gone: that is the
-        // drain having worked.
-        match self.env.read_running()? {
-            Some(running) if running.pid == before.pid => {}
-            _ => {
-                self.note(transaction, true, "the previous process has already ended");
+        // A re-entered drain finds the old process already gone. That is the drain
+        // having worked — but if no report of it was kept, what it had in flight is
+        // unknown, and the receipt says so. A gateway that merely did not answer in
+        // time is NOT gone: it is left alone and the operator is told.
+        match self.env.read_running_strict() {
+            Ok(Some(running)) if running.pid == before.pid => {}
+            Ok(_) => {
+                self.note(
+                    transaction,
+                    true,
+                    if transaction.drain.is_some() {
+                        "the previous process has already ended"
+                    } else {
+                        "the previous process had already ended when the drain was reached; no \
+                         drain report was recorded, so what it had in flight is unknown"
+                    },
+                );
                 return self.enter(transaction, Phase::Restarting);
             }
+            Err(error) if error.code() == "gateway_upgrade.gateway_unresponsive" => {
+                return self.finalize(
+                    transaction,
+                    Phase::NeedsOperator,
+                    "needs-operator",
+                    format!(
+                        "the gateway holds the socket but did not answer, so it was not drained: {}",
+                        error.message().trim_end_matches('.')
+                    ),
+                    vec![format!(
+                        "look at the gateway (`aikit gateway doctor`); when it answers, `aikit \
+                         gateway upgrade resume {}`",
+                        transaction.id
+                    )],
+                );
+            }
+            Err(error) => return Err(error),
         }
         transaction.drain_requested_at_unix_ms = Some(self.env.now_unix_ms());
         self.save(transaction)?;
@@ -773,32 +896,43 @@ impl<E: UpgradeEnv> Driver<'_, E> {
                         transaction,
                         true,
                         format!(
-                            "drained: {} turn(s) resolved, {} interrupted, {} operation(s) \
-                             pending, nothing replayed",
-                            report.turns_resolved.len(),
-                            report.turns_interrupted.len(),
-                            report.pending_operations.len()
+                            "drained: {} turn(s) resolved, {} interrupted, {} prompt(s) never \
+                             started, nothing replayed",
+                            report.turns_resolved,
+                            report.turns_interrupted,
+                            report.prompts_not_started
                         ),
                     );
                 } else {
                     self.note(
                         transaction,
                         true,
-                        "not measured: the predecessor predates the drain and was stopped with \
-                         its clean shutdown; what it had in flight at that moment is unknown \
-                         (its state was persisted by the shutdown; nothing was replayed)",
+                        "not measured here: the predecessor drains itself for its stop and \
+                         journals every unresolved turn on its own stream; what it had in \
+                         flight at that moment is unknown to this receipt (its state was \
+                         persisted by the stop; nothing was replayed)",
                     );
                 }
                 transaction.drain = Some(report);
             }
             Err(error) => {
-                // The drain may have landed and the connection closed with the
-                // process; what matters is whether the process ends.
+                // The stop may have landed and the process ended before it
+                // could be asked anything; what matters is whether the process
+                // ends. Whatever it counted is not known here, so the receipt
+                // says not measured.
                 self.note(
                     transaction,
                     false,
-                    format!("the drain call did not answer cleanly: {error}"),
+                    format!("the stop could not be asked cleanly: {error}"),
                 );
+                transaction.drain = Some(DrainRecord {
+                    measured: false,
+                    reason: format!(
+                        "upgrade {} (the stop was asked but not confirmed: {error})",
+                        transaction.id
+                    ),
+                    ..DrainRecord::default()
+                });
             }
         }
         self.enter(transaction, Phase::Restarting)
@@ -814,8 +948,16 @@ impl<E: UpgradeEnv> Driver<'_, E> {
         // 1. The old process ends.
         let deadline = self.env.now_unix_ms() + transaction.plan.exit_wait_ms;
         loop {
-            match (self.env.read_running()?, before_pid) {
-                (Some(running), Some(pid)) if running.pid == pid => {
+            // A reading that times out is not "gone": the old process may be busy
+            // finishing its drain. Only an answer, or nothing listening, ends it.
+            let still_there = match self.env.read_running_strict() {
+                Ok(Some(running)) => before_pid == Some(running.pid),
+                Ok(None) => false,
+                Err(error) if error.code() == "gateway_upgrade.gateway_unresponsive" => true,
+                Err(error) => return Err(error),
+            };
+            match (still_there, before_pid) {
+                (true, Some(pid)) => {
                     if self.env.now_unix_ms() >= deadline {
                         return self.finalize(
                             transaction,
@@ -1093,25 +1235,29 @@ impl<E: UpgradeEnv> Driver<'_, E> {
     fn finish(&self, transaction: &mut Transaction) -> Result<()> {
         let after = transaction.after.clone();
         // The counts are stated only when a drain measured them. A predecessor
-        // without a drain was stopped by its shutdown: what was in flight is
-        // unknown, and the receipt says "unknown", not "0".
+        // whose stop was asked but not measured counted something this
+        // transaction never saw: what was in flight is unknown, and the
+        // receipt says "unknown", not "0".
         let measured = transaction
             .drain
             .as_ref()
             .filter(|report| report.was_measured());
         let effects = match measured {
             Some(report) => format!(
-                "{} turn(s) finished, {} interrupted and recorded, {} unreceipted operation(s) \
-                 retained; nothing was replayed",
-                report.turns_resolved.len(),
-                report.turns_interrupted.len(),
-                report.pending_operations.len()
+                "{} turn(s) finished, {} interrupted and recorded, {} queued prompt(s) never \
+                 started; nothing was replayed",
+                report.turns_resolved, report.turns_interrupted, report.prompts_not_started
             ),
-            None if transaction.drain.is_some() => "the predecessor predates the drain, so what \
-                 it had in flight when it stopped is unknown (its state was persisted by its \
-                 shutdown); nothing was replayed"
+            None if transaction.drain.is_some() => "what the predecessor had in flight when it \
+                 stopped is unknown here: it drains itself for its stop and journals every \
+                 unresolved turn on its own stream; nothing was replayed"
                 .to_owned(),
-            None => "nothing was in flight to drain; nothing was replayed".to_owned(),
+            None if transaction.before.is_some() => "what the predecessor had in flight when it \
+                 stopped is unknown: no drain report was recorded; nothing was replayed"
+                .to_owned(),
+            None => {
+                "no gateway was running, so nothing was in flight; nothing was replayed".to_owned()
+            }
         };
         let summary = match (&transaction.before, &after) {
             (Some(before), Some(after)) => format!(
@@ -1223,6 +1369,23 @@ pub fn receipt_line(transaction: &Transaction) -> String {
     line
 }
 
+/// Whether the predecessor may have been stopped while this transaction ran: a
+/// drain was attempted, a new process answered, or a different pid is running at the
+/// end. An upgrade that ended with the predecessor never asked to stop (`no-change`,
+/// an install that failed, a drain that found it busy) stopped nothing, so there is
+/// nothing in flight to report as unknown.
+fn predecessor_may_have_stopped(transaction: &Transaction) -> bool {
+    transaction.drain.is_some()
+        || transaction
+            .steps
+            .iter()
+            .any(|step| step.phase == Phase::Restarting)
+        || matches!(
+            (&transaction.before, &transaction.after),
+            (Some(before), Some(after)) if after.pid != before.pid
+        )
+}
+
 /// The receipt as data: everything an operator or an agent needs to see what
 /// happened, what was retained and what is uncertain.
 pub fn receipt_json(transaction: &Transaction) -> Value {
@@ -1236,24 +1399,36 @@ pub fn receipt_json(transaction: &Transaction) -> Value {
         "installed": transaction.installed,
         "after": transaction.after,
         "drain": transaction.drain,
-        "uncertain_effects": transaction.drain.as_ref().map(|report| {
+        "uncertain_effects": match (&transaction.drain, &transaction.before) {
+            (None, Some(_)) if predecessor_may_have_stopped(transaction) => json!({
+                "measured": false,
+                "note": "no drain report was recorded: what the predecessor had in flight \
+                         when it stopped is UNKNOWN, not zero",
+                "law": "never replayed",
+            }),
+            (None, _) => Value::Null,
+            (Some(report), _) => {
             if report.was_measured() {
                 json!({
                     "measured": true,
-                    "interrupted_turns": report.turns_interrupted,
-                    "unreceipted_operations": report.pending_operations,
+                    "turns_resolved": report.turns_resolved,
+                    "turns_interrupted": report.turns_interrupted,
+                    "prompts_not_started": report.prompts_not_started,
+                    "grace_ms": report.grace_ms,
                     "law": "recorded, never replayed: what a turn or tool did before it was \
-                            interrupted is not known and is not repeated",
+                            interrupted is not known and is not repeated; the gateway that \
+                            met the drain journals each unresolved turn on its own stream",
                 })
             } else {
                 json!({
                     "measured": false,
-                    "note": "the predecessor predates the drain: what it had in flight when \
-                             it stopped is UNKNOWN, not zero",
+                    "note": "the predecessor drains itself for its stop; what it had in \
+                             flight when it stopped is UNKNOWN here, not zero",
                     "law": "never replayed",
                 })
             }
-        }),
+            }
+        },
         "recovery": transaction.recovery,
         "steps": transaction.steps,
         "receipt_delivered": transaction.receipt_delivered,
@@ -1286,31 +1461,43 @@ pub fn receipt_markdown(transaction: &Transaction) -> String {
         describe(&transaction.before),
         describe(&transaction.after)
     ));
+    if transaction.drain.is_none() && transaction.before.is_some() {
+        if predecessor_may_have_stopped(transaction) {
+            text.push_str(
+                "- drain: **no report recorded** — what the predecessor had in flight when it \
+                 stopped is unknown, not zero\n",
+            );
+        } else {
+            text.push_str(
+                "- drain: none — the previous gateway was never asked to stop by this upgrade\n",
+            );
+        }
+    }
     if let Some(drain) = &transaction.drain {
         if !drain.was_measured() {
             text.push_str(
-                "- drain: **not measured** — the predecessor predates the drain and was stopped \
-                 with its clean shutdown; what it had in flight is unknown, not zero\n",
+                "- drain: **not measured here** — the predecessor drains itself for its stop \
+                 and journals every unresolved turn on its own stream; what it had in flight \
+                 is unknown, not zero\n",
             );
         } else {
             text.push_str(&format!(
-                "- drain: {} turn(s) resolved, {} interrupted, {} operation(s) unreceipted\n",
-                drain.turns_resolved.len(),
-                drain.turns_interrupted.len(),
-                drain.pending_operations.len()
+                "- drain: {} turn(s) resolved, {} interrupted, {} queued prompt(s) never started\n",
+                drain.turns_resolved, drain.turns_interrupted, drain.prompts_not_started
             ));
         }
-        for turn in &drain.turns_interrupted {
-            text.push_str(&format!(
-                "  - interrupted turn on {} (reply to #{}): effects before the interrupt are \
-                 uncertain and were not replayed\n",
-                turn.binding_ref, turn.in_reply_to_sequence
-            ));
+        if drain.turns_interrupted > 0 {
+            text.push_str(
+                "  - each interrupted turn is journaled on its own stream by the gateway that \
+                 met the drain; effects before the interrupt are uncertain and were not \
+                 replayed\n",
+            );
         }
-        for operation in &drain.pending_operations {
-            text.push_str(&format!(
-                "  - operation {operation} stays pending; it is not re-sent blindly\n"
-            ));
+        if drain.prompts_not_started > 0 {
+            text.push_str(
+                "  - queued prompts that never started a turn are named on their streams; \
+                 they are not replayed\n",
+            );
         }
     }
     text.push_str("\n## Steps\n");
@@ -1363,8 +1550,8 @@ pub fn plan_reading<E: UpgradeEnv>(
         running.identity.revision.is_empty() || running.identity.revision == "unknown"
     }) {
         notes.push(
-            "the running gateway does not report its build (it predates build identity): it \
-             will be stopped with its clean shutdown rather than drained"
+            "the running gateway does not report its build (it predates build identity): the \
+             verify cannot prove which image the new process runs"
                 .into(),
         );
     }
@@ -1429,7 +1616,6 @@ pub fn default_plan(mode: Mode, installer: Option<Installer>, expected: Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aikit_adapters::{DrainedTurn, UpgradeOrigin};
     use std::cell::{Cell, RefCell};
 
     fn identity(revision: &str) -> Identity {
@@ -1469,13 +1655,17 @@ mod tests {
         /// many clock ticks later (None = the supervisor never does).
         next: RefCell<Option<(Running, u64)>>,
         drained_at: Cell<Option<u64>>,
-        drain_report: RefCell<DrainReport>,
+        drain_report: RefCell<DrainRecord>,
         drain_calls: Cell<u32>,
         start_calls: Cell<u32>,
         announced: RefCell<Vec<String>>,
         announce_fails: Cell<bool>,
         /// A gateway that holds the socket but does not answer in time.
         unresponsive: Cell<bool>,
+        /// The recovery basis cannot be taken (an unreadable state file).
+        backup_fails: Cell<bool>,
+        /// The drain runs and the process exits, but the reply never arrives.
+        drain_reply_lost: Cell<bool>,
         /// Stop driving (simulating a dead worker) after this many `sleep`s.
         die_after_sleeps: Cell<Option<u32>>,
         sleeps: Cell<u32>,
@@ -1494,15 +1684,17 @@ mod tests {
                 rollback_to: RefCell::new(None),
                 next: RefCell::new(None),
                 drained_at: Cell::new(None),
-                drain_report: RefCell::new(DrainReport {
+                drain_report: RefCell::new(DrainRecord {
                     measured: true,
-                    ..DrainReport::default()
+                    ..DrainRecord::default()
                 }),
                 drain_calls: Cell::new(0),
                 start_calls: Cell::new(0),
                 announced: RefCell::new(Vec::new()),
                 announce_fails: Cell::new(false),
                 unresponsive: Cell::new(false),
+                backup_fails: Cell::new(false),
+                drain_reply_lost: Cell::new(false),
                 die_after_sleeps: Cell::new(None),
                 sleeps: Cell::new(0),
                 installer_runs: RefCell::new(Vec::new()),
@@ -1533,6 +1725,10 @@ mod tests {
                 .is_some_and(|limit| self.sleeps.get() >= limit)
             {
                 return Err(AikitError::new("test.worker_died", "the worker was killed"));
+            }
+            // The lenient reading maps "did not answer in time" to "nothing there".
+            if self.unresponsive.get() {
+                return Ok(None);
             }
             self.settle();
             Ok(self.gateway.borrow().clone())
@@ -1592,7 +1788,7 @@ mod tests {
             reason: &str,
             _grace: Duration,
             exit: bool,
-        ) -> Result<DrainReport> {
+        ) -> Result<DrainRecord> {
             self.drain_calls.set(self.drain_calls.get() + 1);
             let current = self.gateway.borrow().clone();
             match current {
@@ -1600,6 +1796,12 @@ mod tests {
                     if exit {
                         *self.gateway.borrow_mut() = None;
                         self.drained_at.set(Some(self.clock.get()));
+                    }
+                    if self.drain_reply_lost.get() {
+                        return Err(AikitError::new(
+                            "agency_gateway_client.read",
+                            "the connection closed before the reply",
+                        ));
                     }
                     let mut report = self.drain_report.borrow().clone();
                     report.reason = reason.into();
@@ -1620,6 +1822,12 @@ mod tests {
             Ok(StartAction::Requested("kickstart".into()))
         }
         fn backup_state(&self, into: &Path) -> Result<Vec<String>> {
+            if self.backup_fails.get() {
+                return Err(AikitError::new(
+                    "gateway_upgrade.io",
+                    "copy gateway.json for recovery: Permission denied",
+                ));
+            }
             let copy = into.join("gateway.json");
             std::fs::write(&copy, b"{}").unwrap();
             Ok(vec![copy.display().to_string()])
@@ -1711,15 +1919,11 @@ mod tests {
             running(11, "bbbb", GatewayLifecycle::SupervisedLaunchd),
             2_000,
         ));
-        *script.drain_report.borrow_mut() = DrainReport {
+        *script.drain_report.borrow_mut() = DrainRecord {
             measured: true,
-            turns_interrupted: vec![DrainedTurn {
-                binding_ref: "gateway-binding/x".into(),
-                in_reply_to_sequence: 7,
-                detail: Some("interrupted".into()),
-            }],
-            pending_operations: vec!["operation/3".into()],
-            ..DrainReport::default()
+            turns_interrupted: 1,
+            prompts_not_started: 1,
+            ..DrainRecord::default()
         };
         let transaction = run(&script, Mode::RestartOnly, Some(origin()));
         assert_eq!(
@@ -1746,16 +1950,10 @@ mod tests {
             outcome.summary
         );
         assert!(outcome.summary.contains("nothing was replayed"));
-        // The uncertain effect and the pending operation are in the receipt.
+        // The uncertain effects are in the receipt, counted.
         let receipt = receipt_json(&transaction);
-        assert_eq!(
-            receipt["uncertain_effects"]["interrupted_turns"][0]["in_reply_to_sequence"],
-            7
-        );
-        assert_eq!(
-            receipt["uncertain_effects"]["unreceipted_operations"][0],
-            "operation/3"
-        );
+        assert_eq!(receipt["uncertain_effects"]["turns_interrupted"], 1);
+        assert_eq!(receipt["uncertain_effects"]["prompts_not_started"], 1);
         // The supervisor brought the process up by itself: nobody kicked it.
         assert_eq!(script.start_calls.get(), 0);
         // The conversation that asked hears about it, once.
@@ -2093,6 +2291,257 @@ mod tests {
     }
 
     #[test]
+    fn a_drain_whose_reply_was_lost_is_unknown_not_nothing_in_flight() {
+        let script = Script::new(
+            Some(running(10, "aaaa", GatewayLifecycle::SupervisedLaunchd)),
+            identity("bbbb"),
+        );
+        script.drain_reply_lost.set(true);
+        *script.next.borrow_mut() = Some((
+            running(11, "bbbb", GatewayLifecycle::SupervisedLaunchd),
+            1_000,
+        ));
+        let transaction = run(&script, Mode::RestartOnly, None);
+        assert_eq!(
+            transaction.phase,
+            Phase::Completed,
+            "{:?}",
+            transaction.steps
+        );
+        let summary = &transaction.outcome.as_ref().unwrap().summary;
+        assert!(summary.contains("unknown"), "{summary}");
+        assert!(!summary.contains("nothing was in flight"), "{summary}");
+        assert!(!summary.contains("0 turn(s)"), "{summary}");
+        assert_eq!(
+            receipt_json(&transaction)["uncertain_effects"]["measured"],
+            false
+        );
+    }
+
+    #[test]
+    fn a_process_that_ended_before_the_drain_was_reached_leaves_no_report_and_the_receipt_says_unknown(
+    ) {
+        let script = Script::new(None, identity("bbbb"));
+        *script.next.borrow_mut() =
+            Some((running(11, "bbbb", GatewayLifecycle::SupervisedLaunchd), 0));
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let driver = Driver {
+            env: &script,
+            store: &store,
+        };
+        let mut transaction = driver
+            .create("test", None, plan(Mode::RestartOnly))
+            .unwrap();
+        // A worker took the transaction up at the drain; the old process is gone.
+        transaction.before = Some(running(10, "aaaa", GatewayLifecycle::SupervisedLaunchd));
+        transaction.installed = Some(identity("bbbb"));
+        transaction.phase = Phase::Draining;
+        driver.drive(&mut transaction).unwrap();
+        assert_eq!(
+            transaction.phase,
+            Phase::Completed,
+            "{:?}",
+            transaction.steps
+        );
+        let summary = &transaction.outcome.as_ref().unwrap().summary;
+        assert!(summary.contains("unknown"), "{summary}");
+        assert!(!summary.contains("nothing was in flight"), "{summary}");
+    }
+
+    #[test]
+    fn a_gateway_that_does_not_answer_at_the_drain_is_not_taken_for_gone() {
+        let script = Script::new(
+            Some(running(10, "aaaa", GatewayLifecycle::SupervisedLaunchd)),
+            identity("bbbb"),
+        );
+        script.unresponsive.set(true);
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let driver = Driver {
+            env: &script,
+            store: &store,
+        };
+        let mut transaction = driver
+            .create("test", None, plan(Mode::RestartOnly))
+            .unwrap();
+        transaction.before = Some(running(10, "aaaa", GatewayLifecycle::SupervisedLaunchd));
+        transaction.installed = Some(identity("bbbb"));
+        transaction.phase = Phase::Draining;
+        driver.drive(&mut transaction).unwrap();
+        assert_eq!(
+            transaction.phase,
+            Phase::NeedsOperator,
+            "{:?}",
+            transaction.steps
+        );
+        assert_eq!(script.drain_calls.get(), 0, "it was not drained");
+        assert_eq!(script.start_calls.get(), 0, "no second gateway was started");
+        assert!(transaction
+            .outcome
+            .as_ref()
+            .unwrap()
+            .summary
+            .contains("did not answer"));
+    }
+
+    #[test]
+    fn an_old_process_that_does_not_answer_while_restarting_is_waited_for_and_never_replaced_around(
+    ) {
+        let script = Script::new(
+            Some(running(10, "aaaa", GatewayLifecycle::SupervisedLaunchd)),
+            identity("bbbb"),
+        );
+        script.unresponsive.set(true);
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let driver = Driver {
+            env: &script,
+            store: &store,
+        };
+        let mut transaction = driver
+            .create("test", None, plan(Mode::RestartOnly))
+            .unwrap();
+        transaction.before = Some(running(10, "aaaa", GatewayLifecycle::SupervisedLaunchd));
+        transaction.installed = Some(identity("bbbb"));
+        transaction.drain = Some(DrainRecord {
+            measured: true,
+            ..DrainRecord::default()
+        });
+        transaction.phase = Phase::Restarting;
+        driver.drive(&mut transaction).unwrap();
+        assert_eq!(
+            transaction.phase,
+            Phase::NeedsOperator,
+            "{:?}",
+            transaction.steps
+        );
+        assert_eq!(
+            script.start_calls.get(),
+            0,
+            "a second gateway was not started beside one that held the socket"
+        );
+        assert!(transaction
+            .outcome
+            .as_ref()
+            .unwrap()
+            .summary
+            .contains("did not stop"));
+    }
+
+    #[test]
+    fn a_gateway_that_was_never_asked_to_stop_is_not_reported_as_unknown_work() {
+        // Nothing to do: the predecessor keeps running, so nothing was in flight "when
+        // it stopped". The receipt must not claim an unknown.
+        let script = Script::new(
+            Some(running(10, "aaaa", GatewayLifecycle::SupervisedLaunchd)),
+            identity("aaaa"),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let driver = Driver {
+            env: &script,
+            store: &store,
+        };
+        let mut transaction = driver
+            .create("test", None, plan(Mode::RestartOnly))
+            .unwrap();
+        driver.drive(&mut transaction).unwrap();
+        assert_eq!(
+            transaction.outcome.as_ref().unwrap().status,
+            "no-change",
+            "{:?}",
+            transaction.steps
+        );
+        assert!(transaction.before.is_some() && transaction.drain.is_none());
+        assert!(
+            receipt_json(&transaction)["uncertain_effects"].is_null(),
+            "{}",
+            receipt_json(&transaction)
+        );
+        let markdown = receipt_markdown(&transaction);
+        assert!(
+            markdown.contains("never asked to stop") && !markdown.contains("unknown, not zero"),
+            "{markdown}"
+        );
+        // The same transaction, but the predecessor did stop: unknown, not zero.
+        let mut stopped = transaction.clone();
+        stopped.steps.push(Step {
+            at_unix_ms: 1,
+            phase: Phase::Restarting,
+            ok: true,
+            detail: "a new process is answering: pid 11".into(),
+        });
+        assert_eq!(
+            receipt_json(&stopped)["uncertain_effects"]["measured"],
+            json!(false)
+        );
+        assert!(receipt_markdown(&stopped).contains("unknown, not zero"));
+    }
+
+    #[test]
+    fn a_step_that_cannot_run_ends_a_transaction_that_changed_nothing_and_a_new_apply_can_start() {
+        let script = Script::new(
+            Some(running(10, "aaaa", GatewayLifecycle::SupervisedLaunchd)),
+            identity("bbbb"),
+        );
+        script.backup_fails.set(true);
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let driver = Driver {
+            env: &script,
+            store: &store,
+        };
+        let mut first = driver
+            .create("test", None, plan(Mode::RestartOnly))
+            .unwrap();
+        driver.drive(&mut first).unwrap();
+        assert_eq!(first.phase, Phase::FailedBeforeChange, "{:?}", first.steps);
+        let summary = &first.outcome.as_ref().unwrap().summary;
+        assert!(
+            summary.contains("nothing was changed") && summary.contains("Permission denied"),
+            "{summary}"
+        );
+        assert!(
+            first
+                .steps
+                .iter()
+                .any(|step| !step.ok && step.detail.contains("Permission denied")),
+            "the cause is in the transaction, not only on stderr"
+        );
+        assert_eq!(script.drain_calls.get(), 0);
+        // It does not wedge the next attempt.
+        script.backup_fails.set(false);
+        assert!(driver.create("test", None, plan(Mode::RestartOnly)).is_ok());
+    }
+
+    #[test]
+    fn an_operator_can_abandon_a_transaction_nothing_is_driving_and_it_changes_nothing() {
+        let script = Script::new(
+            Some(running(10, "aaaa", GatewayLifecycle::SupervisedLaunchd)),
+            identity("bbbb"),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        let driver = Driver {
+            env: &script,
+            store: &store,
+        };
+        let mut transaction = driver
+            .create("test", None, plan(Mode::RestartOnly))
+            .unwrap();
+        transaction.phase = Phase::Draining;
+        driver.abandon(&mut transaction, "its worker died").unwrap();
+        assert_eq!(transaction.phase, Phase::NeedsOperator);
+        let outcome = transaction.outcome.as_ref().unwrap();
+        assert_eq!(outcome.status, "abandoned");
+        assert!(outcome.summary.contains("its worker died"));
+        assert!(outcome.summary.contains("as they were"));
+        assert_eq!(script.drain_calls.get(), 0, "abandon touched nothing");
+        assert!(driver.create("test", None, plan(Mode::RestartOnly)).is_ok());
+    }
+
+    #[test]
     fn a_predecessor_without_a_drain_is_reported_unmeasured_never_as_zero_interrupted() {
         let script = Script::new(
             Some(running(10, "aaaa", GatewayLifecycle::SupervisedLaunchd)),
@@ -2104,9 +2553,9 @@ mod tests {
         ));
         // What `SystemEnv::drain` returns for a gateway that does not know the
         // command: a default report, stopped through its clean shutdown.
-        *script.drain_report.borrow_mut() = DrainReport {
+        *script.drain_report.borrow_mut() = DrainRecord {
             measured: false,
-            ..DrainReport::default()
+            ..DrainRecord::default()
         };
         let transaction = run(&script, Mode::RestartOnly, None);
         assert_eq!(
@@ -2125,7 +2574,7 @@ mod tests {
         let receipt = receipt_json(&transaction);
         assert_eq!(receipt["uncertain_effects"]["measured"], false);
         assert!(receipt["uncertain_effects"]
-            .get("interrupted_turns")
+            .get("turns_interrupted")
             .is_none());
         assert!(receipt_markdown(&transaction).contains("not measured"));
         // A measured drain still states its counts.

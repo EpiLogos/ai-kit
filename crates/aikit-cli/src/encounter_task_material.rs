@@ -63,6 +63,14 @@ impl MaterialHost {
     }
 
     fn call(&self, operation: &str, input: Option<&Value>) -> Result<Value> {
+        self.call_with_runner(operation, input, &OwnerRunner)
+    }
+    fn call_with_runner(
+        &self,
+        operation: &str,
+        input: Option<&Value>,
+        runner: &dyn CommandRunner,
+    ) -> Result<Value> {
         self.check()?;
         let staging = tempfile::tempdir().map_err(error)?;
         let receipt = staging.path().join("world.json");
@@ -93,7 +101,7 @@ impl MaterialHost {
         }
         // WORKCELL_CONTROL_TOKEN travels only through the owner process's
         // environment; no credential is stored in requests, records or argv.
-        let output = OwnerRunner.run(&argv)?;
+        let output = runner.run(&argv)?;
         if !output.ok() {
             return Err(error(format!("Native Workcell {operation} refused or was unavailable; keep this demand and inspect uncertain effects before retry")));
         }
@@ -239,8 +247,17 @@ impl MaterialBinding {
     }
 
     pub fn validate(&self, task: &AllocatedCentralTask) -> Result<Value> {
+        self.validate_with_runner(task, &OwnerRunner)
+    }
+    pub(super) fn validate_with_runner(
+        &self,
+        task: &AllocatedCentralTask,
+        runner: &dyn CommandRunner,
+    ) -> Result<Value> {
         self.check_world(task, &self.world)?;
-        let current = self.host.call("inspect", Some(&self.world))?;
+        let current = self
+            .host
+            .call_with_runner("inspect", Some(&self.world), runner)?;
         self.check_world(task, &current)?;
         if current["world_ref"] != self.world["world_ref"]
             || current["binding_graph"] != self.world["binding_graph"]
@@ -249,7 +266,9 @@ impl MaterialBinding {
         {
             return Err(error("Material binding changed; recovery is a new explicit binding, not opening another view"));
         }
-        let observation = self.host.call("observe", Some(&self.world))?;
+        let observation = self
+            .host
+            .call_with_runner("observe", Some(&self.world), runner)?;
         if observation["world_ref"] != self.world["world_ref"] {
             return Err(error("Observation belongs to a different material world"));
         }

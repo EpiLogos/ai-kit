@@ -10,9 +10,10 @@
 
 use aikit_adapters::{
     coexistence_report, decide, detect, exclusive_gate, load_coexistence, probe_live,
-    store_coexistence, CoexistenceDecision, CoexistencePolicy, GatewayCarrierTarget,
-    GatewayCoexistenceGate, GatewayConversationOperation, GatewayServiceConfig,
-    DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_COEXISTENCE_FILE_NAME,
+    store_coexistence, CarrierScope, CoexistenceDecision, CoexistencePolicy, GatewayBuildIdentity,
+    GatewayCarrierTarget, GatewayCoexistenceGate, GatewayConversationOperation,
+    GatewayListenerReading, GatewayProcessRecord, GatewayServiceConfig, ListenerClass,
+    ListenerState, DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_COEXISTENCE_FILE_NAME,
 };
 use aikit_core::resource::ResourceRef;
 use aikit_core::{AikitError, Result};
@@ -214,14 +215,22 @@ pub fn override_carriers(command: &mut crate::cli::GatewayCmd, carrier: GatewayQ
         G::Delegate(a) => a.carrier = carrier,
         G::Agent(a) => a.carrier = carrier,
         G::NativeOwner(a) => a.carrier = carrier,
-        G::Serve(_)
+        G::Handoff { .. }
+        | G::Message { .. }
+        | G::Team { .. }
+        | G::Serve(_)
         | G::Tick
         | G::InstallService(_)
         | G::UninstallService
         | G::Remote(_)
         | G::Connector(_)
         | G::Coexistence(_)
-        | G::Hoist(_) => {}
+        | G::Hoist(_)
+        | G::Upgrade(_)
+        | G::Doctor
+        | G::Modes
+        | G::Setup(_)
+        | G::Recover(_) => {}
     }
 }
 
@@ -266,6 +275,17 @@ fn gateway_token_from_env() -> Option<String> {
 /// The coexistence document of this AIKit home.
 pub fn coexistence_path(home: &AikitHome) -> std::path::PathBuf {
     home.state().join(GATEWAY_COEXISTENCE_FILE_NAME)
+}
+
+/// What coexistence detection observes right now, one line per foreign
+/// harness gateway: the same reading `aikit gateway coexistence` reports,
+/// for a caller that only wants the observations (the doctor's neighbours).
+pub fn foreign_gateway_lines() -> Vec<String> {
+    let foreign = detect(&probe_live());
+    foreign
+        .iter()
+        .map(|gateway| format!("{}: {}", gateway.harness, gateway.evidence.join("; ")))
+        .collect()
 }
 
 /// What `aikit gateway coexistence` answers with. Human output is plain
@@ -457,4 +477,138 @@ pub fn conversation_operation(args: &GatewayAgentArgs) -> Result<GatewayConversa
             ),
         )),
     }
+}
+
+// ---------------------------------------------------------------------------
+// The running process's posture record
+// ---------------------------------------------------------------------------
+
+/// The running gateway publishes what it is — the build it executes, the
+/// carriers it serves — as a small record beside its state file, written at
+/// service start and refreshed once the executable's digest has been read in
+/// the background. The readers (`gateway doctor`, the upgrade surface) take
+/// the running identity from the process's own record: the wire protocol on
+/// the current internals carries no build identity, and a process is the only
+/// honest witness of what it executes (`oi update` flips a symlink; a
+/// resident keeps executing its old inode).
+pub const PROCESS_RECORD_SCHEMA: &str = "aikit.gateway-process/v1";
+pub const PROCESS_RECORD_FILE_NAME: &str = "gateway-process.json";
+
+/// One published posture reading: the running build and the carriers.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct GatewayProcessPosture {
+    pub schema: String,
+    #[serde(flatten)]
+    pub build: GatewayBuildIdentity,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub listeners: Vec<GatewayListenerReading>,
+}
+
+pub fn process_record_path(home: &AikitHome) -> std::path::PathBuf {
+    home.state().join(PROCESS_RECORD_FILE_NAME)
+}
+
+/// What this process is, stamped the way its build was: the exact source
+/// revision when the build could read one (inside a checkout, or stamped by
+/// the caller), otherwise the short one the managed updater stamps. A process
+/// that cannot name its build is a finding, never a guess.
+pub fn this_process_identity() -> GatewayBuildIdentity {
+    GatewayBuildIdentity::of_this_process(
+        option_env!("AIKIT_BUILD_SOURCE_REVISION")
+            .filter(|revision| !revision.is_empty())
+            .or(option_env!("SUITE_BUILD_REVISION"))
+            .unwrap_or("unknown"),
+        option_env!("AIKIT_BUILD_SOURCE_DIRTY") == Some("1"),
+        std::env::var(crate::gateway_contact::WORKCELL_ENV)
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
+    )
+}
+
+/// The carriers this service is about to serve, as listener readings: the
+/// facts the record can state before any bind (the service refuses to run
+/// with a carrier it cannot bind, so a serving gateway's carriers are bound).
+pub fn configured_listeners(config: &GatewayServiceConfig) -> Vec<GatewayListenerReading> {
+    let mut listeners = Vec::new();
+    #[cfg(unix)]
+    if let Some(path) = &config.unix_socket {
+        listeners.push(GatewayListenerReading {
+            carrier: "unix".into(),
+            bind: path.display().to_string(),
+            class: ListenerClass::LocalIpc,
+            scope: CarrierScope::Owner,
+            state: ListenerState::Bound,
+            detail: None,
+        });
+    }
+    if let Some(bind) = &config.websocket_bind {
+        listeners.push(GatewayListenerReading {
+            carrier: "websocket".into(),
+            bind: bind.clone(),
+            class: ListenerClass::classify_bind(bind),
+            scope: CarrierScope::Peer,
+            state: ListenerState::Bound,
+            detail: None,
+        });
+    }
+    listeners
+}
+
+/// Publish the posture record and keep it fresh until the executable digest
+/// has been read. Called by the serve arm before the carriers start; the
+/// digest thread ends on its own once the digest is written (or after a
+/// generous bound — a record without a digest is a named doctor finding, not
+/// a hang).
+pub fn publish_process_record(
+    home: &AikitHome,
+    listeners: Vec<GatewayListenerReading>,
+) -> Result<()> {
+    let record = GatewayProcessRecord::new(this_process_identity());
+    let path = process_record_path(home);
+    let write = move |build: &GatewayBuildIdentity| -> Result<()> {
+        let posture = GatewayProcessPosture {
+            schema: PROCESS_RECORD_SCHEMA.into(),
+            build: build.clone(),
+            listeners: listeners.clone(),
+        };
+        crate::gateway_upgrade::write_atomic(
+            &path,
+            &serde_json::to_vec_pretty(&posture).map_err(|error| {
+                AikitError::new(
+                    "gateway.process_record_encode",
+                    format!("encode the gateway posture record: {error}"),
+                )
+            })?,
+        )
+    };
+    write(&record.build())?;
+    let writer = std::thread::Builder::new()
+        .name("gateway-posture-digest".into())
+        .spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+            while std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let build = record.build();
+                if build.executable_sha256.is_some() {
+                    let _ = write(&build);
+                    return;
+                }
+            }
+        });
+    match writer {
+        Ok(_) => Ok(()),
+        Err(error) => Err(AikitError::new(
+            "gateway.process_record_thread",
+            format!("start the posture digest reader: {error}"),
+        )),
+    }
+}
+
+/// The published posture of the gateway answering on this home, when one has
+/// published it. A record is trusted only beside a gateway that answers (the
+/// callers ask the socket first): a record without a live gateway is stale
+/// and never read.
+pub fn read_process_record(home: &AikitHome) -> Option<GatewayProcessPosture> {
+    let bytes = std::fs::read(process_record_path(home)).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }

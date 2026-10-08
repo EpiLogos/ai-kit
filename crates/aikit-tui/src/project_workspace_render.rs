@@ -73,6 +73,7 @@ pub struct WorkspaceReading<'a> {
     /// environment boundary, parsed once at construction. `None` when this
     /// terminal is standalone AIKit over what is actually available.
     pub composed_world: Option<&'a crate::world_entry::ComposedWorld>,
+    pub repertoire: Option<&'a BoundaryReading<Option<aikit_core::repertoire::RepertoireReading>>>,
 }
 
 impl<'a> WorkspaceReading<'a> {
@@ -91,6 +92,7 @@ impl<'a> WorkspaceReading<'a> {
             }),
             agent_work_bindings: crate::world_entry::AgentWorkBindings::none(),
             composed_world: None,
+            repertoire: None,
         }
     }
 
@@ -106,6 +108,15 @@ impl<'a> WorkspaceReading<'a> {
         bindings: crate::world_entry::AgentWorkBindings,
     ) -> Self {
         self.agent_work_bindings = bindings;
+        self
+    }
+
+    #[must_use]
+    pub fn with_repertoire(
+        mut self,
+        repertoire: &'a BoundaryReading<Option<aikit_core::repertoire::RepertoireReading>>,
+    ) -> Self {
+        self.repertoire = Some(repertoire);
         self
     }
 
@@ -494,7 +505,22 @@ fn compose_lines(state: &TuiState, reading: WorkspaceReading<'_>, glyphs: Glyphs
     let sep = glyphs.separator();
     let world = reading.world;
     let mut lines = compose_spine_lines(state, reading, glyphs);
+    match reading.repertoire {
+        Some(BoundaryReading::Observed(Some(repertoire))) => {
+            lines.push(String::new());
+            lines.extend(repertoire.render().lines().map(str::to_owned));
+        }
+        Some(BoundaryReading::Unreadable { reason }) => {
+            lines.push(format!("Repertoire unreadable: {reason}"));
+        }
+        _ => {}
+    }
 
+    if let Some(application) = state.repertoire_application.as_ref() {
+        lines.push(String::new());
+        lines.push("Last observed repertoire application:".into());
+        lines.extend(application.render().lines().map(str::to_owned));
+    }
     if let Some(agent) = world.actor_runtime.agent.effective.as_ref() {
         lines.push(format!("Agent         {}", agent.resource));
     }

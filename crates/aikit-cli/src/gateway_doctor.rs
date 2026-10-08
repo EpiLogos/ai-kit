@@ -83,7 +83,6 @@ pub struct ServiceFacts {
     pub declared_lifecycle: Option<String>,
     pub websocket_bind: Option<String>,
     pub token_location: Option<String>,
-    pub owner_token_location: Option<String>,
     pub configured_gateway_ref: Option<String>,
     /// The `AIKIT_HOME` the installed service serves (from its definition).
     pub configured_home: Option<String>,
@@ -250,7 +249,7 @@ pub fn diagnose(facts: &Facts) -> Report {
                     )
                 })
                 .unwrap_or_else(|| {
-                    "it does not report its build (it predates build identity)".into()
+                    "it has published no posture record, so it cannot say which build it                      executes (it predates the posture record)".into()
                 });
             findings.push(finding(
                 "gateway.running",
@@ -288,7 +287,8 @@ pub fn diagnose(facts: &Facts) -> Report {
             None => findings.push(finding(
                 "gateway.stale_unknown",
                 Severity::Warn,
-                "the running gateway cannot report its build, so it predates the installed one",
+                "the running gateway has published no posture record, so it cannot prove \
+                 which build it executes against the installed one",
                 vec![format!("installed: {}", installed.revision)],
                 Some("aikit gateway upgrade apply"),
             )),
@@ -788,7 +788,7 @@ fn file_mode_problem(label: &str, location: &str) -> Option<String> {
 }
 
 /// Arguments of a service definition's `serve` command, read back from the
-/// definition text: `--ws`, `--ws-token-location`, `--ws-owner-token-location`.
+/// definition text: `--ws`, `--ws-token-location`.
 fn definition_argument(definition: &str, flag: &str) -> Option<String> {
     if definition.contains("<string>") {
         // launchd lists each argument as its own <string>.
@@ -844,24 +844,22 @@ pub fn gather(home: &AikitHome) -> Result<Facts> {
     let asked = |command: GatewayCommand| {
         gateway_command_within(&target, command, None, Duration::from_secs(3)).ok()
     };
-    if let Some(GatewayResponse::Protocol {
-        features, build, ..
-    }) = asked(GatewayCommand::Protocol)
-    {
+    if let Some(GatewayResponse::Protocol { features, .. }) = asked(GatewayCommand::Protocol) {
+        // The running identity comes from the process's own posture record
+        // (the wire protocol carries no build identity); the record's
+        // listeners are the carriers the process was configured to serve.
+        let posture = crate::gateway_ops::read_process_record(home);
         let mut running = RunningFacts {
-            build,
+            build: posture.as_ref().map(|posture| posture.build.clone()),
+            listeners: posture.map(|posture| posture.listeners).unwrap_or_default(),
             features,
             ..RunningFacts::default()
         };
         if let Some(GatewayResponse::Status { status }) = asked(GatewayCommand::Status) {
             running.gateway_ref = Some(status.gateway_ref.to_string());
-            running.listeners = status.listeners;
             running.connector_count = status.connector_count;
             running.binding_count = status.binding_count;
             running.pending_operations = status.pending_delivery_count;
-            if running.build.is_none() {
-                running.build = status.build;
-            }
         }
         facts.running = Some(running);
     }
@@ -884,8 +882,6 @@ pub fn gather(home: &AikitHome) -> Result<Facts> {
             facts.service.configured_home = environment_value(&definition, "AIKIT_HOME");
             facts.service.websocket_bind = definition_argument(&definition, "--ws");
             facts.service.token_location = definition_argument(&definition, "--ws-token-location");
-            facts.service.owner_token_location =
-                definition_argument(&definition, "--ws-owner-token-location");
             facts.service.manager_running = match platform {
                 crate::gateway_install::ServicePlatform::LaunchAgent => run_capture(
                     "launchctl",
@@ -924,10 +920,7 @@ pub fn gather(home: &AikitHome) -> Result<Facts> {
     }
 
     // Tokens.
-    for (label, location) in [
-        ("peer", facts.service.token_location.clone()),
-        ("owner", facts.service.owner_token_location.clone()),
-    ] {
+    for (label, location) in [("peer", facts.service.token_location.clone())] {
         if let Some(problem) = location
             .as_deref()
             .and_then(|location| file_mode_problem(label, location))
@@ -1066,9 +1059,7 @@ pub fn gather(home: &AikitHome) -> Result<Facts> {
     }
 
     // Neighbours.
-    if let Ok(report) = crate::gateway_ops::coexistence_lines(home) {
-        facts.foreign_gateways = report;
-    }
+    facts.foreign_gateways = crate::gateway_ops::foreign_gateway_lines();
     Ok(facts)
 }
 

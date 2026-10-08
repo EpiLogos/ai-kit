@@ -90,6 +90,7 @@ mod development_field;
 mod flow_cognition;
 mod knowledge;
 mod model_resident;
+pub mod repertoire;
 mod root_context;
 
 pub use development_field::DevelopmentFieldApplicationRequest;
@@ -911,7 +912,7 @@ impl Service {
     /// failure this feature exists to prevent.
     pub fn secret_env_items(&self, context: &ResolvedContext) -> Result<Vec<ProjectionItem>> {
         let mut items = Vec::new();
-        for id in self.view.active.keys() {
+        for id in context.view.active.keys() {
             let Some(root) = context.capsule_roots.get(id) else {
                 continue;
             };
@@ -1399,12 +1400,19 @@ impl Service {
     }
 
     fn projection_context_for(&self, source_view: &ResolvedView) -> Result<ResolvedContext> {
+        self.projection_context_with_sets(source_view, &self.selected_skill_sets()?)
+    }
+
+    fn projection_context_with_sets(
+        &self,
+        source_view: &ResolvedView,
+        selected: &[String],
+    ) -> Result<ResolvedContext> {
         let mut view = source_view.clone();
-        let selected = self.project_skill_sets();
-        if self.has_project_skill_routing() {
+        if self.project_specification().is_some() || !selected.is_empty() {
             let mut sets = Vec::new();
             for name in selected {
-                sets.push(aikit_store::skillsets::load(&self.home, name)?);
+                sets.push(crate::skillset_package_cli::load_set(&self.home, name)?.0);
             }
             let references: Vec<&aikit_core::SkillSet> = sets.iter().collect();
             let projection = aikit_core::skillset::project_union(&references, &view);
@@ -1424,8 +1432,18 @@ impl Service {
         let actor_bootstrap = if self.descriptor.project_root.is_some() {
             // Compose the live actor inputs from the Actuation instantiation
             // receipt and the Central-authored profile. The native adapter's
-            // Ok(None) is legitimate absence. A known source failure or
-            // ambiguity must refuse this projection, not become empty context.
+            // Ok(None) is legitimate absence. A known source failure must
+            // refuse this projection, not become empty context.
+            //
+            // Profile ambiguity is the one composition refusal that demotes
+            // to disclosed absence here: a ground whose root scope carries
+            // several authored agent profiles (a normal state of a lived-in
+            // ground) would otherwise hard-fail every context-bearing read —
+            // `client status`, the model catalogue — that never uses the
+            // actor. Nothing is guessed: selection inputs are absent, the
+            // ambiguity is named in the view's warnings, and the adapter's
+            // own refusal law (`ambiguous_or_absent_profile_is_never_guessed`)
+            // is untouched.
             let central_root = self.descriptor.project_root.as_deref().and_then(|root| {
                 self.central_meta_root
                     .clone()
@@ -1436,7 +1454,18 @@ impl Service {
                     .as_deref()
                     .map(|central| {
                         let runner = SystemRunner::probe();
-                        compose_live_actor_inputs(&runner, central, root)
+                        match compose_live_actor_inputs(&runner, central, root) {
+                            Err(error)
+                                if error.code() == "actor_composition.ambiguous_profile" =>
+                            {
+                                view.warnings.push(format!(
+                                    "actor composition did not resolve: {message}; selection inputs are absent, no agent was guessed",
+                                    message = error.message()
+                                ));
+                                Ok(None)
+                            }
+                            other => other,
+                        }
                     })
                     .transpose()?
                     .flatten(),
@@ -1974,15 +2003,11 @@ impl Service {
         }))
     }
 
-    fn has_project_skill_routing(&self) -> bool {
-        self.project_specification().is_some()
-    }
-
     /// Publish the generation-backed Codex projection at Codex's native project
     /// discovery path. The link targets the stable `current` pointer, so future
     /// generation swaps are hot without rewriting the project tree.
     fn prepare_codex_project_link(&self, context_dir: &Path) -> Result<()> {
-        if !self.has_project_skill_routing() {
+        if !self.has_repertoire_routing()? {
             return Ok(());
         }
         let Some(project_root) = self.descriptor.project_root.as_ref() else {
@@ -3092,6 +3117,7 @@ impl AikitApplication for Service {
         let plans = vec![
             Self::shell_plan(&self.view, self.secret_env_items(&projection_context)?)?,
             ClaudeAdapter::new(context_dir.join("projections/claude")).plan(&projection_context)?,
+            PiAdapter::new(context_dir.join("projections/pi")).plan(&projection_context)?,
             CodexAdapter::new(tree).plan(&projection_context)?,
             DshAdapter::new(context_dir.join("projections/dsh")).plan(&projection_context)?,
         ];
@@ -3104,14 +3130,19 @@ impl AikitApplication for Service {
             view.properties
                 .insert("label".to_string(), label.to_string());
         }
-        let staged = GenerationBuilder::new()
-            .with_secret_resolver(std::sync::Arc::new(
-                aikit_adapters::secret_resolver::SuiteSecretResolver::default(),
-            ))
-            .build(&context_dir, &view, &plans)?;
+        let builder = GenerationBuilder::new().with_secret_resolver(std::sync::Arc::new(
+            aikit_adapters::secret_resolver::SuiteSecretResolver::default(),
+        ));
+        self.validate_repertoire_discovery()?;
         self.prepare_codex_project_link(&context_dir)?;
         crate::skill_sources::validate_central_generations(&self.home)?;
-        let committed = staged.commit(base.as_ref())?;
+        let committed = match builder.reuse_current(&context_dir, &view, &plans, base.as_ref())? {
+            Some(retained) => retained,
+            None => builder
+                .build(&context_dir, &view, &plans)?
+                .commit(base.as_ref())?,
+        };
+        self.prepare_pi_project_link(&context_dir)?;
         let mut warnings = self.view.warnings.clone();
         warnings.extend(crate::skill_sources::report_central_generation(
             &self.home,
@@ -3320,6 +3351,33 @@ impl Service {
 // ---------------------------------------------------------------------------
 
 impl PaletteBackend for Service {
+    fn repertoire_operations_available(&self) -> bool {
+        true
+    }
+    fn repertoire_profiles(&self) -> Vec<aikit_core::ProfileId> {
+        self.catalog
+            .profiles()
+            .into_iter()
+            .map(|profile| profile.id.clone())
+            .collect()
+    }
+    fn preview_repertoire(
+        &self,
+        request: aikit_core::repertoire::RepertoireRequest,
+    ) -> Result<aikit_core::repertoire::RepertoirePreview> {
+        Service::preview_repertoire(self, request)
+    }
+    fn apply_repertoire(
+        &mut self,
+        preview: aikit_core::repertoire::RepertoirePreview,
+    ) -> Result<aikit_core::repertoire::RepertoireApplication> {
+        Service::apply_repertoire(self, preview)
+    }
+
+    fn repertoire_reading(&self) -> Result<Option<aikit_core::repertoire::RepertoireReading>> {
+        self.resolved_repertoire().map(Some)
+    }
+
     /// The host's terminal working environments, observed over this Service's
     /// own session plan.
     ///

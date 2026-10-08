@@ -20,7 +20,7 @@
 //! native store, explicit env import, or a declared ref through the resolver
 //! suite — and neither ever passes an empty or ambient value. The seam itself
 //! lives once, in [`crate::credential_delivery`].
-use super::{error, native_admission, read_binding};
+use super::{error, native_admission_before, read_binding};
 use crate::credential_delivery::{credential, ModelCredential};
 use crate::encounter_service::{
     EncounterContextAdmission, EncounterProtocol, EncounterProvider, EncounterRequiredSource,
@@ -361,13 +361,28 @@ pub(crate) fn prepare(
     session: &ResourceRef,
     provider: &EncounterProvider,
 ) -> Result<Option<PreparedModel>> {
+    prepare_before(
+        home,
+        session,
+        provider,
+        std::time::Instant::now() + crate::encounter_service::NATIVE_STARTUP_TIMEOUT,
+    )
+}
+
+pub(crate) fn prepare_before(
+    home: &AikitHome,
+    session: &ResourceRef,
+    provider: &EncounterProvider,
+    deadline: std::time::Instant,
+) -> Result<Option<PreparedModel>> {
+    crate::encounter_service::ensure_native_startup_deadline(deadline)?;
     let Some(source) = &provider.model_policy else {
         return Ok(None);
     };
     let dispatch = dispatch_for(provider)?;
     let binding = read_binding(home, session)?
         .ok_or_else(|| error("Selected model needs a real Agency/WorldBinding, not a profile"))?;
-    let admitted = native_admission(&binding)?;
+    let admitted = native_admission_before(&binding, deadline)?;
     let policy = read_policy(source)?;
     let determination = &admitted.receipt["determination"];
     if policy.agent_ref != admitted.agent_ref
@@ -912,14 +927,15 @@ pub(crate) fn validate_target(
     configured: &EncounterProvider,
     model_provider: &EncounterProvider,
     request: &EncounterModelOpen,
+    deadline: std::time::Instant,
 ) -> Result<()> {
     let binding = read_binding(home, session)?
         .ok_or_else(|| error("Selected model target lacks native Agency"))?;
-    let admitted = native_admission(&binding)?;
+    let admitted = native_admission_before(&binding, deadline)?;
     if admitted != request.expected_agency {
         return Err(error("Selected Agency/source/WorldBinding changed between composition and resident admission"));
     }
-    let model = prepare(home, session, model_provider)?
+    let model = prepare_before(home, session, model_provider, deadline)?
         .ok_or_else(|| error("The selected body has no explicit model policy"))?;
     if model.policy.model_ref != request.model_ref
         || request
@@ -948,11 +964,35 @@ impl EncounterService {
         request: EncounterModelOpen,
         released_predecessor: Option<crate::encounter_service::NativeReleasedPredecessor>,
     ) -> Result<Value> {
+        let deadline = std::time::Instant::now() + crate::encounter_service::NATIVE_STARTUP_TIMEOUT;
         self.require_attached(&request.agent_session)?;
+        let task = Self::read_task(&self.home, &request.agent_session)?;
         let mut candidates = Vec::new();
         for configured in self.providers()? {
+            // A prepared task has one exact launcher. A direct body target names
+            // one configured body. Exclude unrelated bodies before their source,
+            // authority, credential or material preflight is invoked.
+            if task
+                .pointer("/launcher/id")
+                .and_then(Value::as_str)
+                .is_some_and(|launcher| launcher != configured.id)
+            {
+                continue;
+            }
+            if request.body.as_deref().is_some_and(|body| {
+                body != configured.id
+                    && task.pointer("/request/provider/id").and_then(Value::as_str) != Some(body)
+            }) {
+                continue;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(aikit_core::AikitError::new(
+                    "encounter.model_preflight_timeout",
+                    "Native model preflight exhausted its operation budget; no provider started",
+                ));
+            }
             let Ok((model_provider, _task_bound)) =
-                self.selected_model_provider(&request.agent_session, &configured, &request.cwd)
+                self.selected_model_provider_before(&request.agent_session, &configured, &request.cwd, deadline)
             else {
                 continue;
             };
@@ -963,11 +1003,18 @@ impl EncounterService {
                     &configured,
                     &model_provider,
                     &request,
+                    deadline,
                 )
                 .is_ok()
             {
                 candidates.push(configured);
             }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(aikit_core::AikitError::new(
+                "encounter.model_preflight_timeout",
+                "Native model preflight exhausted its operation budget; no provider started",
+            ));
         }
         if candidates.len() != 1 {
             return Err(error(if candidates.is_empty() {
@@ -987,7 +1034,7 @@ impl EncounterService {
                 released_predecessor,
                 model_target: Some(&request),
             },
-            std::time::Instant::now() + crate::encounter_service::NATIVE_STARTUP_TIMEOUT,
+            deadline,
         )?;
         result["selected"] = json!(true);
         result["executed"] = json!(false);

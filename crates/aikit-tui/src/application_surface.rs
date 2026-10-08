@@ -238,6 +238,7 @@ pub struct ApplicationSurfaceController {
     /// environment boundary, read exactly once at construction. `None` for
     /// standalone AIKit: the view then operates over what is actually here.
     composed_world: Option<world_entry::ComposedWorld>,
+    repertoire: BoundaryReading<Option<aikit_core::repertoire::RepertoireReading>>,
 }
 
 /// Which field of the §1.3 creator path the text lane is editing. The lane's
@@ -265,6 +266,7 @@ impl ApplicationSurfaceController {
             workspace_section: request.initial_workspace_section,
             relation_view: request.initial_relation_view,
             mutation_scope: Some(backend.context().default_mutation_scope()),
+            compose_profile_field: backend.repertoire_profiles(),
             ..TuiState::default()
         };
         let mut runtime = TuiRuntime::new();
@@ -314,6 +316,7 @@ impl ApplicationSurfaceController {
             conversation: ConversationSurface::default(),
             agent_work_bindings: backend.agent_work_bindings(),
             composed_world: world_entry::ComposedWorld::from_env(),
+            repertoire: BoundaryReading::from_result(backend.repertoire_reading()),
         };
         controller
             .conversation
@@ -429,7 +432,8 @@ impl ApplicationSurfaceController {
                 WorkspaceReading::new(world, &self.session_spaces, &self.history)
                     .with_factory_work_entry(&self.factory_work_entry)
                     .with_agent_work_bindings(self.agent_work_bindings)
-                    .with_composed_world(self.composed_world.as_ref()),
+                    .with_composed_world(self.composed_world.as_ref())
+                    .with_repertoire(&self.repertoire),
                 self.shell_glyphs,
             );
         } else {
@@ -706,10 +710,75 @@ impl ApplicationSurfaceController {
                 UiAction::SetWorkspaceSection(WorkspaceSection::Knowledge),
             );
         }
+        if self.semantic.workspace_section == WorkspaceSection::Compose
+            && self.semantic.overlay.is_none()
+            && backend.repertoire_operations_available()
+        {
+            if ctrl && code == KeyCode::Char('p') {
+                return self.dispatch(
+                    backend,
+                    UiAction::SetMutationScope(aikit_core::scope::ScopeKind::Project),
+                );
+            }
+            if ctrl && code == KeyCode::Char('l') {
+                return self.dispatch(
+                    backend,
+                    UiAction::SetMutationScope(aikit_core::scope::ScopeKind::Session),
+                );
+            }
+            if self.semantic.compose_step == crate::compose_spine::ComposeStep::Governance
+                && self.semantic.query.is_empty()
+                && !ctrl
+                && !alt
+            {
+                if code == KeyCode::Char('0') {
+                    return self.dispatch(backend, UiAction::SelectComposeProfile(None));
+                }
+                if let KeyCode::Char(digit @ '1'..='9') = code {
+                    if let Some(profile) = self
+                        .semantic
+                        .compose_profile_field
+                        .get(digit.to_digit(10).unwrap() as usize - 1)
+                        .cloned()
+                    {
+                        return self
+                            .dispatch(backend, UiAction::SelectComposeProfile(Some(profile)));
+                    }
+                }
+                if matches!(code, KeyCode::Left | KeyCode::Right) && !alt && !ctrl {
+                    let profiles = &self.semantic.compose_profile_field;
+                    let current = self
+                        .semantic
+                        .compose_profile
+                        .as_ref()
+                        .and_then(|profile| profiles.iter().position(|item| item == profile))
+                        .map(|i| i + 1)
+                        .unwrap_or(0);
+                    let count = profiles.len() + 1;
+                    let next = if code == KeyCode::Right {
+                        (current + 1) % count
+                    } else {
+                        (current + count - 1) % count
+                    };
+                    let selected = if next == 0 {
+                        None
+                    } else {
+                        Some(profiles[next - 1].clone())
+                    };
+                    return self.dispatch(backend, UiAction::SelectComposeProfile(selected));
+                }
+            }
+        }
         if ctrl && code == KeyCode::Char('s') {
             let action = match self.semantic.overlay {
                 Some(Overlay::ConfirmApply) => UiAction::ConfirmApply,
                 Some(Overlay::CompositionPreview) => UiAction::RequestApply,
+                _ if self.semantic.workspace_section == WorkspaceSection::Compose
+                    && self.semantic.staged.is_empty()
+                    && backend.repertoire_operations_available() =>
+                {
+                    UiAction::RequestRepertoirePreview
+                }
                 _ => UiAction::RequestCompositionPreview,
             };
             return self.dispatch(backend, action);
@@ -1291,6 +1360,10 @@ impl ApplicationSurfaceController {
             }
         }
 
+        if world_reads_are_stale {
+            self.repertoire = BoundaryReading::from_result(backend.repertoire_reading());
+        }
+
         if world_reads_are_stale
             || self.relation_subject() != previous_relation_subject
             || self.semantic.graph.depth != previous_graph_depth
@@ -1728,24 +1801,9 @@ fn tree_relation_lines<'a>(
 /// from what `dispatch` already holds for them — the four readings
 /// `ApplicationSurfaceController::dispatch` re-reads together.
 ///
-/// This is provable from the reducer's own effect graph, not guessed from
-/// the Action's name. `TuiApplicationService` has exactly three methods that
-/// take `&mut self` and can therefore mutate a backend at all:
-/// `apply_composition`, `observe_resource_use` and `invoke_action`. Every
-/// other method an effect can call — `search`, `contextual_actions`,
-/// `preview_composition`, `explain`, `relations_at_depth` — takes `&self`,
-/// so a well-typed implementation cannot mutate through it; Rust's own
-/// borrow checker is the enforcement, not a convention this function has to
-/// trust. Walking `reduce_tui`'s `effects.push(UiEffect::...)` sites shows
-/// `UiEffect::ApplyComposition`/`ObserveResourceUse`/`InvokeContextualAction`
-/// are reached only from the `ConfirmApply`/`OpenSelection`/`InvokeAction`
-/// arms respectively — every other arm's effects (`Search`,
-/// `LoadContextualActions`, `PreviewComposition`) settle into further
-/// actions (`SearchFinished`, `ContextualActionsLoaded`,
-/// `CompositionPreviewed`) that themselves push only more of the same
-/// non-mutating effects. So a `UiAction` outside this list, however deep the
-/// effect chain `runtime.step` settles for it, cannot have touched the
-/// backend's mutable state.
+/// Native repertoire and capsule application both mutate only after
+/// `ConfirmApply`; their settled result actions preserve the exact owner
+/// reading. Navigation and read-only preview leave these caches current.
 fn action_may_change_world_state(action: &UiAction) -> bool {
     matches!(
         action,

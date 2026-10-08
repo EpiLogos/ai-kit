@@ -208,6 +208,25 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Compose(a)) => match a.command {
             None => cmd_compose(cwd, a),
             Some(ComposeGroupCommand::Plan(_)) => cmd_compose(cwd, compose_plan_args()),
+            Some(ComposeGroupCommand::Repertoire(args)) => {
+                let mut service = Service::discover(cwd)?;
+                let data = aikit_cli::app::repertoire::run(&mut service, args)?;
+                if json_mode {
+                    Ok(reply(&service, data, diagnostic_warnings(&service)))
+                } else {
+                    Ok(Reply::Text(
+                        data["human"]
+                            .as_str()
+                            .ok_or_else(|| {
+                                AikitError::new(
+                                    "composition.result_invalid",
+                                    "repertoire result has no human reading",
+                                )
+                            })?
+                            .to_owned(),
+                    ))
+                }
+            }
             Some(ComposeGroupCommand::Profile(c)) => cmd_profile(cwd, c),
             Some(ComposeGroupCommand::Diff(_)) => cmd_diff(cwd),
             Some(ComposeGroupCommand::Enable(a)) => cmd_toggle(cwd, a, true),
@@ -276,7 +295,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
             Some(SystemGroupCommand::Hook(c)) => cmd_hook(cwd, c, json_mode),
             Some(SystemGroupCommand::ModelCatalogue(a)) => cmd_model_catalogue(cwd, a),
             Some(SystemGroupCommand::Trust(a)) => cmd_trust(cwd, a),
-            Some(SystemGroupCommand::Gateway(c)) => cmd_gateway(c),
+            Some(SystemGroupCommand::Gateway(c)) => cmd_gateway(c, cwd),
             Some(SystemGroupCommand::Shell(c)) => cmd_shell(c),
             Some(SystemGroupCommand::Generations(c)) => match c.command {
                 SystemGenerationsCommand::Prune(a) => cmd_prune(cwd, a),
@@ -376,7 +395,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Alias(c)) => cmd_alias(cwd, c, json_mode),
         Some(Command::Mux(c)) => cmd_mux(cwd, c),
         Some(Command::Shell(c)) => cmd_shell(c),
-        Some(Command::Gateway(c)) => cmd_gateway(c),
+        Some(Command::Gateway(c)) => cmd_gateway(c, cwd),
         Some(Command::Whoami(a)) => cmd_whoami(cwd, a, json_mode),
         Some(Command::Refocus(a)) => cmd_refocus(cwd, a, json_mode),
         Some(Command::Inhabit(a)) => cmd_inhabit(cwd, a, json_mode),
@@ -522,7 +541,7 @@ fn inhabitation_orientation(
 
 fn cmd_inhabit(cwd: &std::path::Path, args: InhabitArgs, json_mode: bool) -> Result<Reply> {
     use aikit_cli::inhabit::{self, ClaimMode, InhabitRequest};
-    use aikit_cli::inhabit_team::{self, HarnessTarget, TeamOutcome};
+    use aikit_cli::inhabit_team::{self, TeamOutcome};
     use aikit_cli::inhabitation as inh;
 
     let runner = aikit_adapters::runner::SystemRunner::new();
@@ -601,11 +620,9 @@ fn cmd_inhabit(cwd: &std::path::Path, args: InhabitArgs, json_mode: bool) -> Res
                 ))
             });
         }
-        let argv = match (&team, HarnessTarget::from_argv(&args.command)) {
-            (Some(team), HarnessTarget::ClaudeCode) => {
-                inhabit_team::with_plugin_dirs(&args.command, &inhabit_team::plugin_dirs(team))
-            }
-            _ => args.command.clone(),
+        let argv = match &team {
+            Some(team) => inhabit_team::with_team_projection(&args.command, team),
+            None => args.command.clone(),
         };
         eprintln!(
             "aikit inhabit: continuing {} as generation {} (verified current) — launching `{}`",
@@ -701,7 +718,7 @@ fn cmd_inhabit(cwd: &std::path::Path, args: InhabitArgs, json_mode: bool) -> Res
         } else {
             let team = match (&team, claimed.team.disclosure()) {
                 (Some(team), _) => format!(
-                    "\n# its agent-set team, for Claude Code: {}",
+                    "\n# its Central-authored team projection: {}",
                     inhabit_team::plugin_dirs(team)
                         .iter()
                         .map(|dir| format!("--plugin-dir {dir}"))
@@ -719,9 +736,22 @@ fn cmd_inhabit(cwd: &std::path::Path, args: InhabitArgs, json_mode: bool) -> Res
     }
     let argv = match &team {
         Some(team) => {
-            let dirs = inhabit_team::plugin_dirs(team);
+            let carrier_args: Vec<String> = team["plugins"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|plugin| {
+                    if let Some(extension) = plugin["extension"].as_str() {
+                        Some(format!("--extension {extension}"))
+                    } else {
+                        plugin["dir"]
+                            .as_str()
+                            .map(|dir| format!("--plugin-dir {dir}"))
+                    }
+                })
+                .collect();
             eprintln!(
-                "aikit inhabit: {} as Claude Code subagents ({})",
+                "aikit inhabit: {} through its native team projection ({})",
                 team["plugins"]
                     .as_array()
                     .into_iter()
@@ -737,10 +767,7 @@ fn cmd_inhabit(cwd: &std::path::Path, args: InhabitArgs, json_mode: bool) -> Res
                     ))
                     .collect::<Vec<_>>()
                     .join(", "),
-                dirs.iter()
-                    .map(|dir| format!("--plugin-dir {dir}"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
+                carrier_args.join(" ")
             );
             for plugin in team["plugins"].as_array().into_iter().flatten() {
                 let missing: Vec<&str> = plugin["skills_missing"]
@@ -757,7 +784,7 @@ fn cmd_inhabit(cwd: &std::path::Path, args: InhabitArgs, json_mode: bool) -> Res
                     );
                 }
             }
-            inhabit_team::with_plugin_dirs(&args.command, &dirs)
+            inhabit_team::with_team_projection(&args.command, team)
         }
         None => {
             if let Some(disclosure) = claimed.team.disclosure() {
@@ -1414,7 +1441,7 @@ fn read_body_file(path: &std::path::Path) -> Result<String> {
 /// `--at WORKCELL_REF` is one routing fact for the whole invocation: the
 /// flattened carriers are replaced with the endpoint declared for that remote
 /// Workcell, and the reply discloses that it came from there. Nothing hides.
-fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
+fn cmd_gateway(command: GatewayCmd, cwd: &std::path::Path) -> Result<Reply> {
     let mut command = command;
     let at = command.at.clone();
     if let Some(reference) = &at {
@@ -1433,7 +1460,7 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
         let carrier = aikit_cli::gateway_ops::at_carrier(&home, reference)?;
         aikit_cli::gateway_ops::override_carriers(&mut command, carrier);
     }
-    let reply = cmd_gateway_dispatch(command)?;
+    let reply = cmd_gateway_dispatch(command, cwd)?;
     Ok(match at {
         Some(reference) => disclose_at(reply, &reference),
         None => reply,
@@ -1459,7 +1486,7 @@ fn disclose_at(mut reply: Reply, reference: &str) -> Reply {
     reply
 }
 
-fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
+fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Reply> {
     use aikit_adapters::GatewayTickLoop;
     use aikit_cli::routine_cli::{gateway_tick, production_dispatcher, GatewayDispatcherTick};
     let home = AikitHome::discover()?;
@@ -1508,6 +1535,14 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
         }
         GatewaySub::Serve(a) => {
             let config = aikit_cli::gateway_ops::serve_config(&home, &a)?;
+            // The running process publishes its own posture — which build it
+            // executes, which carriers it serves — for `gateway doctor` and
+            // the upgrade surface to read: a fact about the process, named by
+            // the process.
+            aikit_cli::gateway_ops::publish_process_record(
+                &home,
+                aikit_cli::gateway_ops::configured_listeners(&config),
+            )?;
             if config.websocket_bind.is_some() && config.unix_socket.is_none() {
                 eprintln!(
                     "warning: serving the WebSocket carrier only; local `aikit gateway send|inbox` \
@@ -1594,6 +1629,28 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
             for line in &coexistence.lines {
                 eprintln!("gateway coexistence: {line}");
             }
+            // SIGTERM (launchctl bootout, systemctl stop, and the upgrade's
+            // stop) and SIGINT become a drain-then-exit instead of a process
+            // killed mid-turn. A second signal while the drain runs takes the
+            // default action, so a stuck drain can still be ended.
+            let stop_signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            #[cfg(unix)]
+            for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+                signal_hook::flag::register_conditional_default(
+                    signal,
+                    std::sync::Arc::clone(&stop_signal),
+                )
+                .and_then(|_| {
+                    signal_hook::flag::register(signal, std::sync::Arc::clone(&stop_signal))
+                })
+                .map_err(|error| {
+                    AikitError::new(
+                        "cli.gateway_signal_handler",
+                        format!("install the stop-signal handler: {error}"),
+                    )
+                })?;
+            }
+            let stop_signal = Some(stop_signal);
             aikit_adapters::run_gateway_service_with_hooks(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
@@ -1615,7 +1672,7 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                         )),
                     }),
                     coexistence: coexistence.gate,
-                    stop_signal: None,
+                    stop_signal,
                     // A peer's Flow request is answered by this Workcell's
                     // own encounter owner, at the moment of asking.
                     encounter_relay: Some(std::sync::Arc::new(
@@ -1728,6 +1785,61 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 a.ack,
             )?)
         }
+        GatewaySub::Handoff { commit } => {
+            let committed = if commit {
+                let text =
+                    std::io::read_to_string(std::io::Read::take(std::io::stdin(), 1024 * 1024 + 1))
+                        .map_err(|error| {
+                            AikitError::new("gateway.handoff_unreadable", error.to_string())
+                        })?;
+                if text.len() > 1024 * 1024 {
+                    return Err(AikitError::new(
+                        "gateway.handoff_too_large",
+                        "The retained handoff exceeds the input budget",
+                    ));
+                }
+                Some(serde_json::from_str(&text).map_err(|error| {
+                    AikitError::new("gateway.handoff_invalid", error.to_string())
+                })?)
+            } else {
+                None
+            };
+            gateway_data(aikit_cli::communique_turn::handoff_current(
+                &aikit_cli::gateway_owners::ProcessOwners::from_env(),
+                &aikit_cli::gateway_contact::LocalGateway::default_for(&home),
+                committed,
+            )?)
+        }
+        GatewaySub::Message { communique_ref } => {
+            gateway_data(aikit_cli::communique_turn::message_current(
+                &aikit_cli::gateway_owners::ProcessOwners::from_env(),
+                &aikit_cli::gateway_contact::LocalGateway::default_for(&home),
+                &communique_ref,
+            )?)
+        }
+        GatewaySub::Team { request_json } => {
+            let text = if let Some(path) = request_json.strip_prefix('@') {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                std::fs::File::open(path)
+                    .and_then(|file| file.take(1_048_577).read_to_end(&mut bytes))
+                    .map_err(|error| {
+                        AikitError::new("gateway.team_unreadable", error.to_string())
+                    })?;
+                String::from_utf8(bytes)
+                    .map_err(|error| AikitError::new("gateway.team_invalid", error.to_string()))?
+            } else {
+                request_json
+            };
+            if text.len() > 1_048_576 {
+                return Err(AikitError::new(
+                    "gateway.team_too_large",
+                    "Team operation exceeds the 1MiB input bound",
+                ));
+            }
+            let input: serde_json::Value = parse_structured_json(&text, "Central team operation")?;
+            gateway_data(aikit_cli::inhabit_team::team_operation(&home, cwd, input)?)
+        }
         GatewaySub::Conversation(a) => {
             let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
             gateway_data(aikit_cli::gateway_contact::conversation(
@@ -1839,6 +1951,121 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 gateway_ref: a.gateway_ref.clone(),
             },
         )?),
+        GatewaySub::Recover(a) => {
+            let data = aikit_cli::gateway_recover::recover(&home, a.apply)?;
+            Ok(Reply::Data {
+                context: EnvelopeContext::default(),
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
+        GatewaySub::Modes => {
+            let data = aikit_cli::gateway_modes::reading(&home)?;
+            Ok(Reply::Data {
+                context: EnvelopeContext::default(),
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
+        GatewaySub::Setup(a) => {
+            use aikit_cli::gateway_modes as modes;
+            let mut inputs = modes::gather_inputs(&home, &a.mode);
+            inputs.port = a.port;
+            inputs.bind = a.bind.clone();
+            inputs.gateway_ref = a.gateway_ref.clone();
+            inputs.workcell_ref = a.workcell_ref.clone();
+            inputs.peer_token_location = a.ws_token_location.clone();
+            inputs.peer_remote_token_location = a.peer_token_location.clone();
+            for peer in &a.peers {
+                let (workcell, endpoint) = peer.split_once('=').ok_or_else(|| {
+                    AikitError::new(
+                        "cli.usage",
+                        format!("--peer takes WORKCELL=HOST:PORT; got `{peer}`"),
+                    )
+                })?;
+                inputs
+                    .peers
+                    .push((workcell.to_owned(), endpoint.to_owned()));
+            }
+            let plan = modes::plan_setup(&inputs)?;
+            let data = if a.apply {
+                let effects = modes::SystemSetupEffects {
+                    home: home.clone(),
+                    home_dir: inputs.home_dir.clone(),
+                };
+                let results = modes::apply_setup(&plan, &effects, a.apply_tailscale)?;
+                jval!({"plan": plan, "applied": true, "results": results,
+                       "next": "aikit gateway doctor"})
+            } else {
+                jval!({"plan": plan, "applied": false,
+                       "next": "re-run with --apply to do this; nothing has changed"})
+            };
+            Ok(Reply::Data {
+                context: EnvelopeContext::default(),
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
+        GatewaySub::Doctor => {
+            let data = aikit_cli::gateway_doctor::run(&home)?;
+            Ok(Reply::Data {
+                context: EnvelopeContext::default(),
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
+        GatewaySub::Upgrade(cmd) => {
+            use aikit_cli::gateway_upgrade_system as upgrade;
+            let data = match cmd.command {
+                GatewayUpgradeSub::Plan(a) => upgrade::plan_command(
+                    &home,
+                    a.channel.as_deref(),
+                    a.candidate.as_deref(),
+                    a.install,
+                )?,
+                GatewayUpgradeSub::Apply(a) => upgrade::apply_command(
+                    &home,
+                    upgrade::ApplyOptions {
+                        install: a.install,
+                        channel: a.channel,
+                        candidate: a.candidate,
+                        origin: a.origin_binding.map(|binding_ref| {
+                            aikit_cli::gateway_upgrade::UpgradeOrigin {
+                                binding_ref,
+                                connector_ref: None,
+                                in_reply_to_sequence: None,
+                            }
+                        }),
+                        requested_by: "cli".into(),
+                        auto_rollback: !a.no_rollback,
+                        drain_grace_secs: a.drain_grace_secs,
+                        verify_timeout_secs: a.verify_timeout_secs,
+                        exit_wait_secs: a.exit_wait_secs,
+                        foreground: a.foreground,
+                        wait: a.wait,
+                    },
+                )?,
+                GatewayUpgradeSub::Status(a) => upgrade::status_command(&home, a.id.as_deref())?,
+                GatewayUpgradeSub::Resume(a) => {
+                    upgrade::resume_command(&home, a.id.as_deref(), a.foreground)?
+                }
+                GatewayUpgradeSub::Rollback(a) => upgrade::rollback_command(&home, &a.id)?,
+                GatewayUpgradeSub::Abandon(a) => {
+                    upgrade::abandon_command(&home, a.id.as_deref(), &a.reason)?
+                }
+                GatewayUpgradeSub::Worker(a) => upgrade::worker_command(&home, &a.transaction)?,
+            };
+            Ok(Reply::Data {
+                context: EnvelopeContext::default(),
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
         query => {
             let command = match query {
                 GatewaySub::Protocol(_) => aikit_adapters::GatewayCommand::Protocol,
@@ -1853,6 +2080,9 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Who(_)
                 | GatewaySub::Send(_)
                 | GatewaySub::Inbox(_)
+                | GatewaySub::Handoff { .. }
+                | GatewaySub::Message { .. }
+                | GatewaySub::Team { .. }
                 | GatewaySub::Conversation(_)
                 | GatewaySub::Delegate(_)
                 | GatewaySub::Forward(_)
@@ -1861,7 +2091,12 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Agent(_)
                 | GatewaySub::NativeOwner(_)
                 | GatewaySub::Coexistence(_)
-                | GatewaySub::Hoist(_) => unreachable!("handled above"),
+                | GatewaySub::Hoist(_)
+                | GatewaySub::Upgrade(_)
+                | GatewaySub::Doctor
+                | GatewaySub::Modes
+                | GatewaySub::Setup(_)
+                | GatewaySub::Recover(_) => unreachable!("handled above"),
             };
             let args = match query {
                 GatewaySub::Protocol(a)
@@ -1876,6 +2111,9 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Who(_)
                 | GatewaySub::Send(_)
                 | GatewaySub::Inbox(_)
+                | GatewaySub::Handoff { .. }
+                | GatewaySub::Message { .. }
+                | GatewaySub::Team { .. }
                 | GatewaySub::Conversation(_)
                 | GatewaySub::Delegate(_)
                 | GatewaySub::Forward(_)
@@ -1884,7 +2122,12 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                 | GatewaySub::Agent(_)
                 | GatewaySub::NativeOwner(_)
                 | GatewaySub::Coexistence(_)
-                | GatewaySub::Hoist(_) => unreachable!("handled above"),
+                | GatewaySub::Hoist(_)
+                | GatewaySub::Upgrade(_)
+                | GatewaySub::Doctor
+                | GatewaySub::Modes
+                | GatewaySub::Setup(_)
+                | GatewaySub::Recover(_) => unreachable!("handled above"),
             };
             let target = aikit_cli::gateway_ops::carrier_target(&home, &args)?;
             let response =
@@ -5651,6 +5894,9 @@ fn cmd_hook(cwd: &std::path::Path, c: HookCmd, json_mode: bool) -> Result<Reply>
     let staged_communiques = aikit_cli::communique_turn::take_staged_delivery();
 
     if json_mode {
+        let mut data = data;
+        data["communique_handoff"] = serde_json::to_value(&staged_communiques)
+            .map_err(|error| AikitError::new("gateway.handoff_invalid", error.to_string()))?;
         Ok(Reply::Data {
             context: EnvelopeContext::from_descriptor(service.descriptor()),
             data,

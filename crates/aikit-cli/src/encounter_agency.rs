@@ -5,7 +5,7 @@ use super::{
 };
 use aikit_adapters::{
     agency_admission::{admit_agency, AdmittedAgency, AgencySourceBasis},
-    runner::SystemRunner,
+    runner::{CommandRunner, SystemRunner},
     secret_resolver::SuiteSecretResolver,
 };
 use aikit_core::secret_ref::SecretResolver;
@@ -190,6 +190,34 @@ fn read_binding(home: &AikitHome, session: &ResourceRef) -> Result<Option<Encoun
     serde_json::from_slice(&bytes).map(Some).map_err(error)
 }
 fn native_admission(binding: &EncounterAgencyBinding) -> Result<AdmittedAgency> {
+    native_admission_with_runner(binding, &SystemRunner::probe().with_body_free_diagnostics())
+}
+
+fn native_admission_before(
+    binding: &EncounterAgencyBinding,
+    deadline: std::time::Instant,
+) -> Result<AdmittedAgency> {
+    let remaining = deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| {
+            AikitError::new(
+            "encounter.model_preflight_timeout",
+            "Native model admission exhausted its operation budget; no provider fallback or replay",
+        )
+        })?;
+    native_admission_with_runner(
+        binding,
+        &SystemRunner::new()
+            .with_timeout(remaining)
+            .with_body_free_diagnostics(),
+    )
+}
+
+fn native_admission_with_runner(
+    binding: &EncounterAgencyBinding,
+    runner: &dyn CommandRunner,
+) -> Result<AdmittedAgency> {
     if !binding.active {
         return Err(AikitError::new(
             "encounter.participant_withdrawn",
@@ -197,7 +225,7 @@ fn native_admission(binding: &EncounterAgencyBinding) -> Result<AdmittedAgency> 
         ));
     }
     let admitted = admit_agency(
-        &SystemRunner::new(),
+        runner,
         &binding.actuation_bin.to_string_lossy(),
         &binding.agency_source,
         &binding.agent_ref,
@@ -231,6 +259,18 @@ enum QueuedOutcome {
     Deferred,
 }
 impl EncounterService {
+    /// Read the existing exact owner binding for native team preparation and
+    /// recovery. This is owner-local source, never a gateway ingress grant.
+    pub fn read_agency_binding(
+        home: &AikitHome,
+        session: &ResourceRef,
+    ) -> Result<Option<EncounterAgencyBinding>> {
+        read_binding(home, session)
+    }
+    /// Reuse the task owner's current native authority/material/placement check.
+    pub fn verify_task_admission(home: &AikitHome, session: &ResourceRef) -> Result<()> {
+        task::check(home, session)
+    }
     pub fn ensure_no_agency(home: &AikitHome, session: &ResourceRef) -> Result<()> {
         if read_binding(home, session)?.is_some() {
             return Err(AikitError::new(
@@ -372,6 +412,42 @@ impl EncounterService {
                 Ok((binding, admitted))
             })
             .transpose()
+    }
+    pub(super) fn check_agency_before(
+        &self,
+        session: &ResourceRef,
+        deadline: std::time::Instant,
+    ) -> Result<Option<(EncounterAgencyBinding, AdmittedAgency)>> {
+        task::check_before(&self.home, session, deadline)?;
+        read_binding(&self.home, session)?
+            .map(|binding| {
+                let admitted = native_admission_before(&binding, deadline)?;
+                Ok((binding, admitted))
+            })
+            .transpose()
+    }
+    pub(super) fn lock_agency_before(
+        &self,
+        session: &ResourceRef,
+        deadline: std::time::Instant,
+    ) -> Result<ContextLock> {
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|budget| !budget.is_zero())
+            .ok_or_else(|| {
+                AikitError::new(
+                    "encounter.model_preflight_timeout",
+                    "Native admission deadline expired before Agency lock",
+                )
+            })?;
+        ContextLock::acquire(
+            &self.home,
+            &format!(
+                "encounter-agency-{}",
+                blake3::hash(session.as_str().as_bytes()).to_hex()
+            ),
+            LockOptions::default().with_timeout(remaining),
+        )
     }
     /// Material is actually delivered as this selected Agent's scoped context;
     /// it is not merely named in an orientation receipt. Source text remains
@@ -1017,5 +1093,219 @@ impl EncounterService {
             }
             _ => Err(error("Not an Agency delivery operation")),
         }
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod native_preflight_bounds_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    fn source_and_backend(root: &std::path::Path) -> (EncounterAgencyBinding, PathBuf, Vec<u8>) {
+        let root = root.canonicalize().unwrap();
+        let source = root.join("request.json");
+        let bytes = serde_json::to_vec(&json!({
+            "schema":aikit_adapters::agency_admission::AGENCY_ACTUALISATION_SCHEMA,
+            "differentiated_binding":{"agent_ref":"agent/preflight","world_ref":"project:preflight"},
+        })).unwrap();
+        std::fs::write(&source, &bytes).unwrap();
+        let pid_file = root.join("owner-pids");
+        let backend = root.join("unavailable-native-owner");
+        let quoted = crate::app::repertoire::shell_word(pid_file.to_str().unwrap());
+        std::fs::write(&backend, format!(
+            "#!/bin/sh\nprintf '%s\\n' 'native-private-source-canary'\nprintf '%s\\n' 'native-private-error-canary' >&2\nprintf '%s\\n' \"$$\" > {quoted}\nsleep 60 &\nprintf '%s\\n' \"$!\" >> {quoted}\nwait\n"
+        )).unwrap();
+        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
+        (
+            EncounterAgencyBinding {
+                revision: SourceRevision::parse("binding/preflight").unwrap(),
+                active: true,
+                agent_ref: ResourceRef::parse("agent/preflight").unwrap(),
+                agency_ref: ResourceRef::parse("agency/preflight").unwrap(),
+                world_ref: ResourceRef::parse("project:preflight").unwrap(),
+                world_binding_ref: ResourceRef::parse("binding/preflight").unwrap(),
+                agency_source: AgencySourceBasis {
+                    source_ref: ResourceRef::parse("source/preflight").unwrap(),
+                    revision: SourceRevision::parse(hash.clone()).unwrap(),
+                    path: source,
+                    content_digest: hash,
+                },
+                actuation_bin: backend,
+                allowed_senders: BTreeSet::new(),
+                allowed_packet_sources: BTreeSet::new(),
+                context: None,
+            },
+            pid_file,
+            bytes,
+        )
+    }
+
+    #[test]
+    fn actual_native_admission_uses_one_deadline_and_retires_owned_processes() {
+        let temp = tempfile::tempdir().unwrap();
+        let (binding, pid_file, bytes) = source_and_backend(temp.path());
+        let source_mtime = std::fs::metadata(&binding.agency_source.path)
+            .unwrap()
+            .modified()
+            .unwrap();
+        let started = Instant::now();
+        let result = native_admission_before(&binding, started + Duration::from_secs(5));
+        assert!(
+            result.is_err(),
+            "an unavailable owner cannot grant admission"
+        );
+        let failure = result.unwrap_err();
+        let public = format!(
+            "{failure:?} {failure} {}",
+            json!({
+                "code":failure.code(), "message":failure.message(), "details":failure.details()
+            })
+        );
+        assert!(!public.contains("native-private-source-canary"));
+        assert!(!public.contains("native-private-error-canary"));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the complete owner call is finite"
+        );
+        let pids: Vec<_> = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .lines()
+            .map(|pid| pid.parse::<u32>().unwrap())
+            .collect();
+        assert_eq!(
+            pids.len(),
+            2,
+            "the real helper and descendant must both start"
+        );
+        let retired_by = Instant::now() + Duration::from_secs(2);
+        loop {
+            let alive = pids.iter().any(|pid| {
+                std::process::Command::new("/bin/kill")
+                    .args(["-0", &pid.to_string()])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            });
+            if !alive {
+                break;
+            }
+            assert!(
+                Instant::now() < retired_by,
+                "native owner process residual: {pids:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(std::fs::read(&binding.agency_source.path).unwrap(), bytes);
+        assert_eq!(
+            std::fs::metadata(&binding.agency_source.path)
+                .unwrap()
+                .modified()
+                .unwrap(),
+            source_mtime
+        );
+    }
+
+    #[test]
+    fn expired_operation_budget_does_not_invoke_the_native_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let (binding, pid_file, bytes) = source_and_backend(temp.path());
+        let error = native_admission_before(&binding, Instant::now() - Duration::from_millis(1))
+            .unwrap_err();
+        assert_eq!(error.code(), "encounter.model_preflight_timeout");
+        assert!(!pid_file.exists());
+        assert_eq!(std::fs::read(&binding.agency_source.path).unwrap(), bytes);
+    }
+    fn model_fixture(
+        root: &std::path::Path,
+    ) -> (AikitHome, ResourceRef, EncounterProvider, PathBuf, Vec<u8>) {
+        let (binding, pid_file, bytes) = source_and_backend(root);
+        let home = AikitHome::at(root.join("aikit"));
+        let session = ResourceRef::parse("agent-session/preflight").unwrap();
+        let target = binding_path(&home, &session);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(target, serde_json::to_vec(&binding).unwrap()).unwrap();
+        let provider: EncounterProvider = serde_json::from_value(json!({
+            "id":"preflight", "label":"preflight", "protocol":"pi-rpc", "argv":["pi", "--mode", "rpc"],
+            "model_policy":{
+                "source":"source/preflight-policy", "revision":binding.agency_source.revision,
+                "path":binding.agency_source.path, "content_digest":binding.agency_source.content_digest
+            }
+        })).unwrap();
+        (home, session, provider, pid_file, bytes)
+    }
+
+    #[test]
+    fn owned_model_prepare_preserves_near_expired_startup_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let (home, session, provider, pid_file, bytes) = model_fixture(temp.path());
+        let source = provider.model_policy.as_ref().unwrap().path.clone();
+        let source_mtime = std::fs::metadata(&source).unwrap().modified().unwrap();
+        let started = Instant::now();
+        let failure =
+            model::prepare_before(&home, &session, &provider, started + Duration::from_secs(5))
+                .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let pids: Vec<u32> = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .lines()
+            .map(|p| p.parse().unwrap())
+            .collect();
+        assert_eq!(
+            pids.len(),
+            2,
+            "the real unavailable owner and child started"
+        );
+        let retired_by = Instant::now() + Duration::from_secs(2);
+        loop {
+            let alive = pids.iter().any(|pid| {
+                std::process::Command::new("/bin/kill")
+                    .args(["-0", &pid.to_string()])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            });
+            if !alive {
+                break;
+            }
+            assert!(
+                Instant::now() < retired_by,
+                "model owner residual: {pids:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let public = format!(
+            "{failure:?} {failure} {}",
+            json!({"code":failure.code(),"message":failure.message(),"details":failure.details()})
+        );
+        assert!(!public.contains("native-private-source-canary"));
+        assert!(!public.contains("native-private-error-canary"));
+        assert_eq!(std::fs::read(&source).unwrap(), bytes);
+        assert_eq!(
+            std::fs::metadata(&source).unwrap().modified().unwrap(),
+            source_mtime
+        );
+    }
+
+    #[test]
+    fn owned_model_prepare_with_expired_budget_has_no_owner_effect() {
+        let temp = tempfile::tempdir().unwrap();
+        let (home, session, provider, pid_file, bytes) = model_fixture(temp.path());
+        let failure = model::prepare_before(
+            &home,
+            &session,
+            &provider,
+            Instant::now() - Duration::from_millis(1),
+        )
+        .unwrap_err();
+        assert_eq!(failure.code(), "encounter.startup_deadline_elapsed");
+        assert!(!pid_file.exists());
+        assert_eq!(
+            std::fs::read(&provider.model_policy.as_ref().unwrap().path).unwrap(),
+            bytes
+        );
     }
 }

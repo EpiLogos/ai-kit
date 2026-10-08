@@ -539,6 +539,8 @@ pub struct SystemCommandsArgs {}
 pub enum ComposeGroupCommand {
     /// Compute the launch plan for the current composition (no realisation).
     Plan(ComposePlanArgs),
+    /// Inspect, preview and apply a Profile and SkillSet repertoire.
+    Repertoire(crate::app::repertoire::RepertoireArgs),
     /// Create and inspect project-specific profile lenses.
     Profile(ProfileCmd),
     /// Show what applying the current declarations would change. No mutation.
@@ -737,6 +739,7 @@ fn compose_route(args: &ComposeArgs) -> &'static str {
     match &args.command {
         None => "cmd_compose",
         Some(ComposeGroupCommand::Plan(_)) => "cmd_compose",
+        Some(ComposeGroupCommand::Repertoire(_)) => "cmd_compose_repertoire",
         Some(ComposeGroupCommand::Profile(c)) => profile_route(&c.command),
         Some(ComposeGroupCommand::Diff(_)) => "cmd_diff",
         Some(ComposeGroupCommand::Enable(_)) => "cmd_toggle_enable",
@@ -1167,6 +1170,9 @@ fn gateway_route(command: &GatewaySub) -> &'static str {
         GatewaySub::Who(_) => "cmd_gateway_who",
         GatewaySub::Send(_) => "cmd_gateway_send",
         GatewaySub::Inbox(_) => "cmd_gateway_inbox",
+        GatewaySub::Handoff { .. } => "cmd_gateway_handoff",
+        GatewaySub::Message { .. } => "cmd_gateway_message",
+        GatewaySub::Team { .. } => "cmd_gateway_team",
         GatewaySub::Conversation(_) => "cmd_gateway_conversation",
         GatewaySub::Delegate(_) => "cmd_gateway_delegate",
         GatewaySub::Forward(_) => "cmd_gateway_forward",
@@ -1189,6 +1195,19 @@ fn gateway_route(command: &GatewaySub) -> &'static str {
         GatewaySub::Ecology(_) => "cmd_gateway_ecology",
         GatewaySub::Snapshot(_) => "cmd_gateway_snapshot",
         GatewaySub::NativeOwner(_) => "cmd_gateway_native_owner",
+        GatewaySub::Upgrade(c) => match &c.command {
+            GatewayUpgradeSub::Plan(_) => "cmd_gateway_upgrade_plan",
+            GatewayUpgradeSub::Apply(_) => "cmd_gateway_upgrade_apply",
+            GatewayUpgradeSub::Status(_) => "cmd_gateway_upgrade_status",
+            GatewayUpgradeSub::Resume(_) => "cmd_gateway_upgrade_resume",
+            GatewayUpgradeSub::Rollback(_) => "cmd_gateway_upgrade_rollback",
+            GatewayUpgradeSub::Abandon(_) => "cmd_gateway_upgrade_abandon",
+            GatewayUpgradeSub::Worker(_) => "cmd_gateway_upgrade_worker",
+        },
+        GatewaySub::Doctor => "cmd_gateway_doctor",
+        GatewaySub::Modes => "cmd_gateway_modes",
+        GatewaySub::Setup(_) => "cmd_gateway_setup",
+        GatewaySub::Recover(_) => "cmd_gateway_recover",
     }
 }
 
@@ -2265,6 +2284,20 @@ pub enum GatewaySub {
     /// The Communiques waiting for an occupant; `--ack` marks them delivered
     /// to this body's verified occupant generation.
     Inbox(GatewayInboxArgs),
+    /// Offer a bounded handoff to the current occupant; commit the exact
+    /// retained delivery from stdin after its peer turn has been persisted.
+    Handoff {
+        #[arg(long)]
+        commit: bool,
+    },
+    /// Retrieve one complete Communique addressed to this verified occupant.
+    Message { communique_ref: String },
+    /// Prepare, delegate to, read or cancel an admitted Central team member.
+    Team {
+        /// Bounded native operation JSON; prefix a file path with @.
+        #[arg(long)]
+        request_json: String,
+    },
     /// Both directions between this Position and another, from the journal.
     Conversation(GatewayConversationArgs),
     /// Cross a Communique into obligation-bearing work: Factory assigns custody
@@ -2290,6 +2323,200 @@ pub enum GatewaySub {
     /// staged here: plan (the default), `--apply` to stage, `--receive` to
     /// unpack. Token locations move; token files stay the operator's.
     Hoist(GatewayHoistArgs),
+    /// A managed upgrade of the running gateway: read the plan, then drain,
+    /// restart and verify the RUNNING version, with a receipt. It runs in a
+    /// worker the restart cannot kill, so it can be asked for through the
+    /// gateway itself.
+    Upgrade(GatewayUpgradeCmd),
+    /// Every finding about this gateway — the running build against the
+    /// installed one, listeners and their exposure, tokens, declared peers,
+    /// the platform firewall, Tailscale Serve/Funnel, the state file, upgrades
+    /// in flight — each with the command that fixes it. Read-only.
+    Doctor,
+    /// The operating modes as a crosswalk — listener binding, transport,
+    /// workcell placement, connector identity, session continuity, lifecycle —
+    /// and which of them this machine actually runs.
+    Modes,
+    /// Choose an operating mode. Plan-first: with no `--apply` it changes
+    /// nothing and prints every step, including the commands it will not run.
+    Setup(GatewaySetupArgs),
+    /// A gateway whose state file will not load: quarantine the damaged file
+    /// (never delete it) and restore the newest copy that decodes. Plan-first.
+    Recover(GatewayRecoverArgs),
+}
+
+/// `aikit gateway recover`.
+#[derive(Debug, Args)]
+pub struct GatewayRecoverArgs {
+    /// Do it. Without this nothing changes.
+    #[arg(long)]
+    pub apply: bool,
+}
+
+/// `aikit gateway setup`.
+#[derive(Debug, Args)]
+pub struct GatewaySetupArgs {
+    /// `local-ipc`, `loopback-service`, `private-tailnet`, `tailscale-serve` or
+    /// `ssh-tunnel` (`aikit gateway modes` explains each).
+    #[arg(long, value_name = "MODE")]
+    pub mode: String,
+    /// The gateway's WebSocket port (default 7788).
+    #[arg(long, default_value_t = 7788)]
+    pub port: u16,
+    /// Bind `HOST:PORT` instead of the mode's default (tailnet address or 127.0.0.1).
+    #[arg(long, value_name = "HOST:PORT")]
+    pub bind: Option<String>,
+    #[arg(long = "gateway-ref", value_name = "REF")]
+    pub gateway_ref: Option<String>,
+    #[arg(long = "workcell-ref", value_name = "REF")]
+    pub workcell_ref: Option<String>,
+    /// Declare a peer gateway: `WORKCELL=HOST:PORT` (repeatable).
+    #[arg(long = "peer", value_name = "WORKCELL=HOST:PORT")]
+    pub peers: Vec<String>,
+    /// Where this gateway's peer token lives (default: a file under
+    /// `~/.aikit/credentials/`, created owner-only).
+    #[arg(long = "ws-token-location", value_name = "LOCATION")]
+    pub ws_token_location: Option<String>,
+    /// Where the token a declared peer expects of us lives.
+    #[arg(long = "peer-token-location", value_name = "LOCATION")]
+    pub peer_token_location: Option<String>,
+    /// Do it: create token files, (re)write the service definition, declare
+    /// the peers. Without this nothing changes.
+    #[arg(long)]
+    pub apply: bool,
+    /// Also run the one private `tailscale serve` mapping (never Funnel). A
+    /// separate consent from --apply.
+    #[arg(long, requires = "apply")]
+    pub apply_tailscale: bool,
+}
+
+/// `aikit gateway upgrade`.
+#[derive(Debug, Args)]
+pub struct GatewayUpgradeCmd {
+    #[command(subcommand)]
+    pub command: GatewayUpgradeSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GatewayUpgradeSub {
+    /// Read what runs, what is installed, whether they differ, what an apply
+    /// would do, and which build each declared peer runs. Changes nothing.
+    Plan(GatewayUpgradePlanArgs),
+    /// Install (optionally), drain the running gateway, restart it on the
+    /// installed build and verify a different process runs it. Detached by
+    /// default; the receipt is `aikit gateway upgrade status`.
+    Apply(GatewayUpgradeApplyArgs),
+    /// The upgrade in flight, or the latest, with its steps and receipt.
+    Status(GatewayUpgradeStatusArgs),
+    /// Finish an upgrade whose worker stopped (another driver takes over at
+    /// the durable phase; nothing already done is repeated).
+    Resume(GatewayUpgradeResumeArgs),
+    /// Restore the previous build of the latest upgrade and verify it runs.
+    Rollback(GatewayUpgradeRollbackArgs),
+    /// Give up on an upgrade whose worker is gone and cannot be resumed. Changes
+    /// nothing on disk or in the running gateway; the receipt says what was known.
+    Abandon(GatewayUpgradeAbandonArgs),
+    /// The detached worker itself. Started by `apply`; not for direct use.
+    #[command(hide = true)]
+    Worker(GatewayUpgradeWorkerArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct GatewayUpgradePlanArgs {
+    /// Include the managed install in the plan (`oi update --apply`).
+    #[arg(long)]
+    pub install: bool,
+    /// The managed update channel (`mainline` or `source`).
+    #[arg(long, value_name = "CHANNEL", requires = "install")]
+    pub channel: Option<String>,
+    /// Choose the candidate: the exact revision (a commit) of this product the
+    /// managed installer builds and installs (`oi update --candidate ai-kit=REV`).
+    #[arg(long, value_name = "REV", requires = "install")]
+    pub candidate: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct GatewayUpgradeApplyArgs {
+    /// Run the managed installer first (`oi update --apply`). Without it the
+    /// upgrade restarts the gateway onto the build already installed.
+    #[arg(long)]
+    pub install: bool,
+    /// Restart onto the build already installed and run no installer. This is
+    /// what `apply` does without `--install`; the flag says so explicitly.
+    #[arg(long, conflicts_with_all = ["install", "channel", "candidate"])]
+    pub restart_only: bool,
+    /// The managed update channel for --install (`mainline` or `source`).
+    #[arg(long, value_name = "CHANNEL", requires = "install")]
+    pub channel: Option<String>,
+    /// Choose the candidate: the exact revision (a commit) of this product the
+    /// managed installer builds and installs (`oi update --candidate ai-kit=REV`).
+    #[arg(long, value_name = "REV", requires = "install")]
+    pub candidate: Option<String>,
+    /// Do not restore the previous build automatically when the new one does
+    /// not come up; leave the exact steps in the receipt instead.
+    #[arg(long)]
+    pub no_rollback: bool,
+    /// Seconds an in-flight turn is given to finish before it is interrupted
+    /// and recorded (default 60).
+    #[arg(long, value_name = "SECS")]
+    pub drain_grace_secs: Option<u64>,
+    /// Seconds to wait for the new process to answer as the expected build
+    /// (default 120).
+    #[arg(long, value_name = "SECS")]
+    pub verify_timeout_secs: Option<u64>,
+    /// Seconds to wait for the old process to exit, and then for the service
+    /// manager to start the next one, before the manager is asked to (default
+    /// 90).
+    #[arg(long, value_name = "SECS")]
+    pub exit_wait_secs: Option<u64>,
+    /// The conversation binding the receipt returns to (a chat asked for it).
+    #[arg(long = "origin-binding", value_name = "REF")]
+    pub origin_binding: Option<String>,
+    /// Drive the upgrade in this process instead of a detached worker.
+    #[arg(long)]
+    pub foreground: bool,
+    /// Wait for the worker to finish and print the outcome.
+    #[arg(long, conflicts_with = "foreground")]
+    pub wait: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct GatewayUpgradeAbandonArgs {
+    /// The upgrade id (default: the one in flight).
+    #[arg(value_name = "ID")]
+    pub id: Option<String>,
+    /// Why, for the receipt.
+    #[arg(long, value_name = "TEXT", default_value = "no reason given")]
+    pub reason: String,
+}
+
+#[derive(Debug, Args)]
+pub struct GatewayUpgradeStatusArgs {
+    /// The upgrade id (default: the one in flight, else the latest).
+    #[arg(value_name = "ID")]
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct GatewayUpgradeResumeArgs {
+    /// The upgrade id (default: the one in flight).
+    #[arg(value_name = "ID")]
+    pub id: Option<String>,
+    /// Drive it in this process instead of a detached worker.
+    #[arg(long)]
+    pub foreground: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct GatewayUpgradeRollbackArgs {
+    #[arg(value_name = "ID")]
+    pub id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct GatewayUpgradeWorkerArgs {
+    #[arg(long = "txn", value_name = "ID")]
+    pub transaction: String,
 }
 
 /// `aikit gateway agent` — the canonical conversation-control operations,
