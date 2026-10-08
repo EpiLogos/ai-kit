@@ -40,14 +40,29 @@ impl World {
         ] {
             let id = format!("skill/development/{name}");
             let root = home.root().join("registries/personal/capsules").join(&id);
-            write(&root.join("manifest.toml"), &format!("schema = 1\nid = \"{id}\"\nkind = \"skill\"\nname = \"{name}\"\ndescription = \"{description}\"\n[skill]\nroot = \"payload\"\n"));
-            write(&root.join("payload/SKILL.md"), &format!("---\nname: {name}\ndescription: \"{description}\"\n---\n\n# {name}\n\nUse the project's own source and report real evidence.\n"));
+            write(
+                &root.join("manifest.toml"),
+                &format!(
+                    "schema = 1\nid = \"{id}\"\nkind = \"skill\"\nname = \"{name}\"\ndescription = \"{description}\"\n[skill]\nroot = \"payload\"\n"
+                ),
+            );
+            write(
+                &root.join("payload/SKILL.md"),
+                &format!(
+                    "---\nname: {name}\ndescription: \"{description}\"\n---\n\n# {name}\n\nUse the project's own source and report real evidence.\n"
+                ),
+            );
             write(
                 &root.join("payload/references/checks.md"),
                 "Run the owner's focused checks before publication.\n",
             );
         }
-        write(&home.root().join("registries/personal/profiles/development.toml"), "schema = 1\nid = \"profile/development\"\nenable = [\"skill/development/plain\", \"skill/development/method\", \"skill/development/field\"]\n");
+        write(
+            &home
+                .root()
+                .join("registries/personal/profiles/development.toml"),
+            "schema = 1\nid = \"profile/development\"\nenable = [\"skill/development/plain\", \"skill/development/method\", \"skill/development/field\"]\n",
+        );
         write(
             &project.join(".aikit/profile.toml"),
             "# authored project contribution\nschema = 1\n",
@@ -63,7 +78,10 @@ impl World {
         aikit_store::skillsets::create(&home, "implementer", &[id("plain"), id("method")], &[])
             .unwrap();
         aikit_store::skillsets::create(&home, "orientation", &[id("field")], &[]).unwrap();
-        write(&home.root().join("skillsets/implementer/set.toml"), "[package.author]\nname = \"Development repertoire source\"\n\n[[package.environment]]\nname = \"PROJECT_ROOT\"\npurpose = \"the project against which the practice acts\"\n");
+        write(
+            &home.root().join("skillsets/implementer/set.toml"),
+            "[package.author]\nname = \"Development repertoire source\"\n\n[[package.environment]]\nname = \"PROJECT_ROOT\"\npurpose = \"the project against which the practice acts\"\n",
+        );
         home.ensure_layout().unwrap();
         let load = aikit_cli::app::load_catalog(&home, Some(&project)).unwrap();
         let index = aikit_store::index::Index::open(&home.database()).unwrap();
@@ -562,7 +580,14 @@ fn profile_precedence_and_project_session_set_union_share_one_inspectable_readin
     assert_eq!(forms[&id("method")], "METHOD");
     assert_eq!(forms[&id("field")], "METHODOLOGY");
     // Sets cannot override a higher-scope Profile exclusion or grant eligibility.
-    write(&world.home.session_overlay(&aikit_core::SessionId::parse(SESSION).unwrap()), &format!("schema = 1\nsession_id = \"{SESSION}\"\nskill_sets = [\"orientation\"]\ndisable = [\"skill/development/plain\"]\n"));
+    write(
+        &world
+            .home
+            .session_overlay(&aikit_core::SessionId::parse(SESSION).unwrap()),
+        &format!(
+            "schema = 1\nsession_id = \"{SESSION}\"\nskill_sets = [\"orientation\"]\ndisable = [\"skill/development/plain\"]\n"
+        ),
+    );
     service.refresh().unwrap();
     let reading = service.resolved_repertoire().unwrap();
     let plain = reading
@@ -941,7 +966,10 @@ fn effective_orientation_changes_export_provenance_without_changing_accepted_sou
 fn effective_package_keeps_additive_metadata_and_reports_conflicting_owner_claims() {
     let world = World::new();
     let (mut service, _) = world.compose();
-    write(&world.home.root().join("skillsets/orientation/set.toml"), "[[package.environment]]\nname = \"VERIFY_ROOT\"\npurpose = \"the selected verification ground\"\n");
+    write(
+        &world.home.root().join("skillsets/orientation/set.toml"),
+        "[[package.environment]]\nname = \"VERIFY_ROOT\"\npurpose = \"the selected verification ground\"\n",
+    );
     let preview = service
         .preview_repertoire(world.request(ScopeKind::Session, &["orientation"], false))
         .unwrap();
@@ -1030,8 +1058,10 @@ fn retained_generation_repairs_missing_provenance_and_avoids_full_rebuild_materi
     assert_eq!(retained_work.tree_hash_operations, 1);
     assert!(retained_work.destination_checks > 0);
     assert!(retained_work.destination_entries_inspected > 0);
-    assert!(retained_work.canonical_file_reads < retained_work.payload_hash_operations,
-        "shared accepted files are actually read once per scan, while every destination contributes to identity");
+    assert!(
+        retained_work.canonical_file_reads < retained_work.payload_hash_operations,
+        "shared accepted files are actually read once per scan, while every destination contributes to identity"
+    );
     assert!(retained_work.destination_entries_inspected < full_work.destination_entries_inspected);
     assert!(retained_work.canonical_file_reads < full_work.canonical_file_reads);
     let generations = context_dir.join("generations");
@@ -1049,7 +1079,13 @@ fn retained_generation_repairs_missing_provenance_and_avoids_full_rebuild_materi
         fs::metadata(&generations).unwrap().modified().unwrap(),
         "unchanged reapply creates no staging material"
     );
-    eprintln!("repertoire material measurement: full_build_entries={before_entries} retained_new_staging_entries=0 full_build_commit_ms={before_ms} retained_generation_ms={retained_ms} retained_preview_apply_ms={after_ms} managed_edits={} full_work={} retained_work={} application_observation={}", reapplied.applied_edits, serde_json::to_string(&full_work).unwrap(), serde_json::to_string(&retained_work).unwrap(), serde_json::to_string(application_work).unwrap());
+    eprintln!(
+        "repertoire material measurement: full_build_entries={before_entries} retained_new_staging_entries=0 full_build_commit_ms={before_ms} retained_generation_ms={retained_ms} retained_preview_apply_ms={after_ms} managed_edits={} full_work={} retained_work={} application_observation={}",
+        reapplied.applied_edits,
+        serde_json::to_string(&full_work).unwrap(),
+        serde_json::to_string(&retained_work).unwrap(),
+        serde_json::to_string(application_work).unwrap()
+    );
     fs::remove_file(context_dir.join("current/metadata.json")).unwrap();
     fs::remove_file(context_dir.join("current/resolution.lock.toml")).unwrap();
     let repaired = service
@@ -1226,7 +1262,7 @@ fn native_tui_profile_and_skillset_selection_retains_and_applies_the_actual_proc
         assert_eq!(applied.procedure, preview.procedure.id);
         assert_eq!(state.status.unwrap().message, applied.render());
         assert!(state.repertoire_preview.is_none());
-        assert!(state.overlay.is_none());
+        assert_eq!(state.overlay, Some(Overlay::RepertoireApplicationReport));
         assert!(
             applied
                 .observation
@@ -1846,4 +1882,351 @@ fn hypothetical_native_target_metadata_is_inspected_and_bound_before_apply() {
     let replay = service.apply_repertoire(preview).unwrap();
     assert!(replay.recovered && replay.reused_generation);
     assert_eq!(replay.reading.generation, result.reading.generation);
+}
+
+#[test]
+fn actual_native_composition_reports_scroll_confirm_apply_and_reopen_without_duplicate_effects() {
+    use aikit_tui::application::Overlay;
+    use aikit_tui::event::PaletteEvent;
+    use aikit_tui::host::UiHost;
+    use aikit_tui::{ApplicationSurfaceController, ApplicationSurfaceRequest};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let key = |code, modifiers| PaletteEvent::Key(KeyEvent::new(code, modifiers));
+    let visible = |surface: &ApplicationSurfaceController, width, height| {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        surface.draw_terminal(&mut terminal).unwrap();
+        let buffer = terminal.backend().buffer();
+        // Only the actual body cells are eligible evidence. Inspector/resource
+        // text and the query/footer cannot satisfy report-material assertions.
+        (2..height - 2)
+            .map(|row| {
+                (1..width - 1)
+                    .map(|column| buffer.cell((column, row)).unwrap().symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let compact = |text: &str| {
+        text.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+    };
+    let world = World::new();
+    let declaration = fs::read(world.project.join(".aikit/profile.toml")).unwrap();
+    let source = source_snapshot(&world.home.registries());
+    let foreign_agents = fs::read(world.project.join("AGENTS.md")).unwrap();
+    let foreign_claude = fs::read(world.project.join("CLAUDE.md")).unwrap();
+    let mut owner = world.service();
+    let context = world.home.context_dir(&owner.descriptor().context_id);
+    let mut surface = ApplicationSurfaceController::new(
+        &mut owner,
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup),
+    )
+    .unwrap();
+    surface
+        .handle(&mut owner, PaletteEvent::Resize(140, 44))
+        .unwrap();
+    for (code, modifiers) in [
+        (KeyCode::Right, KeyModifiers::ALT),
+        (KeyCode::Down, KeyModifiers::ALT),
+        (KeyCode::Down, KeyModifiers::ALT),
+        (KeyCode::Char('1'), KeyModifiers::NONE),
+        (KeyCode::Down, KeyModifiers::ALT),
+        (KeyCode::Char('1'), KeyModifiers::NONE),
+        (KeyCode::Char('2'), KeyModifiers::NONE),
+        (KeyCode::Char('p'), KeyModifiers::CONTROL),
+        (KeyCode::Char('s'), KeyModifiers::CONTROL),
+    ] {
+        surface.handle(&mut owner, key(code, modifiers)).unwrap();
+    }
+    let preview = surface
+        .semantic()
+        .repertoire_preview
+        .as_ref()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        preview.request,
+        world.request(ScopeKind::Project, &["implementer", "orientation"], true)
+    );
+    let structured: RepertoirePreview =
+        serde_json::from_value(serde_json::to_value(&preview).unwrap()).unwrap();
+    assert_eq!(structured.render(), preview.render());
+    let hidden_interactions_leave_material =
+        |surface: &mut ApplicationSurfaceController, owner: &mut Service| {
+            use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+            let selected = surface.semantic().selected.clone();
+            let query = surface.semantic().query.clone();
+            let staged = surface.semantic().staged.clone();
+            let navigation = surface.semantic().navigation.clone();
+            let scope = surface.semantic().mutation_scope;
+            let sets = surface.semantic().compose_skill_sets.clone();
+            let profile = surface.semantic().compose_profile.clone();
+            let read_count = surface.world_reads_refresh_count();
+            let material = source_snapshot(&world.home.state());
+            for (code, modifiers) in [
+                (KeyCode::Insert, KeyModifiers::NONE),
+                (KeyCode::Char(' '), KeyModifiers::CONTROL),
+                (KeyCode::Enter, KeyModifiers::NONE),
+                (KeyCode::Char('x'), KeyModifiers::NONE),
+                (KeyCode::Char('1'), KeyModifiers::NONE),
+                (KeyCode::Right, KeyModifiers::ALT),
+            ] {
+                surface.handle(owner, key(code, modifiers)).unwrap();
+            }
+            surface
+                .handle(
+                    owner,
+                    PaletteEvent::Mouse(MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: 4,
+                        row: 6,
+                        modifiers: KeyModifiers::NONE,
+                    }),
+                )
+                .unwrap();
+            assert_eq!(surface.semantic().selected, selected);
+            assert_eq!(surface.semantic().query, query);
+            assert_eq!(surface.semantic().staged, staged);
+            assert_eq!(surface.semantic().navigation, navigation);
+            assert_eq!(surface.semantic().mutation_scope, scope);
+            assert_eq!(surface.semantic().compose_skill_sets, sets);
+            assert_eq!(surface.semantic().compose_profile, profile);
+            assert_eq!(surface.world_reads_refresh_count(), read_count);
+            assert_eq!(source_snapshot(&world.home.state()), material);
+        };
+    hidden_interactions_leave_material(&mut surface, &mut owner);
+    let initial = visible(&surface, 140, 44);
+    assert!(initial.contains("Composition preview"), "{initial}");
+    assert!(initial.contains("current generation: none"), "{initial}");
+    assert!(!initial.contains("set(s)current generation"), "{initial}");
+    assert!(
+        initial.contains("Ctrl+S confirms; Esc returns"),
+        "{initial}"
+    );
+
+    for (width, height) in [(140, 44), (60, 24)] {
+        surface
+            .handle(&mut owner, PaletteEvent::Resize(width, height))
+            .unwrap();
+        surface
+            .handle(&mut owner, key(KeyCode::Home, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(surface.semantic().repertoire_report_scroll, 0);
+        surface
+            .handle(&mut owner, key(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(surface.semantic().repertoire_report_scroll, 1);
+        surface
+            .handle(&mut owner, key(KeyCode::Home, KeyModifiers::NONE))
+            .unwrap();
+        let mut seen = String::new();
+        for _ in 0..1024 {
+            let screen = visible(&surface, width, height);
+            assert!(screen.contains("Composition preview"), "{screen}");
+            assert!(screen.contains("Ctrl+S confirms; Esc returns"), "{screen}");
+            seen.push_str(&compact(&screen));
+            let before = surface.semantic().repertoire_report_scroll;
+            surface
+                .handle(&mut owner, key(KeyCode::PageDown, KeyModifiers::NONE))
+                .unwrap();
+            if surface.semantic().repertoire_report_scroll == before {
+                break;
+            }
+        }
+        assert!(
+            surface.semantic().repertoire_report_scroll > 0,
+            "actual native metadata exceeds this viewport"
+        );
+        for edit in &preview.diff.edits {
+            if let Some(path) = &edit.path {
+                assert!(
+                    seen.contains(&compact(&path.display().to_string())),
+                    "native edit {} is inaccessible",
+                    path.display()
+                );
+            }
+        }
+        for material in [
+            preview.procedure.id.to_string(),
+            ".claude/skills/plain".into(),
+            ".pi/skills/plain".into(),
+        ] {
+            assert!(
+                seen.contains(&compact(&material)),
+                "native material {material} is inaccessible"
+            );
+        }
+        assert!(!seen.contains(&compact("Human-owned project instructions remain intact.")));
+        assert!(!seen.contains(&compact("Foreign harness instructions remain intact.")));
+        assert!(!seen.contains(&compact(
+            "Use the project's own source and report real evidence."
+        )));
+        let end = surface.semantic().repertoire_report_scroll;
+        surface
+            .handle(&mut owner, key(KeyCode::End, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(surface.semantic().repertoire_report_scroll, end);
+        surface
+            .handle(&mut owner, key(KeyCode::PageDown, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(surface.semantic().repertoire_report_scroll, end);
+        surface
+            .handle(&mut owner, key(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(surface.semantic().repertoire_report_scroll, end - 1);
+        assert_eq!(
+            surface
+                .semantic()
+                .repertoire_preview
+                .as_ref()
+                .unwrap()
+                .procedure,
+            preview.procedure
+        );
+        assert_eq!(
+            fs::read(world.project.join(".aikit/profile.toml")).unwrap(),
+            declaration
+        );
+        assert_eq!(generation::current(&context).unwrap(), None);
+        assert!(!world.project.join(".agents/skills").exists());
+        assert!(!world.project.join(".pi/skills").exists());
+        assert_eq!(source_snapshot(&world.home.registries()), source);
+    }
+
+    surface
+        .handle(&mut owner, PaletteEvent::Resize(140, 44))
+        .unwrap();
+    surface
+        .handle(&mut owner, key(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(surface.semantic().overlay, Some(Overlay::ConfirmApply));
+    assert_eq!(surface.semantic().repertoire_report_scroll, 0);
+    surface
+        .handle(&mut owner, key(KeyCode::End, KeyModifiers::NONE))
+        .unwrap();
+    hidden_interactions_leave_material(&mut surface, &mut owner);
+    let confirmation = visible(&surface, 140, 44);
+    assert!(
+        confirmation.contains("Confirm composition"),
+        "{confirmation}"
+    );
+    assert!(
+        confirmation.contains("Ctrl+S applies; Esc returns"),
+        "{confirmation}"
+    );
+    assert_eq!(
+        surface
+            .semantic()
+            .repertoire_preview
+            .as_ref()
+            .unwrap()
+            .procedure,
+        preview.procedure
+    );
+    assert_eq!(generation::current(&context).unwrap(), None);
+    surface
+        .handle(&mut owner, key(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+    let applied = surface
+        .semantic()
+        .repertoire_application
+        .as_ref()
+        .unwrap()
+        .clone();
+    assert_eq!(applied.procedure, preview.procedure.id);
+    assert_eq!(
+        surface.semantic().status.as_ref().unwrap().message,
+        applied.render()
+    );
+    assert_eq!(
+        surface.semantic().overlay,
+        Some(Overlay::RepertoireApplicationReport)
+    );
+    assert_eq!(surface.semantic().repertoire_report_scroll, 0);
+    let structured: aikit_core::repertoire::RepertoireApplication =
+        serde_json::from_value(serde_json::to_value(&applied).unwrap()).unwrap();
+    assert_eq!(structured.render(), applied.render());
+    assert_eq!(
+        generation::current(&context).unwrap(),
+        applied.reading.generation
+    );
+    surface
+        .handle(&mut owner, key(KeyCode::End, KeyModifiers::NONE))
+        .unwrap();
+    hidden_interactions_leave_material(&mut surface, &mut owner);
+    let application = visible(&surface, 140, 44);
+    assert!(
+        application.contains("Last observed repertoire application"),
+        "{application}"
+    );
+    for value in [
+        applied.procedure.to_string(),
+        applied.reading.generation.as_ref().unwrap().to_string(),
+        applied.undo.clone(),
+        "observed apply:".into(),
+    ] {
+        assert!(
+            compact(&application).contains(&compact(&value)),
+            "application material {value} is inaccessible:\n{application}"
+        );
+    }
+    let material = source_snapshot(&context);
+    let procedure =
+        source_snapshot(&ProcedureRunner::new(&world.home).procedure_dir(&applied.procedure));
+    let profile = fs::read(world.project.join(".aikit/profile.toml")).unwrap();
+    let selected = surface.semantic().compose_skill_sets.clone();
+    for (code, modifiers) in [
+        (KeyCode::Char('s'), KeyModifiers::CONTROL),
+        (KeyCode::Esc, KeyModifiers::NONE),
+        (KeyCode::Char('o'), KeyModifiers::CONTROL),
+        (KeyCode::Home, KeyModifiers::NONE),
+        (KeyCode::PageDown, KeyModifiers::NONE),
+        (KeyCode::End, KeyModifiers::NONE),
+    ] {
+        surface.handle(&mut owner, key(code, modifiers)).unwrap();
+    }
+    assert_eq!(
+        surface.semantic().overlay,
+        Some(Overlay::RepertoireApplicationReport)
+    );
+    assert_eq!(
+        surface.semantic().repertoire_application.as_ref().unwrap(),
+        &applied
+    );
+    assert_eq!(surface.semantic().compose_skill_sets, selected);
+    assert_eq!(source_snapshot(&context), material);
+    assert_eq!(
+        source_snapshot(&ProcedureRunner::new(&world.home).procedure_dir(&applied.procedure)),
+        procedure
+    );
+    assert_eq!(
+        fs::read(world.project.join(".aikit/profile.toml")).unwrap(),
+        profile
+    );
+    owner
+        .verify_repertoire_procedure(&applied.reading, &applied.procedure)
+        .unwrap();
+    ProcedureRunner::new(&world.home)
+        .undo(&applied.procedure)
+        .unwrap();
+    assert_eq!(
+        fs::read(world.project.join(".aikit/profile.toml")).unwrap(),
+        declaration
+    );
+    assert!(!world.project.join(".agents/skills").exists());
+    assert!(!world.project.join(".pi/skills").exists());
+    assert_eq!(source_snapshot(&world.home.registries()), source);
+    assert_eq!(
+        fs::read(world.project.join("AGENTS.md")).unwrap(),
+        foreign_agents
+    );
+    assert_eq!(
+        fs::read(world.project.join("CLAUDE.md")).unwrap(),
+        foreign_claude
+    );
 }

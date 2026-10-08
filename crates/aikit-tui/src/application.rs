@@ -478,7 +478,9 @@ pub trait TuiApplicationService {
     ) -> Result<crate::backend::AgentProfileSaveReceipt> {
         Err(AikitError::new(
             "agent_profile.save_not_exposed",
-            format!("no agent-profile save operation is bound for this service: purpose {purpose:?}, name {name:?} would not be saved"),
+            format!(
+                "no agent-profile save operation is bound for this service: purpose {purpose:?}, name {name:?} would not be saved"
+            ),
         ))
     }
 
@@ -532,6 +534,8 @@ pub enum Overlay {
     Explain,
     CompositionPreview,
     ConfirmApply,
+    /// A retained native application Return, viewed without another effect.
+    RepertoireApplicationReport,
     /// The ranked Model roster, fetched on demand and shown read-only.
     ModelRoster,
 }
@@ -823,6 +827,9 @@ pub struct TuiState {
     pub repertoire_preview: Option<aikit_core::repertoire::RepertoirePreview>,
     #[serde(default)]
     pub repertoire_application: Option<aikit_core::repertoire::RepertoireApplication>,
+    /// Wrapped-row offset of the existing native composition report overlay.
+    #[serde(default)]
+    pub repertoire_report_scroll: u16,
 
     pub status: Option<UiStatus>,
     pub area: (u16, u16),
@@ -907,6 +914,7 @@ impl Default for TuiState {
             compose_profile: None,
             repertoire_preview: None,
             repertoire_application: None,
+            repertoire_report_scroll: 0,
             status: None,
             area: (80, 24),
             live_field: None,
@@ -1009,6 +1017,10 @@ pub enum UiAction {
     RequestRepertoirePreview,
     RepertoirePreviewed(Box<aikit_core::repertoire::RepertoirePreview>),
     RepertoireApplied(Box<aikit_core::repertoire::RepertoireApplication>),
+    ScrollRepertoireReport {
+        offset: u16,
+    },
+    ShowRepertoireApplicationReport,
     SelectComposeProfile(Option<aikit_core::ProfileId>),
     RequestCompositionPreview,
     CompositionPreviewed(CompositionPreview),
@@ -1709,7 +1721,21 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 state.graph.collapsed_groups.insert(key);
             }
         }
-        UiAction::ShowOverlay(overlay) => state.overlay = Some(overlay),
+        UiAction::ShowOverlay(overlay) => {
+            state.overlay = Some(overlay);
+            state.repertoire_report_scroll = 0;
+        }
+        UiAction::ScrollRepertoireReport { offset } => {
+            if let Some((maximum, _)) = crate::v2_render::repertoire_report_scroll_bounds(&state) {
+                state.repertoire_report_scroll = offset.min(maximum);
+            }
+        }
+        UiAction::ShowRepertoireApplicationReport => {
+            if state.repertoire_application.is_some() {
+                state.overlay = Some(Overlay::RepertoireApplicationReport);
+                state.repertoire_report_scroll = 0;
+            }
+        }
         UiAction::Dismiss => {
             // Esc/dismiss is intentionally incapable of clearing query, staged
             // changes, selection, scope, or requesting application exit.
@@ -1783,6 +1809,7 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 && state.staged.is_empty()
             {
                 state.repertoire_preview = Some(*preview);
+                state.repertoire_report_scroll = 0;
                 state.overlay = Some(Overlay::CompositionPreview);
             } else {
                 state.repertoire_preview = None;
@@ -1798,7 +1825,8 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             state.repertoire_application = Some(*application);
             state.repertoire_preview = None;
             state.preview = None;
-            state.overlay = None;
+            state.repertoire_report_scroll = 0;
+            state.overlay = Some(Overlay::RepertoireApplicationReport);
         }
         UiAction::RequestCompositionPreview => request_preview(&mut state, &mut effects),
         UiAction::CompositionPreviewed(preview) => {
@@ -1820,6 +1848,7 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                     && state.compose_skill_sets == preview.request.skill_sets
                     && state.staged.is_empty()
             }) {
+                state.repertoire_report_scroll = 0;
                 state.overlay = Some(Overlay::ConfirmApply);
                 return TuiReduction { state, effects };
             }
@@ -1944,7 +1973,12 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 effects.push(UiEffect::ObserveWorkingEnvironments);
             }
         }
-        UiAction::Resize(cols, rows) => state.area = (cols, rows),
+        UiAction::Resize(cols, rows) => {
+            state.area = (cols, rows);
+            if let Some((maximum, _)) = crate::v2_render::repertoire_report_scroll_bounds(&state) {
+                state.repertoire_report_scroll = state.repertoire_report_scroll.min(maximum);
+            }
+        }
         UiAction::Exit => {
             if state.staged.is_empty() {
                 state.exit_requested = true;

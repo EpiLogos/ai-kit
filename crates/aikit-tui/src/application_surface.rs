@@ -448,6 +448,7 @@ impl ApplicationSurfaceController {
         }
         if self.semantic.presentation == PresentationMode::Workspace
             && self.semantic.workspace_section == WorkspaceSection::Knowledge
+            && crate::v2_render::repertoire_report_scroll_bounds(&self.semantic).is_none()
         {
             self.draw_relations(frame);
         }
@@ -520,7 +521,9 @@ impl ApplicationSurfaceController {
         }
         if matches!(
             self.semantic.overlay,
-            Some(Overlay::ConfirmApply) | Some(Overlay::CompositionPreview)
+            Some(Overlay::ConfirmApply)
+                | Some(Overlay::CompositionPreview)
+                | Some(Overlay::RepertoireApplicationReport)
         ) {
             return;
         }
@@ -577,6 +580,47 @@ impl ApplicationSurfaceController {
         let ctrl = modifiers.contains(KeyModifiers::CONTROL);
         let alt = modifiers.contains(KeyModifiers::ALT);
 
+        // A native material report owns its visible interaction. Hidden
+        // resource, draft and query handlers cannot act beneath that reading.
+        if let Some((maximum, page_rows)) =
+            crate::v2_render::repertoire_report_scroll_bounds(&self.semantic)
+        {
+            if ctrl && matches!(code, KeyCode::Char('c') | KeyCode::Char('q')) {
+                return self.dispatch(backend, UiAction::Exit);
+            }
+            if self.conversation.is_open() {
+                return self.handle_conversation_key(code, ctrl, alt);
+            }
+            if !ctrl && !alt {
+                let current = self.semantic.repertoire_report_scroll.min(maximum);
+                let offset = match code {
+                    KeyCode::Up => Some(current.saturating_sub(1)),
+                    KeyCode::Down => Some(current.saturating_add(1).min(maximum)),
+                    KeyCode::PageUp => Some(current.saturating_sub(page_rows)),
+                    KeyCode::PageDown => Some(current.saturating_add(page_rows).min(maximum)),
+                    KeyCode::Home => Some(0),
+                    KeyCode::End => Some(maximum),
+                    _ => None,
+                };
+                if let Some(offset) = offset {
+                    return self.dispatch(backend, UiAction::ScrollRepertoireReport { offset });
+                }
+                if code == KeyCode::Esc {
+                    return self.dispatch(backend, UiAction::Back);
+                }
+            }
+            if ctrl && !alt && code == KeyCode::Char('s') {
+                return match self.semantic.overlay {
+                    Some(Overlay::CompositionPreview) => {
+                        self.dispatch(backend, UiAction::RequestApply)
+                    }
+                    Some(Overlay::ConfirmApply) => self.dispatch(backend, UiAction::ConfirmApply),
+                    _ => Ok(()),
+                };
+            }
+            return Ok(());
+        }
+
         if self.graph_filter_editing {
             return self.handle_graph_filter_key(backend, code);
         }
@@ -604,6 +648,15 @@ impl ApplicationSurfaceController {
         // composed.
         if self.conversation.is_open() {
             return self.handle_conversation_key(code, ctrl, alt);
+        }
+        if ctrl
+            && code == KeyCode::Char('o')
+            && self.semantic.workspace_section == WorkspaceSection::Compose
+            && self.semantic.overlay.is_none()
+            && self.semantic.query.is_empty()
+            && self.semantic.repertoire_application.is_some()
+        {
+            return self.dispatch(backend, UiAction::ShowRepertoireApplicationReport);
         }
         // Context-aware help (?): explains what the keys and next steps do
         // where the operator actually stands. Only claimed when the query is
@@ -1020,6 +1073,11 @@ impl ApplicationSurfaceController {
         row: u16,
         modifiers: KeyModifiers,
     ) -> Result<()> {
+        // The native report covers the list and Inspector. No hidden hit target
+        // may select, stage or open a resource beneath its material reading.
+        if crate::v2_render::repertoire_report_scroll_bounds(&self.semantic).is_some() {
+            return Ok(());
+        }
         let (cols, rows) = self.semantic.area;
         let cols = cols.max(2);
         let rows = rows.max(2);
