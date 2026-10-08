@@ -284,11 +284,19 @@ fn actual_thirteen_registered_sets_are_visible_and_selectable_at_140_by_44() {
     surface
         .handle(&mut service, key(KeyCode::Right, KeyModifiers::ALT))
         .unwrap();
-    for _ in 0..3 {
+    for _ in 0..2 {
         surface
             .handle(&mut service, key(KeyCode::Down, KeyModifiers::ALT))
             .unwrap();
     }
+    // The fixture's actual Profile admits its reviewed members. SkillSet
+    // routing itself must not grant activation or bypass Profile precedence.
+    surface
+        .handle(&mut service, key(KeyCode::Char('1'), KeyModifiers::NONE))
+        .unwrap();
+    surface
+        .handle(&mut service, key(KeyCode::Down, KeyModifiers::ALT))
+        .unwrap();
     assert_eq!(
         surface.semantic().workspace_section,
         WorkspaceSection::Compose
@@ -375,6 +383,10 @@ fn actual_thirteen_registered_sets_are_visible_and_selectable_at_140_by_44() {
         ["central-engineering", "suite-foundations"]
     );
     assert_eq!(preview.request.scope, ScopeKind::Project);
+    assert_eq!(
+        preview.request.profile,
+        Some(ProfileId::parse("profile/development").unwrap())
+    );
     assert!(!preview.procedure.plan.edits.is_empty());
     assert_eq!(
         preview
