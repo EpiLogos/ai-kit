@@ -35,6 +35,11 @@ fn executable(path: &Path, body: &str) {
 /// dropping hands the SAME port to the next bind(0) of a concurrently running test binary (the allocator is sequential on macOS), which
 /// raced two service tests on a CI runner ("Address already in use"). A random pick over 25,000 ports makes that collision negligible.
 fn free_port() -> u16 {
+    // Never repeat a port within this process: concurrent test binaries draw
+    // from the same pid+time-seeded space, and the bind-check-then-use window
+    // is a TOCTOU the CI runner has hit ("Address already in use").
+    use std::sync::Mutex;
+    static handed_out: Mutex<std::collections::BTreeSet<u16>> = Mutex::new(std::collections::BTreeSet::new());
     let mut seed = u64::from(std::process::id())
         ^ std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -45,7 +50,15 @@ fn free_port() -> u16 {
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
         let port = 30_000 + ((seed >> 33) % 25_000) as u16;
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+        let taken = handed_out
+            .lock()
+            .unwrap()
+            .contains(&port);
+        if !taken && TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            handed_out
+                .lock()
+                .unwrap()
+                .insert(port);
             return port;
         }
     }
