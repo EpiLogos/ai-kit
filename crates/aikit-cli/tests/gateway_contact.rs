@@ -1582,7 +1582,13 @@ fn a_vacant_position_holds_the_communique_for_whoever_claims_it_next() {
         "held-now-deliverable"
     );
     let (document, _) = scribe.prompt(false);
-    assert!(document.contains("Held while the Position was vacant"));
+    // The redesigned communique render names the durable Position instead of
+    // the retired "held while vacant" phrasing; the semantic contract is the
+    // same: the waiting communique is disclosed to the verified occupant.
+    assert!(
+        document.contains("Addressed to this durable Position; verified occupant receives it"),
+        "{document}"
+    );
     let journal = state_file_communiques(&base.home);
     assert_eq!(
         journal[0]["delivered_to_generation_ref"],
