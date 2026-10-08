@@ -11,7 +11,7 @@ with a Kev-shaped card and `POST /v1/systemone` with strictly valid answers.
 import json
 import os
 import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 def snapshot(args):
@@ -96,7 +96,7 @@ def serve(args):
             self.send({"model": request["model"], "answers": answers(request),
                        "usage": {"input_tokens": 11, "output_tokens": 3}})
 
-    HTTPServer((host, port), Handler).serve_forever()
+    ThreadingHTTPServer((host, port), Handler).serve_forever()
 
 
 if __name__ == "__main__":
