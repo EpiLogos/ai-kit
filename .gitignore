@@ -22,6 +22,9 @@
 
 # Subagent restoration-lane build target
 /target-restore/
+<<<<<<< HEAD
 
 # Restoration-lane decoupled build target
 /target-restore/
+=======
+>>>>>>> origin/feat/central-field-ai-kit

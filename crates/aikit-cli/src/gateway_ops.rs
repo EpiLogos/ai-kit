@@ -563,22 +563,20 @@ pub fn publish_process_record(
     home: &AikitHome,
     listeners: Vec<GatewayListenerReading>,
 ) -> Result<()> {
-    let record = GatewayProcessRecord::new(this_process_identity());
-    let path = process_record_path(home);
     // The record is published before the carriers start — frequently before
     // anything else has created the state directory on a fresh home.
-    std::fs::create_dir_all(path.parent().ok_or_else(|| {
+    std::fs::create_dir_all(home.state()).map_err(|error| {
         AikitError::new(
-            "gateway.process_record_path",
-            "The posture record path has no parent directory",
+            "gateway.process_record_directory",
+            format!(
+                "create the gateway state directory {}: {error}",
+                home.state().display()
+            ),
         )
-    })?)
-    .map_err(|error| {
-        AikitError::new(
-            "gateway.process_record_write",
-            format!("create the posture record directory: {error}"),
-        )
+        .with_io_source(error)
     })?;
+    let record = GatewayProcessRecord::new(this_process_identity());
+    let path = process_record_path(home);
     let write = move |build: &GatewayBuildIdentity| -> Result<()> {
         let posture = GatewayProcessPosture {
             schema: PROCESS_RECORD_SCHEMA.into(),

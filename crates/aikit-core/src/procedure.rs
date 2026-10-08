@@ -1161,3 +1161,86 @@ mod tests {
         assert!(Fidelity::default().is_faithful());
     }
 }
+
+/// What one edit would change, rendered for review before anything is written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditDiff {
+    pub description: String,
+    pub path: Option<PathBuf>,
+    /// `true` when the path does not exist yet, so "before" is empty by fact
+    /// rather than by omission.
+    pub creates: bool,
+    pub before: Option<String>,
+    pub after: Option<String>,
+    /// How this edit will be undone, stated up front.
+    pub undo: String,
+}
+
+/// The full reviewable diff of a procedure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcedureDiff {
+    pub procedure: ProcedureId,
+    pub digest: PlanDigest,
+    pub isolation: String,
+    pub edits: Vec<EditDiff>,
+    pub notes: Vec<String>,
+}
+
+impl ProcedureDiff {
+    pub fn is_empty(&self) -> bool {
+        self.edits.is_empty()
+    }
+
+    /// Plain-text rendering for `aikit procedure diff`.
+    pub fn render(&self) -> String {
+        let mut out = format!(
+            "procedure {} ({}) — {} edit{}, staged {}\n",
+            self.procedure,
+            self.digest.short(),
+            self.edits.len(),
+            if self.edits.len() == 1 { "" } else { "s" },
+            self.isolation,
+        );
+        for note in &self.notes {
+            out.push_str(&format!("note: {note}\n"));
+        }
+        for edit in &self.edits {
+            out.push_str(&format!("\n{}\n", edit.description));
+            if let Some(path) = &edit.path {
+                out.push_str(&format!(
+                    "  {} {}\n",
+                    if edit.creates { "create" } else { "modify" },
+                    path.display()
+                ));
+            }
+            if let Some(before) = &edit.before {
+                out.push_str("  before:\n");
+                render_indented(&mut out, before);
+            } else if edit.creates {
+                out.push_str("  before: <absent>\n");
+            }
+            if let Some(after) = &edit.after {
+                out.push_str("  after:\n");
+                render_indented(&mut out, after);
+            } else if edit.path.is_some() {
+                out.push_str("  after: <absent>\n");
+            }
+            out.push_str(&format!("  undo: {}\n", edit.undo));
+        }
+        out
+    }
+}
+
+fn render_indented(out: &mut String, contents: &str) {
+    if contents.is_empty() {
+        out.push_str("    <empty>\n");
+        return;
+    }
+    for line in contents.split_inclusive('\n') {
+        out.push_str("    ");
+        out.push_str(line);
+        if !line.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+}

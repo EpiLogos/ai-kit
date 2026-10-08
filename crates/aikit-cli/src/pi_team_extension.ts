@@ -32,8 +32,14 @@ export default function (pi: any) {
           // resident owner. Its journal retains any uncertain original effect.
           child.kill("SIGTERM");
           const expectedTask=request.expected_task || request.turn?.expected_task;
+<<<<<<< HEAD
           if (request.agent_session && expectedTask) {
             execFile(bin,["--json","gateway","team","--request-json",JSON.stringify({action:"cancel",member_ref:request.member_ref,agent_session:request.agent_session,expected_task:expectedTask,reason:"Parent Pi tool cancellation"})],{cwd:ctx.cwd,timeout:15_000,maxBuffer:64*1024},()=>{});
+=======
+          const expectedBinding=request.expected_binding_revision || request.turn?.expected_binding_revision;
+          if (request.agent_session && expectedTask && expectedBinding) {
+            execFile(bin,["--json","gateway","team","--request-json",JSON.stringify({action:"cancel",member_ref:request.member_ref,agent_session:request.agent_session,expected_task:expectedTask,expected_binding_revision:expectedBinding,reason:"Parent Pi tool cancellation"})],{cwd:ctx.cwd,timeout:15_000,maxBuffer:64*1024},()=>{});
+>>>>>>> origin/feat/central-field-ai-kit
           }
         };
         signal?.addEventListener("abort",abort,{once:true});

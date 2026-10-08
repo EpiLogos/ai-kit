@@ -29,7 +29,6 @@
 
 use std::path::{Path, PathBuf};
 
-use aikit_core::capsule::Kind;
 use aikit_core::harness_admission::{
     FacultySupport, HarnessAdmissionAdapter, HarnessAdmissionDescriptor, HarnessEditionKind,
     HarnessFaculty, HarnessFacultyObservation, HARNESS_ADAPTER_SDK_VERSION,
@@ -123,30 +122,6 @@ impl PiAdapter {
     pub fn with_materialization(mut self, mode: MaterializationMode) -> Self {
         self.materialization = mode;
         self
-    }
-
-    /// The export name for a capability: its `export_name` config override, or
-    /// the capsule's leaf — the same collision-resolution rule the Claude
-    /// adapter uses, so two registries can each ship a `code-review`.
-    fn export_name(capability: &aikit_core::resolve::ActiveCapability) -> String {
-        capability
-            .config
-            .get("export_name")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| capability.id.leaf())
-            .to_string()
-    }
-
-    /// Where a skill capsule's Agent Skill tree lives inside its capsule.
-    fn payload_root(capability: &aikit_core::resolve::ActiveCapability) -> String {
-        capability
-            .config
-            .get("root")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("payload")
-            .to_string()
     }
 }
 
@@ -319,35 +294,11 @@ impl TargetAdapter for PiAdapter {
             ),
         );
 
-        for capability in context.view.active_of_kind(Kind::Skill) {
-            let Some(root) = context.root_of(&capability.id) else {
-                plan = plan.with_note(format!(
-                    "{} was not projected: the registry did not supply a path for it",
-                    capability.id
-                ));
-                continue;
-            };
-
-            let payload = root.join(Self::payload_root(capability));
-            let skill = agent_skills::validate(&payload)
-                .map_err(|e| e.with("capability", capability.id.to_string()))?;
-
-            let exported = agent_skills::AgentSkill {
-                name: Self::export_name(capability),
-                ..skill
-            };
-            let overlays = context
-                .view
-                .skill_usage_overlays
-                .get(&capability.id)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            plan = plan.with_items(exported.project_effective(
-                Path::new(SKILLS_PREFIX),
-                mode,
-                overlays,
-            )?);
-        }
+        plan = plan.with_items(agent_skills::project_repertoire(
+            context,
+            Path::new(SKILLS_PREFIX),
+            mode,
+        )?);
 
         if plan.items.is_empty() {
             plan = plan.with_note(

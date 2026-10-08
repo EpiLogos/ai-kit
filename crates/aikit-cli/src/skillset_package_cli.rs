@@ -59,7 +59,7 @@ pub enum SetPackageSub {
 
 #[derive(Debug, Args)]
 pub struct SetPackageArgs {
-    /// Home set name or registry semantic ref (`aikit:project-author`).
+    /// Home/registry set reference, or `.` for this context's effective repertoire.
     #[arg(value_name = "SET")]
     pub set: String,
     /// openai | codex | claude | pi. Required except for `inspect`.
@@ -145,6 +145,125 @@ pub struct LoadedPackage {
 /// Load a SkillSet by home name or registry semantic ref, with its neutral
 /// `[package]` metadata, and resolve it into a [`PortableSkillPackage`].
 pub fn load_package(service: &Service, set_ref: &str) -> Result<LoadedPackage> {
+    if set_ref == "." {
+        let reading = service.resolved_repertoire()?;
+        let set = service.repertoire_skillset(&reading);
+        let metadata = repertoire_package_metadata(service, &reading.skill_sets)?;
+        let loaded = package_from_skillset(
+            service.snapshot(),
+            &set,
+            &format!("aikit:context/{}", reading.context_id),
+            metadata.clone(),
+        )?;
+        let mut unresolved = loaded.unresolved;
+        let mut members = Vec::new();
+        for mut member in loaded.members {
+            let selected = reading
+                .members
+                .iter()
+                .find(|selected| selected.id.to_string() == member.id);
+            if let Some(selected) = selected.filter(|selected| !selected.projected) {
+                unresolved.push(UnresolvedMember {
+                    id: member.id,
+                    reason: selected
+                        .withheld_reason
+                        .clone()
+                        .unwrap_or_else(|| "withheld in this context".into()),
+                });
+                continue;
+            }
+            if let Ok(id) = aikit_core::CapsuleId::parse(&member.id) {
+                if let Some(active) = service.resolved().active.get(&id) {
+                    member.name = agent_skills::effective_export_name(active).to_string();
+                    if let Some(root) = selected.and_then(|member| member.source_root.as_ref()) {
+                        let payload = agent_skills::effective_payload_root(active, root);
+                        let skill = agent_skills::validate(&payload)?;
+                        member.description = skill.description.clone();
+                        member.form = aikit_core::method::praxis_form(&skill.description);
+                        member.files = package_files(&skill)?;
+                    }
+                    if let Some(overlays) = service
+                        .resolved()
+                        .skill_usage_overlays
+                        .get(&id)
+                        .filter(|overlays| !overlays.is_empty())
+                    {
+                        member.description =
+                            agent_skills::effective_description(&member.description, overlays);
+                        if let Some(file) = member
+                            .files
+                            .iter_mut()
+                            .find(|file| file.path == agent_skills::SKILL_FILE)
+                        {
+                            let source = file.source.as_ref().ok_or_else(|| {
+                                AikitError::new(
+                                    "skillset.package.source_missing",
+                                    member.id.clone(),
+                                )
+                            })?;
+                            let skill =
+                                agent_skills::validate(source.parent().ok_or_else(|| {
+                                    AikitError::new(
+                                        "skillset.package.source_missing",
+                                        member.id.clone(),
+                                    )
+                                })?)?;
+                            let effective = skill.effective_markdown(overlays)?;
+                            file.sha256 = sha256_hex(effective.as_bytes());
+                            file.bytes = effective.len() as u64;
+                            file.inline = Some(effective.into_bytes());
+                            file.source = None;
+                        }
+                    }
+                }
+            }
+            members.push(member);
+        }
+        let mut package = PortableSkillPackage::build(PackageSource {
+            skillset_ref: format!("aikit:context/{}", reading.context_id),
+            set_name: set.name,
+            set_description: "Effective resolved repertoire; withheld members remain explicit"
+                .into(),
+            metadata,
+            members,
+            unresolved,
+        })?;
+        // Accepted capsule revisions stay verbatim on the members. The
+        // effective export also depends on Profile configuration and scoped
+        // orientation; changing those must invalidate its package provenance.
+        package.source_revision = format!(
+            "sha256:{}",
+            sha256_hex(
+                format!(
+                    "aikit-effective-repertoire-source-v1\n{}\n{}\n{}",
+                    package.source_revision,
+                    reading.resolution_hash,
+                    reading.skill_sets.join("\0"),
+                )
+                .as_bytes()
+            ),
+        );
+        let mut source_paths: Vec<PathBuf> = service
+            .repertoire_source_paths()
+            .into_iter()
+            .filter(|path| path.exists())
+            .collect();
+        for reference in &reading.skill_sets {
+            source_paths.extend(load_set(service.home(), reference)?.2);
+        }
+        source_paths.extend(
+            reading
+                .members
+                .into_iter()
+                .filter_map(|member| member.source_root),
+        );
+        source_paths.sort();
+        source_paths.dedup();
+        return Ok(LoadedPackage {
+            package,
+            source_paths,
+        });
+    }
     let (set, metadata, mut source_paths) = load_set(service.home(), set_ref)?;
     let package = package_from_skillset(service.snapshot(), &set, set_ref, metadata)?;
     for member in &package.members {
@@ -165,6 +284,58 @@ pub fn load_package(service: &Service, set_ref: &str) -> Result<LoadedPackage> {
         package,
         source_paths,
     })
+}
+
+/// Metadata is additive like the repertoire: equal contributions deduplicate,
+/// arrays union, and conflicting scalar/target contributions refuse with their
+/// source reference. Selecting two sets never quietly gives one precedence.
+fn repertoire_package_metadata(
+    service: &Service,
+    references: &[String],
+) -> Result<Option<PackageMetadata>> {
+    fn merge(
+        destination: &mut Value,
+        contribution: Value,
+        reference: &str,
+        path: &str,
+    ) -> Result<()> {
+        match (destination, contribution) {
+            (Value::Object(destination), Value::Object(contribution)) => {
+                for (key, value) in contribution {
+                    let path = format!("{path}.{key}");
+                    if let Some(existing) = destination.get_mut(&key) { merge(existing, value, reference, &path)?; }
+                    else { destination.insert(key, value); }
+                }
+            }
+            (Value::Array(destination), Value::Array(contribution)) => {
+                for value in contribution { if !destination.contains(&value) { destination.push(value); } }
+            }
+            (destination, contribution) if *destination == contribution => {},
+            (_, _) => return Err(AikitError::new("skillset.package.metadata_conflict", format!("{reference} conflicts at {path}; reconcile the set's package metadata before exporting the union"))
+                .with("set", reference.to_string()).with("field", path.to_string())),
+        }
+        Ok(())
+    }
+    let mut metadata = json!({});
+    let mut declared = false;
+    for reference in references {
+        if let Some(contribution) = load_set(service.home(), reference)?.1 {
+            declared = true;
+            merge(
+                &mut metadata,
+                serde_json::to_value(contribution).map_err(json_error)?,
+                reference,
+                "package",
+            )?;
+        }
+    }
+    if declared {
+        serde_json::from_value(metadata)
+            .map(Some)
+            .map_err(json_error)
+    } else {
+        Ok(None)
+    }
 }
 
 /// A home set (`<home>/skillsets/<name>/`, `[package]` in `set.toml`) or a
@@ -275,18 +446,7 @@ fn resolve_member(
         section.root.as_str()
     });
     let skill = agent_skills::validate(&payload).map_err(|e| e.to_string())?;
-    let mut files = Vec::new();
-    for relative in &skill.files {
-        let path = payload.join(relative);
-        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        files.push(PackageFile {
-            path: relative.clone(),
-            sha256: sha256_hex(&bytes),
-            bytes: bytes.len() as u64,
-            source: Some(path),
-            inline: None,
-        });
-    }
+    let files = package_files(&skill).map_err(|error| error.to_string())?;
     Ok(PackageMember {
         id: id.to_string(),
         form: aikit_core::method::praxis_form(&skill.description),
@@ -1235,3 +1395,22 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 #[path = "skillset_package_native_tools_tests.rs"]
 mod native_package_tools_tests;
+
+fn package_files(skill: &agent_skills::AgentSkill) -> Result<Vec<PackageFile>> {
+    skill
+        .files
+        .iter()
+        .map(|relative| {
+            let path = skill.root.join(relative);
+            let bytes = std::fs::read(&path)
+                .map_err(|error| io_err("skillset.package.source_unreadable", &path, error))?;
+            Ok(PackageFile {
+                path: relative.clone(),
+                sha256: sha256_hex(&bytes),
+                bytes: bytes.len() as u64,
+                source: Some(path),
+                inline: None,
+            })
+        })
+        .collect()
+}

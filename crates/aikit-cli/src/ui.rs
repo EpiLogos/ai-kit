@@ -113,6 +113,29 @@ impl<'a> V2SurfaceService<'a> {
 }
 
 impl PaletteBackend for V2SurfaceService<'_> {
+    fn repertoire_operations_available(&self) -> bool {
+        self.service.repertoire_operations_available()
+    }
+    fn repertoire_profiles(&self) -> Vec<aikit_core::ProfileId> {
+        self.service.repertoire_profiles()
+    }
+    fn preview_repertoire(
+        &self,
+        request: aikit_core::repertoire::RepertoireRequest,
+    ) -> Result<aikit_core::repertoire::RepertoirePreview> {
+        self.service.preview_repertoire(request)
+    }
+    fn apply_repertoire(
+        &mut self,
+        preview: aikit_core::repertoire::RepertoirePreview,
+    ) -> Result<aikit_core::repertoire::RepertoireApplication> {
+        self.service.apply_repertoire(preview)
+    }
+
+    fn repertoire_reading(&self) -> Result<Option<aikit_core::repertoire::RepertoireReading>> {
+        self.service.repertoire_reading()
+    }
+
     fn context(&self) -> &aikit_core::ContextDescriptor {
         <Service as PaletteBackend>::context(self.service)
     }

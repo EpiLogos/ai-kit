@@ -63,88 +63,8 @@ struct GitCommitRecord {
 // The diff a human reviews
 // ---------------------------------------------------------------------------
 
-/// What one edit would change, rendered for review **before** anything is written.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EditDiff {
-    pub description: String,
-    pub path: Option<PathBuf>,
-    /// `true` when the path does not exist yet, so "before" is empty by fact
-    /// rather than by omission.
-    pub creates: bool,
-    pub before: Option<String>,
-    pub after: Option<String>,
-    /// How this edit will be undone, stated up front.
-    pub undo: String,
-}
-
-/// The full reviewable diff of a procedure.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProcedureDiff {
-    pub procedure: ProcedureId,
-    pub digest: PlanDigest,
-    pub isolation: String,
-    pub edits: Vec<EditDiff>,
-    pub notes: Vec<String>,
-}
-
-impl ProcedureDiff {
-    pub fn is_empty(&self) -> bool {
-        self.edits.is_empty()
-    }
-
-    /// Plain-text rendering for `aikit procedure diff`.
-    pub fn render(&self) -> String {
-        let mut out = format!(
-            "procedure {} ({}) — {} edit{}, staged {}\n",
-            self.procedure,
-            self.digest.short(),
-            self.edits.len(),
-            if self.edits.len() == 1 { "" } else { "s" },
-            self.isolation,
-        );
-        for note in &self.notes {
-            out.push_str(&format!("note: {note}\n"));
-        }
-        for edit in &self.edits {
-            out.push_str(&format!("\n{}\n", edit.description));
-            if let Some(path) = &edit.path {
-                out.push_str(&format!(
-                    "  {} {}\n",
-                    if edit.creates { "create" } else { "modify" },
-                    path.display()
-                ));
-            }
-            if let Some(before) = &edit.before {
-                out.push_str("  before:\n");
-                render_indented(&mut out, before);
-            } else if edit.creates {
-                out.push_str("  before: <absent>\n");
-            }
-            if let Some(after) = &edit.after {
-                out.push_str("  after:\n");
-                render_indented(&mut out, after);
-            } else if edit.path.is_some() {
-                out.push_str("  after: <absent>\n");
-            }
-            out.push_str(&format!("  undo: {}\n", edit.undo));
-        }
-        out
-    }
-}
-
-fn render_indented(out: &mut String, contents: &str) {
-    if contents.is_empty() {
-        out.push_str("    <empty>\n");
-        return;
-    }
-    for line in contents.split_inclusive('\n') {
-        out.push_str("    ");
-        out.push_str(line);
-        if !line.ends_with('\n') {
-            out.push('\n');
-        }
-    }
-}
+/// Pure review DTOs retain their original public store paths for compatibility.
+pub use aikit_core::procedure::{EditDiff, ProcedureDiff};
 
 // ---------------------------------------------------------------------------
 // The runner
@@ -256,6 +176,30 @@ impl<'a> ProcedureRunner<'a> {
         Ok(procedure)
     }
 
+    /// Verify an observed application without replaying it or writing records.
+    /// The immutable retained plan and satisfaction marker are the authority;
+    /// expected outputs and unmodified source observations must still agree.
+    pub fn verify_applied(&self, id: &ProcedureId) -> Result<Procedure> {
+        let procedure = self.load(id)?;
+        if !self.is_satisfied(&procedure.digest)? {
+            return Err(AikitError::new(
+                "procedure.not_applied",
+                "retained Procedure has no completed application",
+            ));
+        }
+        verify_satisfied_result(&procedure.plan)?;
+        let touched = procedure.plan.touched_paths();
+        for expected in &procedure.plan.preconditions {
+            if !touched
+                .iter()
+                .any(|path| path == expected.path() || path.starts_with(expected.path()))
+            {
+                verify_forward_precondition(expected)?;
+            }
+        }
+        Ok(procedure)
+    }
+
     /// Compute the reviewable diff. **Writes nothing.**
     ///
     /// The "before" side is read from the real filesystem, so what a user reviews
@@ -322,7 +266,8 @@ impl<'a> ProcedureRunner<'a> {
         create_dir_all(&dir.join(UNDO_DIR))?;
 
         if self.is_satisfied(&procedure.digest)? {
-            verify_satisfied_result(&procedure.plan)?;
+            // A retained application must still match its unchanged read-source basis.
+            self.verify_applied(&procedure.id)?;
             return Ok(ProcedureOutcome {
                 procedure: procedure.id.clone(),
                 digest: procedure.digest.clone(),

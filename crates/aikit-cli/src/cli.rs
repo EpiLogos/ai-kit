@@ -539,6 +539,8 @@ pub struct SystemCommandsArgs {}
 pub enum ComposeGroupCommand {
     /// Compute the launch plan for the current composition (no realisation).
     Plan(ComposePlanArgs),
+    /// Inspect, preview and apply a Profile and SkillSet repertoire.
+    Repertoire(crate::app::repertoire::RepertoireArgs),
     /// Create and inspect project-specific profile lenses.
     Profile(ProfileCmd),
     /// Show what applying the current declarations would change. No mutation.
@@ -737,6 +739,7 @@ fn compose_route(args: &ComposeArgs) -> &'static str {
     match &args.command {
         None => "cmd_compose",
         Some(ComposeGroupCommand::Plan(_)) => "cmd_compose",
+        Some(ComposeGroupCommand::Repertoire(_)) => "cmd_compose_repertoire",
         Some(ComposeGroupCommand::Profile(c)) => profile_route(&c.command),
         Some(ComposeGroupCommand::Diff(_)) => "cmd_diff",
         Some(ComposeGroupCommand::Enable(_)) => "cmd_toggle_enable",

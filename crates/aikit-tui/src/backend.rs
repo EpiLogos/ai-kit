@@ -335,6 +335,36 @@ pub struct EncounterLaunch {
 /// Despite the retained compatibility name, this trait owns no application state,
 /// selection, Resource identity, search ranking, staging or relation semantics.
 pub trait PaletteBackend {
+    fn repertoire_operations_available(&self) -> bool {
+        false
+    }
+    fn repertoire_profiles(&self) -> Vec<aikit_core::ProfileId> {
+        Vec::new()
+    }
+    fn preview_repertoire(
+        &self,
+        _request: aikit_core::repertoire::RepertoireRequest,
+    ) -> Result<aikit_core::repertoire::RepertoirePreview> {
+        Err(aikit_core::AikitError::new(
+            "composition.repertoire_unavailable",
+            "native repertoire preview is unavailable at this boundary",
+        ))
+    }
+    fn apply_repertoire(
+        &mut self,
+        _preview: aikit_core::repertoire::RepertoirePreview,
+    ) -> Result<aikit_core::repertoire::RepertoireApplication> {
+        Err(aikit_core::AikitError::new(
+            "composition.repertoire_unavailable",
+            "native repertoire application is unavailable at this boundary",
+        ))
+    }
+
+    /// The effective repertoire, resolved by its native composition owner.
+    fn repertoire_reading(&self) -> Result<Option<aikit_core::repertoire::RepertoireReading>> {
+        Ok(None)
+    }
+
     fn context(&self) -> &ContextDescriptor;
 
     fn view(&self) -> &ResolvedView;

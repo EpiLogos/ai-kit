@@ -1,6 +1,6 @@
 //! Task admission for the existing encounter owner. Central owns the clearing;
 //! Workcell confines the existing protocol child; this module owns neither.
-use super::{error, native_admission, read_binding};
+use super::{error, native_admission, native_admission_before, read_binding};
 use crate::encounter_service::{EncounterProtocol, EncounterProvider, EncounterService};
 use aikit_adapters::central_placement::{
     AllocatedCentralTask, CentralTaskRequest, NativeCentralPlacement,
@@ -47,7 +47,115 @@ struct TaskRequest {
     /// keeps the explicitly unhosted protected-process mode, not fake hosting.
     #[serde(default)]
     material_host: Option<MaterialHost>,
+    /// Exact child-specific A application retained by this task owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repertoire: Option<TaskRepertoire>,
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskRepertoire {
+    reading: aikit_core::repertoire::RepertoireReading,
+    procedure: aikit_core::ProcedureId,
+}
+
+/// Pi's ambient project/global discovery is independent of AIKit context IDs.
+/// Pin explicit skills to the verified immutable application, never `current`.
+fn selected_pi_skill_argv(argv: &mut Vec<String>, immutable_skills: Option<&Path>) -> Result<()> {
+    if argv
+        .iter()
+        .any(|arg| arg == "--skill" || arg.starts_with("--skill="))
+    {
+        return Err(error(
+            "Task Pi skill arguments conflict with the exact selected repertoire",
+        ));
+    }
+    if !argv.iter().any(|arg| arg == "--no-skills" || arg == "-ns") {
+        argv.push("--no-skills".into());
+    }
+    if let Some(path) = immutable_skills {
+        let metadata = fs::symlink_metadata(path).map_err(error)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(error(
+                "Selected immutable Pi skill root must be an actual generation directory",
+            ));
+        }
+        argv.push("--skill".into());
+        argv.push(
+            path.to_str()
+                .ok_or_else(|| error("Pi skill path is not UTF-8"))?
+                .into(),
+        );
+    }
+    Ok(())
+}
+fn pin_task_pi_repertoire(
+    home: &AikitHome,
+    session: &ResourceRef,
+    request: &TaskRequest,
+    argv: &mut Vec<String>,
+) -> Result<()> {
+    let Some(selected) = &request.repertoire else {
+        return Ok(());
+    };
+    let generation = selected
+        .reading
+        .generation
+        .as_ref()
+        .ok_or_else(|| error("Selected task repertoire has no actual generation"))?;
+    let skills = home
+        .context_dir(&task_context_id(session))
+        .join("generations")
+        .join(generation.as_str())
+        .join("projections/pi/.pi/skills");
+    let carries_skills = selected
+        .reading
+        .members
+        .iter()
+        .any(|member| member.projected && member.practice == "Skill");
+    if carries_skills && !skills.is_dir() {
+        return Err(error(
+            "Selected Pi generation skills are missing; reconcile the native application",
+        ));
+    }
+    selected_pi_skill_argv(argv, skills.is_dir().then_some(skills.as_path()))
+}
+
+fn task_context_id(session: &ResourceRef) -> aikit_core::ContextId {
+    aikit_core::ContextId::parse(&format!(
+        "ctx_{}",
+        &blake3::hash(session.as_str().as_bytes()).to_hex()[..24]
+    ))
+    .expect("canonical derived ContextId")
+}
+fn task_repertoire_env(session: &ResourceRef, key: &str) -> Option<String> {
+    match key {
+        "AIKIT_SESSION_ID" => Some(task_session_id(session).to_string()),
+        "AIKIT_CONTEXT_ID" => Some(task_context_id(session).to_string()),
+        "AIKIT_TASK" | "AIKIT_PROJECT_ID" | "AIKIT_VIEW" | "AIKIT_CONTEXT_ROOT" => None,
+        _ => std::env::var(key).ok(),
+    }
+}
+fn validate_task_repertoire(
+    home: &AikitHome,
+    session: &ResourceRef,
+    request: &TaskRequest,
+) -> Result<()> {
+    let Some(selected) = &request.repertoire else {
+        return Ok(());
+    };
+    if selected.reading.context_id != task_context_id(session).as_str()
+        || selected.reading.generation.is_none()
+    {
+        return Err(error(
+            "Task repertoire must be an actual application in this exact child runtime context",
+        ));
+    }
+    let service = crate::app::Service::open(home.clone(), &request.cwd, |key| {
+        task_repertoire_env(session, key)
+    })?;
+    service.verify_repertoire_procedure(&selected.reading, &selected.procedure)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TaskRecord {
     schema: String,
@@ -70,15 +178,25 @@ struct TaskRecord {
 /// Finite native-owner requests, not protocol/session lifetime. Partial effects
 /// stay uncertain on timeout; the durable task key is never replaced for retry.
 struct OwnerRunner;
-impl CommandRunner for OwnerRunner {
-    fn run(&self, argv: &[String]) -> Result<Output> {
+impl OwnerRunner {
+    fn run_before(&self, argv: &[String], deadline: Option<std::time::Instant>) -> Result<Output> {
+        let timeout = match deadline {
+            Some(deadline) => deadline
+                .checked_duration_since(std::time::Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or_else(|| {
+                    error("Native task readback exhausted the existing startup deadline")
+                })?
+                .min(Duration::from_secs(15)),
+            None => Duration::from_secs(15),
+        };
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| error("Missing native operation"))?;
         let mut command = Command::new(program);
         command.args(args);
         SystemRunner::new()
-            .with_timeout(Duration::from_secs(15))
+            .with_timeout(timeout)
             .with_output_limit_bytes(4 * 1024 * 1024)
             .with_strict_utf8()
             .capture_command(&mut command)
@@ -97,6 +215,19 @@ impl CommandRunner for OwnerRunner {
             })
     }
 }
+impl CommandRunner for OwnerRunner {
+    fn run(&self, argv: &[String]) -> Result<Output> {
+        self.run_before(argv, None)
+    }
+}
+#[derive(Clone, Copy)]
+struct DeadlineOwnerRunner(Option<std::time::Instant>);
+impl CommandRunner for DeadlineOwnerRunner {
+    fn run(&self, argv: &[String]) -> Result<Output> {
+        OwnerRunner.run_before(argv, self.0)
+    }
+}
+
 fn path(home: &AikitHome, session: &ResourceRef) -> PathBuf {
     home.state().join("encounter-tasks").join(format!(
         "{}.json",
@@ -276,9 +407,20 @@ fn authority(
     session: &ResourceRef,
     request: &TaskRequest,
 ) -> Result<SourceRevision> {
+    authority_before(home, session, request, None)
+}
+fn authority_before(
+    home: &AikitHome,
+    session: &ResourceRef,
+    request: &TaskRequest,
+    deadline: Option<std::time::Instant>,
+) -> Result<SourceRevision> {
     let binding = read_binding(home, session)?
         .ok_or_else(|| error("Task needs an actual selected Agency, not a profile"))?;
-    let admitted = native_admission(&binding)?;
+    let admitted = match deadline {
+        Some(deadline) => native_admission_before(&binding, deadline)?,
+        None => native_admission(&binding)?,
+    };
     if !admitted.authorises(&ResourceRef::parse(WRITE_ACTION)?)
         || !admitted.receipt["determination"]["authority_refs"]
             .as_array()
@@ -328,12 +470,19 @@ fn owner_refusal(operation: &str, output: &Output) -> AikitError {
     ))
 }
 fn inspect(boundary: &Path, requirements: &Value) -> Result<Value> {
+    inspect_with_runner(boundary, requirements, &OwnerRunner)
+}
+fn inspect_with_runner(
+    boundary: &Path,
+    requirements: &Value,
+    runner: &dyn CommandRunner,
+) -> Result<Value> {
     if !boundary.is_absolute() {
         return Err(error("Explicit Workcell executable required"));
     }
     let file = tempfile::NamedTempFile::new().map_err(error)?;
     fs::write(file.path(), requirements.to_string()).map_err(error)?;
-    let output = OwnerRunner.run(&[
+    let output = runner.run(&[
         boundary.display().to_string(),
         "inspect".into(),
         file.path().display().to_string(),
@@ -489,6 +638,16 @@ fn task_codex_runtime(
     }))
 }
 fn validate(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Result<()> {
+    validate_before(home, session, record, None)
+}
+fn validate_before(
+    home: &AikitHome,
+    session: &ResourceRef,
+    record: &TaskRecord,
+    deadline: Option<std::time::Instant>,
+) -> Result<()> {
+    let runner = DeadlineOwnerRunner(deadline);
+    validate_task_repertoire(home, session, &record.request)?;
     if record.schema != "aikit.encounter-task/v1" || !record.ready {
         return Err(error(
             "Task preparation is incomplete; explicitly recover the same request",
@@ -500,7 +659,7 @@ fn validate(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Res
         ));
     }
     crate::encounter_profile_provider::ensure_connection_facts_reachable(&record.request.provider)?;
-    if authority(home, session, &record.request)? != record.agency_revision {
+    if authority_before(home, session, &record.request, deadline)? != record.agency_revision {
         return Err(error(
             "Task Agency changed; explicitly re-resolve before further work",
         ));
@@ -509,7 +668,7 @@ fn validate(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Res
         .allocation
         .as_ref()
         .ok_or_else(|| error("Missing native NOW"))?;
-    let owner = NativeCentralPlacement::new(OwnerRunner);
+    let owner = NativeCentralPlacement::new(runner);
     owner.revalidate(task)?;
     let cwd_anchor = owner.working_directory_anchor(task, &record.request.cwd)?;
     if Some(&cwd_anchor) != record.cwd_anchor.as_ref() {
@@ -524,7 +683,7 @@ fn validate(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Res
     if Some(&requirements) != record.requirements.as_ref() {
         return Err(error("Material requirements changed; no automatic renewal"));
     }
-    let fresh = inspect(boundary_executable(record)?, &requirements)?;
+    let fresh = inspect_with_runner(boundary_executable(record)?, &requirements, &runner)?;
     // Includes every native path/type/inode and the exact material requirement digest.
     if record.inspection.as_ref().is_none_or(|old| {
         old["requirements_digest"] != fresh["requirements_digest"]
@@ -541,7 +700,7 @@ fn validate(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Res
             if run.scope["prepared_write_boundary"] != fresh {
                 return Err(error("Prepared run execution boundary changed"));
             }
-            run.revalidate(request)?;
+            run.revalidate_with_runner(request, &runner)?;
         }
         (None, None) => {}
         _ => {
@@ -552,7 +711,7 @@ fn validate(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Res
     }
     match (&record.request.material_host, &record.material) {
         (Some(host), Some(binding)) if host == &binding.host => {
-            binding.validate(task)?;
+            binding.validate_with_runner(task, &runner)?;
         }
         (None, None) => {}
         _ => {
@@ -570,6 +729,18 @@ pub(super) fn check(home: &AikitHome, session: &ResourceRef) -> Result<()> {
     }
     Ok(())
 }
+pub(super) fn check_before(
+    home: &AikitHome,
+    session: &ResourceRef,
+    deadline: std::time::Instant,
+) -> Result<()> {
+    crate::encounter_service::ensure_native_startup_deadline(deadline)?;
+    if let Some(record) = read(home, session)? {
+        validate_before(home, session, &record, Some(deadline))?;
+    }
+    crate::encounter_service::ensure_native_startup_deadline(deadline)
+}
+
 /// Called at the existing prompt boundary for human and addressed turns alike.
 /// A new task configuration cannot bless an older, unconfined resident process.
 pub(super) fn prompt(service: &EncounterService, session: &ResourceRef) -> Result<String> {
@@ -761,6 +932,8 @@ fn isolate_task_identity(
         "AIKIT_SESSION_ID",
         "AIKIT_VIEW",
         "AIKIT_CONTEXT_ROOT",
+        "AIKIT_TASK",
+        "AIKIT_PROJECT_ID",
     ] {
         command.env_remove(name);
     }
@@ -773,6 +946,16 @@ impl EncounterService {
     pub fn task_repertoire_session_id(session: &ResourceRef) -> aikit_core::SessionId {
         task_session_id(session)
     }
+    pub fn task_repertoire_context_id(session: &ResourceRef) -> aikit_core::ContextId {
+        task_context_id(session)
+    }
+    pub fn open_task_repertoire(
+        home: &AikitHome,
+        cwd: &Path,
+        session: &ResourceRef,
+    ) -> Result<crate::app::Service> {
+        crate::app::Service::open(home.clone(), cwd, |key| task_repertoire_env(session, key))
+    }
     /// Owner-only CAS. A pending record is durable before allocating NOW; any
     /// failed preparation remains blocking, not an unconfined fallback.
     pub fn configure_task(
@@ -782,6 +965,7 @@ impl EncounterService {
         expected: Option<&SourceRevision>,
     ) -> Result<Value> {
         let request: TaskRequest = serde_json::from_value(input).map_err(error)?;
+        validate_task_repertoire(home, session, &request)?;
         crate::encounter_profile_provider::ensure_connection_facts_reachable(&request.provider)?;
         // Resolve and validate the declared body before journalling a pending
         // task or allocating its NOW. The raw request remains the immutable
@@ -985,10 +1169,29 @@ impl EncounterService {
         provider: &EncounterProvider,
         cwd: &std::path::Path,
     ) -> Result<(EncounterProvider, bool)> {
+        self.selected_model_provider_with_deadline(session, provider, cwd, None)
+    }
+    pub(crate) fn selected_model_provider_before(
+        &self,
+        session: &ResourceRef,
+        provider: &EncounterProvider,
+        cwd: &std::path::Path,
+        deadline: std::time::Instant,
+    ) -> Result<(EncounterProvider, bool)> {
+        crate::encounter_service::ensure_native_startup_deadline(deadline)?;
+        self.selected_model_provider_with_deadline(session, provider, cwd, Some(deadline))
+    }
+    fn selected_model_provider_with_deadline(
+        &self,
+        session: &ResourceRef,
+        provider: &EncounterProvider,
+        cwd: &std::path::Path,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(EncounterProvider, bool)> {
         let Some(record) = read(&self.home, session)? else {
             return Ok((provider.clone(), false));
         };
-        validate(&self.home, session, &record)?;
+        validate_before(&self.home, session, &record, deadline)?;
         if let Some(material) = &record.material {
             material.check_encounter_owner()?;
         }
@@ -1089,6 +1292,9 @@ impl EncounterService {
             let default = crate::model_defaults::for_session(home, session, &resolved_body)?;
             model_argv = crate::model_defaults::launch_argv(&resolved_body, default.as_ref())?;
         }
+        if resolved_body.protocol == EncounterProtocol::PiRpc {
+            pin_task_pi_repertoire(home, session, &record.request, &mut model_argv)?;
+        }
         let codex_runtime = task_codex_runtime(&record, &resolved_body, &model_argv)?;
         // Only nonsecret routing/type facts enter this private immutable launch
         // source. It lives with the existing requirements owner, outside Task T.
@@ -1143,7 +1349,13 @@ impl EncounterService {
         }
         // Credential/profile delivery may reconstruct its safe allowlist;
         // identity isolation therefore follows it, at the final child owner.
-        isolate_task_identity(&mut command, session, None);
+        validate_task_repertoire(home, session, &record.request)?;
+        let selected_context = record
+            .request
+            .repertoire
+            .as_ref()
+            .map(|_| task_context_id(session));
+        isolate_task_identity(&mut command, session, selected_context.as_ref());
         if let Some(runtime) = codex_runtime {
             command.env("npm_config_cache", runtime.npm_cache);
             // Task-owned native material placement follows the credential
@@ -1496,5 +1708,75 @@ mod task_identity_tests {
             .env("AIKIT_CONTEXT_ID", "parent-only");
         isolate_task_identity(&mut unselected, &second, None);
         assert!(unselected.status().unwrap().success());
+    }
+}
+
+#[cfg(test)]
+mod task_pi_repertoire_tests {
+    use super::*;
+    #[test]
+    fn pins_native_skill_arguments_to_immutable_directories_and_refuses_ambient_override() {
+        let temporary = tempfile::tempdir().unwrap();
+        let selected = temporary
+            .path()
+            .join("generations/gen_selected/projections/pi/.pi/skills");
+        fs::create_dir_all(&selected).unwrap();
+        fs::write(
+            selected.join("SKILL.md"),
+            "---\nname: selected\ndescription: Selected repertoire\n---\nExact material\n",
+        )
+        .unwrap();
+        let mut argv = vec!["pi".into(), "--mode".into(), "rpc".into()];
+        selected_pi_skill_argv(&mut argv, Some(&selected)).unwrap();
+        assert_eq!(
+            &argv[3..],
+            &[
+                "--no-skills".to_string(),
+                "--skill".into(),
+                selected.to_str().unwrap().into()
+            ]
+        );
+        assert!(fs::read_to_string(selected.join("SKILL.md"))
+            .unwrap()
+            .contains("Exact material"));
+        for conflicting in ["--skill", "--skill=/foreign/context"] {
+            let mut argv = vec!["pi".into(), conflicting.into()];
+            assert!(selected_pi_skill_argv(&mut argv, Some(&selected)).is_err());
+            assert_eq!(argv.len(), 2);
+        }
+        let mut empty = vec!["pi".into()];
+        selected_pi_skill_argv(&mut empty, None).unwrap();
+        assert_eq!(empty, vec!["pi", "--no-skills"]);
+        #[cfg(unix)]
+        {
+            let link = temporary.path().join("current");
+            std::os::unix::fs::symlink(&selected, &link).unwrap();
+            assert!(selected_pi_skill_argv(&mut vec!["pi".into()], Some(&link)).is_err());
+        }
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod startup_deadline_tests {
+    use super::*;
+    #[test]
+    fn actual_native_readbacks_share_the_existing_operation_deadline() {
+        let start = std::time::Instant::now();
+        let runner = DeadlineOwnerRunner(Some(start + Duration::from_secs(5)));
+        let first = runner
+            .run(&["/bin/sh".into(), "-c".into(), "sleep 2".into()])
+            .unwrap();
+        assert!(first.ok());
+        let second = runner.run(&["/bin/sh".into(), "-c".into(), "sleep 60".into()]);
+        assert!(second.is_err());
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "a second owner readback renewed startup"
+        );
+        let expired = runner.run(&["/bin/sh".into(), "-c".into(), "exit 0".into()]);
+        assert!(
+            expired.is_err(),
+            "even a fast owner is not invoked after the retained budget"
+        );
     }
 }

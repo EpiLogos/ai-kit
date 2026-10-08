@@ -445,10 +445,16 @@ fn preview_pane<'a>(
     }
     if state.overlay == Some(Overlay::ConfirmApply) {
         let summary = state
-            .preview
+            .repertoire_preview
             .as_ref()
-            .map(|preview| preview.summary.as_str())
-            .unwrap_or("preview unavailable");
+            .map(|preview| preview.render())
+            .or_else(|| {
+                state
+                    .preview
+                    .as_ref()
+                    .map(|preview| preview.summary.clone())
+            })
+            .unwrap_or_else(|| "preview unavailable".into());
         return Paragraph::new(vec![
             Line::from(Span::styled("Confirm composition", theme.heading())),
             Line::from(""),
@@ -463,10 +469,16 @@ fn preview_pane<'a>(
     }
     if state.overlay == Some(Overlay::CompositionPreview) {
         let summary = state
-            .preview
+            .repertoire_preview
             .as_ref()
-            .map(|preview| preview.summary.as_str())
-            .unwrap_or("preview unavailable");
+            .map(|preview| preview.render())
+            .or_else(|| {
+                state
+                    .preview
+                    .as_ref()
+                    .map(|preview| preview.summary.clone())
+            })
+            .unwrap_or_else(|| "preview unavailable".into());
         let mut lines = vec![
             Line::from(Span::styled("Composition preview", theme.heading())),
             Line::from(""),

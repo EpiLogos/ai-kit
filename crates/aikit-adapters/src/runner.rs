@@ -363,6 +363,36 @@ impl SystemRunner {
         self.spawn_bounded(command, &argv, self.timeout)
     }
 
+    /// Preserve an explicitly retained, finite regular-file input through the
+    /// existing bounded process owner. This scope owns the command group through
+    /// completion, including descendants with closed pipes. Other captures keep
+    /// null stdin and their existing target-owned background semantics.
+    pub fn capture_owned_command_with_stdin_file(
+        &self,
+        command: &mut std::process::Command,
+        input: std::fs::File,
+    ) -> Result<Output> {
+        let metadata = input.metadata().map_err(|failure| {
+            AikitError::new("mux.command_stdin_invalid", failure.to_string())
+                .with("execution_started", "false")
+                .with_io_source(failure)
+        })?;
+        if !metadata.is_file() || metadata.len() > 1_048_576 {
+            return Err(AikitError::new(
+                "mux.command_stdin_invalid",
+                "Command input requires a finite regular file within 1MiB",
+            )
+            .with("execution_started", "false"));
+        }
+        let argv = std::iter::once(command.get_program())
+            .chain(command.get_args())
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        self.configure_command(command);
+        command.stdin(std::process::Stdio::from(input));
+        self.spawn_bounded_with_stdin(command, &argv, self.timeout, true)
+    }
+
     fn configure_command(&self, command: &mut std::process::Command) {
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
@@ -380,6 +410,15 @@ impl SystemRunner {
         command: &mut std::process::Command,
         argv: &[String],
         budget: Option<std::time::Duration>,
+    ) -> Result<Output> {
+        self.spawn_bounded_with_stdin(command, argv, budget, false)
+    }
+    fn spawn_bounded_with_stdin(
+        &self,
+        command: &mut std::process::Command,
+        argv: &[String],
+        budget: Option<std::time::Duration>,
+        preserve_stdin: bool,
     ) -> Result<Output> {
         let limit = self.output_limit_bytes();
         if limit == 0 || usize::try_from(limit).is_err() {
@@ -406,6 +445,8 @@ impl SystemRunner {
                 argv,
                 budget,
                 CapturePolicy {
+                    preserve_stdin,
+                    retire_completed_group: preserve_stdin,
                     limit,
                     strict_utf8: self.strict_utf8,
                     aggregate_limit: self.aggregate_output_limit_bytes,
@@ -417,7 +458,7 @@ impl SystemRunner {
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = (command, budget);
+            let _ = (command, budget, preserve_stdin);
             let failure = AikitError::new(
                 "mux.command_capture_unsupported",
                 "Bounded native command capture is unavailable on this platform",
@@ -589,6 +630,68 @@ impl OwnedCommand {
         result
     }
 
+    // The effect is guarded by the existing native unreaped-child ownership
+    // check. After reap, only a bounded read-only group probe is permitted; a
+    // reused identifier can cause uncertainty, never another numeric signal.
+    fn retire_completed_group(&mut self, deadline: std::time::Instant) -> CommandCleanup {
+        let group = rustix::process::Pid::from_raw(self.child.id() as i32);
+        let mut result = self.cleanup(deadline);
+        // Darwin reports EPERM when the exclusively owned group contains
+        // only the exited unreaped leader. Reaping removes that final zombie.
+        // Preserve every other failure. EPERM is reconciled only by a later
+        // actual ESRCH observation, never interpreted as successful signalling.
+        let completed_darwin_group = cfg!(target_os = "macos")
+            && result.reaped
+            && result.error_stage == Some("group_signal")
+            && result.error.as_ref().is_some_and(|error| {
+                error.raw_os_error() == Some(rustix::io::Errno::PERM.raw_os_error())
+            });
+        if !result.reaped || result.error.is_some() && !completed_darwin_group {
+            return result;
+        }
+        let Some(group) = group else {
+            return result;
+        };
+        loop {
+            match rustix::process::test_kill_process_group(group) {
+                Err(cause) if cause == rustix::io::Errno::SRCH => {
+                    if completed_darwin_group {
+                        result.additional_errors.extend(result.error.take());
+                        result.error_stage = None;
+                        result.signal = "already-absent-after-reap";
+                        result.absence = Some(cause.into());
+                    }
+                    break;
+                }
+                // Killed descendants can remain zombies until their native
+                // reaper runs. Continue read-only within the original cleanup
+                // budget; EPERM remaining at the deadline still refuses success.
+                Err(cause)
+                    if cfg!(target_os = "macos")
+                        && cause == rustix::io::Errno::PERM
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(cause) => {
+                    result.error = Some(cause.into());
+                    result.error_stage = Some("completed_group_retirement");
+                    break;
+                }
+                Ok(()) if std::time::Instant::now() >= deadline => {
+                    result.error = Some(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Owned command group retirement remains unconfirmed",
+                    ));
+                    result.error_stage = Some("completed_group_retirement");
+                    break;
+                }
+                Ok(()) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+        result
+    }
+
     fn cleanup(&mut self, deadline: std::time::Instant) -> CommandCleanup {
         self.cleanup_attempted = true;
         if self.reaped_status.is_some() || self.ownership_lost {
@@ -670,6 +773,8 @@ impl CaptureReadFailure {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy)]
 struct CapturePolicy {
+    preserve_stdin: bool,
+    retire_completed_group: bool,
     limit: u64,
     strict_utf8: bool,
     aggregate_limit: Option<usize>,
@@ -1015,7 +1120,12 @@ impl CapacityRefusalContext<'_> {
                 }
             }
             if self.stdout_eof && self.stderr_eof && self.known_status.is_some() {
-                break (self.owned.reap_without_signal(self.deadline), false);
+                let cleanup = if self.policy.retire_completed_group {
+                    self.owned.retire_completed_group(self.deadline)
+                } else {
+                    self.owned.reap_without_signal(self.deadline)
+                };
+                break (cleanup, false);
             }
             if Instant::now() >= natural_deadline {
                 break (self.owned.cleanup(self.deadline), true);
@@ -1069,6 +1179,8 @@ fn capture_native_command(
     use std::process::Stdio;
     use std::time::{Duration, Instant};
     let CapturePolicy {
+        preserve_stdin,
+        retire_completed_group,
         limit,
         strict_utf8,
         aggregate_limit,
@@ -1077,8 +1189,10 @@ fn capture_native_command(
         body_free_diagnostics,
     } = policy;
     let mut line_feeds = 0usize;
+    if !preserve_stdin {
+        command.stdin(Stdio::null());
+    }
     command
-        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
@@ -1418,7 +1532,12 @@ fn capture_native_command(
             }
         };
         if stdout_eof && stderr_eof {
-            break (owned.reap_without_signal(retirement_deadline), false);
+            let cleanup = if retire_completed_group {
+                owned.retire_completed_group(retirement_deadline)
+            } else {
+                owned.reap_without_signal(retirement_deadline)
+            };
+            break (cleanup, false);
         }
         // Strict semantic capture allows actual late bytes and natural EOF
         // through the SAME finite retirement interval. Generic lossy tools
@@ -2831,6 +2950,55 @@ mod tests {
             refusal.raw_os_error(),
             Some(rustix::io::Errno::CHILD.raw_os_error()),
             "reaped ownership cannot authorise a numeric process-group signal"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn actual_darwin_exited_owned_group_reconciles_permission_error_only_after_absence() {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "exit 7"]).process_group(0);
+        let child = command.spawn().unwrap();
+        let mut owned = OwnedCommand {
+            child,
+            cleanup_attempted: false,
+            reaped_status: None,
+            ownership_lost: false,
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while owned.observe_exit().unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let group = rustix::process::Pid::from_raw(owned.child.id() as i32).unwrap();
+        let native = signal_owned_child_group(&owned.child).unwrap_err();
+        assert_eq!(
+            native.raw_os_error(),
+            Some(rustix::io::Errno::PERM.raw_os_error())
+        );
+        let retired = owned.retire_completed_group(deadline);
+        assert!(retired.error.is_none());
+        assert!(retired.reaped);
+        assert_eq!(retired.status.unwrap().code(), Some(7));
+        assert_eq!(retired.signal, "already-absent-after-reap");
+        assert_eq!(
+            retired.absence.unwrap().raw_os_error(),
+            Some(rustix::io::Errno::SRCH.raw_os_error())
+        );
+        assert_eq!(
+            retired.additional_errors[0].raw_os_error(),
+            Some(rustix::io::Errno::PERM.raw_os_error())
+        );
+        assert_eq!(
+            rustix::process::test_kill_process_group(group),
+            Err(rustix::io::Errno::SRCH)
+        );
+        assert_eq!(
+            signal_owned_child_group(&owned.child)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(rustix::io::Errno::CHILD.raw_os_error())
         );
     }
 

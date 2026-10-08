@@ -305,6 +305,25 @@ impl ActionOutcome {
 /// their own read models behind these methods without teaching renderers their
 /// resolver or provider rules.
 pub trait TuiApplicationService {
+    fn preview_repertoire(
+        &self,
+        _request: aikit_core::repertoire::RepertoireRequest,
+    ) -> Result<aikit_core::repertoire::RepertoirePreview> {
+        Err(aikit_core::AikitError::new(
+            "composition.repertoire_unavailable",
+            "native repertoire preview is unavailable at this boundary",
+        ))
+    }
+    fn apply_repertoire(
+        &mut self,
+        _preview: aikit_core::repertoire::RepertoirePreview,
+    ) -> Result<aikit_core::repertoire::RepertoireApplication> {
+        Err(aikit_core::AikitError::new(
+            "composition.repertoire_unavailable",
+            "native repertoire application is unavailable at this boundary",
+        ))
+    }
+
     fn search(&self, query: &str) -> Result<ResourceListReadModel>;
     fn context_disclosure(&self, resource: &ResourceRef) -> Result<Value>;
     fn preview_composition(
@@ -796,6 +815,15 @@ pub struct TuiState {
     pub navigation: Vec<NavigationPoint>,
     pub selection_invalidation: Option<SelectionInvalidation>,
     pub preview: Option<CompositionPreview>,
+    #[serde(default)]
+    pub compose_profile_field: Vec<aikit_core::ProfileId>,
+    #[serde(default)]
+    pub compose_profile: Option<aikit_core::ProfileId>,
+    #[serde(default)]
+    pub repertoire_preview: Option<aikit_core::repertoire::RepertoirePreview>,
+    #[serde(default)]
+    pub repertoire_application: Option<aikit_core::repertoire::RepertoireApplication>,
+
     pub status: Option<UiStatus>,
     pub area: (u16, u16),
     /// The live working-environment reading, as last observed. `None` means no
@@ -871,6 +899,10 @@ impl Default for TuiState {
             navigation: Vec::new(),
             selection_invalidation: None,
             preview: None,
+            compose_profile_field: Vec::new(),
+            compose_profile: None,
+            repertoire_preview: None,
+            repertoire_application: None,
             status: None,
             area: (80, 24),
             live_field: None,
@@ -955,6 +987,14 @@ pub enum UiAction {
     },
     Unstage(ResourceRef),
     DiscardStaged,
+    RepertoireFailed {
+        reason: String,
+        applying: bool,
+    },
+    RequestRepertoirePreview,
+    RepertoirePreviewed(Box<aikit_core::repertoire::RepertoirePreview>),
+    RepertoireApplied(Box<aikit_core::repertoire::RepertoireApplication>),
+    SelectComposeProfile(Option<aikit_core::ProfileId>),
     RequestCompositionPreview,
     CompositionPreviewed(CompositionPreview),
     RequestApply,
@@ -1073,6 +1113,12 @@ pub enum UiEffect {
     InvokeContextualAction {
         action: ContextualActionDescriptor,
     },
+    PreviewRepertoire {
+        request: aikit_core::repertoire::RepertoireRequest,
+    },
+    ApplyRepertoire {
+        preview: Box<aikit_core::repertoire::RepertoirePreview>,
+    },
     PreviewComposition {
         scope: ScopeKind,
         staged: StagedChanges,
@@ -1164,6 +1210,22 @@ impl TuiRuntime {
             UiEffect::InvokeContextualAction { action } => {
                 Ok(UiAction::ActionFinished(service.invoke_action(&action)?))
             }
+            UiEffect::PreviewRepertoire { request } => {
+                Ok(match service.preview_repertoire(request) {
+                    Ok(preview) => UiAction::RepertoirePreviewed(Box::new(preview)),
+                    Err(error) => UiAction::RepertoireFailed {
+                        reason: error.to_string(),
+                        applying: false,
+                    },
+                })
+            }
+            UiEffect::ApplyRepertoire { preview } => Ok(match service.apply_repertoire(*preview) {
+                Ok(application) => UiAction::RepertoireApplied(Box::new(application)),
+                Err(error) => UiAction::RepertoireFailed {
+                    reason: error.to_string(),
+                    applying: true,
+                },
+            }),
             UiEffect::PreviewComposition { scope, staged } => Ok(UiAction::CompositionPreviewed(
                 service.preview_composition(scope, &staged)?,
             )),
@@ -1462,6 +1524,7 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 } => {
                     state.staged.stage(resource.clone(), *intent);
                     state.preview = None;
+                    state.repertoire_preview = None;
                 }
                 ActionOutcome::NavigatedTo { section, .. } => {
                     state.navigation.push(NavigationPoint {
@@ -1515,6 +1578,7 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             if state.mutation_scope != Some(scope) {
                 state.mutation_scope = Some(scope);
                 state.preview = None;
+                state.repertoire_preview = None;
             }
         }
         UiAction::SetPresentation(presentation) => state.presentation = presentation,
@@ -1628,18 +1692,83 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
         UiAction::Stage { resource, intent } => {
             state.staged.stage(resource, intent);
             state.preview = None;
+            state.repertoire_preview = None;
         }
         UiAction::Unstage(resource) => {
             state.staged.unstage(&resource);
             state.preview = None;
+            state.repertoire_preview = None;
         }
         UiAction::DiscardStaged => {
             state.staged = StagedChanges::default();
             state.preview = None;
+            state.repertoire_preview = None;
             state.overlay = None;
             state.status = Some(UiStatus {
                 message: "staged changes discarded explicitly".into(),
             });
+        }
+        UiAction::RepertoireFailed { reason, applying } => {
+            state.status = Some(UiStatus { message: reason });
+            if !applying {
+                state.repertoire_preview = None;
+            }
+            state.overlay = state
+                .repertoire_preview
+                .as_ref()
+                .map(|_| Overlay::CompositionPreview);
+        }
+        UiAction::SelectComposeProfile(profile) => {
+            state.compose_profile = profile;
+            state.preview = None;
+            state.repertoire_preview = None;
+            state.overlay = None;
+        }
+        UiAction::RequestRepertoirePreview => {
+            if !state.staged.is_empty() {
+                state.status = Some(UiStatus {
+                    message: "apply or discard staged capsule changes before repertoire selection"
+                        .into(),
+                });
+            } else if let Some(scope) = state.mutation_scope {
+                state.preview = None;
+                state.repertoire_preview = None;
+                effects.push(UiEffect::PreviewRepertoire {
+                    request: aikit_core::repertoire::RepertoireRequest {
+                        scope,
+                        profile: state.compose_profile.clone(),
+                        skill_sets: state.compose_skill_sets.clone(),
+                    },
+                });
+            } else {
+                state.status = Some(UiStatus {
+                    message: "choose the project or session scope before preview".into(),
+                });
+            }
+        }
+        UiAction::RepertoirePreviewed(preview) => {
+            if state.mutation_scope == Some(preview.request.scope)
+                && state.compose_profile == preview.request.profile
+                && state.compose_skill_sets == preview.request.skill_sets
+                && state.staged.is_empty()
+            {
+                state.repertoire_preview = Some(*preview);
+                state.overlay = Some(Overlay::CompositionPreview);
+            } else {
+                state.repertoire_preview = None;
+                state.status = Some(UiStatus {
+                    message: "repertoire selection changed during preview; inspect again".into(),
+                });
+            }
+        }
+        UiAction::RepertoireApplied(application) => {
+            state.status = Some(UiStatus {
+                message: application.render(),
+            });
+            state.repertoire_application = Some(*application);
+            state.repertoire_preview = None;
+            state.preview = None;
+            state.overlay = None;
         }
         UiAction::RequestCompositionPreview => request_preview(&mut state, &mut effects),
         UiAction::CompositionPreviewed(preview) => {
@@ -1648,12 +1777,23 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 state.overlay = Some(Overlay::CompositionPreview);
             } else {
                 state.preview = None;
+                state.repertoire_preview = None;
                 state.status = Some(UiStatus {
                     message: "composition preview became stale before it was displayed".into(),
                 });
             }
         }
         UiAction::RequestApply => {
+            if state.repertoire_preview.as_ref().is_some_and(|preview| {
+                state.mutation_scope == Some(preview.request.scope)
+                    && state.compose_profile == preview.request.profile
+                    && state.compose_skill_sets == preview.request.skill_sets
+                    && state.staged.is_empty()
+            }) {
+                state.overlay = Some(Overlay::ConfirmApply);
+                return TuiReduction { state, effects };
+            }
+
             let preview_is_current = state.preview.as_ref().is_some_and(|preview| {
                 state.mutation_scope == Some(preview.scope) && preview.staged == state.staged
             });
@@ -1661,10 +1801,33 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 state.overlay = Some(Overlay::ConfirmApply);
             } else if !state.staged.is_empty() {
                 state.preview = None;
+                state.repertoire_preview = None;
                 request_preview(&mut state, &mut effects);
             }
         }
         UiAction::ConfirmApply => {
+            if state.overlay == Some(Overlay::ConfirmApply) {
+                if let Some(preview) = state.repertoire_preview.clone() {
+                    if state.mutation_scope == Some(preview.request.scope)
+                        && state.compose_profile == preview.request.profile
+                        && state.compose_skill_sets == preview.request.skill_sets
+                        && state.staged.is_empty()
+                    {
+                        effects.push(UiEffect::ApplyRepertoire {
+                            preview: Box::new(preview),
+                        });
+                    } else {
+                        state.repertoire_preview = None;
+                        state.overlay = None;
+                        state.status = Some(UiStatus {
+                            message: "repertoire changed after preview; inspect again before apply"
+                                .into(),
+                        });
+                    }
+                    return TuiReduction { state, effects };
+                }
+            }
+
             if state.overlay == Some(Overlay::ConfirmApply) {
                 if let Some(preview) = state.preview.clone() {
                     if state.mutation_scope == Some(preview.scope) && preview.staged == state.staged
@@ -1673,6 +1836,7 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                     } else {
                         state.overlay = None;
                         state.preview = None;
+                        state.repertoire_preview = None;
                         state.status = Some(UiStatus {
                             message:
                                 "composition changed after preview; preview again before apply"
@@ -1685,6 +1849,7 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
         UiAction::ApplyFinished(receipt) => {
             state.staged = StagedChanges::default();
             state.preview = None;
+            state.repertoire_preview = None;
             state.overlay = None;
             state.status = Some(UiStatus {
                 message: receipt.summary,
@@ -1769,10 +1934,12 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             // describes what this composition resolves to.
             state.compose_purpose = purpose;
             state.preview = None;
+            state.repertoire_preview = None;
         }
         UiAction::SetComposeAgentName(name) => {
             state.compose_agent_name = name;
             state.preview = None;
+            state.repertoire_preview = None;
         }
         UiAction::BeginComposeText(field) => {
             state.compose_text_draft = Some(ComposeTextDraft {
@@ -1802,6 +1969,7 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 ComposeField::Purpose => {
                     state.compose_purpose = committed;
                     state.preview = None;
+                    state.repertoire_preview = None;
                     // The guided path continues to the optional name.
                     state.compose_text_draft = Some(ComposeTextDraft {
                         field: ComposeField::Name,
@@ -1811,6 +1979,7 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 ComposeField::Name => {
                     state.compose_agent_name = committed;
                     state.preview = None;
+                    state.repertoire_preview = None;
                 }
             }
         }
@@ -1831,6 +2000,7 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             // The repertoire changed: the previous preview no longer
             // describes what this composition resolves to.
             state.preview = None;
+            state.repertoire_preview = None;
         }
         UiAction::ComposeSaveAgent => {
             if state.compose_purpose.trim().is_empty() {

@@ -101,6 +101,7 @@ pub mod project_world;
 pub mod projectcentral;
 pub mod projection;
 pub mod ql;
+pub mod repertoire;
 pub mod resolve;
 pub mod resource;
 pub mod scope;

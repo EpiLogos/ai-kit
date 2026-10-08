@@ -208,6 +208,25 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Compose(a)) => match a.command {
             None => cmd_compose(cwd, a),
             Some(ComposeGroupCommand::Plan(_)) => cmd_compose(cwd, compose_plan_args()),
+            Some(ComposeGroupCommand::Repertoire(args)) => {
+                let mut service = Service::discover(cwd)?;
+                let data = aikit_cli::app::repertoire::run(&mut service, args)?;
+                if json_mode {
+                    Ok(reply(&service, data, diagnostic_warnings(&service)))
+                } else {
+                    Ok(Reply::Text(
+                        data["human"]
+                            .as_str()
+                            .ok_or_else(|| {
+                                AikitError::new(
+                                    "composition.result_invalid",
+                                    "repertoire result has no human reading",
+                                )
+                            })?
+                            .to_owned(),
+                    ))
+                }
+            }
             Some(ComposeGroupCommand::Profile(c)) => cmd_profile(cwd, c),
             Some(ComposeGroupCommand::Diff(_)) => cmd_diff(cwd),
             Some(ComposeGroupCommand::Enable(a)) => cmd_toggle(cwd, a, true),
@@ -276,7 +295,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
             Some(SystemGroupCommand::Hook(c)) => cmd_hook(cwd, c, json_mode),
             Some(SystemGroupCommand::ModelCatalogue(a)) => cmd_model_catalogue(cwd, a),
             Some(SystemGroupCommand::Trust(a)) => cmd_trust(cwd, a),
-            Some(SystemGroupCommand::Gateway(c)) => cmd_gateway(c),
+            Some(SystemGroupCommand::Gateway(c)) => cmd_gateway(c, cwd),
             Some(SystemGroupCommand::Shell(c)) => cmd_shell(c),
             Some(SystemGroupCommand::Generations(c)) => match c.command {
                 SystemGenerationsCommand::Prune(a) => cmd_prune(cwd, a),
@@ -376,7 +395,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Alias(c)) => cmd_alias(cwd, c, json_mode),
         Some(Command::Mux(c)) => cmd_mux(cwd, c),
         Some(Command::Shell(c)) => cmd_shell(c),
-        Some(Command::Gateway(c)) => cmd_gateway(c),
+        Some(Command::Gateway(c)) => cmd_gateway(c, cwd),
         Some(Command::Whoami(a)) => cmd_whoami(cwd, a, json_mode),
         Some(Command::Refocus(a)) => cmd_refocus(cwd, a, json_mode),
         Some(Command::Inhabit(a)) => cmd_inhabit(cwd, a, json_mode),
@@ -1422,7 +1441,7 @@ fn read_body_file(path: &std::path::Path) -> Result<String> {
 /// `--at WORKCELL_REF` is one routing fact for the whole invocation: the
 /// flattened carriers are replaced with the endpoint declared for that remote
 /// Workcell, and the reply discloses that it came from there. Nothing hides.
-fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
+fn cmd_gateway(command: GatewayCmd, cwd: &std::path::Path) -> Result<Reply> {
     let mut command = command;
     let at = command.at.clone();
     if let Some(reference) = &at {
@@ -1441,7 +1460,7 @@ fn cmd_gateway(command: GatewayCmd) -> Result<Reply> {
         let carrier = aikit_cli::gateway_ops::at_carrier(&home, reference)?;
         aikit_cli::gateway_ops::override_carriers(&mut command, carrier);
     }
-    let reply = cmd_gateway_dispatch(command)?;
+    let reply = cmd_gateway_dispatch(command, cwd)?;
     Ok(match at {
         Some(reference) => disclose_at(reply, &reference),
         None => reply,
@@ -1467,7 +1486,7 @@ fn disclose_at(mut reply: Reply, reference: &str) -> Reply {
     reply
 }
 
-fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
+fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Reply> {
     use aikit_adapters::GatewayTickLoop;
     use aikit_cli::routine_cli::{gateway_tick, production_dispatcher, GatewayDispatcherTick};
     let home = AikitHome::discover()?;
@@ -1631,6 +1650,7 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                     )
                 })?;
             }
+            let stop_signal = Some(stop_signal);
             aikit_adapters::run_gateway_service_with_hooks(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
@@ -1807,15 +1827,30 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
             )?)
         }
         GatewaySub::Team { request_json } => {
-            // The inhabit-team operation surface is mid-restoration on its own
-            // lane (inhabit_team_native); the dispatch keeps the input contract
-            // and answers honestly until that lane lands.
-            let _ = request_json;
-            Err(AikitError::new(
-                "gateway.team_unavailable",
-                "team operations are mid-restoration; this gateway build does not serve them yet",
-            ))
+        GatewaySub::Team { request_json } => {
+            let text = if let Some(path) = request_json.strip_prefix('@') {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                std::fs::File::open(path)
+                    .and_then(|file| file.take(1_048_577).read_to_end(&mut bytes))
+                    .map_err(|error| {
+                        AikitError::new("gateway.team_unreadable", error.to_string())
+                    })?;
+                String::from_utf8(bytes)
+                    .map_err(|error| AikitError::new("gateway.team_invalid", error.to_string()))?
+            } else {
+                request_json
+            };
+            if text.len() > 1_048_576 {
+                return Err(AikitError::new(
+                    "gateway.team_too_large",
+                    "Team operation exceeds the 1MiB input bound",
+                ));
+            }
+            let input = parse_structured_json(&text, "Central team operation")?;
+            gateway_data(inhabit_team::team_operation(&home, cwd, input)?)
         }
+
         GatewaySub::Conversation(a) => {
             let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
             gateway_data(aikit_cli::gateway_contact::conversation(

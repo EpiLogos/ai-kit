@@ -1746,9 +1746,9 @@ impl EncounterService {
         }
         // Held for the whole launch; released just before the queued-delivery
         // drain, which takes the same agency lock itself.
-        let agency_lock = self.lock_agency(&agent_session)?;
+        let agency_lock = self.lock_agency_before(&agent_session, deadline)?;
         let agency_basis = self
-            .check_agency(&agent_session)?
+            .check_agency_before(&agent_session, deadline)?
             .map(|(binding, _)| binding);
         let task_basis = Self::read_task(&self.home, &agent_session)?;
         crate::direct_agent_session::check(&self.home, &agent_session, &cwd)?;
@@ -1870,7 +1870,7 @@ impl EncounterService {
             configured.required_context.as_ref(),
         )?;
         let (body_provider, task_bound) =
-            self.selected_model_provider(&agent_session, &configured, &cwd)?;
+            self.selected_model_provider_before(&agent_session, &configured, &cwd, deadline)?;
         if let Some(target) = model_target {
             agency::model::validate_target(
                 &self.home,
@@ -1878,6 +1878,7 @@ impl EncounterService {
                 &configured,
                 &body_provider,
                 target,
+                deadline,
             )?;
         }
         let connection = ResourceRef::parse(format!(
@@ -1907,7 +1908,8 @@ impl EncounterService {
             self.permissions.clone(),
             generation.clone(),
         )));
-        let model = agency::model::prepare(&self.home, &agent_session, &body_provider)?;
+        let model =
+            agency::model::prepare_before(&self.home, &agent_session, &body_provider, deadline)?;
         // Use the same validated native body for policy and defaults. A launch
         // preference never changes an explicit policy or a resumed session;
         // final task execution consumes this same pinned choice.
@@ -2431,7 +2433,7 @@ impl EncounterService {
             configured.required_context.as_ref(),
         )?;
         let current_agency = self
-            .check_agency(&agent_session)?
+            .check_agency_before(&agent_session, deadline)?
             .map(|(binding, _)| binding);
         let current_provider = self
             .providers()?
@@ -2439,8 +2441,9 @@ impl EncounterService {
             .find(|p| p.id == provider)
             .ok_or_else(|| error("Native provider was removed during startup"))?;
         let (current_body, current_task_bound) =
-            self.selected_model_provider(&agent_session, &current_provider, &cwd)?;
-        let current_model = agency::model::prepare(&self.home, &agent_session, &current_body)?;
+            self.selected_model_provider_before(&agent_session, &current_provider, &cwd, deadline)?;
+        let current_model =
+            agency::model::prepare_before(&self.home, &agent_session, &current_body, deadline)?;
         if serde_json::to_value(&current_agency).map_err(error)?
             != serde_json::to_value(&agency_basis).map_err(error)?
             || Self::read_task(&self.home, &agent_session)? != task_basis
@@ -2467,6 +2470,7 @@ impl EncounterService {
                 &current_provider,
                 &current_body,
                 target,
+                deadline,
             )?;
         }
         // Source validation can itself spend the remaining budget. It cannot
