@@ -563,6 +563,16 @@ pub fn publish_process_record(
     home: &AikitHome,
     listeners: Vec<GatewayListenerReading>,
 ) -> Result<()> {
+    std::fs::create_dir_all(home.state()).map_err(|error| {
+        AikitError::new(
+            "gateway.process_record_directory",
+            format!(
+                "create the gateway state directory {}: {error}",
+                home.state().display()
+            ),
+        )
+        .with_io_source(error)
+    })?;
     let record = GatewayProcessRecord::new(this_process_identity());
     let path = process_record_path(home);
     let write = move |build: &GatewayBuildIdentity| -> Result<()> {

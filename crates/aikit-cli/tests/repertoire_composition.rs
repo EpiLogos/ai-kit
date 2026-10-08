@@ -258,13 +258,17 @@ fn failed_source_and_stale_preview_leave_accepted_projection_and_authored_bytes_
         .join("registries/personal/capsules/skill/development/field/payload/SKILL.md");
     fs::remove_file(&payload).unwrap();
     let error = service.apply_repertoire(preview).unwrap_err();
-    assert!(
-        matches!(
-            error.code(),
-            "skill.invalid" | "skill.unreadable" | "composition.preview_stale"
-        ),
-        "{error:?}"
-    );
+    assert_eq!(error.code(), "composition.preview_stale", "{error:?}");
+    let source_changes: serde_json::Value =
+        serde_json::from_str(&error.details()["source_changes"]).unwrap();
+    let changed = source_changes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|change| change["id"] == id("field").to_string())
+        .unwrap();
+    assert!(changed["reviewed_revision"].is_string());
+    assert_ne!(changed["reviewed_revision"], changed["observed_revision"]);
     assert_eq!(
         generation::current(&world.home.context_dir(&service.descriptor().context_id)).unwrap(),
         first.reading.generation
@@ -1354,7 +1358,7 @@ fn hypothetical_native_target_metadata_is_inspected_and_bound_before_apply() {
         source_body
     );
     for (target, destination) in [
-        ("claude", ".claude/skills/field"),
+        ("claude-code", ".claude/skills/field"),
         ("pi", ".pi/skills/field"),
     ] {
         let plan = preview

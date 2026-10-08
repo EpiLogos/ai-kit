@@ -88,6 +88,7 @@ fn a_bare_query_without_a_gateway_fails_honestly_and_names_the_start_command() {
 #[test]
 fn flagless_serve_binds_the_well_known_endpoint_and_queries_find_it() {
     let home = TempDir::new().unwrap();
+    assert!(!home.path().join("state").exists());
     let mut serve = ServeGuard::new(
         Command::new(bin())
             .args(["gateway", "serve"])
@@ -100,6 +101,14 @@ fn flagless_serve_binds_the_well_known_endpoint_and_queries_find_it() {
             .expect("aikit gateway serve should spawn"),
     );
     wait_for_socket(home.path());
+    let posture =
+        aikit_cli::gateway_ops::read_process_record(&aikit_store::AikitHome::at(home.path()))
+            .expect("a fresh home publishes the actual gateway process posture before serving");
+    assert_eq!(
+        posture.schema,
+        aikit_cli::gateway_ops::PROCESS_RECORD_SCHEMA
+    );
+    assert_eq!(posture.build.pid, serve.id());
 
     let (ok, protocol, _) = run(home.path(), &["gateway", "protocol"]);
     assert!(ok, "{protocol}");
