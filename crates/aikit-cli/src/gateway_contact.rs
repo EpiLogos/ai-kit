@@ -1462,6 +1462,76 @@ pub(crate) struct OccupancyRouting {
     pub remotes_asked: Vec<Value>,
 }
 
+/// The ONE reading of a recipient's occupancy that every durable-route
+/// decider shares (#481-1): the local ledger answered with a current tenure,
+/// answered vacant, or could not be read at all. What each caller does with
+/// the answer differs (refuse before recording, relay now, queue for the
+/// pass) — the answer itself does not.
+enum TenureReading {
+    Tenured(Value),
+    Vacant,
+    Unreadable(String),
+}
+
+fn read_tenure(owners: &dyn ContactOwners, position_ref: &str) -> TenureReading {
+    match owners.occupancy_read(position_ref) {
+        Ok(reading) => match current_tenure(&reading) {
+            Some(tenure) => TenureReading::Tenured(tenure.clone()),
+            None => TenureReading::Vacant,
+        },
+        Err(unavailable) => TenureReading::Unreadable(unavailable.to_string()),
+    }
+}
+
+/// The ONE resolution of a vacant ledger against one survey of the declared
+/// remotes: exactly one claim relays, none holds, several are ambiguous.
+/// Send-time routing and the relay pass both resolve through this — never
+/// through two private readings of the same claims.
+enum VacantResolution {
+    Relay {
+        remote: GatewayRemote,
+        routing: aikit_adapters::CommuniqueRouting,
+        basis: String,
+    },
+    Hold {
+        basis: String,
+        notice: Value,
+    },
+    Ambiguous {
+        refusal: AikitError,
+    },
+}
+
+fn resolve_vacant(
+    position_ref: &str,
+    elsewhere: &[GatewayRemote],
+    survey: &RemoteSurvey,
+) -> VacantResolution {
+    let claims = survey.claims(position_ref);
+    match claims.as_slice() {
+        [claim] => {
+            let route = claim.routing(position_ref);
+            let basis = format!(
+                "{}; relayed to that Workcell's gateway, delivered at the occupant's next turn \
+                 boundary there",
+                route.basis
+            );
+            VacantResolution::Relay {
+                remote: claim.remote.clone(),
+                routing: route,
+                basis,
+            }
+        }
+        [] => {
+            let (basis, notice) = vacant_everywhere(position_ref, elsewhere, survey);
+            VacantResolution::Hold { basis, notice }
+        }
+        _ => VacantResolution::Ambiguous {
+            refusal: ambiguous_occupancy(position_ref, &claims),
+        },
+    }
+}
+
 /// Route a resolved recipient by occupancy, or refuse before anything is
 /// recorded (ambiguous occupancy, an occupant on an undeclared Workcell).
 pub(crate) fn route_to_occupancy(
@@ -1474,56 +1544,50 @@ pub(crate) fn route_to_occupancy(
     let mut routing = None;
     let mut remotes_asked = Vec::new();
     let (state, state_basis, occupant_workcell, delivery_notice) =
-        match owners.occupancy_read(&recipient.position_ref) {
-            Ok(reading) => match current_tenure(&reading) {
-                Some(tenure) => {
-                    let generation = tenure
-                        .get("generation_ref")
-                        .and_then(Value::as_str)
-                        .unwrap_or("an unnamed generation");
-                    (
-                        CommuniqueState::Pending,
-                        format!("{} is occupied by {generation}; delivered at its next turn boundary", recipient.position_ref),
-                        tenure.get("workcell_ref").and_then(Value::as_str).map(str::to_owned),
-                        None,
-                    )
-                }
-                None => {
-                    let elsewhere = remotes_elsewhere(home, local_workcell)?;
-                    let survey = RemoteSurvey::ask(
-                        &elsewhere,
-                        &GatewayCommand::OccupancyRead {
-                            position_ref: recipient.position_ref.clone(),
-                        },
-                    );
-                    remotes_asked = survey.statuses();
-                    let claims = survey.claims(&recipient.position_ref);
-                    match claims.as_slice() {
-                        [claim] => {
-                            let route = claim.routing(&recipient.position_ref);
-                            let basis = format!(
-                                "{}; relayed to that Workcell's gateway, delivered at the occupant's next turn boundary there",
-                                route.basis
-                            );
-                            remote = Some(claim.remote.clone());
-                            routing = Some(route);
-                            (
-                                CommuniqueState::Pending,
-                                basis,
-                                Some(claim.remote.workcell_ref.clone()),
-                                None,
-                            )
-                        }
-                        [] => {
-                            let (basis, notice) =
-                                vacant_everywhere(&recipient.position_ref, &elsewhere, &survey);
-                            (CommuniqueState::Held, basis, None, Some(notice))
-                        }
-                        _ => return Err(ambiguous_occupancy(&recipient.position_ref, &claims)),
+        match read_tenure(owners, &recipient.position_ref) {
+            TenureReading::Tenured(tenure) => {
+                let generation = tenure
+                    .get("generation_ref")
+                    .and_then(Value::as_str)
+                    .unwrap_or("an unnamed generation");
+                (
+                    CommuniqueState::Pending,
+                    format!("{} is occupied by {generation}; delivered at its next turn boundary", recipient.position_ref),
+                    tenure.get("workcell_ref").and_then(Value::as_str).map(str::to_owned),
+                    None,
+                )
+            }
+            TenureReading::Vacant => {
+                let elsewhere = remotes_elsewhere(home, local_workcell)?;
+                let survey = RemoteSurvey::ask(
+                    &elsewhere,
+                    &GatewayCommand::OccupancyRead {
+                        position_ref: recipient.position_ref.clone(),
+                    },
+                );
+                remotes_asked = survey.statuses();
+                match resolve_vacant(&recipient.position_ref, &elsewhere, &survey) {
+                    VacantResolution::Relay {
+                        remote: entry,
+                        routing: route,
+                        basis,
+                    } => {
+                        remote = Some(entry.clone());
+                        routing = Some(route.clone());
+                        (
+                            CommuniqueState::Pending,
+                            basis,
+                            Some(entry.workcell_ref.clone()),
+                            None,
+                        )
                     }
+                    VacantResolution::Hold { basis, notice } => {
+                        (CommuniqueState::Held, basis, None, Some(notice))
+                    }
+                    VacantResolution::Ambiguous { refusal } => return Err(refusal),
                 }
-            },
-            Err(unavailable) => (
+            }
+            TenureReading::Unreadable(unavailable) => (
                 CommuniqueState::Pending,
                 format!("occupancy of {} could not be read ({unavailable}); pending for whichever occupant takes its next turn here", recipient.position_ref),
                 None,
@@ -2057,7 +2121,11 @@ fn forward_one(
     remote: &GatewayRemote,
     local_gateway_ref: &str,
     routing: Option<aikit_adapters::CommuniqueRouting>,
+    carrier: RemoteCarrier<'_>,
 ) -> Result<(Communique, Value)> {
+    // The SAME carrier the pass was given: the durable route and the
+    // exact-instance route are offered through one seam, so a test (or a
+    // future caller) can stand in for the wire once, for both.
     forward_one_via(
         home,
         gateway,
@@ -2065,7 +2133,7 @@ fn forward_one(
         remote,
         local_gateway_ref,
         routing,
-        &carrier_call,
+        carrier,
     )
 }
 
@@ -2489,17 +2557,20 @@ fn ledger_placement(
     position_ref: &str,
     local: Option<&str>,
 ) -> LedgerPlacement {
-    match owners.occupancy_read(position_ref) {
-        Ok(reading) => match current_tenure(&reading) {
-            None => LedgerPlacement::Vacant,
-            Some(tenure) => match (tenure.get("workcell_ref").and_then(Value::as_str), local) {
+    // The SAME reading `route_to_occupancy` makes at send time (#481-1): one
+    // occupancy answer, one tenure shape — the pass never decides from a
+    // second private reading of the ledger.
+    match read_tenure(owners, position_ref) {
+        TenureReading::Tenured(tenure) => {
+            match (tenure.get("workcell_ref").and_then(Value::as_str), local) {
                 (Some(workcell), Some(local)) if workcell != local => {
                     LedgerPlacement::Elsewhere(workcell.to_owned())
                 }
                 _ => LedgerPlacement::Here,
-            },
-        },
-        Err(_) => LedgerPlacement::Unknown,
+            }
+        }
+        TenureReading::Vacant => LedgerPlacement::Vacant,
+        TenureReading::Unreadable(_) => LedgerPlacement::Unknown,
     }
 }
 
@@ -2708,13 +2779,13 @@ fn forward_pass_via(
                 let survey = survey.get_or_insert_with(|| {
                     RemoteSurvey::ask(&elsewhere, &GatewayCommand::OccupancyList)
                 });
-                let claims = survey.claims(&record.to_position_ref);
-                match claims.as_slice() {
-                    [claim] => (
-                        claim.remote.clone(),
-                        Some(claim.routing(&record.to_position_ref)),
-                    ),
-                    [] => {
+                // The SAME vacant resolution send-time routing makes (#481-1):
+                // one claim relays, none holds, several are ambiguous.
+                match resolve_vacant(&record.to_position_ref, &elsewhere, survey) {
+                    VacantResolution::Relay {
+                        remote, routing, ..
+                    } => (remote, Some(routing)),
+                    VacantResolution::Hold { .. } => {
                         held.push(json!({
                             "communique_ref": record.communique_ref,
                             "position_ref": record.to_position_ref,
@@ -2723,8 +2794,7 @@ fn forward_pass_via(
                         }));
                         continue;
                     }
-                    _ => {
-                        let refusal = ambiguous_occupancy(&record.to_position_ref, &claims);
+                    VacantResolution::Ambiguous { refusal } => {
                         ambiguous.push(json!({
                             "communique_ref": record.communique_ref,
                             "position_ref": record.to_position_ref,
@@ -2737,8 +2807,15 @@ fn forward_pass_via(
                 }
             }
         };
-        let (record, report) =
-            forward_one(home, gateway, record, &entry, &local_gateway_ref, routing)?;
+        let (record, report) = forward_one(
+            home,
+            gateway,
+            record,
+            &entry,
+            &local_gateway_ref,
+            routing,
+            carrier,
+        )?;
         if report["state"] == "forwarded" {
             forwarded.push(json!({
                 "communique_ref": record.communique_ref,
@@ -3971,6 +4048,195 @@ mod exact_instance_binding_tests {
 
     fn code(error: &AikitError) -> &str {
         error.code()
+    }
+
+    /// An owners double whose ledger says the Position's current occupant
+    /// stands on the named Workcell — the Elsewhere case both deciders must
+    /// read identically (#481-1).
+    struct TenuredOn(&'static str);
+
+    impl ContactOwners for TenuredOn {
+        fn position_list(&self, _: Option<&str>) -> std::result::Result<Value, OwnerUnavailable> {
+            Err(unavailable())
+        }
+        fn agent_profiles(&self) -> std::result::Result<Value, OwnerUnavailable> {
+            Err(unavailable())
+        }
+        fn position_read(&self, _: &str) -> std::result::Result<PositionLookup, OwnerUnavailable> {
+            Err(unavailable())
+        }
+        fn world_here(&self, _: &Path) -> std::result::Result<Value, OwnerUnavailable> {
+            Ok(json!({"workcells": [{"ref": "workcell:a", "role": "current"}]}))
+        }
+        fn occupancy_list(&self) -> std::result::Result<Value, OwnerUnavailable> {
+            Err(unavailable())
+        }
+        fn occupancy_read(&self, _: &str) -> std::result::Result<Value, OwnerUnavailable> {
+            Ok(json!({
+                "position_ref": "position:steward",
+                "state": "occupied",
+                "current": {
+                    "generation_ref": "gen-there",
+                    "workcell_ref": self.0,
+                }
+            }))
+        }
+        fn occupancy_verify(
+            &self,
+            _: &str,
+            _generation_ref: &str,
+        ) -> std::result::Result<OccupancyVerdict, OwnerUnavailable> {
+            // The ledger reads the tenure directly; verification is not on
+            // this test's path.
+            Ok(OccupancyVerdict::Current(json!({
+                "generation_ref": "gen-there",
+                "workcell_ref": self.0,
+            })))
+        }
+        fn current_work(&self, _: &str, _: &Path) -> std::result::Result<Value, OwnerUnavailable> {
+            Err(unavailable())
+        }
+        fn custody_assign(
+            &self,
+            _: &CustodyAssign,
+            _: &Path,
+        ) -> std::result::Result<std::result::Result<Value, OwnerRefusal>, OwnerUnavailable>
+        {
+            Err(unavailable())
+        }
+    }
+
+    fn recipient_position() -> Recipient {
+        Recipient {
+            position_ref: "position:steward".into(),
+            handle: None,
+            label: None,
+            source: "test".into(),
+            agency_ref: None,
+        }
+    }
+
+    /// The durable-route convergence (#481-1): send-time routing and the
+    /// relay pass decide from ONE reading of the ledger and ONE vacant
+    /// resolution — an occupant on another Workcell reaches EXACTLY ONE
+    /// recipient, and a re-offer is answered as a replay, never a second
+    /// delivery.
+    #[test]
+    fn one_decision_delivers_to_exactly_one_recipient_across_both_deciders() {
+        if std::env::var(WORKCELL_ENV).is_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        // A usable declared token: the relay's carrier resolves it for real.
+        let token_path = dir.path().join("peer-b.token");
+        std::fs::write(&token_path, "peer-b-secret").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let remote_b_declared = GatewayRemote {
+            workcell_ref: "workcell:b".into(),
+            websocket_bind: "127.0.0.1:1".into(),
+            websocket_path: "/".into(),
+            token_location: format!("file:{}", token_path.display()),
+        };
+        let path = remotes_path(&home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&GatewayRemotes {
+                schema: GATEWAY_REMOTES_SCHEMA.into(),
+                remotes: vec![remote_b_declared],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Decision #1 — send-time routing: the occupant is on workcell:b,
+        // so the route names b and nothing else.
+        let route = route_to_occupancy(
+            &home,
+            &TenuredOn("workcell:b"),
+            Some("workcell:a"),
+            &recipient_position(),
+        )
+        .unwrap();
+        let relayed_to = route
+            .remote
+            .as_ref()
+            .map(|entry| entry.workcell_ref.clone());
+        assert_eq!(
+            relayed_to.as_deref(),
+            Some("workcell:b"),
+            "state: {:?} remote: {:?}",
+            route.state,
+            route.remote
+        );
+        assert_eq!(route.state, CommuniqueState::Pending);
+
+        // Decision #2 — the relay pass re-evaluates the SAME record with ITS
+        // decider. The remote journal answers replayed on the re-offer, so
+        // the record is ingested at exactly one recipient, however many
+        // passes re-run the same decision.
+        let mut record = record("communique:01one", "gen-x", "pending");
+        record.to_instance = None;
+        record.forward = Some(CommuniqueForward::Queued {
+            workcell_ref: "workcell:b".into(),
+            attempts: 0,
+            last_error: None,
+            last_attempt_at_unix_ms: None,
+        });
+        let local = StubGateway {
+            queue: vec![record],
+            ..StubGateway::modern()
+        };
+        let remote = StubGateway::modern();
+        let carrier = |_remote: &GatewayRemote, command: GatewayCommand| remote.call(command);
+        let pass = forward_pass_via(
+            &home,
+            &TenuredOn("workcell:b"),
+            &local,
+            dir.path(),
+            &carrier,
+        )
+        .unwrap();
+        let ingests = remote
+            .log
+            .borrow()
+            .iter()
+            .filter(|k| **k == "ingest-communique")
+            .count();
+        assert_eq!(ingests, 1, "one offer at the one recipient; pass: {pass}");
+        // And the OTHER Workcell got nothing: the stub owns the only ingest.
+        let _ = &local;
+
+        // Consistency for the unreadable ledger: send-time answers
+        // pending-here (never relayed on an unreadable ledger), and the
+        // pass's decider answers Unknown — both keep the record local.
+        let unreadable = route_to_occupancy(
+            &home,
+            &StubOwners,
+            Some("workcell:a"),
+            &recipient_position(),
+        )
+        .unwrap();
+        assert_eq!(unreadable.state, CommuniqueState::Pending);
+        assert!(
+            unreadable.remote.is_none(),
+            "an unreadable ledger is never relayed on"
+        );
+        assert!(unreadable.delivery_notice.is_some());
+        let placement = ledger_placement(
+            &TenuredOn("workcell:b"),
+            "position:steward",
+            Some("workcell:a"),
+        );
+        assert!(matches!(placement, LedgerPlacement::Elsewhere(ref w) if w == "workcell:b"));
+        let placement_unknown =
+            ledger_placement(&StubOwners, "position:steward", Some("workcell:a"));
+        assert!(matches!(placement_unknown, LedgerPlacement::Unknown));
     }
 
     fn test_home() -> (tempfile::TempDir, AikitHome) {
