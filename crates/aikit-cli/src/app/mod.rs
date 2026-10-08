@@ -1424,8 +1424,18 @@ impl Service {
         let actor_bootstrap = if self.descriptor.project_root.is_some() {
             // Compose the live actor inputs from the Actuation instantiation
             // receipt and the Central-authored profile. The native adapter's
-            // Ok(None) is legitimate absence. A known source failure or
-            // ambiguity must refuse this projection, not become empty context.
+            // Ok(None) is legitimate absence. A known source failure must
+            // refuse this projection, not become empty context.
+            //
+            // Profile ambiguity is the one composition refusal that demotes
+            // to disclosed absence here: a ground whose root scope carries
+            // several authored agent profiles (a normal state of a lived-in
+            // ground) would otherwise hard-fail every context-bearing read —
+            // `client status`, the model catalogue — that never uses the
+            // actor. Nothing is guessed: selection inputs are absent, the
+            // ambiguity is named in the view's warnings, and the adapter's
+            // own refusal law (`ambiguous_or_absent_profile_is_never_guessed`)
+            // is untouched.
             let central_root = self.descriptor.project_root.as_deref().and_then(|root| {
                 self.central_meta_root
                     .clone()
@@ -1436,7 +1446,18 @@ impl Service {
                     .as_deref()
                     .map(|central| {
                         let runner = SystemRunner::probe();
-                        compose_live_actor_inputs(&runner, central, root)
+                        match compose_live_actor_inputs(&runner, central, root) {
+                            Err(error)
+                                if error.code() == "actor_composition.ambiguous_profile" =>
+                            {
+                                view.warnings.push(format!(
+                                    "actor composition did not resolve: {message}; selection inputs are absent, no agent was guessed",
+                                    message = error.message()
+                                ));
+                                Ok(None)
+                            }
+                            other => other,
+                        }
                     })
                     .transpose()?
                     .flatten(),

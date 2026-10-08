@@ -5,11 +5,16 @@
 //!
 //! - `none` — no decision service. Ordinary operation never requires one and
 //!   never falls back to hosted inference on its own;
-//! - `managed-local` — the Workcell-owned local model service on loopback
-//!   (recommended where installed);
-//! - `endpoint` — an existing self-hosted SystemOne-compatible endpoint the
-//!   operator already runs (beyond loopback this requires HTTPS and an
-//!   explicit `allow_remote` election);
+//! - `managed-local` — a loopback model service whose lifecycle a product
+//!   owns where that product is installed (Workcell's declared services). The
+//!   election carries no Workcell requirement: validation and invocation need
+//!   only the loopback address and limits, never a `workcell` executable;
+//! - `endpoint` — a SystemOne-compatible endpoint (beyond loopback this
+//!   requires HTTPS and an explicit `allow_remote` election). This is also the
+//!   honest placement for a local service AIKit itself provisions, starts,
+//!   stops, restarts and upgrades (`aikit decide service`, `decide_service.rs`),
+//!   so an installation without Workcell has the complete local lifecycle
+//!   without being labelled Workcell-managed;
 //! - `hosted` — the hosted TypeSafe/Jev API under its own credential, tariff
 //!   and concrete-version law.
 //!
@@ -367,8 +372,13 @@ pub fn invoke_selected(
 /// facts and (with `--probe`) one real bounded typed diagnostic. Mode `none`
 /// reports that ordinary operation uses no decision service.
 pub fn decide_status(args: DecideStatusArgs) -> Result<Value> {
+    let provider_file = crate::local_services_election::resolve_file(
+        &aikit_store::AikitHome::discover()?,
+        crate::local_services_election::Election::Decision,
+        args.provider_file.clone(),
+    )?;
     let config: DecisionProviderConfig =
-        read_json(&args.provider_file, "Decision provider config", 256 * 1024)?;
+        read_json(&provider_file, "Decision provider config", 256 * 1024)?;
     config.validate()?;
     let mut status = json!({
         "schema": "aikit.decision-status/v1",
@@ -513,8 +523,13 @@ fn diagnostic_probe(
 /// `aikit decide invoke`: one real typed invocation through the elected
 /// provider, returning its bounded receipt.
 pub fn decide_invoke(args: DecideInvokeArgs) -> Result<Value> {
+    let provider_file = crate::local_services_election::resolve_file(
+        &aikit_store::AikitHome::discover()?,
+        crate::local_services_election::Election::Decision,
+        args.provider_file.clone(),
+    )?;
     let config: DecisionProviderConfig =
-        read_json(&args.provider_file, "Decision provider config", 256 * 1024)?;
+        read_json(&provider_file, "Decision provider config", 256 * 1024)?;
     let request = JevRequest::parse(&read_bytes(
         &args.request_file,
         "Decision request",

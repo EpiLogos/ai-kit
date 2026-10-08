@@ -1051,6 +1051,14 @@ fn decide_route(command: &DecideSub) -> &'static str {
     match command {
         DecideSub::Status(_) => "cmd_decide_status",
         DecideSub::Invoke(_) => "cmd_decide_invoke",
+        DecideSub::Service(c) => match &c.command {
+            DecideServiceSub::Provision(_) => "cmd_decide_service_provision",
+            DecideServiceSub::Start(_) => "cmd_decide_service_start",
+            DecideServiceSub::Status(_) => "cmd_decide_service_status",
+            DecideServiceSub::Stop(_) => "cmd_decide_service_stop",
+            DecideServiceSub::Restart(_) => "cmd_decide_service_restart",
+            DecideServiceSub::Upgrade(_) => "cmd_decide_service_upgrade",
+        },
     }
 }
 
@@ -1067,6 +1075,14 @@ fn now_context_route(command: &NowContextCmd) -> &'static str {
         NowContextSub::Contemplate(_) => "cmd_now_contemplate",
         NowContextSub::TestSelection(_) => "cmd_now_test_selection",
         NowContextSub::PublishIntelligence(_) => "cmd_now_publish_intelligence",
+        NowContextSub::Service(c) => match &c.command {
+            NowServiceSub::Provision(_) => "cmd_now_service_provision",
+            NowServiceSub::Start(_) => "cmd_now_service_start",
+            NowServiceSub::Status(_) => "cmd_now_service_status",
+            NowServiceSub::Stop(_) => "cmd_now_service_stop",
+            NowServiceSub::Restart(_) => "cmd_now_service_restart",
+            NowServiceSub::Upgrade(_) => "cmd_now_service_upgrade",
+        },
     }
 }
 
@@ -1528,13 +1544,132 @@ pub enum DecideSub {
     /// Invoke the selected decision provider with typed questions and return
     /// its bounded invocation receipt.
     Invoke(DecideInvokeArgs),
+    /// Provision, start, inspect, stop, restart and upgrade a locally served
+    /// decision model through AIKit's own lifecycle — no Workcell involved.
+    Service(DecideServiceCmd),
+}
+
+#[derive(Debug, Args)]
+pub struct DecideServiceCmd {
+    #[command(subcommand)]
+    pub command: DecideServiceSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DecideServiceSub {
+    /// Fetch the pinned upstream, environment and artifacts, hash them into a
+    /// material manifest and write the `endpoint` provider election.
+    Provision(DecideServiceProvisionArgs),
+    /// Start the provisioned service (or adopt this service's own live
+    /// process); ready means the pinned model card answers and one warm
+    /// decision completed.
+    Start(DecideServiceStartArgs),
+    /// Report process identity, live model-card health and (optionally)
+    /// material verification. A listener this service did not start is
+    /// reported as foreign, never adopted.
+    Status(DecideServiceStatusArgs),
+    /// Stop this service's own process (identity-checked TERM, then KILL).
+    Stop(DecideServiceStopArgs),
+    /// Stop then start.
+    Restart(DecideServiceRestartArgs),
+    /// Apply a different pinned recipe; return to the previous cut if the new
+    /// one cannot be provisioned or does not come up healthy.
+    Upgrade(DecideServiceUpgradeArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct DecideServiceCommon {
+    /// Service directory. Default: `<AIKIT_HOME>/services/decision/kev-0.8b`.
+    #[arg(long = "service-dir", value_name = "DIR")]
+    pub service_dir: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct DecideServiceProvisionArgs {
+    #[command(flatten)]
+    pub common: DecideServiceCommon,
+    /// Loopback port the service will bind.
+    #[arg(long, default_value_t = 8019)]
+    pub port: u16,
+    /// A pinned recipe (`aikit.decision-service-recipe/v1`); default: the built-in Kev-0.8B cut.
+    #[arg(long = "recipe-file", value_name = "PATH")]
+    pub recipe_file: Option<std::path::PathBuf>,
+    /// Budget for each network-bound step (clone, environment, artifacts).
+    #[arg(long = "step-timeout-secs", default_value_t = 3600)]
+    pub step_timeout_secs: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct DecideServiceStartArgs {
+    #[command(flatten)]
+    pub common: DecideServiceCommon,
+    /// How long to wait for the pinned model card to answer.
+    #[arg(long = "ready-timeout-secs", default_value_t = 600)]
+    pub ready_timeout_secs: u64,
+    /// Skip the warm decision (the service is then ready but not warmed).
+    #[arg(long = "no-warm")]
+    pub no_warm: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DecideServiceStatusArgs {
+    #[command(flatten)]
+    pub common: DecideServiceCommon,
+    /// Re-hash every manifest artifact and report differences.
+    #[arg(long = "verify-material")]
+    pub verify_material: bool,
+    /// Run one real warm decision through the elected provider.
+    #[arg(long = "probe")]
+    pub probe: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DecideServiceStopArgs {
+    #[command(flatten)]
+    pub common: DecideServiceCommon,
+    /// Seconds to wait after TERM before KILL.
+    #[arg(long = "grace-secs", default_value_t = 15)]
+    pub grace_secs: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct DecideServiceRestartArgs {
+    #[command(flatten)]
+    pub common: DecideServiceCommon,
+    #[arg(long = "grace-secs", default_value_t = 15)]
+    pub grace_secs: u64,
+    #[arg(long = "ready-timeout-secs", default_value_t = 600)]
+    pub ready_timeout_secs: u64,
+    #[arg(long = "no-warm")]
+    pub no_warm: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DecideServiceUpgradeArgs {
+    #[command(flatten)]
+    pub common: DecideServiceCommon,
+    /// The recipe to move to; default: the built-in cut.
+    #[arg(long = "recipe-file", value_name = "PATH")]
+    pub recipe_file: Option<std::path::PathBuf>,
+    /// Re-apply even when the recipe is already current.
+    #[arg(long)]
+    pub force: bool,
+    #[arg(long = "grace-secs", default_value_t = 15)]
+    pub grace_secs: u64,
+    #[arg(long = "ready-timeout-secs", default_value_t = 600)]
+    pub ready_timeout_secs: u64,
+    #[arg(long = "no-warm")]
+    pub no_warm: bool,
+    #[arg(long = "step-timeout-secs", default_value_t = 3600)]
+    pub step_timeout_secs: u64,
 }
 
 #[derive(Debug, Args)]
 pub struct DecideStatusArgs {
     /// Decision-provider configuration (`aikit.decision-provider/v1`).
+    /// Omit to use the election (`ai-kit:local-services:decision.provider`).
     #[arg(long = "provider-file", value_name = "PATH")]
-    pub provider_file: std::path::PathBuf,
+    pub provider_file: Option<std::path::PathBuf>,
     /// Run one real bounded Noul diagnostic against the selected provider.
     #[arg(long = "probe")]
     pub probe: bool,
@@ -1548,8 +1683,9 @@ pub struct DecideStatusArgs {
 #[derive(Debug, Args)]
 pub struct DecideInvokeArgs {
     /// Decision-provider configuration (`aikit.decision-provider/v1`).
+    /// Omit to use the election (`ai-kit:local-services:decision.provider`).
     #[arg(long = "provider-file", value_name = "PATH")]
-    pub provider_file: std::path::PathBuf,
+    pub provider_file: Option<std::path::PathBuf>,
     #[arg(long = "request-file", value_name = "PATH")]
     pub request_file: std::path::PathBuf,
     #[arg(long = "invocation-ref", value_name = "RESOURCE_REF")]
@@ -1601,6 +1737,107 @@ pub enum NowContextSub {
     /// into the participant's prepared view through the existing CAS publish
     /// path, and append one replayable change per published item.
     PublishIntelligence(Box<NowPublishIntelligenceArgs>),
+    /// Provision, start, inspect, stop, restart and upgrade the local Redis
+    /// NOW service through AIKit's own lifecycle — no Workcell involved.
+    Service(NowServiceCmd),
+}
+
+#[derive(Debug, Args)]
+pub struct NowServiceCmd {
+    #[command(subcommand)]
+    pub command: NowServiceSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NowServiceSub {
+    /// Verify a `redis-server` against the reference series, generate the
+    /// reference-profile configuration (loopback, AOF, finite maxmemory,
+    /// noeviction) and the `aikit.redis-now-config/v1` election.
+    Provision(NowServiceProvisionArgs),
+    /// Start the provisioned Redis (or adopt this service's own live process);
+    /// ready means PING answers and the live profile conforms.
+    Start(NowServiceStartArgs),
+    /// Report process identity and the live profile reading. A listener this
+    /// service did not start is reported as foreign, never adopted.
+    Status(NowServiceStatusArgs),
+    /// Stop this service's own process (identity-checked TERM, then KILL). Data
+    /// is kept.
+    Stop(NowServiceStopArgs),
+    /// Stop then start over the same data directory.
+    Restart(NowServiceRestartArgs),
+    /// Move to another `redis-server` executable over the same data; return to
+    /// the previous one if the new one does not come up conforming.
+    Upgrade(NowServiceUpgradeArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct NowServiceCommon {
+    /// Service directory. Default: `<AIKIT_HOME>/services/redis-now`.
+    #[arg(long = "service-dir", value_name = "DIR")]
+    pub service_dir: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct NowServiceProvisionArgs {
+    #[command(flatten)]
+    pub common: NowServiceCommon,
+    /// Loopback port Redis will bind.
+    #[arg(long, default_value_t = 6381)]
+    pub port: u16,
+    /// Finite memory bound in MiB (the reference profile forbids unbounded).
+    #[arg(long = "maxmemory-mb", default_value_t = 256)]
+    pub maxmemory_mb: u64,
+    /// Key prefix written into the `aikit.redis-now-config/v1` election.
+    #[arg(long = "key-prefix", default_value = "aikit-now")]
+    pub key_prefix: String,
+    /// Absolute path of the `redis-server` to use; default: first on PATH.
+    #[arg(long = "redis-server", value_name = "PATH")]
+    pub redis_server: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct NowServiceStartArgs {
+    #[command(flatten)]
+    pub common: NowServiceCommon,
+    #[arg(long = "ready-timeout-secs", default_value_t = 30)]
+    pub ready_timeout_secs: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct NowServiceStatusArgs {
+    #[command(flatten)]
+    pub common: NowServiceCommon,
+}
+
+#[derive(Debug, Args)]
+pub struct NowServiceStopArgs {
+    #[command(flatten)]
+    pub common: NowServiceCommon,
+    #[arg(long = "grace-secs", default_value_t = 15)]
+    pub grace_secs: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct NowServiceRestartArgs {
+    #[command(flatten)]
+    pub common: NowServiceCommon,
+    #[arg(long = "grace-secs", default_value_t = 15)]
+    pub grace_secs: u64,
+    #[arg(long = "ready-timeout-secs", default_value_t = 30)]
+    pub ready_timeout_secs: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct NowServiceUpgradeArgs {
+    #[command(flatten)]
+    pub common: NowServiceCommon,
+    /// The `redis-server` to move to (absolute path).
+    #[arg(long = "redis-server", value_name = "PATH")]
+    pub redis_server: std::path::PathBuf,
+    #[arg(long = "grace-secs", default_value_t = 15)]
+    pub grace_secs: u64,
+    #[arg(long = "ready-timeout-secs", default_value_t = 30)]
+    pub ready_timeout_secs: u64,
 }
 
 #[derive(Debug, Args)]
@@ -1774,8 +2011,10 @@ pub struct NowFieldArgs {
 
 #[derive(Debug, Args)]
 pub struct NowStatusArgs {
+    /// Redis NOW configuration (`aikit.redis-now-config/v1`). Omit to use the
+    /// election (`ai-kit:local-services:now.redis`).
     #[arg(long = "config-file", value_name = "PATH")]
-    pub config_file: std::path::PathBuf,
+    pub config_file: Option<std::path::PathBuf>,
     #[arg(long = "allow-env-import")]
     pub allow_env_import: bool,
 }

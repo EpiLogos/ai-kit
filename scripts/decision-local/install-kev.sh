@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
-# Install the selected local decision model (Kev-0.8B) behind a Workcell-owned
-# serving process. Installs ONLY the selected model — never a larger one
+# Install the selected local decision model (Kev-0.8B) for a Workcell-owned
+# serving process. Without Workcell, use `aikit decide service provision`
+# instead: it runs the same pinned recipe with AIKit's own lifecycle. Installs ONLY the selected model — never a larger one
 # "while we're here" — and records every pinned artifact identity in a
 # material manifest the operator keeps beside the serving checkout.
 #
@@ -89,4 +90,4 @@ out = target / "decision-model-manifest.json"
 out.write_text(json.dumps(manifest, indent=2, sort_keys=True))
 print("manifest:", out)
 PY
-echo "done. Now declare the serving process through Workcell's declared-services path."
+echo "done. Declare the serving process through Workcell's declared-services path (or use 'aikit decide service' on an installation without Workcell)."

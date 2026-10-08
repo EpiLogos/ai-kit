@@ -1,0 +1,120 @@
+{
+ "ok": true,
+ "status": "success",
+ "action": "central.file-map.inspect",
+ "data": {
+  "automatic_agent_or_model_invocation": false,
+  "operation": "inspect",
+  "result": {
+   "database": "/central/.central/bkmr/index.db",
+   "links": {},
+   "native_record": null,
+   "provider": {
+    "available": true,
+    "embedding_model": "BGESmallENV15",
+    "fulltext": true,
+    "hybrid": false,
+    "reason": null,
+    "semantic": false,
+    "tested_version": "7.6.7",
+    "version": "bkmr 7.6.7"
+   },
+   "resources": [],
+   "revision": "central.content-fnv1a64/v1:130567:8f30c66ed8bb3eb4",
+   "scopes": [
+    {
+     "content_pool": false,
+     "path": "/central",
+     "project": null,
+     "world_ref": "control:root"
+    },
+    {
+     "content_pool": false,
+     "path": "/central/Work/Actuation",
+     "project": "Actuation",
+     "world_ref": "project:Actuation"
+    },
+    {
+     "content_pool": false,
+     "path": "/central/Work/Central",
+     "project": "Central",
+     "world_ref": "project:Central"
+    },
+    {
+     "content_pool": false,
+     "path": "/central/Work/Factory",
+     "project": "Factory",
+     "world_ref": "project:Factory"
+    },
+    {
+     "content_pool": false,
+     "path": "/central/Work/O-I",
+     "project": "O-I",
+     "world_ref": "project:O-I"
+    },
+    {
+     "content_pool": false,
+     "path": "/central/Work/Point-Cloud-Demo",
+     "project": "Point-Cloud-Demo",
+     "world_ref": "project:Point-Cloud-Demo"
+    },
+    {
+     "content_pool": false,
+     "path": "/central/Work/Quaternal-Logic",
+     "project": "Quaternal-Logic",
+     "world_ref": "project:quaternal-logic"
+    },
+    {
+     "content_pool": false,
+     "path": "/central/Work/Workcell",
+     "project": "Workcell",
+     "world_ref": "project:Workcell"
+    },
+    {
+     "content_pool": false,
+     "path": "/central/Work/ai-kit",
+     "project": "ai-kit",
+     "world_ref": "project:ai-kit"
+    },
+    {
+     "content_pool": true,
+     "path": "/central/Work/documentation-audit-2026-09-06",
+     "project": "documentation-audit-2026-09-06",
+     "world_ref": "project:documentation-audit-2026-09-06"
+    },
+    {
+     "content_pool": true,
+     "path": "/home/user/Documents/epi",
+     "project": "epi",
+     "world_ref": "project:epi"
+    },
+    {
+     "content_pool": true,
+     "path": "/home/user/Documents/legacy",
+     "project": "legacy",
+     "world_ref": "project:legacy"
+    },
+    {
+     "content_pool": true,
+     "path": "/central/Work/personal",
+     "project": "personal",
+     "world_ref": "project:personal"
+    },
+    {
+     "content_pool": true,
+     "path": "/central/Work/projects",
+     "project": "projects",
+     "world_ref": "project:projects"
+    },
+    {
+     "content_pool": true,
+     "path": "/central/Work/wiki-continuity-2026-09-06",
+     "project": "wiki-continuity-2026-09-06",
+     "world_ref": "project:wiki-continuity-2026-09-06"
+    }
+   ],
+   "world_ref": "control:root"
+  },
+  "schema": "central.file-map/v1"
+ }
+}

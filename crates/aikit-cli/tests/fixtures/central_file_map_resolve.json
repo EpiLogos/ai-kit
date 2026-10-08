@@ -1,0 +1,31 @@
+{
+ "ok": true,
+ "status": "success",
+ "action": "central.file-map.resolve",
+ "data": {
+  "automatic_agent_or_model_invocation": false,
+  "operation": "resolve",
+  "result": {
+   "kind": "file",
+   "native_import": false,
+   "path": "/home/user/Central/Control/agents/now/clearings/06cca2f04e1a408f451f36263de0d3c1dda2aa8547a27d3ed163c222bc711dea/now.json",
+   "project": null,
+   "revision": "central.content-fnv1a64/v1:863:cc1887a08302dcb5",
+   "source": {
+    "agent_retrieval_allowed": true,
+    "path": "Control/agents/now/clearings/06cca2f04e1a408f451f36263de0d3c1dda2aa8547a27d3ed163c222bc711dea/now.json",
+    "provenance": "agent-maintained",
+    "ref": "central:source:control:root:Control/agents/now/clearings/06cca2f04e1a408f451f36263de0d3c1dda2aa8547a27d3ed163c222bc711dea/now.json",
+    "roles": [
+     "now-clearing"
+    ],
+    "standing": "current-development-state",
+    "treatment": "generated-derived"
+   },
+   "tags": [],
+   "title": "Control/agents/now/clearings/06cca2f04e1a408f451f36263de0d3c1dda2aa8547a27d3ed163c222bc711dea/now.json",
+   "world_ref": "control:root"
+  },
+  "schema": "central.file-map/v1"
+ }
+}

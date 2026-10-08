@@ -140,6 +140,8 @@ fn redis_preserves_versioned_participant_context_changes_revocation_and_delivery
         basis_digest: first.basis_digest.clone(),
         change_cursor: cursor,
         delivered_at_unix_ms: 3,
+        decision_provider: None,
+        jev_invocation_ref: None,
     };
     store.mark_delivered(&delivery, None).unwrap();
     assert_eq!(

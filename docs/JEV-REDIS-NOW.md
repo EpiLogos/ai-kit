@@ -50,6 +50,95 @@ aikit --json now-context revoke \
 automatic preparation path; a worker is not required to remember a planning
 tool call.
 
+## Local Redis without Workcell: `aikit now-context service`
+
+AIKit connected to Redis but never started it; the process, reference
+configuration and health came from Workcell's declared services. An
+installation without Workcell now has the lifecycle from AIKit, on the same
+core as `aikit decide service` (recorded process identity, identity-checked
+stop, foreign-listener refusal, rollback on upgrade). No verb discovers, runs
+or requires `workcell` or `factory`.
+
+```sh
+aikit now-context service provision [--port 6381] [--maxmemory-mb 256] [--redis-server ABS]
+aikit now-context service start | status | stop | restart
+aikit now-context service upgrade --redis-server ABS
+```
+
+- `provision` checks `redis-server --version` (reference series ≥ 8.10), hashes
+  the executable, and generates `redis.conf` (loopback, `appendonly yes`,
+  `appendfsync everysec`, finite `maxmemory`, `maxmemory-policy noeviction`) and
+  the `aikit.redis-now-config/v1` election `redis-now.json` in
+  `<AIKIT_HOME>/services/redis-now`.
+- `start` is ready only when PING answers **and** the live `INFO` reading
+  conforms to the profile (AOF on, finite maxmemory, noeviction, ≥ 8.10); a
+  non-conforming Redis is a named failure, not a success. A Redis this service
+  did not start on the same port is reported `foreign-listener`, never adopted.
+- `stop` sends TERM (Redis flushes its append-only file) and keeps the data;
+  `restart` and `upgrade` reuse the same data directory. `upgrade` refuses an
+  older-series executable before touching the running service, and returns to the
+  previous executable if the new one does not come up conforming.
+- Nothing flushes or deletes data.
+
+### Prepared context on provider rows, and what a turn actually received
+
+A configured provider row carries `now_context` only if something sets it.
+`aikit-session-space encounter-now-context-configure --provider-id ID
+--redis-config redis-now.json [--prepare-request REQ] [--required]` sets (or with
+`--withdraw` removes) that one field on any stored row (Pi, Prime, other),
+validates the preparation request against the Redis election at configuration,
+and reports what it elects (`selection.mode`: `none`, `all`, `jev`, `provider`).
+A request with `selection.mode = provider` and the `decision-provider.json`
+written by `aikit decide service` makes the local Kev rank the candidates before
+the first turn.
+
+Observability: each turn that carried prepared context appends a
+`now-context-delivered` journal event whose receipt records the prepared
+version, digest, basis digest and change cursor, **and** the decision-provider
+identity digest and decision invocation behind the view's selection (read from
+the delivered view's own basis). The encounter view returns the latest of these
+as `now_context_receipts` beside `prepared_context_receipts`, including
+`now-context-degraded` and the two `…-uncertain` kinds. A turn that carried none
+therefore shows none.
+
+Provider selection only offers Kev candidates whose `external_egress` is
+`allowed` and `agent_visibility` is `payload` (the Jev rule), even when the
+elected provider is a local loopback one. Central-read sources default to
+egress `denied`, so they are withheld from a local Kev as well; relaxing that
+for a `local-protocol` standing is a law change for the owner, not made here.
+
+### Electing the services through the configuration plane
+
+`aikit config-contribution` contributes two writable machine-scope settings in a
+`local-services` section: `ai-kit:local-services:decision.provider` and
+`ai-kit:local-services:now.redis`, each a `path` to the owner-native document
+(`aikit.decision-provider/v1`, `aikit.redis-now-config/v1`) that the service
+lifecycles above write. `config validate` parses the document with the owner's
+own law; `plan`/`apply` record the path **and the digest it was elected at**
+(`state/config/local-services.json`), never a copy; `reset` removes only the
+election. Electing starts, stops and provisions nothing. `aikit decide
+status|invoke` and `aikit now-context status` use the election when given no
+file, and refuse (`config.election_drifted`) when the document has changed since
+it was elected — for example after `aikit decide service upgrade` — until it is
+re-planned and re-applied. `aikit system --json` discloses each election: declared
+(path + digest), effective (document current / changed / unreadable) and active
+(a bounded read-only probe of the named service).
+
+### Reading what a turn actually used
+
+`aikit-session-space encounter-use --agent-session REF [--turn N | --cursor C]
+[--redis-config F] [--faculty-evidence DIR | --faculty-config F]` reads, without
+writing anything: the prepared-context version delivered to the turn (the
+journal's `now-context-delivered` receipt) and any degradation or uncertainty;
+the decision provider and invocation behind it, and — with `--redis-config` — the
+sources the decision selected, read back from the delivered view (verified by
+digest); and the QL operations the body made: `ql_*` tool calls and their
+results, `ql_relational.*` calls inside `ipython` calls, and the QL owner's own
+faculty receipts for the session in the turn's time window, reconciled by count.
+What could not be read is listed under `absences`; the decision receipt's body is
+not persisted by the prepare path, so only its ref and the provider identity
+digest are reported.
+
 ## Redis material configuration
 
 ```json
@@ -181,8 +270,8 @@ configuration:
 | mode | placement | notes |
 |---|---|---|
 | `none` | no decision service | the ordinary path; unrelated work never requires one and never falls back to hosted inference on its own |
-| `managed-local` | Workcell-owned local model service on loopback | recommended where installed; the serving process, material, health, restart and cleanup belong to Workcell's declared services |
-| `endpoint` | an existing self-hosted SystemOne-compatible endpoint | beyond loopback this requires an explicit `allow_remote` election and HTTPS |
+| `managed-local` | a loopback model service whose lifecycle the Workcell product owns where it is installed | the serving process, material, health, restart and cleanup belong to Workcell's declared services; the election itself never requires a `workcell` executable |
+| `endpoint` | a SystemOne-compatible endpoint | beyond loopback this requires an explicit `allow_remote` election and HTTPS; also the honest placement of the local service AIKit provisions itself (below) |
 | `hosted` | the TypeSafe/Jev API | unchanged law: native credential, `JevLimits`, concrete returned version |
 
 The decision provider is independent of the acting (coding/writing) models:
@@ -243,6 +332,43 @@ happens at start and "started" means ready-at-speed. The input ceiling
 trained state envelope (~7.5k tokens): keep the shared state lean and put
 per-candidate detail in the question entries — small models lose accuracy on
 long states, so narrowing scope beats fattening the state.
+
+### Local lifecycle without Workcell: `aikit decide service`
+
+An installation that does not have Workcell gets the complete Kev lifecycle
+from AIKit itself. Nothing in these verbs discovers, runs or requires a
+`workcell` or `factory` executable, and the generated election is mode
+`endpoint`, never `managed-local`.
+
+```sh
+aikit decide service provision [--port 8019] [--service-dir DIR] [--recipe-file R]
+aikit decide service start     [--ready-timeout-secs 600] [--no-warm]
+aikit decide service status    [--verify-material] [--probe]
+aikit decide service stop      [--grace-secs 15]
+aikit decide service restart
+aikit decide service upgrade   [--recipe-file R] [--force]
+```
+
+- The service directory defaults to `<AIKIT_HOME>/services/decision/kev-0.8b`
+  and holds `service.json` (state), `decision-material-manifest.json`
+  (SHA-256 of every pinned artifact), `decision-provider.json` (the `endpoint`
+  election to pass to `aikit decide`/`now-context`), `service.log`, the pinned
+  upstream checkout and its environment.
+- The recipe pins upstream, adapter and base by full revision (the adapter by
+  revision, where the scripts only named the repository). A branch or tag is
+  refused.
+- `start` adopts only a process this service started (pid + start time +
+  command line recorded). A listener on the same port that it did not start —
+  for example Workcell's own Kev — is reported as `foreign-listener`, never
+  adopted, stopped or restarted. Ready means the pinned model card answers
+  (name, run and base must match the recipe) and one real warm decision
+  completed through the elected provider.
+- `stop` is identity-checked TERM then KILL and idempotent. `upgrade` moves to a
+  different pinned recipe and returns to the previous cut, restarting it if it
+  was running, when the new cut cannot be provisioned or does not come up
+  healthy; the receipt says whether the rollback held.
+- The service process does not inherit `WORKCELL_*` variables.
+- Redis has its own verbs on the same lifecycle core (below).
 
 ### Meaning, disclosure and evaluation
 

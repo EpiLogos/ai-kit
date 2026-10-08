@@ -274,6 +274,44 @@ fn settings() -> Vec<Setting> {
             native_ref: "aikit:config:model-defaults",
         },
         Setting {
+            setting_ref: crate::local_services_election::DECISION_SETTING_REF,
+            section_ref: "local-services",
+            key: "decision.provider",
+            title: "Decision provider election",
+            description: "Which `aikit.decision-provider/v1` document AIKit uses when a command takes no explicit `--provider-file` (`aikit decide`). The value is the absolute path of that owner-native document, recorded as a reference with the digest it was elected at, never a copy; validation parses it with the decision-provider law. The local Kev service AIKit provisions writes such a document (`aikit decide service provision`). Electing starts nothing: the service lifecycle stays explicit.",
+            value_schema: json!({ "type": "path", "format": "aikit.decision-provider/v1" }),
+            allowed_scopes: &["machine"],
+            writable: true,
+            profileable: true,
+            sensitive: false,
+            default: None,
+            default_semantics: "none",
+            effect_kind: "value-change",
+            effect_summary: "`aikit decide status|invoke` without `--provider-file` use the elected document, and refuse when it has changed since it was elected. Nothing is provisioned, started or stopped.",
+            effect_ref: Some("aikit decide status"),
+            operations: (true, true, true, true),
+            native_ref: "aikit:config:decision-provider-election",
+        },
+        Setting {
+            setting_ref: crate::local_services_election::REDIS_SETTING_REF,
+            section_ref: "local-services",
+            key: "now.redis",
+            title: "Redis NOW election",
+            description: "Which `aikit.redis-now-config/v1` document AIKit uses when a command takes no explicit `--config-file` (`aikit now-context status`). The value is the absolute path of that owner-native document, recorded as a reference with the digest it was elected at. The local Redis AIKit provisions writes such a document (`aikit now-context service provision`). Electing starts nothing.",
+            value_schema: json!({ "type": "path", "format": "aikit.redis-now-config/v1" }),
+            allowed_scopes: &["machine"],
+            writable: true,
+            profileable: true,
+            sensitive: false,
+            default: None,
+            default_semantics: "none",
+            effect_kind: "value-change",
+            effect_summary: "`aikit now-context status` without `--config-file` uses the elected document, and refuses when it has changed since it was elected. Nothing is provisioned, started or stopped.",
+            effect_ref: Some("aikit now-context status"),
+            operations: (true, true, true, true),
+            native_ref: "aikit:config:redis-now-election",
+        },
+        Setting {
             setting_ref: crate::permission_defaults::SETTING_REF,
             section_ref: "permissions",
             key: "permissions.default-mode",
@@ -571,6 +609,7 @@ fn sections() -> Vec<Value> {
             "skills" => "Skills / SkillSets / Methods / UsageOverlays",
             "models" => "Models / providers / credential refs",
             "permissions" => "Permissions / session permission modes",
+            "local-services" => "Local services / decision provider / Redis NOW",
             other => unreachable!("unmapped section {other}"),
         };
         let entry = sections.iter_mut().find(|s| s["id"] == setting.section_ref);
@@ -789,6 +828,14 @@ fn validate_value(service: &Service, setting: &Setting, value: &Value) -> Vec<Va
         return crate::model_defaults::violations(value)
             .into_iter()
             .map(|message| violation("invalid_model_defaults", message))
+            .collect();
+    }
+    if let Some(election) =
+        crate::local_services_election::Election::from_setting(setting.setting_ref)
+    {
+        return crate::local_services_election::violations(election, value)
+            .into_iter()
+            .map(|message| violation("invalid_election", message))
             .collect();
     }
     if setting.setting_ref == crate::permission_defaults::SETTING_REF {
@@ -1086,6 +1133,14 @@ fn change_summary(setting: &Setting, value: &Value, scope: &ScopeAddress) -> Str
             scope.compact()
         );
     }
+    if crate::local_services_election::Election::from_setting(setting.setting_ref).is_some() {
+        return format!(
+            "elect `{}` as the {} at {}; nothing is started or stopped",
+            value.as_str().unwrap_or_default(),
+            setting.title.trim_end_matches(" election").to_lowercase(),
+            scope.compact()
+        );
+    }
     if setting.setting_ref == crate::permission_defaults::SETTING_REF {
         let mut parts: Vec<String> = value
             .as_object()
@@ -1256,6 +1311,18 @@ fn execute(
                 )
             });
     }
+    if let Some(election) =
+        crate::local_services_election::Election::from_setting(setting.setting_ref)
+    {
+        return crate::local_services_election::write(service.home(), election, value).map_err(
+            |error| {
+                fail(
+                    "internal",
+                    format!("the native election failed: {}", error.message()),
+                )
+            },
+        );
+    }
     if setting.setting_ref == crate::permission_defaults::SETTING_REF {
         return crate::permission_defaults::from_value(value)
             .and_then(|modes| crate::permission_defaults::write(service.home(), &modes))
@@ -1322,6 +1389,16 @@ fn execute_reset(
     setting: &Setting,
     address: &ScopeAddress,
 ) -> Result<(), Failure> {
+    if let Some(election) =
+        crate::local_services_election::Election::from_setting(setting.setting_ref)
+    {
+        return crate::local_services_election::clear(service.home(), election).map_err(|error| {
+            fail(
+                "internal",
+                format!("the native reset failed: {}", error.message()),
+            )
+        });
+    }
     let scope_kind = address
         .aikit_kind()
         .expect("writable settings always map to an AIKit scope");

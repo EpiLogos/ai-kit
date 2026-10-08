@@ -192,7 +192,7 @@ fn status_reports_mode_none_as_the_ordinary_path_without_touching_a_network() {
     )
     .unwrap();
     let status = aikit_cli::decide::decide_status(aikit_cli::cli::DecideStatusArgs {
-        provider_file: path,
+        provider_file: Some(path),
         probe: true,
         curl: None,
         allow_env_import: false,
@@ -270,7 +270,7 @@ fn status_and_invoke_against_a_controlled_local_endpoint_report_served_facts() {
     std::fs::write(&path, serde_json::to_vec_pretty(&provider).unwrap()).unwrap();
 
     let status = aikit_cli::decide::decide_status(aikit_cli::cli::DecideStatusArgs {
-        provider_file: path.clone(),
+        provider_file: Some(path.clone()),
         probe: true,
         curl: None,
         allow_env_import: false,
@@ -303,7 +303,7 @@ fn status_and_invoke_against_a_controlled_local_endpoint_report_served_facts() {
     )
     .unwrap();
     let receipt = aikit_cli::decide::decide_invoke(aikit_cli::cli::DecideInvokeArgs {
-        provider_file: path,
+        provider_file: Some(path),
         request_file: request_path,
         invocation_ref: None,
         curl: None,

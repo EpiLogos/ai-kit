@@ -1586,7 +1586,12 @@ pub(crate) fn project_matrix_rows(
 }
 
 pub fn now_status(args: NowStatusArgs) -> Result<Value> {
-    let config: RedisNowConfig = read_json(&args.config_file, "Redis NOW config", 256 * 1024)?;
+    let config_file = crate::local_services_election::resolve_file(
+        &aikit_store::AikitHome::discover()?,
+        crate::local_services_election::Election::Redis,
+        args.config_file.clone(),
+    )?;
+    let config: RedisNowConfig = read_json(&config_file, "Redis NOW config", 256 * 1024)?;
     let secret = resolve_secret(&config, args.allow_env_import)?;
     let status = RedisNowStore::new(config)?.status(secret.as_ref())?;
     serde_json::to_value(status).map_err(|e| fail("jev_now.encode", e.to_string()))
@@ -1666,6 +1671,52 @@ pub fn now_prepare(cwd: &Path, args: NowPrepareArgs) -> Result<Value> {
 /// Configured encounter entry uses the same native preparation path as the CLI.
 /// It may refresh the volatile delivery/session/version basis, but never changes
 /// the prepared participant, Project, NOW, disclosure or owner-source selection.
+/// Fail-fast check of an owner-authored encounter preparation request at
+/// provider configuration, so a mismatch is refused here and not at the first
+/// turn. Returns what the request elects: its selection mode and, for provider
+/// selection, the decision-provider file and threshold.
+pub(crate) fn describe_encounter_prepare_request(
+    request_file: &Path,
+    redis: &RedisNowConfig,
+    external_provider: bool,
+) -> Result<Value> {
+    let request: NowPrepareRequest = read_json(
+        request_file,
+        "NOW encounter preparation request",
+        1024 * 1024,
+    )?;
+    if request.schema != PREPARE_SCHEMA {
+        return Err(fail(
+            "now_context.prepare_invalid",
+            "The preparation request has the wrong schema",
+        ));
+    }
+    if request.redis != *redis || request.external_provider != external_provider {
+        return Err(fail(
+            "now_context.encounter_prepare_mismatch",
+            "The preparation request's Redis election or external-provider setting differs from the configured one",
+        ));
+    }
+    let selection = match &request.selection {
+        SelectionMode::All => json!({"mode": "all"}),
+        SelectionMode::Jev { .. } => json!({"mode": "jev"}),
+        SelectionMode::Provider {
+            provider_file,
+            relevance_threshold,
+            ..
+        } => json!({
+            "mode": "provider",
+            "provider_file": provider_file,
+            "relevance_threshold": relevance_threshold,
+        }),
+    };
+    Ok(json!({
+        "participant_ref": request.participant_ref,
+        "project_ref": request.project_ref,
+        "selection": selection,
+    }))
+}
+
 pub(super) fn prepare_for_encounter(
     cwd: &Path,
     request_file: &Path,
@@ -1839,10 +1890,20 @@ fn now_prepare_request(cwd: &Path, request: NowPrepareRequest) -> Result<Value> 
         decision_provider: selection.decision_provider.clone(),
         change_cursor,
     };
+    // The decision invocation behind the selection, whichever transport made
+    // it: the hosted Jev invocation, or the elected provider's (Kev) one. The
+    // delivery receipt reads this back, so a turn can say which determination
+    // its prepared context was selected by.
     let jev_invocation_ref = selection
         .invocation
         .as_ref()
-        .map(|i| i.invocation_ref.clone());
+        .map(|i| i.invocation_ref.clone())
+        .or_else(|| {
+            selection
+                .decision_invocation
+                .as_ref()
+                .map(|d| d.invocation_ref().clone())
+        });
     let view = PreparedNowContext {
         schema: NOW_PREPARED_SCHEMA.into(),
         project_ref: request.project_ref,

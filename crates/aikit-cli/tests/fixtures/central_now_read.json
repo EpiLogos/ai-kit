@@ -1,0 +1,44 @@
+{
+ "ok": true,
+ "status": "success",
+ "action": "central.now.read",
+ "data": {
+  "automatic_agent_or_model_invocation": false,
+  "pointer_note": "Records are pointers, not authority: follow the governing guidance, and search the native surface before building anything new.",
+  "record": {
+   "archive_ref": null,
+   "continuation_refs": [],
+   "created_at_unix_seconds": 1790244759,
+   "horizon": "workcell-root",
+   "lifecycle": "active",
+   "now_ref": "central:now:control:root:06cca2f04e1a408f451f36263de0d3c1dda2aa8547a27d3ed163c222bc711dea",
+   "obligations": [],
+   "participant_refs": [],
+   "policy_revision_at_allocation": "central.content-fnv1a64/v1:3775:05ff4dd9744fe20d",
+   "purpose": "Workcell root NOW for workcell:mac: the live material horizon that child NOWs placed on this Workcell hang from.",
+   "schema": "central.now-clearing/v1",
+   "scope_ref": "control:root",
+   "source_ref": "central:source:control:root:Control/agents/now/clearings/06cca2f04e1a408f451f36263de0d3c1dda2aa8547a27d3ed163c222bc711dea/now.json",
+   "source_refs": [],
+   "task_ref": "central:task:control:root:workcell-root:workcell:mac",
+   "workcell_ref": "workcell:mac"
+  },
+  "returns": [],
+  "revision": {
+   "byte_len": 863,
+   "revision": "central.content-fnv1a64/v1:863:cc1887a08302dcb5"
+  },
+  "schema": "central.now-reading/v1",
+  "source": {
+   "agent_retrieval_allowed": true,
+   "path": "Control/agents/now/clearings/06cca2f04e1a408f451f36263de0d3c1dda2aa8547a27d3ed163c222bc711dea/now.json",
+   "provenance": "agent-maintained",
+   "ref": "central:source:control:root:Control/agents/now/clearings/06cca2f04e1a408f451f36263de0d3c1dda2aa8547a27d3ed163c222bc711dea/now.json",
+   "roles": [
+    "now-clearing"
+   ],
+   "standing": "current-development-state",
+   "treatment": "generated-derived"
+  }
+ }
+}
