@@ -381,14 +381,10 @@ pub enum GatewayConversationOperation {
     Stop,
     /// Ask the machine's managed-upgrade owner to plan (or, with `apply`,
     /// start) a managed upgrade of this gateway. Direct conversations only.
-    Upgrade {
-        apply: bool,
-    },
+    Upgrade { apply: bool },
     /// Give the asking conversation a line: a receipt or a progress note.
     /// A queued answer survives a restart; a sent one reaches a live peer.
-    Announce {
-        text: String,
-    },
+    Announce { text: String },
     /// Fresh turn context for the binding: a forked Stream and a new
     /// AgentSession generation under the same connector conversation. The old
     /// Stream is retained in the journal and named in the result.

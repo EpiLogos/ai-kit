@@ -392,10 +392,9 @@ impl UpgradeEnv for SystemEnv {
                 "a stop that does not end the process cannot be asked of a gateway",
             ));
         }
-        let output = self.control.run(
-            "kill",
-            &["-TERM".to_owned(), expected_pid.to_string()],
-        )?;
+        let output = self
+            .control
+            .run("kill", &["-TERM".to_owned(), expected_pid.to_string()])?;
         if !output.status.success() {
             return Err(AikitError::new(
                 "gateway_upgrade.stop_refused",
