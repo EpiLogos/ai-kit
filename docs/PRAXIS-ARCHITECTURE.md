@@ -247,6 +247,58 @@ files (path + sha256), translated relations, target additions, unsupported
 relations, validation (command, exit, summary) and discovery evidence where
 exercised.
 
+### Scope composition and its application reading
+
+The existing compose operation exposes `aikit compose repertoire`. With no
+selection it reads the effective repertoire. `--profile <existing-profile>`
+and repeatable `--set <set-ref>` preview a project or session change;
+`--apply` applies the same reversible Procedure. A saved preview can be
+applied with `--from-preview <file>` after its exact source and material
+preconditions are checked. Profiles retain their precedence, while SkillSet
+bindings union across scopes and the existing Project Specification. Selecting
+a member grants no trust, authority or invocation.
+
+The `aikit.resolved-repertoire/v1` reading names the accepted member revisions,
+generation, practice classifications, harness effects, withheld reasons and
+package commands. CLI JSON and compact human output, the TUI composition
+surface, and native child-task consumers use this reading. Claude and Pi
+share the orientation and projected-skill path transformation. Unchanged
+application reuses the retained generation; reconciliation validates its
+lock, metadata and tree before repairing managed drift. Foreign instruction
+material stays outside that repair.
+
+In `aikit ui --fullscreen`, the existing Compose Governance step selects an
+existing Profile (0 keeps the baseline; digits or left/right select), and Praxis
+selects SkillSets. Ctrl+P chooses project scope and Ctrl+L session scope.
+Ctrl+S previews, requests confirmation, then applies the retained native
+Procedure. Changing scope or selection invalidates that preview. With no new
+Profile or sets, the operation reconciles the existing repertoire. The resulting
+application and its observed writes, scans, hashes and elapsed apply time are the
+same structured result used by CLI JSON and native delegation; retained Returns
+without measurements report their absence.
+
+`aikit set package {inspect|plan|export|verify|diff} . --target <target>` uses
+the same effective repertoire in the exact home, project and session context.
+Export preserves source bytes and records member revisions and unsupported
+target relations. A native team task retains the applied Procedure and
+child-specific reading; its owner verifies both the Procedure's actual
+satisfaction and the generation's current material before execution.
+
+The bounded collaboration surface is `aikit gateway handoff`, with focused
+full retrieval through `aikit gateway message <communique-ref>`. Confirmation
+with `handoff --commit` carries the exact offered delivery and carried text;
+only records actually retained are acknowledged. `aikit gateway team
+--request-json <json-or-@file>` and Pi's tenure-scoped Central team tool share
+the existing prepare, delegate, read, cancel and release operation. They
+retain the actual member, Agency, task, generation, NOW, Workcell and return
+address. Delivery acknowledgement remains distinct from completed work.
+
+Implementation and acceptance owners are [AIKit #497](https://github.com/EpiLogos/ai-kit/issues/497)
+and [AIKit #498](https://github.com/EpiLogos/ai-kit/issues/498), under the
+existing praxis and cross-harness programmes. Executed evidence belongs to
+their native test and task receipts; these contracts do not imply live
+provider acceptance.
+
 ## 6. World participation and citizenship
 
 Owners: Central (World, AgentProfile, Positions), Actuation (Agency, authority,

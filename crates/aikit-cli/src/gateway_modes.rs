@@ -328,10 +328,8 @@ pub struct SetupInputs {
     /// `WORKCELL=HOST:PORT` peers to declare.
     pub peers: Vec<(String, String)>,
     pub peer_token_location: Option<String>,
-    pub owner_token_location: Option<String>,
     /// The token a declared peer expects of us (by location).
     pub peer_remote_token_location: Option<String>,
-    pub allow_wide_bind: bool,
     /// The node's tailnet address, when `tailscale ip -4` answered.
     pub tailnet_address: Option<String>,
     /// Whether a service definition already exists.
@@ -350,14 +348,14 @@ pub struct SetupInputs {
 pub enum SetupStep {
     /// Create an owner-only random token file if it does not exist.
     Token { path: String, purpose: String },
-    /// (Re)write the service definition and start it.
+    /// (Re)write the service definition and start it. The command surface
+    /// carries no owner-token or wide-bind knobs on this lane; the install
+    /// defaults hold.
     InstallService {
         websocket_bind: Option<String>,
         token_location: Option<String>,
-        owner_token_location: Option<String>,
         gateway_ref: Option<String>,
         workcell_ref: Option<String>,
-        allow_wide_bind: bool,
         replace: bool,
     },
     /// Declare a peer gateway.
@@ -436,27 +434,17 @@ pub fn plan_setup(inputs: &SetupInputs) -> Result<SetupPlan> {
         .peer_token_location
         .clone()
         .unwrap_or_else(|| default_token_path(inputs, "gateway-ws.token"));
-    let owner_token = inputs
-        .owner_token_location
-        .clone()
-        .unwrap_or_else(|| default_token_path(inputs, "gateway-owner.token"));
 
     let ws_steps = |bind: String, steps: &mut Vec<SetupStep>| {
         steps.push(SetupStep::Token {
             path: peer_token.clone(),
             purpose: "the peer token: what another Workcell presents to relay and ask".into(),
         });
-        steps.push(SetupStep::Token {
-            path: owner_token.clone(),
-            purpose: "the owner token: what drains, restores and upgrades over the network (kept separate)".into(),
-        });
         steps.push(SetupStep::InstallService {
             websocket_bind: Some(bind),
             token_location: Some(peer_token.clone()),
-            owner_token_location: Some(owner_token.clone()),
             gateway_ref: inputs.gateway_ref.clone(),
             workcell_ref: inputs.workcell_ref.clone(),
-            allow_wide_bind: inputs.allow_wide_bind,
             replace: inputs.service_installed,
         });
     };
@@ -465,10 +453,8 @@ pub fn plan_setup(inputs: &SetupInputs) -> Result<SetupPlan> {
         "local-ipc" => steps.push(SetupStep::InstallService {
             websocket_bind: None,
             token_location: None,
-            owner_token_location: None,
             gateway_ref: inputs.gateway_ref.clone(),
             workcell_ref: inputs.workcell_ref.clone(),
-            allow_wide_bind: false,
             replace: inputs.service_installed,
         }),
         "loopback-service" => {
@@ -819,10 +805,8 @@ impl SetupEffects for SystemSetupEffects {
         let SetupStep::InstallService {
             websocket_bind,
             token_location,
-            owner_token_location,
             gateway_ref,
             workcell_ref,
-            allow_wide_bind,
             replace,
         } = step
         else {
@@ -833,8 +817,10 @@ impl SetupEffects for SystemSetupEffects {
             token_location: token_location.clone(),
             gateway_ref: gateway_ref.clone(),
             workcell_ref: workcell_ref.clone(),
-            owner_token_location: owner_token_location.clone(),
-            allow_wide_bind: *allow_wide_bind,
+            // The command surface carries no owner-token or wide-bind knobs on
+            // this lane; the install defaults hold.
+            owner_token_location: None,
+            allow_wide_bind: false,
         };
         // Validate before anything is stopped: a bad option must not cost the
         // running gateway.
@@ -1003,24 +989,20 @@ mod tests {
     }
 
     #[test]
-    fn private_tailnet_binds_the_tailnet_address_with_two_distinct_tokens() {
+    fn private_tailnet_binds_the_tailnet_address_with_its_peer_token() {
         let plan = plan_setup(&inputs("private-tailnet")).unwrap();
-        assert_eq!(kinds(&plan), ["token", "token", "install"]);
+        assert_eq!(kinds(&plan), ["token", "install"]);
         let SetupStep::InstallService {
             websocket_bind,
             token_location,
-            owner_token_location,
             replace,
             ..
-        } = &plan.steps[2]
+        } = &plan.steps[1]
         else {
             panic!()
         };
         assert_eq!(websocket_bind.as_deref(), Some("100.109.102.82:7788"));
-        assert_ne!(
-            token_location, owner_token_location,
-            "one token cannot grant two scopes"
-        );
+        assert!(token_location.is_some(), "the peer token is declared");
         assert!(!replace);
         assert!(plan
             .warnings

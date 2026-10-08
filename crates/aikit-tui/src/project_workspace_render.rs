@@ -73,11 +73,7 @@ pub struct WorkspaceReading<'a> {
     /// environment boundary, parsed once at construction. `None` when this
     /// terminal is standalone AIKit over what is actually available.
     pub composed_world: Option<&'a crate::world_entry::ComposedWorld>,
-    /// The composed NOW field the containing O:I surface supplied through the
-    /// same environment boundary, parsed once at construction. `None` when no
-    /// supply exists — the pane then does not render, exactly like the
-    /// composed World.
-    pub now_field: Option<&'a crate::now_field_view::NowFieldReading>,
+    pub repertoire: Option<&'a BoundaryReading<Option<aikit_core::repertoire::RepertoireReading>>>,
 }
 
 impl<'a> WorkspaceReading<'a> {
@@ -96,7 +92,7 @@ impl<'a> WorkspaceReading<'a> {
             }),
             agent_work_bindings: crate::world_entry::AgentWorkBindings::none(),
             composed_world: None,
-            now_field: None,
+            repertoire: None,
         }
     }
 
@@ -116,20 +112,20 @@ impl<'a> WorkspaceReading<'a> {
     }
 
     #[must_use]
+    pub fn with_repertoire(
+        mut self,
+        repertoire: &'a BoundaryReading<Option<aikit_core::repertoire::RepertoireReading>>,
+    ) -> Self {
+        self.repertoire = Some(repertoire);
+        self
+    }
+
+    #[must_use]
     pub fn with_composed_world(
         mut self,
         composed: Option<&'a crate::world_entry::ComposedWorld>,
     ) -> Self {
         self.composed_world = composed;
-        self
-    }
-
-    #[must_use]
-    pub fn with_now_field(
-        mut self,
-        now_field: Option<&'a crate::now_field_view::NowFieldReading>,
-    ) -> Self {
-        self.now_field = now_field;
         self
     }
 }
@@ -208,16 +204,6 @@ pub fn project_world_lines(
                 Some(composed) => crate::world_entry::composed_world_lines(composed, glyphs),
                 None => Vec::new(),
             };
-            if let Some(now_field) = reading.now_field {
-                if !lines.is_empty() {
-                    lines.push(String::new());
-                }
-                lines.extend(crate::now_field_view::now_field_lines(
-                    now_field,
-                    glyphs,
-                    now_field.read_at_unix_seconds,
-                ));
-            }
             lines.extend(context_lines(world, glyphs));
             lines.extend(live_field_lines(state.live_field.as_ref(), glyphs));
             lines
@@ -519,7 +505,22 @@ fn compose_lines(state: &TuiState, reading: WorkspaceReading<'_>, glyphs: Glyphs
     let sep = glyphs.separator();
     let world = reading.world;
     let mut lines = compose_spine_lines(state, reading, glyphs);
+    match reading.repertoire {
+        Some(BoundaryReading::Observed(Some(repertoire))) => {
+            lines.push(String::new());
+            lines.extend(repertoire.render().lines().map(str::to_owned));
+        }
+        Some(BoundaryReading::Unreadable { reason }) => {
+            lines.push(format!("Repertoire unreadable: {reason}"));
+        }
+        _ => {}
+    }
 
+    if let Some(application) = state.repertoire_application.as_ref() {
+        lines.push(String::new());
+        lines.push("Last observed repertoire application:".into());
+        lines.extend(application.render().lines().map(str::to_owned));
+    }
     if let Some(agent) = world.actor_runtime.agent.effective.as_ref() {
         lines.push(format!("Agent         {}", agent.resource));
     }

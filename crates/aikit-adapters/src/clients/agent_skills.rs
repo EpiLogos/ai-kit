@@ -35,6 +35,71 @@ pub const DISCLOSURE_DIRS: [&str; 3] = ["assets", "references", "scripts"];
 
 pub const SKILL_FILE: &str = "SKILL.md";
 
+/// Plan a repertoire at a harness's native skill prefix. Claude and Pi share
+/// capsule-root/export-name/overlay semantics; their path and pickup timing
+/// remain in their own adapters. A missing source refuses the whole plan, so a
+/// previously accepted generation survives instead of becoming a partial set.
+pub fn project_repertoire(
+    context: &aikit_core::projection::ResolvedContext,
+    prefix: &Path,
+    mode: MaterializationMode,
+) -> Result<Vec<ProjectionItem>> {
+    let mut items = Vec::new();
+    for capability in context
+        .view
+        .active_of_kind(aikit_core::capsule::Kind::Skill)
+    {
+        let root = context.root_of(&capability.id).ok_or_else(|| {
+            AikitError::new(
+                "skill.source_missing",
+                format!("{} has no accepted source root", capability.id),
+            )
+            .with("capability", capability.id.to_string())
+        })?;
+        let payload = effective_payload_root(capability, root);
+        let skill = validate(&payload)
+            .map_err(|error| error.with("capability", capability.id.to_string()))?;
+        let exported = AgentSkill {
+            name: effective_export_name(capability).to_string(),
+            ..skill
+        };
+        let overlays = context
+            .view
+            .skill_usage_overlays
+            .get(&capability.id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        items.extend(exported.project_effective(prefix, mode, overlays)?);
+    }
+    Ok(items)
+}
+
+/// The native directory name is a resolved Profile contribution, not an
+/// alteration of the accepted skill's frontmatter or source identity.
+pub fn effective_export_name(capability: &aikit_core::resolve::ActiveCapability) -> &str {
+    capability
+        .config
+        .get("export_name")
+        .and_then(|value| value.as_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| capability.id.leaf())
+}
+
+/// The resolved payload root used by native projection and effective export.
+pub fn effective_payload_root(
+    capability: &aikit_core::resolve::ActiveCapability,
+    capsule_root: &Path,
+) -> PathBuf {
+    capsule_root.join(
+        capability
+            .config
+            .get("root")
+            .and_then(|value| value.as_str())
+            .filter(|root| !root.is_empty())
+            .unwrap_or("payload"),
+    )
+}
+
 /// A validated native Agent Skill.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSkill {
@@ -138,6 +203,21 @@ impl AgentSkill {
     }
 }
 
+/// The additive orientation used by native frontmatter and portable summaries.
+pub fn effective_description(description: &str, overlays: &[AppliedSkillUsageOverlay]) -> String {
+    let additions: Vec<&str> = overlays
+        .iter()
+        .filter_map(|overlay| overlay.description.as_deref())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect();
+    if additions.is_empty() {
+        description.to_string()
+    } else {
+        format!("{} {}", description.trim(), additions.join(" "))
+    }
+}
+
 fn render_effective_skill(source: &str, overlays: &[AppliedSkillUsageOverlay]) -> Result<String> {
     let (frontmatter, body) = split_frontmatter(source)?;
     let mut yaml: serde_yaml::Mapping = serde_yaml::from_str(frontmatter).map_err(|error| {
@@ -156,17 +236,9 @@ fn render_effective_skill(source: &str, overlays: &[AppliedSkillUsageOverlay]) -
                 format!("{SKILL_FILE} description is not a YAML string"),
             )
         })?;
-    let additions: Vec<&str> = overlays
-        .iter()
-        .filter_map(|overlay| overlay.description.as_deref())
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .collect();
-    if !additions.is_empty() {
-        yaml.insert(
-            description_key,
-            serde_yaml::Value::String(format!("{} {}", description.trim(), additions.join(" "))),
-        );
+    let effective = effective_description(description, overlays);
+    if effective != description {
+        yaml.insert(description_key, serde_yaml::Value::String(effective));
     }
     let mut encoded = serde_yaml::to_string(&yaml).map_err(|error| {
         AikitError::new(

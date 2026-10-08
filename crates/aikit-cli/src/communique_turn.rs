@@ -126,12 +126,7 @@ pub fn pending_communiques_with_budget(
         };
         // Pi retains the offer in details while carrying text in content;
         // include both and bounded session/provenance framing in the budget.
-        let bytes = serde_json::to_vec(
-            &json!({"schema":"aikit.gateway-handoff/v1", "delivery":candidate,
-                "content":candidate.text,"peer_provenance_reserve":"x".repeat(1024)}),
-        )
-        .map(|text| text.len())
-        .unwrap_or(usize::MAX);
+        let bytes = handoff_envelope_bytes(&candidate);
         if bytes > budget.serialized_bytes || bytes > budget.token_upper_bound {
             carried.pop();
             break;
@@ -147,6 +142,17 @@ pub fn pending_communiques_with_budget(
         pending_count: total,
         preview_bytes: budget.preview_bytes,
     }))
+}
+
+/// Offer and confirmation use one complete envelope estimate. A byte upper
+/// bound is deliberately conservative for tokenization, including attribution.
+fn handoff_envelope_bytes(delivery: &TurnDelivery) -> usize {
+    serde_json::to_vec(
+        &json!({"schema":"aikit.gateway-handoff/v1", "delivery":delivery,
+        "content":delivery.text,"peer_provenance_reserve":"x".repeat(1024)}),
+    )
+    .map(|value| value.len())
+    .unwrap_or(usize::MAX)
 }
 
 fn render(
@@ -352,7 +358,7 @@ pub fn handoff_for_occupant(
 ) -> Result<Value> {
     let Some(commit) = commit else {
         return Ok(
-            json!({"schema":"aikit.gateway-handoff/v1", "delivery":pending_communiques_for_turn(occupant, gateway)?}),
+            json!({"schema":"aikit.gateway-handoff/v1", "delivery":pending_communiques_for_turn(&occupant, gateway)?}),
         );
     };
     let delivery: TurnDelivery =
@@ -368,12 +374,16 @@ pub fn handoff_for_occupant(
         ));
     }
     let bounds = HandoffBudget::default();
+    let bytes = handoff_envelope_bytes(&delivery);
     if delivery.communique_refs.len() > bounds.records
         || delivery.preview_bytes > bounds.preview_bytes
-        || serde_json::to_vec(&json!({"delivery":delivery,"content":delivery.text,"peer_provenance_reserve":"x".repeat(1024)}))
-            .map(|value| value.len()).unwrap_or(usize::MAX) > bounds.serialized_bytes
+        || bytes > bounds.serialized_bytes
+        || bytes > bounds.token_upper_bound
     {
-        return Err(aikit_core::AikitError::new("gateway.handoff_invalid", "Carried handoff exceeds the native aggregate budget"));
+        return Err(aikit_core::AikitError::new(
+            "gateway.handoff_invalid",
+            "Carried handoff exceeds the native aggregate budget",
+        ));
     }
     let mut records = Vec::new();
     let mut pending = Vec::new();
@@ -426,7 +436,7 @@ pub fn handoff_for_occupant(
     if records.is_empty()
         || delivery.pending_count < records.len()
         || render(
-            occupant,
+            &occupant,
             &records,
             delivery.pending_count,
             delivery.preview_bytes,
@@ -649,6 +659,49 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .ends_with("TAIL-0")
+        );
+    }
+    #[test]
+    fn retained_batch_over_token_bound_cannot_ack_under_byte_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let gateway = LocalGateway::default_for(&AikitHome::at(dir.path()));
+        seed(&gateway, 20);
+        let defaults = HandoffBudget::default();
+        let delivery = pending_communiques_with_budget(
+            &occupant(),
+            &gateway,
+            HandoffBudget {
+                token_upper_bound: defaults.serialized_bytes,
+                ..defaults
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let bytes = handoff_envelope_bytes(&delivery);
+        assert!(
+            bytes > defaults.token_upper_bound,
+            "regression must exceed token budget: {bytes}"
+        );
+        assert!(bytes <= defaults.serialized_bytes);
+        let error = handoff_for_occupant(
+            &occupant(),
+            &gateway,
+            Some(json!({"delivery":delivery,"carried_text":delivery.text})),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "gateway.handoff_invalid");
+        let GatewayResponse::CommuniqueList { communiques } = gateway
+            .call(GatewayCommand::CommuniqueInbox {
+                position_ref: occupant().position_ref,
+            })
+            .unwrap()
+        else {
+            panic!("inbox")
+        };
+        assert_eq!(
+            communiques.len(),
+            20,
+            "refused carrying must preserve all pending records"
         );
     }
     #[test]

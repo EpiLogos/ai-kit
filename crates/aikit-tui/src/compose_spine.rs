@@ -219,7 +219,22 @@ fn standing_for(
             // contract itself: no praxis contract crosses this application,
             // which is a boundary fact, not a claim that praxis does not
             // exist in the product.
-            if state.compose_skill_set_field.is_empty() {
+            if let Some(crate::project_workspace_render::BoundaryReading::Observed(Some(
+                repertoire,
+            ))) = reading.repertoire
+            {
+                StepStanding::Determined(format!(
+                    "{} Profile(s), {} SkillSet(s), {} accepted member(s); inspect/apply: aikit compose repertoire",
+                    repertoire.profiles.len(), repertoire.skill_sets.len(), repertoire.members.len(),
+                ))
+            } else if let Some(crate::project_workspace_render::BoundaryReading::Unreadable {
+                reason,
+            }) = reading.repertoire
+            {
+                StepStanding::NotExposed(format!(
+                    "effective repertoire could not be read: {reason}"
+                ))
+            } else if state.compose_skill_set_field.is_empty() {
                 StepStanding::NotExposed(format!(
                     "no Profile/SkillSet/Skill/Method contract here (no praxis contract crosses this application); {} capabilit{}, {} action{} resolve",
                     world.capability_horizon.capabilities.len(),
@@ -523,7 +538,33 @@ fn step_detail(
         }
 
         ComposeStep::Governance => {
-            let mut lines = Vec::new();
+            let mut lines = vec![format!(
+                "  Selected Profile: {}",
+                state
+                    .compose_profile
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "keep existing baseline".into())
+            )];
+            lines.push(
+                "  0 keeps baseline; digits choose; left/right cycles all existing Profiles."
+                    .into(),
+            );
+            for (index, profile) in state.compose_profile_field.iter().enumerate() {
+                lines.push(format!(
+                    "  {} {} {}",
+                    index + 1,
+                    if state.compose_profile.as_ref() == Some(profile) {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    },
+                    profile
+                ));
+            }
+            lines.push(
+                "  Ctrl+P project / Ctrl+L session; Ctrl+S previews, confirms, applies.".into(),
+            );
             for profile in &world.resolution_basis.profiles {
                 lines.push(format!("  profile  {profile}"));
             }
@@ -562,7 +603,14 @@ fn step_detail(
                 }
                 lines.push(String::new());
                 lines.push("  Digits toggle the numbered sets; the selection rides the".into());
-                lines.push("  save exactly as shown here.".into());
+                lines.push(
+                    "  save exactly as shown here. Ctrl+S previews the native repertoire".into(),
+                );
+                lines.push("  at the selected scope; these sets add to the existing union.".into());
+                lines.push(
+                    "  No selected Profile or sets keeps and reconciles the existing baseline."
+                        .into(),
+                );
             }
             lines.push(format!(
                 "  What does resolve: {} capabilit{}, {} action{}.",

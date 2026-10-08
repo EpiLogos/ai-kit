@@ -52,7 +52,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -231,6 +231,43 @@ pub fn read_lock(generation_dir: &Path) -> Result<ResolvedView> {
 // The builder
 // ---------------------------------------------------------------------------
 
+pub use aikit_core::repertoire::GenerationObservation;
+
+/// An explicitly selected operation's transient observer. Its clone follows a
+/// staged generation into commit; it never changes a lock, plan or digest.
+#[derive(Debug, Clone, Default)]
+pub struct GenerationObserver(Arc<Mutex<GenerationObservation>>);
+
+impl GenerationObserver {
+    pub fn snapshot(&self) -> GenerationObservation {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    fn record(&self, update: impl FnOnce(&mut GenerationObservation)) {
+        update(&mut self.0.lock().unwrap_or_else(|error| error.into_inner()));
+    }
+}
+
+fn observe(observer: Option<&GenerationObserver>, update: impl FnOnce(&mut GenerationObservation)) {
+    if let Some(observer) = observer {
+        observer.record(update);
+    }
+}
+
+fn observed_error(error: AikitError, observer: Option<&GenerationObserver>) -> AikitError {
+    match observer {
+        Some(observer) => error.with(
+            "generation.observation",
+            serde_json::to_string(&observer.snapshot())
+                .expect("bounded numeric observation serializes"),
+        ),
+        None => error,
+    }
+}
+
 /// Builds a generation into a temporary directory.
 #[derive(Debug, Clone)]
 pub struct GenerationBuilder {
@@ -245,6 +282,7 @@ pub struct GenerationBuilder {
     /// configuration only for plans that declare no secret env vars; a plan
     /// carrying one is refused rather than silently materialised without it.
     secret_resolver: Option<Arc<dyn SecretResolver>>,
+    observer: Option<GenerationObserver>,
 }
 
 impl Default for GenerationBuilder {
@@ -255,6 +293,7 @@ impl Default for GenerationBuilder {
             aikit_command: "aikit".to_string(),
             lock_timeout: Duration::from_secs(30),
             secret_resolver: None,
+            observer: None,
         }
     }
 }
@@ -262,6 +301,12 @@ impl Default for GenerationBuilder {
 impl GenerationBuilder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn with_observer(mut self, observer: GenerationObserver) -> Self {
+        self.observer = Some(observer);
+        self
     }
 
     #[must_use]
@@ -319,12 +364,120 @@ impl GenerationBuilder {
         }
     }
 
+    /// Inspect every retained destination once before an unchanged reapply.
+    /// This is the local-first reconciliation used by composition: a matching
+    /// resolver hash and plan digests are necessary, but insufficient without
+    /// validating and hashing the actual retained tree. Secret values are always
+    /// re-resolved by a fresh build. No target-content write occurs on this path.
+    pub fn reuse_current(
+        &self,
+        context_dir: &Path,
+        view: &ResolvedView,
+        plans: &[ProjectionPlan],
+        expected_base: Option<&GenerationId>,
+    ) -> Result<Option<CommittedGeneration>> {
+        if plans
+            .iter()
+            .flat_map(|plan| &plan.items)
+            .any(|item| matches!(item, ProjectionItem::SecretEnv { .. }))
+        {
+            return Ok(None);
+        }
+        self.inspect_current(context_dir, view, plans, expected_base, true)
+            .map_err(|error| observed_error(error, self.observer.as_ref()))
+    }
+
+    /// Read-only validation for a consumer of an actual application. Unlike
+    /// economical reuse this also checks secret-bearing targets, without
+    /// re-resolving secrets or mutating cosmetic generation properties.
+    pub fn verify_current(
+        &self,
+        context_dir: &Path,
+        view: &ResolvedView,
+        plans: &[ProjectionPlan],
+        expected_base: Option<&GenerationId>,
+    ) -> Result<Option<CommittedGeneration>> {
+        self.inspect_current(context_dir, view, plans, expected_base, false)
+            .map_err(|error| observed_error(error, self.observer.as_ref()))
+    }
+
+    fn inspect_current(
+        &self,
+        context_dir: &Path,
+        view: &ResolvedView,
+        plans: &[ProjectionPlan],
+        expected_base: Option<&GenerationId>,
+        carry_labels: bool,
+    ) -> Result<Option<CommittedGeneration>> {
+        let _lock = ContextLock::acquire_at(
+            &context_dir.join(".lock"),
+            &view.context.context_id.to_string(),
+            LockOptions::default()
+                .with_timeout(self.lock_timeout)
+                .with_purpose("reconcile retained generation"),
+        )?;
+        let actual = current(context_dir)?;
+        if actual.as_ref() != expected_base {
+            return Err(stale_base(expected_base, actual.as_ref()));
+        }
+        let Some(id) = actual else { return Ok(None) };
+        let path = context_dir.join(GENERATIONS).join(id.as_str());
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            _ => require_retained_directory(&path)?,
+        }
+        let Ok(metadata) = read_metadata(&path) else {
+            return Ok(None);
+        };
+        if metadata.schema != 1
+            || metadata.generation_format != GENERATION_FORMAT
+            || metadata.generation_id != id
+            || metadata.context_id != view.context.context_id.as_str()
+            || metadata.isolation != view.context.isolation
+            || metadata.resolution_hash != view.hash.to_string()
+            || metadata.catalog_revision != view.catalog_revision
+            || metadata.targets.len() != plans.len()
+            || metadata.targets.iter().zip(plans).any(|(record, plan)| {
+                record.target != plan.target.as_str()
+                    || record.digest != plan.digest()
+                    || record.items != plan.items.len()
+                    || record.effect != describe_effect(&plan.effect)
+            })
+        {
+            return Ok(None);
+        }
+        if !read_lock(&path).is_ok_and(|retained| same_lock_material(&retained, view))
+            || validate(&path, plans, self.observer.as_ref()).is_err()
+            || hash_tree(&path, view, self.observer.as_ref()).ok().as_ref() != Some(&id)
+        {
+            return Ok(None);
+        }
+        if carry_labels && !view.properties.is_empty() {
+            relabel(&path, &view.properties)?;
+        }
+        Ok(Some(CommittedGeneration {
+            id,
+            path,
+            replaced: None,
+        }))
+    }
+
     /// Materialize `view` and `plans` into a staging directory under
     /// `context_dir/generations/`, validate the result, and name it by content.
     ///
     /// Nothing outside the staging directory is touched. On any error the staging
     /// directory is removed and `current` is exactly as it was.
     pub fn build(
+        &self,
+        context_dir: &Path,
+        view: &ResolvedView,
+        plans: &[ProjectionPlan],
+    ) -> Result<StagedGeneration> {
+        self.build_observed(context_dir, view, plans)
+            .map_err(|error| observed_error(error, self.observer.as_ref()))
+    }
+
+    fn build_observed(
         &self,
         context_dir: &Path,
         view: &ResolvedView,
@@ -387,11 +540,11 @@ impl GenerationBuilder {
             });
         }
 
-        validate(staging, plans)?;
+        validate(staging, plans, self.observer.as_ref())?;
 
         // Hash after validation and before metadata, because metadata names the
         // hash and cannot be part of what is hashed.
-        let id = hash_tree(staging, view)?;
+        let id = hash_tree(staging, view, self.observer.as_ref())?;
 
         let mut notes: Vec<String> = degradation.into_iter().collect();
         for plan in plans {
@@ -429,7 +582,9 @@ impl GenerationBuilder {
             staging: staging.to_path_buf(),
             id,
             metadata,
+            plans: plans.to_vec(),
             lock_timeout: self.lock_timeout,
+            observer: self.observer.clone(),
             committed: false,
         })
     }
@@ -446,22 +601,30 @@ impl GenerationBuilder {
                 let destination = root.join(to);
                 require_source(from)?;
                 match mode {
-                    MaterializationMode::Copy => copy_tree(from, &destination),
+                    MaterializationMode::Copy => {
+                        copy_tree(from, &destination, self.observer.as_ref())
+                    }
                     _ => {
                         if let Some(parent) = destination.parent() {
                             create_dir_all(parent)?;
                         }
-                        symlink(from, &destination)
+                        symlink(from, &destination)?;
+                        observe(self.observer.as_ref(), |value| {
+                            value.target_link_writes += 1
+                        });
+                        Ok(())
                     }
                 }
             }
             ProjectionItem::Copy { from, to } => {
                 require_source(from)?;
-                copy_tree(from, &root.join(to))
+                copy_tree(from, &root.join(to), self.observer.as_ref())
             }
-            ProjectionItem::Write { path, contents } => {
-                write_file(&root.join(path), contents.as_bytes())
-            }
+            ProjectionItem::Write { path, contents } => write_target_file(
+                &root.join(path),
+                contents.as_bytes(),
+                self.observer.as_ref(),
+            ),
             // Environment variables are not files. They are collected into the
             // generation's `env` manifest, which the shell integration sources —
             // `AIKIT_VIEW/env` is a stable path, so a shell can read the current
@@ -470,7 +633,7 @@ impl GenerationBuilder {
                 let path = staging.join(ENV_FILE);
                 let mut existing = fs::read_to_string(&path).unwrap_or_default();
                 existing.push_str(&format!("{name}={value}\n"));
-                write_file(&path, existing.as_bytes())
+                write_target_file(&path, existing.as_bytes(), self.observer.as_ref())
             }
             // Secret env vars resolve HERE, at materialisation time, and the
             // value lives only in the env manifest the shell integration
@@ -496,7 +659,7 @@ impl GenerationBuilder {
                 let path = staging.join(ENV_FILE);
                 let mut existing = fs::read_to_string(&path).unwrap_or_default();
                 existing.push_str(&format!("{name}={}\n", value.expose()));
-                write_file(&path, existing.as_bytes())
+                write_target_file(&path, existing.as_bytes(), self.observer.as_ref())
             }
             ProjectionItem::Shim {
                 name,
@@ -514,7 +677,7 @@ impl GenerationBuilder {
                      exec {aikit} run '{capsule}' --export '{export}' \"$@\"\n",
                     aikit = self.aikit_command,
                 );
-                write_file(&path, body.as_bytes())?;
+                write_target_file(&path, body.as_bytes(), self.observer.as_ref())?;
                 make_executable(&path)
             }
         }
@@ -550,7 +713,11 @@ fn describe_effect(effect: &ActivationEffect) -> String {
 /// The checks are the failure modes that actually happen: a projection that did
 /// not land, a symlink into a payload that has since been removed, a shim that is
 /// not executable, and a lock file that cannot be read back.
-fn validate(staging: &Path, plans: &[ProjectionPlan]) -> Result<()> {
+fn validate(
+    staging: &Path,
+    plans: &[ProjectionPlan],
+    observer: Option<&GenerationObserver>,
+) -> Result<()> {
     read_lock(staging).map_err(|e| {
         AikitError::new(
             "generation.validation_failed",
@@ -576,6 +743,7 @@ fn validate(staging: &Path, plans: &[ProjectionPlan]) -> Result<()> {
                     None => continue,
                 },
             };
+            observe(observer, |value| value.destination_checks += 1);
             if fs::symlink_metadata(&path).is_err() {
                 return Err(AikitError::new(
                     "generation.validation_failed",
@@ -625,7 +793,9 @@ pub struct StagedGeneration {
     staging: PathBuf,
     id: GenerationId,
     metadata: GenerationMetadata,
+    plans: Vec<ProjectionPlan>,
     lock_timeout: Duration,
+    observer: Option<GenerationObserver>,
     committed: bool,
 }
 
@@ -653,7 +823,16 @@ impl StagedGeneration {
     }
 
     /// Promote this generation, refusing if `current` is not `expected_base`.
-    pub fn commit(mut self, expected_base: Option<&GenerationId>) -> Result<CommittedGeneration> {
+    pub fn commit(self, expected_base: Option<&GenerationId>) -> Result<CommittedGeneration> {
+        let observer = self.observer.clone();
+        self.commit_observed(expected_base)
+            .map_err(|error| observed_error(error, observer.as_ref()))
+    }
+
+    fn commit_observed(
+        mut self,
+        expected_base: Option<&GenerationId>,
+    ) -> Result<CommittedGeneration> {
         let context_dir = self.context_dir.clone();
         let _lock = ContextLock::acquire_at(
             &context_dir.join(".lock"),
@@ -675,15 +854,54 @@ impl StagedGeneration {
             return Err(error);
         }
 
+        // Linked accepted sources can become unreadable or move after build.
+        // Re-read the exact retained lock and staged material before any
+        // publication effect; the earlier content name must still describe it.
+        let source_view = read_lock(&self.staging)?;
+        if hash_tree(&self.staging, &source_view, self.observer.as_ref())? != self.id {
+            return Err(AikitError::new(
+                "generation.source_changed",
+                "staged projection material changed after build; re-resolve before publication",
+            ));
+        }
         let final_dir = context_dir.join(GENERATIONS).join(self.id.as_str());
-        if final_dir.exists() {
+        if fs::symlink_metadata(&final_dir).is_ok() {
+            require_retained_directory(&final_dir)?;
             // The same content already exists — an identical re-apply. Keep the
             // one on disk and throw the duplicate away rather than churning it.
             // But a cosmetic label the new apply carried is not part of the
             // identity, so carry it onto the existing generation in place: a label
             // edit must update, never mint (PRIOR-ART-ACTIONS #9).
+            // Existing content-addressed directories can have lost a target
+            // after publication. Restore only the reviewed managed entries from
+            // the complete staged tree, atomically per entry; never follow a
+            // destination link and accidentally write into an accepted source.
+            self.metadata.base_generation = actual.clone().filter(|base| base != &self.id);
+            write_metadata(&self.staging, &self.metadata)?;
+            repair_retained_tree(&self.staging, &final_dir, self.observer.as_ref())?;
             carry_properties(&self.staging, &final_dir)?;
+            // A repair is successful only after actual retained readback. In
+            // particular, valid-looking but changed lock/metadata and extra
+            // managed files cannot inherit this content-addressed identity.
+            let retained_view = read_lock(&final_dir)?;
+            let retained_metadata = read_metadata(&final_dir)?;
+            validate(&final_dir, &self.plans, self.observer.as_ref())?;
+            if !same_lock_material(&retained_view, &source_view)
+                || !same_metadata_material(&retained_metadata, &self.metadata)
+                || hash_tree(&final_dir, &retained_view, self.observer.as_ref())? != self.id
+            {
+                return Err(AikitError::new(
+                    "generation.repair_invalid",
+                    "retained generation does not match the reviewed material after repair",
+                ));
+            }
             self.discard_staging();
+            if actual.as_ref() != Some(&self.id) {
+                if let Some(old) = &actual {
+                    set_pointer(&context_dir, PREVIOUS, old)?;
+                }
+                set_pointer(&context_dir, CURRENT, &self.id)?;
+            }
             // Nothing changed, so the pointers stay exactly as they are.
             // Rewriting `previous` here would alias it to `current` — the
             // generation it names IS current — and a rollback would then swap
@@ -692,7 +910,7 @@ impl StagedGeneration {
             return Ok(CommittedGeneration {
                 id: self.id.clone(),
                 path: final_dir,
-                replaced: None,
+                replaced: actual.filter(|old| old != &self.id),
             });
         }
         self.metadata.base_generation = actual.clone();
@@ -972,7 +1190,17 @@ fn write_file(path: &Path, contents: &[u8]) -> Result<()> {
     fs::write(path, contents).map_err(|e| io_error("generation.write_failed", path, &e))
 }
 
-fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+fn write_target_file(
+    path: &Path,
+    contents: &[u8],
+    observer: Option<&GenerationObserver>,
+) -> Result<()> {
+    write_file(path, contents)?;
+    observe(observer, |value| value.target_content_writes += 1);
+    Ok(())
+}
+
+fn copy_tree(from: &Path, to: &Path, observer: Option<&GenerationObserver>) -> Result<()> {
     let metadata =
         fs::metadata(from).map_err(|e| io_error("generation.source_missing", from, &e))?;
     if let Some(parent) = to.parent() {
@@ -984,11 +1212,12 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
             fs::read_dir(from).map_err(|e| io_error("generation.source_missing", from, &e))?;
         for entry in entries {
             let entry = entry.map_err(|e| io_error("generation.source_missing", from, &e))?;
-            copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+            copy_tree(&entry.path(), &to.join(entry.file_name()), observer)?;
         }
         Ok(())
     } else {
         fs::copy(from, to).map_err(|e| io_error("generation.write_failed", to, &e))?;
+        observe(observer, |value| value.target_content_writes += 1);
         // Preserve the execute bit: a copied hook that cannot run is worse than
         // no hook, because the chain would report a system failure instead.
         preserve_mode(from, to)
@@ -1050,6 +1279,197 @@ fn symlink(target: &Path, link: &Path) -> Result<()> {
     result.map_err(|e| io_error("generation.link_failed", link, &e))
 }
 
+/// Repair retained managed material without rewriting equal entries or
+/// replacing the generation directory readers already hold. A crash leaves
+/// complete old/new files and the next reapply resumes from the retained tree.
+fn require_retained_directory(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| io_error("generation.unreadable", path, &error))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(AikitError::new(
+            "generation.repair_foreign_link",
+            format!(
+                "refusing to use a non-directory or linked generation root {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Replace a managed entry atomically, also when drift changed its kind.
+/// A directory is first moved aside: interruption retains recoverable owned
+/// material, and the next exact-tree reconciliation removes that leftover.
+fn replace_managed_entry(temporary: &Path, destination: &Path) -> Result<()> {
+    let displaced = if fs::symlink_metadata(destination)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+    {
+        let displaced =
+            destination.with_file_name(format!(".repair-displaced-{}", ulid::Ulid::generate()));
+        fs::rename(destination, &displaced)
+            .map_err(|error| io_error("generation.repair_failed", destination, &error))?;
+        Some(displaced)
+    } else {
+        None
+    };
+    if let Err(error) = fs::rename(temporary, destination) {
+        let _ = fs::remove_file(temporary);
+        if let Some(displaced) = displaced {
+            let _ = fs::rename(displaced, destination);
+        }
+        return Err(io_error("generation.repair_failed", destination, &error));
+    }
+    if let Some(displaced) = displaced {
+        fs::remove_dir_all(&displaced)
+            .map_err(|error| io_error("generation.repair_failed", &displaced, &error))?;
+    }
+    Ok(())
+}
+
+fn same_lock_material(left: &ResolvedView, right: &ResolvedView) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    left.properties.clear();
+    right.properties.clear();
+    left == right
+}
+
+fn same_metadata_material(left: &GenerationMetadata, right: &GenerationMetadata) -> bool {
+    left.schema == right.schema
+        && left.generation_format == right.generation_format
+        && left.generation_id == right.generation_id
+        && left.context_id == right.context_id
+        && left.resolution_hash == right.resolution_hash
+        && left.catalog_revision == right.catalog_revision
+        && left.isolation == right.isolation
+        && left.materialization == right.materialization
+        && left.targets.len() == right.targets.len()
+        && left
+            .targets
+            .iter()
+            .zip(&right.targets)
+            .all(|(left, right)| {
+                left.target == right.target
+                    && left.digest == right.digest
+                    && left.items == right.items
+                    && left.effect == right.effect
+            })
+}
+
+fn repair_retained_tree(
+    staged: &Path,
+    retained: &Path,
+    observer: Option<&GenerationObserver>,
+) -> Result<()> {
+    require_retained_directory(retained)?;
+    repair_retained_tree_inner(staged, retained, true, observer)
+}
+
+fn repair_retained_tree_inner(
+    staged: &Path,
+    retained: &Path,
+    generation_root: bool,
+    observer: Option<&GenerationObserver>,
+) -> Result<()> {
+    let mut expected_names = std::collections::BTreeSet::new();
+    observe(observer, |value| value.destination_tree_scans += 1);
+    for entry in
+        fs::read_dir(staged).map_err(|error| io_error("generation.unreadable", staged, &error))?
+    {
+        let entry = entry.map_err(|error| io_error("generation.unreadable", staged, &error))?;
+        observe(observer, |value| value.destination_entries_inspected += 1);
+        expected_names.insert(entry.file_name());
+        let destination = retained.join(entry.file_name());
+        if generation_root
+            && fs::symlink_metadata(&destination)
+                .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+            && ((entry.file_name() == METADATA_FILE
+                && read_metadata(retained)
+                    .ok()
+                    .zip(read_metadata(staged).ok())
+                    .is_some_and(|(retained, staged)| same_metadata_material(&retained, &staged)))
+                || (entry.file_name() == LOCK_FILE
+                    && read_lock(retained)
+                        .ok()
+                        .zip(read_lock(staged).ok())
+                        .is_some_and(|(retained, staged)| same_lock_material(&retained, &staged))))
+        {
+            // Preserve original publication provenance and cosmetic labels only
+            // when the retained record still names this exact staged material.
+            continue;
+        }
+        let source = entry.path();
+        let destination = retained.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&source)
+            .map_err(|error| io_error("generation.unreadable", &source, &error))?;
+        if metadata.file_type().is_symlink() {
+            let target = fs::read_link(&source)
+                .map_err(|error| io_error("generation.unreadable", &source, &error))?;
+            if fs::read_link(&destination).ok().as_ref() == Some(&target) && destination.exists() {
+                continue;
+            }
+            let temporary = retained.join(format!(".repair-{}", ulid::Ulid::generate()));
+            symlink(&target, &temporary)?;
+            observe(observer, |value| value.target_link_writes += 1);
+            replace_managed_entry(&temporary, &destination)?;
+        } else if metadata.is_dir() {
+            if let Ok(metadata) = fs::symlink_metadata(&destination) {
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    // The entry is owned by this generation. Remove only its
+                    // link/file, never the foreign material it might name.
+                    fs::remove_file(&destination).map_err(|error| {
+                        io_error("generation.repair_failed", &destination, &error)
+                    })?;
+                }
+            }
+            create_dir_all(&destination)?;
+            repair_retained_tree_inner(&source, &destination, false, observer)?;
+        } else {
+            let contents = fs::read(&source)
+                .map_err(|error| io_error("generation.unreadable", &source, &error))?;
+            if !destination.is_symlink()
+                && fs::read(&destination).ok().as_ref() == Some(&contents)
+                && fs::metadata(&destination)
+                    .is_ok_and(|other| other.permissions() == metadata.permissions())
+            {
+                continue;
+            }
+            let temporary = retained.join(format!(".repair-{}", ulid::Ulid::generate()));
+            write_file(&temporary, &contents)?;
+            if !generation_root
+                || (entry.file_name() != METADATA_FILE && entry.file_name() != LOCK_FILE)
+            {
+                observe(observer, |value| value.target_content_writes += 1);
+            }
+            fs::set_permissions(&temporary, metadata.permissions())
+                .map_err(|error| io_error("generation.repair_failed", &temporary, &error))?;
+            replace_managed_entry(&temporary, &destination)?;
+        }
+    }
+    // This directory belongs wholly to the generation owner. Remove additions
+    // absent from the reviewed staged tree, without following their links.
+    observe(observer, |value| value.destination_tree_scans += 1);
+    for entry in fs::read_dir(retained)
+        .map_err(|error| io_error("generation.unreadable", retained, &error))?
+    {
+        let entry = entry.map_err(|error| io_error("generation.unreadable", retained, &error))?;
+        observe(observer, |value| value.destination_entries_inspected += 1);
+        if expected_names.contains(&entry.file_name()) {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| io_error("generation.unreadable", &path, &error))?;
+        let result = if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        result.map_err(|error| io_error("generation.repair_failed", &path, &error))?;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Content addressing
 // ---------------------------------------------------------------------------
@@ -1068,7 +1488,12 @@ fn symlink(target: &Path, link: &Path) -> Result<()> {
 /// else the lock records (the active set, `catalog_index`, the declared and
 /// unavailable maps) still contributes, so two genuinely different resolutions
 /// remain different generations.
-fn hash_tree(staging: &Path, view: &ResolvedView) -> Result<GenerationId> {
+fn hash_tree(
+    staging: &Path,
+    view: &ResolvedView,
+    observer: Option<&GenerationObserver>,
+) -> Result<GenerationId> {
+    observe(observer, |value| value.tree_hash_operations += 1);
     let mut hasher = blake3::Hasher::new();
     // v2: the lock is folded semantically (properties-excluded) rather than as raw
     // bytes, so old-format ids are recomputed rather than silently reused.
@@ -1090,11 +1515,18 @@ fn hash_tree(staging: &Path, view: &ResolvedView) -> Result<GenerationId> {
     hasher.update(canonical_lock.as_bytes());
 
     let mut files: BTreeMap<String, PathBuf> = BTreeMap::new();
+    observe(observer, |value| value.destination_tree_scans += 1);
     for entry in walkdir::WalkDir::new(staging)
         .follow_links(true)
         .into_iter()
-        .filter_map(std::result::Result::ok)
     {
+        let entry = entry.map_err(|error| {
+            AikitError::new(
+                "generation.unreadable",
+                format!("could not enumerate {}: {error}", staging.display()),
+            )
+        })?;
+        observe(observer, |value| value.destination_entries_inspected += 1);
         if !entry.file_type().is_file() {
             continue;
         }
@@ -1117,12 +1549,26 @@ fn hash_tree(staging: &Path, view: &ResolvedView) -> Result<GenerationId> {
         files.insert(relative, entry.path().to_path_buf());
     }
 
+    // Claude, Codex and Pi can link the same accepted payload. Inspect all
+    // destinations but read each canonical file only once in this pass, like
+    // Kasetto's pinned local-first/all-destination reconciliation. The memo is
+    // invocation-local, so a later repair never trusts an earlier good hash.
+    let mut contents_by_source = BTreeMap::<PathBuf, Vec<u8>>::new();
     for (relative, path) in files {
-        let contents = fs::read(&path).map_err(|e| io_error("generation.unreadable", &path, &e))?;
+        let source =
+            fs::canonicalize(&path).map_err(|e| io_error("generation.unreadable", &path, &e))?;
+        if !contents_by_source.contains_key(&source) {
+            let contents =
+                fs::read(&source).map_err(|e| io_error("generation.unreadable", &source, &e))?;
+            observe(observer, |value| value.canonical_file_reads += 1);
+            contents_by_source.insert(source.clone(), contents);
+        }
+        let contents = &contents_by_source[&source];
         hasher.update(&(relative.len() as u64).to_le_bytes());
         hasher.update(relative.as_bytes());
         hasher.update(&(contents.len() as u64).to_le_bytes());
-        hasher.update(&contents);
+        hasher.update(contents);
+        observe(observer, |value| value.payload_hash_operations += 1);
     }
 
     Ok(GenerationId::from_hash(hasher.finalize()))

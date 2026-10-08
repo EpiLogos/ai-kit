@@ -14,10 +14,18 @@
 //! spend once, and the next event is gated again).
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+use std::io::Read;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::io::Seek;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+use std::process::Stdio;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+use std::time::Duration;
+use std::time::Instant;
 
 use aikit_adapters::runner::SystemRunner;
 use aikit_core::capsule::{HookPhase, Kind};
@@ -149,6 +157,66 @@ pub fn read_guidance_fragment(step: &HookStep, root: &Path) -> StepResult {
 /// `decision.injected` back to the client. Every other phase treats stdout as a
 /// gate channel — the exit status is the whole verdict — so a gate or observer
 /// cannot smuggle content into the session by printing.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn run_hook_step(step: &HookStep, event: &HookEvent, root: &Path) -> StepResult {
+    let started = Instant::now();
+    let run = || -> Result<aikit_adapters::runner::Output> {
+        let payload = serde_json::to_vec(&event.payload)
+            .map_err(|failure| AikitError::new("hook.event_invalid", failure.to_string()))?;
+        if payload.len() > 1_048_576 {
+            return Err(AikitError::new(
+                "hook.event_too_large",
+                "Hook event exceeds 1MiB",
+            ));
+        }
+        // A private regular file closes the pre-deadline blocking-stdin path.
+        let mut input = tempfile::tempfile().map_err(|failure| {
+            AikitError::new("hook.event_input_failed", failure.to_string()).with_io_source(failure)
+        })?;
+        input
+            .write_all(&payload)
+            .and_then(|_| input.rewind())
+            .map_err(|failure| {
+                AikitError::new("hook.event_input_failed", failure.to_string())
+                    .with_io_source(failure)
+            })?;
+        let mut runner = SystemRunner::probe().with_cwd(root);
+        if step.phase == HookPhase::Inject {
+            runner = runner.with_strict_utf8();
+        }
+        if let Some(timeout) = &step.timeout {
+            runner = runner.with_timeout(timeout.as_duration());
+        }
+        let mut command = Command::new(root.join(&step.entry));
+        runner.capture_owned_command_with_stdin_file(&mut command, input)
+    };
+    let result = match run() {
+        Err(failure) => {
+            StepResult::system_failure(format!("{} failed to run: {failure}", step.capsule))
+        }
+        Ok(output) if output.status == 0 => {
+            let text = output.stdout.trim();
+            if step.phase == HookPhase::Inject && !text.is_empty() {
+                StepResult::inject(text)
+            } else {
+                StepResult::allow()
+            }
+        }
+        Ok(output) => {
+            let reason = output.stderr.trim();
+            StepResult::deny(if reason.is_empty() {
+                format!("{} exited with a non-zero status", step.capsule)
+            } else {
+                reason.to_owned()
+            })
+        }
+    };
+    result.taking(started.elapsed())
+}
+
+// Other supported platforms retain their existing hook operation. The bounded
+// native process owner is currently implemented for Linux and macOS only.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn run_hook_step(step: &HookStep, event: &HookEvent, root: &Path) -> StepResult {
     let entry = root.join(&step.entry);
     let started = Instant::now();
@@ -221,6 +289,7 @@ pub fn run_hook_step(step: &HookStep, event: &HookEvent, root: &Path) -> StepRes
     result.taking(started.elapsed())
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 enum WaitResult {
     Exited(std::process::ExitStatus),
     TimedOut,
@@ -232,6 +301,7 @@ enum WaitResult {
 /// A `None` timeout waits indefinitely. A `Some` timeout polls, which is coarse
 /// but correct and needs no extra threads — a hook that has to be killed is
 /// already the slow path, so the polling granularity does not matter.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn wait_with_timeout(child: &mut std::process::Child, timeout: Option<Duration>) -> WaitResult {
     let Some(timeout) = timeout else {
         return match child.wait() {
