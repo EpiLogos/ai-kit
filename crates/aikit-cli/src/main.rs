@@ -1650,7 +1650,6 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                     )
                 })?;
             }
-            let stop_signal = Some(stop_signal);
             aikit_adapters::run_gateway_service_with_hooks(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
@@ -1827,7 +1826,6 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
             )?)
         }
         GatewaySub::Team { request_json } => {
-        GatewaySub::Team { request_json } => {
             let text = if let Some(path) = request_json.strip_prefix('@') {
                 use std::io::Read;
                 let mut bytes = Vec::new();
@@ -1848,7 +1846,7 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 ));
             }
             let input = parse_structured_json(&text, "Central team operation")?;
-            gateway_data(inhabit_team::team_operation(&home, cwd, input)?)
+            gateway_data(aikit_cli::inhabit_team::team_operation(&home, cwd, input)?)
         }
 
         GatewaySub::Conversation(a) => {

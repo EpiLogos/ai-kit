@@ -267,13 +267,10 @@ impl EncounterService {
     ) -> Result<Option<EncounterAgencyBinding>> {
         read_binding(home, session)
     }
-<<<<<<< HEAD
-=======
     /// Reuse the task owner's current native authority/material/placement check.
     pub fn verify_task_admission(home: &AikitHome, session: &ResourceRef) -> Result<()> {
         task::check(home, session)
     }
->>>>>>> origin/feat/central-field-ai-kit
     pub fn ensure_no_agency(home: &AikitHome, session: &ResourceRef) -> Result<()> {
         if read_binding(home, session)?.is_some() {
             return Err(AikitError::new(
