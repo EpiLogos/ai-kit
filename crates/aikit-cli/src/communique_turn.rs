@@ -126,16 +126,7 @@ pub fn pending_communiques_with_budget(
         };
         // Pi retains the offer in details while carrying text in content;
         // include both and bounded session/provenance framing in the budget.
-<<<<<<< HEAD
-        let bytes = serde_json::to_vec(
-            &json!({"schema":"aikit.gateway-handoff/v1", "delivery":candidate,
-                "content":candidate.text,"peer_provenance_reserve":"x".repeat(1024)}),
-        )
-        .map(|text| text.len())
-        .unwrap_or(usize::MAX);
-=======
         let bytes = handoff_envelope_bytes(&candidate);
->>>>>>> origin/feat/central-field-ai-kit
         if bytes > budget.serialized_bytes || bytes > budget.token_upper_bound {
             carried.pop();
             break;
@@ -153,8 +144,6 @@ pub fn pending_communiques_with_budget(
     }))
 }
 
-<<<<<<< HEAD
-=======
 /// Offer and confirmation use one complete envelope estimate. A byte upper
 /// bound is deliberately conservative for tokenization, including attribution.
 fn handoff_envelope_bytes(delivery: &TurnDelivery) -> usize {
@@ -166,7 +155,6 @@ fn handoff_envelope_bytes(delivery: &TurnDelivery) -> usize {
     .unwrap_or(usize::MAX)
 }
 
->>>>>>> origin/feat/central-field-ai-kit
 fn render(
     occupant: &TurnOccupant,
     records: &[Communique],
@@ -205,8 +193,6 @@ fn render(
             ));
         } else {
             out.push_str("   Addressed to this durable Position; verified occupant receives it.\n");
-<<<<<<< HEAD
-=======
             if record
                 .transitions
                 .iter()
@@ -216,7 +202,6 @@ fn render(
                     "   Held while the Position was vacant; retained for its verified occupant.\n",
                 );
             }
->>>>>>> origin/feat/central-field-ai-kit
         }
         let mut end = record.body.len().min(preview_bytes);
         while !record.body.is_char_boundary(end) {
@@ -398,14 +383,6 @@ pub fn handoff_for_occupant(
         ));
     }
     let bounds = HandoffBudget::default();
-<<<<<<< HEAD
-    if delivery.communique_refs.len() > bounds.records
-        || delivery.preview_bytes > bounds.preview_bytes
-        || serde_json::to_vec(&json!({"delivery":delivery,"content":delivery.text,"peer_provenance_reserve":"x".repeat(1024)}))
-            .map(|value| value.len()).unwrap_or(usize::MAX) > bounds.serialized_bytes
-    {
-        return Err(aikit_core::AikitError::new("gateway.handoff_invalid", "Carried handoff exceeds the native aggregate budget"));
-=======
     let bytes = handoff_envelope_bytes(&delivery);
     if delivery.communique_refs.len() > bounds.records
         || delivery.preview_bytes > bounds.preview_bytes
@@ -416,7 +393,6 @@ pub fn handoff_for_occupant(
             "gateway.handoff_invalid",
             "Carried handoff exceeds the native aggregate budget",
         ));
->>>>>>> origin/feat/central-field-ai-kit
     }
     let mut records = Vec::new();
     let mut pending = Vec::new();
@@ -589,12 +565,9 @@ mod tests {
         }
     }
     fn seed(gateway: &LocalGateway, count: usize) {
-<<<<<<< HEAD
-=======
         seed_state(gateway, count, CommuniqueState::Pending)
     }
     fn seed_state(gateway: &LocalGateway, count: usize, state: CommuniqueState) {
->>>>>>> origin/feat/central-field-ai-kit
         for index in 0..count {
             gateway
                 .call(GatewayCommand::SendCommunique {
@@ -613,13 +586,8 @@ mod tests {
                             "😀quoted\"\\\n".repeat(200)
                         ),
                         sent_at_unix_ms: 100 + index as u64,
-<<<<<<< HEAD
-                        state: CommuniqueState::Pending,
-                        state_basis: "current".into(),
-=======
                         state,
                         state_basis: "native owner acceptance".into(),
->>>>>>> origin/feat/central-field-ai-kit
                         reply_to: None,
                         forward_to_workcell_ref: None,
                         routing: None,
@@ -629,8 +597,6 @@ mod tests {
         }
     }
     #[test]
-<<<<<<< HEAD
-=======
     fn durable_held_provenance_survives_delivery_and_exact_ack_replay() {
         let dir = tempfile::tempdir().unwrap();
         let home = AikitHome::at(dir.path());
@@ -658,7 +624,6 @@ mod tests {
     }
 
     #[test]
->>>>>>> origin/feat/central-field-ai-kit
     fn aggregate_budget_preserves_full_material_and_reconciles_ack_after_restart() {
         let dir = tempfile::tempdir().unwrap();
         let home = AikitHome::at(dir.path());
@@ -736,8 +701,6 @@ mod tests {
         );
     }
     #[test]
-<<<<<<< HEAD
-=======
     fn retained_batch_over_token_bound_cannot_ack_under_byte_bound() {
         let dir = tempfile::tempdir().unwrap();
         let gateway = LocalGateway::default_for(&AikitHome::at(dir.path()));
@@ -781,7 +744,6 @@ mod tests {
         );
     }
     #[test]
->>>>>>> origin/feat/central-field-ai-kit
     fn header_or_interrupted_output_never_acknowledges_carried_batch() {
         let dir = tempfile::tempdir().unwrap();
         let gateway = LocalGateway::default_for(&AikitHome::at(dir.path()));

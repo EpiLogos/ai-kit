@@ -25,11 +25,7 @@ pub struct CentralTaskRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workcell_ref: Option<ResourceRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-<<<<<<< HEAD
-    pub work_refs: Vec<ResourceRef>,
-=======
     pub work_refs: Vec<Value>,
->>>>>>> origin/feat/central-field-ai-kit
 }
 
 /// Retains the complete native reading, including source/authority bases,
