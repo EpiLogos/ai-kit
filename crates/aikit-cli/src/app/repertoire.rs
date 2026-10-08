@@ -550,6 +550,45 @@ impl Service {
         // Discovery created by the retained Procedure can change an advisory
         // root-discovery note. Compare accepted selection and material digests,
         // rather than that incidental observation or the current pointer.
+        // A changed accepted source can legitimately change the derived plan.
+        // Classify that stale basis before checking caller-supplied metadata.
+        if !same_repertoire_material(&preview.reading, &fresh.reading) {
+            let source_changes: Vec<_> = preview
+                .reading
+                .members
+                .iter()
+                .filter_map(|reviewed| {
+                    let observed = fresh
+                        .reading
+                        .members
+                        .iter()
+                        .find(|member| member.id == reviewed.id);
+                    if observed.is_some_and(|member| {
+                        member.revision == reviewed.revision
+                            && member.source_root == reviewed.source_root
+                    }) {
+                        None
+                    } else {
+                        Some(serde_json::json!({
+                            "id": reviewed.id,
+                            "reviewed_revision": reviewed.revision,
+                            "observed_revision": observed.and_then(|member| member.revision.as_ref()),
+                            "withheld_reason": observed.and_then(|member| member.withheld_reason.as_ref()),
+                        }))
+                    }
+                })
+                .take(16)
+                .collect();
+            return Err(AikitError::new(
+                "composition.preview_stale",
+                "accepted source, selected repertoire or target plan changed after preview; inspect again",
+            )
+            .with(
+                "source_changes",
+                serde_json::to_string(&source_changes)
+                    .expect("bounded source-reference metadata serializes"),
+            ));
+        }
         if preview.target_plans.len() != fresh.target_plans.len()
             || !preview
                 .target_plans
@@ -561,12 +600,6 @@ impl Service {
             return Err(AikitError::new(
                 "composition.preview_invalid",
                 "proposed native target metadata changed or is absent; inspect a fresh preview before apply",
-            ));
-        }
-        if !same_repertoire_material(&preview.reading, &fresh.reading) {
-            return Err(AikitError::new(
-                "composition.preview_stale",
-                "selected repertoire or target plan changed after preview; inspect again",
             ));
         }
         if preview.procedure.digest != preview.procedure.plan.digest() {

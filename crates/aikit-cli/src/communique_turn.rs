@@ -193,6 +193,15 @@ fn render(
             ));
         } else {
             out.push_str("   Addressed to this durable Position; verified occupant receives it.\n");
+            if record
+                .transitions
+                .iter()
+                .any(|transition| transition.state == aikit_adapters::CommuniqueState::Held)
+            {
+                out.push_str(
+                    "   Held while the Position was vacant; retained for its verified occupant.\n",
+                );
+            }
         }
         let mut end = record.body.len().min(preview_bytes);
         while !record.body.is_char_boundary(end) {
@@ -358,7 +367,7 @@ pub fn handoff_for_occupant(
 ) -> Result<Value> {
     let Some(commit) = commit else {
         return Ok(
-            json!({"schema":"aikit.gateway-handoff/v1", "delivery":pending_communiques_for_turn(&occupant, gateway)?}),
+            json!({"schema":"aikit.gateway-handoff/v1", "delivery":pending_communiques_for_turn(occupant, gateway)?}),
         );
     };
     let delivery: TurnDelivery =
@@ -436,7 +445,7 @@ pub fn handoff_for_occupant(
     if records.is_empty()
         || delivery.pending_count < records.len()
         || render(
-            &occupant,
+            occupant,
             &records,
             delivery.pending_count,
             delivery.preview_bytes,
@@ -556,6 +565,9 @@ mod tests {
         }
     }
     fn seed(gateway: &LocalGateway, count: usize) {
+        seed_state(gateway, count, CommuniqueState::Pending)
+    }
+    fn seed_state(gateway: &LocalGateway, count: usize, state: CommuniqueState) {
         for index in 0..count {
             gateway
                 .call(GatewayCommand::SendCommunique {
@@ -574,8 +586,8 @@ mod tests {
                             "😀quoted\"\\\n".repeat(200)
                         ),
                         sent_at_unix_ms: 100 + index as u64,
-                        state: CommuniqueState::Pending,
-                        state_basis: "current".into(),
+                        state,
+                        state_basis: "native owner acceptance".into(),
                         reply_to: None,
                         forward_to_workcell_ref: None,
                         routing: None,
@@ -584,6 +596,33 @@ mod tests {
                 .unwrap();
         }
     }
+    #[test]
+    fn durable_held_provenance_survives_delivery_and_exact_ack_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let gateway = LocalGateway::default_for(&home);
+        seed_state(&gateway, 1, CommuniqueState::Held);
+        let delivery = pending_communiques_for_turn(&occupant(), &gateway)
+            .unwrap()
+            .unwrap();
+        assert!(delivery.text.contains("Held while the Position was vacant"));
+        let commit = json!({"delivery":delivery,"carried_text":delivery.text});
+        handoff_for_occupant(&occupant(), &gateway, Some(commit.clone())).unwrap();
+        let restarted = LocalGateway::default_for(&home);
+        let replay = handoff_for_occupant(&occupant(), &restarted, Some(commit)).unwrap();
+        assert_eq!(replay["acknowledged"], json!([]));
+        let full =
+            message_for_occupant(&occupant(), &restarted, &delivery.communique_refs[0]).unwrap();
+        assert_eq!(full["communique"]["state"], "delivered");
+        assert_eq!(
+            full["communique"]["delivered_to_generation_ref"],
+            occupant().generation_ref
+        );
+        let transitions = full["communique"]["transitions"].as_array().unwrap();
+        assert_eq!(transitions.first().unwrap()["state"], "held");
+        assert_eq!(transitions.last().unwrap()["state"], "delivered");
+    }
+
     #[test]
     fn aggregate_budget_preserves_full_material_and_reconciles_ack_after_restart() {
         let dir = tempfile::tempdir().unwrap();

@@ -1013,7 +1013,7 @@ mod tests {
         installed.service_installed = true;
         let again = plan_setup(&installed).unwrap();
         assert!(matches!(
-            &again.steps[2],
+            &again.steps[1],
             SetupStep::InstallService { replace: true, .. }
         ));
     }
@@ -1039,13 +1039,13 @@ mod tests {
     #[test]
     fn a_tailscale_serve_setup_keeps_the_listener_on_loopback_and_adds_one_private_mapping() {
         let plan = plan_setup(&inputs("tailscale-serve")).unwrap();
-        assert_eq!(kinds(&plan), ["token", "token", "install", "serve"]);
-        let SetupStep::InstallService { websocket_bind, .. } = &plan.steps[2] else {
+        assert_eq!(kinds(&plan), ["token", "install", "serve"]);
+        let SetupStep::InstallService { websocket_bind, .. } = &plan.steps[1] else {
             panic!()
         };
         assert_eq!(websocket_bind.as_deref(), Some("127.0.0.1:7788"));
         assert!(matches!(
-            plan.steps[3],
+            plan.steps[2],
             SetupStep::TailscaleServe { port: 7788 }
         ));
         assert!(plan
@@ -1106,11 +1106,8 @@ mod tests {
         let mut tunnel = inputs("ssh-tunnel");
         tunnel.peers = vec![("workcell:omarchy".into(), "127.0.0.1:17788".into())];
         let plan = plan_setup(&tunnel).unwrap();
-        assert_eq!(
-            kinds(&plan),
-            ["token", "token", "install", "operator", "remote"]
-        );
-        let SetupStep::OperatorCommand { command, .. } = &plan.steps[3] else {
+        assert_eq!(kinds(&plan), ["token", "install", "operator", "remote"]);
+        let SetupStep::OperatorCommand { command, .. } = &plan.steps[2] else {
             panic!()
         };
         assert!(
@@ -1190,7 +1187,7 @@ mod tests {
                 .iter()
                 .filter(|l| l.starts_with("token"))
                 .count(),
-            2
+            1
         );
         // With the second consent it runs, and only after checking it reads private.
         let effects = Recorded {

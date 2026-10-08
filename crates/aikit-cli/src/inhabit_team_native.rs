@@ -696,7 +696,7 @@ mod retained_repertoire_tests {
             .join("registries/personal/capsules/skill/development/plain");
         write(
             &capsule.join("manifest.toml"),
-            "schema = 1\nid = \"skill/development/plain\"\nkind = \"skill\"\nname = \"plain\"\n[skill]\nroot = \"payload\"\n",
+            "schema = 1\nid = \"skill/development/plain\"\nkind = \"skill\"\nname = \"plain\"\ndescription = \"Actual accepted source material\"\n[skill]\nroot = \"payload\"\n",
         );
         write(
             &capsule.join("payload/SKILL.md"),
@@ -718,6 +718,11 @@ mod retained_repertoire_tests {
         .unwrap();
         home.ensure_layout().unwrap();
         let catalog = crate::app::load_catalog(&home, Some(&project)).unwrap();
+        assert!(catalog.problems.is_empty(), "{:?}", catalog.problems);
+        assert!(catalog
+            .catalog
+            .get(&CapsuleId::parse("skill/development/plain").unwrap())
+            .is_some());
         let index = aikit_store::index::Index::open(&home.database()).unwrap();
         for capsule in catalog.catalog.capsules() {
             let key = TrustKey::new(
