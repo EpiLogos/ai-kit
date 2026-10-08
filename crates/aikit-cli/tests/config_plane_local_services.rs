@@ -34,7 +34,7 @@ fn free_port() -> u16 {
         seed = seed
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
-        let port = 30_000 + ((seed >> 33) % 25_000) as u16;
+        let port = 20_000 + ((seed >> 33) % 20_000) as u16;
         if TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return port;
         }
