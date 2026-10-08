@@ -857,6 +857,10 @@ pub struct TuiState {
     /// rows.
     #[serde(default)]
     pub compose_skill_set_field: Vec<SkillSetFieldRow>,
+    /// The visible nine-row page of the owner-disclosed field. Selection
+    /// remains named and spans pages; this cursor grants no activation.
+    #[serde(default)]
+    pub compose_skill_set_page: usize,
     /// The SkillSet names selected so far, in selection order. A set is a
     /// request the owner resolves; selection is not activation.
     #[serde(default)]
@@ -912,11 +916,22 @@ impl Default for TuiState {
             compose_purpose: String::new(),
             compose_agent_name: String::new(),
             compose_skill_set_field: Vec::new(),
+            compose_skill_set_page: 0,
             compose_skill_sets: Vec::new(),
             agent_work: AgentWorkStage::default(),
             compose_intent: None,
             compose_text_draft: None,
         }
+    }
+}
+
+impl TuiState {
+    /// The same bounded rows drive the renderer and page-local digit keys.
+    pub(crate) fn compose_skill_set_page_range(&self) -> std::ops::Range<usize> {
+        const PAGE_SIZE: usize = 9;
+        let last_page = self.compose_skill_set_field.len().saturating_sub(1) / PAGE_SIZE;
+        let start = self.compose_skill_set_page.min(last_page) * PAGE_SIZE;
+        start..(start + PAGE_SIZE).min(self.compose_skill_set_field.len())
     }
 }
 
@@ -1046,6 +1061,9 @@ pub enum UiAction {
     SkillSetsLoaded {
         rows: Vec<SkillSetFieldRow>,
     },
+    /// Move within the owner-disclosed field without changing its selection.
+    NextComposeSkillSetPage,
+    PreviousComposeSkillSetPage,
     /// Toggle one disclosed SkillSet in the compose repertoire selection.
     ToggleComposeSkillSet {
         name: String,
@@ -1535,6 +1553,9 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                     state.overlay = None;
                     state.presentation = PresentationMode::Workspace;
                     state.workspace_section = *section;
+                    if state.workspace_section == WorkspaceSection::Compose {
+                        effects.push(UiEffect::LoadSkillSets);
+                    }
                 }
                 ActionOutcome::FactoryWorkStarted { .. } => {
                     state.presentation = PresentationMode::Workspace;
@@ -1567,6 +1588,9 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                     state.selected = point.selected.filter(|id| state.read_model.contains(id));
                     state.relation_view = point.relation_view;
                     state.workspace_section = point.workspace_section;
+                    if state.workspace_section == WorkspaceSection::Compose {
+                        effects.push(UiEffect::LoadSkillSets);
+                    }
                     clear_contextual_actions(&mut state);
                     if let Some(subject) = state.selected.clone() {
                         effects.push(UiEffect::LoadContextualActions { subject });
@@ -1592,10 +1616,16 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             state.workspace_section = section;
         }
         UiAction::NextWorkspaceSection => {
-            state.workspace_section = state.workspace_section.relative(1)
+            state.workspace_section = state.workspace_section.relative(1);
+            if state.workspace_section == WorkspaceSection::Compose {
+                effects.push(UiEffect::LoadSkillSets);
+            }
         }
         UiAction::PreviousWorkspaceSection => {
-            state.workspace_section = state.workspace_section.relative(-1)
+            state.workspace_section = state.workspace_section.relative(-1);
+            if state.workspace_section == WorkspaceSection::Compose {
+                effects.push(UiEffect::LoadSkillSets);
+            }
         }
         UiAction::NextComposeStep => state.compose_step = state.compose_step.relative(1),
         UiAction::PreviousComposeStep => state.compose_step = state.compose_step.relative(-1),
@@ -1988,6 +2018,18 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
         }
         UiAction::SkillSetsLoaded { rows } => {
             state.compose_skill_set_field = rows;
+            state.compose_skill_set_page = state.compose_skill_set_page_range().start / 9;
+        }
+        UiAction::NextComposeSkillSetPage => {
+            let range = state.compose_skill_set_page_range();
+            state.compose_skill_set_page = range.start / 9;
+            if range.end < state.compose_skill_set_field.len() {
+                state.compose_skill_set_page += 1;
+            }
+        }
+        UiAction::PreviousComposeSkillSetPage => {
+            state.compose_skill_set_page =
+                (state.compose_skill_set_page_range().start / 9).saturating_sub(1);
         }
         UiAction::ToggleComposeSkillSet { name } => {
             if state.compose_skill_sets.contains(&name) {

@@ -118,6 +118,397 @@ impl World {
 fn id(name: &str) -> CapsuleId {
     CapsuleId::parse(&format!("skill/development/{name}")).unwrap()
 }
+
+#[test]
+fn actual_terminal_compose_entries_read_registered_sets_and_preview_without_effects() {
+    use aikit_tui::event::PaletteEvent;
+    use aikit_tui::host::UiHost;
+    use aikit_tui::{ApplicationSurfaceController, ApplicationSurfaceRequest, WorkspaceSection};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let key = |code, modifiers| PaletteEvent::Key(KeyEvent::new(code, modifiers));
+    for (initial, entry) in [
+        (WorkspaceSection::Worlds, Some(KeyCode::Right)),
+        (WorkspaceSection::Work, Some(KeyCode::Left)),
+        (WorkspaceSection::Compose, None),
+    ] {
+        let world = World::new();
+        let mut service = world.service();
+        let source_before = source_snapshot(&world.home.root().join("registries"));
+        let declaration_before = fs::read(world.project.join(".aikit/profile.toml")).unwrap();
+        let mut request = ApplicationSurfaceRequest::new(UiHost::TmuxPopup);
+        request.initial_workspace_section = initial;
+        let mut surface = ApplicationSurfaceController::new(&mut service, request).unwrap();
+        if let Some(code) = entry {
+            surface
+                .handle(&mut service, key(code, KeyModifiers::ALT))
+                .unwrap();
+        }
+        assert_eq!(
+            surface.semantic().workspace_section,
+            WorkspaceSection::Compose
+        );
+        assert_eq!(
+            surface
+                .semantic()
+                .compose_skill_set_field
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            ["implementer", "orientation"]
+        );
+        // Select the actual native Profile and set through the same keys the
+        // shipped terminal consumes, then retain its no-effect owner preview.
+        for _ in 0..2 {
+            surface
+                .handle(&mut service, key(KeyCode::Down, KeyModifiers::ALT))
+                .unwrap();
+        }
+        surface
+            .handle(&mut service, key(KeyCode::Char('1'), KeyModifiers::NONE))
+            .unwrap();
+        surface
+            .handle(&mut service, key(KeyCode::Down, KeyModifiers::ALT))
+            .unwrap();
+        surface
+            .handle(&mut service, key(KeyCode::Char('2'), KeyModifiers::NONE))
+            .unwrap();
+        surface
+            .handle(&mut service, key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .unwrap();
+        surface
+            .handle(&mut service, key(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .unwrap();
+        let preview = surface
+            .semantic()
+            .repertoire_preview
+            .as_ref()
+            .expect("actual terminal keys must reach the native repertoire preview");
+        assert_eq!(
+            preview.request.profile,
+            Some(ProfileId::parse("profile/development").unwrap())
+        );
+        assert_eq!(preview.request.skill_sets, ["orientation"]);
+        assert_eq!(preview.request.scope, ScopeKind::Project);
+        assert!(preview
+            .reading
+            .members
+            .iter()
+            .any(|member| member.id == id("field") && member.projected));
+        assert_eq!(
+            source_snapshot(&world.home.root().join("registries")),
+            source_before
+        );
+        assert_eq!(
+            fs::read(world.project.join(".aikit/profile.toml")).unwrap(),
+            declaration_before
+        );
+        assert!(
+            generation::current(&world.home.context_dir(&service.descriptor().context_id))
+                .unwrap()
+                .is_none()
+        );
+        assert!(!world.project.join(".agents/skills").exists());
+        assert!(!world.project.join(".pi/skills").exists());
+        // Re-entering observes a real new registration, while keeping the
+        // operator's existing selection; the old field cannot be cached forever.
+        aikit_store::skillsets::create(&world.home, "newly-available", &[id("plain")], &[])
+            .unwrap();
+        surface
+            .handle(&mut service, key(KeyCode::Left, KeyModifiers::ALT))
+            .unwrap();
+        surface
+            .handle(&mut service, key(KeyCode::Right, KeyModifiers::ALT))
+            .unwrap();
+        assert!(surface
+            .semantic()
+            .compose_skill_set_field
+            .iter()
+            .any(|row| row.name == "newly-available"));
+        assert_eq!(surface.semantic().compose_skill_sets, ["orientation"]);
+        assert_eq!(
+            fs::read(world.project.join(".aikit/profile.toml")).unwrap(),
+            declaration_before
+        );
+    }
+}
+
+#[test]
+fn actual_thirteen_registered_sets_are_visible_and_selectable_at_140_by_44() {
+    use aikit_tui::event::PaletteEvent;
+    use aikit_tui::host::UiHost;
+    use aikit_tui::{ApplicationSurfaceController, ApplicationSurfaceRequest, WorkspaceSection};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    let key = |code, modifiers| PaletteEvent::Key(KeyEvent::new(code, modifiers));
+    let world = World::new();
+    for name in ["implementer", "orientation"] {
+        aikit_store::skillsets::delete_to_trash(&world.home, name).unwrap();
+    }
+    // These are the thirteen registered names encountered by the live terminal.
+    // Every row is authored in the actual native store, then resolved from the
+    // same reviewed capsules as the other material-operation regressions.
+    let names = [
+        "central-engineering",
+        "central-lifecycle",
+        "central-skills-system",
+        "docs-methodology",
+        "epi-logos-reader",
+        "factory-sensing",
+        "mattpocock",
+        "nara",
+        "oi-guardian",
+        "personal-machine",
+        "ql-native-agent",
+        "reverse-engineering",
+        "suite-foundations",
+    ];
+    for name in names {
+        let members = if name == "suite-foundations" {
+            vec![id("field")]
+        } else {
+            vec![id("plain"), id("method")]
+        };
+        aikit_store::skillsets::create(&world.home, name, &members, &[]).unwrap();
+    }
+    let source_before = source_snapshot(&world.home.root().join("registries"));
+    let declaration_before = fs::read(world.project.join(".aikit/profile.toml")).unwrap();
+    let mut service = world.service();
+    let mut surface = ApplicationSurfaceController::new(
+        &mut service,
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup),
+    )
+    .unwrap();
+    surface
+        .handle(&mut service, PaletteEvent::Resize(140, 44))
+        .unwrap();
+    surface
+        .handle(&mut service, key(KeyCode::Right, KeyModifiers::ALT))
+        .unwrap();
+    for _ in 0..3 {
+        surface
+            .handle(&mut service, key(KeyCode::Down, KeyModifiers::ALT))
+            .unwrap();
+    }
+    assert_eq!(
+        surface.semantic().workspace_section,
+        WorkspaceSection::Compose
+    );
+    assert_eq!(surface.semantic().compose_skill_set_field.len(), 13);
+    let visible_choices = |surface: &ApplicationSurfaceController| {
+        let mut terminal = Terminal::new(TestBackend::new(140, 44)).unwrap();
+        surface.draw_terminal(&mut terminal).unwrap();
+        // Read only the real Compose preview pane's visible cells. The resource
+        // list and Inspector cannot accidentally satisfy a numbered-row check.
+        let pane = aikit_tui::layout::Layout::for_width(138)
+            .split(Rect::new(1, 1, 138, 42))
+            .preview
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (pane.y..pane.y + pane.height)
+            .map(|row| {
+                (pane.x..pane.x + pane.width)
+                    .map(|column| buffer.cell((column, row)).unwrap().symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let compact = |text: &str| {
+        text.chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>()
+    };
+    let first_page = visible_choices(&surface);
+    assert!(first_page.contains("Page 1/2"), "{first_page}");
+    for (index, name) in names[..9].iter().enumerate() {
+        assert!(
+            compact(&first_page).contains(&compact(&format!("{} [ ] {name}", index + 1))),
+            "missing visible numbered row {name}:\n{first_page}"
+        );
+    }
+    surface
+        .handle(&mut service, key(KeyCode::Char('1'), KeyModifiers::NONE))
+        .unwrap();
+    surface
+        .handle(&mut service, key(KeyCode::PageDown, KeyModifiers::NONE))
+        .unwrap();
+    let second_page = visible_choices(&surface);
+    assert!(second_page.contains("Page 2/2"), "{second_page}");
+    for (index, name) in names[9..].iter().enumerate() {
+        assert!(
+            compact(&second_page).contains(&compact(&format!("{} [ ] {name}", index + 1))),
+            "missing visible numbered row {name}:\n{second_page}"
+        );
+    }
+    surface
+        .handle(&mut service, key(KeyCode::Char('4'), KeyModifiers::NONE))
+        .unwrap();
+    assert!(visible_choices(&surface).contains("4 [x] suite-foundations"));
+    surface
+        .handle(&mut service, key(KeyCode::Char('9'), KeyModifiers::NONE))
+        .unwrap();
+    surface
+        .handle(&mut service, key(KeyCode::PageDown, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(surface.semantic().compose_skill_set_page, 1);
+    assert_eq!(
+        surface.semantic().compose_skill_sets,
+        ["central-engineering", "suite-foundations"]
+    );
+    surface
+        .handle(&mut service, key(KeyCode::PageUp, KeyModifiers::NONE))
+        .unwrap();
+    assert!(visible_choices(&surface).contains("1 [x] central-engineering"));
+    surface
+        .handle(&mut service, key(KeyCode::PageDown, KeyModifiers::NONE))
+        .unwrap();
+    assert!(visible_choices(&surface).contains("4 [x] suite-foundations"));
+    surface
+        .handle(&mut service, key(KeyCode::Char('p'), KeyModifiers::CONTROL))
+        .unwrap();
+    surface
+        .handle(&mut service, key(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+    let preview = surface.semantic().repertoire_preview.as_ref().unwrap();
+    assert_eq!(
+        preview.request.skill_sets,
+        ["central-engineering", "suite-foundations"]
+    );
+    assert_eq!(preview.request.scope, ScopeKind::Project);
+    assert!(!preview.procedure.plan.edits.is_empty());
+    assert_eq!(
+        preview
+            .reading
+            .members
+            .iter()
+            .filter(|member| member.projected)
+            .count(),
+        3
+    );
+    for name in ["plain", "method", "field"] {
+        assert!(preview
+            .reading
+            .members
+            .iter()
+            .any(|member| member.id == id(name) && member.projected));
+    }
+    assert_eq!(
+        source_snapshot(&world.home.root().join("registries")),
+        source_before
+    );
+    assert_eq!(
+        fs::read(world.project.join(".aikit/profile.toml")).unwrap(),
+        declaration_before
+    );
+    assert!(
+        generation::current(&world.home.context_dir(&service.descriptor().context_id))
+            .unwrap()
+            .is_none()
+    );
+    assert!(!world.project.join(".agents/skills").exists());
+    assert!(!world.project.join(".pi/skills").exists());
+    // A fresh actual owner read after the field shrinks clamps the page; the
+    // operator's named selections are preserved, not interpreted as row IDs.
+    for name in &names[9..] {
+        aikit_store::skillsets::delete_to_trash(&world.home, name).unwrap();
+    }
+    surface
+        .handle(&mut service, key(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    surface
+        .handle(&mut service, key(KeyCode::Left, KeyModifiers::ALT))
+        .unwrap();
+    surface
+        .handle(&mut service, key(KeyCode::Right, KeyModifiers::ALT))
+        .unwrap();
+    assert_eq!(surface.semantic().compose_skill_set_field.len(), 9);
+    assert_eq!(surface.semantic().compose_skill_set_page, 0);
+    assert_eq!(
+        surface.semantic().compose_skill_sets,
+        ["central-engineering", "suite-foundations"]
+    );
+}
+
+#[test]
+fn actual_contextual_compose_entry_and_history_back_refresh_registered_sets() {
+    use aikit_tui::event::PaletteEvent;
+    use aikit_tui::host::UiHost;
+    use aikit_tui::{ApplicationSurfaceController, ApplicationSurfaceRequest, WorkspaceSection};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let key = |code| PaletteEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+    let world = World::new();
+    let source_before = source_snapshot(&world.home.root().join("registries"));
+    let declaration_before = fs::read(world.project.join(".aikit/profile.toml")).unwrap();
+    let mut service = world.service();
+    let mut surface = ApplicationSurfaceController::new(
+        &mut service,
+        ApplicationSurfaceRequest::new(UiHost::TmuxPopup).with_query("compose"),
+    )
+    .unwrap();
+    assert!(surface.semantic().compose_skill_set_field.is_empty());
+    let subject = aikit_core::resource::ResourceRef::parse("surface/workspace/compose").unwrap();
+    let index = surface.semantic().read_model.position(&subject).unwrap();
+    for _ in 0..=index {
+        surface.handle(&mut service, key(KeyCode::Down)).unwrap();
+    }
+    assert_eq!(surface.semantic().selected.as_ref(), Some(&subject));
+    surface
+        .handle(&mut service, key(KeyCode::Char(':')))
+        .unwrap();
+    for character in "open".chars() {
+        surface
+            .handle(&mut service, key(KeyCode::Char(character)))
+            .unwrap();
+    }
+    surface.handle(&mut service, key(KeyCode::Enter)).unwrap();
+    assert_eq!(
+        surface.semantic().workspace_section,
+        WorkspaceSection::Compose
+    );
+    assert_eq!(surface.semantic().compose_skill_set_field.len(), 2);
+    assert_eq!(surface.semantic().selected.as_ref(), Some(&subject));
+    surface
+        .handle(&mut service, key(KeyCode::Char(':')))
+        .unwrap();
+    for character in "history".chars() {
+        surface
+            .handle(&mut service, key(KeyCode::Char(character)))
+            .unwrap();
+    }
+    surface.handle(&mut service, key(KeyCode::Enter)).unwrap();
+    assert_eq!(
+        surface.semantic().workspace_section,
+        WorkspaceSection::History
+    );
+    aikit_store::skillsets::create(&world.home, "newly-available", &[id("plain")], &[]).unwrap();
+    surface.handle(&mut service, key(KeyCode::Esc)).unwrap();
+    assert_eq!(
+        surface.semantic().workspace_section,
+        WorkspaceSection::Compose
+    );
+    assert_eq!(surface.semantic().compose_skill_set_field.len(), 3);
+    assert!(surface
+        .semantic()
+        .compose_skill_set_field
+        .iter()
+        .any(|row| row.name == "newly-available"));
+    assert_eq!(
+        source_snapshot(&world.home.root().join("registries")),
+        source_before
+    );
+    assert_eq!(
+        fs::read(world.project.join(".aikit/profile.toml")).unwrap(),
+        declaration_before
+    );
+    assert!(
+        generation::current(&world.home.context_dir(&service.descriptor().context_id))
+            .unwrap()
+            .is_none()
+    );
+    assert!(!world.project.join(".agents/skills").exists());
+    assert!(!world.project.join(".pi/skills").exists());
+}
+
 fn empty_request() -> RepertoireRequest {
     RepertoireRequest {
         scope: ScopeKind::Project,

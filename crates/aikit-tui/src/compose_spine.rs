@@ -462,17 +462,6 @@ pub fn compose_spine_lines(
         ),
         String::new(),
     ];
-    for (index, row) in rows.iter().enumerate() {
-        let here = row.step == state.compose_step;
-        lines.push(format!(
-            "{} {:>2} {} {:<14}{}",
-            if here { glyphs.selected() } else { ' ' },
-            index + 1,
-            row.standing.marker(glyphs),
-            row.step.as_str(),
-            row.standing.detail(),
-        ));
-    }
 
     // The step in hand discloses what stands behind its one-line summary.
     // Alt+Up/Down walks the spine; without this the spine would be a legend
@@ -489,6 +478,21 @@ pub fn compose_spine_lines(
         ));
         lines.extend(detail);
     }
+    // The operative choices come first: in a narrow pane, the full overview
+    // must not push the selected step's actual controls below the viewport.
+    lines.push(String::new());
+    for (index, row) in rows.iter().enumerate() {
+        let here = row.step == state.compose_step;
+        lines.push(format!(
+            "{} {:>2} {} {:<14}{}",
+            if here { glyphs.selected() } else { ' ' },
+            index + 1,
+            row.standing.marker(glyphs),
+            row.step.as_str(),
+            row.standing.detail(),
+        ));
+    }
+
     lines
 }
 
@@ -586,23 +590,42 @@ fn step_detail(
                 lines.push("  no SkillSet field is disclosed at this boundary, so no".into());
                 lines.push("  repertoire can be chosen here.".into());
             } else {
-                lines.push("  Choose a SkillSet first; individual exceptions ride beside".into());
-                lines
-                    .push("  them later. A set is a request: the owner's own resolution at".into());
-                lines.push("  preparation decides what projects and what is withheld.".into());
-                lines.push(String::new());
-                for (index, row) in state.compose_skill_set_field.iter().enumerate() {
+                let range = state.compose_skill_set_page_range();
+                lines.push(format!(
+                    "  Page {}/{}; sets {}-{} of {}",
+                    range.start / 9 + 1,
+                    state.compose_skill_set_field.len().div_ceil(9),
+                    range.start + 1,
+                    range.end,
+                    state.compose_skill_set_field.len(),
+                ));
+                for (index, row) in state.compose_skill_set_field[range.clone()]
+                    .iter()
+                    .enumerate()
+                {
                     let selected = state.compose_skill_sets.contains(&row.name);
                     lines.push(format!(
-                        "  {} {} {:<24} {}",
+                        "{} {} {}",
                         index + 1,
                         if selected { "[x]" } else { "[ ]" },
                         row.name,
-                        row.summary,
                     ));
                 }
+                lines.push("  PgUp/PgDn change page.".into());
                 lines.push(String::new());
-                lines.push("  Digits toggle the numbered sets; the selection rides the".into());
+                for row in &state.compose_skill_set_field[range] {
+                    lines.push(format!("  {}: {}", row.name, row.summary));
+                }
+                lines.push(String::new());
+                lines.push(
+                    "  Choose SkillSets; the owner's resolution decides what projects".into(),
+                );
+                lines
+                    .push("  and what is withheld. Individual exceptions ride beside sets.".into());
+                lines.push(
+                    "  Digits toggle the numbered sets on this page; the selection rides the"
+                        .into(),
+                );
                 lines.push(
                     "  save exactly as shown here. Ctrl+S previews the native repertoire".into(),
                 );
@@ -1177,7 +1200,7 @@ mod tests {
             let lines = compose_spine_lines(&state, reading(&world, &roster), Glyphs::ascii());
             assert!(
                 lines.len() > ComposeStep::ALL.len() + 2,
-                "{step:?} in hand must disclose detail beneath the spine"
+                "{step:?} in hand must disclose detail alongside the spine"
             );
             for line in &lines {
                 assert!(line.is_ascii(), "non-ASCII with {step:?} in hand: {line}");

@@ -35,6 +35,91 @@ fn state_with_model(refs: &[&str]) -> TuiState {
 }
 
 #[test]
+fn every_workspace_entry_into_compose_requests_the_native_skillset_field() {
+    use aikit_tui::WorkspaceSection;
+    for (from, action, destination, reads_sets) in [
+        (
+            WorkspaceSection::Worlds,
+            UiAction::NextWorkspaceSection,
+            WorkspaceSection::Compose,
+            true,
+        ),
+        (
+            WorkspaceSection::Work,
+            UiAction::PreviousWorkspaceSection,
+            WorkspaceSection::Compose,
+            true,
+        ),
+        (
+            WorkspaceSection::Compose,
+            UiAction::NextWorkspaceSection,
+            WorkspaceSection::Work,
+            false,
+        ),
+        (
+            WorkspaceSection::Compose,
+            UiAction::PreviousWorkspaceSection,
+            WorkspaceSection::Worlds,
+            false,
+        ),
+    ] {
+        let mut state = state_with_model(&["skill/rust/review"]);
+        state.workspace_section = from;
+        state.compose_skill_sets = vec!["retained-selection".into()];
+        let next = reduce_tui(state, action);
+        assert_eq!(next.state.workspace_section, destination);
+        assert_eq!(next.state.compose_skill_sets, ["retained-selection"]);
+        assert_eq!(next.state.mutation_scope, Some(ScopeKind::Project));
+        assert_eq!(
+            next.effects
+                .iter()
+                .filter(|effect| matches!(effect, UiEffect::LoadSkillSets))
+                .count(),
+            usize::from(reads_sets)
+        );
+        assert!(
+            next.effects
+                .iter()
+                .all(|effect| matches!(effect, UiEffect::LoadSkillSets)),
+            "navigation must not produce a material effect"
+        );
+    }
+}
+
+#[test]
+fn contextual_destination_and_back_into_compose_request_only_the_owner_field() {
+    use aikit_tui::application::{ActionOutcome, NavigationPoint};
+    use aikit_tui::WorkspaceSection;
+    let mut state = TuiState {
+        compose_skill_sets: vec!["retained-selection".into()],
+        mutation_scope: Some(ScopeKind::Project),
+        ..Default::default()
+    };
+    let reduction = reduce_tui(
+        state,
+        UiAction::ActionFinished(ActionOutcome::NavigatedTo {
+            section: WorkspaceSection::Compose,
+            summary: "Open Compose".into(),
+        }),
+    );
+    assert_eq!(reduction.effects, [UiEffect::LoadSkillSets]);
+    assert_eq!(reduction.state.compose_skill_sets, ["retained-selection"]);
+    assert_eq!(reduction.state.mutation_scope, Some(ScopeKind::Project));
+    state = reduction.state;
+    state.workspace_section = WorkspaceSection::History;
+    state.navigation.push(NavigationPoint {
+        selected: None,
+        relation_view: RelationView::List,
+        workspace_section: WorkspaceSection::Compose,
+    });
+    let reduction = reduce_tui(state, UiAction::Back);
+    assert_eq!(reduction.effects, [UiEffect::LoadSkillSets]);
+    assert_eq!(reduction.state.workspace_section, WorkspaceSection::Compose);
+    assert_eq!(reduction.state.compose_skill_sets, ["retained-selection"]);
+    assert_eq!(reduction.state.mutation_scope, Some(ScopeKind::Project));
+}
+
+#[test]
 fn keyboard_and_mouse_resolve_to_the_same_semantic_selection_action() {
     let resource = id("factory:capability:alpha");
     assert_eq!(
@@ -289,4 +374,50 @@ fn selection_navigation_is_stable_ref_based_not_index_identity() {
     assert_eq!(state.selected, Some(id("factory:capability:beta")));
     state = reduce_tui(state, UiAction::SelectPrevious).state;
     assert_eq!(state.selected, Some(id("factory:capability:alpha")));
+}
+
+#[test]
+fn skillset_paging_is_bounded_and_refresh_preserves_named_selection() {
+    use aikit_tui::SkillSetFieldRow;
+    let rows: Vec<_> = (0..13)
+        .map(|index| SkillSetFieldRow {
+            name: format!("set-{index}"),
+            provenance: "native owner".into(),
+            summary: "1 member, 1 projected".into(),
+            members: 1,
+            projected: 1,
+            withheld: 0,
+        })
+        .collect();
+    let state = reduce_tui(
+        TuiState::default(),
+        UiAction::SkillSetsLoaded { rows: rows.clone() },
+    )
+    .state;
+    let state = reduce_tui(
+        state,
+        UiAction::ToggleComposeSkillSet {
+            name: "set-12".into(),
+        },
+    )
+    .state;
+    let reduction = reduce_tui(state, UiAction::NextComposeSkillSetPage);
+    assert!(reduction.effects.is_empty());
+    assert_eq!(reduction.state.compose_skill_set_page, 1);
+    let state = reduce_tui(reduction.state, UiAction::NextComposeSkillSetPage).state;
+    assert_eq!(state.compose_skill_set_page, 1);
+    let state = reduce_tui(
+        state,
+        UiAction::SkillSetsLoaded {
+            rows: rows[..9].to_vec(),
+        },
+    )
+    .state;
+    assert_eq!(state.compose_skill_set_page, 0);
+    assert_eq!(state.compose_skill_sets, ["set-12"]);
+    let state = reduce_tui(state, UiAction::PreviousComposeSkillSetPage).state;
+    assert_eq!(state.compose_skill_set_page, 0);
+    let state = reduce_tui(state, UiAction::SkillSetsLoaded { rows: vec![] }).state;
+    assert_eq!(state.compose_skill_set_page, 0);
+    assert_eq!(state.compose_skill_sets, ["set-12"]);
 }

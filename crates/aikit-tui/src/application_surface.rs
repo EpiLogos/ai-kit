@@ -281,6 +281,13 @@ impl ApplicationSurfaceController {
                 semantic,
                 UiAction::SetQuery(request.initial_query.unwrap_or_default()),
             )?;
+            if request.initial_workspace_section == WorkspaceSection::Compose {
+                semantic = runtime.step(
+                    &mut service,
+                    semantic,
+                    UiAction::SetWorkspaceSection(WorkspaceSection::Compose),
+                )?;
+            }
             // Observe the host's working environments once, at the one moment
             // that is allowed to be slow. Every later reading comes from the
             // backend's cache, and is refreshed only when this application
@@ -633,19 +640,31 @@ impl ApplicationSurfaceController {
             && self.semantic.compose_step == crate::compose_spine::ComposeStep::Praxis
             && self.semantic.query.is_empty()
             && self.semantic.overlay.is_none()
-            && matches!(code, KeyCode::Char('1'..='9'))
+            && !ctrl
+            && !alt
         {
-            let KeyCode::Char(digit) = code else {
-                return Ok(());
-            };
-            let index = digit.to_digit(10).unwrap_or(0) as usize;
-            if index >= 1 {
-                if let Some(row) = self.semantic.compose_skill_set_field.get(index - 1) {
+            if matches!(code, KeyCode::PageUp | KeyCode::PageDown) {
+                let action = if code == KeyCode::PageUp {
+                    UiAction::PreviousComposeSkillSetPage
+                } else {
+                    UiAction::NextComposeSkillSetPage
+                };
+                return self.dispatch(backend, action);
+            }
+            if let KeyCode::Char(digit @ '1'..='9') = code {
+                let range = self.semantic.compose_skill_set_page_range();
+                let index = range.start + digit.to_digit(10).unwrap_or(0) as usize - 1;
+                if let Some(row) = self
+                    .semantic
+                    .compose_skill_set_field
+                    .get(index)
+                    .filter(|_| index < range.end)
+                {
                     let name = row.name.clone();
                     return self.dispatch(backend, UiAction::ToggleComposeSkillSet { name });
                 }
+                return Ok(());
             }
-            return Ok(());
         }
         if code == KeyCode::Esc {
             // Esc inside an active Graph projection first unwinds the Graph's
