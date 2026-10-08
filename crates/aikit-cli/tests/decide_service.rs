@@ -51,7 +51,6 @@ fn free_port() -> u16 {
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
         let port = 20_000 + ((seed >> 33) % 20_000) as u16;
-        let taken = HANDED_OUT.lock().unwrap().contains(&port);
         if !HANDED_OUT.lock().unwrap().contains(&port)
             && TcpListener::bind(("127.0.0.1", port)).is_ok()
         {
