@@ -233,7 +233,10 @@ enum QueuedOutcome {
 impl EncounterService {
     /// Read the existing exact owner binding for native team preparation and
     /// recovery. This is owner-local source, never a gateway ingress grant.
-    pub fn read_agency_binding(home: &AikitHome, session: &ResourceRef) -> Result<Option<EncounterAgencyBinding>> {
+    pub fn read_agency_binding(
+        home: &AikitHome,
+        session: &ResourceRef,
+    ) -> Result<Option<EncounterAgencyBinding>> {
         read_binding(home, session)
     }
     pub fn ensure_no_agency(home: &AikitHome, session: &ResourceRef) -> Result<()> {

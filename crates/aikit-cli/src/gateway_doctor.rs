@@ -851,9 +851,7 @@ pub fn gather(home: &AikitHome) -> Result<Facts> {
         let posture = crate::gateway_ops::read_process_record(home);
         let mut running = RunningFacts {
             build: posture.as_ref().map(|posture| posture.build.clone()),
-            listeners: posture
-                .map(|posture| posture.listeners)
-                .unwrap_or_default(),
+            listeners: posture.map(|posture| posture.listeners).unwrap_or_default(),
             features,
             ..RunningFacts::default()
         };

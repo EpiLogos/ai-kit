@@ -522,7 +522,7 @@ fn inhabitation_orientation(
 
 fn cmd_inhabit(cwd: &std::path::Path, args: InhabitArgs, json_mode: bool) -> Result<Reply> {
     use aikit_cli::inhabit::{self, ClaimMode, InhabitRequest};
-    use aikit_cli::inhabit_team::{self, HarnessTarget, TeamOutcome};
+    use aikit_cli::inhabit_team::{self, TeamOutcome};
     use aikit_cli::inhabitation as inh;
 
     let runner = aikit_adapters::runner::SystemRunner::new();
@@ -1613,7 +1613,6 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                     )
                 })?;
             }
-            let stop_signal = Some(stop_signal);
             aikit_adapters::run_gateway_service_with_hooks(
                 aikit_adapters::AgencyGateway::new(gateway_ref),
                 config,
@@ -1644,7 +1643,7 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
                         )),
                     }),
                     coexistence: coexistence.gate,
-                    stop_signal: None,
+                    stop_signal: Some(stop_signal),
                     // A peer's Flow request is answered by this Workcell's
                     // own encounter owner, at the moment of asking.
                     encounter_relay: Some(std::sync::Arc::new(
@@ -1794,10 +1793,10 @@ fn cmd_gateway_dispatch(command: GatewayCmd) -> Result<Reply> {
             // lane (inhabit_team_native); the dispatch keeps the input contract
             // and answers honestly until that lane lands.
             let _ = request_json;
-            return Err(AikitError::new(
+            Err(AikitError::new(
                 "gateway.team_unavailable",
                 "team operations are mid-restoration; this gateway build does not serve them yet",
-            ));
+            ))
         }
         GatewaySub::Conversation(a) => {
             let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
