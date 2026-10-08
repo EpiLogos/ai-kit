@@ -1099,6 +1099,7 @@ impl EncounterService {
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod native_preflight_bounds_tests {
     use super::*;
+    use crate::encounter_service::EncounterProvider;
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
 

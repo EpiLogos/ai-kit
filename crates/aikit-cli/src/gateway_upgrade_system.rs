@@ -1702,7 +1702,7 @@ mod tests {
 
     #[test]
     fn a_gateway_that_predates_build_identity_is_still_a_running_process_with_a_pid() {
-        let running = running_from_protocol(
+        let running = running_from_posture(
             vec!["communique-exact-instance".into()],
             None,
             Some(4242),
@@ -1712,6 +1712,6 @@ mod tests {
         assert_eq!(running.pid, 4242);
         assert_eq!(running.identity.revision, "unknown");
         assert_eq!(running.lifecycle, GatewayLifecycle::Foreground);
-        assert!(running_from_protocol(vec![], None, None, true).is_none());
+        assert!(running_from_posture(vec![], None, None, true).is_none());
     }
 }

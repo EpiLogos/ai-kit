@@ -25,7 +25,7 @@ pub struct CentralTaskRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workcell_ref: Option<ResourceRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub work_refs: Vec<ResourceRef>,
+    pub work_refs: Vec<Value>,
 }
 
 /// Retains the complete native reading, including source/authority bases,
@@ -182,6 +182,20 @@ impl<R: CommandRunner> NativeCentralPlacement<R> {
     }
 
     pub fn allocate(&self, request: &CentralTaskRequest) -> Result<AllocatedCentralTask> {
+        // Native NOW work relations are repository/branch objects. Semantic
+        // Run, workflow-unit and Return refs remain in source_refs.
+        if request.work_refs.len() > 64
+            || request.work_refs.iter().any(|work| {
+                !work.is_object()
+                    || ["repo", "branch"].iter().any(|key| {
+                        work.get(*key)
+                            .and_then(Value::as_str)
+                            .is_none_or(|text| text.trim().is_empty())
+                    })
+            })
+        {
+            return Err(failure("configuration", "Native work_refs require bounded repository/branch objects; semantic refs belong in source_refs"));
+        }
         let policy = self.call(request, "central.work.policy", json!({}))?;
         check_policy(&policy)?;
         let existing = self.existing_now_basis(request, &policy)?;
