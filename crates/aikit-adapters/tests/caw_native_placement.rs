@@ -667,3 +667,56 @@ fn native_explicit_exclusion_preserves_hardlink_and_parent_identity_fences() {
         assert_eq!(fs::read(&index).unwrap(), original_bytes);
     }
 }
+
+#[test]
+#[ignore = "requires exact source-built Central; mandatory in CAW workflow"]
+fn native_repository_branch_work_refs_and_child_ancestry_are_retained_on_replay() {
+    let (_dir, mut request) = world();
+    let owner = NativeCentralPlacement::new(SystemRunner::new());
+    let parent = owner.allocate(&request).unwrap();
+    request.task_ref = ResourceRef::parse("task:native-child-work").unwrap();
+    request.parent_now_ref =
+        Some(ResourceRef::parse(parent.allocation["now_ref"].as_str().unwrap()).unwrap());
+    request.workcell_ref = Some(ResourceRef::parse("workcell:controlled-native").unwrap());
+    request.work_refs = vec![json!({"repo":"demo", "branch":"lane/native-child"})];
+    let child = owner.allocate(&request).unwrap();
+    assert_eq!(
+        child.allocation["record"]["work_refs"],
+        json!(request.work_refs)
+    );
+    assert_eq!(
+        child.allocation["record"]["parent_now_ref"],
+        json!(request.parent_now_ref)
+    );
+    assert_eq!(
+        child.allocation["record"]["workcell_ref"],
+        json!(request.workcell_ref)
+    );
+    assert_eq!(child.allocation["record"]["horizon"], "child");
+    let source = request
+        .central_root
+        .join(child.allocation["source"]["path"].as_str().unwrap());
+    let bytes = fs::read(&source).unwrap();
+    let modified = fs::metadata(&source).unwrap().modified().unwrap();
+    let again = owner.allocate(&request).unwrap();
+    assert_eq!(again.allocation["created"], false);
+    assert_eq!(again.allocation["now_ref"], child.allocation["now_ref"]);
+    assert_eq!(again.allocation["revision"], child.allocation["revision"]);
+    assert_eq!(
+        again.allocation["record"]["work_refs"],
+        child.allocation["record"]["work_refs"]
+    );
+    for invalid in [json!("run:semantic"), json!({"repo":"demo","branch":" "})] {
+        let mut changed = request.clone();
+        changed.work_refs = vec![invalid];
+        assert!(owner.allocate(&changed).is_err());
+    }
+    let mut changed = request.clone();
+    changed.work_refs = vec![json!({"repo":"demo", "branch":"lane/other"})];
+    assert!(owner.allocate(&changed).is_err());
+    changed = request.clone();
+    changed.parent_now_ref = Some(ResourceRef::parse("central:now:unrelated").unwrap());
+    assert!(owner.allocate(&changed).is_err());
+    assert_eq!(fs::read(&source).unwrap(), bytes);
+    assert_eq!(fs::metadata(&source).unwrap().modified().unwrap(), modified);
+}

@@ -991,9 +991,12 @@ impl EncounterService {
                     "Native model preflight exhausted its operation budget; no provider started",
                 ));
             }
-            let Ok((model_provider, _task_bound)) =
-                self.selected_model_provider_before(&request.agent_session, &configured, &request.cwd, deadline)
-            else {
+            let Ok((model_provider, _task_bound)) = self.selected_model_provider_before(
+                &request.agent_session,
+                &configured,
+                &request.cwd,
+                deadline,
+            ) else {
                 continue;
             };
             if model_provider.model_policy.is_some()

@@ -992,8 +992,8 @@ pub enum UiAction {
         applying: bool,
     },
     RequestRepertoirePreview,
-    RepertoirePreviewed(aikit_core::repertoire::RepertoirePreview),
-    RepertoireApplied(aikit_core::repertoire::RepertoireApplication),
+    RepertoirePreviewed(Box<aikit_core::repertoire::RepertoirePreview>),
+    RepertoireApplied(Box<aikit_core::repertoire::RepertoireApplication>),
     SelectComposeProfile(Option<aikit_core::ProfileId>),
     RequestCompositionPreview,
     CompositionPreviewed(CompositionPreview),
@@ -1117,7 +1117,7 @@ pub enum UiEffect {
         request: aikit_core::repertoire::RepertoireRequest,
     },
     ApplyRepertoire {
-        preview: aikit_core::repertoire::RepertoirePreview,
+        preview: Box<aikit_core::repertoire::RepertoirePreview>,
     },
     PreviewComposition {
         scope: ScopeKind,
@@ -1212,15 +1212,15 @@ impl TuiRuntime {
             }
             UiEffect::PreviewRepertoire { request } => {
                 Ok(match service.preview_repertoire(request) {
-                    Ok(preview) => UiAction::RepertoirePreviewed(preview),
+                    Ok(preview) => UiAction::RepertoirePreviewed(Box::new(preview)),
                     Err(error) => UiAction::RepertoireFailed {
                         reason: error.to_string(),
                         applying: false,
                     },
                 })
             }
-            UiEffect::ApplyRepertoire { preview } => Ok(match service.apply_repertoire(preview) {
-                Ok(application) => UiAction::RepertoireApplied(application),
+            UiEffect::ApplyRepertoire { preview } => Ok(match service.apply_repertoire(*preview) {
+                Ok(application) => UiAction::RepertoireApplied(Box::new(application)),
                 Err(error) => UiAction::RepertoireFailed {
                     reason: error.to_string(),
                     applying: true,
@@ -1752,7 +1752,7 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                 && state.compose_skill_sets == preview.request.skill_sets
                 && state.staged.is_empty()
             {
-                state.repertoire_preview = Some(preview);
+                state.repertoire_preview = Some(*preview);
                 state.overlay = Some(Overlay::CompositionPreview);
             } else {
                 state.repertoire_preview = None;
@@ -1765,7 +1765,7 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             state.status = Some(UiStatus {
                 message: application.render(),
             });
-            state.repertoire_application = Some(application);
+            state.repertoire_application = Some(*application);
             state.repertoire_preview = None;
             state.preview = None;
             state.overlay = None;
@@ -1813,7 +1813,9 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
                         && state.compose_skill_sets == preview.request.skill_sets
                         && state.staged.is_empty()
                     {
-                        effects.push(UiEffect::ApplyRepertoire { preview });
+                        effects.push(UiEffect::ApplyRepertoire {
+                            preview: Box::new(preview),
+                        });
                     } else {
                         state.repertoire_preview = None;
                         state.overlay = None;
