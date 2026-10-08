@@ -463,6 +463,14 @@ pub fn compose_spine_lines(
         String::new(),
     ];
 
+    // Keep the whole ordered path visible without the wrapped standing prose
+    // pushing operative choices offscreen. Full standings follow the detail.
+    lines.extend(
+        rows.iter()
+            .enumerate()
+            .map(|(index, row)| format!("{:>2} {}", index + 1, row.step.as_str())),
+    );
+
     // The step in hand discloses what stands behind its one-line summary.
     // Alt+Up/Down walks the spine; without this the spine would be a legend
     // rather than a place to work, and the detail each step already has would
