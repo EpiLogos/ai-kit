@@ -1246,9 +1246,7 @@ impl<E: UpgradeEnv> Driver<'_, E> {
             Some(report) => format!(
                 "{} turn(s) finished, {} interrupted and recorded, {} queued prompt(s) never \
                  started; nothing was replayed",
-                report.turns_resolved,
-                report.turns_interrupted,
-                report.prompts_not_started
+                report.turns_resolved, report.turns_interrupted, report.prompts_not_started
             ),
             None if transaction.drain.is_some() => "what the predecessor had in flight when it \
                  stopped is unknown here: it drains itself for its stop and journals every \
@@ -1485,9 +1483,7 @@ pub fn receipt_markdown(transaction: &Transaction) -> String {
         } else {
             text.push_str(&format!(
                 "- drain: {} turn(s) resolved, {} interrupted, {} queued prompt(s) never started\n",
-                drain.turns_resolved,
-                drain.turns_interrupted,
-                drain.prompts_not_started
+                drain.turns_resolved, drain.turns_interrupted, drain.prompts_not_started
             ));
         }
         if drain.turns_interrupted > 0 {
@@ -2577,7 +2573,9 @@ mod tests {
         assert!(summary.contains("nothing was replayed"), "{summary}");
         let receipt = receipt_json(&transaction);
         assert_eq!(receipt["uncertain_effects"]["measured"], false);
-        assert!(receipt["uncertain_effects"].get("turns_interrupted").is_none());
+        assert!(receipt["uncertain_effects"]
+            .get("turns_interrupted")
+            .is_none());
         assert!(receipt_markdown(&transaction).contains("not measured"));
         // A measured drain still states its counts.
         let script = Script::new(

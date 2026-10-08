@@ -352,7 +352,7 @@ pub fn handoff_for_occupant(
 ) -> Result<Value> {
     let Some(commit) = commit else {
         return Ok(
-            json!({"schema":"aikit.gateway-handoff/v1", "delivery":pending_communiques_for_turn(&occupant, gateway)?}),
+            json!({"schema":"aikit.gateway-handoff/v1", "delivery":pending_communiques_for_turn(occupant, gateway)?}),
         );
     };
     let delivery: TurnDelivery =
@@ -426,7 +426,7 @@ pub fn handoff_for_occupant(
     if records.is_empty()
         || delivery.pending_count < records.len()
         || render(
-            &occupant,
+            occupant,
             &records,
             delivery.pending_count,
             delivery.preview_bytes,

@@ -520,7 +520,8 @@ fn an_upgrade_replaces_the_running_process_with_the_installed_build_and_proves_i
     // `oi update` flips the managed symlink. The process keeps running its old image.
     machine.install("bin-b");
     assert_eq!(
-        machine.build()["revision"], machine.revision_a,
+        machine.build()["revision"],
+        machine.revision_a,
         "an installed build is not a running build"
     );
 
@@ -572,10 +573,7 @@ fn an_upgrade_replaces_the_running_process_with_the_installed_build_and_proves_i
     );
     let now = machine.build();
     assert_eq!(now["revision"], machine.revision_b);
-    assert_eq!(
-        now["pid"].as_u64().unwrap(),
-        after["pid"].as_u64().unwrap()
-    );
+    assert_eq!(now["pid"].as_u64().unwrap(), after["pid"].as_u64().unwrap());
 
     // The old process was drained, not killed: it exited cleanly, once, and
     // the supervisor started exactly one successor.
@@ -657,10 +655,7 @@ fn an_install_that_fails_leaves_the_running_gateway_and_the_installed_build_unto
         .unwrap()
         .contains("unchanged"));
     let still = machine.build();
-    assert_eq!(
-        still["pid"], before["pid"],
-        "the gateway was never touched"
-    );
+    assert_eq!(still["pid"], before["pid"], "the gateway was never touched");
     assert_eq!(
         std::fs::read_link(machine.root().join("cur/aikit")).unwrap(),
         machine.root().join("bin-a/aikit")
@@ -729,10 +724,7 @@ fn a_new_build_that_does_not_come_up_is_rolled_back_and_the_old_build_is_verifie
         now["revision"], machine.revision_a,
         "the previous build runs again"
     );
-    assert_ne!(
-        now["pid"], before["pid"],
-        "a new process, on the old build"
-    );
+    assert_ne!(now["pid"], before["pid"], "a new process, on the old build");
     // The supervisor saw the drained exit, the broken builds, and the restore.
     assert!(supervisor.starts.load(Ordering::SeqCst) >= 3);
     let receipt = std::fs::read_to_string(
@@ -835,9 +827,8 @@ fn receipt_details(machine: &Machine) -> Vec<String> {
 }
 
 #[test]
-
-    // RESTORE WITH: the conversation-initiated upgrade path. The engine cluster (launcher trait, attach, parse/perform arms) is restored and the plan leg works, but `apply` through a live gateway hangs the request — the worker and the serving request thread deadlock in the restored flow. Follow-up: fix the ordering, then un-ignore.
-    #[ignore = "apply through a live gateway hangs; see the comment above"]
+// RESTORE WITH: the conversation-initiated upgrade path. The engine cluster (launcher trait, attach, parse/perform arms) is restored and the plan leg works, but `apply` through a live gateway hangs the request — the worker and the serving request thread deadlock in the restored flow. Follow-up: fix the ordering, then un-ignore.
+#[ignore = "apply through a live gateway hangs; see the comment above"]
 fn an_upgrade_asked_for_in_a_conversation_survives_the_restart_and_is_reported_back_into_it() {
     let machine = Machine::new();
     machine.with_second_build();
@@ -1037,8 +1028,5 @@ fn an_install_that_cannot_fit_is_refused_before_anything_is_changed() {
         !machine.root().join("oi.calls").exists(),
         "the installer never ran"
     );
-    assert_eq!(
-        machine.build()["pid"],
-        before["pid"]
-    );
+    assert_eq!(machine.build()["pid"], before["pid"]);
 }
