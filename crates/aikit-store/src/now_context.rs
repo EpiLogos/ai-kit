@@ -5,6 +5,7 @@
 //! views, replayable change cursors and last-delivery state. It speaks RESP2
 //! directly so the Redis boundary adds no second runtime/service dependency.
 use aikit_core::context_source::{AgentVisibility, ExternalEgress};
+use aikit_core::praxis::{EncounterTaskPraxisReceipt, ENCOUNTER_TASK_PRAXIS_SCHEMA};
 use aikit_core::secret_ref::SecretRef;
 use aikit_core::{AikitError, KnowledgeContextPack, ResourceRef, Result, SecretValue};
 use serde::{Deserialize, Serialize};
@@ -381,6 +382,15 @@ pub struct PreparedNowContext {
     pub continuation: Option<String>,
     #[serde(default)]
     pub jev_invocation_ref: Option<ResourceRef>,
+    /// The prepare-time encounter-task praxis receipt, carried verbatim from
+    /// the NOW-preparation boundary that resolved the task's required
+    /// praxisRefs. Admission reads this published receipt — never a
+    /// re-derivation, which would resolve under a moved resolution generation
+    /// and produce a different `resolution_hash`. Absent (and omitted from the
+    /// encoded view, byte-identical to the receipt-less shape) when the
+    /// prepared Factory units name no praxisRefs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub praxis: Option<EncounterTaskPraxisReceipt>,
     pub prepared_at_unix_ms: u64,
 }
 impl PreparedNowContext {
@@ -420,6 +430,10 @@ impl PreparedNowContext {
                 .continuation
                 .as_ref()
                 .is_some_and(|v| !bounded(v, 128 * 1024))
+            || self
+                .praxis
+                .as_ref()
+                .is_some_and(|receipt| receipt.schema != ENCOUNTER_TASK_PRAXIS_SCHEMA)
         {
             return Err(fail(
                 "now_context.prepared_invalid",
@@ -1674,6 +1688,7 @@ mod tests {
             knowledge_frames: vec![],
             continuation: None,
             jev_invocation_ref: None,
+            praxis: None,
             prepared_at_unix_ms: 1,
         };
         assert!(view.validate(false).is_ok());
@@ -1687,5 +1702,164 @@ mod tests {
             view.validate(false).unwrap_err().code(),
             "now_context.prepared_invalid"
         );
+    }
+
+    /// The prepare-time receipt carrier: verbatim persistence on the published
+    /// view, byte-identity without one, fail-closed against a foreign schema.
+    mod praxis_receipt_carry {
+        use super::*;
+        use aikit_core::method::PraxisForm;
+        use aikit_core::praxis::{
+            PraxisClaim, PraxisStanding, ResolvedPraxisRefStanding, UnitPraxisResolution,
+        };
+
+        /// A receipt exactly as the NOW-preparation boundary emits it: typed,
+        /// carrying the resolution generation it was read under.
+        fn receipt() -> EncounterTaskPraxisReceipt {
+            EncounterTaskPraxisReceipt {
+                schema: ENCOUNTER_TASK_PRAXIS_SCHEMA.into(),
+                resolution_hash:
+                    "blake3:9f2c51a4f21b32c31cd998760a4b3bd46e60c96a99847fabc0e2a1de3562ca19".into(),
+                claim: PraxisClaim::Resolved,
+                units: vec![UnitPraxisResolution {
+                    workflow_unit_ref: "unit/one".into(),
+                    resolved: vec![ResolvedPraxisRefStanding {
+                        reference: "skill/practice/receipt-praxis".into(),
+                        form: PraxisForm::Method,
+                        revision: Some("r1".into()),
+                        standing: PraxisStanding::Available,
+                    }],
+                    refusals: vec![],
+                }],
+                standing:
+                    "resolution standing only; a required praxisRef's resolution never grants \
+                     trust, activation, capability or authority"
+                        .into(),
+            }
+        }
+
+        fn view_with(receipt: Option<EncounterTaskPraxisReceipt>) -> PreparedNowContext {
+            let source = ResourceRef::parse("context-source/test").unwrap();
+            let basis = NowContextBasis {
+                source_revisions: BTreeMap::from([(source.to_string(), "r1".into())]),
+                dependency_revisions: BTreeMap::new(),
+                disclosure_revision: "d1".into(),
+                factory_revision: None,
+                decision_provider: None,
+                change_cursor: 0,
+            };
+            PreparedNowContext {
+                schema: NOW_PREPARED_SCHEMA.into(),
+                project_ref: ResourceRef::parse("project/test").unwrap(),
+                now_ref: ResourceRef::parse("now/test").unwrap(),
+                participant_ref: ResourceRef::parse("agent/test").unwrap(),
+                agent_session: ResourceRef::parse("agent-session/test").unwrap(),
+                version: 1,
+                basis_digest: basis.digest().unwrap(),
+                basis,
+                concern: "implement".into(),
+                practice_refs: vec![],
+                items: vec![NowContextItem {
+                    source_ref: source,
+                    source_revision: "r1".into(),
+                    title: "source".into(),
+                    excerpt: "essential passage".into(),
+                    route: None,
+                    agent_visibility: AgentVisibility::Payload,
+                    external_egress: ExternalEgress::Denied,
+                }],
+                neighbours: vec![],
+                factory: None,
+                knowledge_frames: vec![],
+                continuation: None,
+                jev_invocation_ref: None,
+                praxis: receipt,
+                prepared_at_unix_ms: 1,
+            }
+        }
+
+        #[test]
+        fn the_prepared_view_carries_the_prepare_time_receipt_verbatim() {
+            let receipt = receipt();
+            let view = view_with(Some(receipt.clone()));
+            view.validate(false).unwrap();
+            // The publish wire encoding round-trips the receipt exactly: what
+            // admission later reads is the receipt resolved at preparation,
+            // down to its prepare-time resolution generation.
+            let encoded = serde_json::to_vec(&view).unwrap();
+            let decoded: PreparedNowContext = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(decoded, view);
+            assert_eq!(decoded.praxis.as_ref(), Some(&receipt));
+            assert_eq!(
+                decoded.praxis.as_ref().unwrap().resolution_hash,
+                receipt.resolution_hash
+            );
+            // Persistence adds nothing and drops nothing: re-encoding the read
+            // view is byte-identical to the published bytes.
+            assert_eq!(serde_json::to_vec(&decoded).unwrap(), encoded);
+            // The inspect surface exposes the receipt under the additive
+            // `praxis` key, in the receipt's own wire shape.
+            let inspect = serde_json::to_value(&decoded).unwrap();
+            assert_eq!(inspect["praxis"], serde_json::to_value(&receipt).unwrap());
+            assert_eq!(
+                inspect["praxis"]["resolution_hash"],
+                receipt.resolution_hash.as_str()
+            );
+            assert_eq!(inspect["praxis"]["claim"], "resolved");
+        }
+
+        #[test]
+        fn a_view_without_a_receipt_encodes_exactly_the_receipt_less_shape() {
+            let view = view_with(None);
+            view.validate(false).unwrap();
+            let shape: serde_json::Value =
+                serde_json::from_slice(&serde_json::to_vec(&view).unwrap()).unwrap();
+            // Absence is omission, not a null key.
+            assert!(shape.get("praxis").is_none());
+            // The encoded key set is exactly the pre-receipt field set, so a
+            // receipt-less published view — its Redis bytes, its digest, the
+            // delivery receipts and envelopes that quote them — is unchanged
+            // by this field.
+            let mut keys: Vec<&str> = shape
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                [
+                    "agent_session",
+                    "basis",
+                    "basis_digest",
+                    "concern",
+                    "continuation",
+                    "factory",
+                    "items",
+                    "jev_invocation_ref",
+                    "knowledge_frames",
+                    "neighbours",
+                    "now_ref",
+                    "participant_ref",
+                    "practice_refs",
+                    "prepared_at_unix_ms",
+                    "project_ref",
+                    "schema",
+                    "version",
+                ]
+            );
+        }
+
+        #[test]
+        fn a_receipt_under_a_foreign_schema_refuses_the_view() {
+            let mut receipt = receipt();
+            receipt.schema = "aikit.encounter-task-praxis/v2".into();
+            let view = view_with(Some(receipt));
+            assert_eq!(
+                view.validate(false).unwrap_err().code(),
+                "now_context.prepared_invalid"
+            );
+        }
     }
 }

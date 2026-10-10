@@ -57,6 +57,7 @@ fn prepared_view() -> PreparedNowContext {
         knowledge_frames: vec![],
         continuation: None,
         jev_invocation_ref: None,
+        praxis: None,
         prepared_at_unix_ms: 1,
     }
 }
