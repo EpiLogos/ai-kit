@@ -1,9 +1,10 @@
 //! The delivered NOW envelope's praxis projection: the receipt the
-//! NOW-preparation boundary resolved for a dispatched task is projected
-//! verbatim into `aikit.now-context-envelope/v1`, refused claims stay refused
-//! and visible, and a NOW context without a receipt leaves the envelope
-//! byte-identical to the receipt-less shape.
-use super::{now_context_envelope, praxis_receipt_from_reading};
+//! NOW-preparation boundary resolved for a dispatched task reaches the
+//! receiving agent through the envelope's single site, `prepared.praxis` —
+//! verbatim, on the turn that crossed the preparation and on cached reads
+//! alike. Refused claims stay refused and visible, and a NOW context without
+//! a receipt leaves the envelope byte-identical to the receipt-less shape.
+use super::now_context_envelope;
 use aikit_core::context_source::{AgentVisibility, ExternalEgress};
 use aikit_core::method::PraxisForm;
 use aikit_core::praxis::{
@@ -19,6 +20,10 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 fn prepared_view() -> PreparedNowContext {
+    prepared_view_with_praxis(None)
+}
+
+fn prepared_view_with_praxis(praxis: Option<EncounterTaskPraxisReceipt>) -> PreparedNowContext {
     let basis = NowContextBasis {
         source_revisions: BTreeMap::from([("context-source/proof".into(), "r1".into())]),
         dependency_revisions: BTreeMap::new(),
@@ -57,7 +62,7 @@ fn prepared_view() -> PreparedNowContext {
         knowledge_frames: vec![],
         continuation: None,
         jev_invocation_ref: None,
-        praxis: None,
+        praxis,
         prepared_at_unix_ms: 1,
     }
 }
@@ -125,42 +130,50 @@ fn refused_receipt() -> EncounterTaskPraxisReceipt {
 
 #[test]
 fn a_resolved_receipt_projects_every_field_into_the_delivered_envelope() {
-    let receipt = serde_json::to_value(resolved_receipt()).unwrap();
-    let envelope = now_context_envelope(&prepared_view(), &changes(), Some(&receipt)).unwrap();
+    let fixture = resolved_receipt();
+    let receipt = serde_json::to_value(&fixture).unwrap();
+    let envelope =
+        now_context_envelope(&prepared_view_with_praxis(Some(fixture)), &changes()).unwrap();
     let parsed: Value = serde_json::from_str(&envelope).unwrap();
     assert_eq!(parsed["schema"], "aikit.now-context-envelope/v1");
-    // The receipt rides as its own top-level section, verbatim from the
-    // preparation boundary.
-    assert_eq!(parsed["praxis"], receipt);
-    assert_eq!(parsed["praxis"]["schema"], ENCOUNTER_TASK_PRAXIS_SCHEMA);
-    assert_eq!(parsed["praxis"]["claim"], "resolved");
+    // The receipt's single envelope site is `prepared.praxis`: the published
+    // view carries it verbatim, on this turn and on cached reads alike.
+    assert_eq!(parsed["prepared"]["praxis"], receipt);
     assert_eq!(
-        parsed["praxis"]["resolution_hash"],
+        parsed["prepared"]["praxis"]["schema"],
+        ENCOUNTER_TASK_PRAXIS_SCHEMA
+    );
+    assert_eq!(parsed["prepared"]["praxis"]["claim"], "resolved");
+    assert_eq!(
+        parsed["prepared"]["praxis"]["resolution_hash"],
         "blake3:resolved-view-proof"
     );
-    let standing = &parsed["praxis"]["units"][0]["resolved"][0];
+    let standing = &parsed["prepared"]["praxis"]["units"][0]["resolved"][0];
     assert_eq!(standing["reference"], "skill/practice/day-close");
     assert_eq!(standing["form"], "method");
     assert_eq!(standing["revision"], "r1");
     assert_eq!(standing["standing"], "available");
     assert_eq!(
-        parsed["praxis"]["units"][0]["workflow_unit_ref"],
+        parsed["prepared"]["praxis"]["units"][0]["workflow_unit_ref"],
         "unit/one"
     );
-    // It is a sibling section beside the prepared view, not buried inside it.
-    assert!(parsed["prepared"].get("praxis").is_none());
+    // No second, competing copy of the fact exists in the envelope.
+    assert!(parsed.get("praxis").is_none());
 }
 
 #[test]
 fn a_refused_receipt_stays_refused_with_code_and_recovery_visible() {
     let fixture = refused_receipt();
-    let receipt = serde_json::to_value(&fixture).unwrap();
-    let envelope = now_context_envelope(&prepared_view(), &changes(), Some(&receipt)).unwrap();
+    let envelope = now_context_envelope(
+        &prepared_view_with_praxis(Some(fixture.clone())),
+        &changes(),
+    )
+    .unwrap();
     let parsed: Value = serde_json::from_str(&envelope).unwrap();
-    // The claim fails closed in the delivered envelope, at the top level where
-    // the receiving agent reads it.
-    assert_eq!(parsed["praxis"]["claim"], "refused");
-    let refusal = &parsed["praxis"]["units"][0]["refusals"][0];
+    // The claim fails closed in the delivered envelope, at the site the
+    // receiving agent reads.
+    assert_eq!(parsed["prepared"]["praxis"]["claim"], "refused");
+    let refusal = &parsed["prepared"]["praxis"]["units"][0]["refusals"][0];
     assert_eq!(refusal["reference"], "skill/none/such");
     assert_eq!(refusal["code"], "ref-absent");
     // Condition and recovery travel with the refusal, in full: the receiving
@@ -192,36 +205,6 @@ fn no_receipt_leaves_the_envelope_byte_identical_to_the_receiptless_shape() {
         "changes_since_preparation":changes,
     }))
     .unwrap();
-    let actual = now_context_envelope(&view, &changes, None).unwrap();
+    let actual = now_context_envelope(&view, &changes).unwrap();
     assert_eq!(actual, expected);
-}
-
-#[test]
-fn the_preparation_readings_receipt_is_taken_verbatim() {
-    let receipt = serde_json::to_value(resolved_receipt()).unwrap();
-    let reading = json!({
-        "schema":"aikit.now-preparation-result/v1",
-        "publishedVersion":1,
-        "praxis":receipt,
-    });
-    assert_eq!(
-        praxis_receipt_from_reading(&reading).as_ref(),
-        Some(&receipt)
-    );
-}
-
-#[test]
-fn a_reading_without_a_receipt_projects_none() {
-    let reading = json!({
-        "schema":"aikit.now-preparation-result/v1",
-        "publishedVersion":1,
-    });
-    assert_eq!(praxis_receipt_from_reading(&reading), None);
-    // An explicit null is absence, not a receipt.
-    let nulled = json!({
-        "schema":"aikit.now-preparation-result/v1",
-        "publishedVersion":1,
-        "praxis":Value::Null,
-    });
-    assert_eq!(praxis_receipt_from_reading(&nulled), None);
 }
