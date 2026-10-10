@@ -1717,6 +1717,7 @@ pub fn now_publish_intelligence(args: NowPublishIntelligenceArgs) -> Result<Valu
         knowledge_frames: vec![],
         continuation: None,
         jev_invocation_ref,
+        praxis: None,
         prepared_at_unix_ms: now_ms(),
     };
     view.validate(false)?;

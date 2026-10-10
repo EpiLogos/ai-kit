@@ -1518,6 +1518,7 @@ fn publish_view(
         knowledge_frames: Vec::new(),
         continuation: Some(rendered.to_owned()),
         jev_invocation_ref: None,
+        praxis: None,
         prepared_at_unix_ms: now_ms(),
     };
     let version = store.publish(&view, current, None)?;

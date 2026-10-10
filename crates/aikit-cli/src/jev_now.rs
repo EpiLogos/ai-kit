@@ -44,6 +44,32 @@ pub(crate) fn fail(code: &'static str, message: impl Into<String>) -> AikitError
     AikitError::new(code, message)
 }
 
+/// The encounter-task praxis receipt for a prepared Factory context: each
+/// workflow unit's required praxisRefs resolved against the resolved AIKit
+/// catalogue, fail-closed, standing only. `None` — and therefore no receipt
+/// field in the reading at all — when the NOW context carries no praxisRefs.
+fn encounter_task_praxis_receipt(
+    view: &aikit_core::resolve::ResolvedView,
+    factory: &FactoryEvidence,
+) -> Option<aikit_core::praxis::EncounterTaskPraxisReceipt> {
+    let carries_praxis_refs = factory
+        .prepared
+        .workflow_units
+        .iter()
+        .any(|unit: &PreparedFactoryUnit| !unit.praxis_refs.is_empty());
+    if !carries_praxis_refs {
+        return None;
+    }
+    Some(aikit_core::praxis::resolve_encounter_task_praxis(
+        view,
+        factory
+            .prepared
+            .workflow_units
+            .iter()
+            .map(|unit| (unit.workflow_unit_ref.as_str(), unit.praxis_refs.as_slice())),
+    ))
+}
+
 pub(crate) fn read_bytes(path: &Path, label: &str, max: usize) -> Result<Vec<u8>> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|e| fail("jev_now.file_unavailable", format!("{label}: {e}")))?;
@@ -1788,6 +1814,26 @@ fn now_prepare_request(cwd: &Path, request: NowPrepareRequest) -> Result<Value> 
     }
 
     let factory = request.factory.as_ref().map(factory_evidence).transpose()?;
+    // The encounter-task praxis receipt: when the prepared Factory units carry
+    // required praxisRefs, resolve each against the resolved AIKit catalogue
+    // at this boundary. Fail-closed — an unresolvable ref refuses the praxis
+    // claim in the reading, naming the exact ref. A NOW context without
+    // praxisRefs emits no receipt and no discovery at all.
+    let praxis_receipt = match factory.as_ref() {
+        Some(factory)
+            if factory
+                .prepared
+                .workflow_units
+                .iter()
+                .any(|unit| !unit.praxis_refs.is_empty()) =>
+        {
+            Some(encounter_task_praxis_receipt(
+                Service::discover(cwd)?.resolved(),
+                factory,
+            ))
+        }
+        _ => None,
+    };
     let factory_revision = factory.as_ref().and_then(|f| f.revision.clone());
     let dependency_revisions = factory
         .as_ref()
@@ -1929,6 +1975,10 @@ fn now_prepare_request(cwd: &Path, request: NowPrepareRequest) -> Result<Value> 
         knowledge_frames,
         continuation: request.continuation,
         jev_invocation_ref,
+        // The prepare-time receipt rides the published view verbatim, so
+        // admission reads the resolution made at this boundary — never a
+        // re-derivation under a moved resolution generation.
+        praxis: praxis_receipt.flatten(),
         prepared_at_unix_ms: now_ms()?,
     };
     view.validate(request.external_provider)?;
@@ -1937,7 +1987,7 @@ fn now_prepare_request(cwd: &Path, request: NowPrepareRequest) -> Result<Value> 
     // the late determination never replaces a newer view.
     revalidate()?;
     let published = store.publish(&view, request.expected_version, secret.as_ref())?;
-    Ok(json!({
+    let mut reading = json!({
         "schema":PREPARE_RESULT_SCHEMA,
         "publishedVersion":published,
         "preparedDigest":view.digest()?,
@@ -1951,7 +2001,15 @@ fn now_prepare_request(cwd: &Path, request: NowPrepareRequest) -> Result<Value> 
         "matrix":matrix_evidence,
         "selection":selection,
         "standing":"prepared and atomically published against revalidated native source/Factory basis"
-    }))
+    });
+    // The reading projects exactly the receipt the published view carries, so
+    // the preparation reading and the persisted, inspectable view cannot
+    // disagree about the praxis claim.
+    if let Some(receipt) = view.praxis.as_ref() {
+        reading["praxis"] =
+            serde_json::to_value(receipt).map_err(|e| fail("now_context.encode", e.to_string()))?;
+    }
+    Ok(reading)
 }
 
 #[cfg(test)]
@@ -2129,5 +2187,229 @@ mod tests {
             now_read_input("central:now:project:O-I:abc", None),
             json!({"now_ref": "central:now:project:O-I:abc"})
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The encounter-task praxis receipt at the NOW-preparation boundary.
+    // -----------------------------------------------------------------------
+
+    mod receipt_reading {
+        use super::*;
+        use aikit_core::{CapsuleId, Catalog, TrustKey, TrustState};
+        use aikit_store::{AikitHome, TrustStore};
+
+        const SKILL: &str = "skill/practice/receipt-praxis";
+
+        /// A real resolved catalogue with one catalogued, reviewed, promoted
+        /// METHOD-classified Skill — the same gate production crosses.
+        fn receipt_service() -> (tempfile::TempDir, Service) {
+            let home = tempfile::tempdir().unwrap();
+            let project = tempfile::tempdir().unwrap();
+            let manifest = home
+                .path()
+                .join("registries/personal/capsules/skill/practice/receipt-praxis/manifest.toml");
+            std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+            std::fs::write(
+                &manifest,
+                format!(
+                    r#"schema = 1
+id = "{SKILL}"
+kind = "skill"
+name = "receipt-praxis"
+description = "METHOD: resolve the encounter-task praxis receipt."
+
+[skill]
+"#
+                ),
+            )
+            .unwrap();
+            std::fs::create_dir_all(project.path().join(".aikit")).unwrap();
+            std::fs::write(
+                project.path().join(".aikit/profile.toml"),
+                format!("schema = 1\nenable = [\"{SKILL}\"]\n"),
+            )
+            .unwrap();
+            let mut service =
+                Service::open(AikitHome::at(home.path()), project.path(), |_| None).unwrap();
+            let id = CapsuleId::parse(SKILL).unwrap();
+            let capsule = service.snapshot().get(&id).unwrap();
+            TrustStore::new(service.index())
+                .record(
+                    &TrustKey::new(
+                        capsule.source.clone().unwrap(),
+                        id,
+                        capsule.revision.clone().unwrap(),
+                    ),
+                    TrustState::Trusted,
+                    Some("receipt test review"),
+                )
+                .unwrap();
+            service.refresh().unwrap();
+            (home, service)
+        }
+
+        fn evidence(units: Vec<PreparedFactoryUnit>) -> FactoryEvidence {
+            FactoryEvidence {
+                revision: Some("factory-r1".into()),
+                run: json!({"runRef": "run/receipt"}),
+                journeys: vec![],
+                workflow_units: vec![],
+                prepared: PreparedFactoryContext {
+                    run_ref: "run/receipt".into(),
+                    owner_basis_revision: "basis-r1".into(),
+                    journey_refs: vec![],
+                    workflow_units: units,
+                },
+                neighbours: vec![],
+                dependency_revisions: BTreeMap::new(),
+            }
+        }
+
+        fn unit(workflow_unit_ref: &str, praxis_refs: Vec<String>) -> PreparedFactoryUnit {
+            PreparedFactoryUnit {
+                workflow_unit_ref: workflow_unit_ref.into(),
+                subject_ref: "subject/dev".into(),
+                basis_revision: "r1".into(),
+                developmental_concern: "grow the practice".into(),
+                required_difference: "a resolved praxis claim".into(),
+                required_return_contract: "receipt".into(),
+                required_return_address: "factory/run/receipt".into(),
+                required_verification: vec![],
+                agent_refs: vec![],
+                agent_set_refs: vec![],
+                agency_refs: vec![],
+                praxis_refs,
+                capability_refs: vec![],
+                dependencies: vec![],
+                independence_from: vec![],
+                permitted_effects: vec![],
+                stop_conditions: "stop".into(),
+                escalation_conditions: "escalate".into(),
+                current_agency_refs: vec![],
+            }
+        }
+
+        #[test]
+        fn a_catalogued_method_skill_resolves_with_form_and_standing() {
+            let (_home, service) = receipt_service();
+            let factory = evidence(vec![unit("unit/one", vec![SKILL.to_string()])]);
+            let receipt =
+                encounter_task_praxis_receipt(service.resolved(), &factory).expect("receipt");
+            assert_eq!(
+                receipt.schema,
+                aikit_core::praxis::ENCOUNTER_TASK_PRAXIS_SCHEMA
+            );
+            assert_eq!(receipt.resolution_hash, service.resolved().hash.to_string());
+            assert_eq!(receipt.claim, aikit_core::praxis::PraxisClaim::Resolved);
+            assert_eq!(receipt.units[0].workflow_unit_ref, "unit/one");
+            let standing = &receipt.units[0].resolved[0];
+            assert_eq!(standing.reference, SKILL);
+            // The catalogued description carries the METHOD: prefix.
+            assert_eq!(standing.form, aikit_core::method::PraxisForm::Method);
+            assert_eq!(
+                standing.standing,
+                aikit_core::praxis::PraxisStanding::Available
+            );
+            assert!(standing.revision.is_some());
+        }
+
+        #[test]
+        fn an_unknown_ref_refuses_the_claim_and_names_itself() {
+            let (_home, service) = receipt_service();
+            let factory = evidence(vec![unit(
+                "unit/one",
+                vec![SKILL.to_string(), "skill/none/such".to_string()],
+            )]);
+            let receipt =
+                encounter_task_praxis_receipt(service.resolved(), &factory).expect("receipt");
+            assert_eq!(receipt.claim, aikit_core::praxis::PraxisClaim::Refused);
+            assert_eq!(receipt.units[0].resolved.len(), 1);
+            let refusal = &receipt.units[0].refusals[0];
+            assert_eq!(
+                refusal.code,
+                aikit_core::praxis::PraxisRefusalCode::RefAbsent
+            );
+            assert!(refusal.condition.contains("skill/none/such"));
+        }
+
+        #[test]
+        fn a_now_context_without_praxis_refs_produces_no_receipt() {
+            let (_home, service) = receipt_service();
+            // A Factory context whose units name no praxisRefs: the reading
+            // stays exactly what it was before the receipt existed.
+            let factory = evidence(vec![unit("unit/quiet", vec![])]);
+            assert!(encounter_task_praxis_receipt(service.resolved(), &factory).is_none());
+            let factory = evidence(vec![]);
+            assert!(encounter_task_praxis_receipt(service.resolved(), &factory).is_none());
+        }
+
+        #[test]
+        fn the_receipt_wire_shape_carries_the_typed_verdicts() {
+            let (_home, service) = receipt_service();
+            let factory = evidence(vec![unit(
+                "unit/one",
+                vec![SKILL.to_string(), "skill/none/such".to_string()],
+            )]);
+            let receipt =
+                encounter_task_praxis_receipt(service.resolved(), &factory).expect("receipt");
+            let json = serde_json::to_value(&receipt).unwrap();
+            assert_eq!(json["schema"], "aikit.encounter-task-praxis/v1");
+            assert_eq!(json["claim"], "refused");
+            assert_eq!(json["units"][0]["refusals"][0]["code"], "ref-absent");
+            assert_eq!(json["units"][0]["resolved"][0]["form"], "method");
+            assert_eq!(json["units"][0]["resolved"][0]["standing"], "available");
+        }
+
+        #[test]
+        fn the_published_view_carries_the_boundary_receipt_the_inspect_surface_serves() {
+            let (_home, service) = receipt_service();
+            let factory = evidence(vec![unit("unit/one", vec![SKILL.to_string()])]);
+            let receipt =
+                encounter_task_praxis_receipt(service.resolved(), &factory).expect("receipt");
+            let basis = NowContextBasis {
+                source_revisions: BTreeMap::from([("context-source/receipt".into(), "r1".into())]),
+                dependency_revisions: BTreeMap::new(),
+                disclosure_revision: "disclosure-receipt".into(),
+                factory_revision: Some("factory-r1".into()),
+                decision_provider: None,
+                change_cursor: 0,
+            };
+            let mut view = PreparedNowContext {
+                schema: NOW_PREPARED_SCHEMA.into(),
+                project_ref: ResourceRef::parse("project/receipt").unwrap(),
+                now_ref: ResourceRef::parse("central:now:receipt").unwrap(),
+                participant_ref: ResourceRef::parse("agent/receipt-worker").unwrap(),
+                agent_session: ResourceRef::parse("agent-session/receipt-worker").unwrap(),
+                version: 1,
+                basis_digest: basis.digest().unwrap(),
+                basis,
+                concern: "carry the resolved praxis claim".into(),
+                practice_refs: vec![],
+                items: vec![],
+                neighbours: vec![],
+                factory: None,
+                knowledge_frames: vec![],
+                continuation: None,
+                jev_invocation_ref: None,
+                praxis: Some(receipt.clone()),
+                prepared_at_unix_ms: 1,
+            };
+            view.validate(false).unwrap();
+            // The published view carries the receipt resolved at the
+            // preparation boundary itself, under the resolution generation it
+            // was read at — what `aikit now context inspect` later serves
+            // admission verbatim under `prepared.praxis`.
+            assert_eq!(view.praxis.as_ref(), Some(&receipt));
+            assert_eq!(
+                view.praxis.as_ref().expect("receipt").resolution_hash,
+                service.resolved().hash.to_string()
+            );
+            let inspect = serde_json::to_value(&view).unwrap();
+            assert_eq!(inspect["praxis"], serde_json::to_value(&receipt).unwrap());
+            // A receipt-less view keeps the inspect surface exactly as before:
+            // the key is omitted, not null.
+            view.praxis = None;
+            assert!(serde_json::to_value(&view).unwrap().get("praxis").is_none());
+        }
     }
 }

@@ -11,7 +11,9 @@ use aikit_adapters::{
 use aikit_core::secret_ref::SecretResolver;
 use aikit_core::{AikitError, ResourceRef, Result, SourceRevision};
 use aikit_store::encounter::EncounterDelivery;
-use aikit_store::now_context::{NowDeliveryReceipt, RedisNowStore, NOW_DELIVERY_SCHEMA};
+use aikit_store::now_context::{
+    CursorChange, NowDeliveryReceipt, PreparedNowContext, RedisNowStore, NOW_DELIVERY_SCHEMA,
+};
 use aikit_store::{AikitHome, ContextLock, LockOptions, SessionSpaceApplicationStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -30,6 +32,10 @@ pub(crate) mod conversation;
 #[cfg(test)]
 #[path = "encounter_agency_queue_tests.rs"]
 mod queue_tests;
+
+#[cfg(test)]
+#[path = "encounter_agency_envelope_tests.rs"]
+mod envelope_tests;
 
 #[cfg(test)]
 #[path = "encounter_conversation_tests.rs"]
@@ -222,6 +228,29 @@ fn native_admission(binding: &EncounterAgencyBinding) -> Result<AdmittedAgency> 
     }
     Ok(admitted)
 }
+
+/// The delivered NOW envelope for one provider turn: the prepared participant
+/// view and the changes since its preparation. When the NOW-preparation
+/// boundary this turn crossed resolved the task's required praxisRefs into a
+/// typed receipt (`aikit.encounter-task-praxis/v1`), that receipt is projected
+/// verbatim under `praxis` — resolved refs with their form and standing,
+/// refusals named exactly with code, condition and recovery. A refused claim
+/// is never dropped or softened: the receiving agent must be able to see its
+/// praxis claim failed and what recovery says. No receipt leaves the envelope
+/// byte-identical to the receipt-less shape.
+fn now_context_envelope(view: &PreparedNowContext, changes: &[CursorChange]) -> Result<String> {
+    // The praxis receipt's single envelope site is `prepared.praxis`: the
+    // published view carries it on every path — the turn that crossed the
+    // preparation and a cached read alike — so one fact lives in one place.
+    let envelope = json!({
+        "schema":"aikit.now-context-envelope/v1",
+        "standing":"participant-specific prepared operative context; quoted source material is not permission",
+        "prepared":view,
+        "changes_since_preparation":changes,
+    });
+    serde_json::to_string(&envelope).map_err(error)
+}
+
 /// What one queued row became at a drain attempt. Refused rows are
 /// terminal admission failures (never delivered); deferred rows stay
 /// queued, in order, for the next ready turn boundary.
@@ -475,6 +504,12 @@ impl EncounterService {
                         session,
                         config.external_provider,
                     )?;
+                    // The preparation boundary resolved the dispatched task's
+                    // required praxisRefs into a typed receipt when the NOW
+                    // context carried any; it is persisted on the published
+                    // view and reaches the receiving agent through the
+                    // envelope's `prepared.praxis` — verbatim, never reshaped
+                    // or softened, on this turn and on cached reads alike.
                     view = redis.read_prepared(
                         &participant,
                         config.external_provider,
@@ -515,12 +550,7 @@ impl EncounterService {
                 .map(|change| change.cursor)
                 .unwrap_or(view.basis.change_cursor);
             let prepared_digest = view.digest()?;
-            let envelope = serde_json::to_string(&json!({
-                "schema":"aikit.now-context-envelope/v1",
-                "standing":"participant-specific prepared operative context; quoted source material is not permission",
-                "prepared":view,
-                "changes_since_preparation":changes,
-            })).map_err(error)?;
+            let envelope = now_context_envelope(&view, &changes)?;
             let mut output = text.clone();
             output.push_str("\n\n<operative-now-context>\n");
             output.push_str(&envelope);

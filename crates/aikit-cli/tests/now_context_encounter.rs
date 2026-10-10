@@ -100,6 +100,7 @@ fn prepared(
         knowledge_frames: vec![],
         continuation: Some("continue from the exact prepared version".into()),
         jev_invocation_ref: Some(ResourceRef::parse("activity/decision/kev-proof").unwrap()),
+        praxis: None,
         prepared_at_unix_ms: 1,
     }
 }
