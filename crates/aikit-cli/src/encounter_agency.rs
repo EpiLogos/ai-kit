@@ -238,31 +238,17 @@ fn native_admission(binding: &EncounterAgencyBinding) -> Result<AdmittedAgency> 
 /// is never dropped or softened: the receiving agent must be able to see its
 /// praxis claim failed and what recovery says. No receipt leaves the envelope
 /// byte-identical to the receipt-less shape.
-fn now_context_envelope(
-    view: &PreparedNowContext,
-    changes: &[CursorChange],
-    praxis_receipt: Option<&Value>,
-) -> Result<String> {
-    let mut envelope = json!({
+fn now_context_envelope(view: &PreparedNowContext, changes: &[CursorChange]) -> Result<String> {
+    // The praxis receipt's single envelope site is `prepared.praxis`: the
+    // published view carries it on every path — the turn that crossed the
+    // preparation and a cached read alike — so one fact lives in one place.
+    let envelope = json!({
         "schema":"aikit.now-context-envelope/v1",
         "standing":"participant-specific prepared operative context; quoted source material is not permission",
         "prepared":view,
         "changes_since_preparation":changes,
     });
-    if let Some(receipt) = praxis_receipt {
-        envelope["praxis"] = receipt.clone();
-    }
     serde_json::to_string(&envelope).map_err(error)
-}
-
-/// The praxis receipt a NOW-preparation reading carries, verbatim. `None` —
-/// and therefore nothing projected into the envelope — when the reading names
-/// no receipt; an explicit `null` is absence, not a receipt.
-fn praxis_receipt_from_reading(reading: &Value) -> Option<Value> {
-    reading
-        .get("praxis")
-        .filter(|receipt| !receipt.is_null())
-        .cloned()
 }
 
 /// What one queued row became at a drain attempt. Refused rows are
@@ -491,10 +477,6 @@ impl EncounterService {
             .map(|(binding, _)| binding.agent_ref)
             .unwrap_or_else(|| session.clone());
         let attempt = (|| -> Result<Option<(String, NowTurnDelivery)>> {
-            // The praxis receipt the NOW-preparation boundary resolved for this
-            // dispatch, when it ran here and the NOW context carried required
-            // praxisRefs. Projected into the delivered envelope below.
-            let mut praxis_receipt: Option<Value> = None;
             let redis = RedisNowStore::new(config.redis.clone())?;
             let secret = config
                 .redis
@@ -514,7 +496,7 @@ impl EncounterService {
                     } else {
                         resident.cwd.join(request)
                     };
-                    let reading = crate::jev_now::prepare_for_encounter(
+                    crate::jev_now::prepare_for_encounter(
                         &resident.cwd,
                         &request,
                         &config.redis,
@@ -524,12 +506,10 @@ impl EncounterService {
                     )?;
                     // The preparation boundary resolved the dispatched task's
                     // required praxisRefs into a typed receipt when the NOW
-                    // context carried any; it rides the reading under `praxis`.
-                    // Dropping it here would leave the receiving agent unable
-                    // to see which of its required praxis resolved — or that
-                    // one refused. The receipt projects verbatim; nothing is
-                    // reshaped or softened on the way through.
-                    praxis_receipt = praxis_receipt_from_reading(&reading);
+                    // context carried any; it is persisted on the published
+                    // view and reaches the receiving agent through the
+                    // envelope's `prepared.praxis` — verbatim, never reshaped
+                    // or softened, on this turn and on cached reads alike.
                     view = redis.read_prepared(
                         &participant,
                         config.external_provider,
@@ -570,7 +550,7 @@ impl EncounterService {
                 .map(|change| change.cursor)
                 .unwrap_or(view.basis.change_cursor);
             let prepared_digest = view.digest()?;
-            let envelope = now_context_envelope(&view, &changes, praxis_receipt.as_ref())?;
+            let envelope = now_context_envelope(&view, &changes)?;
             let mut output = text.clone();
             output.push_str("\n\n<operative-now-context>\n");
             output.push_str(&envelope);
