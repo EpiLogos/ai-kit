@@ -57,6 +57,7 @@ fn view(version: u64, disclosure: &str, change_cursor: u64) -> PreparedNowContex
         knowledge_frames: vec![],
         continuation: Some("continue from retained Run evidence".into()),
         jev_invocation_ref: Some(ResourceRef::parse("invocation/jev-test").unwrap()),
+        praxis: None,
         prepared_at_unix_ms: 1,
     }
 }
@@ -167,6 +168,56 @@ fn redis_preserves_versioned_participant_context_changes_revocation_and_delivery
             .read_prepared(&second.participant_ref, true, None)
             .unwrap(),
         Some(second)
+    );
+}
+
+/// The prepare-time receipt the NOW-preparation boundary resolved, persisted
+/// verbatim on the published view — the read-only carrier admission fetches it
+/// from (`aikit now context inspect`, `prepared.praxis`).
+#[test]
+fn redis_preserves_the_prepare_time_praxis_receipt_verbatim_for_admission() {
+    let Ok(address) = std::env::var("AIKIT_TEST_REDIS_ADDR") else {
+        eprintln!("AIKIT_TEST_REDIS_ADDR absent; real Redis integration is exercised by the dedicated workflow");
+        return;
+    };
+    use aikit_core::method::PraxisForm;
+    use aikit_core::praxis::{
+        EncounterTaskPraxisReceipt, PraxisClaim, PraxisStanding, ResolvedPraxisRefStanding,
+        UnitPraxisResolution, ENCOUNTER_TASK_PRAXIS_SCHEMA,
+    };
+    let receipt = EncounterTaskPraxisReceipt {
+        schema: ENCOUNTER_TASK_PRAXIS_SCHEMA.into(),
+        resolution_hash: "blake3:9f2c51a4f21b32c31cd998760a4b3bd46e60c96a99847fabc0e2a1de3562ca19"
+            .into(),
+        claim: PraxisClaim::Resolved,
+        units: vec![UnitPraxisResolution {
+            workflow_unit_ref: "unit/one".into(),
+            resolved: vec![ResolvedPraxisRefStanding {
+                reference: "skill/practice/receipt-praxis".into(),
+                form: PraxisForm::Method,
+                revision: Some("r1".into()),
+                standing: PraxisStanding::Available,
+            }],
+            refusals: vec![],
+        }],
+        standing: "resolution standing only; a required praxisRef's resolution never grants \
+                   trust, activation, capability or authority"
+            .into(),
+    };
+    let mut view = view(1, "disclosure-receipt", 0);
+    view.praxis = Some(receipt.clone());
+
+    let store = RedisNowStore::new(config(address)).unwrap();
+    assert_eq!(store.publish(&view, 0, None).unwrap(), 1);
+    let read = store
+        .read_prepared(&view.participant_ref, false, None)
+        .unwrap()
+        .expect("prepared view");
+    // The receipt that comes back is the prepare-time one, not a re-derivation.
+    assert_eq!(read.praxis.as_ref(), Some(&receipt));
+    assert_eq!(
+        read.praxis.expect("receipt").resolution_hash,
+        receipt.resolution_hash
     );
 }
 

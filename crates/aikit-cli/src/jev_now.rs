@@ -1975,6 +1975,10 @@ fn now_prepare_request(cwd: &Path, request: NowPrepareRequest) -> Result<Value> 
         knowledge_frames,
         continuation: request.continuation,
         jev_invocation_ref,
+        // The prepare-time receipt rides the published view verbatim, so
+        // admission reads the resolution made at this boundary — never a
+        // re-derivation under a moved resolution generation.
+        praxis: praxis_receipt.flatten(),
         prepared_at_unix_ms: now_ms()?,
     };
     view.validate(request.external_provider)?;
@@ -1998,7 +2002,10 @@ fn now_prepare_request(cwd: &Path, request: NowPrepareRequest) -> Result<Value> 
         "selection":selection,
         "standing":"prepared and atomically published against revalidated native source/Factory basis"
     });
-    if let Some(receipt) = praxis_receipt {
+    // The reading projects exactly the receipt the published view carries, so
+    // the preparation reading and the persisted, inspectable view cannot
+    // disagree about the praxis claim.
+    if let Some(receipt) = view.praxis.as_ref() {
         reading["praxis"] =
             serde_json::to_value(receipt).map_err(|e| fail("now_context.encode", e.to_string()))?;
     }
@@ -2351,6 +2358,58 @@ description = "METHOD: resolve the encounter-task praxis receipt."
             assert_eq!(json["units"][0]["refusals"][0]["code"], "ref-absent");
             assert_eq!(json["units"][0]["resolved"][0]["form"], "method");
             assert_eq!(json["units"][0]["resolved"][0]["standing"], "available");
+        }
+
+        #[test]
+        fn the_published_view_carries_the_boundary_receipt_the_inspect_surface_serves() {
+            let (_home, service) = receipt_service();
+            let factory = evidence(vec![unit("unit/one", vec![SKILL.to_string()])]);
+            let receipt =
+                encounter_task_praxis_receipt(service.resolved(), &factory).expect("receipt");
+            let basis = NowContextBasis {
+                source_revisions: BTreeMap::from([("context-source/receipt".into(), "r1".into())]),
+                dependency_revisions: BTreeMap::new(),
+                disclosure_revision: "disclosure-receipt".into(),
+                factory_revision: Some("factory-r1".into()),
+                decision_provider: None,
+                change_cursor: 0,
+            };
+            let mut view = PreparedNowContext {
+                schema: NOW_PREPARED_SCHEMA.into(),
+                project_ref: ResourceRef::parse("project/receipt").unwrap(),
+                now_ref: ResourceRef::parse("central:now:receipt").unwrap(),
+                participant_ref: ResourceRef::parse("agent/receipt-worker").unwrap(),
+                agent_session: ResourceRef::parse("agent-session/receipt-worker").unwrap(),
+                version: 1,
+                basis_digest: basis.digest().unwrap(),
+                basis,
+                concern: "carry the resolved praxis claim".into(),
+                practice_refs: vec![],
+                items: vec![],
+                neighbours: vec![],
+                factory: None,
+                knowledge_frames: vec![],
+                continuation: None,
+                jev_invocation_ref: None,
+                praxis: Some(receipt.clone()),
+                prepared_at_unix_ms: 1,
+            };
+            view.validate(false).unwrap();
+            // The published view carries the receipt resolved at the
+            // preparation boundary itself, under the resolution generation it
+            // was read at — what `aikit now context inspect` later serves
+            // admission verbatim under `prepared.praxis`.
+            assert_eq!(view.praxis.as_ref(), Some(&receipt));
+            assert_eq!(
+                view.praxis.as_ref().expect("receipt").resolution_hash,
+                service.resolved().hash.to_string()
+            );
+            let inspect = serde_json::to_value(&view).unwrap();
+            assert_eq!(inspect["praxis"], serde_json::to_value(&receipt).unwrap());
+            // A receipt-less view keeps the inspect surface exactly as before:
+            // the key is omitted, not null.
+            view.praxis = None;
+            assert!(serde_json::to_value(&view).unwrap().get("praxis").is_none());
         }
     }
 }
