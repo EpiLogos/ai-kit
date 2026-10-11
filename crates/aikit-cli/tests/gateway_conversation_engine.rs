@@ -1426,10 +1426,20 @@ fn stop_interrupts_the_turn_drops_the_queue_and_the_next_message_starts_fresh() 
     // The dropped message never becomes a turn, and the interrupted turn is
     // recorded. Then the conversation's next message runs as a fresh turn —
     // the exact flow that used to die on the lane's one-turn guard.
+    // Wait for the two stable facts, not for a stream length: the recorded
+    // interruption is a third event that may land before this poll, and a
+    // length checkpoint that expects two races it (it lost that race on a
+    // loaded runner, on both platforms, 2026-10-11).
     harness.wait_until(
         "the interrupted turn is recorded and the dropped message never runs",
         Duration::from_secs(30),
-        |harness| harness.stream_events().len() == 2 && harness.source.prompted_turns() == 1,
+        |harness| {
+            harness.source.prompted_turns() == 1
+                && harness.stream_events().iter().any(|event| {
+                    event["content"]
+                        == json!("the turn was interrupted before it answered (stop requested from the conversation)")
+                })
+        },
     );
     harness.source.script_reply("fresh answer");
     harness.admit(fixture_inbound("start over with this", "s3"));
