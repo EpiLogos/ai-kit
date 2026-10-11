@@ -1391,6 +1391,8 @@ mod native_preflight_bounds_tests {
                 allowed_senders: BTreeSet::new(),
                 allowed_packet_sources: BTreeSet::new(),
                 context: None,
+                central_profile_ref: None,
+                central_identity_world: None,
             },
             pid_file,
             bytes,
