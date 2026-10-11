@@ -243,7 +243,18 @@ fn the_decision_election_is_contributed_validated_applied_read_back_and_used_by_
 
     // Disclosure: declared (reference + digest), effective (document current),
     // active (the live endpoint answering its model card, read-only).
-    let reading = world.disclosed("decision.provider");
+    let mut reading = world.disclosed("decision.provider");
+    // The active axis is a live 1.5s-deadline probe of the endpoint. A loaded
+    // CI runner can starve the python fixture past that deadline while the
+    // process stays bound and running (observed: "Invocation deadline
+    // reached" with the fake kev alive), so one slow probe is not proof of
+    // unreachability — give the environment a bounded chance to settle.
+    let settle = Instant::now() + Duration::from_secs(30);
+    while reading["axes"]["active"]["value"]["reachable"] != json!(true) && Instant::now() < settle
+    {
+        std::thread::sleep(Duration::from_millis(250));
+        reading = world.disclosed("decision.provider");
+    }
     assert_eq!(
         reading["axes"]["declared"]["value"]["provider_file"],
         document

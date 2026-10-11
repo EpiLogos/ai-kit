@@ -438,7 +438,17 @@ fn the_kev_lifecycle_runs_without_workcell_and_never_adopts_a_service_it_did_not
         refused["error"]["code"], "decision_service.port_occupied",
         "{refused}"
     );
-    let status_b = scene.ok(&["status", "--service-dir", &b]);
+    let mut status_b = scene.ok(&["status", "--service-dir", &b]);
+    // The status health is a live read of the foreign listener under its own
+    // probe deadline; a loaded CI runner can starve the python fixture past
+    // it while the process stays bound (observed: "Invocation deadline
+    // reached" with the foreign listener alive). Poll the read-only status
+    // until the classification settles, bounded.
+    let settle = Instant::now() + Duration::from_secs(30);
+    while status_b["state"] != json!("foreign-listener") && Instant::now() < settle {
+        std::thread::sleep(Duration::from_millis(250));
+        status_b = scene.ok(&["status", "--service-dir", &b]);
+    }
     let foreign_state = match foreign.try_wait() {
         Ok(None) => "running".to_string(),
         Ok(Some(status)) => format!("exited {status}"),
