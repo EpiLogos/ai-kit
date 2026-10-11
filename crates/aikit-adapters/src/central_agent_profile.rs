@@ -18,6 +18,9 @@ pub const CENTRAL_AGENT_PROFILE_SCHEMA: &str = "central.agent-profile/v1";
 /// The provenance block Central stamps when a profile is authored from an
 /// expressed intent (`ctrl/src/agent_profile.rs:34`).
 pub const CENTRAL_AGENT_PROFILE_PROVENANCE_SCHEMA: &str = "central.agent-profile-provenance/v1";
+/// The reference grammar a self-definition pin must use:
+/// `central:source:{world_ref}:{relative path under the world root}`.
+pub const SELF_SOURCE_REF_PREFIX: &str = "central:source:";
 
 /// Authorship of an Agent profile. Central represents exactly one state: an
 /// Action can only ever author a generated proposal.
@@ -56,6 +59,24 @@ pub struct CentralAgentProfileIntentProvenance {
 pub enum CentralAgentProfileScope {
     Personal,
     Project,
+}
+
+/// One exact-source pin of a self definition: the `central:source:` reference
+/// and the sha256 digest of the exact UTF-8 file bytes it accepted. Central
+/// owns the acceptance; AIKit only ever verifies the pinned bytes against it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CentralAgentSelfSourcePin {
+    pub reference: ResourceRef,
+    pub content_digest: String,
+}
+
+/// The optional `self_definition` block: the Agent's first-person orientation
+/// sources, pinned exactly. Absent means the legacy behaviour — no composed
+/// orientation rides either delivery route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CentralAgentSelfDefinition {
+    pub source: CentralAgentSelfSourcePin,
+    pub relational_logos: CentralAgentSelfSourcePin,
 }
 
 /// The full Central-authored AgentProfile, consumed as refs + intents.
@@ -106,6 +127,11 @@ pub struct CentralAgentProfileProjection {
     /// neither dereferences nor interprets the material.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expressive_character_ref: Option<ResourceRef>,
+    /// Optional exact-source pins of the Agent's first-person orientation.
+    /// Tolerated absent (legacy profiles), and the projection never rejects
+    /// unknown fields, so Central may extend the document forward-compatibly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_definition: Option<CentralAgentSelfDefinition>,
 }
 
 impl CentralAgentProfileProjection {
@@ -187,6 +213,13 @@ impl CentralAgentProfileProjection {
                 ));
             }
         }
+        if let Some(self_definition) = &self.self_definition {
+            validate_self_pin(&self_definition.source, "self_definition.source")?;
+            validate_self_pin(
+                &self_definition.relational_logos,
+                "self_definition.relational_logos",
+            )?;
+        }
         Ok(())
     }
 
@@ -206,6 +239,50 @@ impl CentralAgentProfileProjection {
             profile_source: Some(self.clone()),
         }
     }
+}
+
+/// A self-definition pin must reference an exact source under a World root and
+/// pin it by sha256: `central:source:{world_ref}:{relative path}`, a plain
+/// relative path without whitespace or control characters, and
+/// `sha256:` + 64 lowercase hexadecimal digits.
+fn validate_self_pin(pin: &CentralAgentSelfSourcePin, field: &str) -> Result<()> {
+    let reference = pin.reference.as_str();
+    if reference.is_empty()
+        || !reference.starts_with(SELF_SOURCE_REF_PREFIX)
+        || reference
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+        // Central's grammar (ctrl parse_self_source_reference): the world ref
+        // is everything before the last colon (path colons are escaped as
+        // %3A at mint time) and both halves must be non-empty.
+        || reference[SELF_SOURCE_REF_PREFIX.len()..]
+            .rsplit_once(':')
+            .is_none_or(|(world_ref, relative)| world_ref.is_empty() || relative.is_empty())
+    {
+        return Err(AikitError::new(
+            "central_agent_profile.invalid_ref",
+            format!("{field}.reference must be a {SELF_SOURCE_REF_PREFIX}{{world_ref}}:{{relative path}} ref"),
+        ));
+    }
+    if ResourceRef::parse(reference).is_err() {
+        return Err(AikitError::new(
+            "central_agent_profile.invalid_ref",
+            format!("{field}.reference must be a non-empty, trimmed ref"),
+        ));
+    }
+    let digest = pin.content_digest.as_bytes();
+    let valid_digest = digest.len() == "sha256:".len() + 64
+        && digest.starts_with(b"sha256:")
+        && digest["sha256:".len()..]
+            .iter()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b));
+    if !valid_digest {
+        return Err(AikitError::new(
+            "central_agent_profile.invalid_digest",
+            format!("{field}.content_digest must be `sha256:` followed by 64 lowercase hexadecimal digits"),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -380,5 +457,78 @@ mod tests {
                 .code(),
             "central_agent_profile.invalid_intent_expression"
         );
+    }
+
+    /// The optional `self_definition` block round-trips exactly, is absent
+    /// (never defaulted into existence) for legacy profiles, and refuses pins
+    /// that are not an exact `central:source:` + sha256 shape.
+    #[test]
+    fn carries_self_definition_pins_and_refuses_malformed_ones() {
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let mut value = profile_value();
+        value["self_definition"] = serde_json::json!({
+            "source": {
+                "reference": "central:source:control:root:Control/agents/self/definition.md",
+                "content_digest": digest,
+            },
+            "relational_logos": {
+                "reference": "central:source:central:root:Control/agents/governance/being-there/relational-logos.md",
+                "content_digest": digest,
+            },
+        });
+        let projection = CentralAgentProfileProjection::parse(&value).unwrap();
+        let self_definition = projection.self_definition.clone().expect("carried");
+        assert_eq!(
+            self_definition.source.reference.as_str(),
+            "central:source:control:root:Control/agents/self/definition.md"
+        );
+        assert_eq!(self_definition.source.content_digest, digest);
+        // Round trip: the parsed projection serialises the pins verbatim.
+        let round_tripped: CentralAgentProfileProjection =
+            serde_json::from_value(serde_json::to_value(&projection).unwrap()).unwrap();
+        assert_eq!(round_tripped, projection);
+
+        // Legacy behaviour: absent stays absent, on parse and on write.
+        let plain = CentralAgentProfileProjection::parse(&profile_value()).unwrap();
+        assert!(plain.self_definition.is_none());
+        assert!(serde_json::to_value(&plain)
+            .unwrap()
+            .get("self_definition")
+            .is_none());
+        // Forward compatibility: unknown fields in the document are not a
+        // parse refusal.
+        let mut extended = value.clone();
+        extended["a_future_field"] = serde_json::json!({"anything": true});
+        assert!(CentralAgentProfileProjection::parse(&extended).is_ok());
+
+        // A pin that is not the exact accepted-source shape is refused.
+        for (field, bad) in [
+            (
+                "reference",
+                serde_json::json!("Control/agents/self/definition.md"),
+            ),
+            ("reference", serde_json::json!("central:source:no-path")),
+            (
+                "reference",
+                serde_json::json!("central:source:control:root: has space.md"),
+            ),
+            ("content_digest", serde_json::json!("blake3:deadbeef")),
+            ("content_digest", serde_json::json!("sha256:ABCDEF")),
+            (
+                "content_digest",
+                serde_json::json!(format!("sha256:{}", "g".repeat(64))),
+            ),
+        ] {
+            let mut bad_pin = value.clone();
+            bad_pin["self_definition"]["source"][field] = bad;
+            let error = CentralAgentProfileProjection::parse(&bad_pin).unwrap_err();
+            assert!(
+                matches!(
+                    error.code(),
+                    "central_agent_profile.invalid_ref" | "central_agent_profile.invalid_digest"
+                ),
+                "{field} case refused with a named code, got {error:?}"
+            );
+        }
     }
 }

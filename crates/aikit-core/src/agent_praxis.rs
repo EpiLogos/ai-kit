@@ -77,6 +77,31 @@ pub struct AgentProfileFacts {
     pub knowledge_source_refs: Vec<String>,
     #[serde(default)]
     pub intent_provenance: Option<IntentProvenanceFacts>,
+    /// The authored self-definition binding, carried as pins only: the
+    /// sixfold reading is a disclosure optic, not a delivery route, so the
+    /// exact bytes stay with the shared identity compositor. Tolerated absent
+    /// (legacy profiles); present means the reading names what is pinned
+    /// instead of silently dropping it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_definition: Option<SelfDefinitionFacts>,
+}
+
+/// One pinned self source at disclosure grain: reference and digest, no text.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelfSourcePinFacts {
+    #[serde(default)]
+    pub reference: String,
+    #[serde(default)]
+    pub content_digest: String,
+}
+
+/// The `self_definition` binding at disclosure grain.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelfDefinitionFacts {
+    #[serde(default)]
+    pub source: SelfSourcePinFacts,
+    #[serde(default)]
+    pub relational_logos: SelfSourcePinFacts,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +185,11 @@ pub struct AgentPraxisDisclosure {
     pub schema: String,
     pub agent: AgentIdentity,
     pub expression: Expression,
+    /// The authored self-definition binding at pin grain, when the profile
+    /// carries one. Absent for legacy profiles; present never implies the
+    /// bytes were delivered — delivery receipts are the compositor's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_definition: Option<SelfDefinitionFacts>,
     pub repertoire: Repertoire,
     pub praxis: Vec<PraxisEntry>,
     pub world: WorldRefs,
@@ -542,6 +572,7 @@ pub fn disclose_agent_praxis(input: &DisclosureInput) -> AgentPraxisDisclosure {
             name: profile.name.clone(),
         },
         expression,
+        self_definition: profile.self_definition.clone(),
         repertoire,
         praxis,
         world,
@@ -1135,6 +1166,45 @@ mod tests {
             selected: vec![],
             context_id: Some("ctx_test".into()),
         }
+    }
+
+    #[test]
+    fn self_definition_pins_are_disclosed_not_dropped() {
+        let pins = SelfDefinitionFacts {
+            source: SelfSourcePinFacts {
+                reference: "central:source:control:root:Control/self/agents/kite/self.md".into(),
+                content_digest: format!("sha256:{}", "ab".repeat(32)),
+            },
+            relational_logos: SelfSourcePinFacts {
+                reference: "central:source:control:root:Control/self/agents/relational-logos.md"
+                    .into(),
+                content_digest: format!("sha256:{}", "cd".repeat(32)),
+            },
+        };
+        let mut input = input();
+        input.profile.self_definition = Some(pins.clone());
+        let disclosure = disclose_agent_praxis(&input);
+        assert_eq!(disclosure.self_definition.as_ref(), Some(&pins));
+        // Pins only: the disclosure optic never embeds self text.
+        let json = serde_json::to_value(&disclosure).unwrap();
+        let text = serde_json::to_string(&json).unwrap();
+        assert!(!text.contains("generous exactness"));
+
+        // Legacy profile: absent stays absent on the wire.
+        let plain = disclose_agent_praxis(&DisclosureInput {
+            now_location: None,
+            profile: profile(),
+            sets: Vec::new(),
+            catalogue: catalogue(),
+            activity: None,
+            selected: vec![],
+            context_id: Some("ctx_test".into()),
+        });
+        assert!(plain.self_definition.is_none());
+        assert!(serde_json::to_value(&plain)
+            .unwrap()
+            .get("self_definition")
+            .is_none());
     }
 
     #[test]

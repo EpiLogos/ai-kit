@@ -497,6 +497,324 @@ fn a_declared_central_profile_supplies_the_agent_identity() {
     );
 }
 
+/// A listing record that carries the profile's `ref` lets the mint pin the
+/// accepted identity basis onto the binding: the ref plus the Central world it
+/// was read against, so later turns can compose the accepted self orientation.
+#[test]
+fn a_profile_ref_is_carried_onto_the_minted_binding() {
+    let world = MintWorld::new("project:mint-fixture");
+    let session = r("agent-session/mint-proof");
+    let runner = ProfileRunner {
+        profiles: json!([{"profile":{
+            "ref":"agent-profile:mint-warden",
+            "agent_ref":"agent/mint-fixture-warden",
+            "role":"product-guardian"}}]),
+    };
+    let output = mint_per_project_agency(
+        &world.home,
+        &world.project,
+        &session,
+        None,
+        &world.actuation_bin,
+        &runner,
+    )
+    .unwrap();
+    assert_eq!(
+        output["data"]["agent_identity_source"],
+        "central-agent-profile"
+    );
+    assert_eq!(
+        output["data"]["central_profile_ref"],
+        "agent-profile:mint-warden"
+    );
+    let binding: Value =
+        serde_json::from_slice(&fs::read(binding_path(&world.home, &session)).unwrap()).unwrap();
+    assert_eq!(binding["central_profile_ref"], "agent-profile:mint-warden");
+    let central_root = world
+        .project
+        .ancestors()
+        .find(|candidate| candidate.join("Control").is_dir())
+        .unwrap();
+    assert_eq!(
+        binding["central_identity_world"],
+        json!({
+            "central_root": central_root,
+            "project_cwd": world.project,
+            "scope": "project",
+            "project": "mint-fixture",
+        })
+    );
+
+    // The derived fallback (no declared profile) carries none of it: honest
+    // absence, and the binding stays byte-compatible with older releases.
+    let derived_world = MintWorld::new("project:mint-fixture");
+    let derived_session = r("agent-session/mint-proof");
+    mint_per_project_agency(
+        &derived_world.home,
+        &derived_world.project,
+        &derived_session,
+        None,
+        &derived_world.actuation_bin,
+        &SystemRunner::new(),
+    )
+    .unwrap();
+    let derived: Value = serde_json::from_slice(
+        &fs::read(binding_path(&derived_world.home, &derived_session)).unwrap(),
+    )
+    .unwrap();
+    assert!(derived.get("central_profile_ref").is_none());
+    assert!(derived.get("central_identity_world").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// The Agency identity composition seam: the turn-time half of the Agency
+// route. Central is a controlled ctrl STUB (a simulated service, labelled as
+// such) answering `agent-profile.review` from a fixed envelope; the pins,
+// digests and composition are the real shared code.
+// ---------------------------------------------------------------------------
+
+mod identity_composition {
+    use aikit_adapters::identity_composition::{AGENCY_DELIVERY_MODE, IDENTITY_COMPOSITOR_VERSION};
+    use aikit_adapters::runner::{CommandRunner, Output};
+    use aikit_cli::encounter_service::{compose_agency_identity, EncounterCentralIdentityWorld};
+
+    use super::*;
+
+    /// The accepted first-person sources, byte-exact; the digests are sha256
+    /// over exactly these bytes.
+    const SELF_BYTES: &[u8] =
+        b"# My standing\n\nI keep the World's registers honest, in the owner's voice.\n";
+    const LOGOS_BYTES: &[u8] = b"You act from within a relation.\n";
+    const SELF_DIGEST: &str =
+        "sha256:84fad6f901f4b61a3f1a1e4c1bb73758321f9432d47b4235d082832b84f1272d";
+    const LOGOS_DIGEST: &str =
+        "sha256:8a8977236b1bdf2d3ab150ea5c3838385997d2b3ce14d1d258df85906d50fac7";
+    const PROFILE_REF: &str = "agent-profile:mint-warden";
+    const AGENT_REF: &str = "agent/mint-fixture-warden";
+
+    /// A controlled review stub: exactly one action answered from a fixed
+    /// table, everything else panics so a test fails loudly instead of
+    /// silently succeeding.
+    struct ReviewRunner {
+        review: Value,
+    }
+
+    impl CommandRunner for ReviewRunner {
+        fn run(&self, argv: &[String]) -> aikit_core::Result<Output> {
+            assert!(
+                argv.iter().any(|arg| arg == "agent-profile.review"),
+                "the review stub must not be asked for anything else: {argv:?}"
+            );
+            Ok(Output::success(
+                json!({"ok":true,"status":"success","data":self.review}).to_string(),
+            ))
+        }
+    }
+
+    fn profile(agent_ref: &str, with_self: bool) -> Value {
+        let mut profile = json!({
+            "schema":"central.agent-profile/v1",
+            "ref":PROFILE_REF,
+            "revision":"r7",
+            "agent_ref":agent_ref,
+            "scope":"project",
+            "world_ref":"project:mint-fixture",
+            "ratified_world_refs":["project:mint-fixture"],
+            "purpose":"Guard the mint fixture",
+            "intent_provenance":{"schema":"central.agent-profile-provenance/v1","intent_expression":"Guard the mint fixture","origin_action":"agent-profile.express","authorship":"generated-proposal","recognition":"unrecognised"},
+        });
+        if with_self {
+            profile["self_definition"] = json!({
+                "source":{"reference":"central:source:project:mint-fixture:Control/agents/self/definition.md","content_digest":SELF_DIGEST},
+                "relational_logos":{"reference":"central:source:project:mint-fixture:Control/agents/self/logos.md","content_digest":LOGOS_DIGEST},
+            });
+        }
+        profile
+    }
+
+    /// A Central root whose Project member carries the accepted self sources
+    /// under the project root: the project-scope world root the pins resolve
+    /// against.
+    struct IdentityWorld {
+        _temp: tempfile::TempDir,
+        world: EncounterCentralIdentityWorld,
+        agent: ResourceRef,
+    }
+
+    fn fixture(write_sources: bool) -> IdentityWorld {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let project = root.join("Work").join("mint-fixture");
+        std::fs::create_dir_all(project.join("Control/agents/self")).unwrap();
+        std::fs::create_dir_all(project.join("ProjectCentral")).unwrap();
+        std::fs::write(
+            project.join("ProjectCentral/project.json"),
+            json!({"schema":"central.project/v1","project_id":"mint-fixture","human_source":"ProjectCentral/user"}).to_string(),
+        )
+        .unwrap();
+        if write_sources {
+            std::fs::write(
+                project.join("Control/agents/self/definition.md"),
+                SELF_BYTES,
+            )
+            .unwrap();
+            std::fs::write(project.join("Control/agents/self/logos.md"), LOGOS_BYTES).unwrap();
+        }
+        IdentityWorld {
+            _temp: temp,
+            world: EncounterCentralIdentityWorld {
+                central_root: root,
+                project_cwd: project,
+                scope: "project".to_owned(),
+                project: Some("mint-fixture".to_owned()),
+            },
+            agent: r(AGENT_REF),
+        }
+    }
+
+    fn review_runner(agent_ref: &str, with_self: bool, scope_ref: &str) -> ReviewRunner {
+        ReviewRunner {
+            review: json!({
+                "accepted": true,
+                "scope_ref": scope_ref,
+                "profile": profile(agent_ref, with_self),
+            }),
+        }
+    }
+
+    #[test]
+    fn the_seam_composes_the_accepted_orientation_with_its_receipt() {
+        let world = fixture(true);
+        let runner = review_runner(AGENT_REF, true, "project:mint-fixture");
+        let (text, receipt) =
+            compose_agency_identity(&runner, Some(&world.world), &world.agent, Some(PROFILE_REF))
+                .unwrap()
+                .expect("the accepted profile composes a self section");
+        assert!(
+            text.starts_with("# Operative orientation of the selected Agent"),
+            "{text}"
+        );
+        let self_text = String::from_utf8_lossy(SELF_BYTES).into_owned();
+        let logos_text = String::from_utf8_lossy(LOGOS_BYTES).into_owned();
+        assert!(
+            text.contains(&self_text),
+            "the exact accepted self source rides the section"
+        );
+        assert!(
+            text.contains(&logos_text),
+            "the exact accepted relational Logos rides the section"
+        );
+        assert!(text.contains(PROFILE_REF));
+        assert!(text.contains("revision r7"));
+        assert_eq!(receipt.agent_ref, AGENT_REF);
+        assert_eq!(receipt.profile_ref, PROFILE_REF);
+        assert_eq!(receipt.profile_revision, "r7");
+        assert_eq!(receipt.delivery_mode, AGENCY_DELIVERY_MODE);
+        assert_eq!(receipt.compositor_version, IDENTITY_COMPOSITOR_VERSION);
+        assert_eq!(
+            receipt.self_source_ref,
+            "central:source:project:mint-fixture:Control/agents/self/definition.md"
+        );
+        assert_eq!(receipt.self_source_digest, SELF_DIGEST);
+        assert_eq!(
+            receipt.relational_logos_ref,
+            "central:source:project:mint-fixture:Control/agents/self/logos.md"
+        );
+        assert_eq!(receipt.relational_logos_digest, LOGOS_DIGEST);
+    }
+
+    #[test]
+    fn a_changed_or_missing_source_refuses_the_turn_named() {
+        let changed = fixture(true);
+        std::fs::write(
+            changed
+                .world
+                .project_cwd
+                .join("Control/agents/self/definition.md"),
+            b"changed bytes\n",
+        )
+        .unwrap();
+        let error = compose_agency_identity(
+            &review_runner(AGENT_REF, true, "project:mint-fixture"),
+            Some(&changed.world),
+            &changed.agent,
+            Some(PROFILE_REF),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "encounter.self_source_digest_mismatch");
+
+        let missing = fixture(false);
+        let error = compose_agency_identity(
+            &review_runner(AGENT_REF, true, "project:mint-fixture"),
+            Some(&missing.world),
+            &missing.agent,
+            Some(PROFILE_REF),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "encounter.self_source_missing");
+    }
+
+    #[test]
+    fn a_profile_that_drifts_off_this_agent_or_its_self_refuses() {
+        // The accepted definition under the ref no longer carries a self.
+        let no_self = fixture(true);
+        let error = compose_agency_identity(
+            &review_runner(AGENT_REF, false, "project:mint-fixture"),
+            Some(&no_self.world),
+            &no_self.agent,
+            Some(PROFILE_REF),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "encounter.self_source_changed");
+
+        // The accepted definition now names another Agent entirely.
+        let other = fixture(true);
+        let error = compose_agency_identity(
+            &review_runner("agent/someone-else", true, "project:mint-fixture"),
+            Some(&other.world),
+            &other.agent,
+            Some(PROFILE_REF),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "encounter.self_source_changed");
+
+        // The acceptance belongs to another World scope.
+        let other_scope = fixture(true);
+        let error = compose_agency_identity(
+            &review_runner(AGENT_REF, true, "project:elsewhere"),
+            Some(&other_scope.world),
+            &other_scope.agent,
+            Some(PROFILE_REF),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "encounter.scope_changed");
+    }
+
+    #[test]
+    fn a_derived_identity_and_a_refless_binding_are_honest_absence() {
+        let world = fixture(true);
+        // A derived or explicit identity pins no Central profile: no self
+        // section, and no ctrl call at all — the stub panics if asked.
+        let composed = compose_agency_identity(
+            &review_runner(AGENT_REF, true, "project:mint-fixture"),
+            Some(&world.world),
+            &world.agent,
+            None,
+        )
+        .unwrap();
+        assert!(composed.is_none());
+        // A ref without its pinned world is malformed, never composable.
+        let error = compose_agency_identity(
+            &review_runner(AGENT_REF, true, "project:mint-fixture"),
+            None,
+            &world.agent,
+            Some(PROFILE_REF),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "encounter.self_source_changed");
+    }
+}
+
 #[test]
 fn an_ambiguous_project_scope_is_refused_rather_than_guessed() {
     let world = MintWorld::new("project:mint-fixture");

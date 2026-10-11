@@ -219,6 +219,8 @@ impl QueueWorld {
                 projection: None,
                 activation: None,
             }),
+            central_profile_ref: None,
+            central_identity_world: None,
         };
         EncounterService::configure_agency(&self.home, &session, &binding, None).unwrap();
         EncounterService::configure(
