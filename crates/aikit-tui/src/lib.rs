@@ -27,6 +27,7 @@ pub mod live_field;
 pub mod model_roster_surface;
 pub mod navigation;
 pub mod navigator_groups;
+pub mod now_field_view;
 pub mod project_workspace;
 pub mod project_workspace_render;
 pub mod project_world_api;
