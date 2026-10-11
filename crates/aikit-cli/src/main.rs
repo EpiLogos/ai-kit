@@ -1670,6 +1670,15 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                                 cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
                             },
                         )),
+                        // `/upgrade` behind a connector conversation: the
+                        // plan on request, and on `apply` a worker that
+                        // outlives this process and reports back into that
+                        // conversation.
+                        upgrade_launcher: Some(std::sync::Arc::new(
+                            aikit_cli::gateway_upgrade_system::ConversationUpgradeLauncher {
+                                home: home.clone(),
+                            },
+                        )),
                     }),
                     coexistence: coexistence.gate,
                     stop_signal,
