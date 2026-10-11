@@ -2899,8 +2899,14 @@ fn forward_pass_via(
                 }
             }
         };
-        let (record, report) =
-            forward_one(gateway, record, &entry, &local_gateway_ref, routing, carrier)?;
+        let (record, report) = forward_one(
+            gateway,
+            record,
+            &entry,
+            &local_gateway_ref,
+            routing,
+            carrier,
+        )?;
         if report["state"] == "forwarded" {
             forwarded.push(json!({
                 "communique_ref": record.communique_ref,
@@ -4248,13 +4254,6 @@ mod exact_instance_binding_tests {
         let placement_unknown =
             ledger_placement(&StubOwners, "position:steward", Some("workcell:a"));
         assert!(matches!(placement_unknown, LedgerPlacement::Unknown));
-    }
-
-    fn test_home() -> (tempfile::TempDir, AikitHome) {
-        let dir = tempfile::tempdir().unwrap();
-        let home = AikitHome::at(dir.path());
-        std::fs::create_dir_all(home.state()).unwrap();
-        (dir, home)
     }
 
     #[test]
