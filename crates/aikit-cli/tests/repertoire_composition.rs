@@ -227,16 +227,30 @@ fn actual_terminal_compose_entries_read_registered_sets_and_preview_without_effe
         );
         assert!(!world.project.join(".agents/skills").exists());
         assert!(!world.project.join(".pi/skills").exists());
-        // Re-entering observes a real new registration, while keeping the
-        // operator's existing selection; the old field cannot be cached forever.
+        // Leaving Compose and returning observes a real new registration,
+        // while keeping the operator's existing selection; the field is not
+        // cached forever across a section cycle (same law as the history Esc
+        // path in the selected-subject composition proof).
         aikit_store::skillsets::create(&world.home, "newly-available", &[id("plain")], &[])
             .unwrap();
         surface
-            .handle(&mut service, key(KeyCode::Left, KeyModifiers::ALT))
+            .handle(&mut service, key(KeyCode::Char(':')))
             .unwrap();
-        surface
-            .handle(&mut service, key(KeyCode::Right, KeyModifiers::ALT))
-            .unwrap();
+        for character in "history".chars() {
+            surface
+                .handle(&mut service, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        surface.handle(&mut service, key(KeyCode::Enter)).unwrap();
+        assert_eq!(
+            surface.semantic().workspace_section,
+            WorkspaceSection::History
+        );
+        surface.handle(&mut service, key(KeyCode::Esc)).unwrap();
+        assert_eq!(
+            surface.semantic().workspace_section,
+            WorkspaceSection::Compose
+        );
         assert!(surface
             .semantic()
             .compose_skill_set_field
