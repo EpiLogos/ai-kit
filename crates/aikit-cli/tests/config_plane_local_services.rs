@@ -217,7 +217,7 @@ fn the_decision_election_is_contributed_validated_applied_read_back_and_used_by_
     let scratch = TempDir::new().unwrap();
     let kev_cwd = scratch.path().join("kev-run/kev");
     fs::create_dir_all(&kev_cwd).unwrap();
-    let _children = Children(vec![Command::new("python3")
+    let mut children = Children(vec![Command::new("python3")
         .arg(fixtures.join("fake_kev.py"))
         .args([
             "-m",
@@ -253,7 +253,17 @@ fn the_decision_election_is_contributed_validated_applied_read_back_and_used_by_
         reading["axes"]["effective"]["value"]["reading"]["mode"],
         "endpoint"
     );
-    assert_eq!(reading["axes"]["active"]["value"]["reachable"], true);
+    let kev_state = match children.0[0].try_wait() {
+        Ok(None) => "running".to_string(),
+        Ok(Some(status)) => format!("exited {status}"),
+        Err(error) => format!("wait error {error}"),
+    };
+    assert_eq!(
+        reading["axes"]["active"]["value"]["reachable"],
+        true,
+        "active axis: {} (fake kev: {kev_state})",
+        reading["axes"]["active"]["value"]
+    );
     assert_eq!(
         reading["axes"]["active"]["value"]["models"],
         json!(["kev-latest"])
