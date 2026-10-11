@@ -22,7 +22,11 @@ use aikit_store::now_context::{
 use aikit_store::{AikitHome, ContextLock, LockOptions, SessionSpaceApplicationStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeSet, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    collections::BTreeSet,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[path = "encounter_agency_mint.rs"]
 pub(crate) mod mint;
@@ -212,14 +216,12 @@ pub fn compose_agency_identity<R: CommandRunner>(
         "control:root".to_owned()
     } else {
         let manifest: Value = serde_json::from_slice(
-            &std::fs::read(world.project_cwd.join("ProjectCentral/project.json")).map_err(
-                |e| {
-                    AikitError::new(
-                        "encounter.review_invalid",
-                        format!("the Project manifest is unreadable: {e}"),
-                    )
-                },
-            )?,
+            &std::fs::read(world.project_cwd.join("ProjectCentral/project.json")).map_err(|e| {
+                AikitError::new(
+                    "encounter.review_invalid",
+                    format!("the Project manifest is unreadable: {e}"),
+                )
+            })?,
         )
         .map_err(|e| {
             AikitError::new(
@@ -254,11 +256,19 @@ pub fn compose_agency_identity<R: CommandRunner>(
             "The accepted Agent definition no longer carries a self definition; reread and explicitly accept the Agent definition again",
         ));
     };
-    let root = crate::direct_agent_session::world_root(&world.central_root, &world.project_cwd, &world.scope);
+    let root = crate::direct_agent_session::world_root(
+        &world.central_root,
+        &world.project_cwd,
+        &world.scope,
+    );
     let resolved = resolve_self_sources(&root, self_definition)
         .map_err(|error| error.into_aikit(IdentitySourceRoute::Agency))?;
-    let composed =
-        compose_operative_orientation(agent_ref.as_str(), profile_ref, &profile.revision, &resolved);
+    let composed = compose_operative_orientation(
+        agent_ref.as_str(),
+        profile_ref,
+        &profile.revision,
+        &resolved,
+    );
     let receipt = IdentityCompositionReceipt::new(
         agent_ref.as_str(),
         profile_ref,
@@ -595,7 +605,11 @@ impl EncounterService {
     /// Material is actually delivered as this selected Agent's scoped context;
     /// it is not merely named in an orientation receipt. Source text remains
     /// attributed material and cannot configure tools, consent or other Agents.
-    pub(super) fn prepare_agency_text(&self, session: &ResourceRef, text: &str) -> Result<PreparedAgencyText> {
+    pub(super) fn prepare_agency_text(
+        &self,
+        session: &ResourceRef,
+        text: &str,
+    ) -> Result<PreparedAgencyText> {
         let task_context = task::prompt(self, session)?;
         let Some((binding, admitted)) = self.check_agency(session)? else {
             return Ok(PreparedAgencyText {

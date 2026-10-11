@@ -300,10 +300,7 @@ fn resolve_agent_identity(
     }
     let derived = |world: &ProjectRef| -> Result<ResolvedAgentIdentity> {
         Ok(ResolvedAgentIdentity {
-            agent_ref: ResourceRef::parse(format!(
-                "agent/{}-chat",
-                project_slug(world.as_str())
-            ))?,
+            agent_ref: ResourceRef::parse(format!("agent/{}-chat", project_slug(world.as_str())))?,
             source: "derived-project-agent",
             central: None,
         })

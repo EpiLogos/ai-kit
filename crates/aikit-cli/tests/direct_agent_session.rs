@@ -429,9 +429,7 @@ mod self_source_delivery {
                 "agent-profile.review" => &self.review,
                 "agent-profile.list" => &self.list,
                 "central.world.effective-sources" => &self.world,
-                other => panic!(
-                    "the controlled ctrl stub must not be asked for {other}: {argv:?}"
-                ),
+                other => panic!("the controlled ctrl stub must not be asked for {other}: {argv:?}"),
             };
             Ok(Output::success(
                 json!({"ok":true,"status":"success","data":data}).to_string(),
@@ -477,8 +475,7 @@ mod self_source_delivery {
                 std::fs::create_dir_all(root.join(directory)).unwrap();
             }
             if write_sources {
-                std::fs::write(root.join("Control/agents/self/definition.md"), SELF_BYTES)
-                    .unwrap();
+                std::fs::write(root.join("Control/agents/self/definition.md"), SELF_BYTES).unwrap();
                 std::fs::write(root.join("Control/agents/self/logos.md"), LOGOS_BYTES).unwrap();
             }
             let profile = profile(with_self);
@@ -515,7 +512,9 @@ mod self_source_delivery {
     }
 
     fn with_central_root<T>(root: &Path, work: impl FnOnce() -> T) -> T {
-        let _guard = CENTRAL_ROOT_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = CENTRAL_ROOT_GUARD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         std::env::set_var("CENTRAL_ROOT", root);
         let result = work();
         std::env::remove_var("CENTRAL_ROOT");
@@ -533,11 +532,10 @@ mod self_source_delivery {
                 "CENTRAL_ROOT".to_string(),
                 ground.root.display().to_string(),
             );
-            let service =
-                Service::open(ground.home.clone(), &ground.root, move |key| {
-                    env.get(key).cloned()
-                })
-                .unwrap();
+            let service = Service::open(ground.home.clone(), &ground.root, move |key| {
+                env.get(key).cloned()
+            })
+            .unwrap();
             prepare_with(&service, request(), &ground.stub)
         })
     }
@@ -566,16 +564,11 @@ mod self_source_delivery {
         let evidence = evidence.expect("delivery evidence");
 
         // The exact composed header, recomputed from the same accepted pins.
-        let profile =
-            CentralAgentProfileProjection::parse(&ground.review["profile"]).unwrap();
+        let profile = CentralAgentProfileProjection::parse(&ground.review["profile"]).unwrap();
         let definition = profile.self_definition.as_ref().unwrap();
         let resolved = resolve_self_sources(&ground.root, definition).unwrap();
-        let expected_header = compose_operative_orientation(
-            AGENT_REF,
-            PROFILE_REF,
-            "r1",
-            &resolved,
-        );
+        let expected_header =
+            compose_operative_orientation(AGENT_REF, PROFILE_REF, "r1", &resolved);
         assert!(payload.starts_with(&expected_header), "{payload}");
 
         // The EXACT accepted source bytes are embedded verbatim, self before
@@ -620,8 +613,7 @@ mod self_source_delivery {
         assert_eq!(find(&ground.home, REQUEST_ID).unwrap(), Value::Null);
         let bindings = ground.home.state().join("encounter-agents");
         assert!(
-            !bindings.exists()
-                || std::fs::read_dir(&bindings).unwrap().next().is_none(),
+            !bindings.exists() || std::fs::read_dir(&bindings).unwrap().next().is_none(),
             "no binding may be published over unresolved identity"
         );
     }

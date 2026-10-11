@@ -38,12 +38,12 @@ pub use agency::mint::{
     mint_from_cli, mint_per_project_agency, mint_request_document, mint_task_from_cli,
     REQUIRED_MINTED_ACTIONS,
 };
-pub use agency::{compose_agency_identity, EncounterCentralIdentityWorld};
 pub use agency::model::EncounterModelOpen;
 pub(crate) use agency::model::PreparedModel;
 pub use agency::speech::{
     configure as configure_local_speech, disclose as disclose_local_speech, LocalSpeechConfig,
 };
+pub use agency::{compose_agency_identity, EncounterCentralIdentityWorld};
 pub use agency::{
     conversation::{ConversationEntry, ConversationRecipientSpec, ConversationSendRequest},
     EncounterA2aFraming, EncounterAddressedTurn, EncounterAgencyBinding, EncounterContextPacket,

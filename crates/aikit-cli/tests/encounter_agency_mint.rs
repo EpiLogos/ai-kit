@@ -574,9 +574,7 @@ fn a_profile_ref_is_carried_onto_the_minted_binding() {
 // ---------------------------------------------------------------------------
 
 mod identity_composition {
-    use aikit_adapters::identity_composition::{
-        AGENCY_DELIVERY_MODE, IDENTITY_COMPOSITOR_VERSION,
-    };
+    use aikit_adapters::identity_composition::{AGENCY_DELIVERY_MODE, IDENTITY_COMPOSITOR_VERSION};
     use aikit_adapters::runner::{CommandRunner, Output};
     use aikit_cli::encounter_service::{compose_agency_identity, EncounterCentralIdentityWorld};
 
@@ -655,10 +653,12 @@ mod identity_composition {
         )
         .unwrap();
         if write_sources {
-            std::fs::write(project.join("Control/agents/self/definition.md"), SELF_BYTES)
-                .unwrap();
-            std::fs::write(project.join("Control/agents/self/logos.md"), LOGOS_BYTES)
-                .unwrap();
+            std::fs::write(
+                project.join("Control/agents/self/definition.md"),
+                SELF_BYTES,
+            )
+            .unwrap();
+            std::fs::write(project.join("Control/agents/self/logos.md"), LOGOS_BYTES).unwrap();
         }
         IdentityWorld {
             _temp: temp,
@@ -686,15 +686,14 @@ mod identity_composition {
     fn the_seam_composes_the_accepted_orientation_with_its_receipt() {
         let world = fixture(true);
         let runner = review_runner(AGENT_REF, true, "project:mint-fixture");
-        let (text, receipt) = compose_agency_identity(
-            &runner,
-            Some(&world.world),
-            &world.agent,
-            Some(PROFILE_REF),
-        )
-        .unwrap()
-        .expect("the accepted profile composes a self section");
-        assert!(text.starts_with("# Operative orientation of the selected Agent"), "{text}");
+        let (text, receipt) =
+            compose_agency_identity(&runner, Some(&world.world), &world.agent, Some(PROFILE_REF))
+                .unwrap()
+                .expect("the accepted profile composes a self section");
+        assert!(
+            text.starts_with("# Operative orientation of the selected Agent"),
+            "{text}"
+        );
         let self_text = String::from_utf8_lossy(SELF_BYTES).into_owned();
         let logos_text = String::from_utf8_lossy(LOGOS_BYTES).into_owned();
         assert!(
