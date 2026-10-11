@@ -1202,12 +1202,16 @@ fn start_locked(
     if let Some(status) = exited {
         state.process = None;
         save_state(layout, state)?;
+        let tail = log_tail(&log_path, 20);
+        if tail.contains("Address already in use") || tail.contains("Errno 48") {
+            return Err(fail(
+                "decision_service.port_occupied",
+                format!("127.0.0.1:{port} is already bound by another process; log tail:\n{tail}"),
+            ));
+        }
         return Err(fail(
             "decision_service.exited",
-            format!(
-                "the service process exited during startup ({status}); log tail:\n{}",
-                log_tail(&log_path, 20)
-            ),
+            format!("the service process exited during startup ({status}); log tail:\n{tail}"),
         ));
     }
     if !answered {
