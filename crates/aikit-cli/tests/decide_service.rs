@@ -439,7 +439,15 @@ fn the_kev_lifecycle_runs_without_workcell_and_never_adopts_a_service_it_did_not
         "{refused}"
     );
     let status_b = scene.ok(&["status", "--service-dir", &b]);
-    assert_eq!(status_b["state"], "foreign-listener");
+    let foreign_state = match foreign.try_wait() {
+        Ok(None) => "running".to_string(),
+        Ok(Some(status)) => format!("exited {status}"),
+        Err(error) => format!("wait error {error}"),
+    };
+    assert_eq!(
+        status_b["state"], "foreign-listener",
+        "status: {status_b} (foreign listener: {foreign_state})"
+    );
     assert_eq!(
         scene.ok(&["stop", "--service-dir", &b])["outcome"],
         "not-running"
