@@ -259,8 +259,7 @@ fn the_decision_election_is_contributed_validated_applied_read_back_and_used_by_
         Err(error) => format!("wait error {error}"),
     };
     assert_eq!(
-        reading["axes"]["active"]["value"]["reachable"],
-        true,
+        reading["axes"]["active"]["value"]["reachable"], true,
         "active axis: {} (fake kev: {kev_state})",
         reading["axes"]["active"]["value"]
     );
