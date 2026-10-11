@@ -4118,6 +4118,8 @@ mod exact_instance_binding_tests {
     fn recipient_position() -> Recipient {
         Recipient {
             position_ref: "position:steward".into(),
+            identity_kind: RecipientIdentityKind::Position,
+            agent_ref: None,
             handle: None,
             label: None,
             source: "test".into(),
