@@ -137,9 +137,24 @@ systemd markers are read as a fallback.
 | drain, shutdown, snapshot, restore | no | yes |
 | anything added later | **no** until named | yes |
 
+| Command class | `peer` (ordinary token) | `owner` (owner token or Unix socket) |
+|---|---|---|
+| protocol, status, discover, ecology | yes | yes |
+| send, inbox, ack, conversation, read, escalate, counts | yes | yes |
+| relay: ingest, forward queue, standing, occupancy read/list | yes | yes |
+| bind, unbind, ingest (conversation), replay, subscribe, conversation control | no | yes |
+| drain, shutdown, snapshot, restore | no | yes |
+| anything added later | **no** until named | yes |
+
 One shared token used to grant the whole second column to every machine that
 could relay. A peer that answers `agency_gateway.carrier_scope_denied` is told
 which token to use.
+
+The administrator path at a distance (`#481-7`): `--at <workcell> --owner
+<token-location>` presents the OWNER token for that one invocation — consent
+is the flag, the location is resolved through the same owner-only law as any
+credential, and the answer warns that it ran with owner scope. Without the
+flag, `--at` keeps presenting the declared peer token.
 
 ## Feature negotiation
 
