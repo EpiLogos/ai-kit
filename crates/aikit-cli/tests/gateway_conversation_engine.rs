@@ -3835,15 +3835,11 @@ fn a_real_in_flight_turn_is_drained_by_the_stop_signal_journalled_and_never_repl
     let events_after = identity_after["streams"][0]["events"]
         .as_array()
         .unwrap()
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
+        .to_vec();
     let events_before = identity_before["streams"][0]["events"]
         .as_array()
         .unwrap()
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
+        .to_vec();
     assert_eq!(
         &events_after[..events_before.len()],
         &events_before[..],
