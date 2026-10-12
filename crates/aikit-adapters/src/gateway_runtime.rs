@@ -52,7 +52,11 @@ pub const GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE: &str = "communique-exact-in
 
 /// Every protocol feature this gateway advertises in its `protocol` answer.
 pub const GATEWAY_FEATURE_NATIVE_OWNER: &str = "native-owner/v1";
-pub const GATEWAY_PROTOCOL_FEATURES: [&str; 3] = [
+/// The protocol feature advertising sender attestation support: this gateway
+/// signs the sender assertions it relays and verifies those carried to it.
+pub const GATEWAY_FEATURE_SENDER_ATTESTATION: &str = "sender-attestation";
+
+pub const GATEWAY_PROTOCOL_FEATURES: [&str; 4] = [
     GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE,
     GATEWAY_FEATURE_NATIVE_OWNER,
     // Relay advertisement rides the service: a peer that sees it may route an
@@ -60,6 +64,7 @@ pub const GATEWAY_PROTOCOL_FEATURES: [&str; 3] = [
     // Workcell's encounter owner (or refuses by name when none stands behind
     // this process).
     crate::gateway_posture::GATEWAY_FEATURE_ENCOUNTER_RELAY,
+    GATEWAY_FEATURE_SENDER_ATTESTATION,
 ];
 
 /// A serving gateway's answer to "who occupies this Position on your
@@ -1560,6 +1565,11 @@ pub enum GatewayCommand {
     IngestCommunique {
         communique: Box<Communique>,
         relayed_by: String,
+        /// The relaying gateway's signed sender assertion (#481-8). Present
+        /// when the sender speaks `sender-attestation`; the gateway verifies
+        /// it (freshness, body binding, signature) and refuses a bad one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attestation: Option<crate::gateway_attestation::SenderAttestation>,
     },
     /// Undelivered Communiques addressed to one Position.
     CommuniqueInbox {
@@ -1704,6 +1714,11 @@ pub enum GatewayResponse {
         /// predate feature advertisement: they support none of them.
         #[serde(default)]
         features: Vec<String>,
+        /// This gateway's Ed25519 public key, hex, when it signs the sender
+        /// assertions it relays (#481-8). A receiver verifies carried
+        /// attestations against it; an operator may pin it per remote.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_attestation_key: Option<String>,
     },
     Discovery {
         discovery: GatewayDiscovery,
@@ -1801,6 +1816,7 @@ pub fn execute_gateway_command(
                 .iter()
                 .map(|feature| (*feature).to_owned())
                 .collect(),
+            sender_attestation_key: None,
         }),
         GatewayCommand::Discover => Ok(GatewayResponse::Discovery {
             discovery: gateway.discovery(),
@@ -1898,9 +1914,20 @@ pub fn execute_gateway_command(
         GatewayCommand::IngestCommunique {
             communique,
             relayed_by,
+            attestation,
         } => {
             let at = communique_now_unix_ms();
-            let (communique, replayed) = gateway.communiques.ingest(*communique, &relayed_by, at)?;
+            let mut communique = *communique;
+            if let Some(proof) = &attestation {
+                crate::gateway_attestation::verify(&communique, proof, at, None)?;
+                let basis = format!(
+                    "{}; {}",
+                    communique.attribution_basis,
+                    crate::gateway_attestation::attested_basis(Some(proof))
+                );
+                communique.attribution_basis = basis;
+            }
+            let (communique, replayed) = gateway.communiques.ingest(communique, &relayed_by, at)?;
             Ok(GatewayResponse::CommuniqueAccepted {
                 communique,
                 replayed,
