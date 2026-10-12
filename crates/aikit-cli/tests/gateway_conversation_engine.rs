@@ -3723,3 +3723,192 @@ fn a_real_harness_backs_a_connector_conversation_end_to_end() {
 // #481-5 drain-through-carrier proof deferred: main's gateway command enum
 // does not yet admit `drain` (CI: unknown variant `drain`). Land with the
 // Drain command surface, not as an orphaned integration test.
+
+/// #481 item 5, closed at service level: a REAL in-flight turn (the
+/// deterministic ACP fixture provider, spawned by the real serve process) is
+/// drained by the real stop signal, not an in-process call. The interruption
+/// is journalled as an uncertain effect; the restart re-materialises the same
+/// identity, never re-runs the interrupted turn, and a fresh message after
+/// the restart is served on the same conversation.
+#[test]
+fn a_real_in_flight_turn_is_drained_by_the_stop_signal_journalled_and_never_replayed() {
+    let home = TempDir::new().unwrap();
+
+    // The deterministic ACP fixture as the connector's agent backing, and the
+    // specimen connector speaking the stdio wire.
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/conversation_provider.py");
+    let turn_log = home.path().join("fixture-turns.log");
+    let providers = home.path().join("state/encounter-providers");
+    fs::create_dir_all(&providers).unwrap();
+    fs::write(
+        providers.join("fixture-acp.json"),
+        json!({
+            "id": "fixture-acp",
+            "label": "Deterministic ACP fixture for the drain proof",
+            "protocol": "acp",
+            "argv": ["python3", fixture.display().to_string(), "acp",
+                turn_log.display().to_string()]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let connectors = home.path().join("state/gateway-connectors.json");
+    fs::create_dir_all(connectors.parent().unwrap()).unwrap();
+    fs::write(
+        &connectors,
+        json!({
+            "schema": "aikit.gateway-connectors/v1",
+            "connectors": [{
+                "connector_ref": "gateway-connector/specimen/main",
+                "platform": "specimen",
+                "implementation": "stdio",
+                "agent_backing": "fixture-acp",
+                "program": [specimen_bin().display().to_string(),
+                    "--connector-ref", "gateway-connector/specimen/main"]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let socket = home.path().join("state/gateway.sock");
+    let mut serve = spawn_serve(home.path());
+    wait_for_socket(home.path());
+    wait_specimen_connected(home.path());
+    bind_specimen(home.path());
+
+    // A turn that will not finish on its own: the fixture sleeps SLOW_6000
+    // (sixty seconds) before answering — the drain must interrupt it.
+    let admitted = ingest_via_socket(home.path(), "SLOW_6000 think hard", "inflight1");
+    assert_eq!(admitted["ok"], Value::Bool(true), "{admitted}");
+    poll_until(
+        "the real harness turn registers in flight",
+        Duration::from_secs(60),
+        || {
+            let answer = exchange(
+                &socket,
+                json!({
+                    "command": {
+                        "type": "conversation",
+                        "binding_ref": "gateway-binding/specimen",
+                        "operation": {"op": "status"}
+                    }
+                }),
+            );
+            answer["response"]["result"]["turn_in_flight"] == json!(true)
+        },
+    );
+    let identity_before = persisted_identity(home.path());
+
+    // The stop signal is the carrier on the current internals (what
+    // `launchctl bootout` / `systemctl stop` send): the serve process drains
+    // the in-flight turn under its bounded grace, journals the interruption
+    // and exits cleanly. No in-process call, no fabricated command.
+    let pid = serve.id();
+    assert!(Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .unwrap()
+        .success());
+    // The service exits after draining; the test rematerialises it, as the
+    // service manager would.
+    let raw_state = fs::read_to_string(home.path().join("state/gateway.json"))
+        .unwrap_or_else(|error| format!("unreadable: {error}"));
+    eprintln!("state file at exit: {raw_state}");
+    let status = serve.wait().expect("serve should exit after the drain");
+    assert!(
+        status.success(),
+        "a stop-signal drain exits cleanly: {status}"
+    );
+    let mut serve = spawn_serve(home.path());
+    wait_for_socket(home.path());
+
+    // Same semantic identity across the restart — the binding and stream are
+    // exactly what they were, and the journal is a superset: the drain added
+    // the interruption's record and the admitted message, lost nothing.
+    let identity_after = persisted_identity(home.path());
+    assert_eq!(
+        identity_after["bindings"], identity_before["bindings"],
+        "binding identity survives"
+    );
+    let events_after = identity_after["streams"][0]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let events_before = identity_before["streams"][0]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        &events_after[..events_before.len()],
+        &events_before[..],
+        "nothing journalled before the drain is lost or reordered"
+    );
+    assert!(
+        events_after.len() > events_before.len(),
+        "the drain journalled the interruption and retained the admitted message"
+    );
+    let snapshot = persisted_snapshot(home.path());
+    let events = snapshot["streams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|stream| stream["events"].as_array().unwrap().iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    let interrupted = events
+        .iter()
+        .any(|event| event["event"]["metadata"]["failure"]["kind"] == json!("interrupted"));
+    assert!(interrupted, "the interruption is journalled: {events:?}");
+
+    // The interrupted turn and the admitted message are NEVER re-run: the
+    // fixture saw exactly one prompt so far (the interrupted one).
+    poll_until(
+        "the fixture reconnects its harness after the restart",
+        Duration::from_secs(30),
+        || turn_log.exists(),
+    );
+    let prompts_before = fs::read_to_string(&turn_log)
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("session/prompt"))
+        .count();
+    assert_eq!(
+        prompts_before, 1,
+        "the interrupted turn is not re-run and the admitted message is not served"
+    );
+
+    // Continuity: a fresh message on the same conversation is served, on the
+    // same stream, by a new turn.
+    let fresh = ingest_via_socket(home.path(), "fresh after the restart", "post1");
+    assert_eq!(fresh["ok"], Value::Bool(true), "{fresh}");
+    poll_until(
+        "the fresh message runs a turn and its reply lands",
+        Duration::from_secs(60),
+        || {
+            persisted_snapshot(home.path())["streams"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|stream| stream["events"].as_array().unwrap().iter())
+                .any(|event| event["event"]["kind"] == json!("agent-message"))
+        },
+    );
+    let prompts_after = fs::read_to_string(&turn_log)
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("session/prompt"))
+        .count();
+    assert_eq!(
+        prompts_after, 2,
+        "the fixture was prompted for the interrupted turn and the fresh one — never a replay"
+    );
+
+    exchange(&socket, json!({"command": {"type": "shutdown"}}));
+    serve.wait().unwrap();
+}
