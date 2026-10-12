@@ -730,6 +730,19 @@ impl TuiApplicationService for ApplicationService<'_> {
         })
     }
 
+    fn preview_repertoire(
+        &self,
+        request: aikit_core::repertoire::RepertoireRequest,
+    ) -> Result<aikit_core::repertoire::RepertoirePreview> {
+        self.backend.preview_repertoire(request)
+    }
+    fn apply_repertoire(
+        &mut self,
+        preview: aikit_core::repertoire::RepertoirePreview,
+    ) -> Result<aikit_core::repertoire::RepertoireApplication> {
+        self.backend.apply_repertoire(preview)
+    }
+
     fn apply_composition(&mut self, preview: &CompositionPreview) -> Result<ApplyReceipt> {
         let toggles = self.package_toggles(&preview.staged)?;
         let current = self.backend.view().clone();

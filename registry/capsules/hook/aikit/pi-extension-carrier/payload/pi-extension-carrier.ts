@@ -148,10 +148,12 @@ export class NativePeerDelivery {
     const session = sessionIdOf(this.context);
     try {
       if (!session) return;
-      const entries = this.context.sessionManager?.getBranch?.() || this.context.sessionManager?.getEntries?.() || [];
       const textOf = (content: any) => typeof content === "string" ? content : Array.isArray(content) ? content.filter((item: any)=>item.type==="text").map((item: any)=>item.text).join("\n") : "";
       const offer = await this.call();
       if (epoch !== this.epoch || this.stopped || session !== sessionIdOf(this.context)) return;
+      // The actual native branch may have retained a completed peer turn
+      // during the owner read. Reconcile that fresh operation before sending.
+      const entries = this.context.sessionManager?.getBranch?.() || this.context.sessionManager?.getEntries?.() || [];
       const delivery = offer?.delivery;
       if (!delivery?.text || !Array.isArray(delivery.communique_refs) || delivery.communique_refs.length === 0) return;
       // Reconcile only retained carrying that overlaps this pending offer.

@@ -96,6 +96,11 @@ fn draw_shell(
     let layout = Layout::for_width(inner.width);
     let panes = layout.split(inner);
     frame.render_widget(query_line(state, &theme, glyphs), panes.query);
+    if let Some(report) = native_repertoire_report(state) {
+        draw_native_repertoire_report(frame, state, &theme, report);
+        frame.render_widget(footer(state, &theme, glyphs), panes.footer);
+        return;
+    }
 
     // `ApplicationSurfaceController::draw` (`application_surface.rs`) draws
     // the Relations panel directly on top of `panes.list` — at this exact
@@ -404,6 +409,141 @@ fn resource_line<'a>(
     Line::from(spans)
 }
 
+/// The report is the existing native operation's human result, split at its
+/// real line boundaries. It contains metadata, never projected payload bodies.
+fn native_repertoire_report(state: &TuiState) -> Option<(&'static str, String, &'static str)> {
+    match state.overlay {
+        Some(Overlay::CompositionPreview) => state.repertoire_preview.as_ref().map(|preview| {
+            (
+                "Composition preview",
+                preview.render(),
+                "Ctrl+S confirms; Esc returns",
+            )
+        }),
+        Some(Overlay::ConfirmApply) => state.repertoire_preview.as_ref().map(|preview| {
+            (
+                "Confirm composition",
+                preview.render(),
+                "Ctrl+S applies; Esc returns",
+            )
+        }),
+        Some(Overlay::RepertoireApplicationReport) => {
+            state.repertoire_application.as_ref().map(|application| {
+                (
+                    "Last observed repertoire application",
+                    application.render(),
+                    "Esc returns; Ctrl+O reopens",
+                )
+            })
+        }
+        _ => None,
+    }
+}
+
+fn repertoire_report_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    let inner = ratatui::layout::Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    let panes = Layout::for_width(inner.width).split(inner);
+    ratatui::layout::Rect {
+        x: inner.x,
+        width: inner.width,
+        ..panes.list
+    }
+}
+
+fn repertoire_report_body(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    ratatui::layout::Rect {
+        y: area.y.saturating_add(2.min(area.height)),
+        height: area.height.saturating_sub(3),
+        ..area
+    }
+}
+
+fn repertoire_report_paragraph(summary: &str) -> Paragraph<'static> {
+    Paragraph::new(
+        summary
+            .lines()
+            .map(|line| Line::raw(line.to_owned()))
+            .collect::<Vec<_>>(),
+    )
+    .wrap(Wrap { trim: false })
+}
+
+/// Keyboard and rendering share the actual Paragraph wrap calculation and the
+/// same body Rect, including narrow terminals and resize. No effect is requested.
+pub(crate) fn repertoire_report_scroll_bounds(state: &TuiState) -> Option<(u16, u16)> {
+    let (_, summary, _) = native_repertoire_report(state)?;
+    let body = repertoire_report_body(repertoire_report_area(ratatui::layout::Rect::new(
+        0,
+        0,
+        state.area.0,
+        state.area.1,
+    )));
+    let lines = repertoire_report_paragraph(&summary).line_count(body.width);
+    let maximum = lines
+        .saturating_sub(usize::from(body.height))
+        .min(usize::from(u16::MAX)) as u16;
+    Some((maximum, body.height.max(1)))
+}
+
+fn draw_native_repertoire_report(
+    frame: &mut Frame,
+    state: &TuiState,
+    theme: &Theme,
+    report: (&str, String, &str),
+) {
+    let area = repertoire_report_area(frame.area());
+    let body = repertoire_report_body(area);
+    let paragraph = repertoire_report_paragraph(&report.1);
+    let lines = paragraph.line_count(body.width);
+    let maximum = lines
+        .saturating_sub(usize::from(body.height))
+        .min(usize::from(u16::MAX)) as u16;
+    let offset = state.repertoire_report_scroll.min(maximum);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(Line::styled(report.0.to_owned(), theme.heading())),
+        ratatui::layout::Rect {
+            height: area.height.min(1),
+            ..area
+        },
+    );
+    if area.height > 1 {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "rows {}-{} of {}; PgUp/PgDn, arrows, Home/End scroll",
+                if lines == 0 {
+                    0
+                } else {
+                    usize::from(offset) + 1
+                },
+                (usize::from(offset) + usize::from(body.height)).min(lines),
+                lines
+            )),
+            ratatui::layout::Rect {
+                y: area.y + 1,
+                height: 1,
+                ..area
+            },
+        );
+    }
+    frame.render_widget(paragraph.scroll((offset, 0)), body);
+    if area.height > 2 {
+        frame.render_widget(
+            Paragraph::new(Line::styled(report.2.to_owned(), theme.staged())),
+            ratatui::layout::Rect {
+                y: area.y + area.height - 1,
+                height: 1,
+                ..area
+            },
+        );
+    }
+}
+
 fn preview_pane<'a>(
     state: &'a TuiState,
     theme: &Theme,
@@ -445,10 +585,16 @@ fn preview_pane<'a>(
     }
     if state.overlay == Some(Overlay::ConfirmApply) {
         let summary = state
-            .preview
+            .repertoire_preview
             .as_ref()
-            .map(|preview| preview.summary.as_str())
-            .unwrap_or("preview unavailable");
+            .map(|preview| preview.render())
+            .or_else(|| {
+                state
+                    .preview
+                    .as_ref()
+                    .map(|preview| preview.summary.clone())
+            })
+            .unwrap_or_else(|| "preview unavailable".into());
         return Paragraph::new(vec![
             Line::from(Span::styled("Confirm composition", theme.heading())),
             Line::from(""),
@@ -463,10 +609,16 @@ fn preview_pane<'a>(
     }
     if state.overlay == Some(Overlay::CompositionPreview) {
         let summary = state
-            .preview
+            .repertoire_preview
             .as_ref()
-            .map(|preview| preview.summary.as_str())
-            .unwrap_or("preview unavailable");
+            .map(|preview| preview.render())
+            .or_else(|| {
+                state
+                    .preview
+                    .as_ref()
+                    .map(|preview| preview.summary.clone())
+            })
+            .unwrap_or_else(|| "preview unavailable".into());
         let mut lines = vec![
             Line::from(Span::styled("Composition preview", theme.heading())),
             Line::from(""),
@@ -622,6 +774,21 @@ fn project_world_pane(lines: Vec<String>, theme: &Theme) -> Paragraph<'static> {
 }
 
 fn footer<'a>(state: &'a TuiState, theme: &Theme, glyphs: Glyphs) -> Paragraph<'a> {
+    if let Some((_, _, help)) = native_repertoire_report(state) {
+        return Paragraph::new(Line::styled(
+            format!("{help} · PgUp/PgDn scroll report"),
+            theme.dim(),
+        ));
+    }
+    if state.workspace_section == WorkspaceSection::Compose
+        && state.overlay.is_none()
+        && state.repertoire_application.is_some()
+    {
+        return Paragraph::new(Line::styled(
+            "Ctrl+O shows the last observed application; Ctrl+S previews current selection",
+            theme.dim(),
+        ));
+    }
     if let Some(status) = &state.status {
         return Paragraph::new(Line::from(Span::styled(
             status.message.clone(),
@@ -663,7 +830,11 @@ fn footer<'a>(state: &'a TuiState, theme: &Theme, glyphs: Glyphs) -> Paragraph<'
             "{} {sep} {} result{} {sep} {} staged {sep} scope {} {sep} Alt+{} fields {sep} : actions {sep} Ctrl+W Quick{system_hints}{steps_hint}{help_hint}",
             workspace_section_label(state.workspace_section),
             state.read_model.resources.len(),
-            if state.read_model.resources.len() == 1 { "" } else { "s" },
+            if state.read_model.resources.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
             state.staged.len(),
             scope,
             glyphs.horizontal_keys(),
@@ -672,7 +843,11 @@ fn footer<'a>(state: &'a TuiState, theme: &Theme, glyphs: Glyphs) -> Paragraph<'
         format!(
             "{} result{} {sep} {} staged {sep} scope {} {sep} {updown} navigate {sep} : actions {sep} Space stage {sep} Ctrl+S preview/apply {sep} Ctrl+W Workspace{help_hint}",
             state.read_model.resources.len(),
-            if state.read_model.resources.len() == 1 { "" } else { "s" },
+            if state.read_model.resources.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
             state.staged.len(),
             scope,
         )

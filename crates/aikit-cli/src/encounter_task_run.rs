@@ -48,6 +48,14 @@ fn resolve_executable(name: &str) -> Result<PathBuf> {
     )))
 }
 fn call(program: &Path, state_root: &Path, args: &[String]) -> Result<Value> {
+    call_with_runner(program, state_root, args, &OwnerRunner)
+}
+fn call_with_runner(
+    program: &Path,
+    state_root: &Path,
+    args: &[String],
+    runner: &dyn CommandRunner,
+) -> Result<Value> {
     let mut argv = vec![
         program.display().to_string(),
         "--state-root".into(),
@@ -55,7 +63,7 @@ fn call(program: &Path, state_root: &Path, args: &[String]) -> Result<Value> {
         "--json".into(),
     ];
     argv.extend_from_slice(args);
-    let output = OwnerRunner.run(&argv)?;
+    let output = runner.run(&argv)?;
     if !output.ok() {
         return Err(super::owner_refusal("material run operation", &output));
     }
@@ -216,7 +224,14 @@ impl Binding {
         Ok(scope["prepared_write_boundary"].clone())
     }
     pub fn revalidate(&self, request: &Request) -> Result<()> {
-        let reading = call(
+        self.revalidate_with_runner(request, &OwnerRunner)
+    }
+    pub(super) fn revalidate_with_runner(
+        &self,
+        request: &Request,
+        runner: &dyn CommandRunner,
+    ) -> Result<()> {
+        let reading = call_with_runner(
             &self.executable,
             &self.state_root,
             &[
@@ -225,6 +240,7 @@ impl Binding {
                 "--run".into(),
                 request.run_slug.clone(),
             ],
+            runner,
         )?;
         let run = &reading["run"];
         validate_run(run, request)?;

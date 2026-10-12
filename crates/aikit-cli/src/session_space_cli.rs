@@ -248,6 +248,11 @@ enum Command {
         #[arg(long)]
         label: Option<String>,
     },
+    /// Read exact owner-local disclosure/source without granting execution.
+    EncounterAgencyRead {
+        #[arg(long)]
+        agent_session: String,
+    },
     /// Provision or withdraw a native Agency binding under an exact revision.
     /// This is an owner-only operation, not gateway/IPC input.
     EncounterAgencyConfigure {
@@ -830,6 +835,27 @@ fn run(cli: Cli) -> Result<()> {
                 id.unwrap_or_else(|| from_profile.clone()),
                 label.unwrap_or_else(|| format!("{from_profile} (profile-derived)")),
             )?)
+        }
+        Command::EncounterAgencyRead { agent_session } => {
+            let session = aikit_core::ResourceRef::parse(agent_session)?;
+            let binding = crate::encounter_service::EncounterService::read_agency_binding(
+                service.home(),
+                &session,
+            )?
+            .ok_or_else(|| {
+                aikit_core::AikitError::new(
+                    "encounter.agency_required",
+                    "No native Agency binding is retained for this session",
+                )
+            })?;
+            // Source observation is valid even when an execution policy has
+            // expired; it neither re-admits nor widens that expired authority.
+            binding.agency_source.read()?;
+            emit(
+                &serde_json::json!({"schema":"aikit.encounter-agency-source/v1",
+                "agent_session":session,"binding":binding,"source_verified":true,
+                "standing":"owner-local source reading; no execution admission inferred"}),
+            )
         }
         Command::EncounterAgencyConfigure {
             agent_session,

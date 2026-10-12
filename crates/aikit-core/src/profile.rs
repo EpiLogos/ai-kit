@@ -507,6 +507,9 @@ impl ProfileFile {
 pub struct ProjectProfileFile {
     #[serde(default = "one")]
     pub schema: u32,
+    /// Additive repertoire requests, resolved through the existing SkillSet owner.
+    #[serde(default)]
+    pub skill_sets: Vec<String>,
     #[serde(flatten)]
     pub patch: PoolPatch,
 }
@@ -522,6 +525,9 @@ pub struct SessionOverlayFile {
     pub session_id: SessionId,
     #[serde(default)]
     pub base_generation: Option<GenerationId>,
+    /// Session requests union with inherited project repertoire membership.
+    #[serde(default)]
+    pub skill_sets: Vec<String>,
     #[serde(flatten)]
     pub patch: PoolPatch,
 }

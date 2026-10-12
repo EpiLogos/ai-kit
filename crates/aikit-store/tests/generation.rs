@@ -1058,3 +1058,44 @@ fn rotation_that_preserves_the_ref_keeps_the_generation_identity() {
         .unwrap();
     assert_eq!(first.id(), second.id());
 }
+
+#[test]
+fn a_source_change_between_materialization_and_commit_preserves_the_previous_generation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = registry(tmp.path());
+    let resolved = resolve_fixture(
+        &fixture,
+        &["script/test/nt", "skill/rust/review", "hook/gate/secrets"],
+    );
+    let ctx = context_dir(tmp.path());
+    let current = build_and_commit(&ctx, &resolved, "accepted", None);
+    let candidate_source = tmp.path().join("candidate-source.md");
+    fs::write(&candidate_source, b"the reviewed candidate source material").unwrap();
+    let mut candidate_plans = plans(&resolved, "candidate");
+    candidate_plans[0]
+        .items
+        .push(ProjectionItem::link(&candidate_source, ".claude/candidate-source.md").unwrap());
+    let staged = GenerationBuilder::new()
+        .build(&ctx, &resolved.view, &candidate_plans)
+        .unwrap();
+    let staging_path = staged.path().to_path_buf();
+    fs::write(
+        &candidate_source,
+        b"different source material after the candidate was built",
+    )
+    .unwrap();
+    let error = staged.commit(Some(&current)).unwrap_err();
+    assert_eq!(error.code(), "generation.source_changed");
+    assert_eq!(generation::current(&ctx).unwrap(), Some(current.clone()));
+    assert!(
+        !staging_path.exists(),
+        "failed build retains no staging directory"
+    );
+    assert_eq!(
+        fs::read_to_string(ctx.join("current/projections/claude/.claude/settings.json")).unwrap(),
+        "{\"marker\":\"accepted\"}"
+    );
+    assert!(!ctx
+        .join("current/projections/claude/.claude/candidate-source.md")
+        .exists());
+}

@@ -29,7 +29,6 @@
 
 use std::path::{Path, PathBuf};
 
-use aikit_core::capsule::Kind;
 use aikit_core::harness_admission::{
     FacultySupport, HarnessAdmissionAdapter, HarnessAdmissionDescriptor, HarnessEditionKind,
     HarnessFaculty, HarnessFacultyObservation, HARNESS_ADAPTER_SDK_VERSION,
@@ -132,33 +131,6 @@ impl ClaudeAdapter {
     pub fn projection_root(&self) -> PathBuf {
         self.generation_root.join("projections/claude")
     }
-
-    /// The export name for a capability: its `export_name` config override, or
-    /// the capsule's leaf.
-    ///
-    /// Not the `name` from `SKILL.md`: two registries can each ship a
-    /// `code-review`, and the export name is how that collision is resolved
-    /// without editing anybody's payload.
-    fn export_name(capability: &aikit_core::resolve::ActiveCapability) -> String {
-        capability
-            .config
-            .get("export_name")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| capability.id.leaf())
-            .to_string()
-    }
-
-    /// Where a skill capsule's Agent Skill tree lives inside its capsule.
-    fn payload_root(capability: &aikit_core::resolve::ActiveCapability) -> String {
-        capability
-            .config
-            .get("root")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("payload")
-            .to_string()
-    }
 }
 
 impl TargetAdapter for ClaudeAdapter {
@@ -192,39 +164,11 @@ impl TargetAdapter for ClaudeAdapter {
             );
         }
 
-        for capability in context.view.active_of_kind(Kind::Skill) {
-            let Some(root) = context.root_of(&capability.id) else {
-                // The store did not say where this capsule lives. Skipping is
-                // right — a projection cannot be invented — but silence is not.
-                plan = plan.with_note(format!(
-                    "{} was not projected: the registry did not supply a path for it",
-                    capability.id
-                ));
-                continue;
-            };
-
-            let payload = root.join(Self::payload_root(capability));
-            let skill = agent_skills::validate(&payload)
-                .map_err(|e| e.with("capability", capability.id.to_string()))?;
-
-            // The export name replaces the skill's own, so a collision between
-            // two registries is resolved in the projection rather than on disk.
-            let exported = agent_skills::AgentSkill {
-                name: Self::export_name(capability),
-                ..skill
-            };
-            let overlays = context
-                .view
-                .skill_usage_overlays
-                .get(&capability.id)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            plan = plan.with_items(exported.project_effective(
-                Path::new(SKILLS_PREFIX),
-                mode,
-                overlays,
-            )?);
-        }
+        plan = plan.with_items(agent_skills::project_repertoire(
+            context,
+            Path::new(SKILLS_PREFIX),
+            mode,
+        )?);
 
         if let Some(actor) = context.actor_bootstrap.as_ref() {
             plan = plan.with_item(bootstrap::managed_bootstrap_item(

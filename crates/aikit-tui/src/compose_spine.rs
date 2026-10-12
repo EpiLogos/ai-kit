@@ -219,7 +219,22 @@ fn standing_for(
             // contract itself: no praxis contract crosses this application,
             // which is a boundary fact, not a claim that praxis does not
             // exist in the product.
-            if state.compose_skill_set_field.is_empty() {
+            if let Some(crate::project_workspace_render::BoundaryReading::Observed(Some(
+                repertoire,
+            ))) = reading.repertoire
+            {
+                StepStanding::Determined(format!(
+                    "{} Profile(s), {} SkillSet(s), {} accepted member(s); inspect/apply: aikit compose repertoire",
+                    repertoire.profiles.len(), repertoire.skill_sets.len(), repertoire.members.len(),
+                ))
+            } else if let Some(crate::project_workspace_render::BoundaryReading::Unreadable {
+                reason,
+            }) = reading.repertoire
+            {
+                StepStanding::NotExposed(format!(
+                    "effective repertoire could not be read: {reason}"
+                ))
+            } else if state.compose_skill_set_field.is_empty() {
                 StepStanding::NotExposed(format!(
                     "no Profile/SkillSet/Skill/Method contract here (no praxis contract crosses this application); {} capabilit{}, {} action{} resolve",
                     world.capability_horizon.capabilities.len(),
@@ -447,17 +462,14 @@ pub fn compose_spine_lines(
         ),
         String::new(),
     ];
-    for (index, row) in rows.iter().enumerate() {
-        let here = row.step == state.compose_step;
-        lines.push(format!(
-            "{} {:>2} {} {:<14}{}",
-            if here { glyphs.selected() } else { ' ' },
-            index + 1,
-            row.standing.marker(glyphs),
-            row.step.as_str(),
-            row.standing.detail(),
-        ));
-    }
+
+    // Keep the whole ordered path visible without the wrapped standing prose
+    // pushing operative choices offscreen. Full standings follow the detail.
+    lines.extend(
+        rows.iter()
+            .enumerate()
+            .map(|(index, row)| format!("{:>2} {}", index + 1, row.step.as_str())),
+    );
 
     // The step in hand discloses what stands behind its one-line summary.
     // Alt+Up/Down walks the spine; without this the spine would be a legend
@@ -474,6 +486,21 @@ pub fn compose_spine_lines(
         ));
         lines.extend(detail);
     }
+    // The operative choices come first: in a narrow pane, the full overview
+    // must not push the selected step's actual controls below the viewport.
+    lines.push(String::new());
+    for (index, row) in rows.iter().enumerate() {
+        let here = row.step == state.compose_step;
+        lines.push(format!(
+            "{} {:>2} {} {:<14}{}",
+            if here { glyphs.selected() } else { ' ' },
+            index + 1,
+            row.standing.marker(glyphs),
+            row.step.as_str(),
+            row.standing.detail(),
+        ));
+    }
+
     lines
 }
 
@@ -523,7 +550,33 @@ fn step_detail(
         }
 
         ComposeStep::Governance => {
-            let mut lines = Vec::new();
+            let mut lines = vec![format!(
+                "  Selected Profile: {}",
+                state
+                    .compose_profile
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "keep existing baseline".into())
+            )];
+            lines.push(
+                "  0 keeps baseline; digits choose; left/right cycles all existing Profiles."
+                    .into(),
+            );
+            for (index, profile) in state.compose_profile_field.iter().enumerate() {
+                lines.push(format!(
+                    "  {} {} {}",
+                    index + 1,
+                    if state.compose_profile.as_ref() == Some(profile) {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    },
+                    profile
+                ));
+            }
+            lines.push(
+                "  Ctrl+P project / Ctrl+L session; Ctrl+S previews, confirms, applies.".into(),
+            );
             for profile in &world.resolution_basis.profiles {
                 lines.push(format!("  profile  {profile}"));
             }
@@ -545,24 +598,50 @@ fn step_detail(
                 lines.push("  no SkillSet field is disclosed at this boundary, so no".into());
                 lines.push("  repertoire can be chosen here.".into());
             } else {
-                lines.push("  Choose a SkillSet first; individual exceptions ride beside".into());
-                lines
-                    .push("  them later. A set is a request: the owner's own resolution at".into());
-                lines.push("  preparation decides what projects and what is withheld.".into());
-                lines.push(String::new());
-                for (index, row) in state.compose_skill_set_field.iter().enumerate() {
+                let range = state.compose_skill_set_page_range();
+                lines.push(format!(
+                    "  Page {}/{}; sets {}-{} of {}",
+                    range.start / 9 + 1,
+                    state.compose_skill_set_field.len().div_ceil(9),
+                    range.start + 1,
+                    range.end,
+                    state.compose_skill_set_field.len(),
+                ));
+                for (index, row) in state.compose_skill_set_field[range.clone()]
+                    .iter()
+                    .enumerate()
+                {
                     let selected = state.compose_skill_sets.contains(&row.name);
                     lines.push(format!(
-                        "  {} {} {:<24} {}",
+                        "{} {} {}",
                         index + 1,
                         if selected { "[x]" } else { "[ ]" },
                         row.name,
-                        row.summary,
                     ));
                 }
+                lines.push("  PgUp/PgDn change page.".into());
                 lines.push(String::new());
-                lines.push("  Digits toggle the numbered sets; the selection rides the".into());
-                lines.push("  save exactly as shown here.".into());
+                for row in &state.compose_skill_set_field[range] {
+                    lines.push(format!("  {}: {}", row.name, row.summary));
+                }
+                lines.push(String::new());
+                lines.push(
+                    "  Choose SkillSets; the owner's resolution decides what projects".into(),
+                );
+                lines
+                    .push("  and what is withheld. Individual exceptions ride beside sets.".into());
+                lines.push(
+                    "  Digits toggle the numbered sets on this page; the selection rides the"
+                        .into(),
+                );
+                lines.push(
+                    "  save exactly as shown here. Ctrl+S previews the native repertoire".into(),
+                );
+                lines.push("  at the selected scope; these sets add to the existing union.".into());
+                lines.push(
+                    "  No selected Profile or sets keeps and reconciles the existing baseline."
+                        .into(),
+                );
             }
             lines.push(format!(
                 "  What does resolve: {} capabilit{}, {} action{}.",
@@ -1129,7 +1208,7 @@ mod tests {
             let lines = compose_spine_lines(&state, reading(&world, &roster), Glyphs::ascii());
             assert!(
                 lines.len() > ComposeStep::ALL.len() + 2,
-                "{step:?} in hand must disclose detail beneath the spine"
+                "{step:?} in hand must disclose detail alongside the spine"
             );
             for line in &lines {
                 assert!(line.is_ascii(), "non-ASCII with {step:?} in hand: {line}");

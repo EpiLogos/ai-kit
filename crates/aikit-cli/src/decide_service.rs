@@ -47,6 +47,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Read;
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -541,6 +542,16 @@ fn card_identity(card: &Value, recipe: &ServiceRecipe) -> std::result::Result<Va
         ));
     }
     Ok(entry.clone())
+}
+
+/// Listener availability is independent of a readable model card. A foreign
+/// endpoint may be unhealthy or non-HTTP; neither admits starting over it.
+fn port_has_listener(port: u16) -> bool {
+    TcpStream::connect_timeout(
+        &SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_millis(250),
+    )
+    .is_ok()
 }
 
 fn read_card(curl: &Path, port: u16, timeout_ms: u64) -> Result<Value> {
@@ -1117,6 +1128,13 @@ fn start_locked(
         .with("port", port.to_string()));
     }
 
+    if port_has_listener(port) {
+        return Err(fail(
+            "decision_service.port_occupied",
+            format!("127.0.0.1:{port} has a listener whose model card could not be read; it is not a process this service started"),
+        ).with("port", port.to_string()));
+    }
+
     let mut argv = vec![
         python.display().to_string(),
         "-m".into(),
@@ -1434,7 +1452,9 @@ pub fn service_status(args: DecideServiceStatusArgs) -> Result<Value> {
         (true, false) => "running-unhealthy",
         (false, true) => "foreign-listener",
         (false, false) => {
-            if state.provisioned.is_some() {
+            if port_has_listener(state.port) {
+                "foreign-listener"
+            } else if state.provisioned.is_some() {
                 "stopped"
             } else {
                 "declared"

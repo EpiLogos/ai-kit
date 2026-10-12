@@ -20,7 +20,7 @@ aikit-adapters = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-ratatui = { workspace = true }
+ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 crossterm = { workspace = true }
 nucleo-matcher = { workspace = true }
 unicode-width = { workspace = true }

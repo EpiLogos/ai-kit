@@ -238,6 +238,7 @@ pub struct ApplicationSurfaceController {
     /// environment boundary, read exactly once at construction. `None` for
     /// standalone AIKit: the view then operates over what is actually here.
     composed_world: Option<world_entry::ComposedWorld>,
+    repertoire: BoundaryReading<Option<aikit_core::repertoire::RepertoireReading>>,
 }
 
 /// Which field of the §1.3 creator path the text lane is editing. The lane's
@@ -265,6 +266,7 @@ impl ApplicationSurfaceController {
             workspace_section: request.initial_workspace_section,
             relation_view: request.initial_relation_view,
             mutation_scope: Some(backend.context().default_mutation_scope()),
+            compose_profile_field: backend.repertoire_profiles(),
             ..TuiState::default()
         };
         let mut runtime = TuiRuntime::new();
@@ -279,6 +281,13 @@ impl ApplicationSurfaceController {
                 semantic,
                 UiAction::SetQuery(request.initial_query.unwrap_or_default()),
             )?;
+            if request.initial_workspace_section == WorkspaceSection::Compose {
+                semantic = runtime.step(
+                    &mut service,
+                    semantic,
+                    UiAction::SetWorkspaceSection(WorkspaceSection::Compose),
+                )?;
+            }
             // Observe the host's working environments once, at the one moment
             // that is allowed to be slow. Every later reading comes from the
             // backend's cache, and is refreshed only when this application
@@ -314,6 +323,7 @@ impl ApplicationSurfaceController {
             conversation: ConversationSurface::default(),
             agent_work_bindings: backend.agent_work_bindings(),
             composed_world: world_entry::ComposedWorld::from_env(),
+            repertoire: BoundaryReading::from_result(backend.repertoire_reading()),
         };
         controller
             .conversation
@@ -429,7 +439,8 @@ impl ApplicationSurfaceController {
                 WorkspaceReading::new(world, &self.session_spaces, &self.history)
                     .with_factory_work_entry(&self.factory_work_entry)
                     .with_agent_work_bindings(self.agent_work_bindings)
-                    .with_composed_world(self.composed_world.as_ref()),
+                    .with_composed_world(self.composed_world.as_ref())
+                    .with_repertoire(&self.repertoire),
                 self.shell_glyphs,
             );
         } else {
@@ -437,6 +448,7 @@ impl ApplicationSurfaceController {
         }
         if self.semantic.presentation == PresentationMode::Workspace
             && self.semantic.workspace_section == WorkspaceSection::Knowledge
+            && crate::v2_render::repertoire_report_scroll_bounds(&self.semantic).is_none()
         {
             self.draw_relations(frame);
         }
@@ -509,7 +521,9 @@ impl ApplicationSurfaceController {
         }
         if matches!(
             self.semantic.overlay,
-            Some(Overlay::ConfirmApply) | Some(Overlay::CompositionPreview)
+            Some(Overlay::ConfirmApply)
+                | Some(Overlay::CompositionPreview)
+                | Some(Overlay::RepertoireApplicationReport)
         ) {
             return;
         }
@@ -566,6 +580,47 @@ impl ApplicationSurfaceController {
         let ctrl = modifiers.contains(KeyModifiers::CONTROL);
         let alt = modifiers.contains(KeyModifiers::ALT);
 
+        // A native material report owns its visible interaction. Hidden
+        // resource, draft and query handlers cannot act beneath that reading.
+        if let Some((maximum, page_rows)) =
+            crate::v2_render::repertoire_report_scroll_bounds(&self.semantic)
+        {
+            if ctrl && matches!(code, KeyCode::Char('c') | KeyCode::Char('q')) {
+                return self.dispatch(backend, UiAction::Exit);
+            }
+            if self.conversation.is_open() {
+                return self.handle_conversation_key(code, ctrl, alt);
+            }
+            if !ctrl && !alt {
+                let current = self.semantic.repertoire_report_scroll.min(maximum);
+                let offset = match code {
+                    KeyCode::Up => Some(current.saturating_sub(1)),
+                    KeyCode::Down => Some(current.saturating_add(1).min(maximum)),
+                    KeyCode::PageUp => Some(current.saturating_sub(page_rows)),
+                    KeyCode::PageDown => Some(current.saturating_add(page_rows).min(maximum)),
+                    KeyCode::Home => Some(0),
+                    KeyCode::End => Some(maximum),
+                    _ => None,
+                };
+                if let Some(offset) = offset {
+                    return self.dispatch(backend, UiAction::ScrollRepertoireReport { offset });
+                }
+                if code == KeyCode::Esc {
+                    return self.dispatch(backend, UiAction::Back);
+                }
+            }
+            if ctrl && !alt && code == KeyCode::Char('s') {
+                return match self.semantic.overlay {
+                    Some(Overlay::CompositionPreview) => {
+                        self.dispatch(backend, UiAction::RequestApply)
+                    }
+                    Some(Overlay::ConfirmApply) => self.dispatch(backend, UiAction::ConfirmApply),
+                    _ => Ok(()),
+                };
+            }
+            return Ok(());
+        }
+
         if self.graph_filter_editing {
             return self.handle_graph_filter_key(backend, code);
         }
@@ -593,6 +648,15 @@ impl ApplicationSurfaceController {
         // composed.
         if self.conversation.is_open() {
             return self.handle_conversation_key(code, ctrl, alt);
+        }
+        if ctrl
+            && code == KeyCode::Char('o')
+            && self.semantic.workspace_section == WorkspaceSection::Compose
+            && self.semantic.overlay.is_none()
+            && self.semantic.query.is_empty()
+            && self.semantic.repertoire_application.is_some()
+        {
+            return self.dispatch(backend, UiAction::ShowRepertoireApplicationReport);
         }
         // Context-aware help (?): explains what the keys and next steps do
         // where the operator actually stands. Only claimed when the query is
@@ -629,19 +693,31 @@ impl ApplicationSurfaceController {
             && self.semantic.compose_step == crate::compose_spine::ComposeStep::Praxis
             && self.semantic.query.is_empty()
             && self.semantic.overlay.is_none()
-            && matches!(code, KeyCode::Char('1'..='9'))
+            && !ctrl
+            && !alt
         {
-            let KeyCode::Char(digit) = code else {
-                return Ok(());
-            };
-            let index = digit.to_digit(10).unwrap_or(0) as usize;
-            if index >= 1 {
-                if let Some(row) = self.semantic.compose_skill_set_field.get(index - 1) {
+            if matches!(code, KeyCode::PageUp | KeyCode::PageDown) {
+                let action = if code == KeyCode::PageUp {
+                    UiAction::PreviousComposeSkillSetPage
+                } else {
+                    UiAction::NextComposeSkillSetPage
+                };
+                return self.dispatch(backend, action);
+            }
+            if let KeyCode::Char(digit @ '1'..='9') = code {
+                let range = self.semantic.compose_skill_set_page_range();
+                let index = range.start + digit.to_digit(10).unwrap_or(0) as usize - 1;
+                if let Some(row) = self
+                    .semantic
+                    .compose_skill_set_field
+                    .get(index)
+                    .filter(|_| index < range.end)
+                {
                     let name = row.name.clone();
                     return self.dispatch(backend, UiAction::ToggleComposeSkillSet { name });
                 }
+                return Ok(());
             }
-            return Ok(());
         }
         if code == KeyCode::Esc {
             // Esc inside an active Graph projection first unwinds the Graph's
@@ -706,10 +782,75 @@ impl ApplicationSurfaceController {
                 UiAction::SetWorkspaceSection(WorkspaceSection::Knowledge),
             );
         }
+        if self.semantic.workspace_section == WorkspaceSection::Compose
+            && self.semantic.overlay.is_none()
+            && backend.repertoire_operations_available()
+        {
+            if ctrl && code == KeyCode::Char('p') {
+                return self.dispatch(
+                    backend,
+                    UiAction::SetMutationScope(aikit_core::scope::ScopeKind::Project),
+                );
+            }
+            if ctrl && code == KeyCode::Char('l') {
+                return self.dispatch(
+                    backend,
+                    UiAction::SetMutationScope(aikit_core::scope::ScopeKind::Session),
+                );
+            }
+            if self.semantic.compose_step == crate::compose_spine::ComposeStep::Governance
+                && self.semantic.query.is_empty()
+                && !ctrl
+                && !alt
+            {
+                if code == KeyCode::Char('0') {
+                    return self.dispatch(backend, UiAction::SelectComposeProfile(None));
+                }
+                if let KeyCode::Char(digit @ '1'..='9') = code {
+                    if let Some(profile) = self
+                        .semantic
+                        .compose_profile_field
+                        .get(digit.to_digit(10).unwrap() as usize - 1)
+                        .cloned()
+                    {
+                        return self
+                            .dispatch(backend, UiAction::SelectComposeProfile(Some(profile)));
+                    }
+                }
+                if matches!(code, KeyCode::Left | KeyCode::Right) && !alt && !ctrl {
+                    let profiles = &self.semantic.compose_profile_field;
+                    let current = self
+                        .semantic
+                        .compose_profile
+                        .as_ref()
+                        .and_then(|profile| profiles.iter().position(|item| item == profile))
+                        .map(|i| i + 1)
+                        .unwrap_or(0);
+                    let count = profiles.len() + 1;
+                    let next = if code == KeyCode::Right {
+                        (current + 1) % count
+                    } else {
+                        (current + count - 1) % count
+                    };
+                    let selected = if next == 0 {
+                        None
+                    } else {
+                        Some(profiles[next - 1].clone())
+                    };
+                    return self.dispatch(backend, UiAction::SelectComposeProfile(selected));
+                }
+            }
+        }
         if ctrl && code == KeyCode::Char('s') {
             let action = match self.semantic.overlay {
                 Some(Overlay::ConfirmApply) => UiAction::ConfirmApply,
                 Some(Overlay::CompositionPreview) => UiAction::RequestApply,
+                _ if self.semantic.workspace_section == WorkspaceSection::Compose
+                    && self.semantic.staged.is_empty()
+                    && backend.repertoire_operations_available() =>
+                {
+                    UiAction::RequestRepertoirePreview
+                }
                 _ => UiAction::RequestCompositionPreview,
             };
             return self.dispatch(backend, action);
@@ -932,6 +1073,11 @@ impl ApplicationSurfaceController {
         row: u16,
         modifiers: KeyModifiers,
     ) -> Result<()> {
+        // The native report covers the list and Inspector. No hidden hit target
+        // may select, stage or open a resource beneath its material reading.
+        if crate::v2_render::repertoire_report_scroll_bounds(&self.semantic).is_some() {
+            return Ok(());
+        }
         let (cols, rows) = self.semantic.area;
         let cols = cols.max(2);
         let rows = rows.max(2);
@@ -1289,6 +1435,10 @@ impl ApplicationSurfaceController {
                 self.history = BoundaryReading::from_result(service.history_evidence(None));
                 self.factory_work_entry = service.factory_work_entry();
             }
+        }
+
+        if world_reads_are_stale {
+            self.repertoire = BoundaryReading::from_result(backend.repertoire_reading());
         }
 
         if world_reads_are_stale
@@ -1728,24 +1878,9 @@ fn tree_relation_lines<'a>(
 /// from what `dispatch` already holds for them — the four readings
 /// `ApplicationSurfaceController::dispatch` re-reads together.
 ///
-/// This is provable from the reducer's own effect graph, not guessed from
-/// the Action's name. `TuiApplicationService` has exactly three methods that
-/// take `&mut self` and can therefore mutate a backend at all:
-/// `apply_composition`, `observe_resource_use` and `invoke_action`. Every
-/// other method an effect can call — `search`, `contextual_actions`,
-/// `preview_composition`, `explain`, `relations_at_depth` — takes `&self`,
-/// so a well-typed implementation cannot mutate through it; Rust's own
-/// borrow checker is the enforcement, not a convention this function has to
-/// trust. Walking `reduce_tui`'s `effects.push(UiEffect::...)` sites shows
-/// `UiEffect::ApplyComposition`/`ObserveResourceUse`/`InvokeContextualAction`
-/// are reached only from the `ConfirmApply`/`OpenSelection`/`InvokeAction`
-/// arms respectively — every other arm's effects (`Search`,
-/// `LoadContextualActions`, `PreviewComposition`) settle into further
-/// actions (`SearchFinished`, `ContextualActionsLoaded`,
-/// `CompositionPreviewed`) that themselves push only more of the same
-/// non-mutating effects. So a `UiAction` outside this list, however deep the
-/// effect chain `runtime.step` settles for it, cannot have touched the
-/// backend's mutable state.
+/// Native repertoire and capsule application both mutate only after
+/// `ConfirmApply`; their settled result actions preserve the exact owner
+/// reading. Navigation and read-only preview leave these caches current.
 fn action_may_change_world_state(action: &UiAction) -> bool {
     matches!(
         action,

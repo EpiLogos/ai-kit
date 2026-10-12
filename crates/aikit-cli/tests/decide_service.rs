@@ -473,6 +473,33 @@ fn the_kev_lifecycle_runs_without_workcell_and_never_adopts_a_service_it_did_not
     assert_eq!(scene.tripwire_hits(), "", "an excluded owner was reached");
 }
 
+#[test]
+fn a_real_foreign_non_http_listener_is_preserved_and_never_started_over() {
+    let scene = Scene::new();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let port = address.port().to_string();
+    let service_dir = scene._root.path().join("foreign-non-http-service");
+    let dir = service_dir.to_str().unwrap();
+    scene.ok(&["provision", "--service-dir", dir, "--port", &port]);
+    let (ok, reading, _) = scene.run(&[], &["start", "--service-dir", dir]);
+    assert!(!ok);
+    assert_eq!(
+        reading["error"]["code"], "decision_service.port_occupied",
+        "{reading}"
+    );
+    let status = scene.ok(&["status", "--service-dir", dir]);
+    assert_eq!(status["state"], "foreign-listener", "{status}");
+    assert_eq!(status["process"]["recorded"], false, "{status}");
+    assert_eq!(
+        scene.ok(&["stop", "--service-dir", dir])["outcome"],
+        "not-running"
+    );
+    assert_eq!(listener.local_addr().unwrap(), address);
+    assert!(std::net::TcpStream::connect_timeout(&address, Duration::from_secs(1)).is_ok());
+    assert!(scene.tripwire_hits().is_empty());
+}
+
 fn read_default_recipe(service: &Path) -> Value {
     let state: Value =
         serde_json::from_slice(&fs::read(service.join("service.json")).unwrap()).unwrap();
