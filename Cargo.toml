@@ -55,6 +55,11 @@ argon2 = "0.5.3"
 chacha20poly1305 = "0.11"
 getrandom = "0.4.3"
 base64 = "0.22.1"
+# Sender attestation (#481-8): a relayed Communique's sender claim is signed
+# with the relaying gateway's own Ed25519 key, so holding the machine-level
+# peer token alone cannot impersonate an agency. The public key rides the
+# sender's protocol answer and can be pinned at remote declaration.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 tempfile = "3"
 assert_cmd = "2"

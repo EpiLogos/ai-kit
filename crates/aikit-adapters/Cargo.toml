@@ -23,6 +23,9 @@ jiff = { workspace = true }
 blake3 = { workspace = true }
 keyring = { workspace = true }
 sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
+# Sender-attestation key generation (every platform) and the Linux sealed store.
+getrandom = { workspace = true }
 # The gateway service holds an advisory lock on its state file for its whole
 # lifetime so an offline writer can never interleave with a running service.
 fs4 = { workspace = true }
@@ -30,7 +33,6 @@ fs4 = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 argon2 = { workspace = true }
 chacha20poly1305 = { workspace = true }
-getrandom = { workspace = true }
 
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
