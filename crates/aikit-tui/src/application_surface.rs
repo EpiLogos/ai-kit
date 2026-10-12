@@ -618,15 +618,6 @@ impl ApplicationSurfaceController {
                     _ => Ok(()),
                 };
             }
-            // The report owns ordinary reading keys; Alt+Left/Right still cross
-            // the Workspace field so leaving Compose (and reloading its SkillSet
-            // field on return) remains reachable while a preview is open.
-            if alt && code == KeyCode::Left {
-                return self.dispatch(backend, UiAction::PreviousWorkspaceSection);
-            }
-            if alt && code == KeyCode::Right {
-                return self.dispatch(backend, UiAction::NextWorkspaceSection);
-            }
             return Ok(());
         }
 

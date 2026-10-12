@@ -1619,12 +1619,6 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
         }
         UiAction::SetPresentation(presentation) => state.presentation = presentation,
         UiAction::SetWorkspaceSection(section) => {
-            if section != state.workspace_section {
-                // A section change leaves any report/preview overlay behind;
-                // the SkillSet field reload below must not read under a stale
-                // CompositionPreview claim.
-                state.overlay = None;
-            }
             if section == WorkspaceSection::Compose {
                 // The Praxis step renders the real SkillSet field; load it on
                 // every explicit entry so the reading is current. A cheap
@@ -1634,21 +1628,13 @@ pub fn reduce_tui(mut state: TuiState, action: UiAction) -> TuiReduction {
             state.workspace_section = section;
         }
         UiAction::NextWorkspaceSection => {
-            let next = state.workspace_section.relative(1);
-            if next != state.workspace_section {
-                state.overlay = None;
-            }
-            state.workspace_section = next;
+            state.workspace_section = state.workspace_section.relative(1);
             if state.workspace_section == WorkspaceSection::Compose {
                 effects.push(UiEffect::LoadSkillSets);
             }
         }
         UiAction::PreviousWorkspaceSection => {
-            let previous = state.workspace_section.relative(-1);
-            if previous != state.workspace_section {
-                state.overlay = None;
-            }
-            state.workspace_section = previous;
+            state.workspace_section = state.workspace_section.relative(-1);
             if state.workspace_section == WorkspaceSection::Compose {
                 effects.push(UiEffect::LoadSkillSets);
             }
