@@ -1881,7 +1881,6 @@ pub fn send(
             routing,
         };
         return accept_and_relay(
-            home,
             gateway,
             draft,
             remote,
@@ -1933,7 +1932,6 @@ pub fn send(
         routing,
     };
     accept_and_relay(
-        home,
         gateway,
         draft,
         remote,
@@ -1958,17 +1956,15 @@ fn new_communique_ref() -> String {
 /// Append the draft, relay it when a remote was chosen, and answer the
 /// receipt (`context` carries the route's own fields).
 fn accept_and_relay(
-    home: &AikitHome,
     gateway: &dyn GatewayAccess,
     draft: CommuniqueDraft,
     remote: Option<GatewayRemote>,
     context: Value,
 ) -> Result<Value> {
-    accept_and_relay_via(home, gateway, draft, remote, context, &carrier_call)
+    accept_and_relay_via(gateway, draft, remote, context, &carrier_call)
 }
 
 fn accept_and_relay_via(
-    home: &AikitHome,
     gateway: &dyn GatewayAccess,
     draft: CommuniqueDraft,
     remote: Option<GatewayRemote>,
@@ -2004,15 +2000,8 @@ fn accept_and_relay_via(
     ensure_instance_kept(expected.as_ref(), &communique, "on this Workcell")?;
     let mut forward = Value::Null;
     if let Some(entry) = remote {
-        let (record, report) = forward_one_via(
-            home,
-            gateway,
-            &communique,
-            &entry,
-            &accepted_by,
-            None,
-            carrier,
-        )?;
+        let (record, report) =
+            forward_one_via(gateway, &communique, &entry, &accepted_by, None, carrier)?;
         communique = record;
         forward = report;
     }
@@ -2083,17 +2072,6 @@ fn carrier_call(remote: &GatewayRemote, command: GatewayCommand) -> Result<Gatew
     aikit_adapters::gateway_command(&target, command, None)
 }
 
-/// The basis the remote recorded for a relayed message. A verified sender
-/// attestation is appended to the basis the sender stated (#481-8), so the
-/// readback keeps the original wording and may carry exactly that suffix.
-fn attribution_basis_kept(original: &str, observed: &str) -> bool {
-    observed == original
-        || observed
-            .strip_prefix(original)
-            .and_then(|rest| rest.strip_prefix("; sender attested by gateway "))
-            .is_some()
-}
-
 /// Read delivery from the actual gateway that accepted this exact forwarded
 /// record. This is a qualified observation, never a second delivery or journal.
 /// Only the occupant-facing message owner calls it after sender admission.
@@ -2149,7 +2127,7 @@ fn forwarded_readback_via(
         || observed.from_position_ref != communique.from_position_ref
         || observed.from_generation_ref != communique.from_generation_ref
         || observed.attribution != communique.attribution
-        || !attribution_basis_kept(&communique.attribution_basis, &observed.attribution_basis)
+        || observed.attribution_basis != communique.attribution_basis
         || observed.to_position_ref != communique.to_position_ref
         || observed.to_instance != communique.to_instance
         || observed.body != communique.body
@@ -2233,38 +2211,7 @@ fn ensure_instance_kept(
     ))
 }
 
-/// This gateway's signed sender assertion for one Communique it is about to
-/// relay (#481-8): the signing key is generated on first use and stays in
-/// this home; a gateway that cannot sign relays as before, named — never
-/// silently upgraded or downgraded.
-fn sender_attestation_for(
-    home: &AikitHome,
-    gateway_ref: &str,
-    communique: &Communique,
-    now_unix_ms: u64,
-) -> Option<aikit_adapters::SenderAttestation> {
-    match aikit_adapters::gateway_attestation::load_or_create_signing_key(&home.state()) {
-        Ok(key) => match aikit_adapters::gateway_attestation::attest(
-            &key,
-            gateway_ref,
-            communique,
-            now_unix_ms,
-        ) {
-            Ok(proof) => Some(proof),
-            Err(error) => {
-                eprintln!("gateway relay: the sender attestation could not be signed: {error}");
-                None
-            }
-        },
-        Err(error) => {
-            eprintln!("gateway relay: no signing key, the relay carries no attestation: {error}");
-            None
-        }
-    }
-}
-
 fn forward_one(
-    home: &AikitHome,
     gateway: &dyn GatewayAccess,
     communique: &Communique,
     remote: &GatewayRemote,
@@ -2276,7 +2223,6 @@ fn forward_one(
     // exact-instance route are offered through one seam, so a test (or a
     // future caller) can stand in for the wire once, for both.
     forward_one_via(
-        home,
         gateway,
         communique,
         remote,
@@ -2292,7 +2238,6 @@ fn forward_one(
 /// a failed relay (the record stays queued here) and returned as the typed
 /// error.
 fn forward_one_via(
-    home: &AikitHome,
     gateway: &dyn GatewayAccess,
     communique: &Communique,
     remote: &GatewayRemote,
@@ -2319,7 +2264,6 @@ fn forward_one_via(
             GatewayCommand::IngestCommunique {
                 communique: Box::new(communique.clone()),
                 relayed_by: local_gateway_ref.to_owned(),
-                attestation: sender_attestation_for(home, local_gateway_ref, communique, at),
             },
         )?)?;
         if let Err(lost) =
@@ -2601,7 +2545,6 @@ fn route_ask(home: &AikitHome, cwd: &Path, ask: &GatewayAskRequest) -> Result<Ga
 /// exact-instance record is handed only to a remote that advertises the
 /// feature, and the remote's echo must still carry the binding.
 fn relay_attempt(
-    home: &AikitHome,
     remote: &GatewayRemote,
     communique: &Communique,
     relayed_by: &str,
@@ -2627,7 +2570,6 @@ fn relay_attempt(
         expect_accepted(carrier(GatewayCommand::IngestCommunique {
             communique: Box::new(communique.clone()),
             relayed_by: relayed_by.to_owned(),
-            attestation: sender_attestation_for(home, relayed_by, communique, now_unix_ms()),
         })?)?;
     ensure_instance_kept(communique.to_instance.as_ref(), &communique, &whose)?;
     Ok((replayed, remote_gateway_ref))
@@ -2672,7 +2614,7 @@ fn relay_appended(
             )
         })?;
     let at = now_unix_ms();
-    Ok(match relay_attempt(home, entry, communique, relayed_by) {
+    Ok(match relay_attempt(entry, communique, relayed_by) {
         Ok((_, remote_gateway_ref)) => CommuniqueForwardOutcome::Forwarded {
             workcell_ref,
             remote_gateway_ref,
@@ -2870,7 +2812,6 @@ fn forward_pass_via(
                     }
                 };
                 let (relayed, report) = forward_one_via(
-                    home,
                     gateway,
                     &current,
                     &entry,
@@ -2959,7 +2900,6 @@ fn forward_pass_via(
             }
         };
         let (record, report) = forward_one(
-            home,
             gateway,
             record,
             &entry,
@@ -4000,7 +3940,6 @@ mod exact_instance_binding_tests {
             connector_wire_version: "x".into(),
             actuation_stream_schema: "x".into(),
             features: features.iter().map(|f| (*f).to_owned()).collect(),
-            sender_attestation_key: None,
         }
     }
 
@@ -4317,27 +4256,18 @@ mod exact_instance_binding_tests {
         assert!(matches!(placement_unknown, LedgerPlacement::Unknown));
     }
 
-    fn test_home() -> (tempfile::TempDir, AikitHome) {
-        let dir = tempfile::tempdir().unwrap();
-        let home = AikitHome::at(dir.path());
-        std::fs::create_dir_all(home.state()).unwrap();
-        (dir, home)
-    }
-
     #[test]
     fn an_exact_route_is_refused_by_a_local_gateway_that_does_not_advertise_the_feature() {
         let old = StubGateway::default();
-        let (_dir, home) = test_home();
-        let error =
-            accept_and_relay_via(&home, &old, draft(Some("g1")), None, json!({}), &|_, _| {
-                unreachable!("no remote")
-            })
-            .unwrap_err();
+        let error = accept_and_relay_via(&old, draft(Some("g1")), None, json!({}), &|_, _| {
+            unreachable!("no remote")
+        })
+        .unwrap_err();
         assert_eq!(code(&error), "gateway.exact_instance_unsupported");
         assert!(!old.saw("send-communique"), "nothing is handed to it");
 
         // A durable Position route still goes to an older gateway.
-        let sent = accept_and_relay_via(&home, &old, draft(None), None, json!({}), &|_, _| {
+        let sent = accept_and_relay_via(&old, draft(None), None, json!({}), &|_, _| {
             unreachable!("no remote")
         })
         .unwrap();
@@ -4350,9 +4280,7 @@ mod exact_instance_binding_tests {
             strip: true,
             ..StubGateway::modern()
         };
-        let (_dir, home) = test_home();
         let error = accept_and_relay_via(
-            &home,
             &stripping,
             draft(Some("g1")),
             None,
@@ -4367,9 +4295,7 @@ mod exact_instance_binding_tests {
     fn an_exact_relay_to_an_older_remote_gateway_is_refused_before_anything_is_recorded() {
         let local = StubGateway::modern();
         let old_remote = StubGateway::default();
-        let (_dir, home) = test_home();
         let error = accept_and_relay_via(
-            &home,
             &local,
             draft(Some("g1")),
             Some(remote_b()),
@@ -4393,9 +4319,7 @@ mod exact_instance_binding_tests {
             strip: true,
             ..StubGateway::modern()
         };
-        let (_dir, home) = test_home();
         let error = forward_one_via(
-            &home,
             &local,
             &queued,
             &remote_b(),
@@ -4413,9 +4337,7 @@ mod exact_instance_binding_tests {
 
         // A remote that never advertised the feature is never handed it.
         let old_remote = StubGateway::default();
-        let (_dir, home) = test_home();
         let error = forward_one_via(
-            &home,
             &local,
             &queued,
             &remote_b(),
@@ -4575,10 +4497,7 @@ mod forwarded_readback_tests {
             websocket_path: "/".into(),
             token_location: "env:TEST_GATEWAY_TOKEN".into(),
         };
-        let attest_dir = tempfile::tempdir().unwrap();
-        let attest_home = AikitHome::at(attest_dir.path());
         let (forwarded, _) = forward_one_via(
-            &attest_home,
             &sender,
             &original,
             &remote,

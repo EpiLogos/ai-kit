@@ -639,11 +639,6 @@ pub struct GatewayServiceRuntime {
     /// This Workcell's encounter owner behind relayed peer requests, when the
     /// assembler wired one.
     pub encounter: Option<Arc<dyn GatewayEncounterRelay>>,
-    /// This gateway's Ed25519 public key (#481-8): advertised in the protocol
-    /// answer so a receiver can verify (and pin) the sender assertions this
-    /// gateway makes. `None` when no signing key could be established — the
-    /// protocol answer then simply does not advertise the feature's key.
-    pub attestation_key: Option<String>,
 }
 
 /// One live carrier connection, closeable from the service's exit path.
@@ -819,22 +814,6 @@ fn serve_gateway_service(
     if let Some(launcher) = upgrade_launcher {
         engine.attach_upgrade_launcher(launcher);
     }
-    // The signing key is established at start, once: the protocol answer
-    // advertises its public half for the service's whole life.
-    let attestation_key = config
-        .state_file
-        .as_ref()
-        .and_then(|state_file| state_file.parent().map(|dir| dir.to_path_buf()))
-        .and_then(|dir| {
-            crate::gateway_attestation::load_or_create_signing_key(&dir)
-                .ok()
-                .map(|key| crate::gateway_attestation::public_key_hex(&key))
-        });
-    if attestation_key.is_none() {
-        eprintln!(
-            "gateway service: no sender-attestation signing key could be established; relays              carry no attestation until this is resolved"
-        );
-    }
     let runtime = Arc::new(GatewayServiceRuntime {
         native_owners: crate::gateway_native_owner::NativeOwnerRoutes::from_env(),
         hub,
@@ -843,7 +822,6 @@ fn serve_gateway_service(
         engine: Some(engine),
         connections: ConnectionRegistry::default(),
         encounter: encounter_relay,
-        attestation_key,
     });
 
     // Coexistence gate at serve startup: with the exclusive policy and a
@@ -1667,16 +1645,7 @@ fn execute_serialized_request(
             "gateway state lock was poisoned",
         )
     })?;
-    let mut result = execute_gateway_command(&mut gateway, request.command.clone());
-    // The kernel holds no key: the sender-attestation public key is this
-    // service's own fact, added to the protocol reading that discloses it.
-    if let Ok(GatewayResponse::Protocol {
-        sender_attestation_key,
-        ..
-    }) = &mut result
-    {
-        *sender_attestation_key = runtime.attestation_key.clone();
-    }
+    let result = execute_gateway_command(&mut gateway, request.command.clone());
     let mut subscribed = None;
     match &result {
         // A subscribe is a replay plus a live attachment, made one indivisible
@@ -2102,7 +2071,6 @@ mod tests {
         Arc::new(GatewayServiceRuntime {
             native_owners: crate::gateway_native_owner::NativeOwnerRoutes::default(),
             encounter: None,
-            attestation_key: None,
             hub: Arc::new(SubscriptionHub::default()),
             queues: Arc::new(crate::gateway_connector_pump::ConnectorQueues::default()),
             controls: Arc::new(crate::gateway_connector_pump::ConnectorPumpControls::default()),
