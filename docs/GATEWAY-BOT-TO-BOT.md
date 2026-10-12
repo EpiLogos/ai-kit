@@ -47,10 +47,23 @@ What stays separate on purpose, and what is still open:
   still does not learn that the remote copy was delivered (six such records
   were observed on the Mac); closing that loop needs a delivery notice back
   through `RecordCommuniqueStanding`.
-* Durable Position routing is decided in four places in `gateway_contact.rs`
-  (`route_to_occupancy`, `place_instance`, `forward_pass_via`, `relay_attempt`)
-  with slightly different answers for an unknown ledger. The relay pass and the
-  ask path should call one function; they do not yet.
+* **The sender claim on a relay is SIGNED (#481-8).** The relaying gateway
+  signs what it asserts (position, generation, attribution, the body's
+  digest, sent time) with an Ed25519 key that lives only in its own home; the
+  receiver verifies freshness, body binding and signature, refuses a bad
+  proof, and names the attestation in the stored basis. The public key rides
+  the sender's protocol answer (`sender-attestation`); receiver-side
+  carrier-identity plumbing to enforce operator pins automatically is the
+  carried remainder (the verifier already honours a pin when it can name the
+  expected key).
+* Durable Position routing converged (#481-1): send-time routing
+  (`route_to_occupancy`) and the relay pass (`ledger_placement` inside
+  `forward_pass_via`) read the ledger through ONE reading and resolve a vacant
+  ledger through ONE `VacantResolution`, and both routes are offered through
+  the same injected carrier seam. What remains open under #481-1 is the
+  exact-instance decider (`place_instance` — a different route kind with its
+  own verification law) and the single outbound-attempt record spanning all
+  three journals.
 * The connector plane still has no durable outbound queue: restored
   `pending_deliveries` are retained and reported at a drain but not re-sent,
   because a send that might have reached the platform cannot be told from one
