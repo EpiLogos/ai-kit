@@ -31,7 +31,6 @@ pub mod deepseek_maximal;
 pub mod factory_developmental;
 pub mod factory_run_thought_authored_wiki;
 pub mod flow_authored_wiki;
-pub mod gateway_attestation;
 pub mod gateway_client;
 pub mod gateway_coexistence;
 pub mod gateway_communique;
@@ -155,7 +154,6 @@ pub use factory_run_thought_authored_wiki::{
     FACTORY_RUN_THOUGHT_AUTHORED_WIKI_VERSION,
 };
 pub use flow_authored_wiki::{standing_flow_authored_wiki_source, FLOW_AUTHORED_WIKI_VERSION};
-pub use gateway_attestation::SenderAttestation;
 pub use gateway_client::{
     gateway_command, gateway_command_within, gateway_request, GatewayCarrierTarget,
     GATEWAY_CLIENT_VERSION,
