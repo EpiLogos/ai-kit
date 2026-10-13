@@ -112,7 +112,15 @@ pub struct TemporalFacet {
     pub uncertainty: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<String>,
+    /// The source's own name for the period this facet bounds (a reign, an
+    /// era, a war), kept verbatim — the label is authoritative, the range
+    /// only places it (PeriodO's twin law). At most 256 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
+
+/// The longest period label a temporal facet admits.
+pub const TEMPORAL_LABEL_MAX_CHARS: usize = 256;
 
 impl TemporalFacet {
     /// A facet with one kind and no carriers yet; the carrier rule rejects it
@@ -131,6 +139,7 @@ impl TemporalFacet {
             timezone_policy_ref: None,
             uncertainty: None,
             source_ref: None,
+            label: None,
         }
     }
 
@@ -550,6 +559,15 @@ fn validate_temporal_facet(facet: &TemporalFacet) -> Result<()> {
         )
         .with("kind", format!("{:?}", facet.kind)));
     }
+    if let Some(label) = &facet.label {
+        if label.chars().count() > TEMPORAL_LABEL_MAX_CHARS {
+            return Err(AikitError::new(
+                "knowledge.facet_invalid_temporal",
+                "a temporal facet's label is at most 256 characters",
+            )
+            .with("field", "temporal.label"));
+        }
+    }
     if let Some(instant) = &facet.instant {
         require_rfc3339(
             "knowledge.facet_invalid_temporal",
@@ -774,6 +792,40 @@ mod tests {
             ..TemporalFacet::new(TemporalKind::Now)
         };
         assert!(validate_temporal_facet(&carried).is_ok());
+    }
+
+    #[test]
+    fn a_period_label_is_kept_verbatim_and_bounded() {
+        let named = TemporalFacet {
+            instant: Some("1558-11-17T00:00:00Z".to_owned()),
+            label: Some("Reign of Elizabeth I".to_owned()),
+            ..TemporalFacet::new(TemporalKind::Valid)
+        };
+        assert!(validate_temporal_facet(&named).is_ok());
+        let json = serde_json::to_value(&named).unwrap();
+        assert_eq!(json["label"], "Reign of Elizabeth I");
+        let back: TemporalFacet = serde_json::from_value(json).unwrap();
+        assert_eq!(back, named);
+
+        let unnamed = TemporalFacet {
+            instant: Some("1558-11-17T00:00:00Z".to_owned()),
+            ..TemporalFacet::new(TemporalKind::Valid)
+        };
+        assert!(serde_json::to_value(&unnamed)
+            .unwrap()
+            .get("label")
+            .is_none());
+
+        let too_long = TemporalFacet {
+            label: Some("x".repeat(TEMPORAL_LABEL_MAX_CHARS + 1)),
+            ..named
+        };
+        let error = validate_temporal_facet(&too_long).unwrap_err();
+        assert_eq!(error.code(), "knowledge.facet_invalid_temporal");
+        assert_eq!(
+            error.details().get("field").map(String::as_str),
+            Some("temporal.label")
+        );
     }
 
     #[test]
