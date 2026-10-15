@@ -765,6 +765,7 @@ fn knowledge_route(command: &KnowledgeSub) -> &'static str {
         KnowledgeSub::Read(_) => "cmd_knowledge_read",
         KnowledgeSub::Coverage(_) => "cmd_knowledge_coverage",
         KnowledgeSub::Relations(_) => "cmd_knowledge_relations",
+        KnowledgeSub::RelationsBatch(_) => "cmd_knowledge_relations_batch",
         KnowledgeSub::Graph(_) => "cmd_knowledge_graph",
         KnowledgeSub::Route(_) => "cmd_knowledge_route",
         KnowledgeSub::Frame(_) => "cmd_knowledge_frame",
@@ -3513,6 +3514,11 @@ pub enum KnowledgeSub {
     Open(KnowledgeOpenArgs),
     Read(KnowledgeReadArgs),
     Relations(KnowledgeRelationsArgs),
+    /// Many relation views in one process: reads an
+    /// `aikit.knowledge-relations-batch/v1` request on stdin and answers each
+    /// item with exactly the envelope `knowledge relations` prints for it.
+    #[command(name = "relations-batch")]
+    RelationsBatch(KnowledgeRelationsBatchArgs),
     /// Metadata and exact native relations, with explicit completeness limits.
     Graph(KnowledgeGraphArgs),
     Route(KnowledgeRouteArgs),
@@ -3740,6 +3746,11 @@ pub struct KnowledgeRelationsArgs {
     #[arg(long, default_value_t = 512)]
     pub max_edges: usize,
 }
+
+/// `knowledge relations-batch` takes its request on stdin only: structured
+/// input is never shell-expanded argv.
+#[derive(Debug, Args)]
+pub struct KnowledgeRelationsBatchArgs {}
 
 #[derive(Debug, Args)]
 pub struct KnowledgeGraphArgs {

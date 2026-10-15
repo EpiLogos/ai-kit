@@ -6,8 +6,17 @@
 //! writes and reads before this provider serves the projection — writes
 //! strictly (a dangling reference refuses), reads degrading (a dangling
 //! reference becomes a named repair on the provider, never a dead faculty).
+//!
+//! A rebuild writes only what changed. The projection records a digest of
+//! its exact stored rows and register revisions; a rebuild whose objects
+//! encode to the same digest leaves the file untouched, and one that differs
+//! rewrites only the rows whose kind, revision or encoding changed, deletes
+//! only the rows whose objects are gone, and replaces the small register and
+//! metadata tables.
 
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::Duration;
 
 use aikit_core::knowledge::{KnowledgeReading, KnowledgeRelationView, RelationQuery};
 use aikit_core::knowledge_wiki::{
@@ -26,6 +35,10 @@ use rusqlite::{params, Connection};
 
 pub const SQLITE_WIKI_PROVIDER: &str = "provider/semantic-wiki/sqlite";
 const SCHEMA_VERSION: &str = "aikit.sqlite-wiki/v1";
+const DIGEST_KEY: &str = "materialisation_digest";
+
+/// One stored row: kind, object revision and canonical JSON, keyed by ref.
+type StoredRows = BTreeMap<String, (String, String, String)>;
 
 pub struct SqliteWikiProvider {
     index: SemanticWikiIndex,
@@ -65,32 +78,66 @@ impl SqliteWikiProvider {
         let objects = objects.into_iter().collect::<Vec<_>>();
         let (index, repairs) = SemanticWikiIndex::rebuild_with_repairs(objects.clone())?;
         let registers = normalise_registers(registers);
+        let mut rows = StoredRows::new();
+        for object in &objects {
+            let (kind, json) = encode_object(object)?;
+            rows.insert(
+                object.ref_id().as_str().to_owned(),
+                (kind.to_owned(), object.revision().to_string(), json),
+            );
+        }
+        let digest = materialisation_digest(&rows, &registers)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| store_error("create", error))?;
         }
         let mut connection = Connection::open(path).map_err(|error| store_error("open", error))?;
+        // Concurrent invocations over one horizon wait for each other rather
+        // than degrading the Wiki faculty on a busy file.
+        connection
+            .busy_timeout(Duration::from_secs(10))
+            .map_err(|error| store_error("configure", error))?;
         initialise(&connection)?;
+        if stored_digest(&connection)?.as_deref() == Some(digest.as_str()) {
+            return Ok(Self {
+                index,
+                registers,
+                repairs,
+            });
+        }
         let transaction = connection
             .transaction()
             .map_err(|error| store_error("begin", error))?;
-        transaction
-            .execute("DELETE FROM wiki_objects", [])
-            .map_err(|error| store_error("clear objects", error))?;
+        let stored = read_rows(&transaction)?;
+        for reference in stored
+            .keys()
+            .filter(|reference| !rows.contains_key(*reference))
+        {
+            transaction
+                .execute(
+                    "DELETE FROM wiki_objects WHERE resource_ref = ?1",
+                    params![reference],
+                )
+                .map_err(|error| store_error("delete object", error))?;
+        }
+        for (reference, row) in &rows {
+            if stored.get(reference) == Some(row) {
+                continue;
+            }
+            let (kind, revision, json) = row;
+            transaction
+                .execute(
+                    "INSERT INTO wiki_objects(resource_ref, object_kind, object_revision, json) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(resource_ref) DO UPDATE SET object_kind = excluded.object_kind, object_revision = excluded.object_revision, json = excluded.json",
+                    params![reference, kind, revision, json],
+                )
+                .map_err(|error| store_error("write object", error))?;
+        }
         transaction
             .execute("DELETE FROM wiki_register_revisions", [])
             .map_err(|error| store_error("clear revisions", error))?;
         transaction
             .execute("DELETE FROM wiki_metadata", [])
             .map_err(|error| store_error("clear metadata", error))?;
-        for object in &objects {
-            let (kind, json) = encode_object(object)?;
-            transaction
-                .execute(
-                    "INSERT INTO wiki_objects(resource_ref, object_kind, object_revision, json) VALUES (?1, ?2, ?3, ?4)",
-                    params![object.ref_id().as_str(), kind, object.revision().to_string(), json],
-                )
-                .map_err(|error| store_error("write object", error))?;
-        }
         for revision in &registers {
             transaction
                 .execute(
@@ -101,8 +148,8 @@ impl SqliteWikiProvider {
         }
         transaction
             .execute(
-                "INSERT INTO wiki_metadata(key, value) VALUES ('schema', ?1), ('semantic_revision', ?2)",
-                params![SCHEMA_VERSION, index.revision()],
+                "INSERT INTO wiki_metadata(key, value) VALUES ('schema', ?1), ('semantic_revision', ?2), (?3, ?4)",
+                params![SCHEMA_VERSION, index.revision(), DIGEST_KEY, digest],
             )
             .map_err(|error| store_error("write metadata", error))?;
         transaction
@@ -205,6 +252,57 @@ fn initialise(connection: &Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS wiki_register_revisions (register_ref TEXT PRIMARY KEY, content_revision TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS wiki_objects (resource_ref TEXT PRIMARY KEY, object_kind TEXT NOT NULL, object_revision TEXT NOT NULL, json TEXT NOT NULL);",
     ).map_err(|error| store_error("initialise", error))
+}
+
+/// The digest of exactly what the projection stores: every row, ordered by
+/// ref, and the normalised register revisions.
+fn materialisation_digest(rows: &StoredRows, registers: &[WikiRegisterRevision]) -> Result<String> {
+    let encoded = serde_json::to_vec(&(SCHEMA_VERSION, rows, registers))
+        .map_err(|error| store_error("digest projection", error))?;
+    Ok(format!("blake3:{}", blake3::hash(&encoded).to_hex()))
+}
+
+fn stored_digest(connection: &Connection) -> Result<Option<String>> {
+    let mut statement = connection
+        .prepare("SELECT value FROM wiki_metadata WHERE key = ?1")
+        .map_err(|error| store_error("prepare digest read", error))?;
+    let mut rows = statement
+        .query(params![DIGEST_KEY])
+        .map_err(|error| store_error("read digest", error))?;
+    match rows
+        .next()
+        .map_err(|error| store_error("read digest", error))?
+    {
+        Some(row) => Ok(Some(
+            row.get::<_, String>(0)
+                .map_err(|error| store_error("read digest", error))?,
+        )),
+        None => Ok(None),
+    }
+}
+
+fn read_rows(connection: &Connection) -> Result<StoredRows> {
+    let mut statement = connection
+        .prepare("SELECT resource_ref, object_kind, object_revision, json FROM wiki_objects")
+        .map_err(|error| store_error("prepare object read", error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ),
+            ))
+        })
+        .map_err(|error| store_error("read objects", error))?;
+    let mut stored = StoredRows::new();
+    for row in rows {
+        let (reference, value) = row.map_err(|error| store_error("read object", error))?;
+        stored.insert(reference, value);
+    }
+    Ok(stored)
 }
 
 fn normalise_registers(
@@ -445,6 +543,123 @@ mod tests {
                 .revision(),
             u64::MAX
         );
+    }
+
+    /// A write log the projection itself never reads: triggers on the real
+    /// table record every row the next rebuild inserts, updates or deletes.
+    fn log_row_writes(path: &Path) {
+        let connection = Connection::open(path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE row_writes (operation TEXT NOT NULL, resource_ref TEXT NOT NULL);
+                 CREATE TRIGGER log_insert AFTER INSERT ON wiki_objects BEGIN
+                   INSERT INTO row_writes VALUES ('insert', new.resource_ref); END;
+                 CREATE TRIGGER log_update AFTER UPDATE ON wiki_objects BEGIN
+                   INSERT INTO row_writes VALUES ('update', new.resource_ref); END;
+                 CREATE TRIGGER log_delete AFTER DELETE ON wiki_objects BEGIN
+                   INSERT INTO row_writes VALUES ('delete', old.resource_ref); END;",
+            )
+            .unwrap();
+    }
+
+    fn row_writes(path: &Path) -> Vec<(String, String)> {
+        let connection = Connection::open(path).unwrap();
+        let mut statement = connection
+            .prepare("SELECT operation, resource_ref FROM row_writes ORDER BY rowid")
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect()
+    }
+
+    fn two_nodes(second_title: &str) -> Vec<WikiObject> {
+        parse_wiki_objects(&format!(
+            r#"{{"objects":[
+              {{"profile":"okf-wiki/v1","object":"space","ref":"wiki:space:test","revision":1,"node_refs":["wiki:node:one","wiki:node:two"]}},
+              {{"profile":"okf-wiki/v1","object":"node","ref":"wiki:node:one","revision":1,"type":"concept","title":"One","space_refs":["wiki:space:test"],"source_refs":[]}},
+              {{"profile":"okf-wiki/v1","object":"node","ref":"wiki:node:two","revision":1,"type":"concept","title":"{second_title}","space_refs":["wiki:space:test"],"source_refs":[]}}
+            ]}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_unchanged_materialisation_leaves_the_projection_file_untouched() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wiki.sqlite3");
+        SqliteWikiProvider::rebuild(&path, two_nodes("Two"), revisions("blake3:a")).unwrap();
+        log_row_writes(&path);
+        let before = std::fs::read(&path).unwrap();
+        let stamp = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+
+        let again =
+            SqliteWikiProvider::rebuild(&path, two_nodes("Two"), revisions("blake3:a")).unwrap();
+
+        assert_eq!(row_writes(&path), Vec::<(String, String)>::new());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "no byte of the file moved"
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), stamp);
+        assert_eq!(
+            again
+                .resolve(&ResourceRef::parse("wiki:node:two").unwrap())
+                .map(|object| object.revision()),
+            Some(1),
+            "the unchanged projection still serves the objects it was given"
+        );
+    }
+
+    #[test]
+    fn a_changed_object_rewrites_only_its_own_row_and_a_removed_one_only_its_own() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wiki.sqlite3");
+        SqliteWikiProvider::rebuild(&path, two_nodes("Two"), revisions("blake3:a")).unwrap();
+        log_row_writes(&path);
+
+        SqliteWikiProvider::rebuild(&path, two_nodes("Second"), revisions("blake3:b")).unwrap();
+        assert_eq!(
+            row_writes(&path),
+            vec![("update".to_owned(), "wiki:node:two".to_owned())]
+        );
+        let reopened = SqliteWikiProvider::open_current(&path, revisions("blake3:b"))
+            .unwrap()
+            .expect("the new register revision is the stored one");
+        assert_eq!(
+            reopened.search("Second", 4)[0]
+                .address
+                .as_curated()
+                .unwrap()
+                .as_str(),
+            "wiki:node:two"
+        );
+
+        let mut without_two = two_nodes("Second");
+        without_two.retain(|object| object.ref_id().as_str() != "wiki:node:two");
+        if let WikiObject::Space(space) = &mut without_two[0] {
+            space
+                .node_refs
+                .retain(|node| node.as_str() != "wiki:node:two");
+        }
+        SqliteWikiProvider::rebuild(&path, without_two, revisions("blake3:c")).unwrap();
+        assert_eq!(
+            row_writes(&path),
+            vec![
+                ("update".to_owned(), "wiki:node:two".to_owned()),
+                ("delete".to_owned(), "wiki:node:two".to_owned()),
+                ("update".to_owned(), "wiki:space:test".to_owned()),
+            ]
+        );
+        let reopened = SqliteWikiProvider::open_current(&path, revisions("blake3:c"))
+            .unwrap()
+            .unwrap();
+        assert!(reopened
+            .resolve(&ResourceRef::parse("wiki:node:two").unwrap())
+            .is_none());
     }
 
     /// The SQLite projection rebuilds `SemanticWikiIndex` from stored objects,

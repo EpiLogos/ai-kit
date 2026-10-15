@@ -3878,6 +3878,9 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
             let data = aikit_cli::contemplation_field::knowledge_code(code_cmd.command)?;
             return data_reply(data);
         }
+        // Each batch item discovers its own context, exactly as its single
+        // invocation would; the batch itself is bound to none.
+        KnowledgeSub::RelationsBatch(_) => return cmd_knowledge_relations_batch(cwd),
         other => other,
     };
 
@@ -4019,6 +4022,9 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
         KnowledgeSub::Code(_) => {
             unreachable!("KnowledgeSub::Code is dispatched before Service::discover")
         }
+        KnowledgeSub::RelationsBatch(_) => {
+            unreachable!("KnowledgeSub::RelationsBatch is dispatched before Service::discover")
+        }
         // The grouped members route to the exact handlers their root spellings
         // reach: same type, same handler, no second implementation.
         KnowledgeSub::Flow(c) => return cmd_flow(cwd, c),
@@ -4041,6 +4047,163 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
         KnowledgeSub::Jev(c) => return cmd_jev(c),
     };
     Ok(reply(&service, data, warnings))
+}
+
+const RELATIONS_BATCH_SCHEMA: &str = "aikit.knowledge-relations-batch/v1";
+const RELATIONS_BATCH_MAX_ITEMS: usize = 256;
+const RELATIONS_BATCH_MAX_BYTES: u64 = 1024 * 1024;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelationsBatchRequest {
+    schema: String,
+    items: Vec<RelationsBatchItem>,
+}
+
+/// One `knowledge relations` invocation: its `-C` directory, its ADDRESS
+/// (the same text, or the typed address object itself) and its limits, with
+/// the single form's defaults.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelationsBatchItem {
+    cwd: Option<PathBuf>,
+    address: Value,
+    #[serde(default = "relations_default_depth")]
+    depth: u8,
+    #[serde(default = "relations_default_max_nodes")]
+    max_nodes: usize,
+    #[serde(default = "relations_default_max_edges")]
+    max_edges: usize,
+}
+
+fn relations_default_depth() -> u8 {
+    2
+}
+fn relations_default_max_nodes() -> usize {
+    256
+}
+fn relations_default_max_edges() -> usize {
+    512
+}
+
+/// `aikit knowledge relations-batch`: every item answered in one process,
+/// each with exactly the envelope its single `knowledge relations` would
+/// print, in request order. One item's refusal is that item's failure
+/// envelope; it never sinks the others. The items share one reading of each
+/// Central root's world.
+fn cmd_knowledge_relations_batch(cwd: &std::path::Path) -> Result<Reply> {
+    use std::io::Read;
+    let mut body = String::new();
+    std::io::stdin()
+        .take(RELATIONS_BATCH_MAX_BYTES + 1)
+        .read_to_string(&mut body)
+        .map_err(|error| {
+            AikitError::new(
+                "knowledge.relations_batch_input",
+                format!("could not read the relations batch from stdin: {error}"),
+            )
+        })?;
+    if body.len() as u64 > RELATIONS_BATCH_MAX_BYTES {
+        return Err(AikitError::new(
+            "knowledge.relations_batch_input",
+            format!("a relations batch is at most {RELATIONS_BATCH_MAX_BYTES} bytes"),
+        ));
+    }
+    let request: RelationsBatchRequest = serde_json::from_str(&body).map_err(|error| {
+        AikitError::new(
+            "knowledge.relations_batch_input",
+            format!("the relations batch is not an {RELATIONS_BATCH_SCHEMA} request: {error}"),
+        )
+    })?;
+    if request.schema != RELATIONS_BATCH_SCHEMA {
+        return Err(AikitError::new(
+            "knowledge.relations_batch_input",
+            format!(
+                "unsupported relations batch schema {}; expected {RELATIONS_BATCH_SCHEMA}",
+                request.schema
+            ),
+        ));
+    }
+    if request.items.len() > RELATIONS_BATCH_MAX_ITEMS {
+        return Err(AikitError::new(
+            "knowledge.relations_batch_input",
+            format!("a relations batch holds at most {RELATIONS_BATCH_MAX_ITEMS} items"),
+        ));
+    }
+    let share = aikit_cli::app::KnowledgeWorldShare::default();
+    let answers: Vec<std::sync::Mutex<Option<Value>>> =
+        request.items.iter().map(|_| Default::default()).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(1, 4)
+        .min(request.items.len().max(1));
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(item) = request.items.get(index) else {
+                    break;
+                };
+                let answer = relations_batch_answer(cwd, item, &share);
+                *answers[index]
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(answer);
+            });
+        }
+    });
+    let answers: Vec<Value> = answers
+        .into_iter()
+        .map(|answer| {
+            answer
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .expect("every batch item is answered")
+        })
+        .collect();
+    Ok(Reply::Data {
+        context: EnvelopeContext {
+            context_id: None,
+            session_id: None,
+            project_root: Some(cwd.display().to_string()),
+        },
+        data: jval!({"schema": RELATIONS_BATCH_SCHEMA, "answers": answers}),
+        warnings: vec![],
+        exit_code: json::EXIT_OK,
+    })
+}
+
+/// The envelope one item's single invocation prints, success or failure,
+/// reached through the same steps in the same order.
+fn relations_batch_answer(
+    default_cwd: &std::path::Path,
+    item: &RelationsBatchItem,
+    share: &aikit_cli::app::KnowledgeWorldShare,
+) -> Value {
+    let answer = (|| -> Result<Value> {
+        let cwd = item.cwd.as_deref().unwrap_or(default_cwd);
+        let service = Service::discover(cwd)?;
+        let warnings = diagnostic_warnings(&service);
+        let raw = match &item.address {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        let address = parse_knowledge_address(&raw)?;
+        let data = jval!(service.knowledge_relations_shared(
+            &address,
+            item.depth,
+            item.max_nodes,
+            item.max_edges,
+            Some(share),
+        )?);
+        Ok(json::success(
+            &EnvelopeContext::from_descriptor(service.descriptor()),
+            data,
+            warnings,
+        ))
+    })();
+    answer.unwrap_or_else(|error| json::failure(&error))
 }
 
 /// `aikit flow` — owner-side Flow cognition (W1.4/W1.5).

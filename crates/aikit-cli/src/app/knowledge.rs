@@ -44,6 +44,12 @@ use aikit_tui::backend::PaletteBackend;
 
 use super::Service;
 
+mod ledger;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod ledger_tests;
+#[cfg(test)]
+mod relations_tests;
+
 const MAX_DISCOVERY_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_DISCOVERY_FILES: usize = 4096;
 // Native source bytes remain limited independently. JSON escaping can expand
@@ -387,6 +393,100 @@ struct ProjectOwnedAbsence {
     message: String,
 }
 
+/// What an operation needs materialised. Every operation reads current owner
+/// inputs; a narrower need only leaves out the providers its answer never
+/// consults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum KnowledgeNeed {
+    /// Every provider: search, read, status, frame, graph, Flow.
+    Full,
+    /// A Wiki or ProjectMap relation view: the SemanticWiki (with every
+    /// compiled contribution, discovered material's edges included) and the
+    /// ProjectMap. Source pools, NOW-field, Work repos, bkmr and code indexes
+    /// are not attached, because a relation view never reads them.
+    Relations,
+}
+
+/// Central's world reading and the world compiles — the inputs every Project
+/// context of one Central root shares. Read once per operation, or once per
+/// batch through [`KnowledgeWorldShare`].
+pub(super) struct WorldPieces {
+    central_wiki: std::result::Result<CentralWikiPiece, String>,
+    entities: aikit_adapters::central_entities::CentralEntityReading,
+    matrices: aikit_adapters::capability_matrix::WorldMatrixReading,
+    authored: aikit_adapters::projectcentral_authored_wiki::AuthoredWikiWorldReading,
+    explore:
+        Option<std::result::Result<aikit_adapters::oi_explore::ExploreDiscoveryReading, String>>,
+}
+
+struct CentralWikiPiece {
+    objects: Vec<WikiObject>,
+    registers: Vec<aikit_core::knowledge_wiki_provider::WikiRegisterRevision>,
+    absences: Vec<String>,
+}
+
+impl WorldPieces {
+    fn read(central_root: &Path, executable: &Path) -> Self {
+        // Central's world map is an owner process; the world compiles are
+        // local reads. They run side by side.
+        std::thread::scope(|scope| {
+            let central_wiki = scope.spawn(|| {
+                aikit_adapters::central_wiki::read_central_wiki(
+                    &native_source_runner(),
+                    executable,
+                    central_root,
+                )
+                .map(|reading| CentralWikiPiece {
+                    objects: reading.objects,
+                    registers: reading.registers,
+                    absences: reading.absences,
+                })
+                .map_err(|error| error.to_string())
+            });
+            let entities =
+                aikit_adapters::central_entities::materialise_central_entities(central_root);
+            let matrices = aikit_adapters::capability_matrix::compile_world_matrices(central_root);
+            let authored =
+                aikit_adapters::projectcentral_authored_wiki::compile_world_authored_wiki(
+                    central_root,
+                );
+            let explore = aikit_adapters::oi_explore::discovery_seed_path(central_root)
+                .map(|seed| aikit_adapters::oi_explore::read_explore_discovery(&seed));
+            Self {
+                central_wiki: central_wiki
+                    .join()
+                    .expect("Central world reader did not panic"),
+                entities,
+                matrices,
+                authored,
+                explore,
+            }
+        })
+    }
+}
+
+/// One observation of each Central root's world, shared by every operation
+/// of one batch. A batch is one request: its answers stand on one reading of
+/// the owner, taken when the first of them needed it.
+#[derive(Default)]
+pub struct KnowledgeWorldShare {
+    pieces: std::sync::Mutex<BTreeMap<(PathBuf, PathBuf), Arc<WorldPieces>>>,
+}
+
+impl KnowledgeWorldShare {
+    fn pieces(&self, central_root: &Path, executable: &Path) -> Arc<WorldPieces> {
+        let mut pieces = self
+            .pieces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(
+            pieces
+                .entry((central_root.to_path_buf(), executable.to_path_buf()))
+                .or_insert_with(|| Arc::new(WorldPieces::read(central_root, executable))),
+        )
+    }
+}
+
 pub(super) struct KnowledgeRuntime {
     wiki: Option<SqliteWikiProvider>,
     material: Vec<SourceMaterial>,
@@ -691,11 +791,20 @@ impl Service {
         &self,
         operation: impl FnOnce(&KnowledgeRuntime, KnowledgeApplication<'_>) -> Result<T>,
     ) -> Result<T> {
+        self.with_knowledge_for(KnowledgeNeed::Full, None, operation)
+    }
+
+    fn with_knowledge_for<T>(
+        &self,
+        need: KnowledgeNeed,
+        share: Option<&KnowledgeWorldShare>,
+        operation: impl FnOnce(&KnowledgeRuntime, KnowledgeApplication<'_>) -> Result<T>,
+    ) -> Result<T> {
         self.ensure_knowledge_project_scope()?;
         // An operation observes current owner inputs. A later operation,
         // including a nested Flow read, must not inherit a held material
         // snapshot or borrow another operation's runtime.
-        let runtime = self.materialize_knowledge_runtime()?;
+        let runtime = self.materialize_knowledge_runtime(need, share)?;
         let application = runtime.application(self.knowledge_context());
         operation(&runtime, application)
     }
@@ -1410,7 +1519,26 @@ impl Service {
         max_nodes: usize,
         max_edges: usize,
     ) -> Result<KnowledgeRelationView> {
-        self.with_knowledge(|runtime, application| {
+        self.knowledge_relations_shared(address, depth, max_nodes, max_edges, None)
+    }
+
+    /// The relation view, standing on a batch's shared world reading when one
+    /// is supplied. A Wiki or ProjectMap view materialises only the
+    /// SemanticWiki and ProjectMap it reads; a Source or Code view keeps the
+    /// whole runtime, because it reads source pools and code indexes.
+    pub fn knowledge_relations_shared(
+        &self,
+        address: &KnowledgeAddress,
+        depth: u8,
+        max_nodes: usize,
+        max_edges: usize,
+        share: Option<&KnowledgeWorldShare>,
+    ) -> Result<KnowledgeRelationView> {
+        let need = match address {
+            KnowledgeAddress::Wiki(_) | KnowledgeAddress::ProjectMap(_) => KnowledgeNeed::Relations,
+            KnowledgeAddress::Source(_) | KnowledgeAddress::Code(_) => KnowledgeNeed::Full,
+        };
+        self.with_knowledge_for(need, share, |runtime, application| {
             let view = application.relations(address, depth, max_nodes, max_edges)?;
             if !matches!(address, KnowledgeAddress::Source(_)) || depth == 0 {
                 return Ok(view);
@@ -1567,7 +1695,11 @@ impl Service {
         append_familiarity_reset(&self.index, scope, now_ms())
     }
 
-    fn materialize_knowledge_runtime(&self) -> Result<KnowledgeRuntime> {
+    fn materialize_knowledge_runtime(
+        &self,
+        need: KnowledgeNeed,
+        share: Option<&KnowledgeWorldShare>,
+    ) -> Result<KnowledgeRuntime> {
         let root = self
             .descriptor
             .project_root
@@ -1585,71 +1717,112 @@ impl Service {
         let mut folder_subject_projects = BTreeMap::new();
         let mut matrix_object_projects = BTreeMap::new();
         let central_root = self.current_knowledge_central_root(root)?;
-        let mut discovered = discover_material(
-            root,
-            self.home.root(),
-            &mut absences,
-            central_root.is_none(),
-            central_root,
-        )?;
-        if let Some(central_root) = central_root {
-            let executable = std::env::var_os("CENTRAL_CTRL_BIN")
-                .or_else(|| std::env::var_os("OI_CENTRAL_CTRL_BIN"))
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("ctrl"));
-            match aikit_adapters::central_wiki::read_central_wiki(
-                &native_source_runner(),
-                &executable,
+        let executable = std::env::var_os("CENTRAL_CTRL_BIN")
+            .or_else(|| std::env::var_os("OI_CENTRAL_CTRL_BIN"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("ctrl"));
+        let binding_project = central_root
+            .and_then(|central_root| self.invocation_project_member(central_root, root));
+        // The owner reads (Central's world map and this Project's World
+        // binding) and the world compiles do not depend on the discovery walk
+        // or on each other, so they run beside it. Every result is applied
+        // below in exactly the order this runtime has always applied it.
+        let (discovered, world, binding) = std::thread::scope(|scope| {
+            let world = central_root.map(|central_root| {
+                let executable = executable.as_path();
+                scope.spawn(move || match share {
+                    Some(share) => share.pieces(central_root, executable),
+                    None => Arc::new(WorldPieces::read(central_root, executable)),
+                })
+            });
+            let binding =
+                central_root
+                    .zip(binding_project.as_deref())
+                    .map(|(central_root, project)| {
+                        let executable = executable.as_path();
+                        scope.spawn(move || {
+                            let mut disclosures = Vec::new();
+                            let binding =
+                                aikit_adapters::central_world_sources::read_project_binding(
+                                    &SystemRunner::new(),
+                                    executable,
+                                    central_root,
+                                    project,
+                                    &mut disclosures,
+                                );
+                            (binding, disclosures)
+                        })
+                    });
+            let discovered = discover_material_through_ledger(
+                root,
+                self.home.root(),
+                &self.home.cache(),
+                &mut absences,
+                central_root.is_none(),
                 central_root,
-            ) {
+            );
+            (
+                discovered,
+                world.map(|handle| handle.join().expect("Central world reader did not panic")),
+                binding.map(|handle| {
+                    handle
+                        .join()
+                        .expect("Central World binding reader did not panic")
+                }),
+            )
+        });
+        let mut discovered = discovered?;
+        if let (Some(central_root), Some(world)) = (central_root, world) {
+            match &world.central_wiki {
                 Ok(reading) => {
-                    discovered.wiki = reading.objects;
-                    wiki_registers = reading.registers;
-                    absences.extend(reading.absences);
+                    discovered.wiki = reading.objects.clone();
+                    wiki_registers = reading.registers.clone();
+                    absences.extend(reading.absences.iter().cloned());
                 }
                 Err(error) => absences.push(format!("Central wiki discovery unavailable: {error}")),
             }
             // W10 V3: compiled entity materialisation joins the discovered
             // wiki before the index rebuild; colliding stand-in nodes adopt
             // the entity convention (wiki:node:identity keeps its ref).
-            let entities =
-                aikit_adapters::central_entities::materialise_central_entities(central_root);
-            absences.extend(entities.absences);
-            aikit_adapters::central_entities::adopt_into(&mut discovered.wiki, entities.objects);
+            absences.extend(world.entities.absences.iter().cloned());
+            aikit_adapters::central_entities::adopt_into(
+                &mut discovered.wiki,
+                world.entities.objects.clone(),
+            );
             // W10 V4 extension: capability matrices compile in both placements
             // (project spaces + the Central root composition), origin Compiled.
-            let matrices = aikit_adapters::capability_matrix::compile_world_matrices(central_root);
-            absences.extend(matrices.absences);
-            matrix_object_projects = matrices.object_projects;
-            project_absences.extend(matrices.project_absences.into_iter().map(|absence| {
+            absences.extend(world.matrices.absences.iter().cloned());
+            matrix_object_projects = world.matrices.object_projects.clone();
+            project_absences.extend(world.matrices.project_absences.iter().map(|absence| {
                 ProjectOwnedAbsence {
-                    project: absence.project,
-                    message: absence.message,
+                    project: absence.project.clone(),
+                    message: absence.message.clone(),
                 }
             }));
-            aikit_adapters::central_entities::adopt_into(&mut discovered.wiki, matrices.objects);
+            aikit_adapters::central_entities::adopt_into(
+                &mut discovered.wiki,
+                world.matrices.objects.clone(),
+            );
             // CASE 19 / W10 V9.4: authored Markdown under each project's
             // ProjectCentral/user/** compiles its explicit [[wikilinks]]
             // into the same SemanticWiki as ordinary Compiled edges — never
             // as new WikiNodes. Unresolved links stay disclosed as
             // per-project rollups, never as synthetic edges.
-            let authored_wiki =
-                aikit_adapters::projectcentral_authored_wiki::compile_world_authored_wiki(
-                    central_root,
-                );
-            project_absences.extend(authored_wiki.absences.into_iter().map(|absence| {
+            project_absences.extend(world.authored.absences.iter().map(|absence| {
                 ProjectOwnedAbsence {
-                    project: absence.project,
-                    message: absence.message,
+                    project: absence.project.clone(),
+                    message: absence.message.clone(),
                 }
             }));
-            authored_pending = authored_wiki.pending;
-            authored_edge_projects = authored_wiki.edge_projects;
+            authored_pending = world.authored.pending.clone();
+            authored_edge_projects = world.authored.edge_projects.clone();
             aikit_adapters::central_entities::adopt_into(
                 &mut discovered.wiki,
-                authored_wiki
+                world
+                    .authored
                     .edges
-                    .into_iter()
+                    .iter()
+                    .cloned()
                     .map(WikiObject::Edge)
                     .collect(),
             );
@@ -1659,19 +1832,18 @@ impl Service {
             // membership — so Search/Resolve reveals eligible presentations
             // without a second store. An absent seed is ordinary (nothing
             // projected yet); it never gates addressability.
-            if let Some(seed_path) = aikit_adapters::oi_explore::discovery_seed_path(central_root) {
-                match aikit_adapters::oi_explore::read_explore_discovery(&seed_path) {
-                    Ok(reading) => {
-                        absences.extend(reading.absences);
-                        aikit_adapters::central_entities::adopt_into(
-                            &mut discovered.wiki,
-                            reading.objects,
-                        );
-                    }
-                    Err(error) => {
-                        absences.push(format!("Explore discovery seed unreadable: {error}"))
-                    }
+            match &world.explore {
+                Some(Ok(reading)) => {
+                    absences.extend(reading.absences.iter().cloned());
+                    aikit_adapters::central_entities::adopt_into(
+                        &mut discovered.wiki,
+                        reading.objects.clone(),
+                    );
                 }
+                Some(Err(error)) => {
+                    absences.push(format!("Explore discovery seed unreadable: {error}"))
+                }
+                None => {}
             }
             // W10 V5: a project context binds the same entity refs through
             // Central's effective world sources — never a second subject;
@@ -1680,17 +1852,13 @@ impl Service {
             // Work member, else the invocation cwd's), so a Work directory
             // whose discovery collapsed onto the world root still becomes a
             // scoped context instead of running uncontextualised.
-            if let Some(project) = self.invocation_project_member(central_root, root) {
+            if let (Some(project), Some((world_binding, disclosures))) =
+                (binding_project.clone(), binding)
+            {
                 // The owner distinguishes a present native Project facet,
                 // genuine manifest-less membership and current unavailability.
                 // Directory names and raw manifest reads do not grant lineage.
-                let world_binding = aikit_adapters::central_world_sources::read_project_binding(
-                    &SystemRunner::new(),
-                    &executable,
-                    central_root,
-                    &project,
-                    &mut absences,
-                );
+                absences.extend(disclosures);
                 if let Some(binding) = world_binding {
                     aikit_adapters::central_world_sources::bind_project_context(
                         &mut discovered.wiki,
@@ -1830,8 +1998,9 @@ impl Service {
             }
             // Per-project anchor state, loud in status (Design D): a missing
             // anchor degrades folder subjects, so it is named once per
-            // project with the one command that fixes it.
-            for project in &work_projects {
+            // project with the one command that fixes it. Status notes and
+            // source scopes are not read by a relation view.
+            for project in work_projects.iter().filter(|_| need == KnowledgeNeed::Full) {
                 let anchor_ref =
                     aikit_adapters::projectcentral_folder_subjects::project_root_anchor_ref(
                         &project.name,
@@ -1883,29 +2052,32 @@ impl Service {
             }
         }
 
-        let central = if let Some(central_root) = central_root {
-            let project = self.invocation_project_member(central_root, root);
-            // A missing map degrades this lens, not independent Wiki/code
-            // faculties. Its absence never activates a disposable substitute.
-            match CentralFileMapProvider::connect(
-                native_source_runner(),
-                aikit_adapters::central_file_map::executable(),
-                central_root,
-                project.as_deref(),
-            ) {
-                Ok(provider) => {
-                    note_central_map_freshness(central_root, &mut status_notes);
-                    Some(Arc::new(provider))
+        let central =
+            if let Some(central_root) = central_root.filter(|_| need == KnowledgeNeed::Full) {
+                let project = self.invocation_project_member(central_root, root);
+                // A missing map degrades this lens, not independent Wiki/code
+                // faculties. Its absence never activates a disposable substitute.
+                match CentralFileMapProvider::connect(
+                    native_source_runner(),
+                    aikit_adapters::central_file_map::executable(),
+                    central_root,
+                    project.as_deref(),
+                ) {
+                    Ok(provider) => {
+                        note_central_map_freshness(central_root, &mut status_notes);
+                        Some(Arc::new(provider))
+                    }
+                    Err(error) => {
+                        absences.push(format!("Central file map unavailable: {error}"));
+                        None
+                    }
                 }
-                Err(error) => {
-                    absences.push(format!("Central file map unavailable: {error}"));
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let now_field = if let Some(central_root) = central_root {
+            } else {
+                None
+            };
+        let now_field = if let Some(central_root) =
+            central_root.filter(|_| need == KnowledgeNeed::Full)
+        {
             if std::env::var_os("AIKIT_NOW_FIELD_SEARCH").is_some_and(|v| v == "off") {
                 absences.push("NOW-field search disabled by AIKIT_NOW_FIELD_SEARCH=off".into());
                 None
@@ -1935,7 +2107,7 @@ impl Service {
         // The live Work-repos pool (Design A): one repo per discovered
         // project, searched at query time. It exists only where projects
         // were discovered; the NOW-field/native providers keep their priority.
-        let work_repos = if work_projects.is_empty() {
+        let work_repos = if work_projects.is_empty() || need != KnowledgeNeed::Full {
             None
         } else {
             match WorkReposSourcePoolProvider::connect_native(
@@ -1989,7 +2161,9 @@ impl Service {
         // stores — personal included — are searched read-only without any
         // opt-in capsule. Writes stay fenced in the provider; an inactive
         // pool costs one status note, never a per-query absence.
-        let bkmr_stores = {
+        let bkmr_stores = if need != KnowledgeNeed::Full {
+            None
+        } else {
             let config_dir = bkmr_config_dir();
             let stores = discover_bkmr_stores(&config_dir);
             let provider = BkmrStoreSearchProvider::connect(SystemRunner::new(), "bkmr", stores);
@@ -2084,7 +2258,9 @@ impl Service {
                         db_path,
                         embeddings,
                     );
-                    if provider.status().available {
+                    if need != KnowledgeNeed::Full {
+                        // A relation view reads no source pool.
+                    } else if provider.status().available {
                         if let Err(error) = provider.rebuild(&material) {
                             absences.push(format!("bkmr SourcePool degraded: {error}"));
                         }
@@ -2141,7 +2317,13 @@ impl Service {
             let source = SourceRef::parse(format!("source:project-code:{}", project.project_id))?;
             project_sources.push((project.clone(), source));
         }
-        for batch in project_sources.chunks(parallelism) {
+        // A relation view reads no code index; the per-project SourceRefs
+        // above are still formed, so a malformed project identity refuses
+        // every operation alike.
+        for batch in project_sources
+            .chunks(parallelism)
+            .filter(|_| need == KnowledgeNeed::Full)
+        {
             let outcomes: Vec<(
                 WorkRepoProject,
                 GitNexusCodeIndexProvider<SystemRunner>,
@@ -2503,7 +2685,7 @@ impl DiscoveryRootObservation {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct DiscoveryLimits {
     entries: usize,
     queued: usize,
@@ -2744,6 +2926,9 @@ fn directory_observation_failure(
 struct DiscoveryBoundary {
     selected: DiscoveryRootObservation,
     world: Option<DiscoveryRootObservation>,
+    /// How many directory checkpoints a listing ran: the per-entry proof.
+    #[cfg(test)]
+    checkpoints: std::cell::Cell<usize>,
 }
 
 impl DiscoveryBoundary {
@@ -2761,7 +2946,12 @@ impl DiscoveryBoundary {
             }
             None => None,
         };
-        Ok(Self { selected, world })
+        Ok(Self {
+            selected,
+            world,
+            #[cfg(test)]
+            checkpoints: std::cell::Cell::new(0),
+        })
     }
 
     fn admit(&self, path: &Path, directory: bool) -> Result<PathBuf> {
@@ -2849,6 +3039,8 @@ impl DiscoveryBoundary {
         let original_mapping = self.admit(path, true)?;
         let original_identity = discovery_directory_identity(path)?;
         let checkpoint = || -> Result<()> {
+            #[cfg(test)]
+            self.checkpoints.set(self.checkpoints.get() + 1);
             if self.admit(path, true)? != original_mapping
                 || discovery_directory_identity(path)? != original_identity
             {
@@ -2859,8 +3051,12 @@ impl DiscoveryBoundary {
         checkpoint()?;
         let mut entries = fs::read_dir(path)
             .map_err(|error| directory_observation_failure(discovery_io(error), checkpoint()))?;
+        // Each entry is checked once: the checkpoint that follows its
+        // observation binds that observation to the unchanged directory, and
+        // it is also the checkpoint the next entry's listing follows. A second
+        // checkpoint at the top of the loop re-read the same mapping with
+        // nothing but the in-process commit in between.
         loop {
-            checkpoint()?;
             if budget.observed >= budget.limit {
                 // Do not request another entry just to guess whether anything
                 // remains. Exact-bound EOF is still unknown until observed.
@@ -2941,25 +3137,149 @@ fn discovery_absence(absences: &mut Vec<String>, error: &aikit_core::AikitError)
     });
 }
 
-fn discover_material(
+/// The runtime's discovery: the walk a current ledger already answers, or a
+/// full walk that records what it observed so the next invocation can reuse
+/// it while nothing it observed has changed (see `ledger`).
+fn discover_material_through_ledger(
     root: &Path,
     home: &Path,
+    cache: &Path,
     absences: &mut Vec<String>,
     discover_wiki: bool,
     native_world_root: Option<&Path>,
 ) -> Result<DiscoveredMaterial> {
-    discover_material_with_limits(
+    let limits = DiscoveryLimits::default();
+    let absolute = |path: &Path| -> Result<PathBuf> {
+        Ok(if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir().map_err(discovery_io)?.join(path)
+        })
+    };
+    let key = if ledger::SUPPORTED {
+        ledger::LedgerKey::new(
+            &absolute(root)?,
+            &absolute(home)?,
+            native_world_root,
+            discover_wiki,
+            format!("{limits:?}"),
+        )
+    } else {
+        None
+    };
+    let Some(key) = key else {
+        return discover_material_recorded(
+            root,
+            home,
+            absences,
+            discover_wiki,
+            native_world_root,
+            limits,
+            None,
+        );
+    };
+    let ledgers = ledger::DiscoveryLedgers::in_cache(cache);
+    let root_canonical = fs::canonicalize(root).ok();
+    let world_canonical = match native_world_root {
+        Some(world) => fs::canonicalize(world).ok().map(Some),
+        None => Some(None),
+    };
+    if let (Some(root_canonical), Some(world_canonical)) = (&root_canonical, &world_canonical) {
+        if let Some(outcome) = ledgers.current(&key, root_canonical, world_canonical.as_deref()) {
+            absences.extend(outcome.absences);
+            return Ok(DiscoveredMaterial {
+                wiki: outcome.wiki,
+                sources: outcome
+                    .sources
+                    .into_iter()
+                    .map(|item| (item.binding.source.clone(), item))
+                    .collect(),
+            });
+        }
+    }
+    let recorder = std::cell::RefCell::new(ledger::DiscoveryRecorder::new());
+    let first_absence = absences.len();
+    let discovered = discover_material_recorded(
         root,
         home,
         absences,
         discover_wiki,
         native_world_root,
-        DiscoveryLimits::default(),
-    )
+        limits,
+        Some(&recorder),
+    )?;
+    // Kept only when the roots the walk was keyed by still resolve as they
+    // did before it started.
+    if let (Some(root_canonical), Some(world_canonical)) = (root_canonical, world_canonical) {
+        let unchanged = fs::canonicalize(root).ok().as_ref() == Some(&root_canonical)
+            && native_world_root.map(|world| fs::canonicalize(world).ok())
+                == world_canonical.as_ref().map(|path| Some(path.clone()));
+        if unchanged {
+            ledgers.keep(
+                &key,
+                &root_canonical,
+                world_canonical.as_deref(),
+                recorder.into_inner(),
+                &ledger::DiscoveryOutcome {
+                    wiki: discovered.wiki.clone(),
+                    sources: discovered.sources.values().cloned().collect(),
+                    absences: absences[first_absence..].to_vec(),
+                },
+            );
+        }
+    }
+    Ok(discovered)
 }
 
-fn discovery_file_exists(path: &Path) -> Result<bool> {
-    match fs::metadata(path) {
+/// One followed metadata call the walk classified an entry by. A plain
+/// entry's kind cannot change without changing the listed directory that
+/// holds it, whose full stamps are observed; an aliased entry's target can,
+/// so its followed identity and kind (or the exact error, for a dangling
+/// alias) are recorded with the link and the chain it resolves through. A
+/// directory the walk lists and a file whose bytes it reads are observed in
+/// full where that happens.
+fn observed_metadata(
+    path: &Path,
+    aliased: bool,
+    recorder: ledger::SharedRecorder<'_>,
+) -> std::io::Result<fs::Metadata> {
+    let result = fs::metadata(path);
+    if let (Some(recorder), true) = (recorder, aliased) {
+        let mut recorder = recorder.borrow_mut();
+        recorder.record_kind(path, &result);
+        recorder.observe_alias(path);
+    }
+    result
+}
+
+/// A directory's own marker decides whether it is admitted before it is ever
+/// listed; a refused directory is never listed, so its marker is observed.
+fn observe_marker(directory: &Path, recorder: ledger::SharedRecorder<'_>) {
+    if let Some(recorder) = recorder {
+        recorder
+            .borrow_mut()
+            .observe(&directory.join(aikit_core::NO_AGENT_RETRIEVAL_MARKER));
+    }
+}
+
+fn entry_is_alias(entry: &fs::DirEntry) -> bool {
+    entry
+        .file_type()
+        .map(|kind| kind.is_symlink())
+        .unwrap_or(true)
+}
+
+fn discovery_file_exists(path: &Path, recorder: ledger::SharedRecorder<'_>) -> Result<bool> {
+    let result = fs::metadata(path);
+    if let Some(recorder) = recorder {
+        // An existing register is read next; its full stamps decide reuse.
+        recorder.borrow_mut().record(
+            path,
+            ledger::Reading::Followed,
+            ledger::Outcome::of(&result),
+        );
+    }
+    match result {
         Ok(metadata) => Ok(metadata.is_file()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(discovery_io(error)),
@@ -2972,7 +3292,16 @@ fn read_canonical_discovery(
     discovered: &mut DiscoveredMaterial,
     seen: &mut BTreeSet<String>,
     absences: &mut Vec<String>,
+    recorder: ledger::SharedRecorder<'_>,
 ) {
+    if let Some(recorder) = recorder {
+        // The register's bytes and every directory its admission consults.
+        let mut recorder = recorder.borrow_mut();
+        recorder.observe(path);
+        if let Some(parent) = path.parent() {
+            recorder.observe_chain(parent);
+        }
+    }
     let text = match boundary.read(path, 16 * 1024 * 1024) {
         Ok(text) => text,
         Err(error) => {
@@ -3006,6 +3335,26 @@ enum PendingDiscovery {
     },
 }
 
+/// The bare walk, without a ledger: what every recorded walk must equal.
+#[cfg(test)]
+fn discover_material(
+    root: &Path,
+    home: &Path,
+    absences: &mut Vec<String>,
+    discover_wiki: bool,
+    native_world_root: Option<&Path>,
+) -> Result<DiscoveredMaterial> {
+    discover_material_with_limits(
+        root,
+        home,
+        absences,
+        discover_wiki,
+        native_world_root,
+        DiscoveryLimits::default(),
+    )
+}
+
+#[cfg(test)]
 fn discover_material_with_limits(
     root: &Path,
     home: &Path,
@@ -3014,6 +3363,28 @@ fn discover_material_with_limits(
     native_world_root: Option<&Path>,
     limits: DiscoveryLimits,
 ) -> Result<DiscoveredMaterial> {
+    discover_material_recorded(
+        root,
+        home,
+        absences,
+        discover_wiki,
+        native_world_root,
+        limits,
+        None,
+    )
+}
+
+fn discover_material_recorded(
+    root: &Path,
+    home: &Path,
+    absences: &mut Vec<String>,
+    discover_wiki: bool,
+    native_world_root: Option<&Path>,
+    limits: DiscoveryLimits,
+    recorder: ledger::SharedRecorder<'_>,
+) -> Result<DiscoveredMaterial> {
+    #[cfg(test)]
+    ledger::WALKS.with(|walks| walks.set(walks.get() + 1));
     let mut discovered = DiscoveredMaterial::default();
     let boundary = match DiscoveryBoundary::capture(root, native_world_root) {
         Ok(boundary) => boundary,
@@ -3022,6 +3393,17 @@ fn discover_material_with_limits(
             return Ok(discovered);
         }
     };
+    if let Some(recorder) = recorder {
+        // The roots, their canonical forms and every ancestor the admission
+        // policy or a canonicalisation consults on the way to them.
+        let mut recorder = recorder.borrow_mut();
+        recorder.observe_chain(&boundary.selected.requested);
+        recorder.observe_chain(&boundary.selected.canonical);
+        if let Some(world) = &boundary.world {
+            recorder.observe_chain(&world.requested);
+            recorder.observe_chain(&world.canonical);
+        }
+    }
     let root = boundary.selected.requested.as_path();
     let home = if home.is_absolute() {
         home.to_path_buf()
@@ -3038,7 +3420,7 @@ fn discover_material_with_limits(
         match boundary
             .selected
             .check()
-            .and_then(|_| discovery_file_exists(&root_wiki))
+            .and_then(|_| discovery_file_exists(&root_wiki, recorder))
         {
             Ok(true) => read_canonical_discovery(
                 &boundary,
@@ -3046,6 +3428,7 @@ fn discover_material_with_limits(
                 &mut discovered,
                 &mut seen_wiki_refs,
                 absences,
+                recorder,
             ),
             Ok(false) => {
                 if let Err(error) = boundary.selected.check() {
@@ -3057,19 +3440,25 @@ fn discover_material_with_limits(
         let work = root.join("Work");
         let mut canonical = CanonicalPaths::new(limits);
         let mut budget = DirectoryBudget::new(limits.canonical_entries);
+        if let Some(recorder) = recorder {
+            // Listed below: its full stamps decide which registers exist.
+            recorder.borrow_mut().observe(&work);
+        }
         let visit = match fs::metadata(&work) {
             Ok(metadata) if metadata.is_dir() => Some(boundary.visit_entries(
                 &work,
                 &mut budget,
                 |entry| {
                     let path = entry.path();
-                    let metadata = fs::metadata(&path).map_err(discovery_io)?;
+                    let metadata = observed_metadata(&path, entry_is_alias(&entry), recorder)
+                        .map_err(discovery_io)?;
                     if !metadata.is_dir() {
                         return Ok(None);
                     }
+                    observe_marker(&path, recorder);
                     boundary.admit(&path, true)?;
                     let wiki = path.join("ProjectCentral/agents/wiki/wiki.json");
-                    Ok(discovery_file_exists(&wiki)?.then_some(wiki))
+                    Ok(discovery_file_exists(&wiki, recorder)?.then_some(wiki))
                 },
                 |pending| {
                     match pending {
@@ -3121,6 +3510,7 @@ fn discover_material_with_limits(
                 &mut discovered,
                 &mut seen_wiki_refs,
                 absences,
+                recorder,
             );
         }
     }
@@ -3164,6 +3554,10 @@ fn discover_material_with_limits(
                 break;
             }
         }
+        if let Some(recorder) = recorder {
+            // The listing is decided by the directory's own stamps.
+            recorder.borrow_mut().observe(&dir);
+        }
         let visit = boundary.visit_entries(&dir, &mut budget,
             |entry| {
                 let path = entry.path();
@@ -3173,10 +3567,12 @@ fn discover_material_with_limits(
                         limit: limits.single_path_bytes,
                     }));
                 }
-                let metadata = fs::metadata(&path).map_err(discovery_io)?;
+                let metadata = observed_metadata(&path, entry_is_alias(&entry), recorder)
+                    .map_err(discovery_io)?;
                 if metadata.is_dir() {
                     if path == home || is_ignored_dir(&path) { return Ok(PendingDiscovery::Skip); }
                     // Current refusal happens before frontier retention/listing.
+                    observe_marker(&path, recorder);
                     boundary.admit(&path, true)?;
                     return Ok(PendingDiscovery::Directory(path));
                 }
@@ -3191,6 +3587,10 @@ fn discover_material_with_limits(
                 // This is an actually observed JSON candidate, including a
                 // refused/failed body read; counters are not derived products.
                 files.set(files.get() + 1);
+                if let Some(recorder) = recorder {
+                    // Its bytes decide the walk: observed in full, before the read.
+                    recorder.borrow_mut().observe(&path);
+                }
                 let text = boundary.read(&path, MAX_DISCOVERY_FILE_BYTES)?;
                 let source_items = serde_json::from_str::<SourceMaterial>(&text)
                     .map(|item| vec![item])

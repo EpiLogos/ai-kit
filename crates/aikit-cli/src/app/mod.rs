@@ -89,6 +89,7 @@ use crate::temporal::process_central_root;
 mod development_field;
 mod flow_cognition;
 mod knowledge;
+pub use knowledge::KnowledgeWorldShare;
 mod model_resident;
 pub mod repertoire;
 mod root_context;
