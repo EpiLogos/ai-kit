@@ -471,10 +471,93 @@ impl WorldPieces {
 
 /// One observation of each Central root's world, shared by every operation
 /// of one batch. A batch is one request: its answers stand on one reading of
-/// the owner, taken when the first of them needed it.
+/// the owner, taken when the first of them needed it — Central's world map
+/// and the world compiles once per root, and Central's `central.world.here`
+/// facet once per Project (the binding observation asks it before and after
+/// reading the Project's effective sources; within a batch both stand on the
+/// one answer).
 #[derive(Default)]
 pub struct KnowledgeWorldShare {
     pieces: std::sync::Mutex<BTreeMap<(PathBuf, PathBuf), Arc<WorldPieces>>>,
+    world_here: std::sync::Mutex<BTreeMap<Vec<String>, aikit_adapters::runner::Output>>,
+}
+
+/// The owner runner of a batch's World binding reads: every invocation runs
+/// as `SystemRunner` runs it, except that an identical `central.world.here`
+/// invocation Central answered successfully is answered again from the
+/// batch's share, within the capture allowance the caller has left.
+struct SharedWorldHere<'a> {
+    inner: SystemRunner,
+    share: &'a KnowledgeWorldShare,
+}
+
+impl SharedWorldHere<'_> {
+    fn is_world_here(argv: &[String]) -> bool {
+        argv.get(6).map(String::as_str) == Some("central.world.here")
+    }
+}
+
+impl aikit_adapters::runner::CommandRunner for SharedWorldHere<'_> {
+    fn run(&self, argv: &[String]) -> Result<aikit_adapters::runner::Output> {
+        self.inner.run(argv)
+    }
+
+    fn configured_timeout(&self) -> Option<std::time::Duration> {
+        self.inner.configured_timeout()
+    }
+
+    fn run_with_timeout(
+        &self,
+        argv: &[String],
+        timeout: std::time::Duration,
+    ) -> Result<aikit_adapters::runner::Output> {
+        self.inner.run_with_timeout(argv, timeout)
+    }
+
+    fn run_with_limits(
+        &self,
+        argv: &[String],
+        remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize,
+        strict_utf8: bool,
+    ) -> Result<aikit_adapters::runner::Output> {
+        if !Self::is_world_here(argv) {
+            return self.inner.run_with_limits(
+                argv,
+                remaining_timeout,
+                remaining_aggregate_bytes,
+                strict_utf8,
+            );
+        }
+        let held = self
+            .share
+            .world_here
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(argv)
+            .cloned();
+        // The native capture reserves half the allowance for each stream.
+        if let Some(output) = held.filter(|output| {
+            output.stdout.len() <= remaining_aggregate_bytes / 2
+                && output.stderr.len() <= remaining_aggregate_bytes / 2
+        }) {
+            return Ok(output);
+        }
+        let output = self.inner.run_with_limits(
+            argv,
+            remaining_timeout,
+            remaining_aggregate_bytes,
+            strict_utf8,
+        )?;
+        if output.status == 0 {
+            self.share
+                .world_here
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(argv.to_vec(), output.clone());
+        }
+        Ok(output)
+    }
 }
 
 impl KnowledgeWorldShare {
@@ -1746,14 +1829,29 @@ impl Service {
                         let executable = executable.as_path();
                         scope.spawn(move || {
                             let mut disclosures = Vec::new();
-                            let binding =
-                                aikit_adapters::central_world_sources::read_project_binding(
-                                    &SystemRunner::new(),
-                                    executable,
-                                    central_root,
-                                    project,
-                                    &mut disclosures,
-                                );
+                            let binding = match share {
+                                Some(share) => {
+                                    aikit_adapters::central_world_sources::read_project_binding(
+                                        &SharedWorldHere {
+                                            inner: SystemRunner::new(),
+                                            share,
+                                        },
+                                        executable,
+                                        central_root,
+                                        project,
+                                        &mut disclosures,
+                                    )
+                                }
+                                None => {
+                                    aikit_adapters::central_world_sources::read_project_binding(
+                                        &SystemRunner::new(),
+                                        executable,
+                                        central_root,
+                                        project,
+                                        &mut disclosures,
+                                    )
+                                }
+                            };
                             (binding, disclosures)
                         })
                     });

@@ -4050,6 +4050,12 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
 }
 
 const RELATIONS_BATCH_SCHEMA: &str = "aikit.knowledge-relations-batch/v1";
+/// The same request, its answers streamed: one line per item the moment it
+/// is answered — `{"schema": <this>, "index": <item>, "answer": <envelope>}`
+/// in completion order — and then the closing envelope, whose data is
+/// `{"schema": <this>, "answered": <items>}`. Each `answer` is exactly the
+/// envelope the v1 document carries for that item.
+const RELATIONS_BATCH_STREAM_SCHEMA: &str = "aikit.knowledge-relations-batch/v2";
 const RELATIONS_BATCH_MAX_ITEMS: usize = 256;
 const RELATIONS_BATCH_MAX_BYTES: u64 = 1024 * 1024;
 
@@ -4088,9 +4094,9 @@ fn relations_default_max_edges() -> usize {
 
 /// `aikit knowledge relations-batch`: every item answered in one process,
 /// each with exactly the envelope its single `knowledge relations` would
-/// print, in request order. One item's refusal is that item's failure
-/// envelope; it never sinks the others. The items share one reading of each
-/// Central root's world.
+/// print, in request order (v1), or streamed as each is answered (v2). One
+/// item's refusal is that item's failure envelope; it never sinks the
+/// others. The items share one reading of each Central root's world.
 fn cmd_knowledge_relations_batch(cwd: &std::path::Path) -> Result<Reply> {
     use std::io::Read;
     let mut body = String::new();
@@ -4115,11 +4121,12 @@ fn cmd_knowledge_relations_batch(cwd: &std::path::Path) -> Result<Reply> {
             format!("the relations batch is not an {RELATIONS_BATCH_SCHEMA} request: {error}"),
         )
     })?;
-    if request.schema != RELATIONS_BATCH_SCHEMA {
+    let streamed = request.schema == RELATIONS_BATCH_STREAM_SCHEMA;
+    if request.schema != RELATIONS_BATCH_SCHEMA && !streamed {
         return Err(AikitError::new(
             "knowledge.relations_batch_input",
             format!(
-                "unsupported relations batch schema {}; expected {RELATIONS_BATCH_SCHEMA}",
+                "unsupported relations batch schema {}; expected {RELATIONS_BATCH_SCHEMA} or {RELATIONS_BATCH_STREAM_SCHEMA}",
                 request.schema
             ),
         ));
@@ -4147,12 +4154,27 @@ fn cmd_knowledge_relations_batch(cwd: &std::path::Path) -> Result<Reply> {
                     break;
                 };
                 let answer = relations_batch_answer(cwd, item, &share);
+                if streamed {
+                    relations_batch_stream_line(index, &answer);
+                }
                 *answers[index]
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(answer);
             });
         }
     });
+    if streamed {
+        return Ok(Reply::Data {
+            context: EnvelopeContext {
+                context_id: None,
+                session_id: None,
+                project_root: Some(cwd.display().to_string()),
+            },
+            data: jval!({"schema": RELATIONS_BATCH_STREAM_SCHEMA, "answered": answers.len()}),
+            warnings: vec![],
+            exit_code: json::EXIT_OK,
+        });
+    }
     let answers: Vec<Value> = answers
         .into_iter()
         .map(|answer| {
@@ -4172,6 +4194,21 @@ fn cmd_knowledge_relations_batch(cwd: &std::path::Path) -> Result<Reply> {
         warnings: vec![],
         exit_code: json::EXIT_OK,
     })
+}
+
+/// One streamed item: a whole line, written and flushed under the stdout
+/// lock so lines from concurrent items never interleave. A reader that has
+/// gone away (a closed pipe) costs this process nothing but the line.
+fn relations_batch_stream_line(index: usize, answer: &Value) {
+    use std::io::Write;
+    let line = json::line(&jval!({
+        "schema": RELATIONS_BATCH_STREAM_SCHEMA,
+        "index": index,
+        "answer": answer,
+    }));
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    let _ = writeln!(stdout, "{line}").and_then(|()| stdout.flush());
 }
 
 /// The envelope one item's single invocation prints, success or failure,
