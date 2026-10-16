@@ -1,13 +1,12 @@
 ---
-
-**Architecture navigation, 4 October 2026.** [Operations, owners, lifecycles and named Source evidence](../../../docs/ARCHITECTURE-NAVIGATION.md) provide the upward route from this matrix. This documentation-only Main correction preserves the original dated results and source standing; it does not establish installed acceptance.
-
 uid: aikit-capability-matrix
 status: draft-for-review
 standing: agent-inference
 register: episteme
 tags: [aikit, capabilities, product-ground, ql]
 ---
+
+**Architecture navigation, 4 October 2026.** [Operations, owners, lifecycles and named Source evidence](../../../docs/ARCHITECTURE-NAVIGATION.md) provide the upward route from this matrix. This documentation-only Main correction preserves the original dated results and source standing; it does not establish installed acceptance.
 
 # AIKit capability matrix
 
