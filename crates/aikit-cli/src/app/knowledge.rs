@@ -47,8 +47,12 @@ use super::Service;
 mod ledger;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod ledger_tests;
+mod projection_cache;
 #[cfg(test)]
 mod relations_tests;
+mod walk;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod walk_tests;
 
 const MAX_DISCOVERY_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_DISCOVERY_FILES: usize = 4096;
@@ -2219,13 +2223,16 @@ impl Service {
             absences.push("SemanticWiki material absent from the project horizon".into());
             None
         } else {
-            let horizon = blake3::hash(root.to_string_lossy().as_bytes()).to_hex();
-            let path = self
-                .home
-                .cache()
-                .join("knowledge/wiki")
-                .join(format!("{horizon}.sqlite3"));
-            match SqliteWikiProvider::rebuild(&path, discovered.wiki, wiki_registers.clone()) {
+            // One projection per horizon; a projection written new prunes
+            // the horizons nobody has read for its retention, a read never
+            // removes anything (`projection_cache`).
+            match projection_cache::materialise(
+                &self.home.cache(),
+                root,
+                discovered.wiki,
+                wiki_registers.clone(),
+                SystemTime::now(),
+            ) {
                 Ok(provider) => {
                     // The read index materialised past dangling references;
                     // every repair is disclosed as a named absence, one line
@@ -3405,6 +3412,12 @@ fn discover_material_recorded(
         }
     }
     let root = boundary.selected.requested.as_path();
+    // The World the walk stands in decides which named skips apply (`walk`).
+    let position = match &boundary.world {
+        None => walk::WorldPosition::Standalone,
+        Some(world) if world.canonical == boundary.selected.canonical => walk::WorldPosition::Root,
+        Some(_) => walk::WorldPosition::Member,
+    };
     let home = if home.is_absolute() {
         home.to_path_buf()
     } else {
@@ -3554,6 +3567,12 @@ fn discover_material_recorded(
                 break;
             }
         }
+        // A cache is never material. Probed before the directory's own stamps
+        // are recorded: an absent tag is covered by those stamps, a present
+        // one is observed by the probe.
+        if dir != root && walk::cache_skip(&dir, recorder).is_some() {
+            continue;
+        }
         if let Some(recorder) = recorder {
             // The listing is decided by the directory's own stamps.
             recorder.borrow_mut().observe(&dir);
@@ -3571,6 +3590,9 @@ fn discover_material_recorded(
                     .map_err(discovery_io)?;
                 if metadata.is_dir() {
                     if path == home || is_ignored_dir(&path) { return Ok(PendingDiscovery::Skip); }
+                    if walk::named_skip(&path, &dir, root, position).is_some() {
+                        return Ok(PendingDiscovery::Skip);
+                    }
                     // Current refusal happens before frontier retention/listing.
                     observe_marker(&path, recorder);
                     boundary.admit(&path, true)?;

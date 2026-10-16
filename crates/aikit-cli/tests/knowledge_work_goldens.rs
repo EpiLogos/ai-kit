@@ -316,8 +316,10 @@ fn the_discovery_bound_names_where_it_stopped_and_what_it_skipped() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     fs::create_dir_all(root.join("Control")).unwrap();
-    // One deep subtree carrying enough candidate files to trip the bound.
-    let bulk = root.join("Work/bulk/docs/archive");
+    fs::create_dir_all(root.join("Work")).unwrap();
+    // One deep subtree carrying enough candidate files to trip the bound. A World root's walk descends only into its root
+    // register (`Control`; each Project is walked from its own root), so the bulk stands there.
+    let bulk = root.join("Control/bulk/docs/archive");
     fs::create_dir_all(&bulk).unwrap();
     for index in 0..(4096 + 64) {
         fs::write(
