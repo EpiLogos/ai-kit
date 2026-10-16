@@ -48,11 +48,14 @@ impl Snapshot {
         let mut metadata_bytes = Vec::new();
         fs::File::open(&metadata_path)
             .map_err(failure)?
-            .take(1024 * 1024 + 1)
+            .take(super::MAX_INDEX_METADATA_BYTES as u64 + 1)
             .read_to_end(&mut metadata_bytes)
             .map_err(failure)?;
-        if metadata_bytes.len() > 1024 * 1024 {
-            return Err(failure("index metadata exceeds 1 MiB"));
+        if metadata_bytes.len() > super::MAX_INDEX_METADATA_BYTES {
+            return Err(failure(&format!(
+                "index metadata exceeds {} MiB",
+                super::MAX_INDEX_METADATA_BYTES / (1024 * 1024)
+            )));
         }
         let metadata: serde_json::Value =
             serde_json::from_slice(&metadata_bytes).map_err(failure)?;
