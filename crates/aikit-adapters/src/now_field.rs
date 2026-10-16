@@ -66,7 +66,9 @@ impl QueryCapacity {
     fn failure(limit: &str) -> AikitError {
         AikitError::new(
             "now_field.source_roster_budget",
-            "NOW query capacity exhausted before completing its selected roster",
+            format!(
+                "NOW query capacity exhausted before completing its selected roster (limit: {limit})"
+            ),
         )
         .with("capacity", limit)
         .with("remaining_roster", "unknown")
