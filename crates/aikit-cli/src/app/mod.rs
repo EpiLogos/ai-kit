@@ -370,7 +370,7 @@ impl Service {
         })?;
         let args = intent.argv()?;
         let project_root = self.descriptor.project_root.as_deref();
-        let mut command = run::plan_script(capsule, &args, project_root, &self.invocation_cwd)?;
+        let mut command = run::plan_capsule(capsule, &args, project_root, &self.invocation_cwd)?;
         command.mode = intent.mode;
         command.cwd = match intent.cwd {
             aikit_core::capsule::WorkingDir::Project => {
@@ -2675,6 +2675,23 @@ impl Service {
         .with("name", name.to_string()))
     }
 
+    /// Record one run of `capsule` on the event log; see [`run::record_run`].
+    fn record_run(
+        &self,
+        capsule: &Capsule,
+        outcome: aikit_store::Outcome,
+        started: std::time::Instant,
+    ) {
+        run::record_run(
+            &self.index,
+            self.home.event_log(),
+            &self.descriptor,
+            capsule,
+            outcome,
+            started,
+        );
+    }
+
     /// The honest per-client effects of applying `view`, computed by the real
     /// adapters. Any adapter that cannot plan for this context is skipped rather
     /// than guessed at, so a preview never fabricates a projection outcome.
@@ -3166,6 +3183,7 @@ impl AikitApplication for Service {
             self.catalog.get(&id).cloned().ok_or_else(|| {
                 AikitError::new("run.unknown_command", format!("{id} is not loaded"))
             })?;
+        let started = std::time::Instant::now();
 
         // Honour trust: an unreviewed executable must be confirmed before it
         // runs. This must be computed from the capsule's own trust, NOT from
@@ -3180,6 +3198,15 @@ impl AikitApplication for Service {
                 capsule.revision.as_ref(),
             );
             if !trust.may_run_unattended() {
+                // A refusal is a policy denial, recorded as one: `failures`
+                // shows it apart from a run that fell over.
+                self.record_run(
+                    &capsule,
+                    aikit_store::Outcome::Denied {
+                        code: "trust.required".to_string(),
+                    },
+                    started,
+                );
                 return Err(AikitError::new(
                     "trust.required",
                     format!("{id} has not been reviewed; re-run with confirmation"),
@@ -3190,12 +3217,27 @@ impl AikitApplication for Service {
         }
 
         let project_root = self.descriptor.project_root.as_deref();
-        let plan = run::plan_script(&capsule, &r.args, project_root, &self.invocation_cwd)?;
-        let report = run::execute(&plan)?;
-        Ok(RunHandle {
-            capsule: id,
-            report,
-        })
+        let finished = run::plan_capsule(&capsule, &r.args, project_root, &self.invocation_cwd)
+            .and_then(|plan| run::execute(&plan));
+        match finished {
+            Ok(report) => {
+                self.record_run(&capsule, run::run_outcome(&report), started);
+                Ok(RunHandle {
+                    capsule: id,
+                    report,
+                })
+            }
+            Err(error) => {
+                self.record_run(
+                    &capsule,
+                    aikit_store::Outcome::Failure {
+                        code: error.code().to_string(),
+                    },
+                    started,
+                );
+                Err(error)
+            }
+        }
     }
 
     fn session_up(&mut self, r: SessionRequest) -> Result<SessionResult> {
@@ -3958,12 +4000,22 @@ impl PaletteBackend for Service {
         })?;
         let args = intent.argv().unwrap_or_default();
         let project_root = self.descriptor.project_root.as_deref();
-        let mut plan = run::plan_script(&capsule, &args, project_root, &self.invocation_cwd)?;
+        let mut plan = run::plan_capsule(&capsule, &args, project_root, &self.invocation_cwd)?;
         // The palette only starts capture/background modes; force capture so the
         // output comes back for the result panel rather than seizing the terminal
         // the palette is holding.
         plan.mode = aikit_core::capsule::ExecMode::Capture;
-        let report = run::execute(&plan)?;
+        let started = std::time::Instant::now();
+        let report = run::execute(&plan).inspect_err(|error| {
+            self.record_run(
+                &capsule,
+                aikit_store::Outcome::Failure {
+                    code: error.code().to_string(),
+                },
+                started,
+            );
+        })?;
+        self.record_run(&capsule, run::run_outcome(&report), started);
         Ok(JobOutput {
             capsule: Some(intent.capsule.clone()),
             status: Some(report.status),

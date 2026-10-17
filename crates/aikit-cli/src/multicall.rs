@@ -19,6 +19,7 @@ use aikit_core::id::{ContextId, Revision};
 use aikit_core::trust::TrustOracle;
 use aikit_core::{AikitError, Result};
 
+use aikit_store::events::Outcome;
 use aikit_store::generation;
 use aikit_store::home::AikitHome;
 use aikit_store::index::Index;
@@ -120,8 +121,9 @@ where
     // check (activation does not gate scripts), which is precisely why *running*
     // one has to. There is no `--confirm` on this path — the shim's arguments
     // belong to the capability — so the escape hatch is the interactive command.
+    let index = Index::open(&home.database())?;
+    let started = std::time::Instant::now();
     if capsule.kind.is_executable() {
-        let index = Index::open(&home.database())?;
         let trust = TrustStore::new(&index).snapshot()?;
         let state = trust.state_for(
             capsule.source.as_ref(),
@@ -129,6 +131,16 @@ where
             capsule.revision.as_ref(),
         );
         if !state.may_run_unattended() {
+            run::record_run(
+                &index,
+                home.event_log(),
+                &view.context,
+                &capsule,
+                Outcome::Denied {
+                    code: "trust.required".to_string(),
+                },
+                started,
+            );
             return Err(AikitError::new(
                 "trust.required",
                 format!(
@@ -142,10 +154,35 @@ where
         }
     }
 
-    let plan = run::plan_script(&capsule, args, project_root.as_deref(), cwd)?;
-    let report = run::execute(&plan)?;
-    run::emit_report(&report)?;
-    Ok(report.status)
+    let finished = run::plan_capsule(&capsule, args, project_root.as_deref(), cwd)
+        .and_then(|plan| run::execute(&plan));
+    match finished {
+        Ok(report) => {
+            run::record_run(
+                &index,
+                home.event_log(),
+                &view.context,
+                &capsule,
+                run::run_outcome(&report),
+                started,
+            );
+            run::emit_report(&report)?;
+            Ok(report.status)
+        }
+        Err(error) => {
+            run::record_run(
+                &index,
+                home.event_log(),
+                &view.context,
+                &capsule,
+                Outcome::Failure {
+                    code: error.code().to_string(),
+                },
+                started,
+            );
+            Err(error)
+        }
+    }
 }
 
 /// Decide which context's generation to run against.
