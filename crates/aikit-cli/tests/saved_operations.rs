@@ -1041,3 +1041,136 @@ fn a_feed_must_say_what_it_is_feeding_and_a_bad_span_is_refused() {
     ]);
     assert!(time.contains("not a time"), "{time}");
 }
+
+// ---------------------------------------------------------------------------
+// Search aliases: `@name = expression`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_search_alias_is_defined_found_and_expanded_by_search() {
+    let world = World::new();
+
+    let defined = world.json(&["alias", "define", "@gs = @# ( @ ? )", "--by", "human"]);
+    let data = &defined["data"];
+    assert_eq!(data["id"], "alias/personal/gs");
+    assert_eq!(data["alias"], "@gs");
+    assert_eq!(data["takes"], 1);
+    assert_eq!(data["replaced"], false);
+    let manifest =
+        fs::read_to_string(world.capsule_dir("alias/personal/gs").join("manifest.toml")).unwrap();
+    assert!(manifest.contains("syntax = \"operative\""), "{manifest}");
+    assert!(manifest.contains("author = \"human\""), "{manifest}");
+
+    // It is a capsule like any other: found by the kind filter, no second registry.
+    assert_eq!(search_ids(&world, "kind:alias gs"), ["alias/personal/gs"]);
+
+    // Search expands it; the reply says how, and the expression is the one the
+    // expanded text would have given if it had been typed out.
+    let aliased = world.json(&["search", "@gs orient"]);
+    assert_eq!(
+        aliased["data"]["alias_expansion"]["expanded"],
+        "@# ( @ orient )"
+    );
+    assert_eq!(aliased["data"]["alias_expansion"]["aliases"][0], "gs");
+    let written = world.json(&["search", "@# ( @ orient )"]);
+    assert_eq!(aliased["data"]["expression"], written["data"]["expression"]);
+    assert!(written["data"].get("alias_expansion").is_none());
+
+    // A query that names no alias is passed on exactly as typed.
+    let plain = world.json(&["search", "release notes"]);
+    assert!(plain["data"].get("alias_expansion").is_none());
+
+    let shown = world.json(&["alias", "expand", "@gs", "orient"]);
+    assert_eq!(shown["data"]["expanded"], "@# ( @ orient )");
+    assert_eq!(shown["data"]["input"], "@gs orient");
+}
+
+#[test]
+fn a_search_alias_is_a_name_not_a_command() {
+    let world = World::new();
+    world.json(&["alias", "define", "@gs = @# ( @ ? )"]);
+
+    // It cannot be run, and is not asked to be reviewed first.
+    let run = world.refused(&["run", "alias/personal/gs"]);
+    assert!(run.contains("operative"), "{run}");
+    assert!(!run.contains("has not been reviewed"), "{run}");
+    // z shows it rather than proposing a run that could only refuse.
+    let z = world.json(&["z", "gs"]);
+    assert_eq!(z["data"]["capability"], "alias/personal/gs");
+    assert_eq!(z["data"]["action"], "open");
+
+    // Enabled and applied, it puts nothing on the PATH.
+    world.json(&["enable", "alias/personal/gs"]);
+    let applied = world.json(&["apply"]);
+    let context = applied["context"]["context_id"].as_str().unwrap();
+    let generation = applied["data"]["generation"].as_str().unwrap();
+    let bin = world
+        .aikit_home
+        .join("state/contexts")
+        .join(context)
+        .join("generations")
+        .join(generation)
+        .join("bin");
+    assert!(!bin.join("gs").exists(), "an operative alias has no shim");
+}
+
+#[test]
+fn definitions_are_checked_before_they_are_saved() {
+    let world = World::new();
+    world.json(&["alias", "define", "@a = @# ( @ ? )"]);
+
+    // Redefining needs saying so, and keeps working afterwards.
+    let again = world.refused(&["alias", "define", "@a = @ ?"]);
+    assert!(again.contains("--replace"), "{again}");
+    let replaced = world.json(&["alias", "define", "@a = @ ?", "--replace"]);
+    assert_eq!(replaced["data"]["replaced"], true);
+    assert_eq!(
+        world.json(&["alias", "expand", "@a", "x"])["data"]["expanded"],
+        "@ x"
+    );
+
+    // A loop through another alias is refused, naming the chain; nothing changes.
+    world.json(&["alias", "define", "@b = @a ?"]);
+    let before =
+        fs::read_to_string(world.capsule_dir("alias/personal/a").join("manifest.toml")).unwrap();
+    let cycle = world.refused(&["alias", "define", "@a = @b ?", "--replace"]);
+    assert!(cycle.contains("@a -> @b -> @a"), "{cycle}");
+    let after =
+        fs::read_to_string(world.capsule_dir("alias/personal/a").join("manifest.toml")).unwrap();
+    assert_eq!(before, after);
+
+    for (bad, why) in [
+        (&["alias", "define", "gs = x"][..], "@name = expression"),
+        (&["alias", "define", "@Gs = x"][..], "@name = expression"),
+        (&["alias", "define", "@c = ( @ ?"][..], "does not expand"),
+        (&["alias", "define", "@d = ? ? ? ? ?"][..], "at most 4"),
+    ] {
+        let refusal = world.refused(bad);
+        assert!(refusal.contains(why), "{bad:?}: {refusal}");
+    }
+
+    // A name a shell alias already holds is not taken twice.
+    let captured = world.json(&[
+        "capture",
+        "say",
+        "--body",
+        "printf hi",
+        "--kind",
+        "alias",
+        "--export",
+        "say",
+    ]);
+    world.json(&["promote", captured["data"]["candidate"].as_str().unwrap()]);
+    let taken = world.refused(&["alias", "define", "@say = @ ?"]);
+    assert!(taken.contains("shell alias"), "{taken}");
+}
+
+#[test]
+fn using_an_alias_without_the_word_it_wants_says_so() {
+    let world = World::new();
+    world.json(&["alias", "define", "@gs = @# ( @ ? )"]);
+
+    let missing = world.refused(&["search", "@gs"]);
+
+    assert!(missing.contains("takes 1 word"), "{missing}");
+}

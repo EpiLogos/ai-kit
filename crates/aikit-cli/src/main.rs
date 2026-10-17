@@ -4578,9 +4578,14 @@ fn cmd_system_commands() -> Result<Reply> {
 
 fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
     let mut service = Service::discover(cwd)?;
+    // The person's search aliases (`@name = expression`) expand before the query is
+    // read, by the grammar owner, so every client reads the same expansion. A
+    // query naming no alias is passed on exactly as typed.
+    let aliases = aikit_cli::operative_alias::table_from_catalog(service.snapshot());
+    let expansion = aikit_core::resource::expand_aliases(&a.query, &aliases)?;
     let resolved = {
         let application = ApplicationService::new(&mut service);
-        application.resolve_search(&a.query)?
+        application.resolve_search(&expansion.text)?
     };
     let view = service.resolved();
     let rows: Vec<Value> = resolved
@@ -4691,6 +4696,13 @@ fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
         "alias_family_problems": problems,
         "inert": true,
     });
+    if !expansion.used.is_empty() {
+        data["alias_expansion"] = jval!({
+            "input": a.query,
+            "expanded": expansion.text,
+            "aliases": expansion.used,
+        });
+    }
     // A task-phrase query that resolved to nothing at all is an answered
     // absence, never a bare expression dump: what was searched, and what is
     // nearby in the same field.
@@ -7395,7 +7407,6 @@ fn cmd_harness_auth(args: HarnessAuthArgs, json_mode: bool) -> Result<Reply> {
 /// `aikit alias list|check|install` (ADR 0005 Stage 1): the user-owned
 /// command-family surface over manifests that are data, never code.
 fn cmd_alias(cwd: &std::path::Path, c: AliasCmd, _json_mode: bool) -> Result<Reply> {
-    let _ = cwd;
     let home = AikitHome::discover()?;
     match c.command {
         AliasSub::List | AliasSub::Check => {
@@ -7449,6 +7460,43 @@ fn cmd_alias(cwd: &std::path::Path, c: AliasCmd, _json_mode: bool) -> Result<Rep
                 warnings: vec![],
                 exit_code: json::EXIT_OK,
             })
+        }
+        AliasSub::Define(a) => {
+            let service = Service::discover(cwd)?;
+            let defined = aikit_cli::operative_alias::define(
+                &home,
+                service.snapshot(),
+                &a.definition.join(" "),
+                a.description.as_deref(),
+                a.by.as_deref(),
+                a.replace,
+            )?;
+            let data = jval!({
+                "id": defined.id.to_string(),
+                "alias": format!("@{}", defined.definition.name),
+                "expression": defined.definition.body,
+                "takes": defined.definition.gaps,
+                "manifest": defined.manifest.display().to_string(),
+                "replaced": defined.replaced,
+                "try": format!(
+                    "aikit alias expand '@{}{}'",
+                    defined.definition.name,
+                    " word".repeat(defined.definition.gaps)
+                ),
+            });
+            Ok(reply(&service, data, vec![]))
+        }
+        AliasSub::Expand(a) => {
+            let service = Service::discover(cwd)?;
+            let query = a.query.join(" ");
+            let table = aikit_cli::operative_alias::table_from_catalog(service.snapshot());
+            let expansion = aikit_core::resource::expand_aliases(&query, &table)?;
+            let data = jval!({
+                "input": query,
+                "expanded": expansion.text,
+                "aliases": expansion.used,
+            });
+            Ok(reply(&service, data, vec![]))
         }
     }
 }
