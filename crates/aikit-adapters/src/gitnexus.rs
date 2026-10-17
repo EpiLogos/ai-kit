@@ -21,6 +21,10 @@ use crate::runner::CommandRunner;
 #[path = "gitnexus_snapshot.rs"]
 mod snapshot;
 
+/// Bound on the GitNexus index metadata file, read by both the in-place reader
+/// and the isolated snapshot.
+const MAX_INDEX_METADATA_BYTES: usize = 8 * 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct GitNexusCliSurface {
     available: bool,
@@ -613,7 +617,10 @@ impl<R: CommandRunner> CodeIndexProvider for GitNexusCodeIndexProvider<R> {
 }
 
 /// The native index metadata GitNexus writes at the end of `analyze`
-/// (`gitnexus.json`, or `meta.json` from older releases), bounded to 1 MiB.
+/// (`gitnexus.json`, or `meta.json` from older releases), bounded to
+/// [`MAX_INDEX_METADATA_BYTES`]. GitNexus keeps whole-repository caches in this
+/// file (`fileHashes`, `indexCoverage`), so a large repository's metadata passes
+/// 1 MiB (O:I's is 1.8 MiB) while the few fields read here stay small.
 fn read_index_metadata(root: &Path) -> Result<Value> {
     let directory = root.join(".gitnexus");
     let file = match std::fs::File::open(directory.join("gitnexus.json")) {
@@ -631,13 +638,16 @@ fn read_index_metadata(root: &Path) -> Result<Value> {
         }
     };
     let mut bytes = Vec::new();
-    file.take(1024 * 1024 + 1)
+    file.take(MAX_INDEX_METADATA_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| AikitError::new("knowledge.gitnexus_existing_index", error.to_string()))?;
-    if bytes.len() > 1024 * 1024 {
+    if bytes.len() > MAX_INDEX_METADATA_BYTES {
         return Err(AikitError::new(
             "knowledge.gitnexus_existing_index",
-            "index metadata exceeds 1 MiB",
+            format!(
+                "index metadata exceeds {} MiB",
+                MAX_INDEX_METADATA_BYTES / (1024 * 1024)
+            ),
         ));
     }
     serde_json::from_slice(&bytes).map_err(|error| {
@@ -879,6 +889,38 @@ mod tests {
 
     fn runner(query: &str) -> Arc<ScriptedRunner> {
         Arc::new(scripted(query))
+    }
+
+    /// A `.gitnexus/gitnexus.json` whose bulk is a whole-repository cache, as
+    /// GitNexus writes for a large repository (O:I's is 1.8 MiB).
+    fn index_with_cache_of(bytes: usize) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".gitnexus")).unwrap();
+        let body = format!(
+            "{{\"lastCommit\":\"abc123\",\"fileHashes\":{{\"cache\":\"{}\"}}}}",
+            "x".repeat(bytes)
+        );
+        std::fs::write(root.path().join(".gitnexus/gitnexus.json"), body).unwrap();
+        root
+    }
+
+    #[test]
+    fn a_large_repository_index_metadata_over_one_mib_is_read() {
+        let root = index_with_cache_of(1_800_000);
+        let meta = read_index_metadata(root.path()).expect("1.8 MiB metadata is admitted");
+        assert_eq!(meta["lastCommit"], "abc123");
+    }
+
+    #[test]
+    fn index_metadata_beyond_the_bound_is_refused_and_names_the_bound() {
+        let root = index_with_cache_of(MAX_INDEX_METADATA_BYTES);
+        let error = read_index_metadata(root.path()).expect_err("over the bound is refused");
+        assert_eq!(error.code(), "knowledge.gitnexus_existing_index");
+        assert!(
+            error.message().contains("exceeds 8 MiB"),
+            "{}",
+            error.message()
+        );
     }
 
     fn scripted(query: &str) -> ScriptedRunner {

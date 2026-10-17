@@ -12,6 +12,43 @@ Wiki, workflow store, scheduler or memory ontology.
 - Factory owns Run/Journey/workflow/participant/dependency/Return meaning. AIKit reads its native CLI surface and pins the exact Run/Journey basis used for preparation.
 - Actuation remains the owner of acting Agency, Activity, invocation/usage/evidence attribution and Return. AIKit's Jev invocation receipt carries stable invocation and usage evidence for that relation.
 
+## The four jobs, and where each stops
+
+A turn passes through four jobs. They have different owners and different
+failure laws, and nothing below merges them.
+
+| Job | What it answers | How it is done | What it never does |
+|---|---|---|---|
+| Retrieve | Which material exists and could matter | `aikit knowledge search`, `resolve`, `route` over the source pools (work repositories, Central's bkmr file map, the NOW field, ProjectMap code, the Semantic Wiki). Ranked by lexical score, by embeddings where a bkmr database was built with them, and by learned familiarity. | Decide relevance for a turn, or activate anything by ranking alone. |
+| Decide | Which of these candidates matter, and by how much | `action/model/decide`: typed Noul, Choice and Score questions put to the one elected provider (`none`, `managed-local`, `endpoint` or `hosted`). Used by NOW preparation (`selection.mode = jev` or `provider`) and by search reranking (`tool/search/jev-rerank`). | Act, grant authority, supply Recognition, or run without an explicit election. |
+| Prepare | What this one participant should hold | Redis: a prepared view per participant, compare-and-swap versions, change cursors, revocation, the world projection. | Own meaning. It is a projection; losing it loses nothing the owners do not hold. |
+| Act | What is done with it | The acting model through its harness, and the Actions it calls (`aikit act`, `ctrl action run`), Routines. | Draw its model from the decision election, or the reverse. |
+
+Facts that follow from the code and hold for any model placed behind the
+decision route:
+
+- Only candidates marked `external_egress: allowed` and `agent_visibility:
+  payload` are put to a decision model, local or hosted. Central-read sources
+  default to `denied`.
+- Embeddings exist in one place: the bkmr database behind a source pool. The
+  adapter offers semantic and hybrid search only when that database was built
+  with embeddings. Replacing the embedder is a database rebuild and a provider
+  change, not a change to this route.
+- A model is admitted by electing it in `aikit.decision-provider/v1`. Its
+  identity digest joins the prepared view's basis, so a swap cannot pass for the
+  same decision. Thresholds are explicit per provider and are never carried
+  from one provider to another.
+- Kev-0.8B's trained state is about 7.5k tokens and the input ceiling is 16,384.
+  Keep the shared state lean and put per-candidate detail in the questions.
+- A query term that bkmr's full-text arm would read as syntax (a hyphen, a
+  colon, a quote) must be quoted before it reaches bkmr, on every path that
+  ends in bkmr, including the hybrid arm.
+
+What can be read about each job today: `aikit decide status`, `aikit
+now-context status`, `aikit system --json` (elections: declared, effective,
+active) and `aikit-session-space encounter-use` (what a turn actually received
+and which decision selected it).
+
 ## Commands
 
 General Jev access:
