@@ -3257,7 +3257,7 @@ impl AikitApplication for Service {
         // inactive, unreviewed, run-ad-hoc case is exactly the one the
         // confirmation exists to guard. Reading it off `view.active` would skip
         // the gate for every capsule that is not currently enabled.
-        if capsule.kind.is_executable() && !r.confirmed {
+        if capsule.kind.is_executable() && !capsule.is_operative_alias() && !r.confirmed {
             let trust = self.trust.state_for(
                 capsule.source.as_ref(),
                 &capsule.id,

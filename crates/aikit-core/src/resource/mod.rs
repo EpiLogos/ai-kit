@@ -54,12 +54,15 @@ pub use model_route::{
     RouteUsability, UnmatchedModelOffer, MODEL_ROUTE_VERSION,
 };
 pub use operative::{
-    action_semantic_profile, expression_has_scope, expression_scope_project, horizons_for_kind,
-    horizons_for_resource, parse_or_search_expression, parse_or_search_expression_in_scope,
-    parse_resolve_expression, resolve_action_candidates, resolve_expression, resolve_path_identity,
-    resolve_search, resolve_subjects, six_horizon_disclosure, ActionRef, ActionSemanticProfile,
-    AddressHorizon, RelationOp, ResolveCandidate, ResolveExpression, ResolvePath, ResolvePathStep,
-    ResolvedActionCandidate, OPERATIVE_SYNTAX_VERSION,
+    action_semantic_profile, alias_name_is_valid, expand_aliases, expression_has_scope,
+    expression_scope_project, horizons_for_kind, horizons_for_resource, parse_alias_definition,
+    parse_or_search_expression, parse_or_search_expression_in_scope,
+    parse_or_search_expression_with_aliases, parse_resolve_expression, resolve_action_candidates,
+    resolve_expression, resolve_path_identity, resolve_search, resolve_subjects,
+    six_horizon_disclosure, validate_alias_definition, ActionRef, ActionSemanticProfile,
+    AddressHorizon, AliasDefinition, AliasExpansion, AliasTable, RelationOp, ResolveCandidate,
+    ResolveExpression, ResolvePath, ResolvePathStep, ResolvedActionCandidate, ALIAS_GAP,
+    OPERATIVE_SYNTAX_VERSION,
 };
 pub use operative_provider::{
     OperativeSemanticOperation, OperativeSemanticProvider, OperativeSemanticProviderCapabilities,

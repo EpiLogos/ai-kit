@@ -1014,6 +1014,8 @@ fn alias_route(command: &AliasSub) -> &'static str {
         AliasSub::List => "cmd_alias_list",
         AliasSub::Check => "cmd_alias_check",
         AliasSub::Install(_) => "cmd_alias_install",
+        AliasSub::Define(_) => "cmd_alias_define",
+        AliasSub::Expand(_) => "cmd_alias_expand",
     }
 }
 
@@ -5519,6 +5521,35 @@ pub enum AliasSub {
     Check,
     /// Emit a family's launcher scripts as generated data under the AIKit home.
     Install(AliasInstallArgs),
+    /// Name an expression for the search grammar: `@name = expression`, with a
+    /// lone `?` standing for the next word written after the alias.
+    Define(AliasDefineArgs),
+    /// Show what a query becomes once aliases are expanded, without searching.
+    Expand(AliasExpandArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AliasDefineArgs {
+    /// The definition, `@name = expression`. Quote it, or give it as separate
+    /// words; either way it is one definition.
+    #[arg(value_name = "DEFINITION", required = true, num_args = 1..)]
+    pub definition: Vec<String>,
+    /// Redefine an alias of the same name.
+    #[arg(long)]
+    pub replace: bool,
+    /// What it is for, shown beside it in search.
+    #[arg(long, value_name = "TEXT")]
+    pub description: Option<String>,
+    /// Who defined it (`human`, or an agent ref).
+    #[arg(long, value_name = "WHO")]
+    pub by: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AliasExpandArgs {
+    /// The query to expand.
+    #[arg(value_name = "QUERY", required = true, num_args = 1..)]
+    pub query: Vec<String>,
 }
 
 #[derive(Debug, Args)]

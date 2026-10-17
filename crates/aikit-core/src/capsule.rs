@@ -1354,6 +1354,14 @@ impl Capsule {
             _ => None,
         }
     }
+    /// Whether this is an alias in the search grammar rather than a command:
+    /// something that expands inside a query, is never run, and so needs no
+    /// review before it can be used.
+    pub fn is_operative_alias(&self) -> bool {
+        self.alias()
+            .is_some_and(|alias| alias.syntax == AliasSyntax::Operative)
+    }
+
     pub fn alias(&self) -> Option<&AliasSection> {
         match &self.payload {
             Payload::Alias(s) => Some(s),
@@ -1371,7 +1379,10 @@ impl Capsule {
     pub fn exported_commands(&self) -> Vec<String> {
         match &self.payload {
             Payload::Script(s) => s.effective_exports(&self.id),
-            Payload::Alias(a) => vec![a.name.clone()],
+            // Only a shell alias is a command. An operative alias is a name inside
+            // the search grammar; giving it a shim would put a command on the PATH
+            // that can only refuse to run.
+            Payload::Alias(a) if a.syntax == AliasSyntax::Shell => vec![a.name.clone()],
             _ => vec![],
         }
     }
