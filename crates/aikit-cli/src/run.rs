@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use aikit_adapters::runner::{Output, SystemRunner};
 
-use aikit_core::capsule::{Capsule, ExecMode, WorkingDir};
+use aikit_core::capsule::{AliasSyntax, Capsule, ExecMode, Kind, WorkingDir};
 use aikit_core::{AikitError, Result};
 
 /// A fully-resolved command ready to run: no capsule lookups, no path
@@ -115,6 +115,183 @@ pub fn plan_script(
         mode: script.mode,
         timeout: script.timeout.map(|duration| duration.as_duration()),
     })
+}
+
+/// Plan the execution of any runnable capsule: a script as [`plan_script`] does,
+/// an alias as [`plan_alias`] does.
+///
+/// Callers that run "whatever owns this command name" (the CLI, `z`, `act
+/// invoke`, the multicall shim) go through here so an alias is as runnable as a
+/// script; asking for anything else is still `run.not_runnable`.
+pub fn plan_capsule(
+    capsule: &Capsule,
+    user_args: &[String],
+    project_root: Option<&Path>,
+    invocation_cwd: &Path,
+) -> Result<ScriptCommand> {
+    match capsule.kind {
+        Kind::Alias => plan_alias(capsule, user_args, invocation_cwd),
+        _ => plan_script(capsule, user_args, project_root, invocation_cwd),
+    }
+}
+
+/// The shells an alias body may be written for and a shim can actually run:
+/// POSIX-family shells that take `-c`. An alias written for fish or nushell is
+/// valid capsule data, but this runtime refuses it rather than guess.
+const ALIAS_SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
+
+/// Plan the execution of an **alias** capsule written in shell syntax.
+///
+/// The body behaves as a shell alias does: a one-line body is followed by the
+/// caller's words (`gs = "git status -sb"`, `gs -v` runs `git status -sb -v`).
+/// A body of several lines is a small script instead, with the caller's words
+/// as its positional parameters (`"$@"`). It runs where it was typed — the
+/// invocation directory, not the project root — because moving the caller's
+/// directory would change what the alias means.
+///
+/// This is honest about what a command can be: a generated shim is a child
+/// process, so an alias that must change the caller's own shell (`cd`, an
+/// `export`) belongs in `aikit shell init`, not here.
+pub fn plan_alias(
+    capsule: &Capsule,
+    user_args: &[String],
+    invocation_cwd: &Path,
+) -> Result<ScriptCommand> {
+    let alias = capsule.alias().ok_or_else(|| {
+        AikitError::new(
+            "run.not_runnable",
+            format!(
+                "{} is a {} and cannot be run",
+                capsule.id,
+                capsule.kind.as_str()
+            ),
+        )
+        .with("capability", capsule.id.to_string())
+        .with("kind", capsule.kind.as_str())
+    })?;
+
+    let body = alias.body.trim_end();
+    if body.trim().is_empty() {
+        return Err(AikitError::new(
+            "run.alias_empty",
+            format!(
+                "{} has an empty body, so there is nothing to run",
+                capsule.id
+            ),
+        )
+        .with("capability", capsule.id.to_string()));
+    }
+    if alias.syntax != AliasSyntax::Shell {
+        return Err(AikitError::new(
+            "run.alias_syntax",
+            format!(
+                "{} is written in the {} grammar, which a command shim cannot run; it expands \
+                 inside search, not in a shell",
+                capsule.id,
+                alias.syntax.as_str()
+            ),
+        )
+        .with("capability", capsule.id.to_string())
+        .with("syntax", alias.syntax.as_str()));
+    }
+
+    let shell = if alias.shells.is_empty() {
+        "sh"
+    } else {
+        alias
+            .shells
+            .iter()
+            .map(String::as_str)
+            .find(|shell| ALIAS_SHELLS.contains(shell))
+            .ok_or_else(|| {
+                AikitError::new(
+                    "run.alias_shell",
+                    format!(
+                        "{} is written for {}, and only {} can be run from a shim",
+                        capsule.id,
+                        alias.shells.join(", "),
+                        ALIAS_SHELLS.join(", ")
+                    ),
+                )
+                .with("capability", capsule.id.to_string())
+            })?
+    };
+
+    let script = if body.contains('\n') {
+        body.to_string()
+    } else {
+        format!("{body} \"$@\"")
+    };
+    let mut argv = vec!["-c".to_string(), script, alias.name.clone()];
+    argv.extend(user_args.iter().cloned());
+
+    Ok(ScriptCommand {
+        program: shell.to_string(),
+        argv,
+        cwd: invocation_cwd.to_path_buf(),
+        env: BTreeMap::new(),
+        mode: ExecMode::Foreground,
+        timeout: None,
+    })
+}
+
+/// Record one run of `capsule` — finished, refused or failed — on the event log,
+/// where `recent`, `failures`, `stats` and the frecency that `z` reads all look.
+/// A run nobody recorded is a run nothing learns from.
+///
+/// Every path that runs a capsule calls this: the CLI and `z` and `act invoke`
+/// through the application service, and the multicall shim on its own.
+///
+/// Best effort by design: the command has already happened (or been refused) by
+/// now, and a log that cannot be written must not turn a successful run into a
+/// failed one. The inability is said on stderr.
+pub fn record_run(
+    index: &aikit_store::Index,
+    log_path: PathBuf,
+    context: &aikit_core::context::ContextDescriptor,
+    capsule: &Capsule,
+    outcome: aikit_store::Outcome,
+    started: std::time::Instant,
+) {
+    use aikit_store::{Event, EventAction, EventRecorder};
+    let mut event = Event::new(EventAction::Run)
+        .in_context(context.context_id.clone(), context.session_id.clone())
+        .with_outcome(outcome)
+        .with_duration(started.elapsed());
+    event = match capsule.revision.clone() {
+        Some(revision) => event.for_capsule(capsule.id.clone(), revision),
+        None => {
+            event.kind = Some(capsule.kind);
+            event.capsule = Some(capsule.id.clone());
+            event
+        }
+    };
+    if let Some(project) = context.project_id.clone() {
+        event = event.for_project(project);
+    }
+    if let Err(error) = EventRecorder::new(index, log_path).record(&event) {
+        eprintln!(
+            "aikit: could not record the run of {}: {}",
+            capsule.id,
+            error.message()
+        );
+    }
+}
+
+/// How a finished run counts: a background start is a job awaiting its end, a
+/// clean exit is a success, anything else is a failure carrying the status.
+pub fn run_outcome(report: &RunReport) -> aikit_store::Outcome {
+    if report.detached {
+        aikit_store::Outcome::Skipped {
+            reason: "background".to_string(),
+        }
+    } else if report.status == 0 {
+        aikit_store::Outcome::Success
+    } else {
+        aikit_store::Outcome::Failure {
+            code: format!("exit-{}", report.status),
+        }
+    }
 }
 
 /// What a finished run produced.

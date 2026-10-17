@@ -81,7 +81,14 @@ fn action_for(service: &Service, capsule: &CapsuleId) -> JumpAction {
         .catalog_index
         .get(capsule)
         .map(|entry| entry.kind);
+    // A search alias is a name inside the query grammar, never a command: `z`
+    // shows it rather than proposing a run that could only refuse.
+    let operative = aikit_core::catalog::Catalog::get(service.snapshot(), capsule)
+        .is_some_and(|capsule| capsule.is_operative_alias());
     match kind {
+        Some(Kind::Alias) if operative => JumpAction::Open {
+            capsule: capsule.clone(),
+        },
         Some(Kind::Script) | Some(Kind::Alias) => JumpAction::Run {
             capsule: capsule.clone(),
         },

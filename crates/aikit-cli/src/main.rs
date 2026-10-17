@@ -382,6 +382,8 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Promote(a)) => cmd_promote(cwd, a),
         Some(Command::Inbox(a)) => cmd_inbox(cwd, a),
         Some(Command::Capture(a)) => cmd_capture(cwd, a),
+        Some(Command::Observe(a)) => cmd_observe(cwd, a),
+        Some(Command::Saved(a)) => cmd_saved(cwd, a),
         Some(Command::Diff(_)) => cmd_diff(cwd),
         Some(Command::Doctor(a)) => cmd_doctor(cwd, a),
         Some(Command::Credential(c)) => cmd_credential(cwd, c, json_mode),
@@ -4577,9 +4579,14 @@ fn cmd_system_commands() -> Result<Reply> {
 
 fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
     let mut service = Service::discover(cwd)?;
+    // The person's search aliases (`@name = expression`) expand before the query is
+    // read, by the grammar owner, so every client reads the same expansion. A
+    // query naming no alias is passed on exactly as typed.
+    let aliases = aikit_cli::operative_alias::table_from_catalog(service.snapshot());
+    let expansion = aikit_core::resource::expand_aliases(&a.query, &aliases)?;
     let resolved = {
         let application = ApplicationService::new(&mut service);
-        application.resolve_search(&a.query)?
+        application.resolve_search(&expansion.text)?
     };
     let view = service.resolved();
     let rows: Vec<Value> = resolved
@@ -4599,10 +4606,19 @@ fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
             let unavailable_reason = capsule.as_ref().and_then(|id| {
                 view.unavailable_reason(id).map(|reason| reason.describe())
             });
+            // The carrying registry. An active capsule reports the source that
+            // supplied it; one that is only catalogued - a saved script nobody has
+            // enabled - still lives in a registry, and "from where" has an answer.
             let source = capsule
                 .as_ref()
                 .and_then(|id| view.active.get(id))
-                .and_then(|active| active.source.as_ref());
+                .and_then(|active| active.source.as_ref())
+                .or_else(|| {
+                    capsule.as_ref().and_then(|id| {
+                        aikit_core::catalog::Catalog::get(service.snapshot(), id)
+                            .and_then(|capsule| capsule.source.as_ref())
+                    })
+                });
             let describe_route = match &capsule {
                 Some(id) => format!("aikit act describe {id}"),
                 None => format!("aikit act describe {}", row.resource),
@@ -4690,6 +4706,13 @@ fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
         "alias_family_problems": problems,
         "inert": true,
     });
+    if !expansion.used.is_empty() {
+        data["alias_expansion"] = jval!({
+            "input": a.query,
+            "expanded": expansion.text,
+            "aliases": expansion.used,
+        });
+    }
     // A task-phrase query that resolved to nothing at all is an answered
     // absence, never a bare expression dump: what was searched, and what is
     // nearby in the same field.
@@ -4849,6 +4872,7 @@ fn cmd_praxis(cwd: &std::path::Path, a: PraxisCmd) -> Result<Reply> {
         PraxisSub::Run(c) => cmd_run(cwd, c),
         PraxisSub::Inbox(c) => cmd_inbox(cwd, c),
         PraxisSub::Capture(c) => cmd_capture(cwd, c),
+        PraxisSub::Observe(c) => cmd_observe(cwd, c),
         PraxisSub::Promote(c) => cmd_promote(cwd, c),
         PraxisSub::Capabilities(c) => cmd_capabilities(cwd, c),
         PraxisSub::Method(c) => cmd_method(cwd, c),
@@ -5514,7 +5538,7 @@ fn cmd_run(cwd: &std::path::Path, a: RunArgs) -> Result<Reply> {
     let handle = service.run(RunRequest {
         name: a.name,
         args: a.args,
-        export: None,
+        export: a.export,
         // The confirmation must be explicit (`--confirm`), not implied by the
         // invocation: `aikit run` is also how the broker lets an *agent* run a
         // capability, and how a multicall shim on the PATH dispatches. A reviewed
@@ -6631,32 +6655,116 @@ fn mux_session_command(
 /// `aikit inbox` — list the messages the system and agents have addressed to the
 /// user (Spec II §2). Pending by default; `--all` includes resolved items kept for
 /// audit. Speaks the JSON envelope so the broker and agents can read it.
+///
+/// A captured example is one of those messages (`capture-candidate`), so there is
+/// one inbox, not a channel and a separate candidate queue. `inbox accept` and
+/// `inbox reject` decide it: each resolves the message *and* the example.
 fn cmd_inbox(cwd: &std::path::Path, a: InboxArgs) -> Result<Reply> {
+    use aikit_store::inbox::Inbox;
     let service = Service::discover(cwd)?;
-    let items = service.inbox_items(a.all)?;
-    let rows: Vec<Value> = items
+    match a.command {
+        None => {
+            let items = service.inbox_items(a.all)?;
+            let rows: Vec<Value> = items
+                .iter()
+                .map(|item| {
+                    jval!({
+                        "id": item.id.to_string(),
+                        "kind": item.kind.as_str(),
+                        "title": item.title,
+                        "body": item.body,
+                        "state": item.state,
+                        "project": item.project.as_ref().map(|p| p.to_string()),
+                        "evidence": item.evidence,
+                        "proposal": item.proposal.as_ref().map(|p| p.to_string()),
+                        "created": item.created.to_string(),
+                    })
+                })
+                .collect();
+            let data = jval!({ "items": rows, "count": items.len() });
+            Ok(reply(&service, data, vec![]))
+        }
+        Some(InboxSub::Accept(args)) => {
+            let candidate = inbox_candidate(&service, &args.target)?;
+            let accepted = Inbox::new(service.home(), service.index()).accept(&candidate)?;
+            let data = jval!({
+                "candidate": accepted.candidate.id,
+                "item": accepted.item.as_ref().map(|item| item.to_string()),
+                "id": accepted.id.to_string(),
+                "kind": accepted.id.kind().as_str(),
+                "exports": accepted.candidate.exports,
+                "procedure": accepted.procedure.to_string(),
+                "applied": accepted.applied,
+                "undo": format!("aikit procedure undo {}", accepted.procedure),
+            });
+            Ok(reply(&service, data, vec![]))
+        }
+        Some(InboxSub::Reject(args)) => {
+            let candidate = inbox_candidate(&service, &args.target)?;
+            let reason = args
+                .reason
+                .unwrap_or_else(|| "turned down from the inbox".to_string());
+            let rejected =
+                Inbox::new(service.home(), service.index()).reject(&candidate, &reason)?;
+            let data = jval!({
+                "candidate": rejected.id,
+                "state": rejected.state.as_str(),
+                "reason": reason,
+            });
+            Ok(reply(&service, data, vec![]))
+        }
+    }
+}
+
+/// The candidate an inbox decision is about: given as the candidate's own id, or
+/// as the id of the channel item that announced it.
+fn inbox_candidate(service: &Service, target: &str) -> Result<String> {
+    use aikit_store::channel::{Evidence, InboxKind};
+    if target.starts_with("cnd_") {
+        return Ok(target.to_string());
+    }
+    let items = service.inbox_items(true)?;
+    let item = items
         .iter()
-        .map(|item| {
-            jval!({
-                "id": item.id.to_string(),
-                "kind": item.kind.as_str(),
-                "title": item.title,
-                "body": item.body,
-                "state": item.state,
-                "project": item.project.as_ref().map(|p| p.to_string()),
-                "evidence": item.evidence,
-                "proposal": item.proposal.as_ref().map(|p| p.to_string()),
-                "created": item.created.to_string(),
-            })
+        .find(|item| item.id.to_string() == target)
+        .ok_or_else(|| {
+            AikitError::new(
+                "inbox.unknown_item",
+                format!("no inbox item or candidate `{target}`"),
+            )
+            .with("target", target.to_string())
+        })?;
+    if item.kind != InboxKind::CaptureCandidate {
+        return Err(AikitError::new(
+            "inbox.not_a_capture",
+            format!(
+                "`{target}` is a {} message; only a captured example can be accepted or rejected",
+                item.kind.as_str()
+            ),
+        )
+        .with("target", target.to_string()));
+    }
+    item.evidence
+        .iter()
+        .find_map(|evidence| match evidence {
+            Evidence::Hash { label, value } if label == "candidate" => Some(value.clone()),
+            _ => None,
         })
-        .collect();
-    let data = jval!({ "items": rows, "count": items.len() });
-    Ok(reply(&service, data, vec![]))
+        .ok_or_else(|| {
+            AikitError::new(
+                "inbox.no_candidate",
+                format!("`{target}` does not say which captured example it is about"),
+            )
+            .with("target", target.to_string())
+        })
 }
 
 fn cmd_promote(cwd: &std::path::Path, a: PromoteArgs) -> Result<Reply> {
+    use aikit_store::inbox::Inbox;
     let mut service = Service::discover(cwd)?;
     let id = a.id.as_deref().map(CapsuleId::parse).transpose()?;
+    // What the capture said about itself, read before promotion moves it on.
+    let captured = Inbox::new(service.home(), service.index()).candidate(&a.candidate)?;
     let promoted = service.promote(PromoteRequest {
         candidate: a.candidate,
         id,
@@ -6665,6 +6773,9 @@ fn cmd_promote(cwd: &std::path::Path, a: PromoteArgs) -> Result<Reply> {
         "id": promoted.id.to_string(),
         "root": promoted.root.display().to_string(),
         "manifest": promoted.manifest_path.display().to_string(),
+        "kind": promoted.id.kind().as_str(),
+        "scope": captured.as_ref().map(|c| c.scope.as_str()),
+        "exports": captured.as_ref().map(|c| c.exports.clone()).unwrap_or_default(),
     });
     Ok(reply(&service, data, vec![]))
 }
@@ -6696,28 +6807,241 @@ fn cmd_capture(cwd: &std::path::Path, a: CaptureArgs) -> Result<Reply> {
     let capture = Capture {
         title: a.title,
         body,
-        suggested_kind: None,
-        exports: vec![],
+        suggested_kind: a
+            .kind
+            .as_deref()
+            .map(std::str::FromStr::from_str)
+            .transpose()?,
+        exports: a.exports,
         project_root: service.descriptor().project_root.clone(),
         session: service.descriptor().session_id.clone(),
+        scope: a
+            .scope
+            .as_deref()
+            .map(std::str::FromStr::from_str)
+            .transpose()?
+            .unwrap_or_default(),
+        source_ref: a.source_ref,
+        by: a.by,
     };
     // Scanned before storage, never before display: a secret must not reach a file.
     let outcome = inbox.capture_against(capture, service.snapshot())?;
+    let candidate = &outcome.candidate;
 
     let data = jval!({
-        "candidate": outcome.candidate.id,
-        "kind": outcome.candidate.kind.as_str(),
-        "state": outcome.candidate.state.as_str(),
-        "quarantined": outcome.candidate.state == aikit_store::inbox::CandidateState::Quarantined,
-        "findings": outcome.candidate.findings.iter().map(|f| jval!({
+        "candidate": candidate.id,
+        "kind": candidate.kind.as_str(),
+        "state": candidate.state.as_str(),
+        "quarantined": candidate.state == aikit_store::inbox::CandidateState::Quarantined,
+        "findings": candidate.findings.iter().map(|f| jval!({
             "rule": f.rule, "preview": f.preview,
         })).collect::<Vec<_>>(),
         "duplicate_of": outcome.duplicate_of,
         "similar": outcome.similar.iter().map(|s| jval!({
             "other": s.other, "percentage": s.percentage, "summary": s.summary,
         })).collect::<Vec<_>>(),
+        // What the capture says about itself (additive to the reply above).
+        "confidence": candidate.confidence.as_str(),
+        "kind_reason": candidate.kind_reason,
+        "exports": candidate.exports,
+        "scope": candidate.scope.as_str(),
+        "source_ref": candidate.source_ref,
+        "by": candidate.by,
+        "session": candidate.session,
+        "proposed_id": Inbox::proposed_id(candidate).ok().map(|id| id.to_string()),
+        // The message the capture put on `aikit inbox`, and the planned
+        // Procedure that accepting it runs (absent when it is held back).
+        "inbox_item": outcome.announcement.as_ref().map(|a| a.item.to_string()),
+        "proposal": outcome.announcement.as_ref().and_then(|a| a.proposal.as_ref()).map(|p| p.to_string()),
     });
     Ok(reply(&service, data, vec![]))
+}
+
+/// `aikit saved` - the saved operations, as one reading (see
+/// `aikit_cli::saved_operations`).
+fn cmd_saved(cwd: &std::path::Path, a: SavedArgs) -> Result<Reply> {
+    use aikit_cli::saved_operations::{reading, Which};
+    let service = Service::discover(cwd)?;
+    let which = match a.kind.as_deref() {
+        Some("script") => Which::Script,
+        Some("alias") => Which::Alias,
+        _ => Which::All,
+    };
+    let data = reading(&service, which, a.limit)?;
+    Ok(reply(&service, data, vec![]))
+}
+
+/// `aikit observe` — the recurrence observer.
+///
+/// `run` takes attributed command runs from any source (flags, JSON lines, or an
+/// agent harness's `PostToolUse` event) and lets AIKit decide what repeats; the
+/// third repeat inside the window files a capture candidate, which is announced on
+/// the inbox like any other. `status` lists what is repeating.
+fn cmd_observe(cwd: &std::path::Path, a: ObserveArgs) -> Result<Reply> {
+    use aikit_cli::observe;
+    use aikit_store::inbox::Inbox;
+    use aikit_store::observer::{Policy, RunObserver};
+    use std::io::Read;
+
+    let home = AikitHome::discover()?;
+    let index = aikit_store::Index::open(&home.database())?;
+    let observer = RunObserver::open(&home)?;
+    let inbox = Inbox::new(&home, &index);
+
+    let ObserveSub::Run(args) = &a.command else {
+        let ObserveSub::Status(args) = a.command else {
+            unreachable!("two subcommands")
+        };
+        let window = observe::parse_span(&args.window)?;
+        let rows: Vec<Value> = observer
+            .repeating(window)?
+            .into_iter()
+            .map(|row| {
+                let waiting = match &row.offered {
+                    Some(candidate) => {
+                        Some(aikit_store::observer::candidate_waiting(&inbox, candidate)?)
+                    }
+                    None => None,
+                };
+                Ok(jval!({
+                    "command": row.command,
+                    "by": row.by,
+                    "count": row.count,
+                    "first": row.first.to_string(),
+                    "last": row.last.to_string(),
+                    "offered": row.offered,
+                    "waiting": waiting,
+                }))
+            })
+            .collect::<Result<_>>()?;
+        let data = jval!({
+            "repeating": rows,
+            "count": rows.len(),
+            "window_seconds": window.as_secs(),
+        });
+        return Ok(Reply::Data {
+            context: EnvelopeContext::default(),
+            data,
+            warnings: vec![],
+            exit_code: json::EXIT_OK,
+        });
+    };
+
+    let policy = Policy {
+        threshold: args.threshold.max(1),
+        window: observe::parse_span(&args.window)?,
+    };
+    let env = |name: &str| std::env::var(name).ok();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut ignored: Option<&str> = None;
+
+    let runs: Result<Vec<_>> = (|| {
+        let mut stdin = String::new();
+        if args.stdin_jsonl || args.from_hook {
+            std::io::stdin().read_to_string(&mut stdin).map_err(|e| {
+                AikitError::new("cli.stdin_unreadable", format!("could not read stdin: {e}"))
+            })?;
+        }
+        if args.stdin_jsonl {
+            let by = args
+                .by
+                .clone()
+                .unwrap_or_else(|| observe::actor_from_env(env, "unknown"));
+            return observe::runs_from_jsonl(&stdin, &by);
+        }
+        if args.from_hook {
+            let by = args
+                .by
+                .clone()
+                .unwrap_or_else(|| observe::actor_from_env(env, "agent"));
+            let payload: Value = serde_json::from_str(&stdin).map_err(|e| {
+                AikitError::new(
+                    "observe.bad_hook_payload",
+                    format!("the hook payload on stdin is not JSON: {e}"),
+                )
+            })?;
+            return Ok(observe::run_from_hook(&payload, &by).into_iter().collect());
+        }
+        let by = args
+            .by
+            .clone()
+            .unwrap_or_else(|| observe::actor_from_env(env, "unknown"));
+        let object = jval!({
+            "command": args.command,
+            "cwd": args.cwd,
+            "session": args.session,
+            "exit_code": args.exit_code,
+            "at": args.at,
+        });
+        Ok(vec![observe::run_from_object(&object, &by)?])
+    })();
+
+    let runs = match runs {
+        Ok(runs) => runs,
+        // A hook must never fail on the observer's account: a payload that cannot
+        // be read becomes a warning, and the harness carries on.
+        Err(error) if args.from_hook => {
+            warnings.push(error.message().to_string());
+            Vec::new()
+        }
+        Err(error) => return Err(error),
+    };
+    if args.from_hook && runs.is_empty() && warnings.is_empty() {
+        ignored = Some("not a shell command");
+    }
+
+    // What is already saved includes the project's own registry, when the process
+    // stands inside a project.
+    let home_marker = home.root();
+    let project = aikit_cli::discover::discover_project_excluding(cwd, Some(home_marker));
+    let load = aikit_cli::app::load_catalog(&home, project.as_ref().map(|p| p.root.as_path()))?;
+    let mut results: Vec<Value> = Vec::new();
+    let mut offered: Vec<String> = Vec::new();
+    let mut recorded = 0usize;
+    for run in runs {
+        match observer.observe(run, policy, &inbox, &load.catalog) {
+            Ok(seen) => {
+                if seen.recorded {
+                    recorded += 1;
+                }
+                if let Some(offer) = seen.offered.as_ref().filter(|offer| offer.new) {
+                    offered.push(offer.candidate.clone());
+                }
+                results.push(jval!({
+                    "command": seen.command,
+                    "by": seen.by,
+                    "recorded": seen.recorded,
+                    "skipped": seen.skipped.as_ref().map(|skip| skip.code()),
+                    "detail": seen.skipped.as_ref().and_then(|skip| skip.detail()),
+                    "count": seen.count,
+                    "threshold": seen.threshold,
+                    "window_seconds": seen.window.as_secs(),
+                    "offered": seen.offered.as_ref().map(|offer| jval!({
+                        "candidate": offer.candidate,
+                        "inbox_item": offer.item.as_ref().map(|item| item.to_string()),
+                        "proposal": offer.proposal.as_ref().map(|p| p.to_string()),
+                        "new": offer.new,
+                    })),
+                }));
+            }
+            // A hook never fails the harness; anywhere else the feed is told.
+            Err(error) if args.from_hook => warnings.push(error.message().to_string()),
+            Err(error) => return Err(error),
+        }
+    }
+    let data = jval!({
+        "runs": results,
+        "recorded": recorded,
+        "skipped": results.len() - recorded,
+        "offered": offered,
+        "ignored": ignored,
+    });
+    Ok(Reply::Data {
+        context: EnvelopeContext::default(),
+        data,
+        warnings,
+        exit_code: json::EXIT_OK,
+    })
 }
 
 /// `aikit diff` — what applying the current declarations would change.
@@ -6917,20 +7241,33 @@ fn event_json(e: aikit_store::index::EventSummary) -> Value {
 }
 
 /// `aikit stats` — what is catalogued, and what actually gets used.
+///
+/// The roster comes from the loaded catalogue, which is the one place every
+/// registry and project-local capsule is read from. (It used to come from the
+/// index's derived `capsules` table, which no command ever fills, so the
+/// breakdown was always empty and "ever used" could never be anything but zero.)
 fn cmd_stats(cwd: &std::path::Path) -> Result<Reply> {
     let service = Service::discover(cwd)?;
     let index = service.index();
-    let facets = index.facets()?;
     let view = service.resolved();
 
     let mut used = 0usize;
     let mut runs = 0u32;
-    for row in index.capsules()? {
-        let usage = index.usage(&row.id)?;
+    let mut kinds: std::collections::BTreeMap<aikit_core::Kind, u32> =
+        std::collections::BTreeMap::new();
+    let mut sources: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    for capsule in aikit_core::catalog::Catalog::capsules(service.snapshot()) {
+        let usage = index.usage(&capsule.id)?;
         if usage.successful_runs > 0 {
             used += 1;
         }
         runs += usage.successful_runs;
+        *kinds.entry(capsule.kind).or_insert(0) += 1;
+        let source = capsule
+            .source
+            .as_ref()
+            .map_or("personal", |source| source.as_str());
+        *sources.entry(source.to_string()).or_insert(0) += 1;
     }
 
     let data = jval!({
@@ -6940,8 +7277,8 @@ fn cmd_stats(cwd: &std::path::Path) -> Result<Reply> {
         "ever_used": used,
         "successful_runs": runs,
         "events": index.event_count()?,
-        "by_kind": facets.kinds.iter().map(|(k, n)| jval!({ "kind": k.as_str(), "count": n })).collect::<Vec<_>>(),
-        "by_source": facets.sources.iter().map(|(s, n)| jval!({ "source": s, "count": n })).collect::<Vec<_>>(),
+        "by_kind": kinds.iter().map(|(k, n)| jval!({ "kind": k.as_str(), "count": n })).collect::<Vec<_>>(),
+        "by_source": sources.iter().map(|(s, n)| jval!({ "source": s, "count": n })).collect::<Vec<_>>(),
     });
     Ok(reply(&service, data, vec![]))
 }
@@ -6954,15 +7291,15 @@ fn cmd_unused(cwd: &std::path::Path) -> Result<Reply> {
     let service = Service::discover(cwd)?;
     let index = service.index();
     let mut rows: Vec<Value> = Vec::new();
-    for row in index.capsules()? {
-        let usage = index.usage(&row.id)?;
+    for capsule in aikit_core::catalog::Catalog::capsules(service.snapshot()) {
+        let usage = index.usage(&capsule.id)?;
         if usage.successful_runs == 0 {
             rows.push(jval!({
-                "capability": row.id.to_string(),
-                "kind": row.kind.as_str(),
-                "name": row.name,
+                "capability": capsule.id.to_string(),
+                "kind": capsule.kind.as_str(),
+                "name": capsule.name,
                 "failed_runs": usage.failed_runs,
-                "active": service.resolved().is_active(&row.id),
+                "active": service.resolved().is_active(&capsule.id),
             }));
         }
     }
@@ -7094,7 +7431,6 @@ fn cmd_harness_auth(args: HarnessAuthArgs, json_mode: bool) -> Result<Reply> {
 /// `aikit alias list|check|install` (ADR 0005 Stage 1): the user-owned
 /// command-family surface over manifests that are data, never code.
 fn cmd_alias(cwd: &std::path::Path, c: AliasCmd, _json_mode: bool) -> Result<Reply> {
-    let _ = cwd;
     let home = AikitHome::discover()?;
     match c.command {
         AliasSub::List | AliasSub::Check => {
@@ -7148,6 +7484,43 @@ fn cmd_alias(cwd: &std::path::Path, c: AliasCmd, _json_mode: bool) -> Result<Rep
                 warnings: vec![],
                 exit_code: json::EXIT_OK,
             })
+        }
+        AliasSub::Define(a) => {
+            let service = Service::discover(cwd)?;
+            let defined = aikit_cli::operative_alias::define(
+                &home,
+                service.snapshot(),
+                &a.definition.join(" "),
+                a.description.as_deref(),
+                a.by.as_deref(),
+                a.replace,
+            )?;
+            let data = jval!({
+                "id": defined.id.to_string(),
+                "alias": format!("@{}", defined.definition.name),
+                "expression": defined.definition.body,
+                "takes": defined.definition.gaps,
+                "manifest": defined.manifest.display().to_string(),
+                "replaced": defined.replaced,
+                "try": format!(
+                    "aikit alias expand '@{}{}'",
+                    defined.definition.name,
+                    " word".repeat(defined.definition.gaps)
+                ),
+            });
+            Ok(reply(&service, data, vec![]))
+        }
+        AliasSub::Expand(a) => {
+            let service = Service::discover(cwd)?;
+            let query = a.query.join(" ");
+            let table = aikit_cli::operative_alias::table_from_catalog(service.snapshot());
+            let expansion = aikit_core::resource::expand_aliases(&query, &table)?;
+            let data = jval!({
+                "input": query,
+                "expanded": expansion.text,
+                "aliases": expansion.used,
+            });
+            Ok(reply(&service, data, vec![]))
         }
     }
 }

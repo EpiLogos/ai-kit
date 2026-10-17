@@ -1371,6 +1371,362 @@ fn stable_path_identity(rendered: &str) -> String {
     format!("resolve-path:{hash:016x}")
 }
 
+// ---------------------------------------------------------------------------
+// Aliases: names for expressions
+// ---------------------------------------------------------------------------
+//
+// `@gs = @# ( @ ? )` gives an expression a name; `@gs foo` then reads as
+// `@# ( @ foo )`. The grammar itself is unchanged and needs to be: `@gs` already
+// lexes as an ordinary word, and `=` is already the Express relation, so a
+// definition is *also* a valid expression and cannot be told from one by the
+// parser. A definition is therefore a statement a person makes on purpose
+// (`aikit alias define`), and expansion is a step on the text *before* it is
+// parsed - one step, here, so the CLI, agents and the Search device share it.
+//
+// An alias is a textual name, as a shell alias is: it expands where it stands.
+// The one thing added to that is the gap: a lone `?` in the body takes the next
+// word after the alias. Everything else in the query is left byte-for-byte as it
+// was written, and a query that names no alias is not touched at all.
+
+/// A person's operative aliases: the name (without its `@`) and the expression
+/// text it stands for.
+pub type AliasTable = BTreeMap<String, String>;
+
+/// The word that marks a gap in an alias body.
+pub const ALIAS_GAP: &str = "?";
+const MAX_ALIAS_DEPTH: usize = 8;
+const MAX_ALIAS_GAPS: usize = 4;
+
+/// An alias is written `@name`: a lowercase letter, then letters, digits, `-` or
+/// `_`, at most thirty-two characters. The shape keeps `@5`, `@#` and a bare `@`
+/// (the horizons) unambiguous.
+pub fn alias_name_is_valid(name: &str) -> bool {
+    let mut chars = name.chars();
+    name.len() <= 32
+        && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// A definition statement, `@name = expression`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasDefinition {
+    pub name: String,
+    pub body: String,
+    /// How many words the alias takes after it.
+    pub gaps: usize,
+}
+
+/// What expanding aliases in a query did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasExpansion {
+    /// The query with each alias replaced by what it stands for.
+    pub text: String,
+    /// The aliases used, in order of first use.
+    pub used: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WordKind {
+    Bare,
+    Quoted,
+    Open,
+    Close,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Word {
+    start: usize,
+    end: usize,
+    kind: WordKind,
+}
+
+/// The words of a query as the lexer sees them - bare words, quoted strings and
+/// parentheses - with their byte positions, so a replacement can leave the rest
+/// of the text exactly as written.
+fn scan_words(raw: &str) -> Result<Vec<Word>> {
+    let chars = raw.char_indices().collect::<Vec<_>>();
+    let mut words = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let (start, ch) = chars[i];
+        if ch.is_whitespace() {
+            i += 1;
+        } else if ch == '(' || ch == ')' {
+            let end = start + ch.len_utf8();
+            let kind = if ch == '(' {
+                WordKind::Open
+            } else {
+                WordKind::Close
+            };
+            words.push(Word { start, end, kind });
+            i += 1;
+        } else if ch == '\'' || ch == '"' {
+            i += 1;
+            let mut closed = false;
+            while i < chars.len() {
+                let current = chars[i].1;
+                if current == '\\' {
+                    i += 2;
+                } else if current == ch {
+                    i += 1;
+                    closed = true;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            if !closed {
+                return Err(AikitError::new(
+                    "resolve.unclosed_quote",
+                    "quoted Resolve subject is not closed",
+                ));
+            }
+            let end = chars.get(i).map_or(raw.len(), |(at, _)| *at);
+            words.push(Word {
+                start,
+                end,
+                kind: WordKind::Quoted,
+            });
+        } else {
+            while i < chars.len() {
+                let current = chars[i].1;
+                if current.is_whitespace() || current == '(' || current == ')' {
+                    break;
+                }
+                i += if current == '\\' { 2 } else { 1 };
+            }
+            let end = chars.get(i).map_or(raw.len(), |(at, _)| *at);
+            words.push(Word {
+                start,
+                end,
+                kind: WordKind::Bare,
+            });
+        }
+    }
+    Ok(words)
+}
+
+fn word_text<'a>(raw: &'a str, word: &Word) -> &'a str {
+    &raw[word.start..word.end]
+}
+
+fn is_gap(raw: &str, word: &Word) -> bool {
+    word.kind == WordKind::Bare && word_text(raw, word) == ALIAS_GAP
+}
+
+fn count_gaps(body: &str) -> Result<usize> {
+    let words = scan_words(body)?;
+    Ok(words.iter().filter(|word| is_gap(body, word)).count())
+}
+
+/// Read `@name = expression` as a definition. Anything else is an error that
+/// says what a definition looks like.
+pub fn parse_alias_definition(raw: &str) -> Result<AliasDefinition> {
+    let shape = || {
+        AikitError::new(
+            "resolve.alias_definition",
+            "write an alias as `@name = expression`, for example `@gs = @# ( @ ? )`",
+        )
+    };
+    let words = scan_words(raw)?;
+    let (Some(first), Some(second)) = (words.first(), words.get(1)) else {
+        return Err(shape());
+    };
+    let name = word_text(raw, first)
+        .strip_prefix('@')
+        .filter(|name| first.kind == WordKind::Bare && alias_name_is_valid(name))
+        .ok_or_else(shape)?;
+    if second.kind != WordKind::Bare || word_text(raw, second) != "=" {
+        return Err(shape());
+    }
+    let body = raw[second.end..].trim();
+    if body.is_empty() {
+        return Err(shape());
+    }
+    Ok(AliasDefinition {
+        name: name.to_string(),
+        body: body.to_string(),
+        gaps: count_gaps(body)?,
+    })
+}
+
+/// Whether an alias may be defined against what already exists: the body is a
+/// valid operative expression once its gaps are filled, it takes at most four
+/// words, and following it through the other aliases never leads back to itself.
+pub fn validate_alias_definition(definition: &AliasDefinition, table: &AliasTable) -> Result<()> {
+    if !alias_name_is_valid(&definition.name) {
+        return Err(AikitError::new(
+            "resolve.alias_name",
+            format!(
+                "`{}` cannot be an alias name: use a lowercase letter, then letters, digits, `-` \
+                 or `_`",
+                definition.name
+            ),
+        ));
+    }
+    let mut candidate = table.clone();
+    candidate.insert(definition.name.clone(), definition.body.clone());
+    // Use it once with a word for each gap: this follows every alias it reaches,
+    // so a cycle through itself is found here, and the result must still parse.
+    let mut probe = format!("@{}", definition.name);
+    for _ in 0..definition.gaps {
+        probe.push_str(" probe");
+    }
+    let expansion = expand_aliases(&probe, &candidate)?;
+    parse_resolve_expression(&expansion.text).map_err(|error| {
+        AikitError::new(
+            "resolve.alias_body",
+            format!(
+                "`@{}` does not expand to an expression: {}",
+                definition.name,
+                error.message()
+            ),
+        )
+    })?;
+    Ok(())
+}
+
+const RESERVED_WORDS: [&str; 11] = ["@", "@#", "@0", "@1", "@2", "@3", "@4", "@5", "-", "+", "="];
+
+/// Replace each use of an alias in `raw` with what it stands for.
+///
+/// `@name` expands where it stands; a lone `?` in its body takes the next word
+/// written after it (as written, quotes included). A query that uses no alias
+/// comes back unchanged. A use that would loop - `@a` reaching `@a` again - is
+/// refused, naming the chain.
+pub fn expand_aliases(raw: &str, table: &AliasTable) -> Result<AliasExpansion> {
+    let mut used = Vec::new();
+    let text = expand_text(raw, table, &mut Vec::new(), &mut used)?;
+    Ok(AliasExpansion { text, used })
+}
+
+fn expand_text(
+    raw: &str,
+    table: &AliasTable,
+    stack: &mut Vec<String>,
+    used: &mut Vec<String>,
+) -> Result<String> {
+    if table.is_empty() || !raw.contains('@') {
+        return Ok(raw.to_string());
+    }
+    let words = scan_words(raw)?;
+    let mut out = String::new();
+    let mut copied = 0; // bytes of `raw` already written to `out`
+    let mut i = 0;
+    while i < words.len() {
+        let word = words[i];
+        let alias = (word.kind == WordKind::Bare)
+            .then(|| word_text(raw, &word).strip_prefix('@'))
+            .flatten()
+            .filter(|name| table.contains_key(*name));
+        let Some(name) = alias else {
+            i += 1;
+            continue;
+        };
+
+        if let Some(at) = stack.iter().position(|entry| entry == name) {
+            let mut chain: Vec<String> = stack[at..].iter().map(|n| format!("@{n}")).collect();
+            chain.push(format!("@{name}"));
+            return Err(AikitError::new(
+                "resolve.alias_cycle",
+                format!("`@{name}` leads back to itself: {}", chain.join(" -> ")),
+            )
+            .with("alias", name.to_string()));
+        }
+        if stack.len() >= MAX_ALIAS_DEPTH {
+            return Err(AikitError::new(
+                "resolve.alias_too_deep",
+                format!("aliases nest more than {MAX_ALIAS_DEPTH} deep at `@{name}`"),
+            ));
+        }
+        if !used.iter().any(|entry| entry == name) {
+            used.push(name.to_string());
+        }
+
+        // What it stands for first, so an alias inside its body is expanded and
+        // any gap that expansion leaves is the gap this use has to fill.
+        stack.push(name.to_string());
+        let body = expand_text(&table[name], table, stack, used);
+        stack.pop();
+        let body = body?;
+        let gaps = count_gaps(&body)?;
+        if gaps > MAX_ALIAS_GAPS {
+            return Err(AikitError::new(
+                "resolve.alias_gaps",
+                format!("`@{name}` takes {gaps} words; at most {MAX_ALIAS_GAPS}"),
+            ));
+        }
+
+        let mut fills = Vec::with_capacity(gaps);
+        for offset in 1..=gaps {
+            let filler = words
+                .get(i + offset)
+                .filter(|next| match next.kind {
+                    WordKind::Quoted => true,
+                    WordKind::Bare => !RESERVED_WORDS.contains(&word_text(raw, next)),
+                    WordKind::Open | WordKind::Close => false,
+                })
+                .ok_or_else(|| {
+                    AikitError::new(
+                        "resolve.alias_gap",
+                        format!(
+                            "`@{name}` takes {gaps} word{} after it and found {}",
+                            if gaps == 1 { "" } else { "s" },
+                            offset - 1
+                        ),
+                    )
+                    .with("alias", name.to_string())
+                })?;
+            fills.push(word_text(raw, filler).to_string());
+        }
+
+        let mut filled = String::new();
+        let mut at = 0;
+        let gap_words = scan_words(&body)?;
+        for (fill, gap) in fills
+            .iter()
+            .zip(gap_words.iter().filter(|w| is_gap(&body, w)))
+        {
+            filled.push_str(&body[at..gap.start]);
+            filled.push_str(fill);
+            at = gap.end;
+        }
+        filled.push_str(&body[at..]);
+
+        // A body that combines operands (`a / b`) keeps its own grouping when it
+        // is one operand among others; alone, it is left as written.
+        let consumed = i + gaps;
+        let alone = words.len() == consumed + 1 && i == 0;
+        let grouped = if !alone
+            && matches!(
+                parse_resolve_expression(&filled),
+                Ok(ResolveExpression::Binary { .. })
+            ) {
+            format!("( {filled} )")
+        } else {
+            filled
+        };
+
+        out.push_str(&raw[copied..word.start]);
+        out.push_str(&grouped);
+        copied = words[consumed].end;
+        i = consumed + 1;
+    }
+    out.push_str(&raw[copied..]);
+    Ok(out)
+}
+
+/// [`parse_or_search_expression`] after aliases are expanded: the one entry a
+/// caller with a person's alias table uses.
+pub fn parse_or_search_expression_with_aliases(
+    raw: &str,
+    table: &AliasTable,
+) -> Result<(ResolveExpression, AliasExpansion)> {
+    let expansion = expand_aliases(raw, table)?;
+    let expression = parse_or_search_expression(&expansion.text)?;
+    Ok((expression, expansion))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1762,5 +2118,219 @@ mod tests {
         }
         let path = resolve_expression(&expression, &resources, 64);
         assert!(!path.candidates.is_empty());
+    }
+
+    // -- aliases ----------------------------------------------------------
+
+    fn table(entries: &[(&str, &str)]) -> AliasTable {
+        entries
+            .iter()
+            .map(|(name, body)| (name.to_string(), body.to_string()))
+            .collect()
+    }
+
+    fn expand(raw: &str, entries: &[(&str, &str)]) -> String {
+        expand_aliases(raw, &table(entries)).unwrap().text
+    }
+
+    #[test]
+    fn a_definition_is_a_name_an_equals_sign_and_the_expression() {
+        let definition = parse_alias_definition("@gs = @# ( @ ? )").unwrap();
+        assert_eq!(definition.name, "gs");
+        assert_eq!(definition.body, "@# ( @ ? )");
+        assert_eq!(definition.gaps, 1);
+
+        let plain = parse_alias_definition("  @tools   =   @5 method  ").unwrap();
+        assert_eq!(
+            (plain.name.as_str(), plain.body.as_str()),
+            ("tools", "@5 method")
+        );
+        assert_eq!(plain.gaps, 0);
+
+        for bad in [
+            "gs = x", "@Gs = x", "@gs x", "@gs =", "@5 = x", "@ = x", "", "@gs",
+        ] {
+            assert_eq!(
+                parse_alias_definition(bad).unwrap_err().code(),
+                "resolve.alias_definition",
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_definition_is_also_an_ordinary_express_expression_so_only_intent_tells_them_apart() {
+        // The grammar is unchanged: `@gs = x` still parses as the Express
+        // relation between two subjects. That is why defining is a statement.
+        let expression = parse_resolve_expression("@gs = @# ( @ ? )").unwrap();
+        assert!(matches!(
+            expression,
+            ResolveExpression::Binary {
+                op: RelationOp::Express,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_alias_expands_where_it_stands_and_a_gap_takes_the_next_word() {
+        let aliases = [("gs", "@# ( @ ? )")];
+        assert_eq!(expand("@gs foo", &aliases), "@# ( @ foo )");
+        assert_eq!(
+            expand("@gs \"two words\"", &aliases),
+            "@# ( @ \"two words\" )"
+        );
+        assert_eq!(expand("(@gs foo)", &aliases), "(@# ( @ foo ))");
+        assert_eq!(expand("@gs a x @gs b", &aliases), "@# ( @ a ) x @# ( @ b )");
+        let fixed = [("tools", "@5 method")];
+        assert_eq!(expand("@tools", &fixed), "@5 method");
+        let two = [("pair", "? x ?")];
+        assert_eq!(
+            expand("@pair left right", &two),
+            "( left x right )".replace("( ", "").replace(" )", "")
+        );
+    }
+
+    #[test]
+    fn what_is_not_an_alias_use_is_left_exactly_as_written() {
+        let aliases = [("gs", "@# ( @ ? )")];
+        for untouched in [
+            "release notes",
+            "@zz foo",
+            "\"@gs\" foo",
+            "'@gs' foo",
+            "foo@gs bar",
+            "@gsx foo",
+            "@5 something   spaced",
+            "",
+        ] {
+            let expansion = expand_aliases(untouched, &table(&aliases)).unwrap();
+            assert_eq!(expansion.text, untouched);
+            assert!(expansion.used.is_empty(), "{untouched:?}");
+        }
+        assert_eq!(
+            expand("anything @gs foo   trailing", &aliases),
+            "anything @# ( @ foo )   trailing"
+        );
+    }
+
+    #[test]
+    fn an_alias_that_combines_operands_keeps_its_grouping_among_others() {
+        let aliases = [("pair", "a / b")];
+        assert_eq!(expand("@pair", &aliases), "a / b");
+        assert_eq!(expand("@pair x c", &aliases), "( a / b ) x c");
+        assert_eq!(expand("c x @pair", &aliases), "c x ( a / b )");
+    }
+
+    #[test]
+    fn aliases_nest_and_the_gap_an_inner_alias_leaves_is_the_outer_ones() {
+        let aliases = [("a", "@# ( @ ? )"), ("b", "@a ?")];
+        let expansion = expand_aliases("@b foo", &table(&aliases)).unwrap();
+        assert_eq!(expansion.text, "@# ( @ foo )");
+        assert_eq!(expansion.used, ["b", "a"]);
+
+        let chained = [("a", "p"), ("b", "@a / q")];
+        assert_eq!(expand("@b", &chained), "p / q");
+    }
+
+    #[test]
+    fn a_missing_word_for_a_gap_is_refused_and_says_how_many_were_wanted() {
+        let aliases = [("gs", "@# ( @ ? )"), ("pair", "? x ?")];
+        for (raw, code) in [
+            ("@gs", "resolve.alias_gap"),
+            ("(@gs)", "resolve.alias_gap"),
+            ("@gs =", "resolve.alias_gap"),
+            ("@gs @5", "resolve.alias_gap"),
+            ("@pair one", "resolve.alias_gap"),
+        ] {
+            let error = expand_aliases(raw, &table(&aliases)).unwrap_err();
+            assert_eq!(error.code(), code, "{raw:?}");
+        }
+        let error = expand_aliases("@pair one", &table(&aliases)).unwrap_err();
+        assert!(
+            error.message().contains("takes 2 words"),
+            "{}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn an_alias_that_leads_back_to_itself_is_refused_naming_the_chain() {
+        let error = expand_aliases("@a", &table(&[("a", "@b"), ("b", "@a")])).unwrap_err();
+        assert_eq!(error.code(), "resolve.alias_cycle");
+        assert!(
+            error.message().contains("@a -> @b -> @a"),
+            "{}",
+            error.message()
+        );
+
+        let own = expand_aliases("@a", &table(&[("a", "x / @a")])).unwrap_err();
+        assert_eq!(own.code(), "resolve.alias_cycle");
+
+        let long: Vec<(String, String)> = (0..10)
+            .map(|n| (format!("n{n}"), format!("@n{}", n + 1)))
+            .collect();
+        let long: AliasTable = long.into_iter().collect();
+        assert_eq!(
+            expand_aliases("@n0", &long).unwrap_err().code(),
+            "resolve.alias_too_deep"
+        );
+    }
+
+    #[test]
+    fn a_definition_is_checked_against_what_exists_before_it_is_saved() {
+        let existing = table(&[("gs", "@# ( @ ? )")]);
+
+        let fine = parse_alias_definition("@find = @gs ?").unwrap();
+        validate_alias_definition(&fine, &existing).unwrap();
+
+        // Defining it would close a loop through itself or through another.
+        let looping = parse_alias_definition("@gs = @# ( @gs ? )").unwrap();
+        assert_eq!(
+            validate_alias_definition(&looping, &existing)
+                .unwrap_err()
+                .code(),
+            "resolve.alias_cycle"
+        );
+        let a = table(&[("a", "@b")]);
+        let closes = parse_alias_definition("@b = @a").unwrap();
+        assert_eq!(
+            validate_alias_definition(&closes, &a).unwrap_err().code(),
+            "resolve.alias_cycle"
+        );
+
+        let unclosed = parse_alias_definition("@bad = ( @ ?").unwrap();
+        assert_eq!(
+            validate_alias_definition(&unclosed, &existing)
+                .unwrap_err()
+                .code(),
+            "resolve.alias_body"
+        );
+        let greedy = parse_alias_definition("@many = ? ? ? ? ?").unwrap();
+        assert_eq!(
+            validate_alias_definition(&greedy, &existing)
+                .unwrap_err()
+                .code(),
+            "resolve.alias_gaps"
+        );
+    }
+
+    #[test]
+    fn an_expanded_query_parses_to_the_same_expression_as_the_one_written_out() {
+        let aliases = table(&[("gs", "@# ( @ ? )")]);
+
+        let (expression, expansion) =
+            parse_or_search_expression_with_aliases("@gs orient", &aliases).unwrap();
+
+        assert_eq!(
+            expression,
+            parse_or_search_expression("@# ( @ orient )").unwrap()
+        );
+        assert_eq!(expansion.used, ["gs"]);
+        // And with no alias in the table the same text is the ordinary search it was.
+        let (plain, none) =
+            parse_or_search_expression_with_aliases("@gs orient", &AliasTable::new()).unwrap();
+        assert_eq!(plain, parse_or_search_expression("@gs orient").unwrap());
+        assert!(none.used.is_empty());
     }
 }

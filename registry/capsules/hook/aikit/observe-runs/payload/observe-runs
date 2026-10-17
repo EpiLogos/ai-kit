@@ -1,0 +1,15 @@
+#!/bin/sh
+# Recurrence feed - the observe-runs capsule's payload.
+#
+# The dispatcher (aikit hook dispatch <client> PostToolUse) hands the harness's
+# event JSON to this script on stdin. The whole contract is to pass it on:
+# `aikit observe run --from-hook` finds the shell command in the event (any other
+# tool's event is ignored), keeps it only if it holds no secret, counts the
+# repeats, and offers the third on the inbox. AIKit owns the counting; this
+# script only forwards.
+#
+# It runs in the observe phase - it cannot deny a tool call - and the verb never
+# fails a hook on its own account, so a missing `aikit`, an unreadable payload or
+# a locked store all end in exit 0 here (stdin is the payload; the verb reads it).
+aikit observe run --from-hook >/dev/null 2>&1
+exit 0

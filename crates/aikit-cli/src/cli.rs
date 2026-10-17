@@ -194,6 +194,11 @@ pub enum Command {
     Capture(CaptureArgs),
     /// Promote a captured candidate into a capsule.
     Promote(PromoteArgs),
+    /// Feed attributed command runs; AIKit notices what repeats and offers it.
+    Observe(ObserveArgs),
+    /// Read what operations are saved (scripts, aliases), from where, by whom,
+    /// at which revision, how often used - and what is waiting to be saved.
+    Saved(SavedArgs),
     /// Garbage-collect old generations.
     Prune(PruneArgs),
     /// Issue, list and revoke hook bypass tokens.
@@ -666,9 +671,11 @@ impl Command {
             Self::Session(c) => session_route(c),
             Self::SessionSpace { .. } => "session-space-forward",
             Self::Task(c) => task_route(c),
-            Self::Inbox(_) => "cmd_inbox",
+            Self::Inbox(a) => inbox_route(a),
             Self::Capture(_) => "cmd_capture",
             Self::Promote(_) => "cmd_promote",
+            Self::Observe(a) => observe_route(a),
+            Self::Saved(_) => "cmd_saved",
             Self::Prune(_) => "cmd_prune",
             Self::Bypass(c) => bypass_route(&c.command),
             Self::Client(c) => client_route(&c.command),
@@ -811,9 +818,10 @@ fn praxis_route(command: &PraxisSub) -> &'static str {
         PraxisSub::Set(c) => set_route(&c.command),
         PraxisSub::Family(_) => "cmd_family",
         PraxisSub::Run(_) => "cmd_run",
-        PraxisSub::Inbox(_) => "cmd_inbox",
+        PraxisSub::Inbox(a) => inbox_route(a),
         PraxisSub::Capture(_) => "cmd_capture",
         PraxisSub::Promote(_) => "cmd_promote",
+        PraxisSub::Observe(a) => observe_route(a),
         PraxisSub::Capabilities(c) => capabilities_route(&c.command),
         PraxisSub::Method(c) => method_route(&c.command),
         PraxisSub::Routine(c) => routine_route(&c.command),
@@ -990,11 +998,28 @@ fn harness_route(command: &HarnessCmd) -> &'static str {
     }
 }
 
+fn observe_route(args: &ObserveArgs) -> &'static str {
+    match &args.command {
+        ObserveSub::Run(_) => "cmd_observe_run",
+        ObserveSub::Status(_) => "cmd_observe_status",
+    }
+}
+
+fn inbox_route(args: &InboxArgs) -> &'static str {
+    match &args.command {
+        None => "cmd_inbox",
+        Some(InboxSub::Accept(_)) => "cmd_inbox_accept",
+        Some(InboxSub::Reject(_)) => "cmd_inbox_reject",
+    }
+}
+
 fn alias_route(command: &AliasSub) -> &'static str {
     match command {
         AliasSub::List => "cmd_alias_list",
         AliasSub::Check => "cmd_alias_check",
         AliasSub::Install(_) => "cmd_alias_install",
+        AliasSub::Define(_) => "cmd_alias_define",
+        AliasSub::Expand(_) => "cmd_alias_expand",
     }
 }
 
@@ -4529,6 +4554,11 @@ pub struct RunArgs {
     /// Confirm running an executable whose revision has not been reviewed.
     #[arg(long)]
     pub confirm: bool,
+    /// The exported command name this run was made under. The generated shims
+    /// pass it so the run can say which entry point was used; it is consumed
+    /// here and never reaches the capability's own arguments.
+    #[arg(long, value_name = "NAME", hide = true)]
+    pub export: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -4569,9 +4599,39 @@ pub struct RollbackArgs {}
 
 #[derive(Debug, Args)]
 pub struct InboxArgs {
-    /// Include quarantined and rejected candidates.
+    /// Include items already resolved, kept for audit.
     #[arg(long)]
     pub all: bool,
+    #[command(subcommand)]
+    pub command: Option<InboxSub>,
+}
+
+/// What can be decided about an item on the inbox.
+#[derive(Debug, Subcommand)]
+pub enum InboxSub {
+    /// Save a captured example: run the promotion its message proposes, mark the
+    /// example saved and resolve the message.
+    Accept(InboxAcceptArgs),
+    /// Turn a captured example down: move it out of the queue and resolve the
+    /// message.
+    Reject(InboxRejectArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct InboxAcceptArgs {
+    /// The inbox item id, or the candidate id it is about.
+    #[arg(value_name = "ITEM")]
+    pub target: String,
+}
+
+#[derive(Debug, Args)]
+pub struct InboxRejectArgs {
+    /// The inbox item id, or the candidate id it is about.
+    #[arg(value_name = "ITEM")]
+    pub target: String,
+    /// Why, kept with the rejected example.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -4716,6 +4776,9 @@ pub enum PraxisSub {
     /// Promote a captured candidate into a capsule. (The `promote` root
     /// spelling is the same command.)
     Promote(PromoteArgs),
+    /// Feed attributed command runs; AIKit notices what repeats and offers it.
+    /// (The `observe` root spelling is the same command.)
+    Observe(ObserveArgs),
     /// List and read the capabilities exposed to a brokered client.
     /// (The `capabilities` root spelling is the same command.)
     Capabilities(CapabilitiesCmd),
@@ -4796,6 +4859,25 @@ pub struct CaptureArgs {
     /// The body; if omitted, read from stdin.
     #[arg(long, value_name = "TEXT")]
     pub body: Option<String>,
+    /// What this is (script, alias, skill, hook, guidance, template, session,
+    /// tool, tool-protocol). Beats the classifier, which otherwise guesses and
+    /// says how sure it is.
+    #[arg(long, value_name = "KIND")]
+    pub kind: Option<String>,
+    /// A command name this exports (repeatable). Only a script or an alias
+    /// exports commands.
+    #[arg(long = "export", value_name = "NAME")]
+    pub exports: Vec<String>,
+    /// Where it applies: home (the default), project or session.
+    #[arg(long, value_name = "SCOPE")]
+    pub scope: Option<String>,
+    /// Where the example came from: a terminal pane, an agent run, a Factory
+    /// frame. A reference, not the transcript.
+    #[arg(long = "source-ref", value_name = "REF")]
+    pub source_ref: Option<String>,
+    /// Who observed it: `human`, or an agent ref such as `claude-code:name`.
+    #[arg(long, value_name = "WHO")]
+    pub by: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -4806,6 +4888,84 @@ pub struct PromoteArgs {
     /// The capsule id to give the new capability.
     #[arg(long, value_name = "ID")]
     pub id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SavedArgs {
+    /// Only this kind: `script` or `alias`.
+    #[arg(long, value_name = "KIND", value_parser = ["script", "alias"])]
+    pub kind: Option<String>,
+    /// How many saved operations to list.
+    #[arg(long, value_name = "N", default_value_t = 100)]
+    pub limit: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct ObserveArgs {
+    #[command(subcommand)]
+    pub command: ObserveSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ObserveSub {
+    /// Report command runs. AIKit counts the repeats per command and actor, and
+    /// the third inside the window files a capture candidate on the inbox.
+    Run(ObserveRunArgs),
+    /// List the commands that are repeating, and whether each was offered.
+    Status(ObserveStatusArgs),
+}
+
+/// One report of command runs. Give it one run by flags, or many on stdin.
+#[derive(Debug, Args)]
+#[command(group(
+    clap::ArgGroup::new("feed").required(true).args(["command", "stdin_jsonl", "from_hook"])
+))]
+pub struct ObserveRunArgs {
+    /// The command line that was run.
+    #[arg(long, value_name = "TEXT")]
+    pub command: Option<String>,
+    /// Where it was run.
+    #[arg(long, value_name = "DIR", requires = "command")]
+    pub cwd: Option<String>,
+    /// Who ran it: `human`, or an agent ref. Unattributed runs are counted as
+    /// `unknown` (or as the Position this process was launched as).
+    #[arg(long, value_name = "WHO")]
+    pub by: Option<String>,
+    /// When (RFC 3339 or epoch seconds); now when absent.
+    #[arg(long, value_name = "TIME", requires = "command")]
+    pub at: Option<String>,
+    /// The session it belongs to.
+    #[arg(long, value_name = "ID", requires = "command")]
+    pub session: Option<String>,
+    /// How it ended; a run that failed is not counted.
+    #[arg(
+        long = "exit-code",
+        value_name = "N",
+        requires = "command",
+        allow_negative_numbers = true
+    )]
+    pub exit_code: Option<i32>,
+    /// Read runs from stdin, one JSON object per line: command, cwd, by, at,
+    /// session, exit_code.
+    #[arg(long = "stdin-jsonl")]
+    pub stdin_jsonl: bool,
+    /// Read one agent-harness `PostToolUse` event from stdin; a shell tool call
+    /// is a run, any other tool's is ignored. Never fails the hook.
+    #[arg(long = "from-hook")]
+    pub from_hook: bool,
+    /// How many repeats make a pattern.
+    #[arg(long, value_name = "N", default_value_t = 3)]
+    pub threshold: usize,
+    /// How far back repeats count: 7d, 36h, 90m.
+    #[arg(long, value_name = "SPAN", default_value = "7d")]
+    pub window: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ObserveStatusArgs {
+    /// How far back to look: 7d, 36h, 90m.
+    #[arg(long, value_name = "SPAN", default_value = "7d")]
+    pub window: String,
 }
 
 #[derive(Debug, Args)]
@@ -5375,6 +5535,35 @@ pub enum AliasSub {
     Check,
     /// Emit a family's launcher scripts as generated data under the AIKit home.
     Install(AliasInstallArgs),
+    /// Name an expression for the search grammar: `@name = expression`, with a
+    /// lone `?` standing for the next word written after the alias.
+    Define(AliasDefineArgs),
+    /// Show what a query becomes once aliases are expanded, without searching.
+    Expand(AliasExpandArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AliasDefineArgs {
+    /// The definition, `@name = expression`. Quote it, or give it as separate
+    /// words; either way it is one definition.
+    #[arg(value_name = "DEFINITION", required = true, num_args = 1..)]
+    pub definition: Vec<String>,
+    /// Redefine an alias of the same name.
+    #[arg(long)]
+    pub replace: bool,
+    /// What it is for, shown beside it in search.
+    #[arg(long, value_name = "TEXT")]
+    pub description: Option<String>,
+    /// Who defined it (`human`, or an agent ref).
+    #[arg(long, value_name = "WHO")]
+    pub by: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AliasExpandArgs {
+    /// The query to expand.
+    #[arg(value_name = "QUERY", required = true, num_args = 1..)]
+    pub query: Vec<String>,
 }
 
 #[derive(Debug, Args)]

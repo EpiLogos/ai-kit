@@ -112,14 +112,6 @@ pub struct ContextRecord {
     pub updated_at: Timestamp,
 }
 
-/// A capture candidate waiting for a human decision.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QueuedPromotion {
-    pub candidate_id: String,
-    pub reason: String,
-    pub queued_at: Timestamp,
-}
-
 // ---------------------------------------------------------------------------
 // The store
 // ---------------------------------------------------------------------------
@@ -380,56 +372,6 @@ impl<'a> StateStore<'a> {
 
     pub fn binding(&self, context: &ContextId) -> Result<Option<ContextBinding>> {
         self.index.binding(context)
-    }
-
-    // -- promotion queue ---------------------------------------------------
-
-    pub fn queue_promotion(&self, candidate_id: &str, reason: &str) -> Result<()> {
-        self.index
-            .conn()
-            .execute(
-                "INSERT INTO promotion_queue (candidate_id, reason, queued_ns)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(candidate_id) DO UPDATE SET
-                     reason = excluded.reason,
-                     queued_ns = excluded.queued_ns",
-                params![candidate_id, reason, Timestamp::now().as_nanos()],
-            )
-            .map_err(|e| sql_error("state.write_failed", &e))?;
-        Ok(())
-    }
-
-    pub fn promotion_queue(&self) -> Result<Vec<QueuedPromotion>> {
-        let mut stmt = self
-            .index
-            .conn()
-            .prepare(
-                "SELECT candidate_id, reason, queued_ns FROM promotion_queue
-                 ORDER BY queued_ns, candidate_id",
-            )
-            .map_err(|e| sql_error("state.query_failed", &e))?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(QueuedPromotion {
-                    candidate_id: r.get(0)?,
-                    reason: r.get(1)?,
-                    queued_at: Timestamp::from_nanos(r.get(2)?),
-                })
-            })
-            .map_err(|e| sql_error("state.query_failed", &e))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| sql_error("state.query_failed", &e))
-    }
-
-    pub fn dequeue_promotion(&self, candidate_id: &str) -> Result<()> {
-        self.index
-            .conn()
-            .execute(
-                "DELETE FROM promotion_queue WHERE candidate_id = ?1",
-                params![candidate_id],
-            )
-            .map_err(|e| sql_error("state.write_failed", &e))?;
-        Ok(())
     }
 }
 

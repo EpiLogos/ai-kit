@@ -104,9 +104,13 @@ impl Kind {
     }
 
     /// A script can be run explicitly while inactive; activation only decides
-    /// ambient exposure. Hooks and skills have no such escape hatch.
+    /// ambient exposure. An alias is the same kind of thing — a saved command —
+    /// so it follows the script. Hooks and skills have no such escape hatch.
     pub fn runnable_while_inactive(self) -> bool {
-        matches!(self, Kind::Script | Kind::Tool | Kind::Template)
+        matches!(
+            self,
+            Kind::Script | Kind::Alias | Kind::Tool | Kind::Template
+        )
     }
 }
 
@@ -437,6 +441,10 @@ pub struct Provenance {
     pub author: Option<String>,
     #[serde(default)]
     pub upstream: Option<String>,
+    /// Where the example came from when it was captured: a terminal pane, an
+    /// agent run, a Factory frame. A reference, never the transcript itself.
+    #[serde(default)]
+    pub source_ref: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -863,12 +871,50 @@ impl ToolServerRecord {
     }
 }
 
+/// The grammar an alias body is written in. One envelope, two honest runtimes:
+/// a `shell` alias is run by a shim; an `operative` alias is expanded by the
+/// search grammar's owner and never reaches a shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AliasSyntax {
+    #[default]
+    Shell,
+    Operative,
+}
+
+impl AliasSyntax {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AliasSyntax::Shell => "shell",
+            AliasSyntax::Operative => "operative",
+        }
+    }
+}
+
+impl FromStr for AliasSyntax {
+    type Err = AikitError;
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "shell" => Ok(AliasSyntax::Shell),
+            "operative" => Ok(AliasSyntax::Operative),
+            other => err(
+                "capsule.unknown_alias_syntax",
+                format!("`{other}` is not an alias syntax; use `shell` or `operative`"),
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AliasSection {
     pub name: String,
     pub body: String,
-    /// Shells whose syntax the body is written in.
+    /// The grammar of `body`. Absent means `shell`, so every alias written
+    /// before this field existed keeps its meaning.
+    #[serde(default)]
+    pub syntax: AliasSyntax,
+    /// Shells whose syntax the body is written in (a `shell` alias only).
     #[serde(default)]
     pub shells: Vec<String>,
 }
@@ -1308,6 +1354,14 @@ impl Capsule {
             _ => None,
         }
     }
+    /// Whether this is an alias in the search grammar rather than a command:
+    /// something that expands inside a query, is never run, and so needs no
+    /// review before it can be used.
+    pub fn is_operative_alias(&self) -> bool {
+        self.alias()
+            .is_some_and(|alias| alias.syntax == AliasSyntax::Operative)
+    }
+
     pub fn alias(&self) -> Option<&AliasSection> {
         match &self.payload {
             Payload::Alias(s) => Some(s),
@@ -1325,7 +1379,10 @@ impl Capsule {
     pub fn exported_commands(&self) -> Vec<String> {
         match &self.payload {
             Payload::Script(s) => s.effective_exports(&self.id),
-            Payload::Alias(a) => vec![a.name.clone()],
+            // Only a shell alias is a command. An operative alias is a name inside
+            // the search grammar; giving it a shim would put a command on the PATH
+            // that can only refuse to run.
+            Payload::Alias(a) if a.syntax == AliasSyntax::Shell => vec![a.name.clone()],
             _ => vec![],
         }
     }

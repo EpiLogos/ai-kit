@@ -15,7 +15,11 @@ use std::fs;
 
 use aikit_core::catalog::Catalog;
 use aikit_core::{Kind, Maturity, RegistrySource};
-use aikit_store::inbox::{CandidateState, Capture, Inbox, PromotionEdits, SimilarityBasis};
+use aikit_store::channel::{Evidence, InboxChannel, InboxKind, InboxState};
+use aikit_store::inbox::{
+    classify_with_confidence, CandidateState, Capture, CaptureScope, Confidence, Inbox,
+    PromotionEdits, SimilarityBasis,
+};
 use aikit_store::index::Index;
 use aikit_store::registry::load_registry;
 use aikit_store::AikitHome;
@@ -37,14 +41,7 @@ fn setup(dir: &std::path::Path) -> (AikitHome, Index) {
 }
 
 fn capture(title: &str, body: &str) -> Capture {
-    Capture {
-        title: title.to_string(),
-        body: body.to_string(),
-        suggested_kind: None,
-        exports: vec![],
-        project_root: None,
-        session: None,
-    }
+    Capture::new(title, body)
 }
 
 // ---------------------------------------------------------------------------
@@ -603,5 +600,717 @@ fn a_promoted_capsule_starts_unreviewed_however_it_was_captured() {
             capsule.revision.as_ref()
         ),
         aikit_core::TrustState::Unseen
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Capture carries intent (saved operations, A1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_classifier_says_how_sure_it_is_and_never_files_prose_as_a_script() {
+    let cases: &[(&str, Kind, Confidence)] = &[
+        ("#!/bin/sh\necho hi\n", Kind::Script, Confidence::High),
+        (
+            "---\nname: review\ndescription: Reviews\n---\n# Review\n",
+            Kind::Skill,
+            Confidence::High,
+        ),
+        (
+            "Run this on PreToolUse to gate pushes.",
+            Kind::Hook,
+            Confidence::Medium,
+        ),
+        (
+            "# Reviewing migrations\n\nRead the down first.\n",
+            Kind::Guidance,
+            Confidence::Medium,
+        ),
+        (
+            "cargo nextest run --workspace",
+            Kind::Script,
+            Confidence::Medium,
+        ),
+        (
+            "git log --oneline | head -5\nmake -j4 check",
+            Kind::Script,
+            Confidence::Medium,
+        ),
+        (
+            "Remember to ask the owner before changing the schema.",
+            Kind::Guidance,
+            Confidence::Low,
+        ),
+        // A pre-commit hook mentioned in a sentence has a hyphen, not a flag.
+        (
+            "pre-commit hooks are useful; check them before pushing",
+            Kind::Guidance,
+            Confidence::Low,
+        ),
+        // A bare two-word command has no syntax to read: it asks, it does not guess.
+        ("git status", Kind::Guidance, Confidence::Low),
+    ];
+    for (body, kind, confidence) in cases {
+        let got = classify_with_confidence(body);
+        assert_eq!(
+            (got.kind, got.confidence),
+            (*kind, *confidence),
+            "{body:?} was read as {got:?}"
+        );
+        assert!(!got.reason.is_empty(), "every reading comes with a reason");
+    }
+}
+
+#[test]
+fn a_declared_intent_is_kept_on_the_candidate_and_survives_a_reload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+
+    let filed = inbox
+        .capture(
+            Capture::new("deploy", "cargo build --release && ./ship.sh")
+                .of_kind(Kind::Script)
+                .exporting(["deploy", "ship"])
+                .in_scope(CaptureScope::Home)
+                .from_source("terminal:pane-3")
+                .by("claude-code:integrator"),
+        )
+        .unwrap()
+        .candidate;
+    assert_eq!(filed.kind, Kind::Script);
+    assert_eq!(filed.confidence, Confidence::Declared);
+
+    // A different process reads the same inbox: nothing lives only in memory.
+    let reread = Inbox::new(&home, &Index::open(&home.database()).unwrap())
+        .candidate(&filed.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reread.kind, Kind::Script);
+    assert_eq!(reread.confidence, Confidence::Declared);
+    assert_eq!(
+        reread.exports,
+        vec!["deploy".to_string(), "ship".to_string()]
+    );
+    assert_eq!(reread.scope, CaptureScope::Home);
+    assert_eq!(reread.source_ref.as_deref(), Some("terminal:pane-3"));
+    assert_eq!(reread.by.as_deref(), Some("claude-code:integrator"));
+}
+
+#[test]
+fn a_command_captured_as_a_script_with_an_export_promotes_to_script_personal_deploy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    let registry = home.registry("personal");
+
+    let filed = inbox
+        .capture(
+            Capture::new("deploy staging", "cargo build --release && ./ship.sh")
+                .of_kind(Kind::Script)
+                .exporting(["deploy"])
+                .by("human"),
+        )
+        .unwrap()
+        .candidate;
+
+    let id = Inbox::proposed_id(&filed).unwrap();
+    assert_eq!(id.to_string(), "script/personal/deploy");
+
+    // The promoter names no exports: the capture's own are used.
+    inbox
+        .promote(
+            &filed.id,
+            &PromotionEdits::new(id.clone(), "Deploy to staging."),
+            &registry,
+        )
+        .unwrap();
+
+    let load = load_registry(&registry, RegistrySource::personal()).unwrap();
+    assert!(load.problems.is_empty(), "{:?}", load.problems);
+    let capsule = load.catalog.get(&id).unwrap();
+    assert_eq!(capsule.exported_commands(), vec!["deploy".to_string()]);
+    assert_eq!(capsule.provenance.author.as_deref(), Some("human"));
+    assert_eq!(
+        capsule.script().unwrap().interpreter,
+        vec!["sh".to_string()],
+        "a captured command line has no shebang, so the manifest says how to run it"
+    );
+    let payload = fs::read_to_string(
+        capsule
+            .root
+            .as_ref()
+            .unwrap()
+            .join(&capsule.script().unwrap().entry),
+    )
+    .unwrap();
+    assert_eq!(
+        payload, "cargo build --release && ./ship.sh",
+        "the captured text is kept as it was"
+    );
+}
+
+#[test]
+fn a_script_that_has_its_own_shebang_is_not_given_an_interpreter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    let registry = home.registry("personal");
+    let filed = inbox
+        .capture(capture("ci", CLEAN_SCRIPT))
+        .unwrap()
+        .candidate;
+
+    inbox
+        .promote(
+            &filed.id,
+            &PromotionEdits::new(cid("script/personal/ci"), "CI tests."),
+            &registry,
+        )
+        .unwrap();
+
+    let load = load_registry(&registry, RegistrySource::personal()).unwrap();
+    let capsule = load.catalog.get(&cid("script/personal/ci")).unwrap();
+    assert!(capsule.script().unwrap().interpreter.is_empty());
+}
+
+#[test]
+fn an_alias_keeps_the_captured_command_line_in_its_manifest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    let registry = home.registry("personal");
+
+    let filed = inbox
+        .capture(
+            Capture::new("short git status", "git status -sb\n")
+                .of_kind(Kind::Alias)
+                .exporting(["gs"]),
+        )
+        .unwrap()
+        .candidate;
+    let id = Inbox::proposed_id(&filed).unwrap();
+    assert_eq!(id.to_string(), "alias/personal/gs");
+
+    let promoted = inbox
+        .promote(
+            &filed.id,
+            &PromotionEdits::new(id.clone(), "git status, short."),
+            &registry,
+        )
+        .unwrap();
+    assert!(
+        !promoted.root.join("payload").exists(),
+        "an alias has no payload file; its command line is the manifest's body"
+    );
+
+    let load = load_registry(&registry, RegistrySource::personal()).unwrap();
+    assert!(load.problems.is_empty(), "{:?}", load.problems);
+    let alias = load.catalog.get(&id).unwrap().alias().unwrap().clone();
+    assert_eq!(alias.name, "gs");
+    assert_eq!(
+        alias.body, "git status -sb",
+        "no empty body, no trailing newline"
+    );
+}
+
+#[test]
+fn exports_name_commands_so_only_a_script_or_an_alias_may_carry_them() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+
+    let prose = inbox
+        .capture(
+            Capture::new("note", "Ask the owner before changing the schema.").exporting(["note"]),
+        )
+        .unwrap_err();
+    assert_eq!(prose.code(), "inbox.exports_need_a_command");
+
+    let skill = inbox
+        .capture(
+            Capture::new("s", "body")
+                .of_kind(Kind::Skill)
+                .exporting(["s"]),
+        )
+        .unwrap_err();
+    assert_eq!(skill.code(), "inbox.exports_need_a_command");
+
+    for bad in ["a b", "a/b", "", "..", "-x"] {
+        let error = inbox
+            .capture(
+                Capture::new("x", "echo hi && true")
+                    .of_kind(Kind::Script)
+                    .exporting([bad]),
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "inbox.invalid_export", "{bad:?}");
+    }
+    assert!(
+        inbox.candidates().unwrap().is_empty(),
+        "a refused capture leaves nothing behind"
+    );
+}
+
+#[test]
+fn a_scope_the_capture_cannot_satisfy_is_refused_before_anything_is_stored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+
+    let project = inbox
+        .capture(Capture::new("p", "echo hi && true").in_scope(CaptureScope::Project))
+        .unwrap_err();
+    assert_eq!(project.code(), "inbox.scope_needs_project");
+    let session = inbox
+        .capture(Capture::new("s", "echo hi && true").in_scope(CaptureScope::Session))
+        .unwrap_err();
+    assert_eq!(session.code(), "inbox.scope_needs_session");
+    assert!(inbox.candidates().unwrap().is_empty());
+}
+
+#[test]
+fn a_project_scoped_capture_is_promoted_into_the_projects_own_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+
+    let mut c = Capture::new("lint", "cargo clippy --workspace -- -D warnings")
+        .of_kind(Kind::Script)
+        .exporting(["lint"])
+        .in_scope(CaptureScope::Project);
+    c.project_root = Some(project.clone());
+    let filed = inbox.capture(c).unwrap().candidate;
+
+    let id = Inbox::proposed_id(&filed).unwrap();
+    assert_eq!(id.to_string(), "script/project/lint");
+    let registry = inbox.registry_root(&filed).unwrap();
+    assert_eq!(registry, project.join(".aikit"));
+
+    inbox
+        .promote(
+            &filed.id,
+            &PromotionEdits::new(id.clone(), "Lint."),
+            &registry,
+        )
+        .unwrap();
+    let load = load_registry(&registry, RegistrySource::project_local()).unwrap();
+    assert!(load.catalog.get(&id).is_some());
+
+    // And a home-scoped one still goes to the personal registry.
+    let home_scoped = inbox
+        .capture(Capture::new("other", "echo other && true").of_kind(Kind::Script))
+        .unwrap()
+        .candidate;
+    assert_eq!(
+        inbox.registry_root(&home_scoped).unwrap(),
+        home.registry("personal")
+    );
+}
+
+#[test]
+fn naming_the_same_text_again_with_a_declared_kind_upgrades_a_guess() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+
+    let first = inbox
+        .capture(Capture::new("status", "git status"))
+        .unwrap()
+        .candidate;
+    assert_eq!(
+        first.kind,
+        Kind::Guidance,
+        "a bare command is a question, not a script"
+    );
+    assert_eq!(first.confidence, Confidence::Low);
+
+    let again = inbox
+        .capture(
+            Capture::new("status", "git status")
+                .of_kind(Kind::Alias)
+                .exporting(["gs"]),
+        )
+        .unwrap();
+    assert_eq!(
+        again.duplicate_of.as_deref(),
+        Some(first.id.as_str()),
+        "no second candidate"
+    );
+    assert_eq!(again.candidate.kind, Kind::Alias);
+    assert_eq!(again.candidate.confidence, Confidence::Declared);
+    assert_eq!(again.candidate.exports, vec!["gs".to_string()]);
+
+    let reread = inbox.candidate(&first.id).unwrap().unwrap();
+    assert_eq!(reread.kind, Kind::Alias);
+    assert_eq!(inbox.candidates().unwrap().len(), 1);
+}
+
+#[test]
+fn a_candidate_filed_before_intent_was_recorded_still_reads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    let filed = inbox
+        .capture(capture("ci", CLEAN_SCRIPT))
+        .unwrap()
+        .candidate;
+    fs::remove_file(filed.path.join("meta.json")).unwrap();
+
+    let reread = inbox.candidate(&filed.id).unwrap().unwrap();
+
+    assert_eq!(reread.kind, Kind::Script);
+    assert_eq!(reread.scope, CaptureScope::Home);
+    assert!(reread.exports.is_empty());
+    assert_eq!(reread.confidence, Confidence::Medium);
+}
+
+// ---------------------------------------------------------------------------
+// One inbox (saved operations, A2)
+// ---------------------------------------------------------------------------
+
+fn deploy_capture() -> Capture {
+    Capture::new("deploy staging", "cargo build --release && ./ship.sh")
+        .of_kind(Kind::Script)
+        .exporting(["deploy"])
+        .by("claude-code:integrator")
+}
+
+fn pending(index: &Index) -> Vec<aikit_store::channel::InboxItem> {
+    InboxChannel::new(index)
+        .pending(aikit_store::Timestamp::now())
+        .unwrap()
+}
+
+#[test]
+fn a_capture_is_announced_on_the_channel_with_the_candidate_as_evidence_and_the_promotion_as_its_plan(
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+
+    let outcome = inbox.capture(deploy_capture()).unwrap();
+    let announcement = outcome
+        .announcement
+        .clone()
+        .expect("a capture is announced");
+
+    let items = pending(&index);
+    assert_eq!(items.len(), 1, "one inbox: the capture is on the channel");
+    let item = &items[0];
+    assert_eq!(item.id, announcement.item);
+    assert_eq!(item.kind, InboxKind::CaptureCandidate);
+    assert!(item.title.contains("deploy staging"), "{}", item.title);
+    assert!(
+        item.body.contains("script/personal/deploy"),
+        "{}",
+        item.body
+    );
+    assert!(
+        item.body.contains("claude-code:integrator"),
+        "{}",
+        item.body
+    );
+    assert!(
+        item.evidence.iter().any(|e| matches!(e,
+            Evidence::Hash { label, value } if label == "candidate" && *value == outcome.candidate.id)),
+        "the evidence is the candidate: {:?}",
+        item.evidence
+    );
+
+    // The planned Procedure is the promotion: persisted, not applied.
+    let procedure_id = item
+        .proposal
+        .clone()
+        .expect("a ready capture proposes its promotion");
+    let procedure = aikit_store::procedure::ProcedureRunner::new(&home)
+        .load(&procedure_id)
+        .unwrap();
+    assert!(matches!(
+        procedure.kind,
+        aikit_core::procedure::ProcedureKind::Promote { ref candidate } if *candidate == outcome.candidate.id
+    ));
+    assert!(
+        !home
+            .registry("personal")
+            .join("capsules/script/personal/deploy")
+            .exists(),
+        "planning writes nothing"
+    );
+}
+
+#[test]
+fn announcing_is_idempotent_so_the_same_text_never_nags() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+
+    let first = inbox.capture(deploy_capture()).unwrap();
+    let again = inbox.capture(deploy_capture()).unwrap();
+
+    assert_eq!(
+        again.duplicate_of.as_deref(),
+        Some(first.candidate.id.as_str())
+    );
+    assert_eq!(pending(&index).len(), 1);
+    assert_eq!(
+        again.announcement.unwrap().item,
+        first.announcement.unwrap().item,
+        "the second capture points at the message that is already there"
+    );
+}
+
+#[test]
+fn accepting_runs_the_planned_procedure_and_resolves_the_example_and_its_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    let filed = inbox.capture(deploy_capture()).unwrap();
+
+    let accepted = inbox.accept(&filed.candidate.id).unwrap();
+
+    assert_eq!(accepted.id.to_string(), "script/personal/deploy");
+    assert!(accepted.applied > 0);
+    assert_eq!(
+        accepted.item,
+        filed.announcement.as_ref().map(|a| a.item.clone())
+    );
+    assert_eq!(
+        Some(&accepted.procedure),
+        filed.announcement.as_ref().unwrap().proposal.as_ref(),
+        "it ran the plan the message proposed, not another"
+    );
+
+    let registry = home.registry("personal");
+    let load = load_registry(&registry, RegistrySource::personal()).unwrap();
+    assert!(load.problems.is_empty(), "{:?}", load.problems);
+    let capsule = load.catalog.get(&accepted.id).unwrap();
+    assert_eq!(capsule.exported_commands(), vec!["deploy".to_string()]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let entry = capsule
+            .root
+            .as_ref()
+            .unwrap()
+            .join(&capsule.script().unwrap().entry);
+        assert_ne!(fs::metadata(entry).unwrap().permissions().mode() & 0o111, 0);
+    }
+
+    // Both stores agree it is decided.
+    assert_eq!(
+        inbox.candidate(&filed.candidate.id).unwrap().unwrap().state,
+        CandidateState::Promoted
+    );
+    assert!(pending(&index).is_empty());
+    let all = InboxChannel::new(&index).items().unwrap();
+    assert!(
+        matches!(&all[0].state, InboxState::Resolved { decision } if decision.contains("script/personal/deploy"))
+    );
+
+    // And it is reversible: the Procedure that wrote it undoes it.
+    aikit_store::procedure::ProcedureRunner::new(&home)
+        .undo(&accepted.procedure)
+        .unwrap();
+    assert!(!registry.join("capsules/script/personal/deploy").exists());
+
+    let again = inbox.accept(&filed.candidate.id).unwrap_err();
+    assert_eq!(again.code(), "inbox.already_promoted");
+}
+
+#[test]
+fn rejecting_resolves_the_example_and_its_message_and_a_fresh_capture_is_a_fresh_candidate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    let filed = inbox.capture(deploy_capture()).unwrap();
+
+    inbox
+        .reject(&filed.candidate.id, "not worth keeping")
+        .unwrap();
+
+    assert!(pending(&index).is_empty());
+    let all = InboxChannel::new(&index).items().unwrap();
+    assert!(
+        matches!(&all[0].state, InboxState::Resolved { decision } if decision == "rejected: not worth keeping")
+    );
+
+    let again = inbox.capture(deploy_capture()).unwrap();
+    assert!(
+        again.duplicate_of.is_none(),
+        "a rejected capture is not a duplicate"
+    );
+    assert_eq!(pending(&index).len(), 1, "and it is announced afresh");
+}
+
+#[test]
+fn promoting_directly_also_resolves_the_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    let filed = inbox.capture(deploy_capture()).unwrap();
+
+    inbox
+        .promote(
+            &filed.candidate.id,
+            &PromotionEdits::new(cid("script/personal/ship"), "Ship it."),
+            &home.registry("personal"),
+        )
+        .unwrap();
+
+    assert!(
+        pending(&index).is_empty(),
+        "either road leaves the inbox in one state"
+    );
+}
+
+#[test]
+fn a_held_back_capture_is_announced_without_a_plan_and_released_into_a_proposal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    let held = inbox.capture(capture("publish", SECRET_SCRIPT)).unwrap();
+    let id = held.candidate.id.clone();
+
+    let items = pending(&index);
+    assert_eq!(items.len(), 1);
+    assert!(
+        items[0].title.starts_with("Held back"),
+        "{}",
+        items[0].title
+    );
+    assert!(
+        items[0].proposal.is_none(),
+        "a held-back capture proposes nothing"
+    );
+    assert_eq!(inbox.accept(&id).unwrap_err().code(), "inbox.quarantined");
+
+    // Remove the secret from the stored body, as a person editing it would.
+    let body = held.candidate.path.join("body");
+    fs::write(&body, "#!/bin/sh\ncargo publish\n").unwrap();
+    inbox.release_from_quarantine(&id).unwrap();
+
+    let now = pending(&index);
+    assert_eq!(
+        now.len(),
+        1,
+        "the stale message was closed, a fresh one opened"
+    );
+    assert!(now[0].title.starts_with("Save"), "{}", now[0].title);
+    assert!(now[0].proposal.is_some());
+}
+
+#[test]
+fn a_capture_that_cannot_be_saved_as_it_stands_says_why_and_stays_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    // Something already lives at the id this capture would take.
+    let first = inbox.capture(deploy_capture()).unwrap();
+    inbox.accept(&first.candidate.id).unwrap();
+
+    let second = inbox
+        .capture(
+            Capture::new("deploy production", "./ship.sh --prod && true")
+                .of_kind(Kind::Script)
+                .exporting(["deploy"]),
+        )
+        .unwrap();
+
+    let items = pending(&index);
+    assert_eq!(items.len(), 1);
+    assert!(items[0].proposal.is_none());
+    assert!(
+        items[0].body.contains("Not ready to save as it stands"),
+        "{}",
+        items[0].body
+    );
+    assert!(
+        items[0].body.contains("already exists"),
+        "{}",
+        items[0].body
+    );
+    assert_eq!(
+        inbox.accept(&second.candidate.id).unwrap_err().code(),
+        "inbox.id_taken"
+    );
+    assert_eq!(
+        pending(&index).len(),
+        1,
+        "a refused accept leaves the message open"
+    );
+}
+
+#[test]
+fn a_plan_made_before_the_capture_changed_is_replaced_not_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    let first = inbox
+        .capture(Capture::new("status", "git status -sb && true").of_kind(Kind::Script))
+        .unwrap();
+    let stale = first.announcement.unwrap().proposal.unwrap();
+
+    // The capturer comes back and says what it is: an alias called gs.
+    inbox
+        .capture(
+            Capture::new("status", "git status -sb && true")
+                .of_kind(Kind::Alias)
+                .exporting(["gs"]),
+        )
+        .unwrap();
+    let accepted = inbox.accept(&first.candidate.id).unwrap();
+
+    assert_eq!(
+        accepted.id.to_string(),
+        "alias/personal/gs",
+        "the declared kind won"
+    );
+    assert_ne!(
+        accepted.procedure, stale,
+        "the stale plan was not the one that ran"
+    );
+    let items = InboxChannel::new(&index).items().unwrap();
+    assert_eq!(
+        items.len(),
+        1,
+        "still one message, now pointing at the plan that ran"
+    );
+    assert_eq!(items[0].proposal.as_ref(), Some(&accepted.procedure));
+}
+
+#[test]
+fn accepting_a_project_scoped_capture_stages_the_write_instead_of_branching_the_projects_repository(
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    let project = tmp.path().join("project");
+    fs::create_dir_all(project.join(".git")).unwrap();
+
+    let mut c = Capture::new("lint", "cargo clippy --workspace -- -D warnings")
+        .of_kind(Kind::Script)
+        .exporting(["lint"])
+        .in_scope(CaptureScope::Project);
+    c.project_root = Some(project.clone());
+    let filed = inbox.capture(c).unwrap();
+
+    let accepted = inbox.accept(&filed.candidate.id).unwrap();
+
+    assert!(project
+        .join(".aikit/capsules/script/project/lint/manifest.toml")
+        .is_file());
+    let procedure = aikit_store::procedure::ProcedureRunner::new(&home)
+        .load(&accepted.procedure)
+        .unwrap();
+    assert!(
+        matches!(
+            procedure.isolation,
+            aikit_core::procedure::MutationIsolation::Staged { .. }
+        ),
+        "{:?}",
+        procedure.isolation
     );
 }
