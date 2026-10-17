@@ -178,6 +178,7 @@ EXPECTED_HOOKS = {
     "hook/central/fs-guardrail",
     "hook/aikit/knowledge-route",
     "hook/aikit/development-entry",
+    "hook/aikit/observe-runs",
     "hook/continuity/turn-ledger",
     "hook/continuity/entity-disclosure",
     "hook/continuity/domain-activation",
