@@ -521,6 +521,46 @@ impl<'a> Inbox<'a> {
         self
     }
 
+    /// What the scanner finds in `text`, with this inbox's patterns. For callers
+    /// that must refuse a secret before they store or even repeat it.
+    pub fn scan(&self, text: &str) -> Vec<Finding> {
+        self.scanner.scan(text)
+    }
+
+    /// Whether this text was captured and turned down. A rejected capture is not
+    /// a duplicate of a later one (it can be reconsidered), but a *source* that
+    /// offers things unprompted must not offer it again.
+    pub fn was_rejected(&self, body: &str) -> Result<bool> {
+        let stored = if self.scanner.scan(body).is_empty() {
+            body.to_string()
+        } else {
+            self.scanner.redact(body)
+        };
+        let rejected: Option<i64> = self
+            .index
+            .conn()
+            .query_row(
+                "SELECT 1 FROM candidates \
+                 WHERE (body_hash = ?1 OR normalized_hash = ?2) AND state = 'rejected' LIMIT 1",
+                params![hash(&stored), hash(&normalize(&stored))],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| sql_error("inbox.query_failed", &e))?;
+        Ok(rejected.is_some())
+    }
+
+    /// The catalogued capsule whose content is exactly this text (once
+    /// whitespace is normalized), if there is one: the answer to "is this
+    /// already saved?".
+    pub fn already_saved(&self, body: &str, catalog: &dyn Catalog) -> Option<String> {
+        let mine = normalize(body);
+        comparables_from_catalog(catalog)
+            .into_iter()
+            .find(|other| normalize(&other.text) == mine)
+            .map(|other| other.id)
+    }
+
     /// Run the capture pipeline, comparing only against the inbox.
     pub fn capture(&self, capture: Capture) -> Result<CaptureOutcome> {
         self.run(capture, &[])
@@ -689,6 +729,11 @@ impl<'a> Inbox<'a> {
                 candidate.findings.len().max(1),
                 candidate.id
             ));
+        } else if candidate.confidence == Confidence::Declared {
+            body.push_str(&format!(
+                "Captured as a **{}** (as declared).\n",
+                candidate.kind
+            ));
         } else {
             body.push_str(&format!(
                 "Captured as a **{}** ({} confidence: {}).\n",
@@ -701,7 +746,7 @@ impl<'a> Inbox<'a> {
             body.push_str(&format!("\nObserved by {by}."));
         }
         if let Some(source) = &candidate.source_ref {
-            body.push_str(&format!("\nFrom {source}."));
+            body.push_str(&format!("\nSource: {source}."));
         }
         if let (Some(id), None) = (&proposed, &why_not) {
             if candidate.state == CandidateState::Ready {
@@ -1533,6 +1578,14 @@ fn comparables_from_catalog(catalog: &dyn Catalog) -> Vec<Comparable> {
         .capsules()
         .into_iter()
         .filter_map(|capsule| {
+            // An alias keeps its command line in the manifest, not in a file.
+            if let Some(alias) = capsule.alias() {
+                return Some(Comparable {
+                    id: capsule.id.to_string(),
+                    text: alias.body.clone(),
+                    exports: capsule.exported_commands(),
+                });
+            }
             let root = capsule.root.as_ref()?;
             let entry = primary_entry(capsule)?;
             let text = std::fs::read_to_string(root.join(entry)).ok()?;

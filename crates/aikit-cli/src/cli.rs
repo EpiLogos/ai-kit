@@ -194,6 +194,8 @@ pub enum Command {
     Capture(CaptureArgs),
     /// Promote a captured candidate into a capsule.
     Promote(PromoteArgs),
+    /// Feed attributed command runs; AIKit notices what repeats and offers it.
+    Observe(ObserveArgs),
     /// Garbage-collect old generations.
     Prune(PruneArgs),
     /// Issue, list and revoke hook bypass tokens.
@@ -669,6 +671,7 @@ impl Command {
             Self::Inbox(a) => inbox_route(a),
             Self::Capture(_) => "cmd_capture",
             Self::Promote(_) => "cmd_promote",
+            Self::Observe(a) => observe_route(a),
             Self::Prune(_) => "cmd_prune",
             Self::Bypass(c) => bypass_route(&c.command),
             Self::Client(c) => client_route(&c.command),
@@ -814,6 +817,7 @@ fn praxis_route(command: &PraxisSub) -> &'static str {
         PraxisSub::Inbox(a) => inbox_route(a),
         PraxisSub::Capture(_) => "cmd_capture",
         PraxisSub::Promote(_) => "cmd_promote",
+        PraxisSub::Observe(a) => observe_route(a),
         PraxisSub::Capabilities(c) => capabilities_route(&c.command),
         PraxisSub::Method(c) => method_route(&c.command),
         PraxisSub::Routine(c) => routine_route(&c.command),
@@ -987,6 +991,13 @@ fn harness_route(command: &HarnessCmd) -> &'static str {
         HarnessSub::Disclose { .. } => "cmd_harness_disclose",
         HarnessSub::Run(_) => "cmd_harness_run",
         HarnessSub::Auth(_) => "cmd_harness_auth",
+    }
+}
+
+fn observe_route(args: &ObserveArgs) -> &'static str {
+    match &args.command {
+        ObserveSub::Run(_) => "cmd_observe_run",
+        ObserveSub::Status(_) => "cmd_observe_status",
     }
 }
 
@@ -4759,6 +4770,9 @@ pub enum PraxisSub {
     /// Promote a captured candidate into a capsule. (The `promote` root
     /// spelling is the same command.)
     Promote(PromoteArgs),
+    /// Feed attributed command runs; AIKit notices what repeats and offers it.
+    /// (The `observe` root spelling is the same command.)
+    Observe(ObserveArgs),
     /// List and read the capabilities exposed to a brokered client.
     /// (The `capabilities` root spelling is the same command.)
     Capabilities(CapabilitiesCmd),
@@ -4868,6 +4882,74 @@ pub struct PromoteArgs {
     /// The capsule id to give the new capability.
     #[arg(long, value_name = "ID")]
     pub id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ObserveArgs {
+    #[command(subcommand)]
+    pub command: ObserveSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ObserveSub {
+    /// Report command runs. AIKit counts the repeats per command and actor, and
+    /// the third inside the window files a capture candidate on the inbox.
+    Run(ObserveRunArgs),
+    /// List the commands that are repeating, and whether each was offered.
+    Status(ObserveStatusArgs),
+}
+
+/// One report of command runs. Give it one run by flags, or many on stdin.
+#[derive(Debug, Args)]
+#[command(group(
+    clap::ArgGroup::new("feed").required(true).args(["command", "stdin_jsonl", "from_hook"])
+))]
+pub struct ObserveRunArgs {
+    /// The command line that was run.
+    #[arg(long, value_name = "TEXT")]
+    pub command: Option<String>,
+    /// Where it was run.
+    #[arg(long, value_name = "DIR", requires = "command")]
+    pub cwd: Option<String>,
+    /// Who ran it: `human`, or an agent ref. Unattributed runs are counted as
+    /// `unknown` (or as the Position this process was launched as).
+    #[arg(long, value_name = "WHO")]
+    pub by: Option<String>,
+    /// When (RFC 3339 or epoch seconds); now when absent.
+    #[arg(long, value_name = "TIME", requires = "command")]
+    pub at: Option<String>,
+    /// The session it belongs to.
+    #[arg(long, value_name = "ID", requires = "command")]
+    pub session: Option<String>,
+    /// How it ended; a run that failed is not counted.
+    #[arg(
+        long = "exit-code",
+        value_name = "N",
+        requires = "command",
+        allow_negative_numbers = true
+    )]
+    pub exit_code: Option<i32>,
+    /// Read runs from stdin, one JSON object per line: command, cwd, by, at,
+    /// session, exit_code.
+    #[arg(long = "stdin-jsonl")]
+    pub stdin_jsonl: bool,
+    /// Read one agent-harness `PostToolUse` event from stdin; a shell tool call
+    /// is a run, any other tool's is ignored. Never fails the hook.
+    #[arg(long = "from-hook")]
+    pub from_hook: bool,
+    /// How many repeats make a pattern.
+    #[arg(long, value_name = "N", default_value_t = 3)]
+    pub threshold: usize,
+    /// How far back repeats count: 7d, 36h, 90m.
+    #[arg(long, value_name = "SPAN", default_value = "7d")]
+    pub window: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ObserveStatusArgs {
+    /// How far back to look: 7d, 36h, 90m.
+    #[arg(long, value_name = "SPAN", default_value = "7d")]
+    pub window: String,
 }
 
 #[derive(Debug, Args)]

@@ -71,6 +71,30 @@ impl World {
             .expect("aikit runs")
     }
 
+    /// Run a verb with `input` on its stdin; the output is returned whatever its status.
+    fn with_stdin(&self, args: &[&str], input: &str, env: &[(&str, &str)]) -> Output {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut command = self.command(&assert_cmd::cargo::cargo_bin("aikit"));
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        let mut child = command
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("aikit spawns");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    }
+
     /// Run a verb that must succeed and return its JSON envelope.
     fn json(&self, args: &[&str]) -> Value {
         let mut args = args.to_vec();
@@ -724,4 +748,296 @@ fn only_a_captured_example_can_be_accepted_or_rejected_from_the_inbox() {
     let unknown = world.refused(&["inbox", "accept", "inb_does_not_exist"]);
 
     assert!(unknown.contains("no inbox item"), "{unknown}");
+}
+
+// ---------------------------------------------------------------------------
+// The recurrence observer
+// ---------------------------------------------------------------------------
+
+fn observe(world: &World, command: &str, by: &str) -> Value {
+    world.json(&["observe", "run", "--command", command, "--by", by])
+}
+
+#[test]
+fn the_third_identical_agent_command_is_offered_on_the_inbox_and_can_be_accepted_and_run() {
+    let world = World::new();
+    let command = "sh -c 'echo built'";
+
+    let first = observe(&world, command, "claude-code:saved-ops");
+    let second = observe(&world, command, "claude-code:saved-ops");
+    assert_eq!(first["data"]["runs"][0]["count"], 1);
+    assert_eq!(second["data"]["runs"][0]["count"], 2);
+    assert!(
+        inbox_items(&world, false).is_empty(),
+        "two is not a pattern"
+    );
+
+    let third = observe(&world, command, "claude-code:saved-ops");
+
+    let run = &third["data"]["runs"][0];
+    assert_eq!(run["count"], 3);
+    assert_eq!(run["threshold"], 3);
+    let offered = &run["offered"];
+    assert_eq!(offered["new"], true);
+    assert_eq!(third["data"]["offered"][0], offered["candidate"]);
+
+    // On the inbox, carrying the agent's name, with a plan to save it.
+    let items = inbox_items(&world, false);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["kind"], "capture-candidate");
+    assert_eq!(items[0]["id"], offered["inbox_item"]);
+    assert!(items[0]["body"]
+        .as_str()
+        .unwrap()
+        .contains("claude-code:saved-ops"));
+    assert_eq!(items[0]["proposal"], offered["proposal"]);
+
+    // The fourth run offers nothing more.
+    let fourth = observe(&world, command, "claude-code:saved-ops");
+    assert!(fourth["data"]["runs"][0]["offered"].is_null());
+    assert_eq!(inbox_items(&world, false).len(), 1);
+
+    // Accept it and run it: the habit became a saved operation.
+    let accepted = world.json(&["inbox", "accept", offered["inbox_item"].as_str().unwrap()]);
+    let id = accepted["data"]["id"].as_str().unwrap().to_string();
+    assert!(id.starts_with("script/personal/sh-c-echo-built"), "{id}");
+    let ran = world.aikit_raw(&["run", &id, "--confirm"]);
+    assert_eq!(stdout(&ran).trim(), "built");
+}
+
+#[test]
+fn a_human_typed_run_is_attributed_to_the_human() {
+    let world = World::new();
+
+    for _ in 0..3 {
+        observe(&world, "make -j8 check && make doc", "human");
+    }
+
+    let items = inbox_items(&world, false);
+    assert_eq!(items.len(), 1);
+    assert!(items[0]["body"]
+        .as_str()
+        .unwrap()
+        .contains("Observed by human"));
+}
+
+#[test]
+fn a_terminal_or_factory_feed_reports_a_batch_as_json_lines() {
+    let world = World::new();
+    let secret = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
+    let line = |command: &str, at: &str| {
+        serde_json::json!({
+            "command": command, "cwd": "/work/app", "by": "human",
+            "at": at, "session": "ses_1"
+        })
+        .to_string()
+    };
+    let batch = [
+        line("terraform plan -out=tf.plan", "2026-10-16T09:00:00Z"),
+        line("ls -la", "2026-10-16T09:01:00Z"),
+        line("terraform plan -out=tf.plan", "2026-10-15T09:00:00Z"),
+        line(
+            &format!("curl -H 'Authorization: token {secret}' https://x"),
+            "2026-10-16T09:02:00Z",
+        ),
+        line("terraform plan -out=tf.plan", "2026-10-14T09:00:00Z"),
+    ]
+    .join("\n");
+
+    let output = world.with_stdin(&["observe", "run", "--stdin-jsonl", "--json"], &batch, &[]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = stdout(&output);
+    assert!(
+        !text.contains(secret),
+        "the reply never repeats a secret: {text}"
+    );
+    let reply: Value = serde_json::from_str(&text).unwrap();
+    let data = &reply["data"];
+    assert_eq!(data["recorded"], 3);
+    assert_eq!(data["skipped"], 2);
+    assert_eq!(data["offered"].as_array().unwrap().len(), 1);
+    let skipped: Vec<&str> = data["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|run| run["skipped"].as_str())
+        .collect();
+    assert_eq!(skipped, ["noise", "secret"]);
+    assert_eq!(
+        data["runs"][4]["count"], 3,
+        "the window is anchored on the newest run, so a batch arriving out of order still counts"
+    );
+}
+
+#[test]
+fn an_agent_harnesss_post_tool_use_event_feeds_the_observer_and_never_fails_the_hook() {
+    let world = World::new();
+    let bash = |command: &str| {
+        serde_json::json!({
+            "session_id": "ses_9", "transcript_path": "/tmp/t.jsonl", "cwd": "/work/app",
+            "hook_event_name": "PostToolUse", "tool_name": "Bash",
+            "tool_input": { "command": command, "description": "build" },
+            "tool_response": { "stdout": "ok", "stderr": "", "interrupted": false }
+        })
+        .to_string()
+    };
+    let feed = |payload: &str| {
+        world.with_stdin(
+            &["observe", "run", "--from-hook", "--json"],
+            payload,
+            &[("AIKIT_ACTOR", "claude-code:hooked")],
+        )
+    };
+
+    let one = feed(&bash("cargo build --release --locked"));
+    assert!(one.status.success());
+    let one: Value = serde_json::from_slice(&one.stdout).unwrap();
+    assert_eq!(one["data"]["runs"][0]["by"], "claude-code:hooked");
+    feed(&bash("cargo build --release --locked"));
+
+    // Another tool's event is not a run; garbage is a warning, not a failure.
+    let read =
+        serde_json::json!({"tool_name": "Read", "tool_input": {"file_path": "/x"}}).to_string();
+    let ignored: Value = serde_json::from_slice(&feed(&read).stdout).unwrap();
+    assert_eq!(ignored["data"]["ignored"], "not a shell command");
+    assert!(ignored["data"]["runs"].as_array().unwrap().is_empty());
+    let garbage = feed("this is not json");
+    assert!(
+        garbage.status.success(),
+        "a hook must never fail on the observer's account"
+    );
+    let garbage: Value = serde_json::from_slice(&garbage.stdout).unwrap();
+    assert!(garbage["warnings"][0]
+        .as_str()
+        .unwrap()
+        .contains("not JSON"));
+
+    let third: Value =
+        serde_json::from_slice(&feed(&bash("cargo build --release --locked")).stdout).unwrap();
+    assert_eq!(third["data"]["runs"][0]["count"], 3);
+    assert_eq!(third["data"]["offered"].as_array().unwrap().len(), 1);
+    let items = inbox_items(&world, false);
+    assert!(items[0]["body"]
+        .as_str()
+        .unwrap()
+        .contains("claude-code:hooked"));
+}
+
+#[test]
+fn the_shipped_hook_capsule_carries_the_real_post_tool_use_stream_to_the_observer() {
+    let world = World::new();
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../registry/capsules/hook/aikit/observe-runs");
+    let installed = world.capsule_dir("hook/aikit/observe-runs");
+    fs::create_dir_all(installed.join("payload")).unwrap();
+    fs::copy(
+        shipped.join("manifest.toml"),
+        installed.join("manifest.toml"),
+    )
+    .unwrap();
+    fs::copy(
+        shipped.join("payload/observe-runs"),
+        installed.join("payload/observe-runs"),
+    )
+    .unwrap();
+
+    // Opt-in is the capsule machinery's: reviewed, then enabled.
+    world.json(&["trust", "record", "hook/aikit/observe-runs"]);
+    world.json(&["enable", "hook/aikit/observe-runs", "--scope", "project"]);
+
+    let payload = |tool: &str, command: &str| {
+        serde_json::json!({
+            "session_id": "ses_e2e", "cwd": world.project, "hook_event_name": "PostToolUse",
+            "tool_name": tool, "tool_input": { "command": command }
+        })
+        .to_string()
+    };
+    let dispatch = |payload: String| {
+        world.with_stdin(
+            &["hook", "dispatch", "claude", "PostToolUse", "--json"],
+            &payload,
+            &[("AIKIT_ACTOR", "claude-code:e2e")],
+        )
+    };
+
+    // A non-shell tool is not routed to the capsule at all (the matcher).
+    let read = dispatch(payload("Read", "ignored"));
+    assert!(read.status.success());
+    for _ in 0..3 {
+        let out = dispatch(payload("Bash", "sh -c 'echo through the hook'"));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let reply: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            reply["data"]["allowed"], true,
+            "an observer never denies: {reply}"
+        );
+    }
+
+    let items = inbox_items(&world, false);
+    assert_eq!(items.len(), 1, "three Bash events through the dispatcher");
+    assert_eq!(items[0]["kind"], "capture-candidate");
+    assert!(items[0]["title"]
+        .as_str()
+        .unwrap()
+        .contains("echo through the hook"));
+    // Attribution crossed the dispatcher: the actor and the session are named.
+    let body = items[0]["body"].as_str().unwrap();
+    assert!(body.contains("Observed by claude-code:e2e"), "{body}");
+    assert!(body.contains("ses_e2e"), "{body}");
+}
+
+#[test]
+fn status_lists_what_is_repeating_and_whether_it_was_offered() {
+    let world = World::new();
+    observe(&world, "npm run build:all", "human");
+    observe(&world, "npm run build:all", "human");
+
+    let status = world.json(&["observe", "status"])["data"].clone();
+    assert_eq!(status["count"], 1);
+    assert_eq!(status["repeating"][0]["command"], "npm run build:all");
+    assert_eq!(status["repeating"][0]["count"], 2);
+    assert!(status["repeating"][0]["offered"].is_null());
+
+    observe(&world, "npm run build:all", "human");
+    let status = world.json(&["observe", "status"])["data"].clone();
+    assert!(status["repeating"][0]["offered"]
+        .as_str()
+        .unwrap()
+        .starts_with("cnd_"));
+    assert_eq!(status["repeating"][0]["waiting"], true);
+}
+
+#[test]
+fn a_feed_must_say_what_it_is_feeding_and_a_bad_span_is_refused() {
+    let world = World::new();
+
+    let nothing = world.refused(&["observe", "run"]);
+    assert!(nothing.contains("--command"), "{nothing}");
+    let span = world.refused(&[
+        "observe",
+        "run",
+        "--command",
+        "make all",
+        "--window",
+        "soon",
+    ]);
+    assert!(span.contains("not a span"), "{span}");
+    let time = world.refused(&[
+        "observe",
+        "run",
+        "--command",
+        "make all",
+        "--at",
+        "yesterday",
+    ]);
+    assert!(time.contains("not a time"), "{time}");
 }

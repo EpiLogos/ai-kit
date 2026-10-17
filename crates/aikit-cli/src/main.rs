@@ -382,6 +382,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Promote(a)) => cmd_promote(cwd, a),
         Some(Command::Inbox(a)) => cmd_inbox(cwd, a),
         Some(Command::Capture(a)) => cmd_capture(cwd, a),
+        Some(Command::Observe(a)) => cmd_observe(cwd, a),
         Some(Command::Diff(_)) => cmd_diff(cwd),
         Some(Command::Doctor(a)) => cmd_doctor(cwd, a),
         Some(Command::Credential(c)) => cmd_credential(cwd, c, json_mode),
@@ -4849,6 +4850,7 @@ fn cmd_praxis(cwd: &std::path::Path, a: PraxisCmd) -> Result<Reply> {
         PraxisSub::Run(c) => cmd_run(cwd, c),
         PraxisSub::Inbox(c) => cmd_inbox(cwd, c),
         PraxisSub::Capture(c) => cmd_capture(cwd, c),
+        PraxisSub::Observe(c) => cmd_observe(cwd, c),
         PraxisSub::Promote(c) => cmd_promote(cwd, c),
         PraxisSub::Capabilities(c) => cmd_capabilities(cwd, c),
         PraxisSub::Method(c) => cmd_method(cwd, c),
@@ -6831,6 +6833,179 @@ fn cmd_capture(cwd: &std::path::Path, a: CaptureArgs) -> Result<Reply> {
         "proposal": outcome.announcement.as_ref().and_then(|a| a.proposal.as_ref()).map(|p| p.to_string()),
     });
     Ok(reply(&service, data, vec![]))
+}
+
+/// `aikit observe` — the recurrence observer.
+///
+/// `run` takes attributed command runs from any source (flags, JSON lines, or an
+/// agent harness's `PostToolUse` event) and lets AIKit decide what repeats; the
+/// third repeat inside the window files a capture candidate, which is announced on
+/// the inbox like any other. `status` lists what is repeating.
+fn cmd_observe(cwd: &std::path::Path, a: ObserveArgs) -> Result<Reply> {
+    use aikit_cli::observe;
+    use aikit_store::inbox::Inbox;
+    use aikit_store::observer::{Policy, RunObserver};
+    use std::io::Read;
+
+    let home = AikitHome::discover()?;
+    let index = aikit_store::Index::open(&home.database())?;
+    let observer = RunObserver::open(&home)?;
+    let inbox = Inbox::new(&home, &index);
+
+    let ObserveSub::Run(args) = &a.command else {
+        let ObserveSub::Status(args) = a.command else {
+            unreachable!("two subcommands")
+        };
+        let window = observe::parse_span(&args.window)?;
+        let rows: Vec<Value> = observer
+            .repeating(window)?
+            .into_iter()
+            .map(|row| {
+                let waiting = match &row.offered {
+                    Some(candidate) => {
+                        Some(aikit_store::observer::candidate_waiting(&inbox, candidate)?)
+                    }
+                    None => None,
+                };
+                Ok(jval!({
+                    "command": row.command,
+                    "by": row.by,
+                    "count": row.count,
+                    "first": row.first.to_string(),
+                    "last": row.last.to_string(),
+                    "offered": row.offered,
+                    "waiting": waiting,
+                }))
+            })
+            .collect::<Result<_>>()?;
+        let data = jval!({
+            "repeating": rows,
+            "count": rows.len(),
+            "window_seconds": window.as_secs(),
+        });
+        return Ok(Reply::Data {
+            context: EnvelopeContext::default(),
+            data,
+            warnings: vec![],
+            exit_code: json::EXIT_OK,
+        });
+    };
+
+    let policy = Policy {
+        threshold: args.threshold.max(1),
+        window: observe::parse_span(&args.window)?,
+    };
+    let env = |name: &str| std::env::var(name).ok();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut ignored: Option<&str> = None;
+
+    let runs: Result<Vec<_>> = (|| {
+        let mut stdin = String::new();
+        if args.stdin_jsonl || args.from_hook {
+            std::io::stdin().read_to_string(&mut stdin).map_err(|e| {
+                AikitError::new("cli.stdin_unreadable", format!("could not read stdin: {e}"))
+            })?;
+        }
+        if args.stdin_jsonl {
+            let by = args
+                .by
+                .clone()
+                .unwrap_or_else(|| observe::actor_from_env(env, "unknown"));
+            return observe::runs_from_jsonl(&stdin, &by);
+        }
+        if args.from_hook {
+            let by = args
+                .by
+                .clone()
+                .unwrap_or_else(|| observe::actor_from_env(env, "agent"));
+            let payload: Value = serde_json::from_str(&stdin).map_err(|e| {
+                AikitError::new(
+                    "observe.bad_hook_payload",
+                    format!("the hook payload on stdin is not JSON: {e}"),
+                )
+            })?;
+            return Ok(observe::run_from_hook(&payload, &by).into_iter().collect());
+        }
+        let by = args
+            .by
+            .clone()
+            .unwrap_or_else(|| observe::actor_from_env(env, "unknown"));
+        let object = jval!({
+            "command": args.command,
+            "cwd": args.cwd,
+            "session": args.session,
+            "exit_code": args.exit_code,
+            "at": args.at,
+        });
+        Ok(vec![observe::run_from_object(&object, &by)?])
+    })();
+
+    let runs = match runs {
+        Ok(runs) => runs,
+        // A hook must never fail on the observer's account: a payload that cannot
+        // be read becomes a warning, and the harness carries on.
+        Err(error) if args.from_hook => {
+            warnings.push(error.message().to_string());
+            Vec::new()
+        }
+        Err(error) => return Err(error),
+    };
+    if args.from_hook && runs.is_empty() && warnings.is_empty() {
+        ignored = Some("not a shell command");
+    }
+
+    // What is already saved includes the project's own registry, when the process
+    // stands inside a project.
+    let home_marker = home.root();
+    let project = aikit_cli::discover::discover_project_excluding(cwd, Some(home_marker));
+    let load = aikit_cli::app::load_catalog(&home, project.as_ref().map(|p| p.root.as_path()))?;
+    let mut results: Vec<Value> = Vec::new();
+    let mut offered: Vec<String> = Vec::new();
+    let mut recorded = 0usize;
+    for run in runs {
+        match observer.observe(run, policy, &inbox, &load.catalog) {
+            Ok(seen) => {
+                if seen.recorded {
+                    recorded += 1;
+                }
+                if let Some(offer) = seen.offered.as_ref().filter(|offer| offer.new) {
+                    offered.push(offer.candidate.clone());
+                }
+                results.push(jval!({
+                    "command": seen.command,
+                    "by": seen.by,
+                    "recorded": seen.recorded,
+                    "skipped": seen.skipped.as_ref().map(|skip| skip.code()),
+                    "detail": seen.skipped.as_ref().and_then(|skip| skip.detail()),
+                    "count": seen.count,
+                    "threshold": seen.threshold,
+                    "window_seconds": seen.window.as_secs(),
+                    "offered": seen.offered.as_ref().map(|offer| jval!({
+                        "candidate": offer.candidate,
+                        "inbox_item": offer.item.as_ref().map(|item| item.to_string()),
+                        "proposal": offer.proposal.as_ref().map(|p| p.to_string()),
+                        "new": offer.new,
+                    })),
+                }));
+            }
+            // A hook never fails the harness; anywhere else the feed is told.
+            Err(error) if args.from_hook => warnings.push(error.message().to_string()),
+            Err(error) => return Err(error),
+        }
+    }
+    let data = jval!({
+        "runs": results,
+        "recorded": recorded,
+        "skipped": results.len() - recorded,
+        "offered": offered,
+        "ignored": ignored,
+    });
+    Ok(Reply::Data {
+        context: EnvelopeContext::default(),
+        data,
+        warnings,
+        exit_code: json::EXIT_OK,
+    })
 }
 
 /// `aikit diff` — what applying the current declarations would change.

@@ -69,6 +69,7 @@ pub mod knowledge_wiki;
 pub mod locks;
 pub mod model_catalogue;
 pub mod now_context;
+pub mod observer;
 pub mod procedure;
 pub mod procedure_history;
 pub mod registry;
