@@ -36,12 +36,15 @@
 //! then creates the capsule directory. A rejected edit leaves no debris.
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use aikit_core::catalog::Catalog;
 use aikit_core::error::err;
 use aikit_core::{AikitError, Capsule, CapsuleId, Kind, Maturity, Result, SessionId};
 use rusqlite::{params, OptionalExtension};
+use serde::{Deserialize, Serialize};
 
 use crate::events::Timestamp;
 use crate::home::{create_dir_all, io_error};
@@ -52,6 +55,82 @@ use crate::AikitHome;
 // ---------------------------------------------------------------------------
 // Input
 // ---------------------------------------------------------------------------
+
+/// Where a saved operation is meant to apply.
+///
+/// The word is the capturer's intent, kept on the candidate until someone
+/// decides. It also decides where promotion writes: `project` goes into the
+/// project's own `.aikit` registry, the other two into the personal registry.
+/// `session` is for an example that belongs to one working session; it lands in
+/// the personal registry like `home` and is enabled in that session afterwards
+/// (`aikit enable --scope session`) — promotion itself never enables anything.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureScope {
+    /// Every session on this machine.
+    #[default]
+    Home,
+    /// Every session in the capturing project.
+    Project,
+    /// The capturing session only.
+    Session,
+}
+
+impl CaptureScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CaptureScope::Home => "home",
+            CaptureScope::Project => "project",
+            CaptureScope::Session => "session",
+        }
+    }
+}
+
+impl fmt::Display for CaptureScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for CaptureScope {
+    type Err = AikitError;
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "home" => Ok(CaptureScope::Home),
+            "project" => Ok(CaptureScope::Project),
+            "session" => Ok(CaptureScope::Session),
+            other => err(
+                "inbox.unknown_scope",
+                format!("`{other}` is not a capture scope; use home, project or session"),
+            ),
+        }
+    }
+}
+
+/// How sure the classification of a candidate is.
+///
+/// `Declared` means the capturer said what it is; the other three are the
+/// classifier's own reading and say how much of the reading to trust. A UI shows
+/// `Low` as a question, not an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Confidence {
+    Low,
+    Medium,
+    High,
+    Declared,
+}
+
+impl Confidence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Confidence::Low => "low",
+            Confidence::Medium => "medium",
+            Confidence::High => "high",
+            Confidence::Declared => "declared",
+        }
+    }
+}
 
 /// Something observed that might be worth keeping.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +144,13 @@ pub struct Capture {
     pub exports: Vec<String>,
     pub project_root: Option<PathBuf>,
     pub session: Option<SessionId>,
+    /// Where the saved operation is meant to apply.
+    pub scope: CaptureScope,
+    /// Where the example came from — a terminal pane, an agent run, a Factory
+    /// frame. A reference, never the transcript itself.
+    pub source_ref: Option<String>,
+    /// Who observed it: `human`, or an agent ref. Unknown stays unknown.
+    pub by: Option<String>,
 }
 
 impl Capture {
@@ -76,7 +162,40 @@ impl Capture {
             exports: Vec::new(),
             project_root: None,
             session: None,
+            scope: CaptureScope::default(),
+            source_ref: None,
+            by: None,
         }
+    }
+
+    #[must_use]
+    pub fn of_kind(mut self, kind: Kind) -> Self {
+        self.suggested_kind = Some(kind);
+        self
+    }
+
+    #[must_use]
+    pub fn exporting<I: IntoIterator<Item = S>, S: Into<String>>(mut self, exports: I) -> Self {
+        self.exports = exports.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
+    pub fn in_scope(mut self, scope: CaptureScope) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    #[must_use]
+    pub fn from_source(mut self, source_ref: impl Into<String>) -> Self {
+        self.source_ref = Some(source_ref.into());
+        self
+    }
+
+    #[must_use]
+    pub fn by(mut self, by: impl Into<String>) -> Self {
+        self.by = Some(by.into());
+        self
     }
 }
 
@@ -130,6 +249,10 @@ impl CandidateState {
 pub struct Candidate {
     pub id: String,
     pub kind: Kind,
+    /// How sure `kind` is; `Declared` when the capturer named it.
+    pub confidence: Confidence,
+    /// One plain sentence on why the classifier read it that way.
+    pub kind_reason: String,
     pub title: String,
     pub state: CandidateState,
     /// What the scanner found. Never contains the secrets themselves.
@@ -139,9 +262,60 @@ pub struct Candidate {
     /// blake3 of the normalized form, so cosmetic edits are recognized.
     pub normalized_hash: String,
     pub exports: Vec<String>,
+    pub scope: CaptureScope,
+    pub source_ref: Option<String>,
+    pub by: Option<String>,
+    pub session: Option<String>,
     pub project_root: Option<PathBuf>,
     pub path: PathBuf,
     pub created_at: Timestamp,
+}
+
+/// Everything about a candidate that the database row does not carry.
+///
+/// It lives beside the body as `meta.json` rather than in new columns: a column
+/// is a schema step, and a schema step makes every older `aikit` on the machine
+/// refuse the shared database. A candidate without the file (filed before this
+/// existed) reads as an ordinary inferred capture at home scope.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct CandidateMeta {
+    #[serde(default)]
+    exports: Vec<String>,
+    #[serde(default)]
+    scope: Option<CaptureScope>,
+    #[serde(default)]
+    source_ref: Option<String>,
+    #[serde(default)]
+    by: Option<String>,
+    #[serde(default)]
+    session: Option<String>,
+    #[serde(default)]
+    confidence: Option<Confidence>,
+    #[serde(default)]
+    kind_reason: Option<String>,
+}
+
+const META_FILE: &str = "meta.json";
+
+impl CandidateMeta {
+    fn load(dir: &Path) -> Self {
+        std::fs::read(dir.join(META_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn store(&self, dir: &Path) -> Result<()> {
+        let path = dir.join(META_FILE);
+        let text = serde_json::to_string_pretty(self).map_err(|e| {
+            AikitError::new(
+                "inbox.write_failed",
+                format!("could not encode the candidate's details: {e}"),
+            )
+        })?;
+        std::fs::write(&path, text.as_bytes())
+            .map_err(|e| io_error("inbox.write_failed", &path, &e))
+    }
 }
 
 impl Candidate {
@@ -266,12 +440,27 @@ impl PromotionEdits {
 }
 
 /// Where a promoted capsule landed.
+///
+/// An alias has no payload file — its command line lives in the manifest — so
+/// its `payload_path` is empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromotedCapsule {
     pub id: CapsuleId,
     pub root: PathBuf,
     pub manifest_path: PathBuf,
     pub payload_path: PathBuf,
+}
+
+/// What promoting a candidate would write, before any of it is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromotionRender {
+    pub root: PathBuf,
+    pub manifest_path: PathBuf,
+    pub manifest: String,
+    /// The payload file and its text; absent for an alias.
+    pub payload: Option<(PathBuf, String)>,
+    /// Whether the payload must be made executable.
+    pub executable: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +505,26 @@ impl<'a> Inbox<'a> {
     }
 
     fn run(&self, capture: Capture, comparables: &[Comparable]) -> Result<CaptureOutcome> {
+        // Intent is checked before anything is stored: a refused capture leaves
+        // nothing behind to clean up.
+        validate_exports(&capture.exports)?;
+        match capture.scope {
+            CaptureScope::Project if capture.project_root.is_none() => {
+                return err(
+                    "inbox.scope_needs_project",
+                    "a project-scoped capture needs a project, and the working directory is not \
+                     inside one",
+                )
+            }
+            CaptureScope::Session if capture.session.is_none() => {
+                return err(
+                    "inbox.scope_needs_session",
+                    "a session-scoped capture needs an AIKit session, and this context has none",
+                )
+            }
+            _ => {}
+        }
+
         // Scan first. Everything downstream works on the redacted text, so there
         // is no path by which the raw secret reaches a file.
         let findings = self.scanner.scan(&capture.body);
@@ -330,15 +539,22 @@ impl<'a> Inbox<'a> {
         } else {
             CandidateState::Quarantined
         };
-        let kind = capture
-            .suggested_kind
-            .unwrap_or_else(|| classify(&capture.body));
+        let classification = match capture.suggested_kind {
+            Some(kind) => Classification {
+                kind,
+                confidence: Confidence::Declared,
+                reason: "declared by the capturer".to_string(),
+            },
+            None => classify_with_confidence(&capture.body),
+        };
+        require_command_kind(classification.kind, &capture.exports)?;
 
         let body_hash = hash(&stored_body);
         let normalized_hash = hash(&normalize(&stored_body));
 
         // Exact and normalized dedup, before anything fuzzy is attempted.
         if let Some(existing) = self.find_duplicate(&body_hash, &normalized_hash)? {
+            let existing = self.declare(existing, &capture)?;
             let similar = rank_similar(&capture.body, &capture.exports, comparables);
             return Ok(CaptureOutcome {
                 duplicate_of: Some(existing.id.clone()),
@@ -353,15 +569,32 @@ impl<'a> Inbox<'a> {
         std::fs::write(path.join("body"), stored_body.as_bytes())
             .map_err(|e| io_error("inbox.write_failed", &path.join("body"), &e))?;
 
+        let meta = CandidateMeta {
+            exports: capture.exports.clone(),
+            scope: Some(capture.scope),
+            source_ref: capture.source_ref.clone(),
+            by: capture.by.clone(),
+            session: capture.session.as_ref().map(|s| s.as_str().to_string()),
+            confidence: Some(classification.confidence),
+            kind_reason: Some(classification.reason.clone()),
+        };
+        meta.store(&path)?;
+
         let candidate = Candidate {
             id,
-            kind,
+            kind: classification.kind,
+            confidence: classification.confidence,
+            kind_reason: classification.reason,
             title: capture.title.clone(),
             state,
             findings,
             body_hash,
             normalized_hash,
             exports: capture.exports.clone(),
+            scope: capture.scope,
+            source_ref: capture.source_ref.clone(),
+            by: capture.by.clone(),
+            session: meta.session.clone(),
             project_root: capture.project_root.clone(),
             path,
             created_at: Timestamp::now(),
@@ -374,6 +607,58 @@ impl<'a> Inbox<'a> {
             duplicate_of: None,
             similar,
         })
+    }
+
+    /// A second capture of text already in the inbox files nothing new — but if
+    /// the second capturer *said* what it is (a kind, command names), that is
+    /// worth more than the first guess. A declared kind replaces an inferred
+    /// one, and the declared command names are added, on a candidate nobody has
+    /// decided yet.
+    fn declare(&self, existing: Candidate, capture: &Capture) -> Result<Candidate> {
+        let undecided = matches!(
+            existing.state,
+            CandidateState::Ready | CandidateState::Quarantined
+        );
+        let says_kind = capture
+            .suggested_kind
+            .filter(|kind| *kind != existing.kind || existing.confidence != Confidence::Declared);
+        let new_exports: Vec<String> = capture
+            .exports
+            .iter()
+            .filter(|name| !existing.exports.contains(name))
+            .cloned()
+            .collect();
+        if !undecided || (says_kind.is_none() && new_exports.is_empty()) {
+            return Ok(existing);
+        }
+
+        let mut updated = existing.clone();
+        if let Some(kind) = says_kind {
+            updated.kind = kind;
+            updated.confidence = Confidence::Declared;
+            updated.kind_reason = "declared by the capturer".to_string();
+        }
+        updated.exports.extend(new_exports);
+        require_command_kind(updated.kind, &updated.exports)?;
+
+        let meta = CandidateMeta {
+            exports: updated.exports.clone(),
+            scope: Some(updated.scope),
+            source_ref: updated.source_ref.clone(),
+            by: updated.by.clone(),
+            session: updated.session.clone(),
+            confidence: Some(updated.confidence),
+            kind_reason: Some(updated.kind_reason.clone()),
+        };
+        meta.store(&updated.path)?;
+        self.index
+            .conn()
+            .execute(
+                "UPDATE candidates SET kind = ?1 WHERE candidate_id = ?2",
+                params![updated.kind.as_str(), updated.id],
+            )
+            .map_err(|e| sql_error("inbox.write_failed", &e))?;
+        Ok(updated)
     }
 
     /// Every candidate, newest first.
@@ -455,25 +740,69 @@ impl<'a> Inbox<'a> {
         Ok(moved)
     }
 
-    /// Write a candidate into a registry as a real capsule.
-    pub fn promote(
+    /// The capsule id promotion would use when the person names none: the
+    /// candidate's kind, its scope's namespace and a name taken from its first
+    /// exported command, or else from its title.
+    ///
+    /// `script/personal/deploy` for a script captured with `--export deploy`;
+    /// `skill/personal/rust-review` for a skill titled "Rust review".
+    pub fn proposed_id(candidate: &Candidate) -> Result<CapsuleId> {
+        let namespace = match candidate.scope {
+            CaptureScope::Project => "project",
+            CaptureScope::Home | CaptureScope::Session => "personal",
+        };
+        let from_exports = match candidate.kind {
+            Kind::Script | Kind::Alias => candidate.exports.first().map(|name| slug(name)),
+            _ => None,
+        };
+        let leaf = from_exports
+            .filter(|leaf| !leaf.is_empty())
+            .or_else(|| Some(slug(&candidate.title)).filter(|leaf| !leaf.is_empty()))
+            .unwrap_or_else(|| slug(&candidate.id));
+        CapsuleId::parse(&format!("{}/{namespace}/{leaf}", candidate.kind))
+    }
+
+    /// The registry a candidate is promoted into: the project's own `.aikit`
+    /// for a project-scoped capture, the personal registry otherwise.
+    pub fn registry_root(&self, candidate: &Candidate) -> Result<PathBuf> {
+        match candidate.scope {
+            CaptureScope::Project => {
+                let project = candidate.project_root.as_ref().ok_or_else(|| {
+                    AikitError::new(
+                        "inbox.scope_needs_project",
+                        format!(
+                            "{} was captured for a project, but no project is recorded on it",
+                            candidate.id
+                        ),
+                    )
+                })?;
+                Ok(project.join(".aikit"))
+            }
+            CaptureScope::Home | CaptureScope::Session => Ok(self.home.registry("personal")),
+        }
+    }
+
+    /// Everything promotion would write, without writing any of it.
+    ///
+    /// Promotion and a planned Procedure are the same act seen twice, so they
+    /// share this: what a person reviews is, byte for byte, what runs.
+    pub fn render_promotion(
         &self,
-        id: &str,
+        candidate: &Candidate,
         edits: &PromotionEdits,
         registry_root: &Path,
-    ) -> Result<PromotedCapsule> {
-        let candidate = self.require(id)?;
-
+    ) -> Result<PromotionRender> {
         if candidate.state == CandidateState::Quarantined {
             return Err(AikitError::new(
                 "inbox.quarantined",
                 format!(
-                    "{id} was quarantined because the scanner found {} possible secrets; a \
+                    "{} was quarantined because the scanner found {} possible secrets; a \
                      quarantined capture is never written into a registry",
+                    candidate.id,
                     candidate.findings.len()
                 ),
             )
-            .with("candidate", id)
+            .with("candidate", candidate.id.clone())
             .with("findings", candidate.findings.len().to_string()));
         }
         if edits.id.kind() != candidate.kind {
@@ -486,7 +815,7 @@ impl<'a> Inbox<'a> {
                     edits.id.kind()
                 ),
             )
-            .with("candidate", id));
+            .with("candidate", candidate.id.clone()));
         }
 
         let root = registry_root.join(edits.id.registry_path());
@@ -499,46 +828,74 @@ impl<'a> Inbox<'a> {
             .with("path", root.display().to_string()));
         }
 
+        let body = std::fs::read_to_string(candidate.body_path())
+            .map_err(|e| io_error("inbox.unreadable", &candidate.body_path(), &e))?;
+        let exports = if edits.exports.is_empty() {
+            candidate.exports.clone()
+        } else {
+            edits.exports.clone()
+        };
         let entry = entry_for(candidate.kind);
-        let manifest = render_manifest(&candidate, edits, entry);
+        let manifest = render_manifest(candidate, edits, &exports, entry, &body);
 
         // Parse before writing. A generated manifest that would not load is a bug
         // in this function, and the user should never meet it as a broken capsule
         // in their registry.
         Capsule::from_toml_str(&manifest)?;
 
-        let body = std::fs::read_to_string(candidate.body_path())
-            .map_err(|e| io_error("inbox.unreadable", &candidate.body_path(), &e))?;
+        // An alias carries its command line in the manifest; every other kind
+        // keeps the captured text as a payload file beside it.
+        let payload = (candidate.kind != Kind::Alias).then(|| (root.join(entry), body));
+        Ok(PromotionRender {
+            manifest_path: root.join(crate::registry::MANIFEST_FILE),
+            manifest,
+            payload,
+            executable: candidate.kind.is_executable(),
+            root,
+        })
+    }
 
-        let manifest_path = root.join(crate::registry::MANIFEST_FILE);
-        let payload_path = root.join(entry);
-        create_dir_all(&root)?;
-        if let Some(parent) = payload_path.parent() {
-            create_dir_all(parent)?;
-        }
-        std::fs::write(&payload_path, body.as_bytes())
-            .map_err(|e| io_error("inbox.write_failed", &payload_path, &e))?;
-        if candidate.kind.is_executable() {
-            make_executable(&payload_path)?;
-        }
-        std::fs::write(&manifest_path, manifest.as_bytes())
-            .map_err(|e| io_error("inbox.write_failed", &manifest_path, &e))?;
+    /// Write a candidate into a registry as a real capsule.
+    pub fn promote(
+        &self,
+        id: &str,
+        edits: &PromotionEdits,
+        registry_root: &Path,
+    ) -> Result<PromotedCapsule> {
+        let candidate = self.require(id)?;
+        let render = self.render_promotion(&candidate, edits, registry_root)?;
 
-        self.set_state(&candidate.id, CandidateState::Promoted)?;
-        self.index
-            .conn()
-            .execute(
-                "DELETE FROM promotion_queue WHERE candidate_id = ?1",
-                params![candidate.id],
-            )
-            .map_err(|e| sql_error("inbox.write_failed", &e))?;
+        create_dir_all(&render.root)?;
+        if let Some((payload_path, body)) = &render.payload {
+            if let Some(parent) = payload_path.parent() {
+                create_dir_all(parent)?;
+            }
+            std::fs::write(payload_path, body.as_bytes())
+                .map_err(|e| io_error("inbox.write_failed", payload_path, &e))?;
+            if render.executable {
+                make_executable(payload_path)?;
+            }
+        }
+        std::fs::write(&render.manifest_path, render.manifest.as_bytes())
+            .map_err(|e| io_error("inbox.write_failed", &render.manifest_path, &e))?;
+
+        self.finish_promotion(&candidate)?;
 
         Ok(PromotedCapsule {
             id: edits.id.clone(),
-            root,
-            manifest_path,
-            payload_path,
+            root: render.root,
+            manifest_path: render.manifest_path,
+            payload_path: render
+                .payload
+                .map(|(path, _)| path)
+                .unwrap_or_else(PathBuf::new),
         })
+    }
+
+    /// Mark a candidate promoted. The files are written by whoever promoted it —
+    /// [`Inbox::promote`], or a Procedure that ran the same render.
+    pub fn finish_promotion(&self, candidate: &Candidate) -> Result<()> {
+        self.set_state(&candidate.id, CandidateState::Promoted)
     }
 
     // -- internals ---------------------------------------------------------
@@ -655,31 +1012,193 @@ pub fn normalize(text: &str) -> String {
     out.join("\n").trim().to_string()
 }
 
+/// What the classifier made of a capture, and how far to trust it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Classification {
+    pub kind: Kind,
+    pub confidence: Confidence,
+    /// One plain sentence a person can read next to the answer.
+    pub reason: String,
+}
+
 /// Infer what a capture is, when the caller has not said.
 ///
 /// Deliberately conservative and explainable: a shebang is a script, YAML front
-/// matter naming a skill is a skill, prose is guidance. Nothing here guesses from
-/// statistics, because a wrong guess costs the user an edit and a wrong *confident*
-/// guess costs them trust.
+/// matter naming a skill is a skill, shell syntax is a script, prose is guidance.
+/// Nothing here guesses from statistics, because a wrong guess costs the user an
+/// edit and a wrong *confident* guess costs them trust.
 pub fn classify(body: &str) -> Kind {
+    classify_with_confidence(body).kind
+}
+
+/// [`classify`], with how sure it is and why.
+///
+/// Text it cannot place is *prose*, at low confidence — never a script. A note
+/// that happens to be captured is not a command, and filing it as one would put
+/// an "executable" in the registry that nobody wrote.
+pub fn classify_with_confidence(body: &str) -> Classification {
     let trimmed = body.trim_start();
+    let said = |kind, confidence, reason: &str| Classification {
+        kind,
+        confidence,
+        reason: reason.to_string(),
+    };
     if trimmed.starts_with("#!") {
-        return Kind::Script;
+        return said(Kind::Script, Confidence::High, "starts with a shebang line");
     }
     if trimmed.starts_with("---") {
         let front = trimmed.trim_start_matches("---");
         if front.contains("name:") || front.contains("description:") {
-            return Kind::Skill;
+            return said(
+                Kind::Skill,
+                Confidence::High,
+                "opens with YAML front matter that names a skill",
+            );
         }
     }
     if body.contains("PreToolUse") || body.contains("PostToolUse") || body.contains("SessionStart")
     {
-        return Kind::Hook;
+        return said(
+            Kind::Hook,
+            Confidence::Medium,
+            "mentions a hook event (PreToolUse, PostToolUse or SessionStart)",
+        );
     }
     if trimmed.starts_with('#') || trimmed.starts_with("> ") {
-        return Kind::Guidance;
+        return said(
+            Kind::Guidance,
+            Confidence::Medium,
+            "opens with a markdown heading or quote",
+        );
     }
-    Kind::Script
+    if let Some((cued, total)) = shell_shape(body) {
+        return Classification {
+            kind: Kind::Script,
+            confidence: Confidence::Medium,
+            reason: format!(
+                "{cued} of {total} lines read as shell commands (flags, pipes, redirects, \
+                 variables or paths)"
+            ),
+        };
+    }
+    said(
+        Kind::Guidance,
+        Confidence::Low,
+        "reads as prose: no shebang, front matter, hook event or shell syntax — say what it is \
+         with --kind",
+    )
+}
+
+/// `(lines with shell syntax, command lines)` when at least half of the
+/// non-comment lines carry some.
+fn shell_shape(body: &str) -> Option<(usize, usize)> {
+    let lines: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    let cued = lines.iter().filter(|line| has_shell_syntax(line)).count();
+    (cued > 0 && cued * 2 >= lines.len()).then_some((cued, lines.len()))
+}
+
+/// Syntax a sentence does not have: operators, flags, `$variables`, paths and
+/// `NAME=value` prefixes. Each is a structural cue, so the verdict can be
+/// explained and does not depend on which commands this machine happens to have.
+fn has_shell_syntax(line: &str) -> bool {
+    if ["&&", "||", "$(", "${", "2>&1", ">>"]
+        .iter()
+        .any(|operator| line.contains(operator))
+    {
+        return true;
+    }
+    line.split_whitespace().any(|word| {
+        let mut chars = word.chars();
+        let first = chars.next();
+        let second = chars.next();
+        matches!(word, "|" | ">" | "<" | "&")
+            || (word.starts_with("--")
+                && word.len() > 2
+                && word[2..].starts_with(|c: char| c.is_ascii_alphanumeric()))
+            || (first == Some('-')
+                && second.is_some_and(|c| c.is_ascii_alphabetic())
+                && word.len() == 2)
+            || (first == Some('$') && second.is_some_and(|c| c.is_ascii_alphabetic() || c == '_'))
+            || word.starts_with("./")
+            || word.starts_with("../")
+            || word.starts_with("~/")
+            || (first == Some('/') && second.is_some_and(|c| c.is_ascii_alphanumeric()))
+            || is_env_assignment(word)
+    })
+}
+
+fn is_env_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && name.starts_with(|c: char| c.is_ascii_uppercase() || c == '_')
+            && name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    })
+}
+
+/// Command names become files in the contextual `bin/`, so each must be usable
+/// as one: no path separators, no whitespace, not `.` or `..`.
+fn validate_exports(exports: &[String]) -> Result<()> {
+    for name in exports {
+        let bad = name.is_empty()
+            || name.len() > 64
+            || name == "."
+            || name == ".."
+            || name.starts_with('-')
+            || name
+                .chars()
+                .any(|c| c.is_whitespace() || c == '/' || c == '\\' || c == '\0');
+        if bad {
+            return Err(AikitError::new(
+                "inbox.invalid_export",
+                format!(
+                    "`{name}` cannot be a command name: use letters, digits, `-`, `_` or `.`, \
+                     with no spaces or slashes"
+                ),
+            )
+            .with("export", name.clone()));
+        }
+    }
+    Ok(())
+}
+
+/// `--export` names commands, and only a script or an alias is one.
+fn require_command_kind(kind: Kind, exports: &[String]) -> Result<()> {
+    if exports.is_empty() || matches!(kind, Kind::Script | Kind::Alias) {
+        return Ok(());
+    }
+    Err(AikitError::new(
+        "inbox.exports_need_a_command",
+        format!(
+            "--export names a command, but this capture is a {kind}; \
+             say `--kind script` or `--kind alias` if it is one"
+        ),
+    )
+    .with("kind", kind.as_str()))
+}
+
+/// A lowercase, id-safe slug: letters and digits, with `-` between words.
+fn slug(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    trimmed
+        .chars()
+        .take(48)
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
 }
 
 fn hash(text: &str) -> String {
@@ -848,7 +1367,13 @@ fn entry_for(kind: Kind) -> &'static str {
 /// string building rather than a serializer because the result is a file a person
 /// will read and edit next: the comment at the top, the field order and the
 /// spacing are part of the output, not incidental to it.
-fn render_manifest(candidate: &Candidate, edits: &PromotionEdits, entry: &str) -> String {
+fn render_manifest(
+    candidate: &Candidate,
+    edits: &PromotionEdits,
+    exports: &[String],
+    entry: &str,
+    body: &str,
+) -> String {
     let name = edits
         .name
         .clone()
@@ -875,6 +1400,15 @@ fn render_manifest(candidate: &Candidate, edits: &PromotionEdits, entry: &str) -
         quote(&candidate.created_at.to_string())
     ));
     out.push_str(&format!("source_event = {}\n", quote(&candidate.id)));
+    if let Some(by) = &candidate.by {
+        out.push_str(&format!("author = {}\n", quote(by)));
+    }
+    if let Some(session) = &candidate.session {
+        out.push_str(&format!("session_id = {}\n", quote(session)));
+    }
+    if let Some(source_ref) = &candidate.source_ref {
+        out.push_str(&format!("source_ref = {}\n", quote(source_ref)));
+    }
 
     out.push_str(&format!("\n[{}]\n", edits.id.kind().as_str()));
     match edits.id.kind() {
@@ -890,14 +1424,21 @@ fn render_manifest(candidate: &Candidate, edits: &PromotionEdits, entry: &str) -
         }
         Kind::Script => {
             out.push_str(&format!("entry = {}\n", quote(entry)));
-            if !edits.exports.is_empty() {
-                let rendered: Vec<String> = edits.exports.iter().map(|e| quote(e)).collect();
+            // A captured command line has no shebang, and a file with none cannot
+            // be executed directly. Say how to run it rather than rewriting what
+            // was captured.
+            if !body.trim_start().starts_with("#!") {
+                out.push_str("interpreter = [\"sh\"]\n");
+            }
+            if !exports.is_empty() {
+                let rendered: Vec<String> = exports.iter().map(|e| quote(e)).collect();
                 out.push_str(&format!("exports = [{}]\n", rendered.join(", ")));
             }
         }
         Kind::Alias => {
-            out.push_str(&format!("name = {}\n", quote(edits.id.leaf())));
-            out.push_str("body = \"\"\n");
+            let command = exports.first().map_or(edits.id.leaf(), String::as_str);
+            out.push_str(&format!("name = {}\n", quote(command)));
+            out.push_str(&format!("body = {}\n", quote(body.trim_end())));
         }
         Kind::Session => out.push_str(&format!("spec = {}\n", quote(entry))),
         Kind::Template => out.push_str("root = \"payload\"\n"),
@@ -951,9 +1492,16 @@ fn candidate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Candidate>>
 
     Ok((|| {
         let state = CandidateState::parse(&state);
+        let path = PathBuf::from(path);
+        let meta = CandidateMeta::load(&path);
         Ok(Candidate {
             id,
             kind: std::str::FromStr::from_str(&kind)?,
+            // A candidate filed before intent was recorded was always inferred.
+            confidence: meta.confidence.unwrap_or(Confidence::Medium),
+            kind_reason: meta
+                .kind_reason
+                .unwrap_or_else(|| "classified when it was captured".to_string()),
             title,
             state,
             // The findings are not re-hydrated from the row: what matters after
@@ -962,9 +1510,13 @@ fn candidate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Candidate>>
             findings: Vec::new(),
             body_hash,
             normalized_hash,
-            exports: Vec::new(),
+            exports: meta.exports,
+            scope: meta.scope.unwrap_or_default(),
+            source_ref: meta.source_ref,
+            by: meta.by,
+            session: meta.session,
             project_root: project_root.map(PathBuf::from),
-            path: PathBuf::from(path),
+            path,
             created_at: Timestamp::from_nanos(created),
         })
     })())

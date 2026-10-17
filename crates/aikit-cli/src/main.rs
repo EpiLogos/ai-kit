@@ -6655,8 +6655,11 @@ fn cmd_inbox(cwd: &std::path::Path, a: InboxArgs) -> Result<Reply> {
 }
 
 fn cmd_promote(cwd: &std::path::Path, a: PromoteArgs) -> Result<Reply> {
+    use aikit_store::inbox::Inbox;
     let mut service = Service::discover(cwd)?;
     let id = a.id.as_deref().map(CapsuleId::parse).transpose()?;
+    // What the capture said about itself, read before promotion moves it on.
+    let captured = Inbox::new(service.home(), service.index()).candidate(&a.candidate)?;
     let promoted = service.promote(PromoteRequest {
         candidate: a.candidate,
         id,
@@ -6665,6 +6668,9 @@ fn cmd_promote(cwd: &std::path::Path, a: PromoteArgs) -> Result<Reply> {
         "id": promoted.id.to_string(),
         "root": promoted.root.display().to_string(),
         "manifest": promoted.manifest_path.display().to_string(),
+        "kind": promoted.id.kind().as_str(),
+        "scope": captured.as_ref().map(|c| c.scope.as_str()),
+        "exports": captured.as_ref().map(|c| c.exports.clone()).unwrap_or_default(),
     });
     Ok(reply(&service, data, vec![]))
 }
@@ -6696,26 +6702,48 @@ fn cmd_capture(cwd: &std::path::Path, a: CaptureArgs) -> Result<Reply> {
     let capture = Capture {
         title: a.title,
         body,
-        suggested_kind: None,
-        exports: vec![],
+        suggested_kind: a
+            .kind
+            .as_deref()
+            .map(std::str::FromStr::from_str)
+            .transpose()?,
+        exports: a.exports,
         project_root: service.descriptor().project_root.clone(),
         session: service.descriptor().session_id.clone(),
+        scope: a
+            .scope
+            .as_deref()
+            .map(std::str::FromStr::from_str)
+            .transpose()?
+            .unwrap_or_default(),
+        source_ref: a.source_ref,
+        by: a.by,
     };
     // Scanned before storage, never before display: a secret must not reach a file.
     let outcome = inbox.capture_against(capture, service.snapshot())?;
+    let candidate = &outcome.candidate;
 
     let data = jval!({
-        "candidate": outcome.candidate.id,
-        "kind": outcome.candidate.kind.as_str(),
-        "state": outcome.candidate.state.as_str(),
-        "quarantined": outcome.candidate.state == aikit_store::inbox::CandidateState::Quarantined,
-        "findings": outcome.candidate.findings.iter().map(|f| jval!({
+        "candidate": candidate.id,
+        "kind": candidate.kind.as_str(),
+        "state": candidate.state.as_str(),
+        "quarantined": candidate.state == aikit_store::inbox::CandidateState::Quarantined,
+        "findings": candidate.findings.iter().map(|f| jval!({
             "rule": f.rule, "preview": f.preview,
         })).collect::<Vec<_>>(),
         "duplicate_of": outcome.duplicate_of,
         "similar": outcome.similar.iter().map(|s| jval!({
             "other": s.other, "percentage": s.percentage, "summary": s.summary,
         })).collect::<Vec<_>>(),
+        // What the capture says about itself (additive to the reply above).
+        "confidence": candidate.confidence.as_str(),
+        "kind_reason": candidate.kind_reason,
+        "exports": candidate.exports,
+        "scope": candidate.scope.as_str(),
+        "source_ref": candidate.source_ref,
+        "by": candidate.by,
+        "session": candidate.session,
+        "proposed_id": Inbox::proposed_id(candidate).ok().map(|id| id.to_string()),
     });
     Ok(reply(&service, data, vec![]))
 }
@@ -6931,8 +6959,7 @@ fn cmd_stats(cwd: &std::path::Path) -> Result<Reply> {
     let mut runs = 0u32;
     let mut kinds: std::collections::BTreeMap<aikit_core::Kind, u32> =
         std::collections::BTreeMap::new();
-    let mut sources: std::collections::BTreeMap<String, u32> =
-        std::collections::BTreeMap::new();
+    let mut sources: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
     for capsule in aikit_core::catalog::Catalog::capsules(service.snapshot()) {
         let usage = index.usage(&capsule.id)?;
         if usage.successful_runs > 0 {
