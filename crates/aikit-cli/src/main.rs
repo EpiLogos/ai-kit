@@ -383,6 +383,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
         Some(Command::Inbox(a)) => cmd_inbox(cwd, a),
         Some(Command::Capture(a)) => cmd_capture(cwd, a),
         Some(Command::Observe(a)) => cmd_observe(cwd, a),
+        Some(Command::Saved(a)) => cmd_saved(cwd, a),
         Some(Command::Diff(_)) => cmd_diff(cwd),
         Some(Command::Doctor(a)) => cmd_doctor(cwd, a),
         Some(Command::Credential(c)) => cmd_credential(cwd, c, json_mode),
@@ -4605,10 +4606,19 @@ fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
             let unavailable_reason = capsule.as_ref().and_then(|id| {
                 view.unavailable_reason(id).map(|reason| reason.describe())
             });
+            // The carrying registry. An active capsule reports the source that
+            // supplied it; one that is only catalogued - a saved script nobody has
+            // enabled - still lives in a registry, and "from where" has an answer.
             let source = capsule
                 .as_ref()
                 .and_then(|id| view.active.get(id))
-                .and_then(|active| active.source.as_ref());
+                .and_then(|active| active.source.as_ref())
+                .or_else(|| {
+                    capsule.as_ref().and_then(|id| {
+                        aikit_core::catalog::Catalog::get(service.snapshot(), id)
+                            .and_then(|capsule| capsule.source.as_ref())
+                    })
+                });
             let describe_route = match &capsule {
                 Some(id) => format!("aikit act describe {id}"),
                 None => format!("aikit act describe {}", row.resource),
@@ -6844,6 +6854,20 @@ fn cmd_capture(cwd: &std::path::Path, a: CaptureArgs) -> Result<Reply> {
         "inbox_item": outcome.announcement.as_ref().map(|a| a.item.to_string()),
         "proposal": outcome.announcement.as_ref().and_then(|a| a.proposal.as_ref()).map(|p| p.to_string()),
     });
+    Ok(reply(&service, data, vec![]))
+}
+
+/// `aikit saved` - the saved operations, as one reading (see
+/// `aikit_cli::saved_operations`).
+fn cmd_saved(cwd: &std::path::Path, a: SavedArgs) -> Result<Reply> {
+    use aikit_cli::saved_operations::{reading, Which};
+    let service = Service::discover(cwd)?;
+    let which = match a.kind.as_deref() {
+        Some("script") => Which::Script,
+        Some("alias") => Which::Alias,
+        _ => Which::All,
+    };
+    let data = reading(&service, which, a.limit)?;
     Ok(reply(&service, data, vec![]))
 }
 

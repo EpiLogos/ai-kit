@@ -196,6 +196,9 @@ pub enum Command {
     Promote(PromoteArgs),
     /// Feed attributed command runs; AIKit notices what repeats and offers it.
     Observe(ObserveArgs),
+    /// Read what operations are saved (scripts, aliases), from where, by whom,
+    /// at which revision, how often used - and what is waiting to be saved.
+    Saved(SavedArgs),
     /// Garbage-collect old generations.
     Prune(PruneArgs),
     /// Issue, list and revoke hook bypass tokens.
@@ -672,6 +675,7 @@ impl Command {
             Self::Capture(_) => "cmd_capture",
             Self::Promote(_) => "cmd_promote",
             Self::Observe(a) => observe_route(a),
+            Self::Saved(_) => "cmd_saved",
             Self::Prune(_) => "cmd_prune",
             Self::Bypass(c) => bypass_route(&c.command),
             Self::Client(c) => client_route(&c.command),
@@ -4884,6 +4888,16 @@ pub struct PromoteArgs {
     /// The capsule id to give the new capability.
     #[arg(long, value_name = "ID")]
     pub id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SavedArgs {
+    /// Only this kind: `script` or `alias`.
+    #[arg(long, value_name = "KIND", value_parser = ["script", "alias"])]
+    pub kind: Option<String>,
+    /// How many saved operations to list.
+    #[arg(long, value_name = "N", default_value_t = 100)]
+    pub limit: usize,
 }
 
 #[derive(Debug, Args)]
