@@ -28,7 +28,10 @@ use aikit_core::trust::{MemoryTrust, TrustState};
 use aikit_core::{AikitError, FamiliarityObservation, FamiliarityStore, Result};
 
 use aikit_store::events::Timestamp;
-use aikit_store::inbox::{Candidate, CandidateState, PromotionEdits, Similarity, SimilarityBasis};
+use aikit_store::inbox::{
+    Candidate, CandidateState, CaptureScope, Confidence, PromotionEdits, Similarity,
+    SimilarityBasis,
+};
 use aikit_store::scan::{Family, Finding};
 
 use aikit_tui::backend::{
@@ -459,12 +462,18 @@ fn candidate(id: &str, title: &str, state: CandidateState, findings: Vec<Finding
     Candidate {
         id: id.to_string(),
         kind: Kind::Script,
+        confidence: Confidence::Declared,
+        kind_reason: "declared by the capturer".to_string(),
         title: title.to_string(),
         state,
         findings,
         body_hash: format!("hash-{id}"),
         normalized_hash: format!("norm-{id}"),
         exports: vec!["rebuild-index".into()],
+        scope: CaptureScope::Home,
+        source_ref: None,
+        by: None,
+        session: None,
         project_root: Some(PathBuf::from("/work/payments")),
         path: PathBuf::from(format!("/inbox/ready/{id}")),
         created_at: Timestamp::from_nanos(0),

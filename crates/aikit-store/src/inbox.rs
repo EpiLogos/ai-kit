@@ -42,13 +42,19 @@ use std::str::FromStr;
 
 use aikit_core::catalog::Catalog;
 use aikit_core::error::err;
+use aikit_core::id::{InboxId, ProcedureId};
+use aikit_core::procedure::{
+    Inverse, MutationIsolation, Plan, Procedure, ProcedureKind, WorldEdit,
+};
 use aikit_core::{AikitError, Capsule, CapsuleId, Kind, Maturity, Result, SessionId};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
+use crate::channel::{Evidence, InboxChannel, InboxKind, NewItem};
 use crate::events::Timestamp;
 use crate::home::{create_dir_all, io_error};
 use crate::index::{sql_error, Index};
+use crate::procedure::ProcedureRunner;
 use crate::scan::{Finding, Scanner};
 use crate::AikitHome;
 
@@ -332,6 +338,32 @@ pub struct CaptureOutcome {
     pub duplicate_of: Option<String>,
     /// Ranked neighbours in the catalog, worst-first suppressed.
     pub similar: Vec<Similarity>,
+    /// The message the capture put on the inbox channel, where `aikit inbox`
+    /// and any agent reading through the broker will see it.
+    pub announcement: Option<Announcement>,
+}
+
+/// A capture, as the inbox channel carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Announcement {
+    /// The channel item.
+    pub item: InboxId,
+    /// The planned Procedure that saving it would run, when it is ready to save.
+    pub proposal: Option<ProcedureId>,
+}
+
+/// What accepting a capture did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Accepted {
+    pub candidate: Candidate,
+    /// The capsule that now exists.
+    pub id: CapsuleId,
+    /// The Procedure that wrote it; `aikit procedure undo` reverses it.
+    pub procedure: ProcedureId,
+    /// Edits applied; zero when the same plan had already been applied.
+    pub applied: usize,
+    /// The channel item that was resolved, when there was one.
+    pub item: Option<InboxId>,
 }
 
 // ---------------------------------------------------------------------------
@@ -555,11 +587,13 @@ impl<'a> Inbox<'a> {
         // Exact and normalized dedup, before anything fuzzy is attempted.
         if let Some(existing) = self.find_duplicate(&body_hash, &normalized_hash)? {
             let existing = self.declare(existing, &capture)?;
+            let announcement = self.announce(&existing)?;
             let similar = rank_similar(&capture.body, &capture.exports, comparables);
             return Ok(CaptureOutcome {
                 duplicate_of: Some(existing.id.clone()),
                 candidate: existing,
                 similar,
+                announcement,
             });
         }
 
@@ -600,12 +634,258 @@ impl<'a> Inbox<'a> {
             created_at: Timestamp::now(),
         };
         self.record(&candidate)?;
+        let announcement = self.announce(&candidate)?;
 
         let similar = rank_similar(&capture.body, &capture.exports, comparables);
         Ok(CaptureOutcome {
             candidate,
             duplicate_of: None,
             similar,
+            announcement,
+        })
+    }
+
+    /// Put a candidate on the inbox channel, once.
+    ///
+    /// The candidate store and the channel are two stores for one inbox: the
+    /// store holds the example, the channel is where it is *said* — to the person
+    /// at `aikit inbox`, and to any agent reading through the broker. A candidate
+    /// with nothing waiting on it is announced; one already announced is not
+    /// announced again, so a second capture of the same text never nags.
+    ///
+    /// The message's evidence is the candidate, and the Procedure it proposes is
+    /// the promotion itself — the exact plan that accepting it runs.
+    fn announce(&self, candidate: &Candidate) -> Result<Option<Announcement>> {
+        if !matches!(
+            candidate.state,
+            CandidateState::Ready | CandidateState::Quarantined
+        ) {
+            return Ok(None);
+        }
+        let channel = InboxChannel::new(self.index);
+        let key = announcement_key(&candidate.id);
+        if let Some(existing) = channel.pending_by_dedup_key(&key)? {
+            return Ok(Some(Announcement {
+                item: existing.id,
+                proposal: existing.proposal,
+            }));
+        }
+
+        let proposed = Self::proposed_id(candidate).ok();
+        let (planned, why_not) = if candidate.state == CandidateState::Ready {
+            match self.plan_promotion(candidate) {
+                Ok(procedure) => (Some(procedure), None),
+                Err(error) => (None, Some(error.message().to_string())),
+            }
+        } else {
+            (None, None)
+        };
+
+        let mut body = String::new();
+        if candidate.state == CandidateState::Quarantined {
+            body.push_str(&format!(
+                "Held back: the scanner found {} possible secret(s), so this is never written \
+                 into a registry. Remove it with `aikit inbox reject {}`.\n",
+                candidate.findings.len().max(1),
+                candidate.id
+            ));
+        } else {
+            body.push_str(&format!(
+                "Captured as a **{}** ({} confidence: {}).\n",
+                candidate.kind,
+                candidate.confidence.as_str(),
+                candidate.kind_reason
+            ));
+        }
+        if let Some(by) = &candidate.by {
+            body.push_str(&format!("\nObserved by {by}."));
+        }
+        if let Some(source) = &candidate.source_ref {
+            body.push_str(&format!("\nFrom {source}."));
+        }
+        if let (Some(id), None) = (&proposed, &why_not) {
+            if candidate.state == CandidateState::Ready {
+                body.push_str(&format!("\n\nSaving it writes `{id}`"));
+                if !candidate.exports.is_empty() {
+                    let names: Vec<String> =
+                        candidate.exports.iter().map(|e| format!("`{e}`")).collect();
+                    body.push_str(&format!(", run as {}", names.join(", ")));
+                }
+                body.push_str(&format!(
+                    ". `aikit inbox accept {0}` saves it; `aikit inbox reject {0}` turns it down.",
+                    candidate.id
+                ));
+            }
+        }
+        if let Some(reason) = &why_not {
+            body.push_str(&format!(
+                "\n\nNot ready to save as it stands: {reason}. `aikit promote {} --id <ID>` \
+                 names it yourself.",
+                candidate.id
+            ));
+        }
+
+        let title = if candidate.state == CandidateState::Quarantined {
+            format!(
+                "Held back: \u{201c}{}\u{201d} may contain a secret",
+                candidate.title
+            )
+        } else {
+            format!(
+                "Save \u{201c}{}\u{201d} as a {}?",
+                candidate.title, candidate.kind
+            )
+        };
+
+        let mut evidence = vec![Evidence::Hash {
+            label: "candidate".to_string(),
+            value: candidate.id.clone(),
+        }];
+        if let Some(id) = &proposed {
+            evidence.push(Evidence::Hash {
+                label: "proposed-id".to_string(),
+                value: id.to_string(),
+            });
+        }
+        evidence.push(Evidence::File {
+            path: candidate.body_path().display().to_string(),
+        });
+        if let Ok(preview) = self.preview(&candidate.id) {
+            let preview: String = preview.chars().take(240).collect();
+            evidence.push(Evidence::Summary { text: preview });
+        }
+
+        let mut item = NewItem::new(InboxKind::CaptureCandidate, title, body)
+            .with_evidence(evidence)
+            .deduped_by(key);
+        if let Some(procedure) = &planned {
+            item = item.proposing(procedure.id.clone());
+        }
+        let stored = channel.publish(item)?;
+        Ok(Some(Announcement {
+            item: stored.id,
+            proposal: stored.proposal,
+        }))
+    }
+
+    /// The Procedure that promoting `candidate` under its proposed id would run,
+    /// built and persisted but not applied. A person can read it
+    /// (`aikit procedure diff`), and accepting runs exactly it.
+    pub fn plan_promotion(&self, candidate: &Candidate) -> Result<Procedure> {
+        let procedure = self.build_promotion(candidate)?;
+        ProcedureRunner::new(self.home).save(&procedure)?;
+        Ok(procedure)
+    }
+
+    /// [`Inbox::plan_promotion`] without persisting it: the same bytes, so the
+    /// same digest, which is how a stored plan is told from a stale one.
+    fn build_promotion(&self, candidate: &Candidate) -> Result<Procedure> {
+        let id = Self::proposed_id(candidate)?;
+        let registry_root = self.registry_root(candidate)?;
+        let edits = PromotionEdits::new(id.clone(), candidate.title.clone());
+        let render = self.render_promotion(candidate, &edits, &registry_root)?;
+
+        let mut plan = Plan::new()
+            .with_note(format!("promote {} as {id}", candidate.id))
+            .with_edit(WorldEdit::CreateDir {
+                path: render.root.clone(),
+                inverse: Inverse::Remove,
+            });
+        if let Some((payload_path, body)) = &render.payload {
+            if let Some(parent) = payload_path.parent().filter(|p| *p != render.root) {
+                plan = plan.with_edit(WorldEdit::CreateDir {
+                    path: parent.to_path_buf(),
+                    inverse: Inverse::Remove,
+                });
+            }
+            plan = plan.with_edit(WorldEdit::WriteFileMode {
+                path: payload_path.clone(),
+                contents: body.clone().into_bytes(),
+                mode: if render.executable { 0o755 } else { 0o644 },
+                inverse: Inverse::Remove,
+            });
+        }
+        plan = plan.with_edit(WorldEdit::WriteFile {
+            path: render.manifest_path.clone(),
+            contents: render.manifest.clone().into_bytes(),
+            inverse: Inverse::Remove,
+        });
+
+        let plan = crate::procedure::bind_current_preconditions(plan)?;
+        // One new capsule is a small, fully reversible write. A project's own
+        // registry sits inside its git repository, and the automatic rule would
+        // answer that with a branch in the person's repository — a far bigger act
+        // than the one asked for — so the plan is staged in a shadow tree instead.
+        let shadow = self
+            .home
+            .state()
+            .join("procedures")
+            .join(".shadow")
+            .join(plan.digest().short());
+        Procedure::new(
+            ProcedureKind::Promote {
+                candidate: candidate.id.clone(),
+            },
+            plan,
+            MutationIsolation::Staged { shadow },
+        )
+    }
+
+    /// Save a captured example: run the Procedure its message proposed (or plan
+    /// one now, when the message predates the example's last change), then mark
+    /// the example promoted and its message resolved.
+    pub fn accept(&self, candidate_id: &str) -> Result<Accepted> {
+        let candidate = self.require(candidate_id)?;
+        match candidate.state {
+            CandidateState::Promoted => {
+                return Err(AikitError::new(
+                    "inbox.already_promoted",
+                    format!("{} was already saved", candidate.id),
+                )
+                .with("candidate", candidate.id.clone()))
+            }
+            CandidateState::Rejected => {
+                return Err(AikitError::new(
+                    "inbox.already_rejected",
+                    format!(
+                        "{} was turned down; capture it again to reconsider",
+                        candidate.id
+                    ),
+                )
+                .with("candidate", candidate.id.clone()))
+            }
+            CandidateState::Quarantined | CandidateState::Ready => {}
+        }
+
+        let fresh = self.build_promotion(&candidate)?;
+        let channel = InboxChannel::new(self.index);
+        let item = channel.pending_by_dedup_key(&announcement_key(&candidate.id))?;
+        let runner = ProcedureRunner::new(self.home);
+        let stored = item
+            .as_ref()
+            .and_then(|item| item.proposal.as_ref())
+            .and_then(|id| runner.load(id).ok())
+            .filter(|stored| stored.digest == fresh.digest);
+        let procedure = match stored {
+            Some(stored) => stored,
+            None => {
+                runner.save(&fresh)?;
+                if let Some(item) = &item {
+                    channel.set_proposal(&item.id, &fresh.id)?;
+                }
+                fresh
+            }
+        };
+
+        let outcome = runner.run(&procedure)?;
+        let id = Self::proposed_id(&candidate)?;
+        self.finish_promotion(&candidate, &id)?;
+        Ok(Accepted {
+            candidate,
+            id,
+            procedure: procedure.id,
+            applied: outcome.applied,
+            item: item.map(|item| item.id),
         })
     }
 
@@ -729,7 +1009,13 @@ impl<'a> Inbox<'a> {
             .with("candidate", id)
             .with("findings", findings.len().to_string()));
         }
-        self.move_to(&candidate, CandidateState::Ready)
+        let released = self.move_to(&candidate, CandidateState::Ready)?;
+        // The message that said "held back" is stale now: close it and announce
+        // the candidate as the ready proposal it has become.
+        InboxChannel::new(self.index)
+            .resolve_by_dedup_key(&announcement_key(&released.id), "released from quarantine")?;
+        self.announce(&released)?;
+        Ok(released)
     }
 
     pub fn reject(&self, id: &str, reason: &str) -> Result<Candidate> {
@@ -737,6 +1023,8 @@ impl<'a> Inbox<'a> {
         let moved = self.move_to(&candidate, CandidateState::Rejected)?;
         std::fs::write(moved.path.join("rejected-because"), reason.as_bytes())
             .map_err(|e| io_error("inbox.write_failed", &moved.path, &e))?;
+        InboxChannel::new(self.index)
+            .resolve_by_dedup_key(&announcement_key(&moved.id), &format!("rejected: {reason}"))?;
         Ok(moved)
     }
 
@@ -804,6 +1092,26 @@ impl<'a> Inbox<'a> {
             )
             .with("candidate", candidate.id.clone())
             .with("findings", candidate.findings.len().to_string()));
+        }
+        match candidate.state {
+            CandidateState::Promoted => {
+                return Err(AikitError::new(
+                    "inbox.already_promoted",
+                    format!("{} was already saved", candidate.id),
+                )
+                .with("candidate", candidate.id.clone()))
+            }
+            CandidateState::Rejected => {
+                return Err(AikitError::new(
+                    "inbox.already_rejected",
+                    format!(
+                        "{} was turned down; capture it again to reconsider",
+                        candidate.id
+                    ),
+                )
+                .with("candidate", candidate.id.clone()))
+            }
+            CandidateState::Ready | CandidateState::Quarantined => {}
         }
         if edits.id.kind() != candidate.kind {
             return Err(AikitError::new(
@@ -879,7 +1187,7 @@ impl<'a> Inbox<'a> {
         std::fs::write(&render.manifest_path, render.manifest.as_bytes())
             .map_err(|e| io_error("inbox.write_failed", &render.manifest_path, &e))?;
 
-        self.finish_promotion(&candidate)?;
+        self.finish_promotion(&candidate, &edits.id)?;
 
         Ok(PromotedCapsule {
             id: edits.id.clone(),
@@ -892,10 +1200,16 @@ impl<'a> Inbox<'a> {
         })
     }
 
-    /// Mark a candidate promoted. The files are written by whoever promoted it —
-    /// [`Inbox::promote`], or a Procedure that ran the same render.
-    pub fn finish_promotion(&self, candidate: &Candidate) -> Result<()> {
-        self.set_state(&candidate.id, CandidateState::Promoted)
+    /// Mark a candidate promoted and close its message. The files are written by
+    /// whoever promoted it — [`Inbox::promote`], or a Procedure that ran the same
+    /// render — so saving it by either road leaves the inbox in one state.
+    pub fn finish_promotion(&self, candidate: &Candidate, saved_as: &CapsuleId) -> Result<()> {
+        self.set_state(&candidate.id, CandidateState::Promoted)?;
+        InboxChannel::new(self.index).resolve_by_dedup_key(
+            &announcement_key(&candidate.id),
+            &format!("saved as {saved_as}"),
+        )?;
+        Ok(())
     }
 
     // -- internals ---------------------------------------------------------
@@ -1180,6 +1494,11 @@ fn require_command_kind(kind: Kind, exports: &[String]) -> Result<()> {
         ),
     )
     .with("kind", kind.as_str()))
+}
+
+/// The dedup key that ties a candidate to its message on the channel.
+pub fn announcement_key(candidate_id: &str) -> String {
+    format!("capture-candidate:{candidate_id}")
 }
 
 /// A lowercase, id-safe slug: letters and digits, with `-` between words.

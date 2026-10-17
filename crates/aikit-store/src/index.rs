@@ -47,6 +47,12 @@ use crate::events::{Event, EventAction, Outcome, Timestamp};
 use crate::registry::RegistryLoad;
 
 /// Schema steps, applied in order. Append only — never edit one that shipped.
+///
+/// `promotion_queue` (0001) no longer has a reader or a writer: a captured
+/// example is announced on the inbox channel (`inbox_items`), where its planned
+/// promotion rides with it. The empty table stays, because dropping it would be
+/// a schema step, and a schema step makes every older `aikit` on the machine
+/// refuse the shared database.
 const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0001-initial",
