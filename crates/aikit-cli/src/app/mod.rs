@@ -3296,12 +3296,15 @@ impl AikitApplication for Service {
                 format!("no candidate `{}` is waiting", r.candidate),
             )
         })?;
+        // Without a name from the person, the candidate's own kind, scope and
+        // command name make one (`script/personal/deploy`); a project-scoped
+        // capture is written into that project's registry.
         let id = match r.id {
             Some(id) => id,
-            None => CapsuleId::parse(&format!("script/captured/{}", candidate.id))?,
+            None => aikit_store::inbox::Inbox::proposed_id(&candidate)?,
         };
         let edits = PromotionEdits::new(id, candidate.title.clone());
-        let registry_root = self.home.registry("personal");
+        let registry_root = inbox.registry_root(&candidate)?;
         inbox.promote(&r.candidate, &edits, &registry_root)
     }
 }
@@ -4040,7 +4043,7 @@ impl PaletteBackend for Service {
         candidates
             .into_iter()
             .filter_map(|candidate| {
-                let id = CapsuleId::parse(&format!("script/captured/{}", candidate.id)).ok()?;
+                let id = Inbox::proposed_id(&candidate).ok()?;
                 let edits = aikit_store::inbox::PromotionEdits::new(id, candidate.title.clone());
                 Some(PromotionDraft::new(candidate, edits))
             })

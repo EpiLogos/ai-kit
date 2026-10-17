@@ -4801,6 +4801,25 @@ pub struct CaptureArgs {
     /// The body; if omitted, read from stdin.
     #[arg(long, value_name = "TEXT")]
     pub body: Option<String>,
+    /// What this is (script, alias, skill, hook, guidance, template, session,
+    /// tool, tool-protocol). Beats the classifier, which otherwise guesses and
+    /// says how sure it is.
+    #[arg(long, value_name = "KIND")]
+    pub kind: Option<String>,
+    /// A command name this exports (repeatable). Only a script or an alias
+    /// exports commands.
+    #[arg(long = "export", value_name = "NAME")]
+    pub exports: Vec<String>,
+    /// Where it applies: home (the default), project or session.
+    #[arg(long, value_name = "SCOPE")]
+    pub scope: Option<String>,
+    /// Where the example came from: a terminal pane, an agent run, a Factory
+    /// frame. A reference, not the transcript.
+    #[arg(long = "source-ref", value_name = "REF")]
+    pub source_ref: Option<String>,
+    /// Who observed it: `human`, or an agent ref such as `claude-code:name`.
+    #[arg(long, value_name = "WHO")]
+    pub by: Option<String>,
 }
 
 #[derive(Debug, Args)]
