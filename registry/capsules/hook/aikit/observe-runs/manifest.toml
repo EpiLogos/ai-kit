@@ -1,0 +1,14 @@
+schema = 1
+id = "hook/aikit/observe-runs"
+kind = "hook"
+name = "Observe repeated commands"
+description = "Opt-in feed for the recurrence observer: after each shell command an agent runs, the PostToolUse event reports it (command, directory, session) to `aikit observe run --from-hook`, and AIKit counts the repeats. The third identical command by the same actor inside a week is offered on the inbox as a candidate script - saved only if you accept it. Commands holding a secret are never kept. It runs in the observe phase, so it can never deny a tool call, and it fails open. Composes only when enabled and trusted."
+tags = ["aikit", "capture", "recurrence", "posttooluse", "observer"]
+
+[hook]
+entry = "payload/observe-runs"
+events = ["PostToolUse"]
+matcher = "^(Bash|bash|shell|local_shell|run_shell_command)$"
+phase = "observe"
+timeout = "5s"
+failure = "open"

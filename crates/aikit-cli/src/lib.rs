@@ -70,6 +70,7 @@ pub mod model_defaults;
 pub mod model_roster;
 pub mod multicall;
 pub mod mux_install;
+pub mod observe;
 pub mod orientation_packet;
 pub mod permission_defaults;
 pub mod practice_capsule;
