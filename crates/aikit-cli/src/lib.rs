@@ -91,6 +91,7 @@ pub mod routine_cli;
 pub mod routine_dispatch;
 pub mod routine_native;
 pub mod run;
+pub mod saved_operations;
 pub mod scoped_invocation;
 pub mod secret_location;
 pub mod session_lifecycle_ops;

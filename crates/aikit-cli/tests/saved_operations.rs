@@ -235,6 +235,11 @@ fn a_captured_script_travels_from_capture_to_a_counted_run() {
 
     // -- found: by search, by z, and as a capability an act can describe -----
     assert_eq!(search_ids(&world, "kind:script deploy"), [id]);
+    let found = &world.json(&["search", "kind:script deploy"])["data"]["rows"][0];
+    assert_eq!(
+        found["source"], "personal",
+        "inactive, and still from somewhere"
+    );
     let z = world.json(&["z", "deploy"]);
     assert_eq!(z["data"]["decision"], "act");
     assert_eq!(z["data"]["capability"], id);
@@ -1173,4 +1178,181 @@ fn using_an_alias_without_the_word_it_wants_says_so() {
     let missing = world.refused(&["search", "@gs"]);
 
     assert!(missing.contains("takes 1 word"), "{missing}");
+}
+
+// ---------------------------------------------------------------------------
+// One reading of what is saved
+// ---------------------------------------------------------------------------
+
+#[test]
+fn saved_reads_what_is_saved_from_where_by_whom_at_which_revision_and_how_often_used() {
+    let world = World::new();
+
+    // A script an agent captured with its source, promoted and used twice.
+    let c = world.json(&[
+        "capture",
+        "deploy staging",
+        "--body",
+        "echo deploying \"$@\"",
+        "--kind",
+        "script",
+        "--export",
+        "deploy",
+        "--by",
+        "claude-code:saved-ops",
+        "--source-ref",
+        "terminal:pane-1",
+    ]);
+    world.json(&["promote", c["data"]["candidate"].as_str().unwrap()]);
+    world.aikit_raw(&["run", "script/personal/deploy", "--confirm", "a"]);
+    world.aikit_raw(&["run", "script/personal/deploy", "--confirm", "b"]);
+    // A shell alias a person captured, never used.
+    let c = world.json(&[
+        "capture",
+        "say",
+        "--body",
+        "printf hi",
+        "--kind",
+        "alias",
+        "--export",
+        "say",
+        "--by",
+        "human",
+    ]);
+    world.json(&["promote", c["data"]["candidate"].as_str().unwrap()]);
+    // A search alias, a project script, and a capture still waiting.
+    world.json(&["alias", "define", "@gs = @# ( @ ? )", "--by", "human"]);
+    let c = world.json(&[
+        "capture",
+        "lint",
+        "--body",
+        "echo linting && true",
+        "--kind",
+        "script",
+        "--export",
+        "lint",
+        "--scope",
+        "project",
+    ]);
+    world.json(&["promote", c["data"]["candidate"].as_str().unwrap()]);
+    world.json(&[
+        "capture",
+        "later",
+        "--body",
+        "make -j8 check && make doc",
+        "--kind",
+        "script",
+        "--export",
+        "later",
+        "--by",
+        "claude-code:other",
+    ]);
+    let events_before = world.json(&["stats"])["data"]["events"].clone();
+
+    let saved = world.json(&["saved"]);
+    let data = &saved["data"];
+
+    // -- the saved operations, most used first ------------------------------
+    let rows = data["saved"].as_array().unwrap();
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[0]["id"], "script/personal/deploy", "most used leads");
+    let deploy = &rows[0];
+    assert_eq!(deploy["kind"], "script");
+    assert_eq!(deploy["command"], "deploy");
+    assert_eq!(deploy["exports"][0], "deploy");
+    assert_eq!(deploy["registry"], "personal");
+    assert_eq!(deploy["scope"], "home");
+    assert_eq!(deploy["by"], "claude-code:saved-ops");
+    assert_eq!(deploy["source_ref"], "terminal:pane-1");
+    assert_eq!(deploy["origin"], "harvested");
+    assert!(deploy["candidate"].as_str().unwrap().starts_with("cnd_"));
+    assert!(deploy["saved_at"].as_str().is_some());
+    assert!(deploy["revision"].as_str().unwrap().len() >= 32);
+    assert_eq!(deploy["use"]["successful_runs"], 2);
+    assert!(deploy["use"]["last_success_seconds_ago"].as_u64().is_some());
+    assert_eq!(deploy["trust"], "unseen");
+    assert_eq!(deploy["reviewed"], false);
+    assert!(deploy["manifest"]
+        .as_str()
+        .unwrap()
+        .ends_with("manifest.toml"));
+
+    let by_id = |id: &str| rows.iter().find(|r| r["id"] == id).unwrap();
+    let say = by_id("alias/personal/say");
+    assert_eq!(
+        (say["syntax"].as_str(), say["command"].as_str()),
+        (Some("shell"), Some("say"))
+    );
+    assert_eq!(say["use"]["successful_runs"], 0);
+    assert!(say["use"]["last_success_seconds_ago"].is_null());
+    let gs = by_id("alias/personal/gs");
+    assert_eq!(
+        (
+            gs["syntax"].as_str(),
+            gs["command"].as_str(),
+            gs["origin"].as_str()
+        ),
+        (Some("operative"), Some("@gs"), Some("authored"))
+    );
+    assert!(
+        gs["exports"].as_array().unwrap().is_empty(),
+        "a search alias is no command"
+    );
+    let lint = by_id("script/project/lint");
+    assert_eq!(
+        (lint["scope"].as_str(), lint["registry"].as_str()),
+        (Some("project"), Some("project-local"))
+    );
+
+    // -- what is waiting ----------------------------------------------------
+    let waiting = data["waiting"].as_array().unwrap();
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0]["proposed_id"], "script/personal/later");
+    assert_eq!(waiting[0]["by"], "claude-code:other");
+    assert!(waiting[0]["accept"]
+        .as_str()
+        .unwrap()
+        .starts_with("aikit inbox accept cnd_"));
+
+    // -- the summary --------------------------------------------------------
+    let summary = &data["summary"];
+    assert_eq!(summary["saved"], 4);
+    assert_eq!(summary["scripts"], 2);
+    assert_eq!(summary["aliases"]["shell"], 1);
+    assert_eq!(summary["aliases"]["operative"], 1);
+    assert_eq!(summary["ever_used"], 1);
+    assert_eq!(summary["never_used"], 3);
+    assert_eq!(summary["waiting"], 1);
+
+    // -- filters, and it changes nothing ------------------------------------
+    assert_eq!(
+        world.json(&["saved", "--kind", "alias"])["data"]["saved"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        world.json(&["saved", "--limit", "1"])["data"]["saved"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        world.json(&["stats"])["data"]["events"],
+        events_before,
+        "a reading records nothing"
+    );
+
+    // Reviewing is reflected, because it is read, not remembered.
+    world.json(&["trust", "record", "script/personal/deploy"]);
+    let again = world.json(&["saved", "--kind", "script"]);
+    let deploy = again["data"]["saved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "script/personal/deploy")
+        .unwrap();
+    assert_eq!(deploy["reviewed"], true);
 }
