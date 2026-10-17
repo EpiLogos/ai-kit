@@ -12,9 +12,14 @@
 //!   session; nothing in it names the agent, so the actor comes from the
 //!   environment (`OI_POSITION_REF`, then `AIKIT_ACTOR`) or `--by`.
 //!
-//! The hook shapes handled are the harnesses' documented ones: Claude Code's
-//! `tool_input.command` string, and the argv array form some harnesses send
-//! (`["bash", "-lc", "<script>"]`), where the script is the command.
+//! The hook shapes handled are the harnesses' documented ones. Claude Code and
+//! Codex both send JSON on stdin with `tool_name: "Bash"` and a string
+//! `tool_input.command`, plus `cwd` and `session_id` (Codex adds `turn_id`,
+//! `permission_mode` and `model`; its `tool_response` is the tool's model-facing
+//! output, with no exit code, so a Codex run is never marked failed). Codex's
+//! `apply_patch` and MCP tools (`mcp__*`) are not shell commands and are ignored.
+//! The argv array form some harnesses send (`["bash", "-lc", "<script>"]`) is
+//! handled defensively: the script is the command.
 
 use std::time::Duration;
 

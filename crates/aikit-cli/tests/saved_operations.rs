@@ -934,6 +934,66 @@ fn an_agent_harnesss_post_tool_use_event_feeds_the_observer_and_never_fails_the_
 }
 
 #[test]
+fn a_codex_post_tool_use_event_is_read_the_way_its_documentation_sends_it() {
+    // Codex's documented PostToolUse: JSON on stdin; tool_name Bash with a string
+    // tool_input.command; cwd, session_id, turn_id, permission_mode and model;
+    // tool_response is the tool's model-facing output (here a plain string).
+    let world = World::new();
+    let bash = |command: &str| {
+        serde_json::json!({
+            "session_id": "thr_123", "turn_id": "turn_7", "transcript_path": "/w/.codex/rollout.jsonl",
+            "cwd": "/work/app", "hook_event_name": "PostToolUse", "model": "gpt-5",
+            "permission_mode": "default", "tool_name": "Bash", "tool_use_id": "call_1",
+            "tool_input": { "command": command },
+            "tool_response": "Compiling app v0.1.0\nFinished dev [unoptimized] target(s)"
+        })
+        .to_string()
+    };
+    let feed = |payload: &str| {
+        let out = world.with_stdin(
+            &["observe", "run", "--from-hook", "--json"],
+            payload,
+            &[("AIKIT_ACTOR", "codex:thr_123")],
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+
+    let first = feed(&bash("cargo build --workspace --locked"));
+    assert_eq!(first["data"]["runs"][0]["by"], "codex:thr_123");
+    assert_eq!(
+        first["data"]["runs"][0]["recorded"], true,
+        "no exit code means not marked failed"
+    );
+    feed(&bash("cargo build --workspace --locked"));
+
+    // apply_patch and MCP tools are not shell commands.
+    let patch = serde_json::json!({
+        "tool_name": "apply_patch", "tool_input": { "command": "*** Begin Patch" }, "cwd": "/w"
+    })
+    .to_string();
+    assert_eq!(feed(&patch)["data"]["ignored"], "not a shell command");
+    let mcp = serde_json::json!({
+        "tool_name": "mcp__fs__read", "tool_input": { "path": "/x" }, "cwd": "/w"
+    })
+    .to_string();
+    assert_eq!(feed(&mcp)["data"]["ignored"], "not a shell command");
+
+    let third = feed(&bash("cargo build --workspace --locked"));
+    assert_eq!(third["data"]["runs"][0]["count"], 3);
+    assert_eq!(third["data"]["offered"].as_array().unwrap().len(), 1);
+    let body = inbox_items(&world, false)[0]["body"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(body.contains("Observed by codex:thr_123"), "{body}");
+}
+
+#[test]
 fn the_shipped_hook_capsule_carries_the_real_post_tool_use_stream_to_the_observer() {
     let world = World::new();
     let shipped = Path::new(env!("CARGO_MANIFEST_DIR"))
