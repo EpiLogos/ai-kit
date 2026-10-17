@@ -388,6 +388,50 @@ impl<'a> InboxChannel<'a> {
         Ok(())
     }
 
+    /// Resolve every item still wanting attention that carries `key`, recording
+    /// the decision. Returns how many were resolved.
+    ///
+    /// This is how an item and the thing it is about stay one thing: a capture's
+    /// message is resolved by whoever promotes or rejects the capture, whether
+    /// they came through the message or straight to the candidate.
+    pub fn resolve_by_dedup_key(&self, key: &str, decision: &str) -> Result<usize> {
+        let changed = self
+            .index
+            .conn()
+            .execute(
+                "UPDATE inbox_items SET state_label = 'resolved', state_detail = ?1 \
+                 WHERE dedup_key = ?2 AND state_label != 'resolved'",
+                params![decision, key],
+            )
+            .map_err(|e| sql_error("inbox.write_failed", &e))?;
+        Ok(changed)
+    }
+
+    /// The item still wanting attention that carries `key`, if there is one.
+    pub fn pending_by_dedup_key(&self, key: &str) -> Result<Option<InboxItem>> {
+        self.pending_with_dedup(key)
+    }
+
+    /// Point an item at a different planned Procedure — used when the thing it
+    /// proposes was re-planned because its subject changed.
+    pub fn set_proposal(&self, id: &InboxId, procedure: &ProcedureId) -> Result<()> {
+        let changed = self
+            .index
+            .conn()
+            .execute(
+                "UPDATE inbox_items SET proposal = ?1 WHERE inbox_id = ?2",
+                params![procedure.as_str(), id.as_str()],
+            )
+            .map_err(|e| sql_error("inbox.write_failed", &e))?;
+        if changed == 0 {
+            return Err(
+                AikitError::new("inbox.unknown_item", format!("no inbox item {id}"))
+                    .with("inbox_id", id.to_string()),
+            );
+        }
+        Ok(())
+    }
+
     /// The pending item with a given dedup key, if any (used for idempotency).
     fn pending_with_dedup(&self, key: &str) -> Result<Option<InboxItem>> {
         let items = self.query(

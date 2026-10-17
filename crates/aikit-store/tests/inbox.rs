@@ -15,6 +15,7 @@ use std::fs;
 
 use aikit_core::catalog::Catalog;
 use aikit_core::{Kind, Maturity, RegistrySource};
+use aikit_store::channel::{Evidence, InboxChannel, InboxKind, InboxState};
 use aikit_store::inbox::{
     classify_with_confidence, CandidateState, Capture, CaptureScope, Confidence, Inbox,
     PromotionEdits, SimilarityBasis,
@@ -964,4 +965,352 @@ fn a_candidate_filed_before_intent_was_recorded_still_reads() {
     assert_eq!(reread.scope, CaptureScope::Home);
     assert!(reread.exports.is_empty());
     assert_eq!(reread.confidence, Confidence::Medium);
+}
+
+// ---------------------------------------------------------------------------
+// One inbox (saved operations, A2)
+// ---------------------------------------------------------------------------
+
+fn deploy_capture() -> Capture {
+    Capture::new("deploy staging", "cargo build --release && ./ship.sh")
+        .of_kind(Kind::Script)
+        .exporting(["deploy"])
+        .by("claude-code:integrator")
+}
+
+fn pending(index: &Index) -> Vec<aikit_store::channel::InboxItem> {
+    InboxChannel::new(index)
+        .pending(aikit_store::Timestamp::now())
+        .unwrap()
+}
+
+#[test]
+fn a_capture_is_announced_on_the_channel_with_the_candidate_as_evidence_and_the_promotion_as_its_plan(
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+
+    let outcome = inbox.capture(deploy_capture()).unwrap();
+    let announcement = outcome
+        .announcement
+        .clone()
+        .expect("a capture is announced");
+
+    let items = pending(&index);
+    assert_eq!(items.len(), 1, "one inbox: the capture is on the channel");
+    let item = &items[0];
+    assert_eq!(item.id, announcement.item);
+    assert_eq!(item.kind, InboxKind::CaptureCandidate);
+    assert!(item.title.contains("deploy staging"), "{}", item.title);
+    assert!(
+        item.body.contains("script/personal/deploy"),
+        "{}",
+        item.body
+    );
+    assert!(
+        item.body.contains("claude-code:integrator"),
+        "{}",
+        item.body
+    );
+    assert!(
+        item.evidence.iter().any(|e| matches!(e,
+            Evidence::Hash { label, value } if label == "candidate" && *value == outcome.candidate.id)),
+        "the evidence is the candidate: {:?}",
+        item.evidence
+    );
+
+    // The planned Procedure is the promotion: persisted, not applied.
+    let procedure_id = item
+        .proposal
+        .clone()
+        .expect("a ready capture proposes its promotion");
+    let procedure = aikit_store::procedure::ProcedureRunner::new(&home)
+        .load(&procedure_id)
+        .unwrap();
+    assert!(matches!(
+        procedure.kind,
+        aikit_core::procedure::ProcedureKind::Promote { ref candidate } if *candidate == outcome.candidate.id
+    ));
+    assert!(
+        !home
+            .registry("personal")
+            .join("capsules/script/personal/deploy")
+            .exists(),
+        "planning writes nothing"
+    );
+}
+
+#[test]
+fn announcing_is_idempotent_so_the_same_text_never_nags() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+
+    let first = inbox.capture(deploy_capture()).unwrap();
+    let again = inbox.capture(deploy_capture()).unwrap();
+
+    assert_eq!(
+        again.duplicate_of.as_deref(),
+        Some(first.candidate.id.as_str())
+    );
+    assert_eq!(pending(&index).len(), 1);
+    assert_eq!(
+        again.announcement.unwrap().item,
+        first.announcement.unwrap().item,
+        "the second capture points at the message that is already there"
+    );
+}
+
+#[test]
+fn accepting_runs_the_planned_procedure_and_resolves_the_example_and_its_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    let filed = inbox.capture(deploy_capture()).unwrap();
+
+    let accepted = inbox.accept(&filed.candidate.id).unwrap();
+
+    assert_eq!(accepted.id.to_string(), "script/personal/deploy");
+    assert!(accepted.applied > 0);
+    assert_eq!(
+        accepted.item,
+        filed.announcement.as_ref().map(|a| a.item.clone())
+    );
+    assert_eq!(
+        Some(&accepted.procedure),
+        filed.announcement.as_ref().unwrap().proposal.as_ref(),
+        "it ran the plan the message proposed, not another"
+    );
+
+    let registry = home.registry("personal");
+    let load = load_registry(&registry, RegistrySource::personal()).unwrap();
+    assert!(load.problems.is_empty(), "{:?}", load.problems);
+    let capsule = load.catalog.get(&accepted.id).unwrap();
+    assert_eq!(capsule.exported_commands(), vec!["deploy".to_string()]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let entry = capsule
+            .root
+            .as_ref()
+            .unwrap()
+            .join(&capsule.script().unwrap().entry);
+        assert_ne!(fs::metadata(entry).unwrap().permissions().mode() & 0o111, 0);
+    }
+
+    // Both stores agree it is decided.
+    assert_eq!(
+        inbox.candidate(&filed.candidate.id).unwrap().unwrap().state,
+        CandidateState::Promoted
+    );
+    assert!(pending(&index).is_empty());
+    let all = InboxChannel::new(&index).items().unwrap();
+    assert!(
+        matches!(&all[0].state, InboxState::Resolved { decision } if decision.contains("script/personal/deploy"))
+    );
+
+    // And it is reversible: the Procedure that wrote it undoes it.
+    aikit_store::procedure::ProcedureRunner::new(&home)
+        .undo(&accepted.procedure)
+        .unwrap();
+    assert!(!registry.join("capsules/script/personal/deploy").exists());
+
+    let again = inbox.accept(&filed.candidate.id).unwrap_err();
+    assert_eq!(again.code(), "inbox.already_promoted");
+}
+
+#[test]
+fn rejecting_resolves_the_example_and_its_message_and_a_fresh_capture_is_a_fresh_candidate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    let filed = inbox.capture(deploy_capture()).unwrap();
+
+    inbox
+        .reject(&filed.candidate.id, "not worth keeping")
+        .unwrap();
+
+    assert!(pending(&index).is_empty());
+    let all = InboxChannel::new(&index).items().unwrap();
+    assert!(
+        matches!(&all[0].state, InboxState::Resolved { decision } if decision == "rejected: not worth keeping")
+    );
+
+    let again = inbox.capture(deploy_capture()).unwrap();
+    assert!(
+        again.duplicate_of.is_none(),
+        "a rejected capture is not a duplicate"
+    );
+    assert_eq!(pending(&index).len(), 1, "and it is announced afresh");
+}
+
+#[test]
+fn promoting_directly_also_resolves_the_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    let filed = inbox.capture(deploy_capture()).unwrap();
+
+    inbox
+        .promote(
+            &filed.candidate.id,
+            &PromotionEdits::new(cid("script/personal/ship"), "Ship it."),
+            &home.registry("personal"),
+        )
+        .unwrap();
+
+    assert!(
+        pending(&index).is_empty(),
+        "either road leaves the inbox in one state"
+    );
+}
+
+#[test]
+fn a_held_back_capture_is_announced_without_a_plan_and_released_into_a_proposal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    let held = inbox.capture(capture("publish", SECRET_SCRIPT)).unwrap();
+    let id = held.candidate.id.clone();
+
+    let items = pending(&index);
+    assert_eq!(items.len(), 1);
+    assert!(
+        items[0].title.starts_with("Held back"),
+        "{}",
+        items[0].title
+    );
+    assert!(
+        items[0].proposal.is_none(),
+        "a held-back capture proposes nothing"
+    );
+    assert_eq!(inbox.accept(&id).unwrap_err().code(), "inbox.quarantined");
+
+    // Remove the secret from the stored body, as a person editing it would.
+    let body = held.candidate.path.join("body");
+    fs::write(&body, "#!/bin/sh\ncargo publish\n").unwrap();
+    inbox.release_from_quarantine(&id).unwrap();
+
+    let now = pending(&index);
+    assert_eq!(
+        now.len(),
+        1,
+        "the stale message was closed, a fresh one opened"
+    );
+    assert!(now[0].title.starts_with("Save"), "{}", now[0].title);
+    assert!(now[0].proposal.is_some());
+}
+
+#[test]
+fn a_capture_that_cannot_be_saved_as_it_stands_says_why_and_stays_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    // Something already lives at the id this capture would take.
+    let first = inbox.capture(deploy_capture()).unwrap();
+    inbox.accept(&first.candidate.id).unwrap();
+
+    let second = inbox
+        .capture(
+            Capture::new("deploy production", "./ship.sh --prod && true")
+                .of_kind(Kind::Script)
+                .exporting(["deploy"]),
+        )
+        .unwrap();
+
+    let items = pending(&index);
+    assert_eq!(items.len(), 1);
+    assert!(items[0].proposal.is_none());
+    assert!(
+        items[0].body.contains("Not ready to save as it stands"),
+        "{}",
+        items[0].body
+    );
+    assert!(
+        items[0].body.contains("already exists"),
+        "{}",
+        items[0].body
+    );
+    assert_eq!(
+        inbox.accept(&second.candidate.id).unwrap_err().code(),
+        "inbox.id_taken"
+    );
+    assert_eq!(
+        pending(&index).len(),
+        1,
+        "a refused accept leaves the message open"
+    );
+}
+
+#[test]
+fn a_plan_made_before_the_capture_changed_is_replaced_not_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    let first = inbox
+        .capture(Capture::new("status", "git status -sb && true").of_kind(Kind::Script))
+        .unwrap();
+    let stale = first.announcement.unwrap().proposal.unwrap();
+
+    // The capturer comes back and says what it is: an alias called gs.
+    inbox
+        .capture(
+            Capture::new("status", "git status -sb && true")
+                .of_kind(Kind::Alias)
+                .exporting(["gs"]),
+        )
+        .unwrap();
+    let accepted = inbox.accept(&first.candidate.id).unwrap();
+
+    assert_eq!(
+        accepted.id.to_string(),
+        "alias/personal/gs",
+        "the declared kind won"
+    );
+    assert_ne!(
+        accepted.procedure, stale,
+        "the stale plan was not the one that ran"
+    );
+    let items = InboxChannel::new(&index).items().unwrap();
+    assert_eq!(
+        items.len(),
+        1,
+        "still one message, now pointing at the plan that ran"
+    );
+    assert_eq!(items[0].proposal.as_ref(), Some(&accepted.procedure));
+}
+
+#[test]
+fn accepting_a_project_scoped_capture_stages_the_write_instead_of_branching_the_projects_repository(
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    let project = tmp.path().join("project");
+    fs::create_dir_all(project.join(".git")).unwrap();
+
+    let mut c = Capture::new("lint", "cargo clippy --workspace -- -D warnings")
+        .of_kind(Kind::Script)
+        .exporting(["lint"])
+        .in_scope(CaptureScope::Project);
+    c.project_root = Some(project.clone());
+    let filed = inbox.capture(c).unwrap();
+
+    let accepted = inbox.accept(&filed.candidate.id).unwrap();
+
+    assert!(project
+        .join(".aikit/capsules/script/project/lint/manifest.toml")
+        .is_file());
+    let procedure = aikit_store::procedure::ProcedureRunner::new(&home)
+        .load(&accepted.procedure)
+        .unwrap();
+    assert!(
+        matches!(
+            procedure.isolation,
+            aikit_core::procedure::MutationIsolation::Staged { .. }
+        ),
+        "{:?}",
+        procedure.isolation
+    );
 }

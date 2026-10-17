@@ -545,3 +545,183 @@ fn a_project_scoped_capture_is_saved_in_the_project_not_in_the_personal_registry
         ["script/project/lint"]
     );
 }
+
+// ---------------------------------------------------------------------------
+// One inbox
+// ---------------------------------------------------------------------------
+
+fn inbox_items(world: &World, all: bool) -> Vec<Value> {
+    let mut args = vec!["inbox"];
+    if all {
+        args.push("--all");
+    }
+    world.json(&args)["data"]["items"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn a_captured_example_shows_in_the_inbox_and_accepting_it_saves_it_and_resolves_the_message() {
+    let world = World::new();
+    assert!(inbox_items(&world, false).is_empty());
+
+    let captured = world.json(&[
+        "capture",
+        "deploy staging",
+        "--body",
+        "echo deploying \"$@\"",
+        "--kind",
+        "script",
+        "--export",
+        "deploy",
+        "--by",
+        "claude-code:integrator",
+    ]);
+    let candidate = captured["data"]["candidate"].as_str().unwrap().to_string();
+    let item_id = captured["data"]["inbox_item"].as_str().unwrap().to_string();
+    let proposal = captured["data"]["proposal"].as_str().unwrap().to_string();
+
+    // -- the example is on the inbox, as an agent reading the broker sees it --
+    let items = inbox_items(&world, false);
+    assert_eq!(items.len(), 1);
+    let item = &items[0];
+    assert_eq!(item["id"], item_id.as_str());
+    assert_eq!(item["kind"], "capture-candidate");
+    assert_eq!(item["proposal"], proposal.as_str());
+    assert!(item["title"].as_str().unwrap().contains("deploy staging"));
+    assert!(item["body"]
+        .as_str()
+        .unwrap()
+        .contains("script/personal/deploy"));
+    let evidence = item["evidence"].as_array().unwrap();
+    assert!(
+        evidence
+            .iter()
+            .any(|e| e["label"] == "candidate" && e["value"] == candidate.as_str()),
+        "the evidence is the candidate: {evidence:?}"
+    );
+    assert!(
+        !world.capsule_dir("script/personal/deploy").exists(),
+        "announcing writes nothing"
+    );
+
+    // -- accept: runs the planned Procedure, resolves both sides --------------
+    let accepted = world.json(&["inbox", "accept", &item_id]);
+    let data = &accepted["data"];
+    assert_eq!(data["id"], "script/personal/deploy");
+    assert_eq!(
+        data["procedure"],
+        proposal.as_str(),
+        "it ran the plan it showed"
+    );
+    assert!(data["applied"].as_u64().unwrap() > 0);
+    assert!(world
+        .capsule_dir("script/personal/deploy")
+        .join("manifest.toml")
+        .is_file());
+
+    assert!(
+        inbox_items(&world, false).is_empty(),
+        "nothing left to decide"
+    );
+    let resolved = &inbox_items(&world, true)[0];
+    assert_eq!(resolved["state"]["state"], "resolved");
+    assert!(resolved["state"]["decision"]
+        .as_str()
+        .unwrap()
+        .contains("script/personal/deploy"));
+    // The example is decided too: promoting it again says so.
+    let again = world.refused(&["inbox", "accept", &candidate]);
+    assert!(again.contains("already saved"), "{again}");
+
+    // -- and it can be taken back by the Procedure that wrote it ---------------
+    let undo = data["undo"].as_str().unwrap().to_string();
+    let procedure = undo.rsplit(' ').next().unwrap();
+    let undone = world.aikit_raw(&["procedure", "undo", procedure]);
+    assert!(
+        undone.status.success(),
+        "{}",
+        String::from_utf8_lossy(&undone.stderr)
+    );
+    assert!(!world.capsule_dir("script/personal/deploy").exists());
+}
+
+#[test]
+fn rejecting_from_the_inbox_resolves_the_message_and_the_example() {
+    let world = World::new();
+    let captured = world.json(&["capture", "ci", "--body", "#!/bin/sh\ncargo test\n"]);
+    let candidate = captured["data"]["candidate"].as_str().unwrap().to_string();
+
+    let rejected = world.json(&["inbox", "reject", &candidate, "--reason", "one-off"]);
+
+    assert_eq!(rejected["data"]["state"], "rejected");
+    assert!(inbox_items(&world, false).is_empty());
+    assert_eq!(
+        inbox_items(&world, true)[0]["state"]["decision"],
+        "rejected: one-off"
+    );
+    let promoted = world.refused(&["promote", &candidate]);
+    assert!(promoted.contains("turned down"), "{promoted}");
+    assert!(
+        !world.capsule_dir("script/personal/ci").exists(),
+        "a rejected example is never written"
+    );
+}
+
+#[test]
+fn promoting_straight_from_the_candidate_resolves_the_message_too() {
+    let world = World::new();
+    let captured = world.json(&[
+        "capture",
+        "say",
+        "--body",
+        "printf hi && true",
+        "--kind",
+        "script",
+        "--export",
+        "hi",
+    ]);
+    let candidate = captured["data"]["candidate"].as_str().unwrap().to_string();
+    assert_eq!(inbox_items(&world, false).len(), 1);
+
+    world.json(&["promote", &candidate]);
+
+    assert!(inbox_items(&world, false).is_empty());
+}
+
+#[test]
+fn a_capture_holding_a_secret_is_on_the_inbox_as_held_back_and_cannot_be_accepted() {
+    let world = World::new();
+    let captured = world.json(&[
+        "capture",
+        "publish",
+        "--body",
+        "#!/bin/sh\nexport GITHUB_TOKEN=ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8\ncargo publish\n",
+    ]);
+    assert_eq!(captured["data"]["quarantined"], true);
+    assert!(captured["data"]["proposal"].is_null());
+    let candidate = captured["data"]["candidate"].as_str().unwrap().to_string();
+
+    let items = inbox_items(&world, false);
+    assert_eq!(items.len(), 1);
+    assert!(items[0]["title"].as_str().unwrap().starts_with("Held back"));
+    assert!(items[0]["proposal"].is_null());
+    let text = serde_json::to_string(&items[0]).unwrap();
+    assert!(
+        !text.contains("ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"),
+        "the secret never reaches the inbox: {text}"
+    );
+
+    let refused = world.refused(&["inbox", "accept", &candidate]);
+    assert!(refused.contains("quarantined"), "{refused}");
+}
+
+#[test]
+fn only_a_captured_example_can_be_accepted_or_rejected_from_the_inbox() {
+    let world = World::new();
+
+    let unknown = world.refused(&["inbox", "accept", "inb_does_not_exist"]);
+
+    assert!(unknown.contains("no inbox item"), "{unknown}");
+}

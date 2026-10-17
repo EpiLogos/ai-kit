@@ -666,7 +666,7 @@ impl Command {
             Self::Session(c) => session_route(c),
             Self::SessionSpace { .. } => "session-space-forward",
             Self::Task(c) => task_route(c),
-            Self::Inbox(_) => "cmd_inbox",
+            Self::Inbox(a) => inbox_route(a),
             Self::Capture(_) => "cmd_capture",
             Self::Promote(_) => "cmd_promote",
             Self::Prune(_) => "cmd_prune",
@@ -811,7 +811,7 @@ fn praxis_route(command: &PraxisSub) -> &'static str {
         PraxisSub::Set(c) => set_route(&c.command),
         PraxisSub::Family(_) => "cmd_family",
         PraxisSub::Run(_) => "cmd_run",
-        PraxisSub::Inbox(_) => "cmd_inbox",
+        PraxisSub::Inbox(a) => inbox_route(a),
         PraxisSub::Capture(_) => "cmd_capture",
         PraxisSub::Promote(_) => "cmd_promote",
         PraxisSub::Capabilities(c) => capabilities_route(&c.command),
@@ -987,6 +987,14 @@ fn harness_route(command: &HarnessCmd) -> &'static str {
         HarnessSub::Disclose { .. } => "cmd_harness_disclose",
         HarnessSub::Run(_) => "cmd_harness_run",
         HarnessSub::Auth(_) => "cmd_harness_auth",
+    }
+}
+
+fn inbox_route(args: &InboxArgs) -> &'static str {
+    match &args.command {
+        None => "cmd_inbox",
+        Some(InboxSub::Accept(_)) => "cmd_inbox_accept",
+        Some(InboxSub::Reject(_)) => "cmd_inbox_reject",
     }
 }
 
@@ -4574,9 +4582,39 @@ pub struct RollbackArgs {}
 
 #[derive(Debug, Args)]
 pub struct InboxArgs {
-    /// Include quarantined and rejected candidates.
+    /// Include items already resolved, kept for audit.
     #[arg(long)]
     pub all: bool,
+    #[command(subcommand)]
+    pub command: Option<InboxSub>,
+}
+
+/// What can be decided about an item on the inbox.
+#[derive(Debug, Subcommand)]
+pub enum InboxSub {
+    /// Save a captured example: run the promotion its message proposes, mark the
+    /// example saved and resolve the message.
+    Accept(InboxAcceptArgs),
+    /// Turn a captured example down: move it out of the queue and resolve the
+    /// message.
+    Reject(InboxRejectArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct InboxAcceptArgs {
+    /// The inbox item id, or the candidate id it is about.
+    #[arg(value_name = "ITEM")]
+    pub target: String,
+}
+
+#[derive(Debug, Args)]
+pub struct InboxRejectArgs {
+    /// The inbox item id, or the candidate id it is about.
+    #[arg(value_name = "ITEM")]
+    pub target: String,
+    /// Why, kept with the rejected example.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Args)]

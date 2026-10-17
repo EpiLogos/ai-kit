@@ -6631,27 +6631,108 @@ fn mux_session_command(
 /// `aikit inbox` — list the messages the system and agents have addressed to the
 /// user (Spec II §2). Pending by default; `--all` includes resolved items kept for
 /// audit. Speaks the JSON envelope so the broker and agents can read it.
+///
+/// A captured example is one of those messages (`capture-candidate`), so there is
+/// one inbox, not a channel and a separate candidate queue. `inbox accept` and
+/// `inbox reject` decide it: each resolves the message *and* the example.
 fn cmd_inbox(cwd: &std::path::Path, a: InboxArgs) -> Result<Reply> {
+    use aikit_store::inbox::Inbox;
     let service = Service::discover(cwd)?;
-    let items = service.inbox_items(a.all)?;
-    let rows: Vec<Value> = items
+    match a.command {
+        None => {
+            let items = service.inbox_items(a.all)?;
+            let rows: Vec<Value> = items
+                .iter()
+                .map(|item| {
+                    jval!({
+                        "id": item.id.to_string(),
+                        "kind": item.kind.as_str(),
+                        "title": item.title,
+                        "body": item.body,
+                        "state": item.state,
+                        "project": item.project.as_ref().map(|p| p.to_string()),
+                        "evidence": item.evidence,
+                        "proposal": item.proposal.as_ref().map(|p| p.to_string()),
+                        "created": item.created.to_string(),
+                    })
+                })
+                .collect();
+            let data = jval!({ "items": rows, "count": items.len() });
+            Ok(reply(&service, data, vec![]))
+        }
+        Some(InboxSub::Accept(args)) => {
+            let candidate = inbox_candidate(&service, &args.target)?;
+            let accepted = Inbox::new(service.home(), service.index()).accept(&candidate)?;
+            let data = jval!({
+                "candidate": accepted.candidate.id,
+                "item": accepted.item.as_ref().map(|item| item.to_string()),
+                "id": accepted.id.to_string(),
+                "kind": accepted.id.kind().as_str(),
+                "exports": accepted.candidate.exports,
+                "procedure": accepted.procedure.to_string(),
+                "applied": accepted.applied,
+                "undo": format!("aikit procedure undo {}", accepted.procedure),
+            });
+            Ok(reply(&service, data, vec![]))
+        }
+        Some(InboxSub::Reject(args)) => {
+            let candidate = inbox_candidate(&service, &args.target)?;
+            let reason = args
+                .reason
+                .unwrap_or_else(|| "turned down from the inbox".to_string());
+            let rejected =
+                Inbox::new(service.home(), service.index()).reject(&candidate, &reason)?;
+            let data = jval!({
+                "candidate": rejected.id,
+                "state": rejected.state.as_str(),
+                "reason": reason,
+            });
+            Ok(reply(&service, data, vec![]))
+        }
+    }
+}
+
+/// The candidate an inbox decision is about: given as the candidate's own id, or
+/// as the id of the channel item that announced it.
+fn inbox_candidate(service: &Service, target: &str) -> Result<String> {
+    use aikit_store::channel::{Evidence, InboxKind};
+    if target.starts_with("cnd_") {
+        return Ok(target.to_string());
+    }
+    let items = service.inbox_items(true)?;
+    let item = items
         .iter()
-        .map(|item| {
-            jval!({
-                "id": item.id.to_string(),
-                "kind": item.kind.as_str(),
-                "title": item.title,
-                "body": item.body,
-                "state": item.state,
-                "project": item.project.as_ref().map(|p| p.to_string()),
-                "evidence": item.evidence,
-                "proposal": item.proposal.as_ref().map(|p| p.to_string()),
-                "created": item.created.to_string(),
-            })
+        .find(|item| item.id.to_string() == target)
+        .ok_or_else(|| {
+            AikitError::new(
+                "inbox.unknown_item",
+                format!("no inbox item or candidate `{target}`"),
+            )
+            .with("target", target.to_string())
+        })?;
+    if item.kind != InboxKind::CaptureCandidate {
+        return Err(AikitError::new(
+            "inbox.not_a_capture",
+            format!(
+                "`{target}` is a {} message; only a captured example can be accepted or rejected",
+                item.kind.as_str()
+            ),
+        )
+        .with("target", target.to_string()));
+    }
+    item.evidence
+        .iter()
+        .find_map(|evidence| match evidence {
+            Evidence::Hash { label, value } if label == "candidate" => Some(value.clone()),
+            _ => None,
         })
-        .collect();
-    let data = jval!({ "items": rows, "count": items.len() });
-    Ok(reply(&service, data, vec![]))
+        .ok_or_else(|| {
+            AikitError::new(
+                "inbox.no_candidate",
+                format!("`{target}` does not say which captured example it is about"),
+            )
+            .with("target", target.to_string())
+        })
 }
 
 fn cmd_promote(cwd: &std::path::Path, a: PromoteArgs) -> Result<Reply> {
@@ -6744,6 +6825,10 @@ fn cmd_capture(cwd: &std::path::Path, a: CaptureArgs) -> Result<Reply> {
         "by": candidate.by,
         "session": candidate.session,
         "proposed_id": Inbox::proposed_id(candidate).ok().map(|id| id.to_string()),
+        // The message the capture put on `aikit inbox`, and the planned
+        // Procedure that accepting it runs (absent when it is held back).
+        "inbox_item": outcome.announcement.as_ref().map(|a| a.item.to_string()),
+        "proposal": outcome.announcement.as_ref().and_then(|a| a.proposal.as_ref()).map(|p| p.to_string()),
     });
     Ok(reply(&service, data, vec![]))
 }
