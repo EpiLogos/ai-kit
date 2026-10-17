@@ -476,3 +476,117 @@ fn actual_selected_capture_failure_keeps_partial_output_and_arguments_out_of_pri
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Aliases: a saved command line, run the way a shell alias reads
+// ---------------------------------------------------------------------------
+
+fn alias_capsule(body: &str, extra: &str) -> Capsule {
+    let manifest = format!(
+        "schema = 1\nid = \"alias/demo/say\"\nkind = \"alias\"\nname = \"say\"\n\
+         description = \"An alias for the test.\"\n\n[alias]\nname = \"say\"\nbody = {body:?}\n{extra}"
+    );
+    Capsule::from_toml_str(&manifest).unwrap()
+}
+
+fn run_captured(capsule: &Capsule, args: &[&str], cwd: &std::path::Path) -> (i32, String) {
+    let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+    let mut plan = run::plan_capsule(capsule, &args, None, cwd).unwrap();
+    plan.mode = ExecMode::Capture;
+    let report = run::execute(&plan).unwrap();
+    (report.status, report.output.join("\n"))
+}
+
+#[test]
+fn a_one_line_alias_is_followed_by_the_callers_words_like_a_shell_alias() {
+    let tmp = TempDir::new().unwrap();
+    let alias = alias_capsule("printf '<%s>' hello", "");
+
+    let (status, out) = run_captured(&alias, &["a b", "c"], tmp.path());
+
+    assert_eq!(status, 0);
+    assert_eq!(
+        out, "<hello><a b><c>",
+        "the words arrive as separate arguments"
+    );
+}
+
+#[test]
+fn a_multi_line_alias_is_a_small_script_with_the_callers_words_as_parameters() {
+    let tmp = TempDir::new().unwrap();
+    let alias = alias_capsule("first=$1\nprintf 'one:%s two:%s' \"$first\" \"$2\"", "");
+
+    let (status, out) = run_captured(&alias, &["x", "y"], tmp.path());
+
+    assert_eq!(status, 0);
+    assert_eq!(out, "one:x two:y");
+}
+
+#[test]
+fn an_alias_runs_where_it_was_typed_not_in_the_project_root() {
+    let invoked_in = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let alias = alias_capsule("pwd -P", "");
+
+    let args: Vec<String> = vec![];
+    let mut plan =
+        run::plan_capsule(&alias, &args, Some(project.path()), invoked_in.path()).unwrap();
+    plan.mode = ExecMode::Capture;
+    let report = run::execute(&plan).unwrap();
+
+    let expected = fs::canonicalize(invoked_in.path()).unwrap();
+    assert_eq!(report.output.join("\n"), expected.display().to_string());
+}
+
+#[test]
+fn an_alias_keeps_its_exit_status() {
+    let tmp = TempDir::new().unwrap();
+    let alias = alias_capsule("exit 3", "");
+
+    let (status, _) = run_captured(&alias, &[], tmp.path());
+
+    assert_eq!(status, 3);
+}
+
+#[test]
+fn an_alias_that_a_shell_cannot_run_is_refused_with_the_reason() {
+    let tmp = TempDir::new().unwrap();
+    let args: Vec<String> = vec![];
+
+    let empty = alias_capsule("   ", "");
+    assert_eq!(
+        run::plan_capsule(&empty, &args, None, tmp.path())
+            .unwrap_err()
+            .code(),
+        "run.alias_empty"
+    );
+
+    let fish = alias_capsule("echo hi", "shells = [\"fish\"]\n");
+    assert_eq!(
+        run::plan_capsule(&fish, &args, None, tmp.path())
+            .unwrap_err()
+            .code(),
+        "run.alias_shell",
+        "an alias written only for fish cannot be run from a shim"
+    );
+
+    let operative = alias_capsule("@a = b", "syntax = \"operative\"\n");
+    assert_eq!(
+        run::plan_capsule(&operative, &args, None, tmp.path())
+            .unwrap_err()
+            .code(),
+        "run.alias_syntax",
+        "an operative alias expands in search, not in a shell"
+    );
+}
+
+#[test]
+fn an_alias_names_the_first_shell_it_declares_that_a_shim_can_run() {
+    let tmp = TempDir::new().unwrap();
+    let args: Vec<String> = vec![];
+    let alias = alias_capsule("echo hi", "shells = [\"fish\", \"bash\"]\n");
+
+    let plan = run::plan_capsule(&alias, &args, None, tmp.path()).unwrap();
+
+    assert_eq!(plan.program, "bash");
+}

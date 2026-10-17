@@ -4529,6 +4529,11 @@ pub struct RunArgs {
     /// Confirm running an executable whose revision has not been reviewed.
     #[arg(long)]
     pub confirm: bool,
+    /// The exported command name this run was made under. The generated shims
+    /// pass it so the run can say which entry point was used; it is consumed
+    /// here and never reaches the capability's own arguments.
+    #[arg(long, value_name = "NAME", hide = true)]
+    pub export: Option<String>,
 }
 
 #[derive(Debug, Args)]

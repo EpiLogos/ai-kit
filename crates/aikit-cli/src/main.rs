@@ -5514,7 +5514,7 @@ fn cmd_run(cwd: &std::path::Path, a: RunArgs) -> Result<Reply> {
     let handle = service.run(RunRequest {
         name: a.name,
         args: a.args,
-        export: None,
+        export: a.export,
         // The confirmation must be explicit (`--confirm`), not implied by the
         // invocation: `aikit run` is also how the broker lets an *agent* run a
         // capability, and how a multicall shim on the PATH dispatches. A reviewed
@@ -6917,20 +6917,34 @@ fn event_json(e: aikit_store::index::EventSummary) -> Value {
 }
 
 /// `aikit stats` — what is catalogued, and what actually gets used.
+///
+/// The roster comes from the loaded catalogue, which is the one place every
+/// registry and project-local capsule is read from. (It used to come from the
+/// index's derived `capsules` table, which no command ever fills, so the
+/// breakdown was always empty and "ever used" could never be anything but zero.)
 fn cmd_stats(cwd: &std::path::Path) -> Result<Reply> {
     let service = Service::discover(cwd)?;
     let index = service.index();
-    let facets = index.facets()?;
     let view = service.resolved();
 
     let mut used = 0usize;
     let mut runs = 0u32;
-    for row in index.capsules()? {
-        let usage = index.usage(&row.id)?;
+    let mut kinds: std::collections::BTreeMap<aikit_core::Kind, u32> =
+        std::collections::BTreeMap::new();
+    let mut sources: std::collections::BTreeMap<String, u32> =
+        std::collections::BTreeMap::new();
+    for capsule in aikit_core::catalog::Catalog::capsules(service.snapshot()) {
+        let usage = index.usage(&capsule.id)?;
         if usage.successful_runs > 0 {
             used += 1;
         }
         runs += usage.successful_runs;
+        *kinds.entry(capsule.kind).or_insert(0) += 1;
+        let source = capsule
+            .source
+            .as_ref()
+            .map_or("personal", |source| source.as_str());
+        *sources.entry(source.to_string()).or_insert(0) += 1;
     }
 
     let data = jval!({
@@ -6940,8 +6954,8 @@ fn cmd_stats(cwd: &std::path::Path) -> Result<Reply> {
         "ever_used": used,
         "successful_runs": runs,
         "events": index.event_count()?,
-        "by_kind": facets.kinds.iter().map(|(k, n)| jval!({ "kind": k.as_str(), "count": n })).collect::<Vec<_>>(),
-        "by_source": facets.sources.iter().map(|(s, n)| jval!({ "source": s, "count": n })).collect::<Vec<_>>(),
+        "by_kind": kinds.iter().map(|(k, n)| jval!({ "kind": k.as_str(), "count": n })).collect::<Vec<_>>(),
+        "by_source": sources.iter().map(|(s, n)| jval!({ "source": s, "count": n })).collect::<Vec<_>>(),
     });
     Ok(reply(&service, data, vec![]))
 }
@@ -6954,15 +6968,15 @@ fn cmd_unused(cwd: &std::path::Path) -> Result<Reply> {
     let service = Service::discover(cwd)?;
     let index = service.index();
     let mut rows: Vec<Value> = Vec::new();
-    for row in index.capsules()? {
-        let usage = index.usage(&row.id)?;
+    for capsule in aikit_core::catalog::Catalog::capsules(service.snapshot()) {
+        let usage = index.usage(&capsule.id)?;
         if usage.successful_runs == 0 {
             rows.push(jval!({
-                "capability": row.id.to_string(),
-                "kind": row.kind.as_str(),
-                "name": row.name,
+                "capability": capsule.id.to_string(),
+                "kind": capsule.kind.as_str(),
+                "name": capsule.name,
                 "failed_runs": usage.failed_runs,
-                "active": service.resolved().is_active(&row.id),
+                "active": service.resolved().is_active(&capsule.id),
             }));
         }
     }
