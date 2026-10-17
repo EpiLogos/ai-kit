@@ -52,7 +52,7 @@ impl Snapshot {
             .read_to_end(&mut metadata_bytes)
             .map_err(failure)?;
         if metadata_bytes.len() > super::MAX_INDEX_METADATA_BYTES {
-            return Err(failure(&format!(
+            return Err(failure(format!(
                 "index metadata exceeds {} MiB",
                 super::MAX_INDEX_METADATA_BYTES / (1024 * 1024)
             )));
