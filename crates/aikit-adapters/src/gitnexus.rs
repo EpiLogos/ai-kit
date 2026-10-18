@@ -220,6 +220,29 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
                 ],
             );
         }
+        // GitNexus's reply is taken through a file, never a pipe. It ends with
+        // process.exit(), and Node writes a pipe asynchronously on macOS, so
+        // everything past the 64 KiB pipe buffer was lost: on 18 Oct 2026 a
+        // Factory query answered exactly 65 536 bytes of an 87 245-byte reply,
+        // and knowledge search disclosed "GitNexus returned invalid JSON". A
+        // file is written synchronously on every platform.
+        let reply = tempfile::NamedTempFile::new().map_err(|error| {
+            AikitError::new(code, format!("GitNexus reply file unavailable: {error}"))
+        })?;
+        let reply_path = reply
+            .path()
+            .to_str()
+            .ok_or_else(|| AikitError::new(code, "GitNexus reply file path is not UTF-8"))?;
+        argv.splice(
+            0..0,
+            [
+                "/bin/sh".into(),
+                "-c".into(),
+                r#"reply=$1; shift; exec "$@" > "$reply""#.into(),
+                "sh".into(),
+                reply_path.into(),
+            ],
+        );
         // This is an optional derived lens. Its ceiling cannot lengthen the
         // budget the application configured for this provider's runner.
         let ceiling = std::time::Duration::from_secs(15);
@@ -227,11 +250,30 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
             .runner
             .configured_timeout()
             .map_or(ceiling, |configured| configured.min(ceiling));
-        Ok(self
+        let output = self
             .runner
             .run_with_timeout(&argv, timeout)?
-            .require(&argv, code)?
-            .stdout)
+            .require(&argv, code)?;
+        let limit = crate::runner::DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES;
+        let mut written = Vec::new();
+        std::io::Read::take(reply.as_file(), limit + 1)
+            .read_to_end(&mut written)
+            .map_err(|error| {
+                AikitError::new(code, format!("GitNexus reply unreadable: {error}"))
+            })?;
+        if written.len() as u64 > limit {
+            return Err(AikitError::new(
+                code,
+                format!("GitNexus reply exceeds {limit} bytes"),
+            ));
+        }
+        // A runner that does not execute the command (a scripted stand-in)
+        // answers on stdout; a real GitNexus wrote its reply to the file.
+        if written.is_empty() {
+            return Ok(output.stdout);
+        }
+        String::from_utf8(written)
+            .map_err(|error| AikitError::new(code, format!("GitNexus reply is not UTF-8: {error}")))
     }
 
     fn run_json(&self, args: &[String], code: &'static str) -> Result<Value> {
@@ -951,6 +993,43 @@ mod tests {
             SourceRef::parse("source:git/demo").unwrap(),
             Some(SourceRevision::parse("git:abc").unwrap()),
         )
+    }
+
+    #[test]
+    fn a_reply_larger_than_a_pipe_buffer_is_read_whole_from_its_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("gitnexus");
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+             --version) echo 1.6.12 ;;\n\
+             --help) echo 'analyze query context impact trace detect-changes check cypher' ;;\n\
+             *) printf '{\"processes\":['; i=0\n\
+                while [ $i -lt 3000 ]; do printf '{\"name\":\"symbol-%05d\",\"filePath\":\"src/s.rs\"},' $i; i=$((i+1)); done\n\
+                printf '{\"name\":\"last\"}]}\\n' ;;\n\
+             esac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let provider = GitNexusCodeIndexProvider::with_binary(
+            crate::runner::SystemRunner::new(),
+            binary.to_str().unwrap(),
+            "demo",
+            SourceRef::parse("source:git/demo").unwrap(),
+            None,
+        );
+        let reply = provider
+            .run_json(
+                &["query".into(), "auth".into()],
+                "knowledge.gitnexus_query_failed",
+            )
+            .expect("the whole reply parses");
+        let processes = reply["processes"].as_array().unwrap();
+        assert_eq!(processes.len(), 3001);
+        assert_eq!(processes[2999]["name"], "symbol-02999");
+        assert!(reply.to_string().len() > 64 * 1024);
     }
 
     #[test]
