@@ -11,12 +11,14 @@
 use super::{error, read as read_task_record};
 use crate::encounter_service::EncounterService;
 use aikit_core::{ResourceRef, Result, SourceRevision};
-use aikit_store::{AikitHome, ContextLock, LockOptions};
+use aikit_store::{AikitHome, ContextLock, LockOptions, SessionSpaceApplicationStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{fs, io::Write, path::PathBuf};
 
 pub const READING_SCHEMA: &str = "aikit.encounter-session-settings/v1";
+pub const LIST_SCHEMA: &str = "aikit.encounter-session-settings-list/v1";
+const MAX_LISTED: usize = 256;
 const RECORD_SCHEMA: &str = "aikit.encounter-session-settings-record/v1";
 const MAX_POINTS: usize = 64;
 const MAX_SECONDS: f64 = 7.0 * 24.0 * 3600.0;
@@ -436,6 +438,33 @@ impl EncounterService {
         let record = read_record(home, session)?;
         let bound = bound_task(home, session)?;
         Ok(reading(session, record.as_ref(), bound.as_ref()))
+    }
+
+    /// Several sessions' readings at once (several `--agent-session`), in
+    /// the order asked: a session no retained SessionSpace holds answers its
+    /// refusal in words, the others their readings.
+    pub fn read_sessions_settings(home: &AikitHome, sessions: &[ResourceRef]) -> Result<Value> {
+        if sessions.len() > MAX_LISTED {
+            return Err(error(format!(
+                "At most {MAX_LISTED} sessions' settings are read at once"
+            )));
+        }
+        let spaces = SessionSpaceApplicationStore::new(home.clone()).list()?;
+        let mut readings = Vec::with_capacity(sessions.len());
+        for session in sessions {
+            if !spaces
+                .iter()
+                .any(|space| space.agent_sessions.contains_key(session))
+            {
+                readings.push(json!({"agent_session": session.as_str(),
+                    "refused": "Canonical AgentSession is not attached to any retained SessionSpace"}));
+                continue;
+            }
+            let record = read_record(home, session)?;
+            let bound = bound_task(home, session)?;
+            readings.push(reading(session, record.as_ref(), bound.as_ref()));
+        }
+        Ok(json!({"schema": LIST_SCHEMA, "readings": readings}))
     }
 
     /// The same, with `--request-json` and the revision the change was made

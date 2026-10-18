@@ -132,10 +132,10 @@ enum Command {
     /// Read or change this session's settings and its bound task's: the
     /// track's Telemetry and Solo; the task's name, colour, activator, output
     /// style, Launch, Then, Hand off to, Quantize and envelopes. Without
-    /// --request-json it reads.
+    /// --request-json it reads; several --agent-session read each at once.
     EncounterSessionSettings {
-        #[arg(long)]
-        agent_session: String,
+        #[arg(long, required = true)]
+        agent_session: Vec<String>,
         #[arg(long)]
         request_json: Option<String>,
         #[arg(long)]
@@ -503,19 +503,33 @@ fn run(cli: Cli) -> Result<()> {
             request_json,
             expected_revision,
         } => {
-            let session = aikit_core::ResourceRef::parse(agent_session)?;
-            match request_json {
-                None if expected_revision.is_some() => Err(aikit_core::AikitError::new(
+            let sessions = agent_session
+                .iter()
+                .map(aikit_core::ResourceRef::parse)
+                .collect::<aikit_core::Result<Vec<_>>>()?;
+            match (request_json, sessions.as_slice()) {
+                (None, _) if expected_revision.is_some() => Err(aikit_core::AikitError::new(
                     "encounter.runtime",
                     "--expected-revision goes with a change (--request-json)",
                 )),
-                None => emit(
+                (None, [session]) => emit(
                     &crate::encounter_service::EncounterService::read_session_settings(
                         service.home(),
-                        &session,
+                        session,
                     )?,
                 ),
-                Some(request_json) => {
+                (None, sessions) => emit(
+                    &crate::encounter_service::EncounterService::read_sessions_settings(
+                        service.home(),
+                        sessions,
+                    )?,
+                ),
+                (Some(_), [_, _, ..]) => Err(aikit_core::AikitError::new(
+                    "encounter.runtime",
+                    "A change is made to one session's settings at a time",
+                )),
+                (Some(request_json), sessions) => {
+                    let session = &sessions[0];
                     let expected = expected_revision
                         .as_deref()
                         .map(aikit_core::SourceRevision::parse)
@@ -523,7 +537,7 @@ fn run(cli: Cli) -> Result<()> {
                     emit(
                         &crate::encounter_service::EncounterService::write_session_settings(
                             service.home(),
-                            &session,
+                            session,
                             parse_json_arg(&request_json)?,
                             expected.as_ref(),
                         )?,

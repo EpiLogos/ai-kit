@@ -119,6 +119,11 @@ aikit session-space -C WORLD encounter-session-settings \
   [--request-json @change.json [--expected-revision session-settings/CURRENT]]
 ```
 
+Several `--agent-session` read each at once as
+`aikit.encounter-session-settings-list/v1` (`readings`, in the order asked; a
+session no retained SessionSpace holds answers `refused` in words), so a view of
+many tracks asks once. A change names one session.
+
 Without `--request-json` it reads `aikit.encounter-session-settings/v1`: the
 track's `telemetry` (on by default) and `solo` (off), and for the bound task its
 `name` (its purpose until named), `colour` (null takes the session's), `active`,
