@@ -166,12 +166,28 @@ pub fn intake_actuation_detection(
     runner: &dyn CommandRunner,
     actuation_bin: &str,
 ) -> DetectionOutcome {
-    let argv = vec![
+    intake_actuation_detection_of(runner, actuation_bin, None)
+}
+
+/// [`intake_actuation_detection`] narrowed to the owner's harnesses in use
+/// (`actuation harness detect --only a,b,c`); `None` detects every catalogued
+/// harness. A slug the installed catalog does not declare is Actuation's own
+/// refusal, carried as `Unavailable`.
+pub fn intake_actuation_detection_of(
+    runner: &dyn CommandRunner,
+    actuation_bin: &str,
+    only: Option<&[String]>,
+) -> DetectionOutcome {
+    let mut argv = vec![
         actuation_bin.to_string(),
         "harness".to_string(),
         "detect".to_string(),
         "--json".to_string(),
     ];
+    if let Some(only) = only.filter(|only| !only.is_empty()) {
+        argv.push("--only".to_string());
+        argv.push(only.join(","));
+    }
     let output = match runner.run(&argv) {
         Ok(output) => output,
         Err(error) => {
@@ -568,6 +584,42 @@ mod tests {
         fn run(&self, _argv: &[String]) -> Result<Output> {
             Ok(Output::success(sample_record()))
         }
+    }
+
+    /// Records the argv it was asked to run.
+    struct ArgvRunner(std::sync::Mutex<Vec<Vec<String>>>);
+    impl CommandRunner for ArgvRunner {
+        fn run(&self, argv: &[String]) -> Result<Output> {
+            self.0.lock().unwrap().push(argv.to_vec());
+            Ok(Output::success(sample_record()))
+        }
+    }
+
+    #[test]
+    fn the_harnesses_in_use_narrow_detection_to_their_slugs() {
+        let runner = ArgvRunner(std::sync::Mutex::new(Vec::new()));
+        let in_use = vec!["claude-code".to_owned(), "codex".to_owned()];
+        intake_actuation_detection_of(&runner, "actuation", Some(&in_use));
+        intake_actuation_detection_of(&runner, "actuation", Some(&[]));
+        intake_actuation_detection_of(&runner, "actuation", None);
+        let calls = runner.0.lock().unwrap();
+        assert_eq!(
+            calls[0],
+            [
+                "actuation",
+                "harness",
+                "detect",
+                "--json",
+                "--only",
+                "claude-code,codex"
+            ]
+        );
+        assert_eq!(
+            calls[1],
+            ["actuation", "harness", "detect", "--json"],
+            "an empty list narrows nothing"
+        );
+        assert_eq!(calls[2], ["actuation", "harness", "detect", "--json"]);
     }
 
     #[test]

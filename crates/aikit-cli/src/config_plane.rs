@@ -312,6 +312,29 @@ fn settings() -> Vec<Setting> {
             native_ref: "aikit:config:redis-now-election",
         },
         Setting {
+            setting_ref: crate::harnesses_in_use::SETTING_REF,
+            section_ref: "harnesses",
+            key: "harnesses.in-use",
+            title: "Harnesses in use",
+            description: "Which of the harnesses Actuation catalogues the owner works with, as \
+                      a list of catalog slugs (for example `claude-code`, `codex`, `pi`). \
+                      Declared, `aikit client status` asks Actuation to detect only these \
+                      and lists only these beside the broker; unset or empty, every \
+                      catalogued harness is detected.",
+            value_schema: json!({ "type": "list", "items": { "type": "scalar" } }),
+            allowed_scopes: &["machine"],
+            writable: true,
+            profileable: true,
+            sensitive: false,
+            default: None,
+            default_semantics: "none",
+            effect_kind: "value-change",
+            effect_summary: "the next `aikit client status` (and the O:I kernel's harness status) detects and lists only these harnesses; nothing is installed or removed",
+            effect_ref: Some("aikit client status"),
+            operations: (true, true, true, true),
+            native_ref: "aikit:config:harnesses-in-use",
+        },
+        Setting {
             setting_ref: crate::permission_defaults::SETTING_REF,
             section_ref: "permissions",
             key: "permissions.default-mode",
@@ -610,6 +633,7 @@ fn sections() -> Vec<Value> {
             "models" => "Models / providers / credential refs",
             "permissions" => "Permissions / session permission modes",
             "local-services" => "Local services / decision provider / Redis NOW",
+            "harnesses" => "Harnesses / HarnessComposition",
             other => unreachable!("unmapped section {other}"),
         };
         let entry = sections.iter_mut().find(|s| s["id"] == setting.section_ref);
@@ -836,6 +860,12 @@ fn validate_value(service: &Service, setting: &Setting, value: &Value) -> Vec<Va
         return crate::local_services_election::violations(election, value)
             .into_iter()
             .map(|message| violation("invalid_election", message))
+            .collect();
+    }
+    if setting.setting_ref == crate::harnesses_in_use::SETTING_REF {
+        return crate::harnesses_in_use::violations(value)
+            .into_iter()
+            .map(|message| violation("invalid_harnesses", message))
             .collect();
     }
     if setting.setting_ref == crate::permission_defaults::SETTING_REF {
@@ -1141,6 +1171,21 @@ fn change_summary(setting: &Setting, value: &Value, scope: &ScopeAddress) -> Str
             scope.compact()
         );
     }
+    if setting.setting_ref == crate::harnesses_in_use::SETTING_REF {
+        let names: Vec<&str> = value
+            .as_array()
+            .map(|list| list.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        return if names.is_empty() {
+            format!("every catalogued harness is in use at {}", scope.compact())
+        } else {
+            format!(
+                "harnesses in use at {}: {}",
+                scope.compact(),
+                names.join(", ")
+            )
+        };
+    }
     if setting.setting_ref == crate::permission_defaults::SETTING_REF {
         let mut parts: Vec<String> = value
             .as_object()
@@ -1323,6 +1368,16 @@ fn execute(
             },
         );
     }
+    if setting.setting_ref == crate::harnesses_in_use::SETTING_REF {
+        return crate::harnesses_in_use::from_value(value)
+            .and_then(|harnesses| crate::harnesses_in_use::write(service.home(), &harnesses))
+            .map_err(|error| {
+                fail(
+                    "internal",
+                    format!("the native mutation failed: {}", error.message()),
+                )
+            });
+    }
     if setting.setting_ref == crate::permission_defaults::SETTING_REF {
         return crate::permission_defaults::from_value(value)
             .and_then(|modes| crate::permission_defaults::write(service.home(), &modes))
@@ -1413,6 +1468,7 @@ fn execute_reset(
         crate::permission_defaults::SETTING_REF => {
             crate::permission_defaults::clear(service.home())
         }
+        crate::harnesses_in_use::SETTING_REF => crate::harnesses_in_use::clear(service.home()),
         crate::model_defaults::SETTING_REF => crate::model_defaults::clear(service.home()),
         other => unreachable!("no reset executor for {other}"),
     };
