@@ -128,3 +128,29 @@ fn redirected_control_is_not_accepted_as_a_root_binding() {
         "central.root_context_unavailable"
     );
 }
+
+#[test]
+fn a_relative_cwd_option_names_a_directory_from_where_aikit_was_invoked() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("Central");
+    central(&root);
+    fs::create_dir_all(root.join("Work/child")).unwrap();
+    for (from, relative) in [(&root, "Work/child"), (&root.join("Work"), "child")] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_aikit"))
+            .current_dir(from)
+            .args(["--json", "-C", relative, "status"])
+            .env("CENTRAL_ROOT", &root)
+            .env("AIKIT_HOME", temp.path().join("aikit-home"))
+            .env("HOME", temp.path())
+            .output()
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)));
+        assert_eq!(
+            reply["ok"],
+            true,
+            "-C {relative} from {}: {reply}",
+            from.display()
+        );
+    }
+}
