@@ -103,7 +103,7 @@ pub fn run(args: ConstructArgs) -> Result<Value> {
             "schema":native::ACTION,"owner":"ai-kit","action_ref":"aikit.constellation.apply",
             "native_carriers":["WikiFrame","WikiConstellation","WikiEdge","WikiProvenanceRef"],
             "changes":["create","inquiry_set","frame_set","member_add","member_remove","role_set","sources_set","relation_put","relation_retract","alternative_add","alternative_remove","composition_attach","place_set","temporal_set"],
-            "fact_targets":["participation","node","whole"],"facts_action":{"action_ref":"aikit.wiki.facts.apply","schema":facts::ACTION,"targets":["node","whole"],"changes":["temporal_set","place_set"],"command":["wiki-construct","facts-apply"]},
+            "fact_targets":["participation","node","whole"],"facts_action":{"action_ref":"aikit.wiki.facts.apply","schema":facts::ACTION,"targets":["node","whole","space"],"changes":["temporal_set","place_set","body_set"],"command":["wiki-construct","facts-apply"]},
             "revision_required":true,"operation_identity_required":true,"exact_file_basis_supported":true,
             "preparation_is_not_persistence":true,"ql_grammar_is_interpretive_truth":false,"automatic_publication":false
         })),
