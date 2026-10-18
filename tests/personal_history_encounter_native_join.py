@@ -13,11 +13,13 @@ Run: python3 tests/personal_history_encounter_native_join.py \
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import json
 import os
 import pathlib
 import secrets
+import socket
 import subprocess
 import tempfile
 import time
@@ -41,6 +43,52 @@ def run(argv, env, expect=True, cwd=None):
 def jargv(argv, env, expect=True, cwd=None):
     result = run(argv, env, expect, cwd)
     return json.loads(result.stdout)
+
+
+def _resp(stream):
+    """One RESP reply from a Redis connection."""
+    line = stream.readline().rstrip(b"\r\n")
+    kind, body = line[:1], line[1:]
+    if kind == b"*":
+        return [_resp(stream) for _ in range(int(body))]
+    if kind == b"$":
+        size = int(body)
+        if size < 0:
+            return None
+        data = stream.read(size + 2)[:size]
+        return data.decode()
+    if kind == b"-":
+        raise RuntimeError(body.decode())
+    return body.decode()
+
+
+def redis_clear_prefix(address: str, prefix: str) -> None:
+    """Remove every key this run wrote under its own prefix. The harness talks to the
+    machine's default Redis, and keys it left behind outlived every run (31 were found
+    there on 16 Oct 2026). `<prefix>:*` never matches another run's prefix."""
+    host, _, port = address.rpartition(":")
+    try:
+        with socket.create_connection((host or "127.0.0.1", int(port)), timeout=5) as sock:
+            stream = sock.makefile("rwb")
+
+            def command(*parts):
+                frame = f"*{len(parts)}\r\n".encode()
+                for part in parts:
+                    data = str(part).encode()
+                    frame += f"${len(data)}\r\n".encode() + data + b"\r\n"
+                stream.write(frame)
+                stream.flush()
+                return _resp(stream)
+
+            cursor = "0"
+            while True:
+                cursor, keys = command("SCAN", cursor, "MATCH", f"{prefix}:*", "COUNT", 500)
+                if keys:
+                    command("DEL", *keys)
+                if cursor == "0":
+                    break
+    except (OSError, RuntimeError, ValueError):
+        pass
 
 
 def main():
@@ -183,6 +231,7 @@ def main():
                  "connect_timeout_ms": 1000, "io_timeout_ms": 1000,
                  "prepared_ttl_seconds": 3600,
                  "coordination_retention_seconds": 7200}
+    atexit.register(redis_clear_prefix, args.redis_address, redis_cfg["key_prefix"])
     candidates = [{"selection": json.dumps({
         "kind": "source", "value": ref}), "visibility": "team",
         "note": entry_id}
