@@ -245,7 +245,24 @@ fn current_source_material(
         .map(|material| material.binding.requires_live_origin_read())
         .transpose()?
         .unwrap_or(false);
-    let live = binding.provider.read_for(source, target)?;
+    admit_current_source(
+        source,
+        held,
+        target,
+        origin_required,
+        binding.provider.read_for(source, target),
+    )
+}
+
+/// Admit a Source against its current owner reading, already taken.
+fn admit_current_source(
+    source: &SourceRef,
+    held: Option<&SourceMaterial>,
+    target: RetrievalTarget,
+    origin_required: bool,
+    live: Result<Option<SourcePoolReading>>,
+) -> Result<SourceMaterial> {
+    let live = live?;
     if origin_required && live.is_none() {
         return Err(AikitError::new(
             "knowledge.source_origin_unavailable",
@@ -397,6 +414,51 @@ impl<'a> ScopedAttribution<'a> {
 /// its own heavy process over a private copy of a repository's graph.
 const MAX_PARALLEL_CODE_SEARCHES: usize = 4;
 
+/// At most this many of one pool's hits are read at once when its owner reads
+/// one Source at a time. Each admission is a current owner read — for
+/// Central's file map, one `ctrl` process — and a hybrid pool answers with
+/// most of the candidate pool: on 18 Oct 2026 "ariadne" at the root drew 177
+/// file-map hits, and admitting them one after another took 40 s, so the 15 s
+/// search deadline cut the pool off and dropped the rest as unavailable. An
+/// owner that reads a batch (`read_batch_for`) is asked once instead.
+const MAX_PARALLEL_ADMISSIONS: usize = 8;
+
+/// `each` over `items` on at most `workers` threads, answers in item order.
+fn in_parallel<T: Sync, R: Send>(
+    items: &[T],
+    workers: usize,
+    each: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    if items.len() < 2 || workers < 2 {
+        return items.iter().map(each).collect();
+    }
+    let slots: Vec<std::sync::Mutex<Option<R>>> =
+        items.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..items.len().min(workers) {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(item) = items.get(index) else {
+                    break;
+                };
+                let answer = each(item);
+                *slots[index]
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(answer);
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .expect("every item was answered")
+        })
+        .collect()
+}
+
 /// One provider's contribution to a subject search: its hits, and its
 /// absences in the order it met them (`true` when the absence is disclosed at
 /// most once across the whole search).
@@ -450,12 +512,42 @@ fn pool_outcome(
         .search(source_query, mode, tag_filter, limit)
     {
         Ok(provider_hits) => {
-            for hit in provider_hits {
+            let sources: Vec<SourceRef> =
+                provider_hits.iter().map(|hit| hit.source.clone()).collect();
+            let readings = match binding.provider.read_batch_for(&sources, target) {
+                Some(readings) if readings.len() == sources.len() => readings,
+                Some(readings) => {
+                    let mismatch = AikitError::new(
+                        "knowledge.source_batch_mismatch",
+                        format!(
+                            "the owner answered {} readings for {} Sources",
+                            readings.len(),
+                            sources.len()
+                        ),
+                    );
+                    sources.iter().map(|_| Err(mismatch.clone())).collect()
+                }
+                None => in_parallel(&sources, MAX_PARALLEL_ADMISSIONS, |source| {
+                    binding.provider.read_for(source, target)
+                }),
+            };
+            for (hit, reading) in provider_hits.into_iter().zip(readings) {
                 let held = binding
                     .material
                     .iter()
                     .find(|material| material.binding.source == hit.source);
-                let admitted = current_source_material(binding, &hit.source, held, target)
+                let admitted = held
+                    .map(|material| material.binding.requires_live_origin_read())
+                    .transpose()
+                    .and_then(|origin_required| {
+                        admit_current_source(
+                            &hit.source,
+                            held,
+                            target,
+                            origin_required.unwrap_or(false),
+                            reading,
+                        )
+                    })
                     .and_then(|current| validate_source_hit_basis(&hit, held, &current));
                 if let Err(error) = admitted {
                     // No denied title, path, SourceRef or query-match
@@ -3041,6 +3133,42 @@ mod tests {
         assert_eq!(selection.total, 24u64);
         assert_eq!(selection.content.chars().count(), 12);
         assert_eq!(selection.remaining, vec![SpanRange { start: 12, end: 24 }]);
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::{in_parallel, MAX_PARALLEL_ADMISSIONS};
+
+    #[test]
+    fn admissions_overlap_within_their_bound_and_answer_in_hit_order() {
+        let (in_flight, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let hits: Vec<usize> = (0..40).collect();
+        let answers = in_parallel(&hits, MAX_PARALLEL_ADMISSIONS, |hit| {
+            let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            most.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(5));
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+            hit * 10
+        });
+        assert_eq!(answers, hits.iter().map(|hit| hit * 10).collect::<Vec<_>>());
+        let most = most.load(Ordering::SeqCst);
+        assert!(
+            (2..=MAX_PARALLEL_ADMISSIONS).contains(&most),
+            "{most} admissions overlapped"
+        );
+    }
+
+    #[test]
+    fn a_single_hit_is_admitted_on_the_calling_thread() {
+        let caller = std::thread::current().id();
+        let answers = in_parallel(&[7], MAX_PARALLEL_ADMISSIONS, |hit| {
+            (*hit, std::thread::current().id() == caller)
+        });
+        assert_eq!(answers, vec![(7, true)]);
     }
 }
 

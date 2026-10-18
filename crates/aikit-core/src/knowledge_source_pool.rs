@@ -408,6 +408,17 @@ pub trait SourcePoolProvider {
         Ok(Some(SourcePoolReading { material, privacy }))
     }
 
+    /// `read_for` for many Sources in one owner read, answered in the order
+    /// asked, where the owner reads a batch. None: this provider reads one
+    /// Source at a time, through `read_for`.
+    fn read_batch_for(
+        &self,
+        _sources: &[SourceRef],
+        _target: RetrievalTarget,
+    ) -> Option<Vec<Result<Option<SourcePoolReading>>>> {
+        None
+    }
+
     /// Build/rebuild derived provider state from already-authorised material.
     fn rebuild(&mut self, material: &[SourceMaterial]) -> Result<()>;
 
