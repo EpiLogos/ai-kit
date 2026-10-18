@@ -40,13 +40,118 @@ pub const MAX_READ_BYTES: u64 = 1024 * 1024;
 /// Bound on selected NOW descriptors, query candidates and retained matches.
 /// Native attachment preloads no bodies or roster; current query metadata is
 /// admitted separately from the complete native World's capture/parse cost.
-pub const MAX_ROSTER_FILES: usize = 2048;
+/// Since Central reads every NOW record as a Source by its shape (18 Oct
+/// 2026), the root's federated roster carries ~1,800 records and its agents
+/// family grows by the day; the retained-bytes bound below stays the limit
+/// on what this holds.
+pub const MAX_ROSTER_FILES: usize = 8192;
 const MAX_PENDING_DIRECTORIES: usize = 2048;
 const MAX_SEEN_STATES: usize = 4096;
 const MAX_OBSERVED_ENTRIES: usize = 65536;
 const MAX_RETAINED_ROUTE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SINGLE_PATH_BYTES: usize = 16384;
 const MAX_NATIVE_REF_BYTES: usize = 4096;
+
+/// Absolute directories under which every member `scope` includes lies, for
+/// narrowing the owner's roster: each include's literal leading directories,
+/// with a `*` directory expanded over the directories present when a literal
+/// directory follows it (`Work/*/ProjectCentral/now` becomes each Project's).
+/// Empty — the whole roster — when an include has no literal root or the
+/// expansion is unreadable or past its bound.
+fn roster_prefixes(scope: &NowFieldScope) -> Vec<PathBuf> {
+    const MAX_PREFIXES: usize = 1024;
+    // The owner spells its roster from its canonical root (a macOS temporary
+    // root under /var is /private/var to it); a prefix that does not match
+    // that spelling would narrow the roster to nothing.
+    let Ok(root) = std::fs::canonicalize(&scope.central_root) else {
+        return Vec::new();
+    };
+    let mut prefixes = BTreeSet::new();
+    for include in &scope.includes {
+        let components: Vec<&str> = include.glob.split('/').collect();
+        let directories = &components[..components.len().saturating_sub(1)];
+        let mut bases = vec![root.clone()];
+        let mut narrowed = false;
+        for (index, component) in directories.iter().enumerate() {
+            if !component.contains(['*', '?', '[']) {
+                bases = bases.into_iter().map(|base| base.join(component)).collect();
+                narrowed = true;
+                continue;
+            }
+            let literal_follows = directories[index + 1..]
+                .iter()
+                .any(|later| !later.contains(['*', '?', '[']));
+            if *component != "*" || !literal_follows {
+                break;
+            }
+            let mut expanded = Vec::new();
+            for base in &bases {
+                let entries = match std::fs::read_dir(base) {
+                    Ok(entries) => entries,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(_) => return Vec::new(),
+                };
+                for entry in entries {
+                    let Ok(entry) = entry else {
+                        return Vec::new();
+                    };
+                    if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                        expanded.push(entry.path());
+                    }
+                }
+            }
+            if expanded.len() > MAX_PREFIXES {
+                return Vec::new();
+            }
+            bases = expanded;
+        }
+        if !narrowed {
+            return Vec::new();
+        }
+        prefixes.extend(bases);
+        if prefixes.len() > MAX_PREFIXES {
+            return Vec::new();
+        }
+    }
+    prefixes.into_iter().collect()
+}
+
+/// Is `relative` (to the Central root) a NOW record by Central's own shape
+/// rule (ctrl `source_horizon::is_now_record_member`): a file at its family's
+/// record depth — `agents/<file>`, `day/<file>`, `flows/<file>` — or
+/// `clearings/<id>/now.json`, under `Control/agents/now` or a Project's
+/// `ProjectCentral/now`. Anything deeper is evidence (`day/<date>.sources/`,
+/// a clearing's `T/`) and `tmp/` is scratch: none of it is a record.
+fn is_now_record(relative: &Path) -> bool {
+    let Some(text) = relative.to_str() else {
+        return false;
+    };
+    let rest = text.strip_prefix("Control/agents/now/").or_else(|| {
+        let (_, rest) = text.strip_prefix("Work/")?.split_once('/')?;
+        rest.strip_prefix("ProjectCentral/now/")
+    });
+    let Some(rest) = rest else {
+        return false;
+    };
+    match rest.split('/').collect::<Vec<_>>().as_slice() {
+        [family, file] if ["agents", "day", "flows"].contains(family) => {
+            !file.starts_with('.')
+                && Path::new(file)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| ["json", "md", "txt", "html"].contains(&extension))
+        }
+        ["clearings", id, "now.json"] => !id.is_empty() && !id.starts_with('.'),
+        _ => false,
+    }
+}
+
+/// One match a query window qualifies, or the refusal that ends the window
+/// where the match loop met it.
+enum Admit<'m> {
+    Match(&'m RipgrepMatch, Option<&'m SourceRef>),
+    Refused(AikitError),
+}
 
 // Operation-local allocation admission, separate from the native response's
 // capture/parse capacity. Counts are charged before retained clones/inserts;
@@ -57,8 +162,9 @@ struct QueryCapacity {
     seen_states: usize,
     observed_entries: usize,
     selected_native: usize,
-    /// Authorised record files the owner's roster does not register: not
-    /// Sources of this World, so not searched (see `query_candidates`).
+    /// Authorised NOW records (by `is_now_record`) the owner's roster does
+    /// not carry: not Sources of this World, so not searched (see
+    /// `query_candidates`). Evidence and scratch files are never counted.
     unregistered: usize,
 }
 
@@ -1023,22 +1129,17 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
         tags
     }
 
-    fn qualified_hit(
+    /// A match's current owner reading: through the native owner when the
+    /// match is an admitted native Source, else this provider's own read.
+    fn current_reading(
         &self,
-        matched: &RipgrepMatch,
-        request: &SearchRequest,
+        relative: &Path,
         native_source: Option<&SourceRef>,
         deadline: std::time::Instant,
-    ) -> Result<Option<SourceHit>> {
-        let Some(relative) = self.relative_to_root(&matched.path) else {
-            return Ok(None);
-        };
-        if !self.current_scope().is_authorised(&relative) {
-            return Ok(None);
-        }
-        let basis = self.root_basis()?;
-        let before = if let Some(source) = native_source {
-            self.native_owner
+    ) -> Result<SourcePoolReading> {
+        match native_source {
+            Some(source) => self
+                .native_owner
                 .as_ref()
                 .expect("native query has an attached owner")
                 .read_for_with_timeout(
@@ -1046,17 +1147,68 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
                     RetrievalTarget::LocalAgent,
                     Self::remaining(deadline)?,
                 )?
-                .ok_or_else(|| {
-                    AikitError::new(
-                        "now_field.native_binding_unavailable",
-                        "Native owner declined the admitted Source",
-                    )
-                })?
-        } else {
-            self.read_member_for(&relative, RetrievalTarget::LocalAgent)?
+                .ok_or_else(Self::native_declined),
+            None => self.read_member_for(relative, RetrievalTarget::LocalAgent),
+        }
+    }
+
+    fn native_declined() -> AikitError {
+        AikitError::new(
+            "now_field.native_binding_unavailable",
+            "Native owner declined the admitted Source",
+        )
+    }
+
+    /// Current readings of `sources` from the native owner in one owner batch
+    /// (`resolve-batch`) where the owner reads one, else one at a time; each
+    /// answers as `current_reading` would.
+    fn owner_readings(
+        &self,
+        sources: &[SourceRef],
+        deadline: std::time::Instant,
+    ) -> Result<Vec<Result<SourcePoolReading>>> {
+        if sources.is_empty() {
+            return Ok(Vec::new());
+        }
+        let owner = self
+            .native_owner
+            .as_ref()
+            .expect("native query has an attached owner");
+        let answers = match owner.read_batch_for_with_timeout(
+            sources,
+            RetrievalTarget::LocalAgent,
+            Self::remaining(deadline)?,
+        ) {
+            Some(answers) => answers,
+            None => sources
+                .iter()
+                .map(|source| {
+                    Self::remaining(deadline).and_then(|timeout| {
+                        owner.read_for_with_timeout(source, RetrievalTarget::LocalAgent, timeout)
+                    })
+                })
+                .collect(),
         };
-        self.validate_owner_reading(&before, &before.material.binding.source, &relative, &basis)?;
-        let absolute = self.scope.central_root.join(&relative);
+        Ok(answers
+            .into_iter()
+            .map(|answer| answer.and_then(|reading| reading.ok_or_else(Self::native_declined)))
+            .collect())
+    }
+
+    /// The first half of qualifying a match: its reading taken before the
+    /// re-query is the owner's, and a re-query of that one file still finds
+    /// the same first match on the same line of that reading.
+    fn requery(
+        &self,
+        matched: &RipgrepMatch,
+        request: &SearchRequest,
+        relative: &Path,
+        before: &SourcePoolReading,
+        basis: &(PathBuf, std::fs::Metadata),
+        deadline: std::time::Instant,
+    ) -> Result<()> {
+        self.validate_owner_reading(before, &before.material.binding.source, relative, basis)?;
+        let absolute = self.scope.central_root.join(relative);
         let selected = SearchRequest {
             roots: vec![absolute.clone()],
             include_globs: vec![],
@@ -1075,7 +1227,7 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
             .map(|line| line.trim_end_matches('\r'));
         if checked.truncated
             || checked_match.is_none_or(|current| {
-                self.relative_to_root(&current.path).as_deref() != Some(relative.as_path())
+                self.relative_to_root(&current.path).as_deref() != Some(relative)
                     || current.line_number != matched.line_number
                     || current.line != matched.line
             })
@@ -1086,33 +1238,30 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
                 "Native query no longer agrees with the selected current Source",
             ));
         }
-        let after = if let Some(source) = native_source {
-            self.native_owner
-                .as_ref()
-                .expect("native query has an attached owner")
-                .read_for_with_timeout(
-                    source,
-                    RetrievalTarget::LocalAgent,
-                    Self::remaining(deadline)?,
-                )?
-                .ok_or_else(|| {
-                    AikitError::new(
-                        "now_field.native_binding_unavailable",
-                        "Native owner declined the admitted Source",
-                    )
-                })?
-        } else {
-            self.read_member_for(&relative, RetrievalTarget::LocalAgent)?
-        };
-        self.validate_owner_reading(&after, &before.material.binding.source, &relative, &basis)?;
-        if before != after {
+        Ok(())
+    }
+
+    /// The second half: the reading taken after the re-query is the same
+    /// current Source, unchanged, and the match becomes its hit.
+    fn settle(
+        &self,
+        matched: &RipgrepMatch,
+        relative: &Path,
+        before: SourcePoolReading,
+        after: &SourcePoolReading,
+        basis: &(PathBuf, std::fs::Metadata),
+        deadline: std::time::Instant,
+    ) -> Result<SourceHit> {
+        self.validate_owner_reading(after, &before.material.binding.source, relative, basis)?;
+        if &before != after {
             return Err(AikitError::new(
                 "now_field.source_search_basis_conflict",
                 "Selected current Source changed during its native query",
             ));
         }
         Self::remaining(deadline)?;
-        Ok(Some(SourceHit {
+        let relative = relative.to_path_buf();
+        Ok(SourceHit {
             source: before.material.binding.source,
             revision: Some(before.material.binding.revision),
             provider: provider(),
@@ -1128,7 +1277,122 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
             tags: self.derive_tags(&relative),
             provider_binding: Some(format!("line:{}", matched.line_number)),
             retrieval_mode: SourceSearchMode::Fulltext,
-        }))
+        })
+    }
+
+    /// Qualify a window of matches exactly as one match is qualified, each
+    /// read before and after its re-query, answered in window order; the
+    /// first refusal in that order is the window's. The native owner's
+    /// readings are taken for the whole window in one batch before the
+    /// re-queries and one after them, where each hit used to cost two `ctrl`
+    /// processes: 47 O-I NOW hits took 47 s on 18 Oct 2026.
+    fn qualified_hits(
+        &self,
+        window: &[Admit<'_>],
+        request: &SearchRequest,
+        deadline: std::time::Instant,
+    ) -> Result<Vec<Option<SourceHit>>> {
+        let scope = self.current_scope();
+        let selected: Vec<Option<(PathBuf, Option<&SourceRef>)>> = window
+            .iter()
+            .map(|admit| match admit {
+                Admit::Match(matched, native) => self
+                    .relative_to_root(&matched.path)
+                    .filter(|relative| scope.is_authorised(relative))
+                    .map(|relative| (relative, *native)),
+                Admit::Refused(_) => None,
+            })
+            .collect();
+        let natives: Vec<SourceRef> = selected
+            .iter()
+            .flatten()
+            .filter_map(|(_, native)| native.cloned())
+            .collect();
+        let mut befores = self.owner_readings(&natives, deadline)?.into_iter();
+        struct Requeried<'m> {
+            matched: &'m RipgrepMatch,
+            relative: PathBuf,
+            native: bool,
+            before: SourcePoolReading,
+            basis: (PathBuf, std::fs::Metadata),
+        }
+        enum Stage<'m> {
+            Answered(Option<SourceHit>),
+            Requeried(Box<Requeried<'m>>),
+        }
+        let mut stages = Vec::with_capacity(window.len());
+        let mut refusal = None;
+        for (admit, selected) in window.iter().zip(&selected) {
+            let matched = match admit {
+                Admit::Refused(error) => {
+                    refusal = Some(error.clone());
+                    break;
+                }
+                Admit::Match(matched, _) => *matched,
+            };
+            let Some((relative, native)) = selected else {
+                stages.push(Stage::Answered(None));
+                continue;
+            };
+            let requeried = self.root_basis().and_then(|basis| {
+                let before = match native {
+                    Some(_) => befores.next().expect("one reading per native Source")?,
+                    None => self.current_reading(relative, None, deadline)?,
+                };
+                self.requery(matched, request, relative, &before, &basis, deadline)?;
+                Ok((before, basis))
+            });
+            match requeried {
+                Ok((before, basis)) => stages.push(Stage::Requeried(Box::new(Requeried {
+                    matched,
+                    relative: relative.clone(),
+                    native: native.is_some(),
+                    before,
+                    basis,
+                }))),
+                Err(error) => {
+                    refusal = Some(error);
+                    break;
+                }
+            }
+        }
+        let after_natives: Vec<SourceRef> = stages
+            .iter()
+            .filter_map(|stage| match stage {
+                Stage::Requeried(requeried) if requeried.native => {
+                    Some(requeried.before.material.binding.source.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let mut afters = self.owner_readings(&after_natives, deadline)?.into_iter();
+        let mut answers = Vec::with_capacity(stages.len());
+        for stage in stages {
+            match stage {
+                Stage::Answered(answer) => answers.push(answer),
+                Stage::Requeried(requeried) => {
+                    let Requeried {
+                        matched,
+                        relative,
+                        native,
+                        before,
+                        basis,
+                    } = *requeried;
+                    let after = if native {
+                        afters.next().expect("one reading per native Source")?
+                    } else {
+                        self.current_reading(&relative, None, deadline)?
+                    };
+                    answers.push(Some(
+                        self.settle(matched, &relative, before, &after, &basis, deadline)?,
+                    ));
+                }
+            }
+        }
+        match refusal {
+            Some(error) => Err(error),
+            None => Ok(answers),
+        }
     }
 
     fn check_query_argv(&self, request: &SearchRequest) -> Result<()> {
@@ -1272,7 +1536,7 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
                             .strip_prefix(&scope.central_root)
                             .expect("declared member");
                         if admitted.is_some_and(|admitted| !admitted.contains_key(relative)) {
-                            if scope.is_authorised(relative) {
+                            if scope.is_authorised(relative) && is_now_record(relative) {
                                 capacity.unregistered += 1;
                             }
                             continue;
@@ -1386,7 +1650,12 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
             hidden: true,
             max_file_bytes: MAX_READ_BYTES,
             limit: MAX_ROSTER_FILES,
-            max_count_per_file: None,
+            // A hit is a file's first match, and the retained-match bound
+            // counts matches: with every matching line retained, a common
+            // word across the root's ~1,800 NOW records ran past it
+            // ("exceeded retained match capacity") and the pool answered
+            // nothing.
+            max_count_per_file: Some(1),
             timeout: Some(Self::remaining(deadline)?),
         };
         let required: BTreeSet<&str> = tags.iter().map(String::as_str).collect();
@@ -1397,7 +1666,8 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
         if let Some(owner) = &self.native_owner {
             // One body-free owner roster; its metadata revisions never become
             // Source payload revisions. Native registration remains explicit.
-            owner.visit_source_roster(Self::remaining(deadline)?, |source, path| {
+            let under = roster_prefixes(&live_scope);
+            owner.visit_source_roster(Self::remaining(deadline)?, &under, |source, path| {
                 Self::remaining(deadline)?;
                 if let Some(relative) = self.borrowed_owner_member(path, &basis, &live_scope)? {
                     if native_sources.contains_key(relative) {
@@ -1428,8 +1698,8 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
             return Err(AikitError::new(
                 "now_field.no_registered_source",
                 format!(
-                    "{} NOW record file(s) in this scope are not registered Sources of this World \
-                     and the owner's roster registers none here; none was searched",
+                    "{} NOW record(s) in this scope are absent from the owner's Source roster, \
+                     which carries none here; none was searched",
                     capacity.unregistered
                 ),
             ));
@@ -1488,31 +1758,48 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
         self.check_root(&basis)?;
         let mut hits = Vec::new();
         let mut seen = BTreeSet::new();
-        for matched in &matches {
-            let Some(relative) = self.relative_to_root(&matched.path) else {
-                continue;
-            };
-            let derived = self.derive_tags(&relative);
-            if !required.is_subset(&derived.iter().map(String::as_str).collect())
-                || seen.contains(&relative)
-            {
-                continue;
-            }
-            capacity.retain_path(&relative)?;
-            seen.insert(relative.clone());
-            let native = native_sources.get(&relative);
-            if self.native_owner.is_some() && native.is_none() {
-                return Err(AikitError::new(
-                    "now_field.native_binding_invalid",
-                    "Query returned a member outside the admitted native roster",
-                ));
-            }
-            if let Some(hit) = self.qualified_hit(matched, &request, native, deadline)? {
-                hits.push(hit);
-                if hits.len() == limit {
+        let mut remaining_matches = matches.iter();
+        // Matches are qualified a window at a time — as many as the hits
+        // still wanted — so the owner reads each window in one batch, and no
+        // match past the last needed hit is qualified, as one at a time.
+        while hits.len() < limit {
+            let mut window = Vec::new();
+            while window.len() < limit - hits.len() {
+                let Some(matched) = remaining_matches.next() else {
+                    break;
+                };
+                let Some(relative) = self.relative_to_root(&matched.path) else {
+                    continue;
+                };
+                let derived = self.derive_tags(&relative);
+                if !required.is_subset(&derived.iter().map(String::as_str).collect())
+                    || seen.contains(&relative)
+                {
+                    continue;
+                }
+                if let Err(error) = capacity.retain_path(&relative) {
+                    window.push(Admit::Refused(error));
                     break;
                 }
+                seen.insert(relative.clone());
+                let native = native_sources.get(&relative);
+                if self.native_owner.is_some() && native.is_none() {
+                    window.push(Admit::Refused(AikitError::new(
+                        "now_field.native_binding_invalid",
+                        "Query returned a member outside the admitted native roster",
+                    )));
+                    break;
+                }
+                window.push(Admit::Match(matched, native));
             }
+            if window.is_empty() {
+                break;
+            }
+            hits.extend(
+                self.qualified_hits(&window, &request, deadline)?
+                    .into_iter()
+                    .flatten(),
+            );
         }
         Self::remaining(deadline)?;
         Ok(hits)
@@ -1618,6 +1905,72 @@ impl<R: CommandRunner> SourcePoolProvider for NowFieldSourcePoolProvider<R> {
             return Ok(None);
         }
         Ok(Some(self.read_member_for(&relative, target)?))
+    }
+
+    /// `read_for` for many Sources with two native owner batches — the
+    /// metadata that declines another family's Source before any payload,
+    /// then the payloads — where admitting each NOW hit cost two `ctrl`
+    /// processes (148 for one O-I search on 18 Oct 2026, ~30 s). Without a
+    /// native owner each Source is this provider's own read.
+    fn read_batch_for(
+        &self,
+        sources: &[SourceRef],
+        target: RetrievalTarget,
+    ) -> Option<Vec<Result<Option<SourcePoolReading>>>> {
+        let owner = self.native_owner.as_ref()?;
+        let central: Vec<SourceRef> = sources
+            .iter()
+            .filter(|source| source.as_str().starts_with("central:source:"))
+            .cloned()
+            .collect();
+        let basis = self.root_basis();
+        let mut paths = owner.source_paths_batch(&central)?.into_iter();
+        // Each Central Source's member, or its answer when it has one already.
+        let members: Vec<Result<Option<PathBuf>>> = sources
+            .iter()
+            .map(|source| {
+                if !source.as_str().starts_with("central:source:") {
+                    return Ok(None);
+                }
+                let path = paths.next().expect("one path per Central Source");
+                let basis = basis.as_ref().map_err(Clone::clone)?;
+                let Some(relative) = self.member_from_owner_path(&path?, basis)? else {
+                    return Ok(None);
+                };
+                self.check_member(&relative)?;
+                Ok(Some(relative))
+            })
+            .collect();
+        let asked: Vec<SourceRef> = sources
+            .iter()
+            .zip(&members)
+            .filter(|(_, member)| matches!(member, Ok(Some(_))))
+            .map(|(source, _)| source.clone())
+            .collect();
+        let mut readings = owner.read_batch_for(&asked, target)?.into_iter();
+        Some(
+            sources
+                .iter()
+                .zip(members)
+                .map(|(source, member)| {
+                    let Some(relative) = member? else {
+                        return Ok(None);
+                    };
+                    let reading = readings
+                        .next()
+                        .expect("one reading per admitted member")?
+                        .ok_or_else(|| {
+                            AikitError::new(
+                                "now_field.native_binding_unavailable",
+                                "Native owner declined its selected Source",
+                            )
+                        })?;
+                    let basis = basis.as_ref().map_err(Clone::clone)?;
+                    self.validate_owner_reading(&reading, source, &relative, basis)?;
+                    Ok(Some(reading))
+                })
+                .collect(),
+        )
     }
 
     fn search(
@@ -2233,6 +2586,117 @@ mod tests {
         assert_eq!(status.version.as_deref(), Some("ripgrep 15.2.0"));
         assert!(status.detail.contains("3 include families"));
         assert!(status.detail.contains("prunes 1 subtree(s)"));
+    }
+
+    #[test]
+    fn the_roster_is_asked_for_the_directories_the_scope_includes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        for project in ["Alpha", "Beta"] {
+            std::fs::create_dir_all(root.join("Work").join(project)).unwrap();
+        }
+        std::fs::write(root.join("Work/not-a-directory"), "").unwrap();
+        std::fs::create_dir_all(root.join("Control/user/day/2026-10-18")).unwrap();
+        let include = |glob: &str| ScopeInclude {
+            glob: glob.into(),
+            family: "now",
+        };
+        let mut scope = NowFieldScope {
+            central_root: temp.path().to_path_buf(),
+            includes: vec![
+                include("Control/agents/now/clearings/**/*.json"),
+                include("Control/agents/now/agents/*.json"),
+                include("Control/user/day/*/day.md"),
+                include("Work/*/ProjectCentral/now/**/*.json"),
+            ],
+            excludes: vec![],
+            pruned: vec![],
+        };
+        assert_eq!(
+            roster_prefixes(&scope),
+            vec![
+                root.join("Control/agents/now/agents"),
+                root.join("Control/agents/now/clearings"),
+                root.join("Control/user/day"),
+                root.join("Work/Alpha/ProjectCentral/now"),
+                root.join("Work/Beta/ProjectCentral/now"),
+            ]
+        );
+        scope.includes.push(include("**/*.json"));
+        assert!(
+            roster_prefixes(&scope).is_empty(),
+            "no literal root: the whole roster"
+        );
+    }
+
+    #[test]
+    fn now_records_are_files_at_their_family_depth() {
+        for record in [
+            "Control/agents/now/agents/handoff-2026-10-18.json",
+            "Control/agents/now/day/2026-10-18.md",
+            "Control/agents/now/flows/dlw-build-2026-10-18.md",
+            "Control/agents/now/clearings/c-01/now.json",
+            "Work/O-I/ProjectCentral/now/agents/return.json",
+            "Work/O-I/ProjectCentral/now/day/2026-10-18.md",
+        ] {
+            assert!(is_now_record(Path::new(record)), "{record}");
+        }
+        for other in [
+            "Control/agents/now/tmp/scratch.json",
+            "Control/agents/now/day/2026-10-18.sources/agents/handoff.json",
+            "Control/agents/now/clearings/c-01/T/payload.json",
+            "Control/agents/now/clearings/c-01/notes.md",
+            "Control/agents/now/agents/.hidden.json",
+            "Control/agents/now/agents/binary.png",
+            "Work/O-I/ProjectCentral/now/tmp/x.json",
+            "Work/O-I/ProjectCentral/user/now/agents/x.json",
+            "Control/user/day/2026-10-18/day.md",
+        ] {
+            assert!(!is_now_record(Path::new(other)), "{other}");
+        }
+    }
+
+    #[test]
+    fn the_walk_counts_only_records_the_roster_lacks_never_evidence_or_scratch() {
+        let (temp, mut declared) = native_scope();
+        declared.includes = vec![ScopeInclude {
+            glob: "Control/agents/now/**/*.json".into(),
+            family: "now",
+        }];
+        let now = temp.path().join("Control/agents/now");
+        for (relative, record) in [
+            ("agents/return.json", true),
+            ("clearings/c-01/now.json", true),
+            ("clearings/c-01/T/payload.json", false),
+            ("day/2026-10-18.sources/agents/handoff.json", false),
+            ("tmp/scratch.json", false),
+        ] {
+            let path = now.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "{}").unwrap();
+            assert_eq!(
+                is_now_record(&Path::new("Control/agents/now").join(relative)),
+                record
+            );
+        }
+        let provider = NowFieldSourcePoolProvider::connect(
+            default_runner(temp.path()),
+            crate::ripgrep::executable(),
+            declared,
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut capacity = QueryCapacity::default();
+        let candidates = provider
+            .query_candidates(
+                provider.scope(),
+                deadline,
+                &mut capacity,
+                Some(&std::collections::BTreeMap::new()),
+            )
+            .unwrap();
+        assert!(candidates.is_empty());
+        assert_eq!(capacity.unregistered, 2);
     }
 
     #[test]

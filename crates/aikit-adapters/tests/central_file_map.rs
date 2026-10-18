@@ -966,7 +966,7 @@ fn attached_now_preserves_registered_project_identity_current_payload_and_native
 
 #[test]
 #[ignore = "explicit native integration: requires built/pinned AIKIT_CENTRAL_REAL_BIN and real ripgrep"]
-fn attached_now_queries_only_registered_records_and_an_unregistered_one_is_no_candidate() {
+fn attached_now_finds_records_by_placement_and_never_evidence_or_scratch() {
     use aikit_adapters::now_field::{
         default_runner, NowFieldScope, NowFieldSourcePoolProvider, ScopeInclude,
     };
@@ -982,36 +982,29 @@ fn attached_now_queries_only_registered_records_and_an_unregistered_one_is_no_ca
         "projectcentral.init",
         json!({"project":"native-now", "project_id":"native/now"}),
     );
-    let records = root.join("Work/native-now/ProjectCentral/now/agents");
-    fs::create_dir_all(&records).unwrap();
-    fs::write(
-        records.join("registered.json"),
-        "{\"native-now-query\":\"registered record\"}\n",
-    )
-    .unwrap();
-    let inspected = action(
-        &ctrl,
-        &root,
-        "central.file-map.inspect",
-        json!({"project":"native-now", "resources":false}),
-    );
-    let registered = action(
-        &ctrl,
-        &root,
-        "central.file-map.register",
-        json!({
-            "project":"native-now", "path":"ProjectCentral/now/agents/registered.json",
-            "expected_revision":inspected["revision"],
-        }),
-    );
-    let source = SourceRef::parse(registered["source_ref"].as_str().unwrap()).unwrap();
-    // In scope and on disk, but never registered with the owner: the live
-    // NOW field always holds records the owner's map has not taken in.
-    fs::write(
-        records.join("unregistered.json"),
-        "{\"native-now-query\":\"unregistered record\"}\n",
-    )
-    .unwrap();
+    // NOW records are Sources by placement (Central#276): nothing registers
+    // them. Evidence beside them (a day's `.sources` snapshot) and scratch
+    // (`tmp/`) carry the same words and are never records.
+    let now = root.join("Work/native-now/ProjectCentral/now");
+    for (relative, body) in [
+        (
+            "agents/first.json",
+            "{\"native-now-query\":\"first record\"}\n",
+        ),
+        (
+            "agents/second.json",
+            "{\"native-now-query\":\"second record\"}\n",
+        ),
+        (
+            "day/2026-10-18.sources/agents/copied.json",
+            "{\"native-now-query\":\"evidence copy\"}\n",
+        ),
+        ("tmp/scratch.json", "{\"native-now-query\":\"scratch\"}\n"),
+    ] {
+        let path = now.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
     let central = Arc::new(
         CentralFileMapProvider::connect(
             SystemRunner::new().with_timeout(Duration::from_secs(30)),
@@ -1044,9 +1037,38 @@ fn attached_now_queries_only_registered_records_and_an_unregistered_one_is_no_ca
             &[],
             8,
         )
-        .expect("an unregistered record is no candidate, never a failed query");
-    assert_eq!(hits.len(), 1, "{hits:?}");
-    assert_eq!(hits[0].source, source);
+        .expect("evidence and scratch are no candidates, never a failed query");
+    let mut found: Vec<&str> = hits.iter().map(|hit| hit.source.as_str()).collect();
+    found.sort_unstable();
+    assert_eq!(
+        found,
+        vec![
+            "central:source:project:native/now:ProjectCentral/now/agents/first.json",
+            "central:source:project:native/now:ProjectCentral/now/agents/second.json",
+        ],
+        "{hits:?}"
+    );
+    // Admission reads the hits in owner batches, each Source answered as its
+    // single read: a record, a Source outside the NOW family, a nonowner.
+    let asked: Vec<SourceRef> = hits
+        .iter()
+        .map(|hit| hit.source.clone())
+        .chain([
+            SourceRef::parse("central:source:control:root:Control/user/outside.md").unwrap(),
+            SourceRef::parse("work:source:elsewhere:README.md").unwrap(),
+        ])
+        .collect();
+    let batch = now
+        .read_batch_for(&asked, RetrievalTarget::LocalAgent)
+        .expect("an owner with resolve-batch reads the batch");
+    assert_eq!(batch.len(), asked.len());
+    for (source, answer) in asked.iter().zip(batch) {
+        match (answer, now.read_for(source, RetrievalTarget::LocalAgent)) {
+            (Ok(batch), Ok(single)) => assert_eq!(batch, single, "{source}"),
+            (Err(batch), Err(single)) => assert_eq!(batch.code(), single.code(), "{source}"),
+            (batch, single) => panic!("{source}: batch {batch:?} but single {single:?}"),
+        }
+    }
 }
 
 #[test]
