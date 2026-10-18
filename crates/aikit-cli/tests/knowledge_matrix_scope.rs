@@ -193,10 +193,11 @@ fn matrix_world() -> TempDir {
         "rootNeedleMatrixScope",
     );
     // Cedar's own NOW material: the positive check that its own scope still
-    // discloses its own Project.
+    // discloses its own Project. A NOW record sits at its family's depth
+    // (`agents/<file>`, Central's NOW record rule).
     write(
         &world
-            .join("Work/cedar/ProjectCentral/now/returns")
+            .join("Work/cedar/ProjectCentral/now/agents")
             .join("own.md"),
         "cedarMatrixScopeNeedle from cedar NOW\n",
     );
@@ -291,7 +292,7 @@ fn projectworld_matrix_isolation_over_real_scopes() {
     let own_hit = own.hits.iter().any(|hit| {
         hit.resource
             .as_str()
-            .ends_with("Work/cedar/ProjectCentral/now/returns/own.md")
+            .ends_with("Work/cedar/ProjectCentral/now/agents/own.md")
     });
     let now_field_unavailable = own
         .absences

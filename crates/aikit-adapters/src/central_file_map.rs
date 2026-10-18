@@ -351,13 +351,24 @@ impl<R: CommandRunner> CentralFileMapProvider<R> {
 
     /// Current allowed descriptor metadata only. Inspect's metadata revision
     /// is not a payload SourceRevision and is never forwarded as one.
+    ///
+    /// `under` narrows the roster to Sources under these absolute directories
+    /// (the owner's `path_prefixes`): the whole federated World's roster at
+    /// the Central root is 11.6 MB, its NOW field's 1.3 MB. Empty, or a
+    /// directory not spelled in UTF-8, asks for the whole World; an owner that
+    /// does not narrow answers it, and the visitor selects as before.
     pub(crate) fn visit_source_roster(
         &self,
         timeout: Duration,
+        under: &[PathBuf],
         mut visit: impl FnMut(&str, &Path) -> Result<()>,
     ) -> Result<()> {
         let mut input = self.input.clone();
         input["resources"] = json!(true);
+        let prefixes: Option<Vec<&str>> = under.iter().map(|path| path.to_str()).collect();
+        if let Some(prefixes) = prefixes.filter(|prefixes| !prefixes.is_empty()) {
+            input["path_prefixes"] = json!(prefixes);
+        }
         let reading = call_with_timeout(
             &self.runner,
             &self.executable,
@@ -432,29 +443,95 @@ impl<R: CommandRunner> CentralFileMapProvider<R> {
     }
 }
 impl<R: CommandRunner> CentralFileMapProvider<R> {
+    /// `read_batch_for` bounded, call by call, by `timeout`.
+    pub(crate) fn read_batch_for_with_timeout(
+        &self,
+        sources: &[SourceRef],
+        target: RetrievalTarget,
+        timeout: Duration,
+    ) -> Option<Vec<Result<Option<SourcePoolReading>>>> {
+        self.read_current_batch_for(sources, target, Some(timeout))
+    }
+
+    /// `source_path` for many Sources in one metadata-only owner batch,
+    /// answered in the order asked; each answers as `source_path` would. None
+    /// when the installed Central has no batch read.
+    pub(crate) fn source_paths_batch(&self, sources: &[SourceRef]) -> Option<Vec<Result<PathBuf>>> {
+        let asked: Vec<&SourceRef> = sources.iter().collect();
+        let entries = self.resolve_batch(&asked, false, None)?;
+        Some(
+            sources
+                .iter()
+                .zip(entries)
+                .map(|(source, reading)| {
+                    let reading = reading?;
+                    if reading["source"]["ref"] != source.as_str() {
+                        return Err(invalid("Owner returned another SourceRef")
+                            .with("native_reading", reading.to_string()));
+                    }
+                    if reading["source"]["agent_retrieval_allowed"] != true {
+                        return Err(AikitError::new(
+                            "central.file_map_denied",
+                            "Owner withheld source retrieval",
+                        )
+                        .with("native_reading", reading.to_string()));
+                    }
+                    Ok(PathBuf::from(string(&reading, "path")?))
+                })
+                .collect(),
+        )
+    }
+
     /// `read_current_for` for many Sources through the owner's batch read
-    /// (`resolve-batch`), answered in the order asked. A batch past the
-    /// owner's byte budget defers its tail, which is asked again. None when
-    /// the installed Central has no batch read.
+    /// (`resolve-batch`), answered in the order asked. None when the
+    /// installed Central has no batch read.
     fn read_current_batch_for(
         &self,
         sources: &[SourceRef],
         target: RetrievalTarget,
+        timeout: Option<Duration>,
     ) -> Option<Vec<Result<Option<SourcePoolReading>>>> {
         let privacy = ContextSourcePrivacy::default();
         let mut answers: Vec<Option<Result<Option<SourcePoolReading>>>> =
             Vec::with_capacity(sources.len());
-        let mut pending = Vec::new();
-        for (index, source) in sources.iter().enumerate() {
+        let mut asked = Vec::new();
+        for source in sources {
             if !source.as_str().starts_with("central:source:") {
                 answers.push(Some(Ok(None)));
             } else if let Err(error) = SourcePoolReading::check_target(privacy, target) {
                 answers.push(Some(Err(error)));
             } else {
                 answers.push(None);
-                pending.push(index);
+                asked.push(source);
             }
         }
+        let mut readings = self.resolve_batch(&asked, true, timeout)?.into_iter();
+        Some(
+            sources
+                .iter()
+                .zip(answers)
+                .map(|(source, answer)| {
+                    answer.unwrap_or_else(|| {
+                        let reading = readings.next().expect("one reading per Source asked")?;
+                        decode_reading(source, &reading, privacy)
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// The owner's `resolve-batch` for `sources`, in the order asked: each
+    /// Source's reading, or its refusal in the codes a single `resolve`
+    /// refuses with. A batch past the owner's byte budget defers its tail,
+    /// which is asked again. None when the installed Central has no batch read.
+    fn resolve_batch(
+        &self,
+        sources: &[&SourceRef],
+        content: bool,
+        timeout: Option<Duration>,
+    ) -> Option<Vec<Result<Value>>> {
+        let mut answers: Vec<Option<Result<Value>>> = vec![None; sources.len()];
+        let mut pending: Vec<usize> = (0..sources.len()).collect();
         let mut answered_any = false;
         while !pending.is_empty() {
             let chunk: Vec<usize> = pending
@@ -467,13 +544,14 @@ impl<R: CommandRunner> CentralFileMapProvider<R> {
                 .iter()
                 .map(|&index| sources[index].as_str())
                 .collect::<Vec<_>>());
-            input["content"] = json!(true);
-            let readings = call(
+            input["content"] = json!(content);
+            let readings = call_with_timeout(
                 &self.runner,
                 &self.executable,
                 &self.root,
                 "resolve-batch",
                 &input,
+                timeout,
             )
             .and_then(|reply| {
                 reply["readings"]
@@ -501,7 +579,7 @@ impl<R: CommandRunner> CentralFileMapProvider<R> {
                 if entry["deferred"] == true && entry["source_ref"] == sources[index].as_str() {
                     continue;
                 }
-                answers[index] = Some(batch_entry(&sources[index], entry, privacy));
+                answers[index] = Some(batch_entry(sources[index], entry));
                 progressed = true;
             }
             if !progressed {
@@ -523,12 +601,9 @@ impl<R: CommandRunner> CentralFileMapProvider<R> {
     }
 }
 
-/// One batch entry, read exactly as a single `resolve` reply is.
-fn batch_entry(
-    source: &SourceRef,
-    entry: &Value,
-    privacy: ContextSourcePrivacy,
-) -> Result<Option<SourcePoolReading>> {
+/// One batch entry: its reading, or its refusal as a single `resolve`
+/// refuses.
+fn batch_entry(source: &SourceRef, entry: &Value) -> Result<Value> {
     if entry["source_ref"] != source.as_str() {
         return Err(invalid("Owner answered another SourceRef in its batch")
             .with("native_reading", entry.to_string()));
@@ -547,14 +622,23 @@ fn batch_entry(
         )
         .with("owner_operation", "central.file-map.resolve-batch"));
     }
-    let reading = &entry["reading"];
+    Ok(entry["reading"].clone())
+}
+
+/// One batch reading with its payload, read exactly as a single `resolve`
+/// reply is.
+fn decode_reading(
+    source: &SourceRef,
+    reading: &Value,
+    privacy: ContextSourcePrivacy,
+) -> Result<Option<SourcePoolReading>> {
     if reading["source"]["ref"] != source.as_str() {
         return Err(
-            invalid("Owner returned another SourceRef").with("native_reading", entry.to_string())
+            invalid("Owner returned another SourceRef").with("native_reading", reading.to_string())
         );
     }
     let body = reading["content"].as_str().ok_or_else(|| {
-        invalid("Owner returned no text payload").with("native_reading", entry.to_string())
+        invalid("Owner returned no text payload").with("native_reading", reading.to_string())
     })?;
     Ok(Some(SourcePoolReading {
         material: material(reading, body.into())?,
@@ -591,7 +675,7 @@ impl<R: CommandRunner> SourcePoolProvider for CentralFileMapProvider<R> {
         sources: &[SourceRef],
         target: RetrievalTarget,
     ) -> Option<Vec<Result<Option<SourcePoolReading>>>> {
-        self.read_current_batch_for(sources, target)
+        self.read_current_batch_for(sources, target, None)
     }
     fn search(
         &self,

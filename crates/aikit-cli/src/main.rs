@@ -75,11 +75,16 @@ fn run_cli() -> i32 {
     };
 
     let json_mode = cli.json;
-    let cwd = cli
-        .cwd
-        .clone()
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
+    // A relative -C names a directory from where aikit was invoked. Left
+    // relative, discovery walked its parents down to an empty path and
+    // `aikit -C Work/O-I …` failed with a bare "No such file or directory"
+    // (central.root_context_unavailable).
+    let invoked_from = std::env::current_dir().ok();
+    let cwd = match (cli.cwd.clone(), &invoked_from) {
+        (Some(dir), Some(from)) if dir.is_relative() => from.join(dir),
+        (Some(dir), _) => dir,
+        (None, from) => from.clone().unwrap_or_else(|| PathBuf::from(".")),
+    };
 
     match dispatch(cli, &cwd) {
         Ok(reply) => emit(reply, json_mode),
