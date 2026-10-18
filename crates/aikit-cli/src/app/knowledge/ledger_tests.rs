@@ -65,6 +65,7 @@ fn through_ledger(root: &Path, home: &Path) -> Reading {
         &mut absences,
         true,
         None,
+        None,
     )
     .unwrap();
     Reading {
@@ -271,4 +272,103 @@ fn a_walk_inside_the_racy_window_is_not_kept() {
     let second = through_ledger(root.path(), home.path());
     assert_eq!(walks(), started + 2, "so the next discovery walks again");
     assert_same(&first, &second);
+}
+
+/// A search's discovery deadline stops the walk with an absence naming where
+/// it stopped. The stopped walk is kept for the next search only: an operation
+/// without a deadline walks in full and answers what the bare walk answers.
+#[test]
+fn a_walk_stopped_at_a_search_deadline_answers_only_another_search() {
+    let root = scratch();
+    let home = scratch();
+    fs::create_dir_all(root.path().join("docs")).unwrap();
+    fs::write(
+        root.path().join("docs/one.json"),
+        source("source:demo:one", "one"),
+    )
+    .unwrap();
+    settle();
+    let passed = Some(DiscoveryDeadline {
+        at: std::time::Instant::now(),
+        budget: std::time::Duration::from_secs(5),
+    });
+    let discover = |deadline: Option<DiscoveryDeadline>| {
+        let mut absences = Vec::new();
+        let discovered = discover_material_through_ledger(
+            root.path(),
+            home.path(),
+            &home.path().join("cache"),
+            &mut absences,
+            true,
+            None,
+            deadline,
+        )
+        .unwrap();
+        (discovered, absences)
+    };
+    let before = walks();
+    let (stopped, absences) = discover(passed);
+    assert_eq!(walks(), before + 1);
+    assert!(stopped.deadline_stopped);
+    // On disk the stopped walk carries its own schema, so an aikit that
+    // predates the flag (it reads only v1) walks again instead of reusing it.
+    fn schemas(dir: &std::path::Path, found: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                schemas(&path, found);
+            } else if let Ok(bytes) = fs::read(&path) {
+                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    if let Some(schema) = value["schema"].as_str() {
+                        found.push(schema.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    let mut written = Vec::new();
+    schemas(&home.path().join("cache"), &mut written);
+    assert!(
+        written
+            .iter()
+            .any(|schema| schema == "aikit.knowledge-discovery-ledger/deadline-stopped-v1")
+            && !written
+                .iter()
+                .any(|schema| schema == "aikit.knowledge-discovery-ledger/v1"),
+        "{written:?}"
+    );
+    assert!(stopped.sources.is_empty());
+    assert!(
+        absences
+            .iter()
+            .any(|absence| absence.contains("5.0 s discovery deadline")),
+        "{absences:?}"
+    );
+    let (replayed, replayed_absences) = discover(passed);
+    assert_eq!(
+        walks(),
+        before + 1,
+        "another search replays the stopped walk"
+    );
+    assert!(replayed.deadline_stopped);
+    assert_eq!(replayed_absences, absences);
+    let (full, full_absences) = discover(None);
+    assert_eq!(
+        walks(),
+        before + 2,
+        "an operation without a deadline walks in full"
+    );
+    assert!(!full.deadline_stopped);
+    let expected = bare(root.path(), home.path());
+    assert_eq!(full.sources, expected.sources);
+    assert_eq!(full_absences, expected.absences);
+    assert!(body_of(
+        &Reading {
+            wiki: full.wiki,
+            sources: full.sources,
+            absences: full_absences,
+        },
+        "source:demo:one"
+    )
+    .is_some());
 }

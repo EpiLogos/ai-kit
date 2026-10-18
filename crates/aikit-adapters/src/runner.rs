@@ -244,6 +244,9 @@ pub struct SystemRunner {
     /// shell happened to carry (e.g. `RIPGREP_CONFIG_PATH`).
     env_removed: Vec<String>,
     timeout: Option<std::time::Duration>,
+    /// The end of the operation this runner serves: no command it starts
+    /// outlives it (`with_deadline`).
+    deadline: Option<std::time::Instant>,
     output_limit_bytes: Option<u64>,
     strict_utf8: bool,
     aggregate_output_limit_bytes: Option<usize>,
@@ -301,6 +304,57 @@ impl SystemRunner {
     pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.timeout = Some(timeout);
         self
+    }
+
+    /// Bound every command this runner starts by one operation's deadline:
+    /// each command's budget narrows to the time the operation has left, a
+    /// command still running at the deadline is killed, and none starts after
+    /// it. Both answer as a timeout that names the operation's deadline, so a
+    /// caller with its own deadline answers on time with what it has.
+    #[must_use]
+    pub fn with_deadline(mut self, deadline: std::time::Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    /// The budget one command runs under: its own, narrowed to what the
+    /// operation's deadline leaves, and whether the deadline is what binds.
+    fn deadline_budget(
+        &self,
+        argv: &[String],
+        budget: Option<std::time::Duration>,
+    ) -> Result<(Option<std::time::Duration>, bool)> {
+        let Some(deadline) = self.deadline else {
+            return Ok((budget, false));
+        };
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(AikitError::new(
+                "mux.command_timeout",
+                format!(
+                    "{} was not started: its operation's deadline had passed",
+                    self.deadline_subject(argv)
+                ),
+            )
+            .with("execution_started", "false")
+            .with("deadline", "operation"));
+        }
+        Ok(match budget {
+            Some(budget) if budget <= remaining => (Some(budget), false),
+            _ => (Some(remaining), true),
+        })
+    }
+
+    fn deadline_subject(&self, argv: &[String]) -> String {
+        if self.body_free_diagnostics {
+            return "Selected command".into();
+        }
+        let program = argv.first().map(String::as_str).unwrap_or_default();
+        let name = Path::new(program)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(program);
+        format!("`{name}`")
     }
 
     /// Captured raw bytes per stream. A larger transport is explicit; no output
@@ -414,6 +468,34 @@ impl SystemRunner {
         self.spawn_bounded_with_stdin(command, argv, budget, false)
     }
     fn spawn_bounded_with_stdin(
+        &self,
+        command: &mut std::process::Command,
+        argv: &[String],
+        budget: Option<std::time::Duration>,
+        preserve_stdin: bool,
+    ) -> Result<Output> {
+        let (budget, deadline_bound) = self.deadline_budget(argv, budget)?;
+        let outcome = self.spawn_within(command, argv, budget, preserve_stdin);
+        match outcome {
+            Err(timeout) if deadline_bound && timeout.code() == "mux.command_timeout" => {
+                let mut relabelled = AikitError::new(
+                    "mux.command_timeout",
+                    format!(
+                        "{} did not finish before its operation's deadline",
+                        self.deadline_subject(argv)
+                    ),
+                )
+                .with_io_source_from(&timeout);
+                for (key, value) in timeout.details() {
+                    relabelled = relabelled.with(key.clone(), value.clone());
+                }
+                Err(relabelled.with("deadline", "operation"))
+            }
+            outcome => outcome,
+        }
+    }
+
+    fn spawn_within(
         &self,
         command: &mut std::process::Command,
         argv: &[String],
@@ -1765,7 +1847,13 @@ fn invocation_stream_limit(timeout: std::time::Duration, aggregate_bytes: usize)
 
 impl CommandRunner for SystemRunner {
     fn configured_timeout(&self) -> Option<std::time::Duration> {
-        self.timeout
+        let remaining = self
+            .deadline
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
+        match (self.timeout, remaining) {
+            (Some(timeout), Some(remaining)) => Some(timeout.min(remaining)),
+            (timeout, remaining) => timeout.or(remaining),
+        }
     }
 
     fn run(&self, argv: &[String]) -> Result<Output> {
@@ -4046,6 +4134,50 @@ mod tests {
             .run(&["sleep".into(), "30".into()])
             .expect_err("a 30s sleep cannot finish inside a 120ms budget");
         assert_eq!(error.code(), "mux.command_timeout");
+    }
+
+    #[test]
+    fn an_operation_deadline_cuts_a_running_command_and_starts_none_after_it() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        let runner = SystemRunner::new()
+            .with_timeout(std::time::Duration::from_secs(30))
+            .with_deadline(deadline);
+        assert!(runner
+            .configured_timeout()
+            .is_some_and(|budget| budget <= std::time::Duration::from_millis(300)));
+        let started = std::time::Instant::now();
+        let cut = runner
+            .run(&["sleep".into(), "30".into()])
+            .expect_err("a 30s sleep cannot outlive a 300ms operation deadline");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(cut.code(), "mux.command_timeout");
+        assert_eq!(
+            cut.message(),
+            "`sleep` did not finish before its operation's deadline"
+        );
+        assert_eq!(cut.details()["deadline"], "operation");
+        assert_eq!(cut.details()["execution_started"], "true");
+        let refused = runner
+            .run(&["true".into()])
+            .expect_err("no command starts after the deadline");
+        assert_eq!(refused.code(), "mux.command_timeout");
+        assert_eq!(refused.details()["execution_started"], "false");
+        assert_eq!(runner.configured_timeout(), Some(std::time::Duration::ZERO));
+    }
+
+    #[test]
+    fn a_command_inside_its_operation_deadline_answers_as_before() {
+        let runner = SystemRunner::new()
+            .with_deadline(std::time::Instant::now() + std::time::Duration::from_secs(30));
+        let output = runner.run(&["printf".into(), "kept".into()]).unwrap();
+        assert_eq!(output.stdout, "kept");
+        let own = SystemRunner::new()
+            .with_timeout(std::time::Duration::from_millis(120))
+            .with_deadline(std::time::Instant::now() + std::time::Duration::from_secs(30))
+            .run(&["sleep".into(), "30".into()])
+            .expect_err("the command's own budget still binds first");
+        assert_eq!(own.code(), "mux.command_timeout");
+        assert!(!own.details().contains_key("deadline"), "{own:?}");
     }
 
     #[test]

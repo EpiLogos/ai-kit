@@ -1141,11 +1141,16 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
         Ok(())
     }
 
+    /// Every record file the declared scope reaches. With a native owner
+    /// attached, `admitted` is the owner's Source roster: a file the owner has
+    /// not registered is no Source of this World, so it is not a candidate
+    /// and costs neither an admission check nor candidate capacity.
     fn query_candidates(
         &self,
         scope: &NowFieldScope,
         deadline: std::time::Instant,
         capacity: &mut QueryCapacity,
+        admitted: Option<&std::collections::BTreeMap<PathBuf, SourceRef>>,
     ) -> Result<Vec<PathBuf>> {
         let mut files = BTreeSet::new();
         for include in &scope.includes {
@@ -1248,6 +1253,9 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
                         let relative = path
                             .strip_prefix(&scope.central_root)
                             .expect("declared member");
+                        if admitted.is_some_and(|admitted| !admitted.contains_key(relative)) {
+                            continue;
+                        }
                         if scope.is_authorised(relative) {
                             if !crate::projectcentral::path_agent_readability(
                                 &scope.central_root,
@@ -1356,7 +1364,8 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
                 .includes
                 .retain(|include| include.glob.starts_with("Control/"));
         }
-        let candidates = self.query_candidates(&query_scope, deadline, &mut capacity)?;
+        let admitted = self.native_owner.as_ref().map(|_| &native_sources);
+        let candidates = self.query_candidates(&query_scope, deadline, &mut capacity, admitted)?;
         let mut paths = Vec::new();
         for relative in candidates {
             Self::remaining(deadline)?;
@@ -2183,7 +2192,12 @@ mod tests {
         );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let error = provider
-            .query_candidates(provider.scope(), deadline, &mut QueryCapacity::default())
+            .query_candidates(
+                provider.scope(),
+                deadline,
+                &mut QueryCapacity::default(),
+                None,
+            )
             .unwrap_err();
         assert_eq!(error.code(), "now_field.source_roster_budget");
         assert_eq!(error.details()["capacity"], "pending_directories");
@@ -2213,6 +2227,7 @@ mod tests {
                 provider.scope(),
                 current_deadline,
                 &mut QueryCapacity::default(),
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -2260,7 +2275,12 @@ mod tests {
         );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let error = provider
-            .query_candidates(provider.scope(), deadline, &mut QueryCapacity::default())
+            .query_candidates(
+                provider.scope(),
+                deadline,
+                &mut QueryCapacity::default(),
+                None,
+            )
             .unwrap_err();
         assert_eq!(error.code(), "now_field.source_roster_budget");
         assert_eq!(error.details()["capacity"], "observed_entries");
@@ -2362,7 +2382,12 @@ mod tests {
         );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let error = provider
-            .query_candidates(provider.scope(), deadline, &mut QueryCapacity::default())
+            .query_candidates(
+                provider.scope(),
+                deadline,
+                &mut QueryCapacity::default(),
+                None,
+            )
             .unwrap_err();
         assert_eq!(error.code(), "now_field.source_roster_budget");
         assert_eq!(error.details()["capacity"], "retained_route_bytes");

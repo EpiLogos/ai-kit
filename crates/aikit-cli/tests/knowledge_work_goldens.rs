@@ -37,6 +37,12 @@ fn isolate_bkmr_config() {
         dir.to_string_lossy().into_owned()
     });
     std::env::set_var("AIKIT_BKMR_CONFIG_DIR", dir);
+    // These goldens pin the walk's own bounds and the wording of their
+    // absences on fixture trees. A search's deadline (15 s whole, discovery a
+    // third of it) is a separate bound with its own tests (ledger_tests,
+    // runner); lifted here, or a loaded debug run trips it before the bound a
+    // golden is about.
+    std::env::set_var("AIKIT_KNOWLEDGE_SEARCH_BUDGET_SECS", "600");
 }
 
 /// The minimal canonical wiki for a fixture project: its space and its

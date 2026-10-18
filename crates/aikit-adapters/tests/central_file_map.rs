@@ -965,6 +965,91 @@ fn attached_now_preserves_registered_project_identity_current_payload_and_native
 }
 
 #[test]
+#[ignore = "explicit native integration: requires built/pinned AIKIT_CENTRAL_REAL_BIN and real ripgrep"]
+fn attached_now_queries_only_registered_records_and_an_unregistered_one_is_no_candidate() {
+    use aikit_adapters::now_field::{
+        default_runner, NowFieldScope, NowFieldSourcePoolProvider, ScopeInclude,
+    };
+    use std::sync::Arc;
+    let ctrl = owner();
+    let owned = scratch();
+    let root = fs::canonicalize(owned.path()).unwrap();
+    action(&ctrl, &root, "central.init", json!({}));
+    fs::create_dir_all(root.join("Work/native-now")).unwrap();
+    action(
+        &ctrl,
+        &root,
+        "projectcentral.init",
+        json!({"project":"native-now", "project_id":"native/now"}),
+    );
+    let records = root.join("Work/native-now/ProjectCentral/now/agents");
+    fs::create_dir_all(&records).unwrap();
+    fs::write(
+        records.join("registered.json"),
+        "{\"native-now-query\":\"registered record\"}\n",
+    )
+    .unwrap();
+    let inspected = action(
+        &ctrl,
+        &root,
+        "central.file-map.inspect",
+        json!({"project":"native-now", "resources":false}),
+    );
+    let registered = action(
+        &ctrl,
+        &root,
+        "central.file-map.register",
+        json!({
+            "project":"native-now", "path":"ProjectCentral/now/agents/registered.json",
+            "expected_revision":inspected["revision"],
+        }),
+    );
+    let source = SourceRef::parse(registered["source_ref"].as_str().unwrap()).unwrap();
+    // In scope and on disk, but never registered with the owner: the live
+    // NOW field always holds records the owner's map has not taken in.
+    fs::write(
+        records.join("unregistered.json"),
+        "{\"native-now-query\":\"unregistered record\"}\n",
+    )
+    .unwrap();
+    let central = Arc::new(
+        CentralFileMapProvider::connect(
+            SystemRunner::new().with_timeout(Duration::from_secs(30)),
+            &ctrl,
+            &root,
+            None,
+        )
+        .unwrap(),
+    );
+    let scope = NowFieldScope {
+        central_root: root.clone(),
+        includes: vec![ScopeInclude {
+            glob: "Work/native-now/ProjectCentral/now/**/*.json".into(),
+            family: "projectcentral",
+        }],
+        excludes: vec![],
+        pruned: vec![],
+    };
+    let now = NowFieldSourcePoolProvider::connect(
+        default_runner(&root),
+        aikit_adapters::ripgrep::executable(),
+        scope,
+    )
+    .unwrap()
+    .with_native_owner(central);
+    let hits = now
+        .search(
+            "native-now-query",
+            aikit_core::knowledge_source_pool::SourceSearchMode::Fulltext,
+            &[],
+            8,
+        )
+        .expect("an unregistered record is no candidate, never a failed query");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].source, source);
+}
+
+#[test]
 #[ignore = "explicit native roster capacity qualification: pinned ctrl and real ripgrep"]
 fn selected_now_roster_is_bounded_without_capping_unselected_world_sources() {
     use aikit_adapters::now_field::{

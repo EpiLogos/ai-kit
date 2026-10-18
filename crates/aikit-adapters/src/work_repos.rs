@@ -646,6 +646,10 @@ fn provider() -> ProviderRef {
     ProviderRef::parse(WORK_REPOS_PROVIDER_REF).expect("static ref")
 }
 
+/// At most this many Work repos are searched at once (each ripgrep runs its
+/// own two threads).
+const MAX_PARALLEL_REPO_SEARCHES: usize = 4;
+
 /// Glob class for a pattern letter that is special inside a ripgrep glob.
 fn is_glob_metachar(ch: char) -> bool {
     matches!(ch, '*' | '?' | '[' | ']' | '{' | '}')
@@ -663,16 +667,36 @@ fn glob_escape(text: &str) -> String {
 }
 
 /// An escape of one regex alternation arm: every term is a literal, whatever
-/// characters it carries.
+/// characters it carries. Only ripgrep's regex metacharacters are escaped;
+/// every other character is already itself. Escaping more is not harmless:
+/// ripgrep refuses an escaped non-ASCII character (`\–` is a parse error) and
+/// reads `\<` and `\>` as word boundaries.
 fn regex_escape(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for ch in text.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            escaped.push(ch);
-        } else {
+        if matches!(
+            ch,
+            '\\' | '.'
+                | '+'
+                | '*'
+                | '?'
+                | '('
+                | ')'
+                | '|'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '^'
+                | '$'
+                | '#'
+                | '&'
+                | '-'
+                | '~'
+        ) {
             escaped.push('\\');
-            escaped.push(ch);
         }
+        escaped.push(ch);
     }
     escaped
 }
@@ -964,7 +988,10 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
         Ok(attachment)
     }
 
-    pub fn for_project(&self, project_id: &str) -> Result<impl SourcePoolProvider + '_> {
+    pub fn for_project(&self, project_id: &str) -> Result<impl SourcePoolProvider + '_>
+    where
+        R: Sync,
+    {
         let attachment = self.attachment(project_id)?.ok_or_else(|| {
             AikitError::new(
                 "work_repos.source_out_of_scope",
@@ -1358,17 +1385,46 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
         Ok(hits)
     }
 
-    fn run_search(&self, query: &str, tags: &[String], limit: usize) -> Result<Vec<SourceHit>> {
+    fn run_search(&self, query: &str, tags: &[String], limit: usize) -> Result<Vec<SourceHit>>
+    where
+        R: Sync,
+    {
         let terms = query_terms(query);
         if terms.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
+        // Every repo answers on its own terms, so the repos are asked side by
+        // side; their answers are merged in project order and the first
+        // failure in that order stands, exactly as one repo after another.
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let answers: Vec<std::sync::Mutex<Option<Result<Vec<SourceHit>>>>> = self
+            .projects
+            .iter()
+            .map(|_| std::sync::Mutex::new(None))
+            .collect();
+        std::thread::scope(|scope| {
+            for _ in 0..self.projects.len().min(MAX_PARALLEL_REPO_SEARCHES) {
+                scope.spawn(|| loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(project) = self.projects.get(index) else {
+                        break;
+                    };
+                    let answer = self.search_project(project, &terms, tags, limit);
+                    *answers[index]
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(answer);
+                });
+            }
+        });
         let mut merged: Vec<SourceHit> = Vec::new();
-        for project in &self.projects {
-            // Every repo answers on its own terms; the merge is bounded by
-            // limit × projects and the final ranking decides what surfaces.
-            let hits = self.search_project(project, &terms, tags, limit)?;
-            merged.extend(hits);
+        for answer in answers {
+            // The merge is bounded by limit × projects and the final ranking
+            // decides what surfaces.
+            let answer = answer
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .expect("every Work repo was asked");
+            merged.extend(answer?);
         }
         merged.sort_by(|left, right| {
             right
@@ -1387,7 +1443,7 @@ struct WorkProjectView<'a, R> {
     project: &'a WorkRepoProject,
 }
 
-impl<R: CommandRunner> SourcePoolProvider for WorkProjectView<'_, R> {
+impl<R: CommandRunner + Sync> SourcePoolProvider for WorkProjectView<'_, R> {
     fn capabilities(&self) -> SourceProviderCapabilities {
         self.owner.capabilities()
     }
@@ -1438,7 +1494,7 @@ impl<R: CommandRunner> SourcePoolProvider for WorkProjectView<'_, R> {
     }
 }
 
-impl<R: CommandRunner> SourcePoolProvider for WorkReposSourcePoolProvider<R> {
+impl<R: CommandRunner + Sync> SourcePoolProvider for WorkReposSourcePoolProvider<R> {
     fn capabilities(&self) -> SourceProviderCapabilities {
         SourceProviderCapabilities {
             provider: provider(),
@@ -1745,6 +1801,41 @@ mod tests {
         assert_eq!(hits[0].provider.as_str(), WORK_REPOS_PROVIDER_REF);
         assert!(hits[0].tags.contains(&"work-repos".to_string()));
         assert!(hits.iter().all(|hit| hit.title.contains('.')));
+    }
+
+    #[test]
+    fn a_term_escapes_only_regex_metacharacters() {
+        assert_eq!(regex_escape("R1–R5"), "R1–R5");
+        assert_eq!(regex_escape("café"), "café");
+        assert_eq!(regex_escape("a<b>c"), "a<b>c");
+        assert_eq!(
+            regex_escape(r"cap.aikit.continuity|#388(x)\\"),
+            r"cap\.aikit\.continuity\|\#388\(x\)\\\\"
+        );
+    }
+
+    #[test]
+    fn a_query_with_non_ascii_terms_reaches_ripgrep_and_matches() {
+        let temp = native_scratch();
+        let root = temp.path();
+        let provider = WorkReposSourcePoolProvider::connect(
+            native_matches(
+                root,
+                &[
+                    ("docs/ranges.md", 2, "the R1–R5 ladder"),
+                    ("docs/menu.md", 4, "a café menu"),
+                    ("docs/other.md", 1, "R1-R5 with a plain hyphen"),
+                ],
+            ),
+            crate::ripgrep::executable(),
+            vec![project(root)],
+        );
+        let hits = provider
+            .search("R1–R5 café", SourceSearchMode::Fulltext, &[], 10)
+            .expect("ripgrep accepts a pattern carrying an en dash and an accented letter");
+        let mut titles: Vec<&str> = hits.iter().map(|hit| hit.title.as_str()).collect();
+        titles.sort_unstable();
+        assert_eq!(titles, vec!["docs/menu.md", "docs/ranges.md"], "{hits:?}");
     }
 
     #[test]

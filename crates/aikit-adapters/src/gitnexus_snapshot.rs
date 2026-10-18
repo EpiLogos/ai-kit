@@ -2,7 +2,7 @@
 //! a bounded, quiescent private copy; never forward the owner's graph or registry.
 use aikit_core::{AikitError, Result};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -64,25 +64,17 @@ impl Snapshot {
         let home = directory.path().join("home");
         fs::create_dir(&snapshot).map_err(failure)?;
         fs::create_dir(&home).map_err(failure)?;
-        let mut reader = fs::File::open(&source).map_err(failure)?;
-        let mut writer = fs::File::create(snapshot.join("lbug")).map_err(failure)?;
-        let mut buffer = vec![0; 1024 * 1024];
-        let mut copied = 0u64;
-        loop {
-            if began.elapsed() > Duration::from_secs(5) {
-                return Err(failure("graph snapshot exceeded five seconds"));
-            }
-            let count = reader.read(&mut buffer).map_err(failure)?;
-            if count == 0 {
-                break;
-            }
-            copied += count as u64;
-            if copied > 512 * 1024 * 1024 {
-                return Err(failure("graph grew beyond 512 MiB"));
-            }
-            writer.write_all(&buffer[..count]).map_err(failure)?;
+        // The platform copy clones the graph where the filesystem can (APFS
+        // clonefile, a reflink elsewhere), so a query no longer rewrites
+        // hundreds of MiB; the bounds and the quiescence check below still
+        // decide whether the copy stands.
+        let copied = fs::copy(&source, snapshot.join("lbug")).map_err(failure)?;
+        if copied > 512 * 1024 * 1024 {
+            return Err(failure("graph grew beyond 512 MiB"));
         }
-        drop(writer);
+        if began.elapsed() > Duration::from_secs(5) {
+            return Err(failure("graph snapshot exceeded five seconds"));
+        }
         active_sidecars(&storage)?;
         let after = fs::metadata(&source).map_err(failure)?;
         if before.len() != copied

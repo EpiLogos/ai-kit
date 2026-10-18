@@ -229,7 +229,7 @@ pub fn split_tag_filters(query: &str) -> (String, Vec<String>) {
 }
 
 pub struct SourcePoolBinding<'a> {
-    pub provider: &'a dyn SourcePoolProvider,
+    pub provider: &'a (dyn SourcePoolProvider + Sync),
     pub material: &'a [SourceMaterial],
 }
 
@@ -342,7 +342,7 @@ pub struct KnowledgeApplication<'a> {
     sources: Vec<SourcePoolBinding<'a>>,
     /// One code-index provider per declared project; each answers only its
     /// own references, so search and relations fan out across all of them.
-    code: Vec<&'a dyn CodeIndexProvider>,
+    code: Vec<&'a (dyn CodeIndexProvider + Sync)>,
     project_map: Option<&'a ProjectMap>,
     /// Scoped-reply attribution: the reply's own Project display plus the
     /// ref → owning-Project maps for compiled authored edges, folder
@@ -393,6 +393,156 @@ impl<'a> ScopedAttribution<'a> {
     }
 }
 
+/// At most this many code indexes are asked at once. Each GitNexus query is
+/// its own heavy process over a private copy of a repository's graph.
+const MAX_PARALLEL_CODE_SEARCHES: usize = 4;
+
+/// One provider's contribution to a subject search: its hits, and its
+/// absences in the order it met them (`true` when the absence is disclosed at
+/// most once across the whole search).
+struct ProviderOutcome {
+    hits: Vec<KnowledgeSearchHit>,
+    absences: Vec<(String, bool)>,
+}
+
+/// Ask one SourcePool for a subject and admit each hit against its current
+/// owner reading.
+fn pool_outcome(
+    binding: &SourcePoolBinding<'_>,
+    source_query: &str,
+    tag_filter: &[String],
+    limit: usize,
+    target: RetrievalTarget,
+) -> ProviderOutcome {
+    let mut outcome = ProviderOutcome {
+        hits: Vec::new(),
+        absences: Vec::new(),
+    };
+    let status = binding.provider.status();
+    if !status.available {
+        outcome.absences.push((
+            format!("SourcePool search unavailable from {}", status.provider),
+            false,
+        ));
+        return outcome;
+    }
+    if !tag_filter.is_empty() && !status.capabilities.tags {
+        // Dropping the filter and searching anyway would answer a
+        // narrower question than the one that was asked, silently.
+        outcome.absences.push((
+            format!(
+                "SourcePool provider {} cannot filter by tag; the tag filter [{}] was not \
+                 applied and this provider was not searched",
+                status.provider,
+                tag_filter.join(", ")
+            ),
+            false,
+        ));
+        return outcome;
+    }
+    let mode = if status.capabilities.hybrid {
+        SourceSearchMode::Hybrid
+    } else {
+        SourceSearchMode::Fulltext
+    };
+    match binding
+        .provider
+        .search(source_query, mode, tag_filter, limit)
+    {
+        Ok(provider_hits) => {
+            for hit in provider_hits {
+                let held = binding
+                    .material
+                    .iter()
+                    .find(|material| material.binding.source == hit.source);
+                let admitted = current_source_material(binding, &hit.source, held, target)
+                    .and_then(|current| validate_source_hit_basis(&hit, held, &current));
+                if let Err(error) = admitted {
+                    // No denied title, path, SourceRef or query-match
+                    // detail is an absence. Selected reads retain the
+                    // full native cause through the same validator.
+                    outcome.absences.push((
+                        format!(
+                            "SourcePool current origin unavailable or withheld ({})",
+                            error.code()
+                        ),
+                        true,
+                    ));
+                    continue;
+                }
+                let resource = ResourceRef::parse(hit.source.as_str())
+                    .expect("SourceRef is a valid ResourceRef");
+                outcome.hits.push(KnowledgeSearchHit {
+                    address: KnowledgeAddress::Source(hit.source),
+                    resource,
+                    kind: ResourceKind::KnowledgeSource,
+                    label: hit.title,
+                    score: hit.score.unwrap_or(0.5),
+                    snippet: hit.snippet,
+                    provider: hit.provider,
+                    authority: SourceAuthority::Observed,
+                    corroborated_by: Vec::new(),
+                    ranking: None,
+                });
+            }
+        }
+        Err(error) => {
+            outcome.absences.push((
+                format!(
+                    "SourcePool search degraded for {}: {}",
+                    status.provider,
+                    error.message()
+                ),
+                true,
+            ));
+        }
+    }
+    outcome
+}
+
+/// Ask one code index for a subject.
+fn code_outcome(
+    code: &(dyn CodeIndexProvider + Sync),
+    query: &str,
+    limit: usize,
+) -> ProviderOutcome {
+    let mut outcome = ProviderOutcome {
+        hits: Vec::new(),
+        absences: Vec::new(),
+    };
+    let status = code.status();
+    if status.available && status.indexed && status.capabilities.search {
+        match code.search(query, limit) {
+            Ok(code_hits) => {
+                outcome
+                    .hits
+                    .extend(code_hits.into_iter().map(|hit| KnowledgeSearchHit {
+                        address: KnowledgeAddress::Code(hit.reference.clone()),
+                        resource: hit.resource,
+                        kind: ResourceKind::CodeReference,
+                        label: hit.title,
+                        score: hit.score.unwrap_or(0.5),
+                        snippet: hit.snippet,
+                        provider: hit.provider,
+                        authority: SourceAuthority::Derived,
+                        corroborated_by: Vec::new(),
+                        ranking: None,
+                    }))
+            }
+            Err(error) => outcome.absences.push((
+                format!("ProjectMap code search degraded: {}", error.message()),
+                false,
+            )),
+        }
+    } else {
+        outcome.absences.push((
+            "ProjectMap code search unavailable: index absent or degraded".into(),
+            false,
+        ));
+    }
+    outcome
+}
+
 impl<'a> KnowledgeApplication<'a> {
     pub fn new(context: FamiliarityContext) -> Self {
         Self {
@@ -426,7 +576,7 @@ impl<'a> KnowledgeApplication<'a> {
     #[must_use]
     pub fn with_source_pool(
         mut self,
-        provider: &'a dyn SourcePoolProvider,
+        provider: &'a (dyn SourcePoolProvider + Sync),
         material: &'a [SourceMaterial],
     ) -> Self {
         self.sources.push(SourcePoolBinding { provider, material });
@@ -434,7 +584,7 @@ impl<'a> KnowledgeApplication<'a> {
     }
 
     #[must_use]
-    pub fn with_code(mut self, provider: &'a dyn CodeIndexProvider) -> Self {
+    pub fn with_code(mut self, provider: &'a (dyn CodeIndexProvider + Sync)) -> Self {
         self.code.push(provider);
         self
     }
@@ -776,116 +926,58 @@ impl<'a> KnowledgeApplication<'a> {
         // did, left that facility implemented, capability-detected and never
         // reachable from a query.
         let (source_query, tag_filter) = split_tag_filters(query);
-        for binding in &self.sources {
-            let status = binding.provider.status();
-            if !status.available {
-                absences.push(format!(
-                    "SourcePool search unavailable from {}",
-                    status.provider
-                ));
-                continue;
+        // Every SourcePool and code index answers on its own, so they are
+        // asked side by side: a search costs its slowest provider, not the sum
+        // of them. Each provider's outcome is then applied in the declared
+        // order, so hits and absences are exactly those of asking one
+        // provider after another.
+        let target = self.retrieval_target;
+        let codes = &self.code;
+        let code_slots: Vec<std::sync::Mutex<Option<ProviderOutcome>>> =
+            codes.iter().map(|_| std::sync::Mutex::new(None)).collect();
+        let next_code = std::sync::atomic::AtomicUsize::new(0);
+        let pool_outcomes: Vec<ProviderOutcome> = std::thread::scope(|scope| {
+            for _ in 0..codes.len().min(MAX_PARALLEL_CODE_SEARCHES) {
+                scope.spawn(|| loop {
+                    let index = next_code.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(code) = codes.get(index) else {
+                        break;
+                    };
+                    let outcome = code_outcome(*code, query, limit);
+                    *code_slots[index]
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outcome);
+                });
             }
-            if !tag_filter.is_empty() && !status.capabilities.tags {
-                // Dropping the filter and searching anyway would answer a
-                // narrower question than the one that was asked, silently.
-                absences.push(format!(
-                    "SourcePool provider {} cannot filter by tag; the tag filter [{}] was not \
-                     applied and this provider was not searched",
-                    status.provider,
-                    tag_filter.join(", ")
-                ));
-                continue;
-            }
-            let mode = if status.capabilities.hybrid {
-                SourceSearchMode::Hybrid
-            } else {
-                SourceSearchMode::Fulltext
-            };
-            match binding
-                .provider
-                .search(&source_query, mode, &tag_filter, limit)
-            {
-                Ok(provider_hits) => {
-                    for hit in provider_hits {
-                        let held = binding
-                            .material
-                            .iter()
-                            .find(|material| material.binding.source == hit.source);
-                        let admitted = current_source_material(
-                            binding,
-                            &hit.source,
-                            held,
-                            self.retrieval_target,
-                        )
-                        .and_then(|current| validate_source_hit_basis(&hit, held, &current));
-                        if let Err(error) = admitted {
-                            // No denied title, path, SourceRef or query-match
-                            // detail is an absence. Selected reads retain the
-                            // full native cause through the same validator.
-                            let absence = format!(
-                                "SourcePool current origin unavailable or withheld ({})",
-                                error.code()
-                            );
-                            if !absences.contains(&absence) {
-                                absences.push(absence);
-                            }
-                            continue;
-                        }
-                        let resource = ResourceRef::parse(hit.source.as_str())
-                            .expect("SourceRef is a valid ResourceRef");
-                        hits.push(KnowledgeSearchHit {
-                            address: KnowledgeAddress::Source(hit.source),
-                            resource,
-                            kind: ResourceKind::KnowledgeSource,
-                            label: hit.title,
-                            score: hit.score.unwrap_or(0.5),
-                            snippet: hit.snippet,
-                            provider: hit.provider,
-                            authority: SourceAuthority::Observed,
-                            corroborated_by: Vec::new(),
-                            ranking: None,
-                        });
-                    }
+            let pools: Vec<_> = self
+                .sources
+                .iter()
+                .map(|binding| {
+                    let (source_query, tag_filter) = (source_query.as_str(), tag_filter.as_slice());
+                    scope.spawn(move || {
+                        pool_outcome(binding, source_query, tag_filter, limit, target)
+                    })
+                })
+                .collect();
+            pools
+                .into_iter()
+                .map(|pool| {
+                    pool.join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                })
+                .collect()
+        });
+        let code_outcomes = code_slots.into_iter().map(|slot| {
+            slot.into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .expect("every code index was asked")
+        });
+        for outcome in pool_outcomes.into_iter().chain(code_outcomes) {
+            hits.extend(outcome.hits);
+            for (absence, once) in outcome.absences {
+                if !once || !absences.contains(&absence) {
+                    absences.push(absence);
                 }
-                Err(error) => {
-                    let absence = format!(
-                        "SourcePool search degraded for {}: {}",
-                        status.provider,
-                        error.message()
-                    );
-                    if !absences.contains(&absence) {
-                        absences.push(absence);
-                    }
-                }
-            }
-        }
-
-        for code in &self.code {
-            let status = code.status();
-            if status.available && status.indexed && status.capabilities.search {
-                match code.search(query, limit) {
-                    Ok(code_hits) => {
-                        hits.extend(code_hits.into_iter().map(|hit| KnowledgeSearchHit {
-                            address: KnowledgeAddress::Code(hit.reference.clone()),
-                            resource: hit.resource,
-                            kind: ResourceKind::CodeReference,
-                            label: hit.title,
-                            score: hit.score.unwrap_or(0.5),
-                            snippet: hit.snippet,
-                            provider: hit.provider,
-                            authority: SourceAuthority::Derived,
-                            corroborated_by: Vec::new(),
-                            ranking: None,
-                        }))
-                    }
-                    Err(error) => absences.push(format!(
-                        "ProjectMap code search degraded: {}",
-                        error.message()
-                    )),
-                }
-            } else {
-                absences
-                    .push("ProjectMap code search unavailable: index absent or degraded".into());
             }
         }
         if self.code.is_empty() {
