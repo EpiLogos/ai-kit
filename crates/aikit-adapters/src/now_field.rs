@@ -57,6 +57,9 @@ struct QueryCapacity {
     seen_states: usize,
     observed_entries: usize,
     selected_native: usize,
+    /// Authorised record files the owner's roster does not register: not
+    /// Sources of this World, so not searched (see `query_candidates`).
+    unregistered: usize,
 }
 
 impl QueryCapacity {
@@ -1254,6 +1257,9 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
                             .strip_prefix(&scope.central_root)
                             .expect("declared member");
                         if admitted.is_some_and(|admitted| !admitted.contains_key(relative)) {
+                            if scope.is_authorised(relative) {
+                                capacity.unregistered += 1;
+                            }
                             continue;
                         }
                         if scope.is_authorised(relative) {
@@ -1366,6 +1372,18 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
         }
         let admitted = self.native_owner.as_ref().map(|_| &native_sources);
         let candidates = self.query_candidates(&query_scope, deadline, &mut capacity, admitted)?;
+        if candidates.is_empty() && capacity.unregistered > 0 {
+            // Every record here is outside the owner's roster: answering with
+            // nothing would silently empty the horizon, so the pool says why.
+            return Err(AikitError::new(
+                "now_field.no_registered_source",
+                format!(
+                    "{} NOW record file(s) in this scope are not registered Sources of this World \
+                     and the owner's roster registers none here; none was searched",
+                    capacity.unregistered
+                ),
+            ));
+        }
         let mut paths = Vec::new();
         for relative in candidates {
             Self::remaining(deadline)?;
