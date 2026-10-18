@@ -1157,6 +1157,19 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
         capacity: &mut QueryCapacity,
         admitted: Option<&std::collections::BTreeMap<PathBuf, SourceRef>>,
     ) -> Result<Vec<PathBuf>> {
+        if let Some(admitted) = admitted {
+            // With a native owner, the candidates are its Source roster: every
+            // registered record the scope authorises, readable and present.
+            // That is the set the walk would find, without visiting every
+            // directory of the declared families — at the Central root those
+            // hold the clearings' temp trees, past any seen-state capacity.
+            let from_roster = self.roster_candidates(scope, deadline, capacity, admitted)?;
+            if !from_roster.is_empty() {
+                return Ok(from_roster);
+            }
+            // The roster registers nothing here: walk, so a scope of
+            // unregistered records says so rather than answering empty.
+        }
         let mut files = BTreeSet::new();
         for include in &scope.includes {
             let segments: Vec<_> = include.glob.split('/').collect();
@@ -1287,6 +1300,41 @@ impl<R: CommandRunner> NowFieldSourcePoolProvider<R> {
             }
         }
         Ok(files.into_iter().collect())
+    }
+
+    /// The owner's registered records that `scope` authorises, are readable
+    /// to agents and exist as files, in roster (path) order.
+    fn roster_candidates(
+        &self,
+        scope: &NowFieldScope,
+        deadline: std::time::Instant,
+        capacity: &mut QueryCapacity,
+        admitted: &std::collections::BTreeMap<PathBuf, SourceRef>,
+    ) -> Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+        for relative in admitted.keys() {
+            Self::remaining(deadline)?;
+            if !scope.is_authorised(relative) {
+                continue;
+            }
+            match std::fs::metadata(scope.central_root.join(relative)) {
+                Ok(metadata) if metadata.is_file() => {}
+                _ => continue,
+            }
+            if !crate::projectcentral::path_agent_readability(&scope.central_root, relative)
+                .map_err(|error| {
+                    Self::io_failure("could not observe NOW member admission", error)
+                })?
+            {
+                continue;
+            }
+            if files.len() >= MAX_ROSTER_FILES {
+                return Err(QueryCapacity::failure("candidate_files"));
+            }
+            capacity.retain_path(relative)?;
+            files.push(relative.clone());
+        }
+        Ok(files)
     }
 
     fn run_search(
@@ -2185,6 +2233,54 @@ mod tests {
         assert_eq!(status.version.as_deref(), Some("ripgrep 15.2.0"));
         assert!(status.detail.contains("3 include families"));
         assert!(status.detail.contains("prunes 1 subtree(s)"));
+    }
+
+    #[test]
+    fn a_roster_names_the_candidates_without_walking_the_scope() {
+        let (temp, mut declared) = native_scope();
+        declared.includes = vec![ScopeInclude {
+            glob: "Control/agents/now/**/*.json".into(),
+            family: "now",
+        }];
+        let now = temp.path().join("Control/agents/now");
+        // More directories than the walk may visit (the Central root's
+        // clearings trees tripped seen_states): the roster needs none of them.
+        for index in 0..MAX_SEEN_STATES + 8 {
+            std::fs::create_dir_all(now.join(format!("clearings/c{index:05}"))).unwrap();
+        }
+        std::fs::create_dir_all(now.join("returns")).unwrap();
+        std::fs::write(now.join("returns/kept.json"), "{}").unwrap();
+        std::fs::write(now.join("returns/unregistered.json"), "{}").unwrap();
+        let provider = NowFieldSourcePoolProvider::connect(
+            default_runner(temp.path()),
+            crate::ripgrep::executable(),
+            declared,
+        )
+        .unwrap();
+        let source = |relative: &str| {
+            SourceRef::parse(format!("central:source:control:root:{relative}")).unwrap()
+        };
+        let mut roster = std::collections::BTreeMap::new();
+        for relative in [
+            "Control/agents/now/returns/kept.json",
+            "Control/agents/now/returns/gone.json",
+            "Control/user/outside-the-scope.json",
+        ] {
+            roster.insert(PathBuf::from(relative), source(relative));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let candidates = provider
+            .query_candidates(
+                provider.scope(),
+                deadline,
+                &mut QueryCapacity::default(),
+                Some(&roster),
+            )
+            .unwrap();
+        assert_eq!(
+            candidates,
+            vec![PathBuf::from("Control/agents/now/returns/kept.json")]
+        );
     }
 
     #[test]

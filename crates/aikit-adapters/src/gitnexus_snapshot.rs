@@ -36,9 +36,15 @@ impl Snapshot {
         let source = storage.join("lbug");
         let before = fs::metadata(&source).map_err(failure)?;
         if !before.is_file() || before.len() > 512 * 1024 * 1024 {
-            return Err(failure(
-                "existing graph must be a regular file no larger than 512 MiB for an isolated read",
-            ));
+            // A clone would make the snapshot free (APFS), but GitNexus still
+            // has to open the graph: measured 18 Oct, a 1.6 GB graph (O-I's)
+            // ran past the search's whole deadline, so the bound stays and the
+            // refusal names the size — the index is what wants trimming.
+            return Err(failure(format!(
+                "existing graph must be a regular file no larger than 512 MiB for an isolated read \
+                 (this one is {} MiB; re-index with exclusions to bring it under)",
+                before.len() / (1024 * 1024)
+            )));
         }
         let metadata_path = if storage.join("gitnexus.json").exists() {
             storage.join("gitnexus.json")
