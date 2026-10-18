@@ -87,12 +87,7 @@ fn call_with_timeout<R: CommandRunner>(
     })?;
     if !output.ok() || envelope["ok"] != true {
         return Err(AikitError::new(
-            match envelope["error"]["code"].as_str() {
-                Some("central.file_map_not_found") => "central.file_map_not_found",
-                Some("central.file_map_denied") => "central.file_map_denied",
-                Some("central.file_map_conflict") => "central.file_map_conflict",
-                _ => "central.file_map_unavailable",
-            },
+            refusal_code(envelope["error"]["code"].as_str()),
             envelope["error"]["message"]
                 .as_str()
                 .unwrap_or("Central map operation failed"),
@@ -119,6 +114,31 @@ fn call_with_timeout<R: CommandRunner>(
 }
 fn invalid(message: impl Into<String>) -> AikitError {
     AikitError::new("central.file_map_invalid", message)
+}
+/// The owner's refusal code, as AIKit names it.
+fn refusal_code(native: Option<&str>) -> &'static str {
+    match native {
+        Some("central.file_map_not_found") => "central.file_map_not_found",
+        Some("central.file_map_denied") => "central.file_map_denied",
+        Some("central.file_map_conflict") => "central.file_map_conflict",
+        _ => "central.file_map_unavailable",
+    }
+}
+/// At most this many Sources go to one `resolve-batch`: the owner's bound.
+const RESOLVE_BATCH_SOURCES: usize = 256;
+/// Whether a refusal is a Central that has no `resolve-batch` (before
+/// 18 Oct 2026): the caller then reads one Source at a time.
+fn batch_unknown(error: &AikitError) -> bool {
+    error
+        .details()
+        .get("native_error")
+        .and_then(|native| serde_json::from_str::<Value>(native).ok())
+        .is_some_and(|native| {
+            native["code"] == "invalid_input"
+                && native["message"]
+                    .as_str()
+                    .is_some_and(|message| message.starts_with("Unknown Action"))
+        })
 }
 fn string<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
     v[key]
@@ -411,6 +431,137 @@ impl<R: CommandRunner> CentralFileMapProvider<R> {
         }))
     }
 }
+impl<R: CommandRunner> CentralFileMapProvider<R> {
+    /// `read_current_for` for many Sources through the owner's batch read
+    /// (`resolve-batch`), answered in the order asked. A batch past the
+    /// owner's byte budget defers its tail, which is asked again. None when
+    /// the installed Central has no batch read.
+    fn read_current_batch_for(
+        &self,
+        sources: &[SourceRef],
+        target: RetrievalTarget,
+    ) -> Option<Vec<Result<Option<SourcePoolReading>>>> {
+        let privacy = ContextSourcePrivacy::default();
+        let mut answers: Vec<Option<Result<Option<SourcePoolReading>>>> =
+            Vec::with_capacity(sources.len());
+        let mut pending = Vec::new();
+        for (index, source) in sources.iter().enumerate() {
+            if !source.as_str().starts_with("central:source:") {
+                answers.push(Some(Ok(None)));
+            } else if let Err(error) = SourcePoolReading::check_target(privacy, target) {
+                answers.push(Some(Err(error)));
+            } else {
+                answers.push(None);
+                pending.push(index);
+            }
+        }
+        let mut answered_any = false;
+        while !pending.is_empty() {
+            let chunk: Vec<usize> = pending
+                .iter()
+                .take(RESOLVE_BATCH_SOURCES)
+                .copied()
+                .collect();
+            let mut input = self.input.clone();
+            input["source_refs"] = json!(chunk
+                .iter()
+                .map(|&index| sources[index].as_str())
+                .collect::<Vec<_>>());
+            input["content"] = json!(true);
+            let readings = call(
+                &self.runner,
+                &self.executable,
+                &self.root,
+                "resolve-batch",
+                &input,
+            )
+            .and_then(|reply| {
+                reply["readings"]
+                    .as_array()
+                    .filter(|readings| readings.len() == chunk.len())
+                    .cloned()
+                    .ok_or_else(|| {
+                        invalid("Owner answered another number of readings than Sources asked")
+                            .with("native_reading", reply.to_string())
+                    })
+            });
+            let readings = match readings {
+                Ok(readings) => readings,
+                Err(error) if !answered_any && batch_unknown(&error) => return None,
+                Err(error) => {
+                    for &index in &chunk {
+                        answers[index] = Some(Err(error.clone()));
+                    }
+                    pending.retain(|index| answers[*index].is_none());
+                    continue;
+                }
+            };
+            let mut progressed = false;
+            for (&index, entry) in chunk.iter().zip(&readings) {
+                if entry["deferred"] == true && entry["source_ref"] == sources[index].as_str() {
+                    continue;
+                }
+                answers[index] = Some(batch_entry(&sources[index], entry, privacy));
+                progressed = true;
+            }
+            if !progressed {
+                // An owner that answers nothing would be asked forever.
+                let error = invalid("Owner deferred every Source of a batch");
+                for &index in &chunk {
+                    answers[index] = Some(Err(error.clone()));
+                }
+            }
+            answered_any = true;
+            pending.retain(|index| answers[*index].is_none());
+        }
+        Some(
+            answers
+                .into_iter()
+                .map(|answer| answer.expect("every Source is answered"))
+                .collect(),
+        )
+    }
+}
+
+/// One batch entry, read exactly as a single `resolve` reply is.
+fn batch_entry(
+    source: &SourceRef,
+    entry: &Value,
+    privacy: ContextSourcePrivacy,
+) -> Result<Option<SourcePoolReading>> {
+    if entry["source_ref"] != source.as_str() {
+        return Err(invalid("Owner answered another SourceRef in its batch")
+            .with("native_reading", entry.to_string()));
+    }
+    if let Some(refusal) = entry.get("refusal") {
+        return Err(AikitError::new(
+            refusal_code(refusal["code"].as_str()),
+            refusal["message"]
+                .as_str()
+                .unwrap_or("Central map operation failed"),
+        )
+        .with("native_error", refusal.to_string())
+        .with(
+            "native_error_code",
+            refusal["code"].as_str().unwrap_or_default(),
+        )
+        .with("owner_operation", "central.file-map.resolve-batch"));
+    }
+    let reading = &entry["reading"];
+    if reading["source"]["ref"] != source.as_str() {
+        return Err(
+            invalid("Owner returned another SourceRef").with("native_reading", entry.to_string())
+        );
+    }
+    let body = reading["content"].as_str().ok_or_else(|| {
+        invalid("Owner returned no text payload").with("native_reading", entry.to_string())
+    })?;
+    Ok(Some(SourcePoolReading {
+        material: material(reading, body.into())?,
+        privacy,
+    }))
+}
+
 impl<R: CommandRunner> SourcePoolProvider for CentralFileMapProvider<R> {
     fn capabilities(&self) -> SourceProviderCapabilities {
         self.capabilities.clone()
@@ -434,6 +585,13 @@ impl<R: CommandRunner> SourcePoolProvider for CentralFileMapProvider<R> {
         // Nonowners decline before the owning target predicate. Native errors
         // and denials stay on this exact owner route without replica fallback.
         self.read_current_for(source, target, None)
+    }
+    fn read_batch_for(
+        &self,
+        sources: &[SourceRef],
+        target: RetrievalTarget,
+    ) -> Option<Vec<Result<Option<SourcePoolReading>>>> {
+        self.read_current_batch_for(sources, target)
     }
     fn search(
         &self,

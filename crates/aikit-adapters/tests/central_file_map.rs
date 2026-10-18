@@ -1590,3 +1590,115 @@ fn native_work_exact_ids_collisions_current_declaration_and_historical_copies_re
         "# left\nWorkidentityneedle.\n"
     );
 }
+
+// Delegate to the real owner, but address its batch read by a name an owner
+// from before `resolve-batch` existed answers: the owner's own "Unknown
+// Action" refusal, not a generated one.
+struct BeforeResolveBatch(SystemRunner);
+
+impl BeforeResolveBatch {
+    fn renamed(argv: &[String]) -> Vec<String> {
+        argv.iter()
+            .map(|argument| match argument.as_str() {
+                "central.file-map.resolve-batch" => "central.file-map.resolve-batch-absent".into(),
+                _ => argument.clone(),
+            })
+            .collect()
+    }
+}
+
+impl CommandRunner for BeforeResolveBatch {
+    fn run(&self, argv: &[String]) -> aikit_core::Result<Output> {
+        self.0.run(&Self::renamed(argv))
+    }
+
+    fn configured_timeout(&self) -> Option<Duration> {
+        self.0.configured_timeout()
+    }
+
+    fn run_with_timeout(&self, argv: &[String], timeout: Duration) -> aikit_core::Result<Output> {
+        self.0.run_with_timeout(&Self::renamed(argv), timeout)
+    }
+}
+
+#[test]
+#[ignore = "explicit native integration: requires built/pinned AIKIT_CENTRAL_REAL_BIN"]
+fn a_batch_read_answers_each_source_as_its_single_read_and_an_older_owner_reads_singly() {
+    let ctrl = owner();
+    let owned = scratch();
+    let root = fs::canonicalize(owned.path()).unwrap();
+    action(&ctrl, &root, "central.init", json!({}));
+    let mut sources = Vec::new();
+    for name in ["first-batch-note.md", "second-batch-note.md"] {
+        let note = root.join("Control/user").join(name);
+        fs::write(&note, format!("# {name}\nActual body.\n")).unwrap();
+        let located = action(
+            &ctrl,
+            &root,
+            "central.file-map.locate",
+            json!({"path": note}),
+        );
+        sources.push(SourceRef::parse(located["source"]["ref"].as_str().unwrap()).unwrap());
+    }
+    let absent =
+        SourceRef::parse("central:source:control:root:Control/user/never-written.md").unwrap();
+    let nonowner = SourceRef::parse("work:source:elsewhere:README.md").unwrap();
+    let asked = [
+        sources[0].clone(),
+        absent.clone(),
+        nonowner.clone(),
+        sources[1].clone(),
+    ];
+    let provider = CentralFileMapProvider::connect(
+        SystemRunner::new().with_timeout(Duration::from_secs(30)),
+        &ctrl,
+        &root,
+        None,
+    )
+    .unwrap();
+    for target in [
+        RetrievalTarget::LocalAgent,
+        RetrievalTarget::ExternalProvider,
+    ] {
+        let batch = provider
+            .read_batch_for(&asked, target)
+            .expect("an owner with resolve-batch reads the batch");
+        assert_eq!(batch.len(), asked.len());
+        for (source, answer) in asked.iter().zip(batch) {
+            match (answer, provider.read_for(source, target)) {
+                (Ok(batch), Ok(single)) => assert_eq!(batch, single, "{source}"),
+                (Err(batch), Err(single)) => {
+                    assert_eq!(batch.code(), single.code(), "{source}");
+                    assert_eq!(
+                        batch.details().get("native_error_code"),
+                        single.details().get("native_error_code"),
+                        "{source}"
+                    );
+                }
+                (batch, single) => panic!("{source}: batch {batch:?} but single {single:?}"),
+            }
+        }
+    }
+    let read = provider
+        .read_batch_for(&asked, RetrievalTarget::LocalAgent)
+        .unwrap();
+    assert!(read[0].as_ref().unwrap().is_some());
+    assert_eq!(
+        read[1].as_ref().unwrap_err().code(),
+        "central.file_map_not_found"
+    );
+    assert!(read[2].as_ref().unwrap().is_none());
+    let older = CentralFileMapProvider::connect(
+        BeforeResolveBatch(SystemRunner::new().with_timeout(Duration::from_secs(30))),
+        &ctrl,
+        &root,
+        None,
+    )
+    .unwrap();
+    assert!(
+        older
+            .read_batch_for(&asked, RetrievalTarget::LocalAgent)
+            .is_none(),
+        "an owner without resolve-batch leaves the caller to read one Source at a time"
+    );
+}
