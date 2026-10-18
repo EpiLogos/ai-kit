@@ -347,6 +347,94 @@ fn production_handlers_collect_partial_streams_and_reopen_the_same_session() {
     rig.stop();
 }
 #[test]
+fn provider_lifecycle_updates_and_turn_usage_are_journaled_and_read_back() {
+    let rig = Rig::new("normal");
+    rig.prompt("lifecycle");
+    rig.until(|v| {
+        v["connection"]["state"] == "Resident"
+            && v["blocks"].to_string().contains("Lifecycle reported.")
+    });
+    let journal = rig.journal();
+    let signals = journal
+        .iter()
+        .filter_map(|row| row["event"].pointer("/event/Signal/kind"))
+        .collect::<Vec<_>>();
+    let updates = signals
+        .iter()
+        .filter(|kind| kind["kind"] == "provider-update")
+        .map(|kind| {
+            (
+                kind["session_update"].as_str().unwrap().to_owned(),
+                kind["payload"].clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let names = updates
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![
+            "usage_update",
+            "plan",
+            "compaction_update",
+            "session_info_update",
+            "a_kind_from_next_year"
+        ],
+        "every lifecycle report is journaled in wire order, the unknown kind too: {signals:?}"
+    );
+    assert_eq!(
+        updates[0].1,
+        serde_json::json!({"sessionUpdate": "usage_update", "used": 18342, "size": 272000}),
+        "the update object is journaled as the provider sent it"
+    );
+    assert_eq!(updates[4].1["anything"], serde_json::json!([1, 2, 3]));
+    assert!(
+        !signals.iter().any(|kind| kind["kind"] == "status"
+            && kind["message"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("ACP session update"))),
+        "no lifecycle report collapses to a status line: {signals:?}"
+    );
+    let completed = signals
+        .iter()
+        .find(|kind| kind["kind"] == "completed")
+        .expect("the turn completes");
+    assert_eq!(completed["stop_reason"], "end_turn");
+    assert_eq!(
+        completed["usage"],
+        serde_json::json!({"inputTokens": 1200, "outputTokens": 340, "totalTokens": 1540}),
+        "the turn's usage report rides its completion"
+    );
+    rig.stop();
+}
+#[test]
+fn codex_acp_advertised_resume_reconnects_and_matches_the_codex_declaration() {
+    // The Codex profile declares the open modes codex-acp 1.13.1 advertises;
+    // this peer answers initialize exactly as that build does, and the
+    // encounter reconnect must ride its session/resume.
+    let codex = aikit_adapters::profiles::for_slug("codex").unwrap();
+    let declared = &codex.sessions.as_ref().unwrap().open_modes;
+    assert!(declared.iter().any(|mode| mode == "resume"), "{declared:?}");
+    assert!(declared.iter().any(|mode| mode == "load"), "{declared:?}");
+    let mut rig = Rig::new("codex-acp-1.13.1");
+    rig.prompt("partial");
+    let view = rig.until(|v| {
+        v["connection"]["state"] == "Resident" && v["blocks"].to_string().contains("then final.")
+    });
+    let original = view["connection"]["native_session_id"].clone();
+    rig.stop();
+    rig.service = Arc::new(EncounterService::new(rig.home.clone()).unwrap());
+    rig.service.apply(rig.open(true)).unwrap();
+    assert_eq!(rig.view()["connection"]["native_session_id"], original);
+    rig.prompt("partial");
+    rig.until(|v| {
+        v["connection"]["state"] == "Resident" && v["blocks"].to_string().contains("then final.")
+    });
+    rig.stop();
+}
+#[test]
 fn native_permission_denial_and_cancellation_are_not_agent_work_success() {
     let rig = Rig::new("normal");
     rig.prompt("deny");

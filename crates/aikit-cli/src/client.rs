@@ -976,12 +976,28 @@ pub fn plan_install(service: &Service, client: &str) -> Result<Procedure> {
         )
         .with("client", client.to_string()));
     }
-    let items = adapter.install(&config_dir)?;
+    // Only the events that do work in this composition are routed: the
+    // harness runs every event its settings register, and an event no step,
+    // floor reaction or Event Routine answers would cost each occurrence a
+    // dispatch process for nothing.
+    let working = service.working_hook_events(client)?;
+    let items = adapter.install_working(&config_dir, &working)?;
 
-    let mut plan = Plan::new().with_note(format!(
-        "install AIKit's {client} integration into {}",
-        config_dir.display()
-    ));
+    let mut plan = Plan::new()
+        .with_note(format!(
+            "install AIKit's {client} integration into {}",
+            config_dir.display()
+        ))
+        .with_note(format!(
+            "routes only the events that do work in this composition ({}); an event with no \
+             chain step, floor reaction or Event Routine is left unregistered — install again \
+             after composing one",
+            working
+                .iter()
+                .map(|event| event.as_str().to_owned())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     for item in items {
         match item {
             ProjectionItem::Write { path, contents } => {

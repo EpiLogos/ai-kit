@@ -494,6 +494,12 @@ pub struct GatewayStatus {
     pub delivery_receipt_count: usize,
     #[serde(default)]
     pub connector_health: Vec<ConnectorHealth>,
+    /// How each carrier of the answering service is bound, as the service
+    /// itself sees it: a WebSocket carrier whose address cannot be bound yet
+    /// reads `waiting`, its detail naming why, while the Unix carrier serves.
+    /// Empty where no service answered (an offline read of the state file).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carriers: Vec<crate::gateway_posture::GatewayListenerReading>,
 }
 
 /// Qualitatively distinct co-internal relations the gateway ecology can name.
@@ -1182,6 +1188,7 @@ impl AgencyGateway {
             pending_delivery_count: self.pending_deliveries.len(),
             delivery_receipt_count: self.delivery_receipts.len(),
             connector_health: self.connector_health.values().cloned().collect(),
+            carriers: Vec::new(),
         }
     }
 

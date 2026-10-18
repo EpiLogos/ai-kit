@@ -106,6 +106,7 @@ pub use agent_connection::{
     ConnectionState, NativeModeObservation, NativeModeOption, NativePermissionChoice,
     NativePermissionRequest, NativeSessionBinding, PromptRequest, SessionOpenMode,
     SessionOpenRequest, ACP_STABLE_PROTOCOL_VERSION, AGENT_CONNECTION_ADAPTER_VERSION,
+    PROVIDER_PAYLOAD_LIMIT,
 };
 pub use agent_session_host::{
     AgentSessionHost, AgentSessionHostLimits, HostEvent, InterruptOrigin, InterruptReceipt,

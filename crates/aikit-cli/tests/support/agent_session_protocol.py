@@ -50,6 +50,17 @@ for line in sys.stdin:
     if method == "initialize":
         if mode == "slow-initialize":
             time.sleep(0.5)
+        if mode == "codex-acp-1.13.1":
+            # codex-acp 1.13.1's own initialize answer (its dist, read
+            # 2026-10-16): capabilities are empty objects, not booleans.
+            result(ident, {"protocolVersion": 1, "agentInfo": {
+                "name": "@agentclientprotocol/codex-acp", "title": "Codex", "version": "1.13.1"},
+                "agentCapabilities": {"auth": {"logout": {}}, "providers": {}, "loadSession": True,
+                    "promptCapabilities": {"embeddedContext": True, "image": True},
+                    "sessionCapabilities": {"resume": {}, "list": {}, "close": {}, "delete": {},
+                        "fork": {}, "additionalDirectories": {}, "subagents": {}},
+                    "mcpCapabilities": {"acp": False, "http": True, "sse": False}}})
+            continue
         # Resume advertised: the encounter reconnect rides the capability-gated
         # session/resume (no history replay), not session/load.
         result(ident, {"protocolVersion": 1, "agentCapabilities": {"loadSession": True,
@@ -102,6 +113,19 @@ for line in sys.stdin:
             update({"sessionUpdate": "current_mode_update", "modeId": permission_mode})
             text("Switched myself to plan.")
             result(ident, {"stopReason": "end_turn"})
+        elif prompt == "lifecycle":
+            # The lifecycle reports codex-acp emits beside text, plus a kind no
+            # AIKit release knows; the turn's result carries the usage report.
+            update({"sessionUpdate": "usage_update", "used": 18342, "size": 272000})
+            update({"sessionUpdate": "plan", "entries": [
+                {"content": "Read the gateway", "priority": "high", "status": "in_progress"}]})
+            update({"sessionUpdate": "compaction_update", "status": "completed",
+                    "_meta": {"tokensBefore": 240000, "tokensAfter": 31000}})
+            update({"sessionUpdate": "session_info_update", "title": "Gateway outage"})
+            update({"sessionUpdate": "a_kind_from_next_year", "anything": [1, 2, 3]})
+            text("Lifecycle reported.")
+            result(ident, {"stopReason": "end_turn", "usage": {
+                "inputTokens": 1200, "outputTokens": 340, "totalTokens": 1540}})
         elif prompt == "disconnect":
             text("Partial answer before disconnect.")
             os._exit(0)

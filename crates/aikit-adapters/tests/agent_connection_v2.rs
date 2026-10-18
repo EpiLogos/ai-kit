@@ -462,3 +462,123 @@ fn attach_rides_the_stabilized_resume_operation_where_it_is_advertised() {
     assert_eq!(binding.opened_as, SessionOpenMode::Attach);
     assert_eq!(binding.native_session_id, "native-live");
 }
+
+#[test]
+fn acp_lifecycle_updates_are_kept_verbatim_and_usage_rides_the_completed_turn() {
+    use aikit_adapters::{PromptRequest, PROVIDER_PAYLOAD_LIMIT};
+
+    let mut adapter = AcpV1ConnectionAdapter::new(
+        r("connection/acp/lifecycle"),
+        vec!["target/codex-acp".into()],
+    );
+    adapter.initialize().unwrap();
+    adapter
+        .ingest(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "protocolVersion": 1, "agentCapabilities": {} }
+        }))
+        .unwrap();
+
+    // The kinds codex-acp 1.13.1 emits beside text and tools, plus a kind no
+    // AIKit release knows: each is kept as the provider sent it.
+    let updates = [
+        json!({"sessionUpdate": "usage_update", "used": 18342, "size": 272000}),
+        json!({"sessionUpdate": "plan", "entries": [
+            {"content": "Read the gateway", "priority": "high", "status": "in_progress"}
+        ]}),
+        json!({"sessionUpdate": "compaction_update", "status": "completed",
+               "_meta": {"tokensBefore": 240000, "tokensAfter": 31000}}),
+        json!({"sessionUpdate": "session_info_update", "title": "Gateway outage"}),
+        json!({"sessionUpdate": "a_kind_from_next_year", "anything": [1, 2, 3]}),
+    ];
+    for update in &updates {
+        let signals = adapter
+            .ingest(json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": { "sessionId": "s-1", "update": update }
+            }))
+            .unwrap();
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0].native_session_id.as_deref(), Some("s-1"));
+        let ConnectionSignalKind::ProviderUpdate {
+            session_update,
+            payload,
+            truncated_from_bytes,
+        } = &signals[0].kind
+        else {
+            panic!(
+                "{update} must be kept as a provider update: {:?}",
+                signals[0].kind
+            );
+        };
+        assert_eq!(session_update, update["sessionUpdate"].as_str().unwrap());
+        assert_eq!(payload, update, "the update object is kept as sent");
+        assert_eq!(*truncated_from_bytes, None);
+    }
+
+    // A runaway update is bounded, and the bound is named.
+    let huge = json!({"sessionUpdate": "plan", "entries": "x".repeat(PROVIDER_PAYLOAD_LIMIT * 2)});
+    let signals = adapter
+        .ingest(json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": { "sessionId": "s-1", "update": huge }
+        }))
+        .unwrap();
+    let ConnectionSignalKind::ProviderUpdate {
+        payload,
+        truncated_from_bytes,
+        ..
+    } = &signals[0].kind
+    else {
+        panic!("an oversized update is still kept");
+    };
+    assert!(payload.as_str().unwrap().len() <= PROVIDER_PAYLOAD_LIMIT);
+    assert_eq!(*truncated_from_bytes, Some(huge.to_string().len()));
+
+    // The prompt result's usage rides the Completed signal.
+    let prompt = adapter
+        .prompt(PromptRequest {
+            native_session_id: "s-1".into(),
+            prompt: json!([{"type": "text", "text": "go"}]),
+        })
+        .unwrap();
+    let id = prompt.payload["id"].as_u64().unwrap();
+    let usage = json!({"inputTokens": 1200, "outputTokens": 340, "totalTokens": 1540,
+                       "cachedReadTokens": 800});
+    let completed = adapter
+        .ingest(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "stopReason": "end_turn", "usage": usage }
+        }))
+        .unwrap();
+    assert_eq!(
+        completed[0].kind,
+        ConnectionSignalKind::Completed {
+            stop_reason: "end_turn".into(),
+            usage: Some(usage),
+        }
+    );
+
+    // A provider that reports no usage gets none invented.
+    let prompt = adapter
+        .prompt(PromptRequest {
+            native_session_id: "s-1".into(),
+            prompt: json!([{"type": "text", "text": "again"}]),
+        })
+        .unwrap();
+    let id = prompt.payload["id"].as_u64().unwrap();
+    let completed = adapter
+        .ingest(json!({"jsonrpc": "2.0", "id": id, "result": { "stopReason": "end_turn" }}))
+        .unwrap();
+    assert_eq!(
+        completed[0].kind,
+        ConnectionSignalKind::Completed {
+            stop_reason: "end_turn".into(),
+            usage: None,
+        }
+    );
+}

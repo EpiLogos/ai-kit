@@ -310,26 +310,27 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
                 reason,
             } => format!("unavailable ({reason})"),
         };
-        let capability_leg =
-            match aikit_adapters::actuation_harness_capability::intake_actuation_capability(
-                &aikit_adapters::runner::SystemRunner::probe(),
-                "actuation",
-                slug,
-            ) {
-                aikit_adapters::actuation_harness_capability::CapabilityOutcome::Descriptor(
-                    capability,
-                ) => format!(
-                    "r{}: {} event(s), blocking {}, wake {}, seam {}",
-                    capability.provenance.catalog_revision.unwrap_or_default(),
-                    capability.native_events.len(),
-                    capability.blocking_semantics.kind,
-                    capability.wake_capability.kind,
-                    capability.install_seam.config_path
-                ),
-                aikit_adapters::actuation_harness_capability::CapabilityOutcome::Unavailable {
-                    reason,
-                } => format!("unavailable ({reason})"),
-            };
+        let capability = aikit_adapters::actuation_harness_capability::intake_actuation_capability(
+            &aikit_adapters::runner::SystemRunner::probe(),
+            "actuation",
+            slug,
+        );
+        let capability_leg = match &capability {
+            aikit_adapters::actuation_harness_capability::CapabilityOutcome::Descriptor(
+                capability,
+            ) => format!(
+                "r{}: {} event(s), blocking {}, wake {}, seam {}",
+                capability.provenance.catalog_revision.unwrap_or_default(),
+                capability.native_events.len(),
+                capability.blocking_semantics.kind,
+                capability.wake_capability.kind,
+                capability.install_seam.config_path
+            ),
+            aikit_adapters::actuation_harness_capability::CapabilityOutcome::Unavailable {
+                reason,
+            } => format!("unavailable ({reason})"),
+        };
+        let mut seam_text: Option<String> = None;
         let projection_leg = std::env::var_os("HOME")
             .map(std::path::PathBuf::from)
             .and_then(|home| {
@@ -353,7 +354,9 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
                     .iter()
                     .find_map(|path| {
                         let text = std::fs::read_to_string(path).ok()?;
-                        Some(text.contains(marker))
+                        let installed = text.contains(marker);
+                        seam_text = Some(text);
+                        Some(installed)
                     })
                     .or(Some(false))
             });
@@ -371,6 +374,43 @@ pub fn run(service: &Service) -> Result<Vec<Finding>> {
             )
             .with_detail(format!("capability: {capability_leg}")),
         );
+
+        // An install routes only the events that did work when it ran. A step,
+        // reaction or Event Routine composed since, on an event the seam does
+        // not route, would never run — named here, never silent.
+        if let (Some(text), Some(client)) = (
+            seam_text.as_deref().filter(|text| text.contains(marker)),
+            marker.rsplit(' ').next(),
+        ) {
+            let declared = if slug == "codex" {
+                capability
+                    .dispatch_events_on_transports(&["hooks-json-file"])
+                    .0
+            } else {
+                capability.dispatch_events().0
+            };
+            let working = service.working_hook_events(client)?;
+            let unrouted: Vec<&str> = declared
+                .iter()
+                .map(|(event, _native)| event)
+                .filter(|event| working.contains(*event))
+                .filter(|event| !text.contains(&format!("{marker} {}", event.as_str())))
+                .map(|event| event.as_str())
+                .collect();
+            if !unrouted.is_empty() {
+                findings.push(
+                    Finding::new(
+                        "dispatch.unrouted",
+                        Severity::Warning,
+                        format!(
+                            "{slug} does not route {} although this composition does work on it",
+                            unrouted.join(", ")
+                        ),
+                    )
+                    .with_detail(format!("run `aikit client install {client}` (or `aikit apply` for a project seam) to route it")),
+                );
+            }
+        }
     }
 
     // The Agency Gateway at its well-known endpoint. Three honest states:

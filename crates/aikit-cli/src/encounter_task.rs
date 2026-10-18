@@ -1650,7 +1650,7 @@ mod profile_task_tests {
         assert!(resolved
             .argv
             .iter()
-            .any(|arg| arg == "@agentclientprotocol/codex-acp"));
+            .any(|arg| arg == "@agentclientprotocol/codex-acp@1.13.1"));
 
         let session = ResourceRef::parse("agent-session/codex-native-task").unwrap();
         let revision = SourceRevision::parse("task-binding/codex-native-task").unwrap();

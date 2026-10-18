@@ -2053,7 +2053,7 @@ impl HostState {
             TurnStop::OperationalLimit { max_signals }
         } else {
             match &signal.kind {
-                ConnectionSignalKind::Completed { stop_reason } => TurnStop::Completed {
+                ConnectionSignalKind::Completed { stop_reason, .. } => TurnStop::Completed {
                     stop_reason: stop_reason.clone(),
                 },
                 ConnectionSignalKind::Failed { reason } => TurnStop::Failed {

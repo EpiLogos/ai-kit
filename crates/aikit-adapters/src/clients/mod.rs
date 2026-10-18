@@ -71,4 +71,19 @@ pub trait ClientAdapter: TargetAdapter {
     /// Returns projection items rather than writing them: the caller decides when
     /// anything lands on disk, and a plan can be shown before it is applied.
     fn install(&self, config_dir: &Path) -> Result<Vec<ProjectionItem>>;
+
+    /// [`ClientAdapter::install`], routing only the dispatch boundaries in
+    /// `working` — the events the resolved composition does work on. A
+    /// harness runs, and waits on, every event its settings register; an
+    /// event nothing answers is left unregistered, and an AIKit entry already
+    /// installed for it is swept. An adapter whose install carries no hook
+    /// entries has nothing to select and installs as before.
+    fn install_working(
+        &self,
+        config_dir: &Path,
+        working: &std::collections::BTreeSet<aikit_core::hooks::HookEventKind>,
+    ) -> Result<Vec<ProjectionItem>> {
+        let _ = working;
+        self.install(config_dir)
+    }
 }

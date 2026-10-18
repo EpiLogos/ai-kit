@@ -497,6 +497,7 @@ impl AgentConnectionAdapter for PrimeRpcConnectionAdapter {
                     },
                     _ => ConnectionSignalKind::Completed {
                         stop_reason: reason,
+                        usage: None,
                     },
                 })
             }

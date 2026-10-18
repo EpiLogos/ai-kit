@@ -537,6 +537,7 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
                     },
                     _ => ConnectionSignalKind::Completed {
                         stop_reason: reason,
+                        usage: None,
                     },
                 })
             }
