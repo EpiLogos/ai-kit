@@ -5755,6 +5755,18 @@ pub enum SessionSpaceCommand {
         #[arg(long)]
         agent_session: String,
     },
+    /// Read or change this session's settings and its bound task's: the
+    /// track's Telemetry and Solo; the task's name, colour, activator, output
+    /// style, Launch, Then, Hand off to, Quantize and envelopes. Without
+    /// --request-json it reads.
+    EncounterSessionSettings {
+        #[arg(long)]
+        agent_session: String,
+        #[arg(long)]
+        request_json: Option<String>,
+        #[arg(long)]
+        expected_revision: Option<String>,
+    },
     /// Internal native protocol launch; emits no wrapper bytes to stdout.
     EncounterTaskExec {
         #[arg(long)]

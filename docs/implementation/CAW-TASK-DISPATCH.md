@@ -108,6 +108,45 @@ replacing itself with Workcell's native launcher. Central and Workcell control
 bearers are removed before provider execution; credential isolation against
 hostile same-UID readers remains a separate material/installed requirement.
 
+### The session's own settings
+
+A session and its bound task also carry the person's settings, kept beside the
+task record and never inside it:
+
+```text
+aikit session-space -C WORLD encounter-session-settings \
+  --agent-session agent-session/example \
+  [--request-json @change.json [--expected-revision session-settings/CURRENT]]
+```
+
+Without `--request-json` it reads `aikit.encounter-session-settings/v1`: the
+track's `telemetry` (on by default) and `solo` (off), and for the bound task its
+`name` (its purpose until named), `colour` (null takes the session's), `active`,
+`register` (plain · warm · terse), `form` (technical · narrative · list),
+`launch` (once · hold · loop), `then` (next · handoff · stop), `handoff_to` (an
+agent session), `quantize` (global · now · next-tool · next-turn),
+`envelope_mode` (automation · modulation), `envelope_linked`, and the `effort`
+and `autonomy` envelopes as `[[second, value]…]` along the task's time: level
+words under Automation (an empty envelope inherits the session's value), steps
+from −2 to +2 under Modulation. Each part lists what the person `set`; every
+other value is the stated default.
+
+A change names what moves, `null` returning a field to its default:
+
+```json
+{"track": {"telemetry": false},
+ "task": {"task_ref": "task:example", "set": {"launch": "loop", "effort": [[0, "high"]]}}}
+```
+
+It is made against the revision that stands (absent while the session has none)
+and refused in words when that revision moved, when `task_ref` is not the bound
+task, or when a value lies outside the manual's. Each change publishes a new
+`session-settings/<ulid>` revision by atomic replacement and keeps the replaced
+reading in `encounter-tasks/settings/history/`. Settings bind to the task they
+were written for: a rebound session starts its new task from the defaults and
+discloses the previous task's settings as `previous_task`. Settings are intent:
+nothing here selects a model, starts a turn or moves a task.
+
 ## Persistent material and the actual encounter host
 
 To require persistent Workcell material, add this field to the same task request:

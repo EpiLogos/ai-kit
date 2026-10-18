@@ -129,6 +129,18 @@ enum Command {
         #[arg(long)]
         agent_session: String,
     },
+    /// Read or change this session's settings and its bound task's: the
+    /// track's Telemetry and Solo; the task's name, colour, activator, output
+    /// style, Launch, Then, Hand off to, Quantize and envelopes. Without
+    /// --request-json it reads.
+    EncounterSessionSettings {
+        #[arg(long)]
+        agent_session: String,
+        #[arg(long)]
+        request_json: Option<String>,
+        #[arg(long)]
+        expected_revision: Option<String>,
+    },
     /// Restore an exact prior ready task after failed unhosted preparation.
     /// Hosted pending work requires recovery of the same Workcell demand.
     EncounterTaskAbort {
@@ -485,6 +497,39 @@ fn run(cli: Cli) -> Result<()> {
                 service.home(),
                 &aikit_core::ResourceRef::parse(agent_session)?,
             )?)
+        }
+        Command::EncounterSessionSettings {
+            agent_session,
+            request_json,
+            expected_revision,
+        } => {
+            let session = aikit_core::ResourceRef::parse(agent_session)?;
+            match request_json {
+                None if expected_revision.is_some() => Err(aikit_core::AikitError::new(
+                    "encounter.runtime",
+                    "--expected-revision goes with a change (--request-json)",
+                )),
+                None => emit(
+                    &crate::encounter_service::EncounterService::read_session_settings(
+                        service.home(),
+                        &session,
+                    )?,
+                ),
+                Some(request_json) => {
+                    let expected = expected_revision
+                        .as_deref()
+                        .map(aikit_core::SourceRevision::parse)
+                        .transpose()?;
+                    emit(
+                        &crate::encounter_service::EncounterService::write_session_settings(
+                            service.home(),
+                            &session,
+                            parse_json_arg(&request_json)?,
+                            expected.as_ref(),
+                        )?,
+                    )
+                }
+            }
         }
         Command::EncounterTaskAbort {
             agent_session,

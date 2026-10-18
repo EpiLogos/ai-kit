@@ -23,6 +23,8 @@ use std::{
 mod material;
 #[path = "encounter_task_run.rs"]
 mod prepared_run;
+#[path = "encounter_task_settings.rs"]
+mod settings;
 use material::{MaterialBinding, MaterialHost};
 
 const WRITE_ACTION: &str = "action/aikit/encounter-task";
