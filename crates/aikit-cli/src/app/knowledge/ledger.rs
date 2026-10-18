@@ -42,6 +42,11 @@ use aikit_core::knowledge_wiki::{
 use serde::{Deserialize, Serialize};
 
 const SCHEMA: &str = "aikit.knowledge-discovery-ledger/v1";
+/// A walk a search's deadline stopped is kept under its own schema: an aikit
+/// that predates the flag reads only [`SCHEMA`] and so walks again rather than
+/// taking a partial walk for a whole one (several installed builds share one
+/// AIKit home).
+const STOPPED_SCHEMA: &str = "aikit.knowledge-discovery-ledger/deadline-stopped-v1";
 
 /// The ledger records unix stat facts; elsewhere every walk runs in full.
 pub(super) const SUPPORTED: bool = cfg!(unix);
@@ -326,6 +331,8 @@ pub(super) struct DiscoveryOutcome {
     pub(super) wiki: Vec<WikiObject>,
     pub(super) sources: Vec<SourceMaterial>,
     pub(super) absences: Vec<String>,
+    /// The walk stopped at a search's deadline; only another search reuses it.
+    pub(super) deadline_stopped: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -344,6 +351,8 @@ struct LedgerFile {
     wiki: Vec<EncodedObject>,
     sources: Vec<SourceMaterial>,
     absences: Vec<String>,
+    #[serde(default)]
+    deadline_stopped: bool,
 }
 
 fn encode(object: &WikiObject) -> Option<EncodedObject> {
@@ -395,7 +404,8 @@ impl DiscoveryLedgers {
         let path = self.directory.join(key.file_name()?);
         let bytes = fs::read(path).ok()?;
         let file: LedgerFile = serde_json::from_slice(&bytes).ok()?;
-        if file.schema != SCHEMA
+        let stopped = file.schema == STOPPED_SCHEMA;
+        if (file.schema != SCHEMA && !stopped)
             || &file.key != key
             || file.root_canonical != root_canonical
             || file.world_canonical.as_deref() != world_canonical
@@ -412,6 +422,7 @@ impl DiscoveryLedgers {
             wiki,
             sources: file.sources,
             absences: file.absences,
+            deadline_stopped: file.deadline_stopped || stopped,
         })
     }
 
@@ -435,7 +446,12 @@ impl DiscoveryLedgers {
             return;
         };
         let file = LedgerFile {
-            schema: SCHEMA.into(),
+            schema: if outcome.deadline_stopped {
+                STOPPED_SCHEMA
+            } else {
+                SCHEMA
+            }
+            .into(),
             key: key.clone(),
             root_canonical: root_canonical.to_path_buf(),
             world_canonical: world_canonical.map(Path::to_path_buf),
@@ -443,6 +459,7 @@ impl DiscoveryLedgers {
             wiki,
             sources: outcome.sources.clone(),
             absences: outcome.absences.clone(),
+            deadline_stopped: outcome.deadline_stopped,
         };
         let Ok(bytes) = serde_json::to_vec(&file) else {
             return;

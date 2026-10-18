@@ -104,6 +104,7 @@ fn a_cache_tag_the_walk_read_is_observed_by_the_ledger() {
             &mut absences,
             true,
             None,
+            None,
         )
         .unwrap()
         .sources

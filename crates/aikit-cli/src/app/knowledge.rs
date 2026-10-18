@@ -97,13 +97,77 @@ fn gitnexus_budget() -> std::time::Duration {
     parse_gitnexus_budget(std::env::var(GITNEXUS_BUDGET_VAR).ok().as_deref())
 }
 
+/// How long one Knowledge search may take, whole. The shell's Search device
+/// waits twenty seconds for an answer; a search answers before that on its
+/// own deadline: the discovery walk stops at a third of the budget, and a
+/// provider still asking when the budget ends is cut and named as an absence.
+const DEFAULT_SEARCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Environment override for [`DEFAULT_SEARCH_BUDGET`], in whole seconds.
+const SEARCH_BUDGET_VAR: &str = "AIKIT_KNOWLEDGE_SEARCH_BUDGET_SECS";
+
+/// The deadlines one search answers inside.
+#[derive(Clone, Copy)]
+struct SearchDeadline {
+    discovery: DiscoveryDeadline,
+    providers: std::time::Instant,
+}
+
+impl SearchDeadline {
+    fn starting_now() -> Self {
+        let budget = parse_gitnexus_budget_with(
+            std::env::var(SEARCH_BUDGET_VAR).ok().as_deref(),
+            DEFAULT_SEARCH_BUDGET,
+        );
+        let started = std::time::Instant::now();
+        let discovery = budget / 3;
+        Self {
+            discovery: DiscoveryDeadline {
+                at: started + discovery,
+                budget: discovery,
+            },
+            providers: started + budget,
+        }
+    }
+
+    /// The runner a provider of this search starts its commands with.
+    fn bound(deadline: Option<Self>, runner: SystemRunner) -> SystemRunner {
+        match deadline {
+            Some(deadline) => runner.with_deadline(deadline.providers),
+            None => runner,
+        }
+    }
+}
+
+/// Where a search's discovery walk stops listing, and the budget it had.
+#[derive(Clone, Copy)]
+struct DiscoveryDeadline {
+    at: std::time::Instant,
+    budget: std::time::Duration,
+}
+
+impl DiscoveryDeadline {
+    fn passed(deadline: Option<Self>) -> bool {
+        deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline.at)
+    }
+}
+
 /// Pure parse behind [`gitnexus_budget`], split out so the fallback rules are
 /// testable without mutating process-wide environment state.
 fn parse_gitnexus_budget(raw: Option<&str>) -> std::time::Duration {
+    parse_gitnexus_budget_with(raw, DEFAULT_GITNEXUS_BUDGET)
+}
+
+/// Whole seconds of at least one, otherwise `default`: a bound has no off
+/// switch.
+fn parse_gitnexus_budget_with(
+    raw: Option<&str>,
+    default: std::time::Duration,
+) -> std::time::Duration {
     raw.and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|secs| *secs >= 1)
         .map(std::time::Duration::from_secs)
-        .unwrap_or(DEFAULT_GITNEXUS_BUDGET)
+        .unwrap_or(default)
 }
 
 #[cfg(test)]
@@ -717,7 +781,7 @@ impl KnowledgeRuntime {
             self.now_field.as_ref(),
             self.work_repos
                 .as_ref()
-                .map(|provider| provider as &dyn SourcePoolProvider),
+                .map(|provider| provider as &(dyn SourcePoolProvider + Sync)),
         )
     }
 
@@ -726,7 +790,7 @@ impl KnowledgeRuntime {
         context: FamiliarityContext,
         scoped_project: Option<&'a str>,
         now_field: Option<&'a NowFieldSourcePoolProvider<SystemRunner>>,
-        work_repos: Option<&'a dyn SourcePoolProvider>,
+        work_repos: Option<&'a (dyn SourcePoolProvider + Sync)>,
     ) -> KnowledgeApplication<'a> {
         let mut application =
             KnowledgeApplication::new(context).with_project_map(&self.project_map);
@@ -878,20 +942,21 @@ impl Service {
         &self,
         operation: impl FnOnce(&KnowledgeRuntime, KnowledgeApplication<'_>) -> Result<T>,
     ) -> Result<T> {
-        self.with_knowledge_for(KnowledgeNeed::Full, None, operation)
+        self.with_knowledge_for(KnowledgeNeed::Full, None, None, operation)
     }
 
     fn with_knowledge_for<T>(
         &self,
         need: KnowledgeNeed,
         share: Option<&KnowledgeWorldShare>,
+        deadline: Option<SearchDeadline>,
         operation: impl FnOnce(&KnowledgeRuntime, KnowledgeApplication<'_>) -> Result<T>,
     ) -> Result<T> {
         self.ensure_knowledge_project_scope()?;
         // An operation observes current owner inputs. A later operation,
         // including a nested Flow read, must not inherit a held material
         // snapshot or borrow another operation's runtime.
-        let runtime = self.materialize_knowledge_runtime(need, share)?;
+        let runtime = self.materialize_knowledge_runtime(need, share, deadline)?;
         let application = runtime.application(self.knowledge_context());
         operation(&runtime, application)
     }
@@ -931,186 +996,207 @@ impl Service {
         let explicit_scope = expression_scope_project(expression).map(str::to_owned);
         // Query the current native horizon before ranking or remembering
         // destinations; an old answer cannot grant source admission.
-        let mut result = self.with_knowledge(|runtime, _application| {
-            let scoped_display = runtime.scoped_project_display(explicit_scope.as_deref());
-            if explicit_scope.is_some() && scoped_display.is_none() {
-                return Err(aikit_core::AikitError::new(
-                    "knowledge.scope_invalid",
-                    "Explicit Project scope is invalid or cannot be resolved",
-                ));
-            }
-            let discovered_project = scoped_display.as_deref().and_then(|display| {
-                runtime
-                    .work_repos
-                    .as_ref()?
-                    .projects()
-                    .iter()
-                    .find(|project| format!("Work/{}", project.name) == display)
-            });
-            // The root NOW provider includes every Work project, but a
-            // Project-scoped reply may only query its own NOW files plus
-            // common Control records. Selecting globs before ripgrep also
-            // prevents sibling read failures from surfacing as absences.
-            let mut scoped_provider_absences = Vec::new();
-            let scoped_now_field = match (
-                scoped_display.as_deref(),
-                runtime.now_field.as_ref(),
-                runtime.central.as_ref(),
-            ) {
-                (Some(_), Some(provider), Some(owner)) => {
-                    let scope = provider
-                        .scope()
-                        .for_project(discovered_project.map(|p| p.name.as_str()));
-                    // The native owner's admission is per-Project: a scoped
-                    // reply reads through the owner bound to THAT Project's
-                    // map (common Control records ride the root lineage), so
-                    // the invoking session's own binding never fences another
-                    // Project's records out of an explicitly scoped reply.
-                    let owner: Arc<CentralFileMapProvider<SystemRunner>> = match discovered_project
-                    {
-                        Some(project) => {
-                            match CentralFileMapProvider::connect(
-                                native_source_runner(),
-                                aikit_adapters::central_file_map::executable(),
-                                &scope.central_root,
-                                Some(project.name.as_str()),
-                            ) {
-                                Ok(rebound) => Arc::new(rebound),
-                                Err(error) => {
-                                    scoped_provider_absences.push(format!(
-                                        "NOW-field scoped owner unavailable: {error}"
-                                    ));
-                                    Arc::clone(owner)
+        // A search answers on its own deadline, with what its providers gave
+        // by then; the rest are named absences.
+        let deadline = SearchDeadline::starting_now();
+        let mut result = self.with_knowledge_for(
+            KnowledgeNeed::Full,
+            None,
+            Some(deadline),
+            |runtime, _application| {
+                let scoped_display = runtime.scoped_project_display(explicit_scope.as_deref());
+                if explicit_scope.is_some() && scoped_display.is_none() {
+                    return Err(aikit_core::AikitError::new(
+                        "knowledge.scope_invalid",
+                        "Explicit Project scope is invalid or cannot be resolved",
+                    ));
+                }
+                let discovered_project = scoped_display.as_deref().and_then(|display| {
+                    runtime
+                        .work_repos
+                        .as_ref()?
+                        .projects()
+                        .iter()
+                        .find(|project| format!("Work/{}", project.name) == display)
+                });
+                // The root NOW provider includes every Work project, but a
+                // Project-scoped reply may only query its own NOW files plus
+                // common Control records. Selecting globs before ripgrep also
+                // prevents sibling read failures from surfacing as absences.
+                let mut scoped_provider_absences = Vec::new();
+                let scoped_now_field = match (
+                    scoped_display.as_deref(),
+                    runtime.now_field.as_ref(),
+                    runtime.central.as_ref(),
+                ) {
+                    (Some(_), Some(provider), Some(owner)) => {
+                        let scope = provider
+                            .scope()
+                            .for_project(discovered_project.map(|p| p.name.as_str()));
+                        // The native owner's admission is per-Project: a scoped
+                        // reply reads through the owner bound to THAT Project's
+                        // map (common Control records ride the root lineage), so
+                        // the invoking session's own binding never fences another
+                        // Project's records out of an explicitly scoped reply.
+                        let owner: Arc<CentralFileMapProvider<SystemRunner>> =
+                            match discovered_project {
+                                Some(project) => {
+                                    match CentralFileMapProvider::connect(
+                                        SearchDeadline::bound(
+                                            Some(deadline),
+                                            native_source_runner(),
+                                        ),
+                                        aikit_adapters::central_file_map::executable(),
+                                        &scope.central_root,
+                                        Some(project.name.as_str()),
+                                    ) {
+                                        Ok(rebound) => Arc::new(rebound),
+                                        Err(error) => {
+                                            scoped_provider_absences.push(format!(
+                                                "NOW-field scoped owner unavailable: {error}"
+                                            ));
+                                            Arc::clone(owner)
+                                        }
+                                    }
                                 }
+                                None => Arc::clone(owner),
+                            };
+                        match NowFieldSourcePoolProvider::connect(
+                            SearchDeadline::bound(
+                                Some(deadline),
+                                aikit_adapters::now_field::default_runner(&scope.central_root),
+                            ),
+                            aikit_adapters::ripgrep::executable(),
+                            scope,
+                        ) {
+                            Ok(provider) => Some(provider.with_native_owner(owner)),
+                            Err(error) => {
+                                scoped_provider_absences
+                                    .push(format!("NOW-field scoped search unavailable: {error}"));
+                                None
                             }
                         }
-                        None => Arc::clone(owner),
-                    };
-                    match NowFieldSourcePoolProvider::connect(
-                        aikit_adapters::now_field::default_runner(&scope.central_root),
-                        aikit_adapters::ripgrep::executable(),
-                        scope,
-                    ) {
-                        Ok(provider) => Some(provider.with_native_owner(owner)),
+                    }
+                    _ => None,
+                };
+                let now_field = if scoped_display.is_some() {
+                    scoped_now_field.as_ref()
+                } else {
+                    runtime.now_field.as_ref()
+                };
+                // A Work-repos search can fail before producing any hits. Search
+                // only the resolved Project at the provider boundary so another
+                // repo's ripgrep failure cannot appear in this reply's absences.
+                // The root World deliberately retains the broad native provider.
+                let scoped_work_repos = discovered_project.and_then(|project| {
+                    let owner = runtime.work_repos.as_ref()?;
+                    match owner.for_project(&project.project_id) {
+                        Ok(provider) => Some(provider),
                         Err(error) => {
                             scoped_provider_absences
-                                .push(format!("NOW-field scoped search unavailable: {error}"));
+                                .push(format!("Work source scope unavailable: {error}"));
                             None
                         }
                     }
-                }
-                _ => None,
-            };
-            let now_field = if scoped_display.is_some() {
-                scoped_now_field.as_ref()
-            } else {
-                runtime.now_field.as_ref()
-            };
-            // A Work-repos search can fail before producing any hits. Search
-            // only the resolved Project at the provider boundary so another
-            // repo's ripgrep failure cannot appear in this reply's absences.
-            // The root World deliberately retains the broad native provider.
-            let scoped_work_repos = discovered_project.and_then(|project| {
-                let owner = runtime.work_repos.as_ref()?;
-                match owner.for_project(&project.project_id) {
-                    Ok(provider) => Some(provider),
-                    Err(error) => {
-                        scoped_provider_absences
-                            .push(format!("Work source scope unavailable: {error}"));
-                        None
-                    }
-                }
-            });
-            let work_repos: Option<&dyn SourcePoolProvider> = if scoped_display.is_some() {
-                scoped_work_repos
-                    .as_ref()
-                    .map(|provider| provider as &dyn SourcePoolProvider)
-            } else {
-                runtime
-                    .work_repos
-                    .as_ref()
-                    .map(|provider| provider as &dyn SourcePoolProvider)
-            };
-            let mut result = runtime
-                .application_with_project_scope(
-                    self.knowledge_context(),
-                    scoped_display.as_deref(),
-                    now_field,
-                    work_repos,
-                )
-                .resolve(expression, candidate_limit);
-            result.absences.extend(scoped_provider_absences);
-            result.absences.extend(runtime.absences.clone());
-            result.absences.extend(
-                runtime
-                    .project_absences
-                    .iter()
-                    .filter(|absence| {
-                        scoped_display
-                            .as_deref()
-                            .is_none_or(|project| project == absence.project)
-                    })
-                    .map(|absence| absence.message.clone()),
-            );
-            // Pending authored relations are scoped: a query sees its own
-            // scope's rollup; other projects' pendings stay with
-            // `knowledge status`.
-            if let Some(pending) = scoped_display.as_deref().and_then(|display| {
-                runtime
-                    .authored_pending
-                    .iter()
-                    .find(|pending| pending.project == display)
-            }) {
-                result.absences.push(pending.rollup_line());
-            }
-            // Code-index degradations are scoped the same way: a reply carries
-            // only its own scope's line, never another project's — the leak
-            // this fix closes. Every project's degradation stays in
-            // `knowledge status`.
-            if let Some(display) = scoped_display.as_deref() {
-                for degradation in &runtime.code_degradations {
-                    if degradation.project == display {
-                        result.absences.push(degradation.message.clone());
-                    }
-                }
-            }
-            // A scoped query keeps another project's compiled authored edges
-            // — and its compiled folder subjects — out of its results;
-            // unattributable material passes through. Work-repo hits carry
-            // their exact project in the owner-decoded address, so
-            // the same discipline applies to them.
-            if let Some(display) = &scoped_display {
-                let attributed_to_other_project =
-                    |attribution: &BTreeMap<String, String>, resource: &str| {
-                        attribution
-                            .get(resource)
-                            .is_some_and(|project| project != display)
-                    };
-                result.hits.retain(|hit| {
-                    let resource = hit.resource.as_str();
-                    // A Source ref may surface through SourcePool or a
-                    // ProjectMap endpoint. The address wrapper does not
-                    // change which Project owns it.
-                    if !runtime.source_belongs_to_scope(resource, display) {
-                        return false;
-                    }
-                    if attributed_to_other_project(&runtime.authored_edge_projects, resource)
-                        || attributed_to_other_project(&runtime.folder_subject_projects, resource)
-                        || attributed_to_other_project(&runtime.matrix_object_projects, resource)
-                    {
-                        return false;
-                    }
-                    match &hit.address {
-                        aikit_core::KnowledgeAddress::Code(reference) => runtime
-                            .code_source_scopes
-                            .get(reference.source.as_str())
-                            .is_some_and(|project| project == display),
-                        _ => true,
-                    }
                 });
-            }
-            Ok(result)
-        })?;
+                let work_repos: Option<&(dyn SourcePoolProvider + Sync)> =
+                    if scoped_display.is_some() {
+                        scoped_work_repos
+                            .as_ref()
+                            .map(|provider| provider as &(dyn SourcePoolProvider + Sync))
+                    } else {
+                        runtime
+                            .work_repos
+                            .as_ref()
+                            .map(|provider| provider as &(dyn SourcePoolProvider + Sync))
+                    };
+                let mut result = runtime
+                    .application_with_project_scope(
+                        self.knowledge_context(),
+                        scoped_display.as_deref(),
+                        now_field,
+                        work_repos,
+                    )
+                    .resolve(expression, candidate_limit);
+                result.absences.extend(scoped_provider_absences);
+                result.absences.extend(runtime.absences.clone());
+                result.absences.extend(
+                    runtime
+                        .project_absences
+                        .iter()
+                        .filter(|absence| {
+                            scoped_display
+                                .as_deref()
+                                .is_none_or(|project| project == absence.project)
+                        })
+                        .map(|absence| absence.message.clone()),
+                );
+                // Pending authored relations are scoped: a query sees its own
+                // scope's rollup; other projects' pendings stay with
+                // `knowledge status`.
+                if let Some(pending) = scoped_display.as_deref().and_then(|display| {
+                    runtime
+                        .authored_pending
+                        .iter()
+                        .find(|pending| pending.project == display)
+                }) {
+                    result.absences.push(pending.rollup_line());
+                }
+                // Code-index degradations are scoped the same way: a reply carries
+                // only its own scope's line, never another project's — the leak
+                // this fix closes. Every project's degradation stays in
+                // `knowledge status`.
+                if let Some(display) = scoped_display.as_deref() {
+                    for degradation in &runtime.code_degradations {
+                        if degradation.project == display {
+                            result.absences.push(degradation.message.clone());
+                        }
+                    }
+                }
+                // A scoped query keeps another project's compiled authored edges
+                // — and its compiled folder subjects — out of its results;
+                // unattributable material passes through. Work-repo hits carry
+                // their exact project in the owner-decoded address, so
+                // the same discipline applies to them.
+                if let Some(display) = &scoped_display {
+                    let attributed_to_other_project =
+                        |attribution: &BTreeMap<String, String>, resource: &str| {
+                            attribution
+                                .get(resource)
+                                .is_some_and(|project| project != display)
+                        };
+                    result.hits.retain(|hit| {
+                        let resource = hit.resource.as_str();
+                        // A Source ref may surface through SourcePool or a
+                        // ProjectMap endpoint. The address wrapper does not
+                        // change which Project owns it.
+                        if !runtime.source_belongs_to_scope(resource, display) {
+                            return false;
+                        }
+                        if attributed_to_other_project(&runtime.authored_edge_projects, resource)
+                            || attributed_to_other_project(
+                                &runtime.folder_subject_projects,
+                                resource,
+                            )
+                            || attributed_to_other_project(
+                                &runtime.matrix_object_projects,
+                                resource,
+                            )
+                        {
+                            return false;
+                        }
+                        match &hit.address {
+                            aikit_core::KnowledgeAddress::Code(reference) => runtime
+                                .code_source_scopes
+                                .get(reference.source.as_str())
+                                .is_some_and(|project| project == display),
+                            _ => true,
+                        }
+                    });
+                }
+                Ok(result)
+            },
+        )?;
         self.apply_learned_accessibility(&resolve_subjects(expression), &mut result)?;
         result.hits.truncate(limit);
         if let Err(error) = self.knowledge_store().remember_search_hits(&result.hits) {
@@ -1625,7 +1711,7 @@ impl Service {
             KnowledgeAddress::Wiki(_) | KnowledgeAddress::ProjectMap(_) => KnowledgeNeed::Relations,
             KnowledgeAddress::Source(_) | KnowledgeAddress::Code(_) => KnowledgeNeed::Full,
         };
-        self.with_knowledge_for(need, share, |runtime, application| {
+        self.with_knowledge_for(need, share, None, |runtime, application| {
             let view = application.relations(address, depth, max_nodes, max_edges)?;
             if !matches!(address, KnowledgeAddress::Source(_)) || depth == 0 {
                 return Ok(view);
@@ -1786,6 +1872,7 @@ impl Service {
         &self,
         need: KnowledgeNeed,
         share: Option<&KnowledgeWorldShare>,
+        deadline: Option<SearchDeadline>,
     ) -> Result<KnowledgeRuntime> {
         let root = self
             .descriptor
@@ -1844,7 +1931,7 @@ impl Service {
                                 }
                                 None => {
                                     aikit_adapters::central_world_sources::read_project_binding(
-                                        &SystemRunner::new(),
+                                        &SearchDeadline::bound(deadline, SystemRunner::new()),
                                         executable,
                                         central_root,
                                         project,
@@ -1862,6 +1949,7 @@ impl Service {
                 &mut absences,
                 central_root.is_none(),
                 central_root,
+                deadline.map(|deadline| deadline.discovery),
             );
             (
                 discovered,
@@ -2160,7 +2248,7 @@ impl Service {
                 // A missing map degrades this lens, not independent Wiki/code
                 // faculties. Its absence never activates a disposable substitute.
                 match CentralFileMapProvider::connect(
-                    native_source_runner(),
+                    SearchDeadline::bound(deadline, native_source_runner()),
                     aikit_adapters::central_file_map::executable(),
                     central_root,
                     project.as_deref(),
@@ -2185,7 +2273,10 @@ impl Service {
                 None
             } else if let Some(owner) = central.as_ref() {
                 match NowFieldSourcePoolProvider::connect(
-                    aikit_adapters::now_field::default_runner(central_root),
+                    SearchDeadline::bound(
+                        deadline,
+                        aikit_adapters::now_field::default_runner(central_root),
+                    ),
                     aikit_adapters::ripgrep::executable(),
                     NowFieldScope::standard(central_root),
                 ) {
@@ -2213,7 +2304,10 @@ impl Service {
             None
         } else {
             match WorkReposSourcePoolProvider::connect_native(
-                native_source_runner().with_env_removed("RIPGREP_CONFIG_PATH"),
+                SearchDeadline::bound(
+                    deadline,
+                    native_source_runner().with_env_removed("RIPGREP_CONFIG_PATH"),
+                ),
                 aikit_adapters::ripgrep::executable(),
                 native_work_projects,
             ) {
@@ -2268,7 +2362,11 @@ impl Service {
         } else {
             let config_dir = bkmr_config_dir();
             let stores = discover_bkmr_stores(&config_dir);
-            let provider = BkmrStoreSearchProvider::connect(SystemRunner::new(), "bkmr", stores);
+            let provider = BkmrStoreSearchProvider::connect(
+                SearchDeadline::bound(deadline, SystemRunner::new()),
+                "bkmr",
+                stores,
+            );
             let status = provider.status();
             if status.available {
                 status_notes.push(format!("bkmr store pool: {}", status.detail));
@@ -2359,7 +2457,7 @@ impl Service {
                         .and_then(|value| value.as_bool())
                         .unwrap_or(false);
                     let mut provider = BkmrSourcePoolProvider::new(
-                        SystemRunner::new().with_cwd(root),
+                        SearchDeadline::bound(deadline, SystemRunner::new().with_cwd(root)),
                         db_path,
                         embeddings,
                     );
@@ -2441,9 +2539,12 @@ impl Service {
                         let source = source.clone();
                         let binary = gitnexus_binary.clone();
                         scope.spawn(move || {
-                            let runner = SystemRunner::new()
-                                .with_cwd(&project.root)
-                                .with_timeout(code_budget);
+                            let runner = SearchDeadline::bound(
+                                deadline,
+                                SystemRunner::new()
+                                    .with_cwd(&project.root)
+                                    .with_timeout(code_budget),
+                            );
                             let mut provider = match binary.as_deref() {
                                 Some(binary) => GitNexusCodeIndexProvider::with_binary_memoised(
                                     runner,
@@ -2702,6 +2803,9 @@ impl Service {
 struct DiscoveredMaterial {
     wiki: Vec<WikiObject>,
     sources: BTreeMap<SourceRef, SourceMaterial>,
+    /// The walk stopped at a search's deadline: what it holds is what it saw
+    /// in that time, and the absence it carries says where it stopped.
+    deadline_stopped: bool,
 }
 
 // Per-operation physical continuity only. The selected root is supplied by
@@ -2983,6 +3087,26 @@ impl CanonicalPaths {
     }
 }
 
+/// The stop a search's discovery deadline makes, carried as a capacity.
+const DISCOVERY_DEADLINE: &str = "discovery_deadline";
+
+fn discovery_deadline_absence(
+    absences: &mut Vec<String>,
+    deadline: Option<DiscoveryDeadline>,
+    directory: &Path,
+    queued: usize,
+    observed: usize,
+    candidates: usize,
+) {
+    let budget = deadline.map_or(0.0, |deadline| deadline.budget.as_secs_f64());
+    absences.push(format!(
+        "Knowledge discovery stopped at this search's {budget:.1} s discovery deadline in {}; \
+         {queued} directories were never listed; observed {observed} directory entries and \
+         {candidates} candidate files; unseen remainder is unknown",
+        directory.display(),
+    ));
+}
+
 // The arguments are the disclosed capacity facts themselves — the absence
 // names each counter — so a facts struct would only re-wrap the same tuple.
 #[allow(clippy::too_many_arguments)]
@@ -3252,6 +3376,7 @@ fn discover_material_through_ledger(
     absences: &mut Vec<String>,
     discover_wiki: bool,
     native_world_root: Option<&Path>,
+    deadline: Option<DiscoveryDeadline>,
 ) -> Result<DiscoveredMaterial> {
     let limits = DiscoveryLimits::default();
     let absolute = |path: &Path| -> Result<PathBuf> {
@@ -3281,6 +3406,7 @@ fn discover_material_through_ledger(
             native_world_root,
             limits,
             None,
+            deadline,
         );
     };
     let ledgers = ledger::DiscoveryLedgers::in_cache(cache);
@@ -3290,7 +3416,12 @@ fn discover_material_through_ledger(
         None => Some(None),
     };
     if let (Some(root_canonical), Some(world_canonical)) = (&root_canonical, &world_canonical) {
-        if let Some(outcome) = ledgers.current(&key, root_canonical, world_canonical.as_deref()) {
+        // A walk a search stopped at its deadline answers only another
+        // search; an operation without a deadline walks in full.
+        if let Some(outcome) = ledgers
+            .current(&key, root_canonical, world_canonical.as_deref())
+            .filter(|outcome| !outcome.deadline_stopped || deadline.is_some())
+        {
             absences.extend(outcome.absences);
             return Ok(DiscoveredMaterial {
                 wiki: outcome.wiki,
@@ -3299,6 +3430,7 @@ fn discover_material_through_ledger(
                     .into_iter()
                     .map(|item| (item.binding.source.clone(), item))
                     .collect(),
+                deadline_stopped: outcome.deadline_stopped,
             });
         }
     }
@@ -3312,6 +3444,7 @@ fn discover_material_through_ledger(
         native_world_root,
         limits,
         Some(&recorder),
+        deadline,
     )?;
     // Kept only when the roots the walk was keyed by still resolve as they
     // did before it started.
@@ -3329,6 +3462,7 @@ fn discover_material_through_ledger(
                     wiki: discovered.wiki.clone(),
                     sources: discovered.sources.values().cloned().collect(),
                     absences: absences[first_absence..].to_vec(),
+                    deadline_stopped: discovered.deadline_stopped,
                 },
             );
         }
@@ -3476,9 +3610,11 @@ fn discover_material_with_limits(
         native_world_root,
         limits,
         None,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn discover_material_recorded(
     root: &Path,
     home: &Path,
@@ -3487,6 +3623,7 @@ fn discover_material_recorded(
     native_world_root: Option<&Path>,
     limits: DiscoveryLimits,
     recorder: ledger::SharedRecorder<'_>,
+    deadline: Option<DiscoveryDeadline>,
 ) -> Result<DiscoveredMaterial> {
     #[cfg(test)]
     ledger::WALKS.with(|walks| walks.set(walks.get() + 1));
@@ -3641,6 +3778,18 @@ fn discover_material_recorded(
         if dir == home || is_ignored_dir(&dir) {
             continue;
         }
+        if DiscoveryDeadline::passed(deadline) {
+            discovery_deadline_absence(
+                absences,
+                deadline,
+                &dir,
+                frontier.queued.len() + 1,
+                budget.observed,
+                files.get(),
+            );
+            discovered.deadline_stopped = true;
+            break;
+        }
         let canonical_directory = match boundary.admit(&dir, true) {
             Ok(directory) => directory,
             Err(error) => {
@@ -3704,6 +3853,12 @@ fn discover_material_recorded(
                 if path.extension().and_then(|value| value.to_str()) != Some("json") {
                     return Ok(PendingDiscovery::Skip);
                 }
+                if DiscoveryDeadline::passed(deadline) {
+                    return Ok(PendingDiscovery::Capacity(DiscoveryCapacity {
+                        dimension: DISCOVERY_DEADLINE,
+                        limit: 0,
+                    }));
+                }
                 // This is an actually observed JSON candidate, including a
                 // refused/failed body read; counters are not derived products.
                 files.set(files.get() + 1);
@@ -3765,6 +3920,18 @@ fn discover_material_recorded(
         );
         match visit {
             Ok(DirectoryVisit::Complete) => {}
+            Ok(DirectoryVisit::Stopped(capacity)) if capacity.dimension == DISCOVERY_DEADLINE => {
+                discovery_deadline_absence(
+                    absences,
+                    deadline,
+                    &dir,
+                    frontier.queued.len(),
+                    budget.observed,
+                    files.get(),
+                );
+                discovered.deadline_stopped = true;
+                break;
+            }
             Ok(DirectoryVisit::Stopped(capacity)) => {
                 if capacity.dimension == "generic_candidate_files" {
                     // A bound that fires stays acceptable; one that hides what
