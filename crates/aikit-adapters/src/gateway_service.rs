@@ -31,6 +31,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::gateway_connector_config::GatewayConnectorFactory;
 use crate::gateway_connector_pump::{spawn_connector_workers, ConnectorQueues};
+use crate::gateway_posture::{
+    unix_listener_reading, CarrierScope, GatewayListenerReading, ListenerClass, ListenerState,
+};
 use crate::gateway_runtime::{
     execute_gateway_command, AgencyGateway, GatewayCommand, GatewayIngressResult,
     GatewayOccupancyReading, GatewayRequestEnvelope, GatewayResponse, GatewayResponseEnvelope,
@@ -39,6 +42,12 @@ use crate::gateway_runtime::{
 
 pub const GATEWAY_SERVICE_CARRIER_VERSION: &str = "aikit.gateway-service-carrier/v1";
 pub const DEFAULT_GATEWAY_MAX_FRAME_BYTES: usize = 1024 * 1024;
+/// The first wait before a WebSocket carrier whose address cannot be bound
+/// tries again; each failure doubles it up to [`WEBSOCKET_BIND_RETRY_MAX`].
+const WEBSOCKET_BIND_RETRY_FIRST: Duration = Duration::from_millis(250);
+/// The longest wait between WebSocket bind attempts: a tailnet address that
+/// appears when Tailscale starts is served within this bound.
+const WEBSOCKET_BIND_RETRY_MAX: Duration = Duration::from_secs(30);
 const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
 pub(crate) const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -639,6 +648,114 @@ pub struct GatewayServiceRuntime {
     /// This Workcell's encounter owner behind relayed peer requests, when the
     /// assembler wired one.
     pub encounter: Option<Arc<dyn GatewayEncounterRelay>>,
+    /// How each carrier is bound right now, read into every status answer.
+    pub carriers: CarrierReadings,
+}
+
+/// The service's own reading of its carriers, one per carrier kind. The
+/// carrier threads write it as they bind (or wait to); a status answer reads
+/// it, so `gateway status` names a WebSocket carrier that is not bound yet
+/// instead of the service vanishing with it.
+#[derive(Debug, Default)]
+pub struct CarrierReadings(Mutex<Vec<GatewayListenerReading>>);
+
+impl CarrierReadings {
+    /// Record the carrier's current reading, replacing its previous one.
+    pub fn set(&self, reading: GatewayListenerReading) {
+        if let Ok(mut readings) = self.0.lock() {
+            match readings
+                .iter_mut()
+                .find(|existing| existing.carrier == reading.carrier)
+            {
+                Some(existing) => *existing = reading,
+                None => readings.push(reading),
+            }
+        }
+    }
+
+    pub fn readings(&self) -> Vec<GatewayListenerReading> {
+        self.0
+            .lock()
+            .map(|readings| readings.clone())
+            .unwrap_or_default()
+    }
+}
+
+fn websocket_reading(
+    bind: &str,
+    state: ListenerState,
+    detail: Option<String>,
+) -> GatewayListenerReading {
+    GatewayListenerReading {
+        carrier: "websocket".into(),
+        bind: bind.into(),
+        class: ListenerClass::classify_bind(bind),
+        scope: CarrierScope::Peer,
+        state,
+        detail,
+    }
+}
+
+/// Bind the WebSocket carrier, waiting out an address that cannot be bound
+/// yet (a tailnet address before Tailscale is up, a port another process
+/// still holds). Each failure is recorded as a `waiting` reading naming the
+/// OS error and retried with doubling backoff up to
+/// [`WEBSOCKET_BIND_RETRY_MAX`]; the other carriers serve meanwhile. An
+/// address that can never parse is refused at once — retrying cannot fix a
+/// typo. `None` means the service stopped before the address became bindable.
+fn bind_websocket_when_available(
+    bind: &str,
+    shutdown: &AtomicBool,
+    carriers: &CarrierReadings,
+) -> Result<Option<TcpListener>> {
+    let mut wait = WEBSOCKET_BIND_RETRY_FIRST;
+    let mut announced: Option<String> = None;
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        match TcpListener::bind(bind) {
+            Ok(listener) => {
+                if announced.is_some() {
+                    eprintln!("gateway: the WebSocket carrier at {bind} is bound now");
+                }
+                return Ok(Some(listener));
+            }
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+                return Err(AikitError::new(
+                    "agency_gateway_service.websocket_bind",
+                    format!("bind WebSocket gateway at {bind}: {error}"),
+                ));
+            }
+            Err(error) => {
+                let reason = error.to_string();
+                carriers.set(websocket_reading(
+                    bind,
+                    ListenerState::Waiting,
+                    Some(format!(
+                        "unavailable: bind {bind}: {reason}; retried with backoff up to {}s \
+                         while the other carriers serve",
+                        WEBSOCKET_BIND_RETRY_MAX.as_secs()
+                    )),
+                ));
+                if announced.as_deref() != Some(reason.as_str()) {
+                    eprintln!(
+                        "gateway: the WebSocket carrier at {bind} is unavailable ({reason}); \
+                         the other carriers serve while it retries"
+                    );
+                    announced = Some(reason);
+                }
+            }
+        }
+        let until = std::time::Instant::now() + wait;
+        while std::time::Instant::now() < until {
+            if shutdown.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        wait = (wait * 2).min(WEBSOCKET_BIND_RETRY_MAX);
+    }
 }
 
 /// One live carrier connection, closeable from the service's exit path.
@@ -822,6 +939,7 @@ fn serve_gateway_service(
         engine: Some(engine),
         connections: ConnectionRegistry::default(),
         encounter: encounter_relay,
+        carriers: CarrierReadings::default(),
     });
 
     // Coexistence gate at serve startup: with the exclusive policy and a
@@ -910,21 +1028,6 @@ fn serve_gateway_service(
             .websocket_bearer_token
             .clone()
             .expect("validated WebSocket bearer token");
-        let listener = match prebound_websocket_listener {
-            Some(listener) => listener,
-            None => TcpListener::bind(&bind).map_err(|error| {
-                AikitError::new(
-                    "agency_gateway_service.websocket_bind",
-                    format!("bind WebSocket gateway at {bind}: {error}"),
-                )
-            })?,
-        };
-        listener.set_nonblocking(true).map_err(|error| {
-            AikitError::new(
-                "agency_gateway_service.websocket_nonblocking",
-                format!("configure WebSocket listener {bind}: {error}"),
-            )
-        })?;
         let gateway = Arc::clone(&gateway);
         let shutdown = Arc::clone(&shutdown);
         let state_file = config.state_file.clone();
@@ -932,6 +1035,34 @@ fn serve_gateway_service(
         let occupancy = occupancy.clone();
         let runtime = Arc::clone(&runtime);
         workers.push(thread::spawn(move || {
+            // An address that cannot be bound yet is waited out on this
+            // worker, never fatal to the service: the Unix carrier keeps
+            // answering, and status names this carrier `waiting` and why.
+            let listener = match prebound_websocket_listener {
+                Some(listener) => listener,
+                None => match bind_websocket_when_available(&bind, &shutdown, &runtime.carriers) {
+                    Ok(Some(listener)) => listener,
+                    Ok(None) => return Ok(()),
+                    Err(error) => {
+                        shutdown.store(true, Ordering::SeqCst);
+                        return Err(error);
+                    }
+                },
+            };
+            if let Err(error) = listener.set_nonblocking(true) {
+                shutdown.store(true, Ordering::SeqCst);
+                return Err(AikitError::new(
+                    "agency_gateway_service.websocket_nonblocking",
+                    format!("configure WebSocket listener {bind}: {error}"),
+                ));
+            }
+            let bound = listener
+                .local_addr()
+                .map(|address| address.to_string())
+                .unwrap_or_else(|_| bind.clone());
+            runtime
+                .carriers
+                .set(websocket_reading(&bound, ListenerState::Bound, None));
             let result = serve_websocket_listener(
                 listener,
                 gateway,
@@ -942,8 +1073,9 @@ fn serve_gateway_service(
                 occupancy,
                 runtime,
             );
-            // A carrier that fails stops the whole service: a half-alive
-            // gateway answering on one carrier only is silent degradation.
+            // A carrier that fails once bound stops the whole service: a
+            // half-alive gateway answering on one carrier only is silent
+            // degradation. Waiting to bind is not failing — it is named.
             if result.is_err() {
                 shutdown.store(true, Ordering::SeqCst);
             }
@@ -1282,6 +1414,9 @@ fn serve_unix_socket(
             format!("bind Unix gateway socket {}: {error}", path.display()),
         )
     })?;
+    runtime
+        .carriers
+        .set(unix_listener_reading(&path, ListenerState::Bound));
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|error| {
         AikitError::new(
             "agency_gateway_service.unix_permissions",
@@ -1645,7 +1780,11 @@ fn execute_serialized_request(
             "gateway state lock was poisoned",
         )
     })?;
-    let result = execute_gateway_command(&mut gateway, request.command.clone());
+    let mut result = execute_gateway_command(&mut gateway, request.command.clone());
+    // The kernel knows no carriers; the service answering knows its own.
+    if let Ok(GatewayResponse::Status { status }) = &mut result {
+        status.carriers = runtime.carriers.readings();
+    }
     let mut subscribed = None;
     match &result {
         // A subscribe is a replay plus a live attachment, made one indivisible
@@ -2076,6 +2215,7 @@ mod tests {
             controls: Arc::new(crate::gateway_connector_pump::ConnectorPumpControls::default()),
             engine: None,
             connections: ConnectionRegistry::default(),
+            carriers: CarrierReadings::default(),
         })
     }
 
@@ -2207,6 +2347,211 @@ mod tests {
             error.code().starts_with("agency_gateway_service.unix"),
             "{error}"
         );
+    }
+
+    /// Ask the service for its status over the Unix carrier.
+    #[cfg(unix)]
+    fn unix_status(socket: &std::path::Path) -> Value {
+        let mut stream = UnixStream::connect(socket).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let response = line_exchange(
+            &mut stream,
+            serde_json::json!({"request_id":"s","command":{"type":"status"}}),
+        );
+        assert_eq!(response["ok"], true, "{response}");
+        response["response"]["status"].clone()
+    }
+
+    #[cfg(unix)]
+    fn carrier(status: &Value, name: &str) -> Value {
+        status["carriers"]
+            .as_array()
+            .unwrap_or_else(|| panic!("status names its carriers: {status}"))
+            .iter()
+            .find(|reading| reading["carrier"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("status names the {name} carrier: {status}"))
+    }
+
+    #[cfg(unix)]
+    fn stop_over_unix(socket: &std::path::Path) {
+        let mut stream = UnixStream::connect(socket).unwrap();
+        let response = line_exchange(
+            &mut stream,
+            serde_json::json!({"request_id":"stop","command":{"type":"shutdown"}}),
+        );
+        assert_eq!(response["ok"], true, "{response}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unbindable_websocket_address_never_takes_the_unix_carrier_down() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("gateway.sock");
+        // TEST-NET-1: an address no interface of this machine carries, like a
+        // tailnet address while Tailscale is stopped.
+        let config = GatewayServiceConfig {
+            websocket_bind: Some("192.0.2.1:7788".into()),
+            websocket_bearer_token: Some("token".into()),
+            unix_socket: Some(socket.clone()),
+            state_file: Some(root.path().join("gateway.json")),
+            max_frame_bytes: DEFAULT_GATEWAY_MAX_FRAME_BYTES,
+        };
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = done_tx.send(run_gateway_service(gateway(), config));
+        });
+        wait_connectable(&socket);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let websocket = loop {
+            let status = unix_status(&socket);
+            let unix = carrier(&status, "unix");
+            assert_eq!(unix["state"], "bound", "{status}");
+            assert_eq!(unix["scope"], "owner");
+            if let Some(websocket) = status["carriers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|reading| reading["carrier"] == "websocket")
+            {
+                break websocket.clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the WebSocket reading never appeared"
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(websocket["state"], "waiting", "{websocket}");
+        assert_eq!(websocket["bind"], "192.0.2.1:7788");
+        let detail = websocket["detail"].as_str().unwrap();
+        assert!(
+            detail.starts_with("unavailable: bind 192.0.2.1:7788:"),
+            "the reading names why: {detail}"
+        );
+        assert!(
+            done_rx.try_recv().is_err(),
+            "the service keeps running while the WebSocket address waits"
+        );
+
+        stop_over_unix(&socket);
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the service stops on request")
+            .expect("a waiting carrier is not a failed service");
+        assert!(!socket.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_websocket_address_that_becomes_bindable_comes_up_while_the_service_runs() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("gateway.sock");
+        // Another process holds the port first; the carrier waits for it.
+        let holder = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = holder.local_addr().unwrap();
+        let config = GatewayServiceConfig {
+            websocket_bind: Some(address.to_string()),
+            websocket_bearer_token: Some("secret".into()),
+            unix_socket: Some(socket.clone()),
+            state_file: Some(root.path().join("gateway.json")),
+            max_frame_bytes: DEFAULT_GATEWAY_MAX_FRAME_BYTES,
+        };
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = done_tx.send(run_gateway_service(gateway(), config));
+        });
+        wait_connectable(&socket);
+
+        let wait_for = |state: &str| {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let status = unix_status(&socket);
+                let found = status["carriers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|reading| reading["carrier"] == "websocket")
+                    .cloned();
+                if let Some(reading) = found.filter(|reading| reading["state"] == state) {
+                    return reading;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the WebSocket carrier never read {state}: {status}"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+        };
+        let waiting = wait_for("waiting");
+        assert!(waiting["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("unavailable:"));
+
+        drop(holder);
+        let bound = wait_for("bound");
+        assert_eq!(bound["bind"], address.to_string());
+        assert!(bound.get("detail").is_none(), "{bound}");
+
+        // The carrier that came up answers the protocol like any other.
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        write!(
+            stream,
+            "GET / HTTP/1.1\r\nHost: {address}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nAuthorization: Bearer secret\r\n\r\n"
+        )
+        .unwrap();
+        stream.flush().unwrap();
+        let mut handshake = Vec::new();
+        while !handshake.ends_with(b"\r\n\r\n") {
+            let mut byte = [0u8; 1];
+            stream.read_exact(&mut byte).unwrap();
+            handshake.push(byte[0]);
+        }
+        assert!(String::from_utf8(handshake)
+            .unwrap()
+            .starts_with("HTTP/1.1 101"));
+        let protocol =
+            serde_json::json!({"request_id":"p1","command":{"type":"protocol"}}).to_string();
+        stream.write_all(&masked_text_frame(&protocol)).unwrap();
+        assert_eq!(
+            read_server_text(&mut stream)["response"]["type"],
+            "protocol"
+        );
+        drop(stream);
+
+        stop_over_unix(&socket);
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn a_websocket_address_that_can_never_parse_still_stops_the_service() {
+        let root = tempfile::tempdir().unwrap();
+        let config = GatewayServiceConfig {
+            websocket_bind: Some("not-an-address".into()),
+            websocket_bearer_token: Some("token".into()),
+            unix_socket: None,
+            state_file: Some(root.path().join("gateway.json")),
+            max_frame_bytes: DEFAULT_GATEWAY_MAX_FRAME_BYTES,
+        };
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(run_gateway_service(gateway(), config));
+        });
+        let error = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("retrying cannot fix a malformed address")
+            .unwrap_err();
+        assert_eq!(error.code(), "agency_gateway_service.websocket_bind");
     }
 
     #[test]

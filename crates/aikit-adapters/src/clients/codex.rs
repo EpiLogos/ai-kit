@@ -647,6 +647,26 @@ impl ClientAdapter for CodexAdapter {
     }
 
     fn install(&self, config_dir: &Path) -> Result<Vec<ProjectionItem>> {
+        self.install_events(config_dir, &|_| true)
+    }
+
+    fn install_working(
+        &self,
+        config_dir: &Path,
+        working: &std::collections::BTreeSet<HookEventKind>,
+    ) -> Result<Vec<ProjectionItem>> {
+        self.install_events(config_dir, &|event| working.contains(event))
+    }
+}
+
+impl CodexAdapter {
+    /// Merge the dispatcher entries for the seam's events that `keep`
+    /// selects; AIKit entries for every other event are swept by the merge.
+    fn install_events(
+        &self,
+        config_dir: &Path,
+        keep: &dyn Fn(&HookEventKind) -> bool,
+    ) -> Result<Vec<ProjectionItem>> {
         // The descriptor decides both the seam and the events that ride it:
         // codex's hooks.json carries session_start / pre_tool_use /
         // post_tool_use (transport hooks-json-file); its Notification rides
@@ -654,7 +674,8 @@ impl ClientAdapter for CodexAdapter {
         // separately and never invented here. The file's event keys are the
         // boundary spellings the grammar uses (SessionStart, ...), as observed
         // on real trusted installs.
-        let events = self.descriptor_events()?;
+        let mut events = self.descriptor_events()?;
+        events.retain(|(event, _)| keep(event));
         let file_name = self
             .capability
             .as_ref()

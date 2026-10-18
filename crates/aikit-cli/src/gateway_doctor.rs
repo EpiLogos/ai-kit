@@ -856,6 +856,12 @@ pub fn gather(home: &AikitHome) -> Result<Facts> {
             ..RunningFacts::default()
         };
         if let Some(GatewayResponse::Status { status }) = asked(GatewayCommand::Status) {
+            // The answering service's own carrier reading is live; the
+            // posture record names what it was configured to serve at start.
+            // A carrier still waiting to bind is the live fact.
+            if !status.carriers.is_empty() {
+                running.listeners = status.carriers.clone();
+            }
             running.gateway_ref = Some(status.gateway_ref.to_string());
             running.connector_count = status.connector_count;
             running.binding_count = status.binding_count;

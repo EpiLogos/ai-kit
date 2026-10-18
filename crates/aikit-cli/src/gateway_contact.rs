@@ -3995,6 +3995,7 @@ mod exact_instance_binding_tests {
                         pending_delivery_count: 0,
                         delivery_receipt_count: 0,
                         connector_health: Vec::new(),
+                        carriers: Vec::new(),
                     },
                 }),
                 GatewayCommand::SendCommunique { draft } => {

@@ -593,6 +593,11 @@ pub enum ConnectionSignalKind {
     },
     Completed {
         stop_reason: String,
+        /// The provider's own usage report for the turn (the ACP prompt
+        /// result's `usage`), kept as sent within [`PROVIDER_PAYLOAD_LIMIT`].
+        /// Absent when the provider reported none — never estimated.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Value>,
     },
     Cancelled,
     Failed {
@@ -600,6 +605,20 @@ pub enum ConnectionSignalKind {
     },
     Status {
         message: String,
+    },
+    /// A provider session update AIKit gives no dedicated signal
+    /// (`usage_update`, `plan`, `compaction_update`, `session_info_update`,
+    /// and every kind a provider adds later): the update object exactly as
+    /// sent, within [`PROVIDER_PAYLOAD_LIMIT`]. Unknown kinds are kept, never
+    /// collapsed to a status line or dropped.
+    ProviderUpdate {
+        /// The provider's own `sessionUpdate` name.
+        session_update: String,
+        /// The whole update object; past the limit, a UTF-8-safe prefix of
+        /// its JSON text, with `truncated_from_bytes` naming the full size.
+        payload: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        truncated_from_bytes: Option<usize>,
     },
     /// A provider confirmed its standard ACP model config selector after an
     /// explicit request. It changes no canonical AgentSession identity.
@@ -926,7 +945,13 @@ impl AcpV1ConnectionAdapter {
                 let kind = if stop_reason == "cancelled" {
                     ConnectionSignalKind::Cancelled
                 } else {
-                    ConnectionSignalKind::Completed { stop_reason }
+                    ConnectionSignalKind::Completed {
+                        stop_reason,
+                        usage: result
+                            .get("usage")
+                            .filter(|usage| !usage.is_null())
+                            .map(|usage| bounded_provider_payload(usage).0),
+                    }
                 };
                 Ok(vec![self.signal(Some(native_session_id), kind)])
             }
@@ -958,9 +983,15 @@ impl AcpV1ConnectionAdapter {
                         ConnectionSignalKind::ToolCall { payload: update }
                     }
                     "tool_result" => ConnectionSignalKind::ToolResult { payload: update },
-                    _ => ConnectionSignalKind::Status {
-                        message: format!("ACP session update: {kind_name}"),
-                    },
+                    _ => {
+                        let session_update = kind_name.to_owned();
+                        let (payload, truncated_from_bytes) = bounded_provider_payload(&update);
+                        ConnectionSignalKind::ProviderUpdate {
+                            session_update,
+                            payload,
+                            truncated_from_bytes,
+                        }
+                    }
                 };
                 Ok(vec![self.signal(Some(native_session_id), kind)])
             }
@@ -1293,6 +1324,7 @@ impl AgentConnectionAdapter for ClassicProcessConnectionAdapter {
                     .and_then(Value::as_str)
                     .unwrap_or("completed")
                     .to_string(),
+                usage: None,
             },
             Some("cancelled") => ConnectionSignalKind::Cancelled,
             Some(other) => ConnectionSignalKind::Status {
@@ -1304,6 +1336,25 @@ impl AgentConnectionAdapter for ClassicProcessConnectionAdapter {
         };
         Ok(vec![self.signal(native_session_id, kind)])
     }
+}
+
+/// The most of one provider payload (a session update object, a turn's usage
+/// report) a signal carries verbatim. Lifecycle reports are small; the bound
+/// stops one runaway update from swelling the encounter journal.
+pub const PROVIDER_PAYLOAD_LIMIT: usize = 64 * 1024;
+
+/// The payload as sent when its JSON fits [`PROVIDER_PAYLOAD_LIMIT`]; past
+/// it, a UTF-8-safe prefix of that JSON text, with the full size named.
+fn bounded_provider_payload(payload: &Value) -> (Value, Option<usize>) {
+    let text = payload.to_string();
+    if text.len() <= PROVIDER_PAYLOAD_LIMIT {
+        return (payload.clone(), None);
+    }
+    let mut end = PROVIDER_PAYLOAD_LIMIT;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (Value::String(text[..end].to_owned()), Some(text.len()))
 }
 
 fn capability_present(value: &Value, field: &str) -> bool {

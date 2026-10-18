@@ -4,7 +4,8 @@
 //!
 //! The acceptance law: applying a project installs the project-scoped managed
 //! hook seam through the same procedure pipeline as `aikit client install` —
-//! foreign entries preserved, AIKit's stale entries swept — a second apply is
+//! foreign entries preserved, AIKit's stale entries swept, only the events
+//! the composition does work on routed — a second apply is
 //! satisfied rather than a second install, the dispatcher entries the seam
 //! carries actually dispatch, the doctor's `dispatch.chain` projection leg
 //! reads the seam as installed, and a harness whose descriptor cannot be read
@@ -176,9 +177,13 @@ fn apply_installs_the_project_hook_seam_and_the_doctor_leg_reads_it_installed() 
         "the dispatched event lands: {merged}"
     );
     assert!(
-        merged.contains("aikit hook dispatch codex PreToolUse")
-            && merged.contains("aikit hook dispatch codex PostToolUse"),
-        "every hooks-json-file event lands: {merged}"
+        !merged.contains("aikit hook dispatch codex PreToolUse"),
+        "PreToolUse, which no chain step, reaction or Event Routine answers here, is \
+         not routed — codex would wait on a dispatch process before every tool call: {merged}"
+    );
+    assert!(
+        merged.contains("aikit hook dispatch codex PostToolUse"),
+        "PostToolUse stays routed: completed tool use is recorded from it: {merged}"
     );
     assert!(
         merged.contains("my-own-guard"),
@@ -271,5 +276,85 @@ fn apply_discloses_a_refused_hook_seam_instead_of_failing() {
     assert!(
         untouched.contains("my-own-guard") && !untouched.contains("aikit hook dispatch"),
         "a refused install writes nothing: {untouched}"
+    );
+}
+
+/// A first-party-shaped hook capsule with one PreToolUse step, composed into
+/// the project and trusted, exactly as a reviewed gate would be.
+fn compose_pre_tool_step(home: &Path) {
+    use aikit_core::catalog::Catalog;
+    use aikit_core::{CapsuleId, TrustKey, TrustState};
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = home.join("aikit-home/registries/personal/capsules/hook/gate/pre-tool");
+    fs::create_dir_all(root.join("payload")).unwrap();
+    fs::write(
+        root.join("manifest.toml"),
+        "schema = 1\nid = \"hook/gate/pre-tool\"\nkind = \"hook\"\nname = \"pre-tool\"\n\
+         description = \"A PreToolUse gate under test.\"\n\
+         [hook]\nentry = \"payload/check\"\nevents = [\"PreToolUse\"]\n",
+    )
+    .unwrap();
+    let payload = root.join("payload/check");
+    fs::write(&payload, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&payload, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        home.join("project/.aikit/profile.toml"),
+        "schema = 1\nenable = [\"hook/gate/pre-tool\"]\n",
+    )
+    .unwrap();
+    let service = aikit_cli::app::Service::open(
+        aikit_store::AikitHome::at(home.join("aikit-home")),
+        &home.join("project"),
+        |_| None,
+    )
+    .unwrap();
+    let id = CapsuleId::parse("hook/gate/pre-tool").unwrap();
+    let capsule = service
+        .snapshot()
+        .get(&id)
+        .expect("the fixture registry carries the gate");
+    let key = TrustKey::new(
+        capsule.source.clone().unwrap(),
+        id,
+        capsule.revision.clone().unwrap(),
+    );
+    aikit_store::TrustStore::new(service.index())
+        .record(&key, TrustState::Trusted, Some("test review"))
+        .unwrap();
+}
+
+fn hooks_of(seam: &str) -> Value {
+    serde_json::from_str::<Value>(seam).unwrap()["hooks"].clone()
+}
+
+#[test]
+fn a_composed_pre_tool_step_brings_its_entry_back_and_leaves_working_entries_unchanged() {
+    let home = scenario(true);
+    envelope(home.path(), &["apply"]);
+    let without = hooks_of(&seam(home.path()));
+    assert!(
+        without.get("PreToolUse").is_none(),
+        "no step answers PreToolUse yet: {without}"
+    );
+
+    compose_pre_tool_step(home.path());
+    let applied = envelope(home.path(), &["apply"]);
+    assert_eq!(applied["data"]["hook_seams"][0]["state"], "installed");
+    let with = hooks_of(&seam(home.path()));
+    let pre_tool = with["PreToolUse"].to_string();
+    assert!(
+        pre_tool.contains("aikit hook dispatch codex PreToolUse"),
+        "the composed PreToolUse step brings its seam entry back: {with}"
+    );
+    for event in ["SessionStart", "PostToolUse"] {
+        assert_eq!(
+            with[event], without[event],
+            "{event} does work: its entry is kept exactly"
+        );
+    }
+    assert!(
+        with.to_string().contains("my-own-guard"),
+        "the foreign entry is preserved: {with}"
     );
 }

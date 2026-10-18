@@ -102,7 +102,7 @@ fn real_acp_sdk_target_streams_and_preserves_identity_boundary() {
                     assert_eq!(text, "hello from AIKit");
                     saw_chunk = true;
                 }
-                ConnectionSignalKind::Completed { stop_reason } => {
+                ConnectionSignalKind::Completed { stop_reason, .. } => {
                     assert_eq!(stop_reason, "end_turn");
                     saw_completed = true;
                 }

@@ -195,11 +195,13 @@ fn portable_signal(signal: &ConnectionSignal) -> (&'static str, Option<String>, 
                 "provenance": request.provenance,
             })),
         ),
-        ConnectionSignalKind::Completed { stop_reason } => (
-            "model-result",
-            None,
-            Some(json!({ "event": "completed", "stop_reason": stop_reason })),
-        ),
+        ConnectionSignalKind::Completed { stop_reason, usage } => {
+            let mut native = json!({ "event": "completed", "stop_reason": stop_reason });
+            if let Some(usage) = usage {
+                native["usage"] = usage.clone();
+            }
+            ("model-result", None, Some(native))
+        }
         ConnectionSignalKind::Failed { reason } => (
             "model-result",
             None,
@@ -210,6 +212,20 @@ fn portable_signal(signal: &ConnectionSignal) -> (&'static str, Option<String>, 
             "harness-event",
             Some(message.clone()),
             Some(json!({ "event": "status" })),
+        ),
+        ConnectionSignalKind::ProviderUpdate {
+            session_update,
+            payload,
+            truncated_from_bytes,
+        } => (
+            "harness-event",
+            None,
+            Some(json!({
+                "event": "provider-update",
+                "session_update": session_update,
+                "payload": payload,
+                "truncated_from_bytes": truncated_from_bytes,
+            })),
         ),
         ConnectionSignalKind::ModelConfigured { model_observation } => (
             "harness-event",

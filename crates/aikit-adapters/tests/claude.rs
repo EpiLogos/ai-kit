@@ -644,3 +644,81 @@ fn claude_activation_truth_rejects_an_overclaiming_observation() {
     // A projection write is never proof that the running harness loaded it.
     assert!(verify_activation_truth(&plan, &observation).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Only the events that do work are routed
+// ---------------------------------------------------------------------------
+
+fn written(items: &[ProjectionItem]) -> String {
+    match &items[0] {
+        ProjectionItem::Write { contents, .. } => contents.clone(),
+        other => panic!("the install writes the settings file, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_event_nothing_answers_is_not_routed_and_events_with_work_are_unchanged() {
+    use aikit_core::hooks::HookEventKind;
+    use std::collections::BTreeSet;
+
+    let generation = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = adapter(generation.path());
+    // A previous install routed every descriptor event.
+    let everything = claude.install(config.path()).unwrap();
+    materialize(&everything, config.path());
+    let before = settings_after_install(config.path());
+
+    // The composition's working events: the floor's, with no PreToolUse step.
+    let mut working = BTreeSet::from([
+        HookEventKind::SessionStart,
+        HookEventKind::UserPromptSubmit,
+        HookEventKind::PreCompact,
+        HookEventKind::Stop,
+        HookEventKind::PostToolUse,
+    ]);
+    let selected = claude.install_working(config.path(), &working).unwrap();
+    let after: serde_json::Value = serde_json::from_str(&written(&selected)).unwrap();
+    let mut routed: Vec<&String> = after["hooks"].as_object().unwrap().keys().collect();
+    routed.sort();
+    assert_eq!(
+        routed,
+        vec![
+            "PostToolUse",
+            "PreCompact",
+            "SessionStart",
+            "Stop",
+            "UserPromptSubmit"
+        ],
+        "the previously installed PreToolUse/SessionEnd/Notification entries are swept"
+    );
+    for event in [
+        "PostToolUse",
+        "PreCompact",
+        "SessionStart",
+        "Stop",
+        "UserPromptSubmit",
+    ] {
+        assert_eq!(
+            after["hooks"][event], before["hooks"][event],
+            "{event} does work: its entry is unchanged"
+        );
+    }
+
+    // Composing a PreToolUse step brings its entry back, exactly as before.
+    working.insert(HookEventKind::PreToolUse);
+    let with_step = claude.install_working(config.path(), &working).unwrap();
+    let restored: serde_json::Value = serde_json::from_str(&written(&with_step)).unwrap();
+    assert_eq!(
+        restored["hooks"]["PreToolUse"],
+        before["hooks"]["PreToolUse"]
+    );
+    assert!(restored["hooks"].get("SessionEnd").is_none());
+
+    // Every descriptor event working is byte-for-byte the full install.
+    let all = BTreeSet::from(HookEventKind::KNOWN);
+    assert_eq!(
+        written(&claude.install_working(config.path(), &all).unwrap()),
+        written(&everything)
+    );
+}

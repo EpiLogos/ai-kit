@@ -122,11 +122,12 @@ posture = "observed"
 # Connection truth 2026-09-22 (cards [VL+VR]): claude-code has NO native ACP
 # (verified-live 2.1.263); the maintained adapter is
 # @agentclientprotocol/claude-agent-acp (verified 0.81.0 on npm 2026-09-22;
-# the old @zed-industries package is gone). The adapter tracks the Claude Code
-# release line, so the package is deliberately NOT version-pinned in the
-# declaration — the verified version lives in this comment.
+# the old @zed-industries package is gone). The argv pins that verified
+# version: an unpinned spec resolves whatever npm calls latest at launch, so
+# an encounter would run an adapter nobody verified. Moving to a newer adapter
+# is a re-verification that edits this pin.
 protocol = "acp"
-connect = { argv = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"] }
+connect = { argv = ["npx", "-y", "@agentclientprotocol/claude-agent-acp@0.81.0"] }
 # ordered-streaming/cancellation: the ACP baseline every agent MUST support
 # per spec. permission-requests: the claude-code permission flow through the
 # adapter is its core feature. reconnect/mcp-servers/additional-directories
@@ -199,15 +200,18 @@ posture = "observed"
 # Connection truth 2026-09-22 (cards [VL+VR]): codex has NO native ACP
 # subcommand (verified-live codex-cli 0.155.1; `codex app-server` is its own
 # protocol, not ACP); the maintained adapter is
-# @agentclientprotocol/codex-acp (verified 1.13.0; zed-industries/codex-acp is
-# archived at 0.16.0). The adapter tracks the codex release line, so the
-# package is deliberately NOT version-pinned in the declaration — the
-# verified version lives in this comment.
+# @agentclientprotocol/codex-acp (cards verified 1.13.0; zed-industries/codex-acp
+# is archived at 0.16.0). The argv pins 1.13.1: the build this machine's npx
+# cache has held since 2026-09-24, and the one whose initialize answer was read
+# (its dist, 2026-10-16) to declare the open modes below. An unpinned spec
+# resolves whatever npm calls latest at launch; moving to a newer adapter is a
+# re-verification that edits this pin.
 protocol = "acp"
-connect = { argv = ["npx", "-y", "@agentclientprotocol/codex-acp"] }
-# The cards verify `codex exec resume <id|--last>` for the process face only;
-# adapter-side resume is unverified, so the acp face claims create alone.
-open-modes = ["create"]
+connect = { argv = ["npx", "-y", "@agentclientprotocol/codex-acp@1.13.1"] }
+# codex-acp 1.13.1 initialize advertises `agentCapabilities.loadSession: true`
+# and `sessionCapabilities.resume: {}` (with list/close/fork): the encounter
+# reconnect rides `session/resume`, and `session/load` replays history.
+open-modes = ["create", "load", "resume"]
 # ordered-streaming/cancellation: the ACP baseline every agent MUST support
 # per spec. permission-requests stays false: unverified (the cards evidence
 # the adapter's existence and version, not its approval-flow surface — codex's
@@ -1357,6 +1361,34 @@ mod tests {
         assert!(!sessions.capabilities.mcp_servers);
         assert!(!sessions.capabilities.additional_directories);
         assert!(!sessions.capabilities.reconnect);
+    }
+
+    #[test]
+    fn acp_adapters_launch_pinned_to_the_version_their_declaration_was_read_from() {
+        // An unpinned `npx -y <package>` runs whatever npm calls latest at
+        // launch: the declared open modes would describe an adapter nobody read.
+        for (slug, package) in [
+            (
+                "claude-code",
+                "@agentclientprotocol/claude-agent-acp@0.81.0",
+            ),
+            ("codex", "@agentclientprotocol/codex-acp@1.13.1"),
+        ] {
+            let sessions = for_slug(slug).unwrap().sessions.as_ref().unwrap();
+            let argv = &sessions.connect.as_ref().unwrap().argv;
+            assert_eq!(
+                argv,
+                &vec!["npx".to_owned(), "-y".to_owned(), package.to_owned()],
+                "{slug} launches its adapter pinned"
+            );
+        }
+        // codex-acp 1.13.1's initialize advertises loadSession and
+        // sessionCapabilities.resume, so the declaration names both.
+        let codex = for_slug("codex").unwrap().sessions.as_ref().unwrap();
+        assert_eq!(
+            codex.open_modes,
+            vec!["create".to_owned(), "load".to_owned(), "resume".to_owned()]
+        );
     }
 
     #[test]

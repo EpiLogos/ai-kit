@@ -329,7 +329,28 @@ impl ClientAdapter for ClaudeAdapter {
     }
 
     fn install(&self, config_dir: &Path) -> Result<Vec<ProjectionItem>> {
-        let events = self.descriptor_events()?;
+        self.install_events(config_dir, &|_| true)
+    }
+
+    fn install_working(
+        &self,
+        config_dir: &Path,
+        working: &std::collections::BTreeSet<HookEventKind>,
+    ) -> Result<Vec<ProjectionItem>> {
+        self.install_events(config_dir, &|event| working.contains(event))
+    }
+}
+
+impl ClaudeAdapter {
+    /// Merge the dispatcher entries for the descriptor's events that `keep`
+    /// selects; AIKit entries for every other event are swept by the merge.
+    fn install_events(
+        &self,
+        config_dir: &Path,
+        keep: &dyn Fn(&HookEventKind) -> bool,
+    ) -> Result<Vec<ProjectionItem>> {
+        let mut events = self.descriptor_events()?;
+        events.retain(|(event, _)| keep(event));
         let file_name = self
             .capability
             .as_ref()

@@ -2158,6 +2158,72 @@ impl Service {
         Ok((decision, refocus))
     }
 
+    /// The dispatch boundaries that do work for `client` in this composition —
+    /// the events a harness seam routes into `aikit hook dispatch`. A harness
+    /// runs, and waits on, every event its settings register, so an event
+    /// nothing answers costs each occurrence a process for nothing.
+    ///
+    /// This mirrors what a dispatch actually runs (`dispatch_hook_inhabited`
+    /// and the hook command around it); a reaction added there is added here:
+    ///
+    /// * the resolved chain: every event with at least one step;
+    /// * the floor, which no composition gates: Central's temporal reground
+    ///   and lean entry (SessionStart, UserPromptSubmit), the floor ledger
+    ///   reset (PreCompact), Communiqué delivery (UserPromptSubmit), and World
+    ///   inhabitation's Refocus (SessionStart, UserPromptSubmit, PreCompact,
+    ///   Stop) — a body may be inhabited after the seam was installed;
+    /// * PostToolUse, whatever the composition: it is where completed tool
+    ///   use is recorded (activity evidence, and the observers that read
+    ///   finished tool calls), and evidence that silently stops is worse than
+    ///   one process after each call. What this selection removes is the
+    ///   PreToolUse wait in front of every call;
+    /// * composed continuity reactions on their events: file-context on
+    ///   PreToolUse (the rest ride the events above already);
+    /// * Enabled Event Routines whose trigger names this client and event.
+    pub fn working_hook_events(
+        &self,
+        client: &str,
+    ) -> Result<std::collections::BTreeSet<aikit_core::hooks::HookEventKind>> {
+        use aikit_core::hooks::{build_chains, HookEventKind};
+        use aikit_core::resource::routine::{RoutineState, RoutineTrigger};
+
+        let mut working = std::collections::BTreeSet::from([
+            HookEventKind::SessionStart,
+            HookEventKind::UserPromptSubmit,
+            HookEventKind::PreCompact,
+            HookEventKind::Stop,
+            HookEventKind::PostToolUse,
+        ]);
+        for chain in build_chains(&self.view, &self.catalog)?.into_values() {
+            if !chain.steps.is_empty() {
+                working.insert(chain.event);
+            }
+        }
+        let tuning = ContinuityTuning::resolve(&self.view);
+        if tuning.allows(aikit_core::continuity::FILE_CONTEXT) {
+            working.insert(HookEventKind::PreToolUse);
+        }
+        let routines = aikit_store::RoutineStore::new(self.home.clone()).list()?;
+        for record in routines {
+            if record.routine.state != RoutineState::Enabled {
+                continue;
+            }
+            let RoutineTrigger::Event { event_ref } = &record.routine.trigger else {
+                continue;
+            };
+            let Some(rest) = event_ref.strip_prefix("aikit.routine-event/v1:") else {
+                continue;
+            };
+            let mut parts = rest.splitn(3, ':');
+            if let (Some(event_client), Some(event_kind)) = (parts.next(), parts.next()) {
+                if event_client == client {
+                    working.insert(HookEventKind::parse(event_kind));
+                }
+            }
+        }
+        Ok(working)
+    }
+
     fn dispatch_hook_chain(
         &self,
         event: &aikit_core::hooks::HookEvent,
