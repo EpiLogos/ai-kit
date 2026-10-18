@@ -129,6 +129,18 @@ enum Command {
         #[arg(long)]
         agent_session: String,
     },
+    /// Read or change this session's settings and its bound task's: the
+    /// track's Telemetry and Solo; the task's name, colour, activator, output
+    /// style, Launch, Then, Hand off to, Quantize and envelopes. Without
+    /// --request-json it reads; several --agent-session read each at once.
+    EncounterSessionSettings {
+        #[arg(long, required = true)]
+        agent_session: Vec<String>,
+        #[arg(long)]
+        request_json: Option<String>,
+        #[arg(long)]
+        expected_revision: Option<String>,
+    },
     /// Restore an exact prior ready task after failed unhosted preparation.
     /// Hosted pending work requires recovery of the same Workcell demand.
     EncounterTaskAbort {
@@ -485,6 +497,53 @@ fn run(cli: Cli) -> Result<()> {
                 service.home(),
                 &aikit_core::ResourceRef::parse(agent_session)?,
             )?)
+        }
+        Command::EncounterSessionSettings {
+            agent_session,
+            request_json,
+            expected_revision,
+        } => {
+            let sessions = agent_session
+                .iter()
+                .map(aikit_core::ResourceRef::parse)
+                .collect::<aikit_core::Result<Vec<_>>>()?;
+            match (request_json, sessions.as_slice()) {
+                (None, _) if expected_revision.is_some() => Err(aikit_core::AikitError::new(
+                    "encounter.runtime",
+                    "--expected-revision goes with a change (--request-json)",
+                )),
+                (None, [session]) => emit(
+                    &crate::encounter_service::EncounterService::read_session_settings(
+                        service.home(),
+                        session,
+                    )?,
+                ),
+                (None, sessions) => emit(
+                    &crate::encounter_service::EncounterService::read_sessions_settings(
+                        service.home(),
+                        sessions,
+                    )?,
+                ),
+                (Some(_), [_, _, ..]) => Err(aikit_core::AikitError::new(
+                    "encounter.runtime",
+                    "A change is made to one session's settings at a time",
+                )),
+                (Some(request_json), sessions) => {
+                    let session = &sessions[0];
+                    let expected = expected_revision
+                        .as_deref()
+                        .map(aikit_core::SourceRevision::parse)
+                        .transpose()?;
+                    emit(
+                        &crate::encounter_service::EncounterService::write_session_settings(
+                            service.home(),
+                            session,
+                            parse_json_arg(&request_json)?,
+                            expected.as_ref(),
+                        )?,
+                    )
+                }
+            }
         }
         Command::EncounterTaskAbort {
             agent_session,
