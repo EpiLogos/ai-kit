@@ -56,6 +56,7 @@ pub mod gateway_upgrade_system;
 pub mod guardian_family;
 pub mod harness_auth;
 pub mod harness_disclosure;
+pub mod harnesses_in_use;
 pub mod hook;
 pub mod inhabit;
 pub mod inhabit_team;

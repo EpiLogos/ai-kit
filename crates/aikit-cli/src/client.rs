@@ -36,7 +36,7 @@ use aikit_adapters::actuation_harness_capability::{
     intake_actuation_capability, CapabilityOutcome, HarnessCapability,
 };
 use aikit_adapters::actuation_harness_detection::{
-    intake_actuation_detection, DetectionEntry, DetectionOutcome, DetectionState,
+    intake_actuation_detection_of, DetectionEntry, DetectionOutcome, DetectionState,
 };
 use aikit_adapters::clients::{
     aider::AiderAdapter, antigravity::AntigravityAdapter, broker::BrokerAdapter,
@@ -711,6 +711,18 @@ enum RosterMember {
 }
 
 impl RosterMember {
+    /// Whether the owner's harnesses in use name this member by its Actuation
+    /// catalog slug. The broker is AIKit's own row and always stands.
+    fn in_use(&self, in_use: &[String]) -> bool {
+        match self {
+            RosterMember::Broker => true,
+            RosterMember::Descriptor { entry, .. } => in_use.contains(&entry.slug),
+            RosterMember::Unrecorded { overlay } => {
+                in_use.iter().any(|slug| slug == overlay.catalog_slug)
+            }
+        }
+    }
+
     /// Whether this member answers to the given name: its CLI-facing name, an
     /// alias, or — for a generic row — its catalog slug.
     fn answers_to(&self, name: &str) -> bool {
@@ -1581,8 +1593,12 @@ pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::V
     // budget, and its outcome rides every row whose leg could not be read, so
     // a hanging or missing `actuation` is named (`timed-out` / `unreachable`)
     // instead of silently stalling the whole surface.
+    // The owner's harnesses in use narrow detection and the rows to those
+    // (harnesses_in_use.rs); unset, every catalogued harness is detected.
+    let in_use = crate::harnesses_in_use::in_force(service.home())?;
     let detection_probe = ProbeTracker::shared();
-    let detection = intake_actuation_detection(&detection_probe, ACTUATION_BIN);
+    let detection =
+        intake_actuation_detection_of(&detection_probe, ACTUATION_BIN, in_use.as_deref());
     let surface_probe = detection_probe
         .first()
         .unwrap_or(ProbeOutcome::Unsupported {
@@ -1593,6 +1609,11 @@ pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::V
     for member in &members {
         if let Some(only) = only {
             if !member.answers_to(only) {
+                continue;
+            }
+        }
+        if let Some(in_use) = &in_use {
+            if !member.in_use(in_use) {
                 continue;
             }
         }

@@ -682,6 +682,9 @@ pub fn disclose(service: &Service) -> Result<Value> {
         service.home(),
         crate::local_services_election::Election::Redis,
     );
+    let harnesses_in_use_declared = crate::harnesses_in_use::declared(service.home())?
+        .map(|harnesses| json!(harnesses))
+        .unwrap_or(Value::Null);
     let permission_modes_declared = crate::permission_defaults::declared(service.home())?
         .map(|modes| json!(modes))
         .unwrap_or(Value::Null);
@@ -1027,6 +1030,17 @@ pub fn disclose(service: &Service) -> Result<Value> {
             "id": "harnesses",
             "title": "Harnesses / HarnessComposition",
             "settings": [
+                setting(
+                    "harnesses.in-use", "Harnesses in use", "list",
+                    harnesses_in_use_declared.clone(), "ai-kit:harnesses:in-use:authored",
+                    harnesses_in_use_declared,
+                    Value::Null,
+                    Value::Null, "none",
+                    "the next `aikit client status` detects and lists only these harnesses; unset or empty, every catalogued harness",
+                    "aikit config plan --setting ai-kit:harnesses:harnesses.in-use",
+                    "ai-kit:harnesses:in-use", observed_at,
+                    materialisation_ref.clone(),
+                ),
                 setting(
                     "harnesses.candidates", "Resolved harness candidates", "table",
                     Value::Null, "ai-kit:harness:authored",

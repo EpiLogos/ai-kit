@@ -156,6 +156,7 @@ fn contribution_is_a_bare_conforming_document() {
             "skills",
             "models",
             "local-services",
+            "harnesses",
             "permissions",
             "claude-code",
             "codex",
