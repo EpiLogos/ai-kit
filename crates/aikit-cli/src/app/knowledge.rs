@@ -1341,9 +1341,20 @@ impl Service {
             .as_deref()
             .or(self.central_meta_root.as_deref())
             .or_else(|| {
-                root.ancestors().find(|candidate| {
-                    candidate.join("Control").is_dir() && candidate.join("Work").is_dir()
-                })
+                root.ancestors()
+                    .find(|candidate| {
+                        candidate.join("Control").is_dir() && candidate.join("Work").is_dir()
+                    })
+                    // The last ancestor of a relative path (`-C Work/x`) is the empty
+                    // path, which names the current directory but cannot be
+                    // canonicalised; spell it as such.
+                    .map(|found| {
+                        if found.as_os_str().is_empty() {
+                            Path::new(".")
+                        } else {
+                            found
+                        }
+                    })
             })
     }
 
