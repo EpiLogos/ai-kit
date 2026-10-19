@@ -659,6 +659,45 @@ mod tests {
     }
 
     #[test]
+    fn a_place_names_the_body_it_stands_on_and_absent_it_stands_on_the_earth() {
+        // A location on your own body: the PlaceSet carries the body's ref, kept verbatim and read back; a place
+        // with no body_ref is an Earth place and serialises exactly as before bodies existed.
+        let on_body = json!([{"change":"place_set","places":[
+            {"place_ref":"wiki:place:study","precision":"approximate","source_ref":"central:file:notes",
+             "geometry":{"type":"point","coordinates":[10.0,22.0]},"identity":{"names":[{"name":"The study"}]},
+             "body_ref":"body:central:wiki:root"},
+            {"place_ref":"wiki:place:athens","precision":"exact","source_ref":"central:file:notes",
+             "geometry":{"type":"point","coordinates":[23.72,37.98]}}
+        ]}]);
+        let saved = apply(
+            &register(),
+            &request(
+                json!({"kind":"node","ref":"wiki:a"}),
+                1,
+                "operation:study",
+                on_body,
+            ),
+        )
+        .unwrap();
+        let read = inspect(&saved.content, &ResourceRef::parse("wiki:a").unwrap()).unwrap();
+        let spatial = &read["object"]["aikit.techne-facet/v1"]["spatial"];
+        assert_eq!(spatial[0]["body_ref"], "body:central:wiki:root");
+        assert!(
+            spatial[1].get("body_ref").is_none(),
+            "an Earth place carries no body_ref: absence is the Earth"
+        );
+        let blank = request(
+            json!({"kind":"node","ref":"wiki:a"}),
+            1,
+            "operation:blank",
+            json!([{"change":"place_set","places":[
+                {"place_ref":"wiki:place:x","precision":"approximate","source_ref":"central:file:notes","body_ref":"  "}
+            ]}]),
+        );
+        assert!(refusal(&register(), &blank).contains("place.body_ref"));
+    }
+
+    #[test]
     fn a_project_registers_root_space_takes_its_body_under_the_peer_root() {
         let project = json!({"profile":"okf-wiki/v1","objects":[
             {"object":"space","profile":"okf-wiki/v1","ref":"central:wiki:project:O-I","revision":2,"parent_space_refs":["central:wiki:root"]}
