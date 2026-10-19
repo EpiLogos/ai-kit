@@ -129,6 +129,19 @@ enum Command {
         #[arg(long)]
         agent_session: String,
     },
+    /// Read or record the attempts this session's bound task serves: the
+    /// Software Factory attempts dispatched on it, each with its Run and
+    /// Factory state. Without --request-json it reads; several
+    /// --agent-session read each at once. Factory writes; nothing here
+    /// starts, lands or chooses an attempt.
+    EncounterTaskAttempts {
+        #[arg(long, required = true)]
+        agent_session: Vec<String>,
+        #[arg(long)]
+        request_json: Option<String>,
+        #[arg(long)]
+        expected_revision: Option<String>,
+    },
     /// Read or change this session's settings and its bound task's: the
     /// track's Telemetry and Solo; the task's name, colour, activator, output
     /// style, Launch, Then, Hand off to, Quantize and envelopes. Without
@@ -497,6 +510,53 @@ fn run(cli: Cli) -> Result<()> {
                 service.home(),
                 &aikit_core::ResourceRef::parse(agent_session)?,
             )?)
+        }
+        Command::EncounterTaskAttempts {
+            agent_session,
+            request_json,
+            expected_revision,
+        } => {
+            let sessions = agent_session
+                .iter()
+                .map(aikit_core::ResourceRef::parse)
+                .collect::<aikit_core::Result<Vec<_>>>()?;
+            match (request_json, sessions.as_slice()) {
+                (None, _) if expected_revision.is_some() => Err(aikit_core::AikitError::new(
+                    "encounter.runtime",
+                    "--expected-revision goes with a record (--request-json)",
+                )),
+                (None, [session]) => emit(
+                    &crate::encounter_service::EncounterService::read_task_attempts(
+                        service.home(),
+                        session,
+                    )?,
+                ),
+                (None, sessions) => emit(
+                    &crate::encounter_service::EncounterService::read_sessions_task_attempts(
+                        service.home(),
+                        sessions,
+                    )?,
+                ),
+                (Some(_), [_, _, ..]) => Err(aikit_core::AikitError::new(
+                    "encounter.runtime",
+                    "An attempt is recorded on one session's task at a time",
+                )),
+                (Some(request_json), sessions) => {
+                    let session = &sessions[0];
+                    let expected = expected_revision
+                        .as_deref()
+                        .map(aikit_core::SourceRevision::parse)
+                        .transpose()?;
+                    emit(
+                        &crate::encounter_service::EncounterService::write_task_attempts(
+                            service.home(),
+                            session,
+                            parse_json_arg(&request_json)?,
+                            expected.as_ref(),
+                        )?,
+                    )
+                }
+            }
         }
         Command::EncounterSessionSettings {
             agent_session,
