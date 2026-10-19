@@ -861,12 +861,12 @@ mod tests {
         let b = session("b");
         assert_eq!(solo_refusal(&a, &[]), None, "nothing soloed: nothing gated");
         assert_eq!(
-            solo_refusal(&a, &[a.clone()]),
+            solo_refusal(&a, std::slice::from_ref(&a)),
             None,
             "the soloed session itself runs"
         );
         assert!(
-            solo_refusal(&b, &[a.clone()]).is_some(),
+            solo_refusal(&b, std::slice::from_ref(&a)).is_some(),
             "every other session is gated"
         );
         assert!(
