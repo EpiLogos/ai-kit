@@ -435,6 +435,22 @@ fn project_scope_profiles(
     }))
 }
 
+/// Central's native scope_ref (`central.now.allocate`/`central.work.policy`)
+/// always names a project as `project:<id>`; AIKit's own `ProjectRef` (the
+/// `project-context` resolver's `project_binding.project`) carries the bare
+/// id instead (confirmed against a real project: `ProjectCentral/project.json`'s
+/// `project_id` is `"O-I"`, not `"project:O-I"`). The mint's `world_ref` must
+/// agree with Central's form exactly — `encounter-task-configure` refuses a
+/// task whose allocation `scope_ref` differs from the Agency's `world_ref` —
+/// so it is canonicalised here rather than passed through bare.
+fn canonical_world_ref(project_ref: &str) -> String {
+    if project_ref.starts_with("project:") || project_ref.starts_with("control:") {
+        project_ref.to_owned()
+    } else {
+        format!("project:{project_ref}")
+    }
+}
+
 /// `project:Factory` and `central/native-context` become `factory` and
 /// `central-native-context`: a lowercase, slug-safe attribution token.
 fn project_slug(world_ref: &str) -> String {
@@ -567,7 +583,7 @@ fn mint_per_project_agency_with_intent(
         ));
     }
     let world = resolve_project(home, project_cwd)?;
-    let world_ref = ResourceRef::parse(world.as_str())?;
+    let world_ref = ResourceRef::parse(canonical_world_ref(world.as_str()))?;
     let ResolvedAgentIdentity {
         agent_ref,
         source: identity_source,
