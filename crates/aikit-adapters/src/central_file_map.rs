@@ -121,6 +121,10 @@ fn refusal_code(native: Option<&str>) -> &'static str {
         Some("central.file_map_not_found") => "central.file_map_not_found",
         Some("central.file_map_denied") => "central.file_map_denied",
         Some("central.file_map_conflict") => "central.file_map_conflict",
+        // A read failure keeps its own code: it carries the stage and the
+        // io kind the caller classifies on, and "unavailable" would say the
+        // origin could not be reached when it was reached and had no text.
+        Some("central.file_map_failure") => "central.file_map_failure",
         _ => "central.file_map_unavailable",
     }
 }
@@ -620,6 +624,18 @@ fn batch_entry(source: &SourceRef, entry: &Value) -> Result<Value> {
             "native_error_code",
             refusal["code"].as_str().unwrap_or_default(),
         )
+        .with(
+            "failure_stage",
+            refusal["details"]["failure_stage"]
+                .as_str()
+                .unwrap_or_default(),
+        )
+        .with(
+            "io_error_kind",
+            refusal["details"]["io_error"]["kind"]
+                .as_str()
+                .unwrap_or_default(),
+        )
         .with("owner_operation", "central.file-map.resolve-batch"));
     }
     Ok(entry["reading"].clone())
@@ -732,5 +748,49 @@ impl<R: CommandRunner> SourcePoolProvider for CentralFileMapProvider<R> {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod batch_refusal_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn refusal(code: &str, details: Value) -> Value {
+        json!({"source_ref": "central:source:control:root:a.png",
+               "refusal": {"code": code, "message": "m", "details": details}})
+    }
+
+    #[test]
+    fn a_payload_that_is_not_text_keeps_its_code_stage_and_io_kind() {
+        let source = SourceRef::parse("central:source:control:root:a.png").unwrap();
+        let entry = refusal(
+            "central.file_map_failure",
+            json!({"failure_stage": "payload_read", "io_error": {"kind": "InvalidInput"}}),
+        );
+        let error = batch_entry(&source, &entry).unwrap_err();
+        assert_eq!(error.code(), "central.file_map_failure");
+        assert_eq!(
+            error.details().get("failure_stage").map(String::as_str),
+            Some("payload_read")
+        );
+        assert_eq!(
+            error.details().get("io_error_kind").map(String::as_str),
+            Some("InvalidInput")
+        );
+    }
+
+    #[test]
+    fn the_owner_codes_aikit_already_names_are_unchanged_and_the_rest_stay_unavailable() {
+        let source = SourceRef::parse("central:source:control:root:a.png").unwrap();
+        for (native, expected) in [
+            ("central.file_map_not_found", "central.file_map_not_found"),
+            ("central.file_map_denied", "central.file_map_denied"),
+            ("central.file_map_conflict", "central.file_map_conflict"),
+            ("central.something_new", "central.file_map_unavailable"),
+        ] {
+            let error = batch_entry(&source, &refusal(native, json!({}))).unwrap_err();
+            assert_eq!(error.code(), expected, "{native}");
+        }
     }
 }
