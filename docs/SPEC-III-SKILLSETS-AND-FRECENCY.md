@@ -301,6 +301,20 @@ It ranks. It does not activate. A frecent capsule that is not selected by any
 scope is still inactive, and `z` on it proposes running it, not enabling it.
 Rule 6 again: nothing becomes active because of a score.
 
+### 3.5 Use is recorded, so familiarity can learn
+
+Every run is an event. The application service, the palette and the multicall shim
+record each run: success, failure (`exit-N`), a trust refusal as a *denial*, a
+background start as *skipped*, on the event log, best effort (a log that cannot be
+written never fails the run). That is what `aikit recent`, `failures`, `stats`,
+`unused` and the frecency that `aikit z` ranks by read. Before this, `aikit run`
+recorded nothing, and `stats` and `unused` read an index table that no command fills.
+
+`aikit saved` is the one reading of the saved operations (scripts and aliases): id,
+command, exports, registry, scope, revision, trust and `reviewed`, who saved them, from
+what, when, and `use`; plus the captures still waiting. It stores nothing. Its fields
+are listed in [SAVED-OPERATIONS.md](SAVED-OPERATIONS.md).
+
 ---
 
 ## 4. The tree: a virtual filesystem you already know how to use
