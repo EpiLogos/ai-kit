@@ -5755,6 +5755,19 @@ pub enum SessionSpaceCommand {
         #[arg(long)]
         agent_session: String,
     },
+    /// Read or record the attempts this session's bound task serves: the
+    /// Software Factory attempts dispatched on it, each with its Run and
+    /// Factory state. Without --request-json it reads; several
+    /// --agent-session read each at once. Factory writes; nothing here
+    /// starts, lands or chooses an attempt.
+    EncounterTaskAttempts {
+        #[arg(long, required = true)]
+        agent_session: Vec<String>,
+        #[arg(long)]
+        request_json: Option<String>,
+        #[arg(long)]
+        expected_revision: Option<String>,
+    },
     /// Read or change this session's settings and its bound task's: the
     /// track's Telemetry and Solo; the task's name, colour, activator, output
     /// style, Launch, Then, Hand off to, Quantize and envelopes. Without

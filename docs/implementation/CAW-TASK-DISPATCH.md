@@ -152,6 +152,47 @@ were written for: a rebound session starts its new task from the defaults and
 discloses the previous task's settings as `previous_task`. Settings are intent:
 nothing here selects a model, starts a turn or moves a task.
 
+### The attempts a session's task serves
+
+A Software Factory attempt names the session it dispatched on, but a session
+could not name its attempts. Once Factory has bound an attempt to its dispatch
+it records that attempt on the session's bound task, beside the task record and
+never inside it:
+
+```text
+aikit session-space -C WORLD encounter-task-attempts \
+  --agent-session agent-session/example \
+  [--request-json @attempt.json [--expected-revision task-attempts/CURRENT]]
+```
+
+Without `--request-json` it reads `aikit.encounter-task-attempts/v1`: the bound
+task's `task_ref`, the `attempts` that task serves (each with its `attempt_ref`,
+`run_ref`, the Factory `state_path` holding the Run, the `workflow_unit`, the
+`execution_ref` and `delivery_ref` when Factory had them, who recorded it and
+when) and `earlier` attempts served by tasks the session was bound to before.
+Several `--agent-session` read each at once (`aikit.encounter-task-attempts-list/v1`),
+a session no retained SessionSpace holds answering its refusal in words.
+
+The dispatcher records one attempt at a time:
+
+```json
+{"attempt": {"task_ref": "task:example", "attempt_ref": "attempt:one",
+             "run_ref": "run:build", "state_path": "/abs/factory-state.json",
+             "workflow_unit": {"key": "build", "unit": "write"},
+             "execution_ref": "execution:one", "delivery_ref": "delivery:one",
+             "recorded_by": "factory"}}
+```
+
+The write is refused in words when no task is bound, when `task_ref` is not the
+bound task, when a value is outside the contract, or when the revision that
+stands moved. An exact replay of a recorded attempt is the dispatcher retrying:
+it answers the standing reading and publishes nothing; a different record under
+the same attempt is a conflict, never a replacement. Each record publishes a
+new `task-attempts/<ulid>` revision by atomic replacement and keeps the replaced
+reading in `encounter-tasks/attempts/history/`. Factory owns the attempts: this
+record only says which ones the session serves, and nothing in it starts, lands
+or chooses an attempt.
+
 ## Persistent material and the actual encounter host
 
 To require persistent Workcell material, add this field to the same task request:

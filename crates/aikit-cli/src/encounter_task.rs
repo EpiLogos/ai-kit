@@ -19,6 +19,8 @@ use std::{
     time::Duration,
 };
 
+#[path = "encounter_task_attempts.rs"]
+mod attempts;
 #[path = "encounter_task_material.rs"]
 mod material;
 #[path = "encounter_task_run.rs"]
