@@ -50,7 +50,6 @@ const WORLD: &str = "central.world";
 const NOW_ROLLOVER: &str = "projectcentral.now.rollover";
 const FACTORY_COLLECT: &str = "factory:action/telemetry.collect";
 const FACTORY_FIELD: &str = "factory:action/telemetry.field";
-const FILE_MAP_SEARCH: &str = "central.file-map.search";
 const FILE_MAP_REFRESH: &str = "central.file-map.refresh";
 
 /// A native body AIKit knows how to execute. Adding one is a code change and
@@ -88,7 +87,7 @@ impl NativeBody {
     fn required_actions(self) -> &'static [&'static str] {
         match self {
             Self::CentralDayRollover => &[TIME_POLICY, DAY_ENSURE, WORLD, NOW_ROLLOVER],
-            Self::CentralFileMapRefresh => &[FILE_MAP_SEARCH, FILE_MAP_REFRESH, WORLD],
+            Self::CentralFileMapRefresh => &[FILE_MAP_REFRESH],
             Self::FactoryCollect | Self::FactoryFieldRefresh => &[],
         }
     }
@@ -379,8 +378,20 @@ impl std::fmt::Display for CallError {
     }
 }
 
+/// How long one owner Action may run before the runner stops it.
+const ACTION_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+
 impl Run<'_> {
     fn call(&mut self, action: &str, input: Value) -> std::result::Result<Value, CallError> {
+        self.call_within(action, input, ACTION_BUDGET)
+    }
+
+    fn call_within(
+        &mut self,
+        action: &str,
+        input: Value,
+        budget: std::time::Duration,
+    ) -> std::result::Result<Value, CallError> {
         let reference = central_action_ref(action);
         if !self
             .request
@@ -401,7 +412,7 @@ impl Run<'_> {
         // Action that declared a need receives its bound value. (The runner
         // applies removals after sets, so the bound variable is never also
         // in the removal list.)
-        let mut process = SystemRunner::new().with_timeout(std::time::Duration::from_secs(120));
+        let mut process = SystemRunner::new().with_timeout(budget);
         let withheld = std::iter::once("CENTRAL_NATIVE_TOKEN")
             .chain(self.method.credentials.iter().map(|need| need.env.as_str()));
         for env in withheld {
@@ -1008,98 +1019,72 @@ impl NativeActionRunner {
     }
 }
 
-/// The scope world a file-map absence names. Search reports either
-/// `"<world>: map not initialized"` or a stale source ref of the form
-/// `central:source:<world>:<path>: stale index; refresh required`.
-fn absence_world(absence: &str) -> Option<String> {
-    if let Some(world) = absence.strip_suffix(": map not initialized") {
-        return Some(world.to_owned());
-    }
-    let rest = absence.strip_prefix("central:source:")?;
-    if rest.starts_with("control:root:") {
-        return Some("control:root".to_owned());
-    }
-    let name = rest.strip_prefix("project:")?;
-    let end = name.find(':')?;
-    Some(format!("project:{}", &name[..end]))
-}
+/// A world refresh may rebuild many scopes' worth of rows (the first after a
+/// change to what a scope holds withdraws thousands one by one), so it gets
+/// far longer than an Action that reads. Central refreshes scope by scope and
+/// checkpoints, so a run cut short resumes where it stopped.
+const FILE_MAP_REFRESH_BUDGET: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 impl NativeActionRunner {
-    /// Environmental file-map hygiene: probe every participating scope for
-    /// uninitialized or stale persistent maps, then refresh exactly those
-    /// scopes. Derived-state maintenance only — no source is registered or
-    /// withdrawn, no knowledge is compiled, no model runs.
+    /// Environmental file-map upkeep: Central refreshes every scope it has,
+    /// external ones included, and answers one report per scope. Derived-state
+    /// maintenance only — no source is registered or withdrawn, no knowledge is
+    /// compiled, no model runs.
+    ///
+    /// This used to probe with a federated search and parse the absences it
+    /// printed. That search re-hashes every roster file, was killed at its
+    /// 120 s timeout on 8 of the 11 runs it got, and could name only the
+    /// scopes that were uninitialised or hit. Central knows its scopes; the
+    /// body asks it to refresh them.
     fn file_map_refresh(&self, run: &mut Run<'_>) -> (RunStatus, Value) {
-        // `limit: 0` short-circuits Central's search before it inspects any
-        // scope, so the probe asks for one hit and reads only the absences.
-        let probe = match run.call(FILE_MAP_SEARCH, json!({ "federated": true, "limit": 1 })) {
-            Ok(probe) => probe,
+        let report = match run.call_within(
+            FILE_MAP_REFRESH,
+            json!({ "federated": true, "embeddings": true }),
+            FILE_MAP_REFRESH_BUDGET,
+        ) {
+            Ok(report) => report,
             Err(error) => {
                 return (
                     RunStatus::Failed,
-                    json!({ "stage": "probe", "error": error.to_string() }),
+                    json!({ "stage": "refresh", "error": error.to_string() }),
                 )
             }
         };
-        // `run.call` hands back the Action envelope's data; a file-map result
-        // lives one level down, under `result`.
-        let mut worlds: Vec<String> = probe
-            .get("result")
-            .and_then(|result| result.get("absences"))
+        // `run.call_within` hands back the Action envelope's data; a file-map
+        // result lives one level down, under `result`.
+        let result = report.get("result").unwrap_or(&report);
+        if result.get("federated").and_then(Value::as_bool) != Some(true) {
+            // A Central from before the world refresh reads `federated` as
+            // nothing and refreshes the root alone: success would be a lie.
+            return (
+                RunStatus::Failed,
+                json!({
+                    "stage": "refresh",
+                    "error": "the installed Central refreshed one scope and does not answer a \
+                              world refresh (central.file-map.refresh {federated: true}); \
+                              update Central",
+                }),
+            );
+        }
+        let scopes = result
+            .get("scopes")
             .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|absence| absence.as_str().and_then(absence_world))
-            .collect();
-        worlds.sort();
-        worlds.dedup();
-        let names: Vec<String> = match run.call(WORLD, json!({})) {
-            Ok(world) => world
-                .pointer("/work/projects")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|project| {
-                    project
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .collect(),
-            // World spelling stays recoverable: fall back to the raw world
-            // name and let the per-scope refresh record what happened.
-            Err(_) => Vec::new(),
-        };
-        let mut scopes = Vec::new();
-        let mut failed = false;
-        if worlds.iter().any(|world| world == "control:root") {
-            let (outcome, ok) = refresh_scope(run, None);
-            failed |= !ok;
-            scopes.push(outcome);
-        }
-        for world in worlds.iter().filter(|world| world.starts_with("project:")) {
-            let world_name = world.trim_start_matches("project:");
-            // World refs fold case; `central.world` is the authority for the
-            // spelling a refresh accepts (Work/Quaternal-Logic, not
-            // `project:quaternal-logic`).
-            let name = names
-                .iter()
-                .find(|name| name.to_lowercase() == world_name)
-                .cloned()
-                .unwrap_or_else(|| world_name.to_owned());
-            let (outcome, ok) = refresh_scope(run, Some(&name));
-            failed |= !ok;
-            scopes.push(outcome);
-        }
+            .cloned()
+            .unwrap_or_default();
+        let failed = scopes
+            .iter()
+            .filter(|scope| scope.get("ok").and_then(Value::as_bool) != Some(true))
+            .count();
         (
-            if failed {
+            if failed > 0 {
                 RunStatus::Failed
             } else {
                 RunStatus::Completed
             },
             json!({
                 "stage": "complete",
-                "absences": probe.get("result").and_then(|result| result.get("absences")),
+                "refreshed": scopes.len() - failed,
+                "failed": failed,
                 "scopes": scopes,
                 "not_done": [
                     "no source registered or withdrawn",
@@ -1109,41 +1094,6 @@ impl NativeActionRunner {
                 ],
             }),
         )
-    }
-}
-
-fn refresh_scope(run: &mut Run<'_>, project: Option<&str>) -> (Value, bool) {
-    let world = project
-        .map(|project| format!("project:{project}"))
-        .unwrap_or_else(|| "control:root".to_owned());
-    let input = match project {
-        Some(project) => json!({ "project": project, "embeddings": true }),
-        None => json!({ "embeddings": true }),
-    };
-    match run.call(FILE_MAP_REFRESH, input) {
-        Ok(report) => {
-            let result = report.get("result").unwrap_or(&report);
-            (
-                json!({
-                    "world": world,
-                    "project": project,
-                    "outcome": "refreshed",
-                    "entries": result.get("entries"),
-                    "changes": result.get("changes").and_then(Value::as_array).map(Vec::len),
-                    "diagnostics": result.get("diagnostics"),
-                }),
-                true,
-            )
-        }
-        Err(error) => (
-            json!({
-                "world": world,
-                "project": project,
-                "outcome": "failed",
-                "error": error.to_string(),
-            }),
-            false,
-        ),
     }
 }
 
@@ -1274,6 +1224,103 @@ pub fn bind_credential(
 pub fn receipt_path(home: &aikit_store::AikitHome, invocation_ref: &ResourceRef) -> PathBuf {
     let name = blake3::hash(invocation_ref.as_str().as_bytes()).to_hex()[..24].to_string();
     NativeActionRunner::receipts_dir(home).join(format!("{name}.json"))
+}
+
+/// What a Routine's native run receipts say about it now: when it last ran,
+/// how that ended, and how many runs in a row have failed. `null` for a
+/// Routine with no native receipt (its runs leave evidence elsewhere).
+///
+/// A maintenance Routine that fails every day looks exactly like one that
+/// works until somebody reads a receipt: `central-file-map-refresh` failed 10
+/// times in a row between 26 Sep and 18 Oct and nothing said so. This is the
+/// reading `aikit routine list` and `show` carry so the failure is seen where
+/// the Routine is.
+pub fn run_health(home: &aikit_store::AikitHome, routine_ref: &ResourceRef) -> Value {
+    let seconds = |at: std::time::SystemTime| {
+        at.duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs())
+    };
+    let mut runs: Vec<(std::time::SystemTime, bool, Option<String>)> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(NativeActionRunner::receipts_dir(home)) else {
+        return Value::Null;
+    };
+    for entry in entries.flatten() {
+        let Ok(bytes) = std::fs::read(entry.path()) else {
+            continue;
+        };
+        let Ok(receipt) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        if receipt.get("routine_ref").and_then(Value::as_str) != Some(routine_ref.as_str()) {
+            continue;
+        }
+        let at = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        let completed = receipt.get("status").and_then(Value::as_str) == Some("completed");
+        let reason = if completed {
+            None
+        } else {
+            failure_reason(&receipt["result"])
+        };
+        runs.push((at, completed, reason));
+    }
+    runs.sort_by_key(|run| run.0);
+    let Some((last_at, last_completed, last_reason)) = runs.last().cloned() else {
+        return Value::Null;
+    };
+    json!({
+        "runs_recorded": runs.len(),
+        "last_run": {
+            "at_unix_seconds": seconds(last_at),
+            "status": if last_completed { "completed" } else { "failed" },
+            "reason": last_reason,
+        },
+        "last_success_unix_seconds": runs
+            .iter()
+            .rev()
+            .find(|run| run.1)
+            .map(|run| seconds(run.0)),
+        "consecutive_failures": runs.iter().rev().take_while(|run| !run.1).count(),
+    })
+}
+
+/// The first thing a failed run's result says went wrong, in one line.
+fn failure_reason(result: &Value) -> Option<String> {
+    let reason = result
+        .get("error")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            result
+                .get("scopes")
+                .and_then(Value::as_array)?
+                .iter()
+                .find(|scope| scope.get("ok").and_then(Value::as_bool) == Some(false))
+                .map(|scope| {
+                    format!(
+                        "{}: {}",
+                        scope
+                            .get("world_ref")
+                            .and_then(Value::as_str)
+                            .unwrap_or("scope"),
+                        scope
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("failed")
+                    )
+                })
+        })?;
+    Some(
+        reason
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(240)
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -1434,5 +1481,106 @@ project_world_ref = "project:Alpha"
             bound["bindings"]["CENTRAL_NATIVE_TOKEN"],
             "file:/secure/token"
         );
+    }
+
+    mod run_health_tests {
+        use super::super::*;
+
+        fn receipt(
+            home: &aikit_store::AikitHome,
+            name: &str,
+            routine: &str,
+            status: &str,
+            result: Value,
+            age_secs: u64,
+        ) {
+            let dir = NativeActionRunner::receipts_dir(home);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(format!("{name}.json"));
+            std::fs::write(
+                &path,
+                json!({"routine_ref": routine, "status": status, "result": result}).to_string(),
+            )
+            .unwrap();
+            let at = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        }
+
+        #[test]
+        fn a_routine_that_fails_every_run_says_so_with_the_last_reason() {
+            let dir = tempfile::tempdir().unwrap();
+            let home = aikit_store::AikitHome::at(dir.path());
+            let mine = "routine/central-file-map-refresh";
+            receipt(
+                &home,
+                "a",
+                mine,
+                "completed",
+                json!({"stage": "complete"}),
+                4000,
+            );
+            receipt(
+                &home,
+                "b",
+                mine,
+                "failed",
+                json!({"stage": "probe", "error": "mux.command_timeout: did not finish within 120s\nsecond line"}),
+                3000,
+            );
+            receipt(
+                &home,
+                "c",
+                mine,
+                "failed",
+                json!({"stage": "refresh", "scopes": [
+                {"world_ref": "control:root", "ok": true},
+                {"world_ref": "project:Alpha", "ok": false, "error": "edited in bkmr"}]}),
+                2000,
+            );
+            receipt(
+                &home,
+                "other",
+                "routine/someone-else",
+                "completed",
+                json!({}),
+                10,
+            );
+            let health = run_health(&home, &ResourceRef::parse(mine).unwrap());
+            assert_eq!(health["runs_recorded"], 3);
+            assert_eq!(health["consecutive_failures"], 2);
+            assert_eq!(health["last_run"]["status"], "failed");
+            assert_eq!(
+                health["last_run"]["reason"],
+                "project:Alpha: edited in bkmr"
+            );
+            assert!(health["last_success_unix_seconds"].as_u64().unwrap() > 0);
+        }
+
+        #[test]
+        fn a_success_ends_the_failure_streak_and_a_routine_without_receipts_has_no_health() {
+            let dir = tempfile::tempdir().unwrap();
+            let home = aikit_store::AikitHome::at(dir.path());
+            let mine = "routine/central-file-map-refresh";
+            receipt(&home, "a", mine, "failed", json!({"error": "x"}), 3000);
+            receipt(
+                &home,
+                "b",
+                mine,
+                "completed",
+                json!({"stage": "complete"}),
+                1000,
+            );
+            let health = run_health(&home, &ResourceRef::parse(mine).unwrap());
+            assert_eq!(health["consecutive_failures"], 0);
+            assert_eq!(health["last_run"]["status"], "completed");
+            assert_eq!(health["last_run"]["reason"], Value::Null);
+            let none = run_health(&home, &ResourceRef::parse("routine/never-ran").unwrap());
+            assert_eq!(none, Value::Null);
+        }
     }
 }
