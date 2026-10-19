@@ -717,7 +717,33 @@ impl OwnedCommand {
     // reused identifier can cause uncertainty, never another numeric signal.
     fn retire_completed_group(&mut self, deadline: std::time::Instant) -> CommandCleanup {
         let group = rustix::process::Pid::from_raw(self.child.id() as i32);
-        let mut result = self.cleanup(deadline);
+        let result = self.cleanup(deadline);
+        self.confirm_group_retired(result, group, deadline, true)
+    }
+
+    // The leader has exited and its pipes are not yet at EOF, so the capture
+    // is idle and the group is signalled. Under load that moment arrives
+    // before the exited leader's pipes close, while the group holds nothing
+    // but the leader: Darwin answers the signal with EPERM and a command that
+    // exited cleanly with all its output was reported as a cleanup failure
+    // (measured 19 Oct 2026: 5 of 960 `sh -c 'echo out; echo err >&2'` runs
+    // under CPU load). Only that exact refusal is reconciled, and only by
+    // the same later ESRCH observation `retire_completed_group` demands; a
+    // delivered signal is left exactly as `cleanup` found it, so a live
+    // descendant is still killed without waiting for its retirement.
+    fn cleanup_idle_capture(&mut self, deadline: std::time::Instant) -> CommandCleanup {
+        let group = rustix::process::Pid::from_raw(self.child.id() as i32);
+        let result = self.cleanup(deadline);
+        self.confirm_group_retired(result, group, deadline, false)
+    }
+
+    fn confirm_group_retired(
+        &mut self,
+        mut result: CommandCleanup,
+        group: Option<rustix::process::Pid>,
+        deadline: std::time::Instant,
+        probe_after_signal: bool,
+    ) -> CommandCleanup {
         // Darwin reports EPERM when the exclusively owned group contains
         // only the exited unreaped leader. Reaping removes that final zombie.
         // Preserve every other failure. EPERM is reconciled only by a later
@@ -729,6 +755,9 @@ impl OwnedCommand {
                 error.raw_os_error() == Some(rustix::io::Errno::PERM.raw_os_error())
             });
         if !result.reaped || result.error.is_some() && !completed_darwin_group {
+            return result;
+        }
+        if !probe_after_signal && !completed_darwin_group {
             return result;
         }
         let Some(group) = group else {
@@ -1627,7 +1656,7 @@ fn capture_native_command(
         if Instant::now() >= retirement_deadline
             || (!strict_utf8 && !stdout_progress && !stderr_progress)
         {
-            break (owned.cleanup(retirement_deadline), true);
+            break (owned.cleanup_idle_capture(retirement_deadline), true);
         }
         if stdout_progress || stderr_progress {
             std::thread::yield_now();
@@ -3088,6 +3117,64 @@ mod tests {
                 .raw_os_error(),
             Some(rustix::io::Errno::CHILD.raw_os_error())
         );
+    }
+
+    /// The false failure that load exposed: the capture goes idle after the
+    /// leader exited but before its pipes closed, the group holds only the
+    /// exited leader, and Darwin's EPERM must not turn a clean exit with its
+    /// full output into "cleanup was not established".
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn actual_darwin_idle_capture_cleanup_of_an_exited_leader_is_not_a_failure() {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]).process_group(0);
+        let child = command.spawn().unwrap();
+        let mut owned = OwnedCommand {
+            child,
+            cleanup_attempted: false,
+            reaped_status: None,
+            ownership_lost: false,
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while owned.observe_exit().unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let cleanup = owned.cleanup_idle_capture(deadline);
+        assert!(cleanup.error.is_none(), "{:?}", cleanup.error);
+        assert!(cleanup.reaped);
+        assert_eq!(cleanup.status.unwrap().code(), Some(0));
+        assert_eq!(cleanup.signal, "already-absent-after-reap");
+    }
+
+    /// Reconciling the exited-leader refusal must not make the idle path wait
+    /// for retirement: a live group is still signalled and the leader reaped.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn actual_idle_capture_cleanup_still_kills_a_live_group_without_waiting() {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new("/bin/sleep");
+        command
+            .arg("30")
+            .process_group(0)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let child = command.spawn().unwrap();
+        let mut owned = OwnedCommand {
+            child,
+            cleanup_attempted: false,
+            reaped_status: None,
+            ownership_lost: false,
+        };
+        let began = std::time::Instant::now();
+        let cleanup = owned.cleanup_idle_capture(began + std::time::Duration::from_secs(2));
+        assert!(cleanup.error.is_none(), "{:?}", cleanup.error);
+        assert!(cleanup.reaped);
+        assert_eq!(cleanup.signal, "delivered");
+        assert!(!cleanup.status.unwrap().success());
+        assert!(began.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
