@@ -612,6 +612,24 @@ fn pool_outcome(
                         binding.provider.read_for(source, target)
                     }),
                 };
+                // The owner failing is not the Sources failing: when every
+                // reading of a page is refused with one and the same
+                // unreadable cause (a batch that timed out answers each Source
+                // with its own copy of the error), the next page would be
+                // refused the same way after the same wait. Say so once and
+                // stop reading this pool.
+                let owner_failed = !readings.is_empty()
+                    && readings.iter().all(|reading| {
+                        reading.as_ref().err().is_some_and(|first| {
+                            matches!(WithheldCause::of(first), WithheldCause::Unreadable(_))
+                                && readings.iter().all(|other| {
+                                    other
+                                        .as_ref()
+                                        .err()
+                                        .is_some_and(|error| error.to_string() == first.to_string())
+                                })
+                        })
+                    });
                 for (hit, reading) in page.into_iter().zip(readings) {
                     let held = binding
                         .material
@@ -651,6 +669,9 @@ fn pool_outcome(
                         corroborated_by: Vec::new(),
                         ranking: None,
                     });
+                }
+                if owner_failed {
+                    break;
                 }
             }
             for (cause, count) in withheld {
@@ -3534,6 +3555,68 @@ mod admission_page_tests {
                 .iter()
                 .any(|absence| absence
                     .ends_with("40 matched Sources hold no text and were not read")),
+            "{:?}",
+            result.absences
+        );
+    }
+
+    /// A pool whose owner fails every read the same way, as a batch that timed
+    /// out does: the Sources are not at fault and the next page would wait out
+    /// the same failure.
+    struct FailingOwner {
+        asked: AtomicUsize,
+    }
+
+    impl SourcePoolProvider for FailingOwner {
+        fn capabilities(&self) -> SourceProviderCapabilities {
+            CountingPool {
+                count: 0,
+                refused: 0,
+                asked: AtomicUsize::new(0),
+            }
+            .capabilities()
+        }
+        fn rebuild(&mut self, _: &[SourceMaterial]) -> Result<()> {
+            Ok(())
+        }
+        fn search(
+            &self,
+            query: &str,
+            mode: SourceSearchMode,
+            tags: &[String],
+            limit: usize,
+        ) -> Result<Vec<SourceHit>> {
+            CountingPool {
+                count: 200,
+                refused: 0,
+                asked: AtomicUsize::new(0),
+            }
+            .search(query, mode, tags, limit)
+        }
+        fn read_batch_for(
+            &self,
+            sources: &[SourceRef],
+            _: RetrievalTarget,
+        ) -> Option<Vec<Result<Option<SourcePoolReading>>>> {
+            self.asked.fetch_add(sources.len(), Ordering::Relaxed);
+            let failure = AikitError::new("central.file_map_unavailable", "ctrl did not finish");
+            Some(sources.iter().map(|_| Err(failure.clone())).collect())
+        }
+    }
+
+    #[test]
+    fn an_owner_that_fails_a_whole_page_the_same_way_is_not_asked_again_and_is_named_once() {
+        let pool = FailingOwner {
+            asked: AtomicUsize::new(0),
+        };
+        let result = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_source_pool(&pool, &[])
+            .search("anything", 10);
+        assert_eq!(pool.asked.load(Ordering::Relaxed), MIN_ADMISSION_PAGE);
+        assert!(result.hits.is_empty());
+        assert!(
+            result.absences.iter().any(|absence| absence
+                .ends_with("32 matched Sources could not be read from their origin (central.file_map_unavailable)")),
             "{:?}",
             result.absences
         );
