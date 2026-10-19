@@ -423,6 +423,10 @@ const MAX_PARALLEL_CODE_SEARCHES: usize = 4;
 /// owner that reads a batch (`read_batch_for`) is asked once instead.
 const MAX_PARALLEL_ADMISSIONS: usize = 8;
 
+/// The fewest Sources one admission page reads, so a search for a handful of
+/// hits does not turn into a run of one-Source owner reads when some are withheld.
+const MIN_ADMISSION_PAGE: usize = 32;
+
 /// `each` over `items` on at most `workers` threads, answers in item order.
 fn in_parallel<T: Sync, R: Send>(
     items: &[T],
@@ -569,66 +573,85 @@ fn pool_outcome(
         .provider
         .search(source_query, mode, tag_filter, limit)
     {
-        Ok(provider_hits) => {
-            let sources: Vec<SourceRef> =
-                provider_hits.iter().map(|hit| hit.source.clone()).collect();
-            let readings = match binding.provider.read_batch_for(&sources, target) {
-                Some(readings) if readings.len() == sources.len() => readings,
-                Some(readings) => {
-                    let mismatch = AikitError::new(
-                        "knowledge.source_batch_mismatch",
-                        format!(
-                            "the owner answered {} readings for {} Sources",
-                            readings.len(),
-                            sources.len()
-                        ),
-                    );
-                    sources.iter().map(|_| Err(mismatch.clone())).collect()
-                }
-                None => in_parallel(&sources, MAX_PARALLEL_ADMISSIONS, |source| {
-                    binding.provider.read_for(source, target)
-                }),
-            };
+        Ok(mut provider_hits) => {
+            // Best first, whatever order the provider answered in, so that
+            // stopping early can never drop a better hit than it keeps.
+            provider_hits.sort_by(|left, right| {
+                right
+                    .score
+                    .unwrap_or(0.5)
+                    .total_cmp(&left.score.unwrap_or(0.5))
+            });
             let mut withheld: BTreeMap<WithheldCause, usize> = BTreeMap::new();
-            for (hit, reading) in provider_hits.into_iter().zip(readings) {
-                let held = binding
-                    .material
-                    .iter()
-                    .find(|material| material.binding.source == hit.source);
-                let admitted = held
-                    .map(|material| material.binding.requires_live_origin_read())
-                    .transpose()
-                    .and_then(|origin_required| {
-                        admit_current_source(
-                            &hit.source,
-                            held,
-                            target,
-                            origin_required.unwrap_or(false),
-                            reading,
-                        )
-                    })
-                    .and_then(|current| validate_source_hit_basis(&hit, held, &current));
-                if let Err(error) = admitted {
-                    // No denied title, path, SourceRef or query-match
-                    // detail is an absence. Selected reads retain the
-                    // full native cause through the same validator.
-                    *withheld.entry(WithheldCause::of(&error)).or_default() += 1;
-                    continue;
+            // A provider answers with a candidate pool larger than the page the
+            // caller asked for, so that withheld Sources can be replaced. The
+            // owner's read costs about 12 ms per Source whatever it carries
+            // (225 candidates admitted whole took 2.9 s to show 50), so the
+            // pool is admitted a page at a time, best first, and only until
+            // `limit` Sources are in. A pool's next-best hit cannot outrank its
+            // own `limit` admitted ones, so the merged answer is the same.
+            let page_size = limit.max(MIN_ADMISSION_PAGE);
+            let mut pending = provider_hits.into_iter().peekable();
+            while pending.peek().is_some() && outcome.hits.len() < limit {
+                let page: Vec<SourceHit> = pending.by_ref().take(page_size).collect();
+                let sources: Vec<SourceRef> = page.iter().map(|hit| hit.source.clone()).collect();
+                let readings = match binding.provider.read_batch_for(&sources, target) {
+                    Some(readings) if readings.len() == sources.len() => readings,
+                    Some(readings) => {
+                        let mismatch = AikitError::new(
+                            "knowledge.source_batch_mismatch",
+                            format!(
+                                "the owner answered {} readings for {} Sources",
+                                readings.len(),
+                                sources.len()
+                            ),
+                        );
+                        sources.iter().map(|_| Err(mismatch.clone())).collect()
+                    }
+                    None => in_parallel(&sources, MAX_PARALLEL_ADMISSIONS, |source| {
+                        binding.provider.read_for(source, target)
+                    }),
+                };
+                for (hit, reading) in page.into_iter().zip(readings) {
+                    let held = binding
+                        .material
+                        .iter()
+                        .find(|material| material.binding.source == hit.source);
+                    let admitted = held
+                        .map(|material| material.binding.requires_live_origin_read())
+                        .transpose()
+                        .and_then(|origin_required| {
+                            admit_current_source(
+                                &hit.source,
+                                held,
+                                target,
+                                origin_required.unwrap_or(false),
+                                reading,
+                            )
+                        })
+                        .and_then(|current| validate_source_hit_basis(&hit, held, &current));
+                    if let Err(error) = admitted {
+                        // No denied title, path, SourceRef or query-match
+                        // detail is an absence. Selected reads retain the
+                        // full native cause through the same validator.
+                        *withheld.entry(WithheldCause::of(&error)).or_default() += 1;
+                        continue;
+                    }
+                    let resource = ResourceRef::parse(hit.source.as_str())
+                        .expect("SourceRef is a valid ResourceRef");
+                    outcome.hits.push(KnowledgeSearchHit {
+                        address: KnowledgeAddress::Source(hit.source),
+                        resource,
+                        kind: ResourceKind::KnowledgeSource,
+                        label: hit.title,
+                        score: hit.score.unwrap_or(0.5),
+                        snippet: hit.snippet,
+                        provider: hit.provider,
+                        authority: SourceAuthority::Observed,
+                        corroborated_by: Vec::new(),
+                        ranking: None,
+                    });
                 }
-                let resource = ResourceRef::parse(hit.source.as_str())
-                    .expect("SourceRef is a valid ResourceRef");
-                outcome.hits.push(KnowledgeSearchHit {
-                    address: KnowledgeAddress::Source(hit.source),
-                    resource,
-                    kind: ResourceKind::KnowledgeSource,
-                    label: hit.title,
-                    score: hit.score.unwrap_or(0.5),
-                    snippet: hit.snippet,
-                    provider: hit.provider,
-                    authority: SourceAuthority::Observed,
-                    corroborated_by: Vec::new(),
-                    ranking: None,
-                });
             }
             for (cause, count) in withheld {
                 outcome
@@ -3354,6 +3377,178 @@ mod withheld_hit_tests {
         assert_eq!(said.len(), 1);
         assert!(said[0].contains("central.file_map_failure"), "{said:?}");
         assert!(!said[0].contains("hold no text"), "{said:?}");
+    }
+}
+
+#[cfg(test)]
+mod admission_page_tests {
+    use super::*;
+    use crate::knowledge_source_pool::{
+        SourceBinding, SourceHit, SourceMaterial, SourcePoolProvider, SourceProviderCapabilities,
+        SourceSearchMode, SourceVisibility,
+    };
+    use crate::resource::SourceRevision;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A pool with `count` candidates whose owner reads cost one unit each.
+    /// Candidate `i` scores `i`, and the pool answers them worst first. The
+    /// first `refused` by score are refused as holding no text.
+    struct CountingPool {
+        count: usize,
+        refused: usize,
+        asked: AtomicUsize,
+    }
+
+    fn source(index: usize) -> SourceRef {
+        SourceRef::parse(format!("source:scripted/{index}")).unwrap()
+    }
+
+    fn reading(index: usize) -> SourcePoolReading {
+        SourcePoolReading {
+            material: SourceMaterial {
+                binding: SourceBinding {
+                    source: source(index),
+                    revision: SourceRevision::parse("sha256:scripted").unwrap(),
+                    title: format!("candidate {index}"),
+                    tags: Vec::new(),
+                    visibility: SourceVisibility::Team,
+                    owners: Vec::new(),
+                    media_type: "text/markdown".into(),
+                    locator: None,
+                    metadata: BTreeMap::new(),
+                },
+                body: "text".into(),
+            },
+            privacy: ContextSourcePrivacy::default(),
+        }
+    }
+
+    impl SourcePoolProvider for CountingPool {
+        fn capabilities(&self) -> SourceProviderCapabilities {
+            SourceProviderCapabilities {
+                provider: ProviderRef::parse("provider/source-pool/counting").unwrap(),
+                version: None,
+                fulltext: true,
+                fuzzy_interactive: false,
+                semantic: false,
+                hybrid: false,
+                tags: false,
+                structured_output: true,
+                reasons: BTreeMap::new(),
+            }
+        }
+        fn rebuild(&mut self, _: &[SourceMaterial]) -> Result<()> {
+            Ok(())
+        }
+        fn search(
+            &self,
+            _: &str,
+            _: SourceSearchMode,
+            _: &[String],
+            _: usize,
+        ) -> Result<Vec<SourceHit>> {
+            Ok((0..self.count)
+                .map(|index| SourceHit {
+                    source: source(index),
+                    revision: Some(SourceRevision::parse("sha256:scripted").unwrap()),
+                    provider: ProviderRef::parse("provider/source-pool/counting").unwrap(),
+                    score: Some(index as f64),
+                    title: format!("candidate {index}"),
+                    snippet: String::new(),
+                    tags: Vec::new(),
+                    provider_binding: None,
+                    retrieval_mode: SourceSearchMode::Fulltext,
+                })
+                .collect())
+        }
+        fn read_batch_for(
+            &self,
+            sources: &[SourceRef],
+            _: RetrievalTarget,
+        ) -> Option<Vec<Result<Option<SourcePoolReading>>>> {
+            self.asked.fetch_add(sources.len(), Ordering::Relaxed);
+            Some(
+                sources
+                    .iter()
+                    .map(|source| {
+                        let index: usize = source
+                            .as_str()
+                            .rsplit('/')
+                            .next()
+                            .and_then(|tail| tail.parse().ok())
+                            .unwrap();
+                        // Best first means the highest index; the worst `refused`
+                        // by score are the lowest indices, the best ones refused
+                        // are the highest.
+                        if index >= self.count - self.refused {
+                            Err(AikitError::new("central.file_map_failure", "no text")
+                                .with("failure_stage", "payload_read")
+                                .with("io_error_kind", "InvalidInput"))
+                        } else {
+                            Ok(Some(reading(index)))
+                        }
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    fn search(pool: &CountingPool, limit: usize) -> KnowledgeSearchResult {
+        KnowledgeApplication::new(FamiliarityContext::default())
+            .with_source_pool(pool, &[])
+            .search("anything", limit)
+    }
+
+    #[test]
+    fn a_pool_is_read_a_page_at_a_time_best_first_and_only_until_the_limit_is_in() {
+        let pool = CountingPool {
+            count: 200,
+            refused: 0,
+            asked: AtomicUsize::new(0),
+        };
+        let result = search(&pool, 10);
+        // One page, not the 200 candidates; and the best candidate leads
+        // although the pool answered it last.
+        assert_eq!(pool.asked.load(Ordering::Relaxed), MIN_ADMISSION_PAGE);
+        // No pool fills more than half the surfaced limit.
+        assert_eq!(result.hits.len(), 5);
+        assert_eq!(result.hits[0].label, "candidate 199");
+    }
+
+    #[test]
+    fn withheld_candidates_are_replaced_from_the_next_page_and_counted() {
+        // The 40 best candidates hold no text: page one (32) is all refused,
+        // page two reads 8 more refused and 24 good ones, and then it stops.
+        let pool = CountingPool {
+            count: 200,
+            refused: 40,
+            asked: AtomicUsize::new(0),
+        };
+        let result = search(&pool, 10);
+        assert_eq!(pool.asked.load(Ordering::Relaxed), 2 * MIN_ADMISSION_PAGE);
+        assert_eq!(result.hits.len(), 5);
+        assert_eq!(result.hits[0].label, "candidate 159");
+        assert!(
+            result
+                .absences
+                .iter()
+                .any(|absence| absence
+                    .ends_with("40 matched Sources hold no text and were not read")),
+            "{:?}",
+            result.absences
+        );
+    }
+
+    #[test]
+    fn a_pool_smaller_than_the_limit_is_read_whole() {
+        let pool = CountingPool {
+            count: 5,
+            refused: 0,
+            asked: AtomicUsize::new(0),
+        };
+        let result = search(&pool, 50);
+        assert_eq!(pool.asked.load(Ordering::Relaxed), 5);
+        assert_eq!(result.hits.len(), 5);
     }
 }
 
