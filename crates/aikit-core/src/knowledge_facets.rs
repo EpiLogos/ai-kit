@@ -234,6 +234,12 @@ pub struct PlaceFacet {
     pub uncertainty: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<String>,
+    /// The body the place stands on: a world body's `body_ref`
+    /// (`aikit.world-body/v1`, a register's root space), carried verbatim.
+    /// Absent: the place stands on the Earth, so every place written before
+    /// bodies existed keeps its meaning and round-trips byte-equivalent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_ref: Option<String>,
 }
 
 impl PlaceFacet {
@@ -249,6 +255,7 @@ impl PlaceFacet {
             observer_frame: None,
             uncertainty: None,
             source_ref: None,
+            body_ref: None,
         }
     }
 }
@@ -647,6 +654,9 @@ fn validate_place_facet(facet: &PlaceFacet) -> Result<()> {
             observer_frame,
             "place.observer_frame",
         )?;
+    }
+    if let Some(body_ref) = &facet.body_ref {
+        require_non_empty("knowledge.facet_invalid_place", body_ref, "place.body_ref")?;
     }
     Ok(())
 }
