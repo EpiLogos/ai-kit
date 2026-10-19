@@ -387,7 +387,7 @@ pub fn list(home: &aikit_store::AikitHome, state: Option<&str>) -> Result<Value>
                 continue;
             }
         }
-        routines.push(routine_summary(&record));
+        routines.push(routine_summary(home, &record));
     }
     let foreign = foreign_reconciliation(home)?;
     Ok(json!({
@@ -396,8 +396,9 @@ pub fn list(home: &aikit_store::AikitHome, state: Option<&str>) -> Result<Value>
     }))
 }
 
-fn routine_summary(record: &StoredRoutine) -> Value {
+fn routine_summary(home: &aikit_store::AikitHome, record: &StoredRoutine) -> Value {
     json!({
+        "health": crate::routine_native::run_health(home, &record.routine.id),
         "routine": record.routine.id.to_string(),
         "name": record.routine.name,
         "method": record.routine.method.to_string(),
@@ -416,7 +417,7 @@ pub fn show(home: &aikit_store::AikitHome, routine_ref: &str) -> Result<Value> {
     let reference = ResourceRef::parse(routine_ref)?;
     let store = RoutineStore::new(home.clone());
     let record = store.get(&reference)?;
-    let mut data = routine_summary(&record);
+    let mut data = routine_summary(home, &record);
     if let Some(object) = data.as_object_mut() {
         object.insert(
             "proof".into(),

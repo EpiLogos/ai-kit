@@ -6,9 +6,9 @@
 //!
 //! The Routine is the first-party `skill/aikit/central-file-map-refresh`
 //! Method, whose body is native: one `aikit gateway tick` admits the due
-//! occurrence and the native runner probes every scope's persistent map
-//! through `central.file-map.search`, then refreshes exactly the
-//! uninitialized or stale ones. Nothing touches the owner's Central.
+//! occurrence and the native runner asks Central to refresh the world
+//! (`central.file-map.refresh {federated: true}`), which answers one report
+//! per scope. Nothing touches the owner's Central.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -21,11 +21,7 @@ use tempfile::TempDir;
 const SERVICE_TOKEN: &str = "disposable-file-map-service-token-0123456789";
 const METHOD: &str = "skill/aikit/central-file-map-refresh";
 const ROUTINE: &str = "routine/central-file-map-refresh";
-const ACTIONS: [&str; 3] = [
-    "central:action/central.file-map.search",
-    "central:action/central.world",
-    "central:action/central.file-map.refresh",
-];
+const ACTIONS: [&str; 1] = ["central:action/central.file-map.refresh"];
 
 fn native_ctrl() -> Option<PathBuf> {
     let candidate = std::env::var_os("AIKIT_TEST_CTRL")
@@ -258,40 +254,13 @@ fn read_json(path: &Path) -> Value {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
 
-#[test]
-fn a_due_file_map_occurrence_probes_every_scope_and_refreshes_the_uninitialized() {
-    let Some(ctrl_bin) = native_ctrl() else {
-        return;
-    };
-    let dir = TempDir::new().unwrap();
+/// The Routine bound and enabled over a disposable root, due now. `runner_ctrl`
+/// is the `ctrl` the native runner calls; `ctrl` initialises the root.
+fn due_routine(dir: &TempDir, ctrl: &Path, runner_ctrl: &Path) -> (Aikit, PathBuf) {
     let root = dir.path().join("Central");
     std::fs::create_dir_all(&root).unwrap();
-    disposable_root(&ctrl_bin, &root);
+    disposable_root(ctrl, &root);
     let bkmr = fake_bkmr(dir.path());
-
-    // Before: no persistent map anywhere.
-    let probe = ok(ctrl_run(
-        &ctrl_bin,
-        &root,
-        "central.file-map.search",
-        json!({"federated": true, "limit": 1}),
-        Some(&bkmr),
-    ));
-    let worlds: Vec<String> = probe["result"]["absences"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|absence| absence.as_str().unwrap().to_owned())
-        .collect();
-    assert!(
-        worlds
-            .iter()
-            .any(|world| world == "control:root: map not initialized"),
-        "{worlds:?}"
-    );
-    assert!(!root.join(".central/bkmr/index.db").exists());
-
-    // AIKit: the first-party registry, the Method proven, the Routine bound.
     let home = dir.path().join("aikit-home");
     std::fs::create_dir_all(home.join("registries")).unwrap();
     std::os::unix::fs::symlink(
@@ -300,10 +269,10 @@ fn a_due_file_map_occurrence_probes_every_scope_and_refreshes_the_uninitialized(
     )
     .unwrap();
     let aikit = Aikit {
-        home: home.clone(),
-        ctrl: ctrl_bin.clone(),
+        home,
+        ctrl: runner_ctrl.to_path_buf(),
         root: root.clone(),
-        bkmr: bkmr.clone(),
+        bkmr,
     };
     let proof = aikit.run(&[
         "method",
@@ -345,50 +314,95 @@ fn a_due_file_map_occurrence_probes_every_scope_and_refreshes_the_uninitialized(
     aikit.run(&["routine", "enable", ROUTINE, "--authority-json", &authority]);
     let shown = aikit.run(&["routine", "show", ROUTINE]);
     assert_eq!(shown["method_body"], "native:central-file-map-refresh");
+    (aikit, root)
+}
 
-    // The boundary: one dispatcher pass.
+/// One dispatcher pass: the single dispatched record and its run receipt.
+fn tick(aikit: &Aikit) -> (Value, Value) {
     let tick = aikit.run(&["gateway", "tick"]);
     let dispatched = tick["dispatched"].as_array().unwrap();
     assert_eq!(dispatched.len(), 1, "{tick}");
-    let record = &dispatched[0];
+    let record = dispatched[0].clone();
     assert_eq!(record["admission"], "applied");
     assert_eq!(record["method_body"], "native:central-file-map-refresh");
-    assert_eq!(record["outcome"]["status"], "completed", "{record}");
     let detail: Value =
         serde_json::from_str(record["outcome"]["detail"].as_str().unwrap()).unwrap();
     assert_eq!(detail["runner"], "native");
-
-    // Every scope the probe named was refreshed, root included.
     let receipt = read_json(Path::new(detail["receipt"].as_str().unwrap()));
+    (record, receipt)
+}
+
+/// A `ctrl` that answers every Action with `reply`, for the shapes a real
+/// Central cannot be made to produce on demand.
+fn canned_ctrl(dir: &Path, reply: &Value) -> PathBuf {
+    let script = dir.join("canned-ctrl.sh");
+    std::fs::write(&script, format!("#!/bin/sh\ncat <<'EOF'\n{reply}\nEOF\n")).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+#[test]
+fn a_due_file_map_occurrence_refreshes_every_scope_of_the_world_in_one_call() {
+    let Some(ctrl_bin) = native_ctrl() else {
+        return;
+    };
+    let dir = TempDir::new().unwrap();
+    let (aikit, root) = due_routine(&dir, &ctrl_bin, &ctrl_bin);
+
+    // Before: no persistent map anywhere.
+    let probe = ok(ctrl_run(
+        &ctrl_bin,
+        &root,
+        "central.file-map.search",
+        json!({"federated": true, "limit": 1}),
+        Some(&aikit.bkmr),
+    ));
+    let worlds: Vec<String> = probe["result"]["absences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|absence| absence.as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        worlds
+            .iter()
+            .any(|world| world == "control:root: map not initialized"),
+        "{worlds:?}"
+    );
+    assert!(!root.join(".central/bkmr/index.db").exists());
+
+    let (record, receipt) = tick(&aikit);
+    assert_eq!(record["outcome"]["status"], "completed", "{record}");
     assert_eq!(receipt["method_body"], "central-file-map-refresh");
-    let scopes = receipt["result"]["scopes"].as_array().unwrap();
+
+    // One Action, asked for the world: no probe, no scope enumeration.
+    let calls = receipt["calls"].as_array().unwrap();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0]["action"], "central.file-map.refresh");
+    assert_eq!(calls[0]["input"]["federated"], true);
+    assert!(
+        calls[0]["credential_env"].is_null(),
+        "the Action is not token-gated: {calls:?}"
+    );
+
+    // Central answered a report per scope, root and both projects included.
+    let result = &receipt["result"];
+    assert_eq!(result["failed"], 0, "{result}");
+    let scopes = result["scopes"].as_array().unwrap();
     let refreshed = |world: &str| {
         scopes
             .iter()
-            .find(|scope| scope["world"] == world)
+            .find(|scope| scope["world_ref"] == world)
             .unwrap_or_else(|| panic!("{world} missing from {scopes:?}"))
     };
-    assert_eq!(refreshed("control:root")["outcome"], "refreshed");
-    let names: Vec<&str> = scopes
-        .iter()
-        .filter_map(|scope| scope["project"].as_str())
-        .collect();
-    assert!(
-        names.contains(&"Alpha") && names.contains(&"Beta"),
-        "{scopes:?}"
-    );
-    let calls = receipt["calls"].as_array().unwrap();
-    let called: Vec<&str> = calls
-        .iter()
-        .map(|call| call["action"].as_str().unwrap())
-        .collect();
-    assert!(called.contains(&"central.file-map.search"), "{called:?}");
-    assert!(called.contains(&"central.file-map.refresh"), "{called:?}");
-    assert!(called.contains(&"central.world"), "{called:?}");
-    assert!(
-        calls.iter().all(|call| call["credential_env"].is_null()),
-        "no Action is token-gated: {calls:?}"
-    );
+    assert_eq!(refreshed("control:root")["ok"], true);
+    for member in ["Alpha", "Beta"] {
+        let scope = scopes
+            .iter()
+            .find(|scope| scope["project"] == member)
+            .unwrap_or_else(|| panic!("{member} missing from {scopes:?}"));
+        assert_eq!(scope["ok"], true, "{scope}");
+    }
 
     // After: the maps exist and the probe is clean.
     assert!(root.join(".central/bkmr/index.db").exists());
@@ -404,11 +418,53 @@ fn a_due_file_map_occurrence_probes_every_scope_and_refreshes_the_uninitialized(
         &root,
         "central.file-map.search",
         json!({"federated": true, "limit": 1}),
-        Some(&bkmr),
+        Some(&aikit.bkmr),
     ));
     assert_eq!(
         after["result"]["absences"].as_array().unwrap().len(),
         0,
         "{after}"
     );
+}
+
+#[test]
+fn a_scope_that_cannot_refresh_fails_the_run_and_the_others_are_still_reported() {
+    let Some(ctrl_bin) = native_ctrl() else {
+        return;
+    };
+    let dir = TempDir::new().unwrap();
+    let reply = json!({"ok":true,"data":{"result":{"federated":true,"refreshed":1,"failed":1,"scopes":[
+        {"world_ref":"control:root","project":null,"ok":true,"entries":5,"changes":2,"diagnostics":[],"seconds":0.1},
+        {"world_ref":"project:Alpha","project":"Alpha","ok":false,
+         "error":"Managed indexed description was edited in bkmr","seconds":0.0}]}}});
+    let canned = canned_ctrl(dir.path(), &reply);
+    let (aikit, _root) = due_routine(&dir, &ctrl_bin, &canned);
+    let (record, receipt) = tick(&aikit);
+    assert_eq!(record["outcome"]["status"], "failed", "{record}");
+    let scopes = receipt["result"]["scopes"].as_array().unwrap();
+    assert_eq!(scopes.len(), 2);
+    assert_eq!(receipt["result"]["refreshed"], 1);
+    assert_eq!(receipt["result"]["failed"], 1);
+    assert_eq!(
+        scopes[1]["error"],
+        "Managed indexed description was edited in bkmr"
+    );
+}
+
+#[test]
+fn a_central_that_refreshes_one_scope_is_not_reported_as_a_refreshed_world() {
+    let Some(ctrl_bin) = native_ctrl() else {
+        return;
+    };
+    let dir = TempDir::new().unwrap();
+    // What a Central from before the world refresh answers: `federated` read
+    // as nothing, the root refreshed alone.
+    let reply = json!({"ok":true,"data":{"result":{"world_ref":"control:root","entries":5,
+                                                    "changes":[],"diagnostics":[]}}});
+    let canned = canned_ctrl(dir.path(), &reply);
+    let (aikit, _root) = due_routine(&dir, &ctrl_bin, &canned);
+    let (record, receipt) = tick(&aikit);
+    assert_eq!(record["outcome"]["status"], "failed", "{record}");
+    let error = receipt["result"]["error"].as_str().unwrap();
+    assert!(error.contains("does not answer a world refresh"), "{error}");
 }
