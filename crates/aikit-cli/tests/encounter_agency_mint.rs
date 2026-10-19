@@ -418,6 +418,32 @@ fn mint_provisions_the_session_binding_through_the_real_native_seam() {
     assert!(admitted.authorises(&r("action/aikit/model-realise")));
 }
 
+/// A real `ProjectCentral/project.json` names its project bare (`"O-I"`,
+/// confirmed against the actual file on disk), not pre-prefixed `project:O-I`
+/// the way every other fixture in this suite spells it. Central's native
+/// `scope_ref` (`central.now.allocate`/`central.work.policy`) is always
+/// `project:<id>`, so a world_ref minted from the bare id must still agree
+/// with it — otherwise `encounter-task-configure` refuses every task on this
+/// binding with "Central task scope differs from the native Agency World".
+#[test]
+fn a_bare_project_id_still_mints_a_canonical_project_prefixed_world_ref() {
+    let world = MintWorld::new("mint-fixture");
+    let session = r("agent-session/mint-proof-bare");
+    let output = mint_per_project_agency(
+        &world.home,
+        &world.project,
+        &session,
+        None,
+        &world.actuation_bin,
+        &SystemRunner::new(),
+    )
+    .unwrap();
+    assert_eq!(output["data"]["world_ref"], "project:mint-fixture");
+    let binding_bytes = fs::read(binding_path(&world.home, &session)).unwrap();
+    let binding: Value = serde_json::from_slice(&binding_bytes).unwrap();
+    assert_eq!(binding["world_ref"], "project:mint-fixture");
+}
+
 #[test]
 fn reminting_the_same_session_and_project_is_a_clean_cas_bump() {
     let world = MintWorld::new("project:mint-fixture");
