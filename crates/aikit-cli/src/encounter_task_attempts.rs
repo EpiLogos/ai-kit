@@ -279,10 +279,15 @@ fn apply(
             )))
         };
     }
-    if current.as_ref().map(|r| &r.revision) != expected {
-        return Err(error(
-            "Task attempts revision conflict; read the current attempts and write again",
-        ));
+    // A distinct attempt joins whatever stands: the record is a set keyed by attempt,
+    // and the dispatcher does not read before it writes. A caller that did read
+    // names the revision it read, and a record that has moved since is a conflict.
+    if let Some(expected) = expected {
+        if current.as_ref().map(|r| &r.revision) != Some(expected) {
+            return Err(error(
+                "Task attempts revision conflict; read the current attempts and write again",
+            ));
+        }
     }
     if attempts.len() >= MAX_ATTEMPTS {
         return Err(error(format!(
@@ -503,16 +508,30 @@ mod tests {
         )
         .unwrap()
         .unwrap();
+        let old = SourceRevision::parse("task-attempts/OLD").unwrap();
         let stale = apply(
             &session(),
             Some(first.clone()),
             Some(&bound),
             request("task:fixtures", "attempt:two"),
-            None,
+            Some(&old),
             20,
         )
         .unwrap_err();
         assert!(stale.to_string().contains("revision conflict"), "{stale}");
+        let invented = apply(
+            &session(),
+            None,
+            Some(&bound),
+            request("task:fixtures", "attempt:two"),
+            Some(&first.revision),
+            20,
+        )
+        .unwrap_err();
+        assert!(
+            invented.to_string().contains("revision conflict"),
+            "a revision named against no record is a conflict: {invented}"
+        );
         let other = apply(
             &session(),
             Some(first.clone()),
@@ -607,6 +626,36 @@ mod tests {
             "the same attempt ref under another task is its own attempt"
         );
         assert_eq!(read["earlier"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_distinct_attempt_is_appended_when_the_dispatcher_names_no_revision() {
+        // Factory dispatches a retry on the same task without reading the record first.
+        let bound = task("task:fixtures");
+        let mut record = None;
+        for (n, attempt) in ["attempt:one", "attempt:two", "attempt:three"]
+            .iter()
+            .enumerate()
+        {
+            record = apply(
+                &session(),
+                record.clone(),
+                Some(&bound),
+                request("task:fixtures", attempt),
+                None,
+                10 + n as u64,
+            )
+            .unwrap()
+            .or(record);
+        }
+        let read = reading(&session(), record.as_ref(), Some(&bound));
+        let refs: Vec<_> = read["attempts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["attempt_ref"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(refs, ["attempt:one", "attempt:two", "attempt:three"]);
     }
 
     #[test]
