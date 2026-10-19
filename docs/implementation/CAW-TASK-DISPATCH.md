@@ -184,8 +184,10 @@ The dispatcher records one attempt at a time:
 ```
 
 The write is refused in words when no task is bound, when `task_ref` is not the
-bound task, when a value is outside the contract, or when the revision that
-stands moved. An exact replay of a recorded attempt is the dispatcher retrying:
+bound task, when a value is outside the contract, or when it names a revision
+(`--expected-revision`) that is not the one that stands. A record that names none
+appends: the dispatcher does not read before it writes, and a retry on the same
+task is a distinct attempt that joins the set. An exact replay of a recorded attempt is the dispatcher retrying:
 it answers the standing reading and publishes nothing; a different record under
 the same attempt is a conflict, never a replacement. Each record publishes a
 new `task-attempts/<ulid>` revision by atomic replacement and keeps the replaced
