@@ -3281,7 +3281,16 @@ impl EncounterService {
                 limit,
             } => {
                 self.require_attached(&agent_session)?;
-                Ok(json!(self.store.events(&agent_session, after, limit)?))
+                let mut page = self.store.events(&agent_session, after, limit)?;
+                // Telemetry off: the session "keeps working, in silence, and
+                // stops sending to the tiles" (FACTORY_MIXER.activator's own
+                // words) — the cursor/draft still answer truthfully so a
+                // later Telemetry-on read is not left out of step; only the
+                // events themselves are withheld.
+                if !crate::encounter_task_executor::telemetry_on(&self.home, &agent_session) {
+                    page.events.clear();
+                }
+                Ok(json!(page))
             }
             EncounterRequest::Draft {
                 agent_session,
@@ -3295,6 +3304,10 @@ impl EncounterService {
                 agent_session,
                 draft_revision,
             } => {
+                // Solo: "only soloed sessions may run" (FACTORY_MIXER.solo's
+                // own words) gates every launch of this harness, a human's
+                // own Prompt included — never only the executor's own.
+                crate::encounter_task_executor::solo_gate(&self.home, &agent_session)?;
                 let resident = self.resident(&agent_session)?;
                 let _operation = resident.operations.lock().map_err(error)?;
                 let _agency_lock = self.lock_agency(&agent_session)?;
@@ -3415,8 +3428,10 @@ pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
     }
     let listener = UnixListener::bind(socket).map_err(error)?;
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600)).map_err(error)?;
+    let executor_home = home.clone();
     let service = Arc::new(EncounterService::new(home)?);
     agency::conversation::spawn_worker(&service);
+    crate::encounter_task_executor::spawn_worker(&service, executor_home);
     let clients = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     listener.set_nonblocking(true).map_err(error)?;

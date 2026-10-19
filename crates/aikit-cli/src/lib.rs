@@ -124,6 +124,7 @@ pub mod encounter_mcp;
 pub mod encounter_native_projection;
 pub mod encounter_profile_provider;
 pub mod encounter_service;
+pub mod encounter_task_executor;
 pub mod encounter_use;
 
 /// Self-invocation shape for session-space verbs. The main `aikit` binary
