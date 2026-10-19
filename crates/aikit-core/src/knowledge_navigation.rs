@@ -467,6 +467,64 @@ struct ProviderOutcome {
     absences: Vec<(String, bool)>,
 }
 
+/// Why a matched Source was not admitted, by what an agent can do about it.
+/// One absence per cause per provider, with the count: "unavailable or
+/// withheld (code)" for all of them said nothing about which. Never the
+/// Source's title, path or ref: a denied one is not disclosed.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum WithheldCause {
+    /// The owner read it and it holds bytes, not text (an image, an archive).
+    NoText,
+    /// Retrieval treatment or the delivery target refuses it.
+    Withheld,
+    /// It no longer matches what the index recorded: the map needs a refresh.
+    Changed,
+    /// Any other refusal, named by its code.
+    Unreadable(String),
+}
+
+impl WithheldCause {
+    fn of(error: &AikitError) -> Self {
+        let detail = |key: &str| error.details().get(key).map(String::as_str);
+        match error.code() {
+            "central.file_map_failure"
+                if detail("failure_stage") == Some("payload_read")
+                    && detail("io_error_kind") == Some("InvalidInput") =>
+            {
+                Self::NoText
+            }
+            "central.file_map_denied" => Self::Withheld,
+            "knowledge.source_origin_revision_conflict" => Self::Changed,
+            other => Self::Unreadable(other.to_owned()),
+        }
+    }
+
+    fn describe(&self, provider: &ProviderRef, count: usize) -> String {
+        let sources = if count == 1 {
+            "1 matched Source".to_owned()
+        } else {
+            format!("{count} matched Sources")
+        };
+        // "SourcePool" leads each statement: absences are classed by wording.
+        match self {
+            Self::NoText => {
+                format!("SourcePool {provider}: {sources} hold no text and were not read")
+            }
+            Self::Withheld => format!(
+                "SourcePool {provider}: {sources} withheld by retrieval treatment \
+                 (central.file_map_denied)"
+            ),
+            Self::Changed => format!(
+                "SourcePool {provider}: {sources} changed since the index recorded them; the \
+                 map needs a refresh (knowledge.source_origin_revision_conflict)"
+            ),
+            Self::Unreadable(code) => format!(
+                "SourcePool {provider}: {sources} could not be read from their origin ({code})"
+            ),
+        }
+    }
+}
+
 /// Ask one SourcePool for a subject and admit each hit against its current
 /// owner reading.
 fn pool_outcome(
@@ -531,6 +589,7 @@ fn pool_outcome(
                     binding.provider.read_for(source, target)
                 }),
             };
+            let mut withheld: BTreeMap<WithheldCause, usize> = BTreeMap::new();
             for (hit, reading) in provider_hits.into_iter().zip(readings) {
                 let held = binding
                     .material
@@ -553,13 +612,7 @@ fn pool_outcome(
                     // No denied title, path, SourceRef or query-match
                     // detail is an absence. Selected reads retain the
                     // full native cause through the same validator.
-                    outcome.absences.push((
-                        format!(
-                            "SourcePool current origin unavailable or withheld ({})",
-                            error.code()
-                        ),
-                        true,
-                    ));
+                    *withheld.entry(WithheldCause::of(&error)).or_default() += 1;
                     continue;
                 }
                 let resource = ResourceRef::parse(hit.source.as_str())
@@ -576,6 +629,11 @@ fn pool_outcome(
                     corroborated_by: Vec::new(),
                     ranking: None,
                 });
+            }
+            for (cause, count) in withheld {
+                outcome
+                    .absences
+                    .push((cause.describe(&status.provider, count), true));
             }
         }
         Err(error) => {
@@ -3169,6 +3227,133 @@ mod admission_tests {
             (*hit, std::thread::current().id() == caller)
         });
         assert_eq!(answers, vec![(7, true)]);
+    }
+}
+
+#[cfg(test)]
+mod withheld_hit_tests {
+    use super::*;
+    use crate::knowledge_source_pool::{
+        SourceHit, SourcePoolProvider, SourceProviderCapabilities, SourceSearchMode,
+    };
+
+    /// A pool whose search names `refs` and whose owner answers each with the
+    /// scripted refusal, so the absences an agent sees can be read exactly.
+    struct RefusingPool {
+        refusals: Vec<AikitError>,
+    }
+
+    impl SourcePoolProvider for RefusingPool {
+        fn capabilities(&self) -> SourceProviderCapabilities {
+            SourceProviderCapabilities {
+                provider: ProviderRef::parse("provider/source-pool/scripted").unwrap(),
+                version: None,
+                fulltext: true,
+                fuzzy_interactive: false,
+                semantic: false,
+                hybrid: false,
+                tags: false,
+                structured_output: true,
+                reasons: BTreeMap::new(),
+            }
+        }
+        fn rebuild(&mut self, _: &[SourceMaterial]) -> Result<()> {
+            Ok(())
+        }
+        fn search(
+            &self,
+            _: &str,
+            _: SourceSearchMode,
+            _: &[String],
+            _: usize,
+        ) -> Result<Vec<SourceHit>> {
+            Ok((0..self.refusals.len())
+                .map(|index| SourceHit {
+                    source: SourceRef::parse(format!("source:scripted/{index}")).unwrap(),
+                    revision: None,
+                    provider: ProviderRef::parse("provider/source-pool/scripted").unwrap(),
+                    score: Some(0.5),
+                    title: format!("secret title {index}"),
+                    snippet: String::new(),
+                    tags: Vec::new(),
+                    provider_binding: None,
+                    retrieval_mode: SourceSearchMode::Fulltext,
+                })
+                .collect())
+        }
+        fn read_batch_for(
+            &self,
+            _: &[SourceRef],
+            _: RetrievalTarget,
+        ) -> Option<Vec<Result<Option<SourcePoolReading>>>> {
+            Some(self.refusals.iter().cloned().map(Err).collect())
+        }
+    }
+
+    fn not_text() -> AikitError {
+        AikitError::new("central.file_map_failure", "Source is not text")
+            .with("failure_stage", "payload_read")
+            .with("io_error_kind", "InvalidInput")
+    }
+
+    fn absences(refusals: Vec<AikitError>) -> Vec<String> {
+        let pool = RefusingPool { refusals };
+        let app =
+            KnowledgeApplication::new(FamiliarityContext::default()).with_source_pool(&pool, &[]);
+        let result = app.search("anything", 10);
+        assert!(result.hits.is_empty(), "{:?}", result.hits);
+        result
+            .absences
+            .into_iter()
+            .filter(|absence| absence.contains("scripted"))
+            .collect()
+    }
+
+    #[test]
+    fn matched_sources_with_no_text_are_counted_as_such_not_as_an_unreadable_origin() {
+        let said = absences(vec![not_text(), not_text(), not_text()]);
+        assert_eq!(
+            said,
+            vec!["SourcePool provider/source-pool/scripted: 3 matched Sources hold no text and were not read"]
+        );
+    }
+
+    #[test]
+    fn each_cause_is_its_own_counted_absence_and_no_title_or_path_is_disclosed() {
+        let said = absences(vec![
+            not_text(),
+            AikitError::new("central.file_map_denied", "withheld"),
+            AikitError::new("central.file_map_denied", "withheld"),
+            AikitError::new("knowledge.source_origin_revision_conflict", "changed"),
+            AikitError::new("central.file_map_unavailable", "gone"),
+        ]);
+        assert_eq!(said.len(), 4, "{said:?}");
+        let all = said.join("\n");
+        assert!(all.contains("1 matched Source hold no text"), "{all}");
+        assert!(
+            all.contains("2 matched Sources withheld by retrieval treatment"),
+            "{all}"
+        );
+        assert!(all.contains("the map needs a refresh"), "{all}");
+        assert!(
+            all.contains("could not be read from their origin (central.file_map_unavailable)"),
+            "{all}"
+        );
+        assert!(
+            !all.contains("secret title") && !all.contains("scripted/"),
+            "{all}"
+        );
+    }
+
+    #[test]
+    fn a_read_failure_that_is_not_a_missing_payload_is_not_called_no_text() {
+        let other_stage = AikitError::new("central.file_map_failure", "x")
+            .with("failure_stage", "binding_metadata")
+            .with("io_error_kind", "InvalidInput");
+        let said = absences(vec![other_stage]);
+        assert_eq!(said.len(), 1);
+        assert!(said[0].contains("central.file_map_failure"), "{said:?}");
+        assert!(!said[0].contains("hold no text"), "{said:?}");
     }
 }
 
