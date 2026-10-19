@@ -303,6 +303,23 @@ work changes, and after `AIKIT_REFOCUS_PROMPTS` prompts (default 40) — never
 every turn. It is recorded as delivered only after the hook output carrying it
 was written. `AIKIT_INHABITATION_HOOKS=off` disables both.
 
+## Saved operations: scripts, commands and aliases
+
+One road from something you did to something you can run again, with no second store:
+
+```sh
+aikit capture "deploy" --kind script --export deploy --body 'cargo build --release && ./ship.sh'
+aikit inbox                      # the capture is a message here, with the plan to save it
+aikit inbox accept <item>        # writes the capsule; `aikit procedure undo` reverses it
+aikit run deploy                 # first run of an unreviewed script needs --confirm
+aikit saved                      # what is saved, from where, by whom, how often used
+aikit alias define '@gs = @# ( @ ? )'   # a search alias: `aikit search '@gs orient'`
+```
+
+`aikit observe run` and the opt-in `hook/aikit/observe-runs` capsule offer a command you
+have run three times as a candidate. Nothing is saved until you accept. The field-level
+contract for devices is in [SAVED-OPERATIONS.md](SAVED-OPERATIONS.md).
+
 ## What “working” means
 
 At minimum, all of these should succeed:

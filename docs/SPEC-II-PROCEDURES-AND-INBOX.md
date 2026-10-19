@@ -201,6 +201,55 @@ Three properties make it a channel rather than a list:
 Redaction is unconditional: the secret scanner runs on every item before it is
 stored, and quarantined content is never rendered in a preview or written to git.
 
+**A captured example is a message, not a second queue.** `aikit capture` files the
+example in the candidate store *and* announces it on the channel as a
+`capture-candidate` item. The item's evidence is the candidate (`candidate`,
+`proposed-id`, the body file, a redacted summary) and its `proposal` is the promotion
+itself: a real `promote` Procedure, persisted and not applied, holding exactly the
+bytes that accepting will write. A capture held back by the scanner is announced
+too, with no plan, and cannot be accepted.
+
+`aikit inbox accept <item|candidate>` runs the planned Procedure (re-planning if the
+capture changed since, a kind was declared, say), marks the example saved and
+resolves the message; `aikit procedure undo` reverses it. `aikit inbox reject
+<item|candidate> [--reason]` rejects the example and resolves the message. `aikit
+promote` resolves the message as well, so either road leaves the inbox in one state.
+The plan is staged in a shadow tree, not on a git branch: a project-scoped capture
+lands inside the project's repository, and one new capsule does not warrant a branch
+there.
+
+**What the capturer can say.** `aikit capture` takes `--kind`, `--export` (repeatable),
+`--scope home|project|session`, `--source-ref` and `--by`. The classifier reports
+`confidence` (declared, high, medium, low) and a reason, and no longer files text it
+cannot place as a script: prose is guidance at low confidence. Intent is kept beside
+the body (`meta.json`), not in new database columns, because a schema step makes every
+older `aikit` refuse the shared database.
+
+### 2.1 The recurrence observer: "you ran this three times; want it as a script?"
+
+`aikit observe run` takes attributed command runs: one by flags, many as JSON lines on
+stdin (`command`, `cwd`, `by`, `at`, `session`, `exit_code`), or one harness
+`PostToolUse` event (`--from-hook`). AIKit decides what repeats; sources only feed it.
+Counting is per command and per actor inside a window (default three in seven days)
+anchored on the newest run. The run that reaches the threshold files a capture
+candidate carrying the actor's name, the count and the session; the next does not
+offer again.
+
+Not counted: empty or over-long commands, runs the source says failed, shell staples
+and read-only git (`ls`, `cd`, `git status`...), `aikit` itself, a command already
+turned down, one already saved as a capsule. **A command holding a secret is not
+redacted-and-kept; it is not kept at all.** Observations live in their own SQLite file
+(`state/observations.sqlite3`), pruned at thirty days.
+
+The agent feed is opt-in through the capsule machinery: enable and trust
+`hook/aikit/observe-runs` (observe phase, so it can never deny; fail-open; Bash-only
+matcher). Claude Code and Codex both send JSON on stdin with `tool_name: "Bash"` and a
+string `tool_input.command`; Codex's `apply_patch` and MCP tools are ignored, and a
+Codex run carries no exit code, so it is recorded and never marked failed. The Terminal
+pane and Factory frames feed the same verb with `--stdin-jsonl`; the actor is whatever
+the feed attributes (`human`, or an agent ref), and an unattributed run is counted as
+`unknown`, never as a person's.
+
 ---
 
 ## 3. Foreign roots and adoption
