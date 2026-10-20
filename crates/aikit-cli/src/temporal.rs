@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use aikit_adapters::central_temporal::read_central_temporal_ground;
+use aikit_adapters::central_temporal::{read_central_temporal_ground, read_control_unpushed};
 use aikit_adapters::runner::CommandRunner;
 use aikit_core::hooks::{HookDecision, HookEvent, HookEventKind};
 
@@ -30,6 +30,11 @@ pub fn event_needs_reground(kind: &HookEventKind) -> bool {
 /// a temporarily unavailable `ctrl` binary must not counterfeit a hook denial.
 /// When a Project is actually bound to Central and the owner read fails, the
 /// warning stays visible in the decision.
+///
+/// A session standing in the Central world without being a Project — the root
+/// itself, `Control` — has no NOW to report, but it is owed one thing: whether
+/// Control's commits have reached their remote. `process_central_root` reads
+/// such a session as no root, so the root is resolved here.
 pub fn reground<R: CommandRunner>(
     decision: &mut HookDecision,
     event: &HookEvent,
@@ -41,32 +46,44 @@ pub fn reground<R: CommandRunner>(
     if !event_needs_reground(&event.kind) {
         return;
     }
-    let (Some(project_root), Some(central_root)) = (project_root, central_root) else {
+    let Some(project_root) = project_root else {
+        return;
+    };
+    let Some(central_root) = central_root
+        .map(Path::to_path_buf)
+        .or_else(|| central_root_enclosing(Some(project_root)))
+    else {
         return;
     };
 
-    match read_central_temporal_ground(runner, central_root, project_root) {
-        Ok(Some(ground)) => {
-            let rendered = ground.render();
-            if let (Some(ledger), Some(session)) =
-                (ledger, crate::refocus::hook_session(&event.payload))
-            {
-                let digest = blake3::hash(rendered.as_bytes()).to_hex().to_string();
-                if event.kind == HookEventKind::UserPromptSubmit
-                    && ledger.last(&session).as_deref() == Some(digest.as_str())
-                {
-                    return;
-                }
-                ledger.record(&session, &digest);
+    let rendered = match read_central_temporal_ground(runner, &central_root, project_root) {
+        Ok(Some(ground)) => ground.render(),
+        Ok(None) => match read_control_unpushed(runner, &central_root) {
+            Some(unpushed) => unpushed.render_standalone(),
+            None => return,
+        },
+        Err(error) => {
+            decision.warnings.push(format!(
+                "Central temporal re-grounding unavailable for this turn: {}",
+                error.message()
+            ));
+            // A failed NOW read says nothing about Control's remote.
+            match read_control_unpushed(runner, &central_root) {
+                Some(unpushed) => unpushed.render_standalone(),
+                None => return,
             }
-            decision.injected.insert(0, rendered)
         }
-        Ok(None) => {}
-        Err(error) => decision.warnings.push(format!(
-            "Central temporal re-grounding unavailable for this turn: {}",
-            error.message()
-        )),
+    };
+    if let (Some(ledger), Some(session)) = (ledger, crate::refocus::hook_session(&event.payload)) {
+        let digest = blake3::hash(rendered.as_bytes()).to_hex().to_string();
+        if event.kind == HookEventKind::UserPromptSubmit
+            && ledger.last(&session).as_deref() == Some(digest.as_str())
+        {
+            return;
+        }
+        ledger.record(&session, &digest);
     }
+    decision.injected.insert(0, rendered)
 }
 
 /// The lifecycle floor. With a lean World-inhabitation entry (a Position
@@ -542,6 +559,216 @@ mod tests {
         assert!(
             !after.injected.is_empty(),
             "the first prompt after compaction re-grounds the compacted session"
+        );
+    }
+
+    fn control_ahead() -> ScriptedRunner {
+        ScriptedRunner::new()
+            .on("rev-list --count origin/main..HEAD", "6\n")
+            .on("--skip=", "2026-10-08 14194ff\n")
+    }
+
+    #[test]
+    fn a_session_at_the_central_root_still_hears_that_control_is_unpushed() {
+        // The root is no Project, so there is no NOW to report — but the
+        // owner's ground being unpushed is exactly what such a session must hear.
+        let central = Path::new("/home/me/Central");
+        let runner = control_ahead();
+        let start = HookEvent::new("claude", HookEventKind::SessionStart, json!({}));
+        let mut result = decision(HookEventKind::SessionStart);
+        reground(
+            &mut result,
+            &start,
+            Some(central),
+            Some(central),
+            &runner,
+            None,
+        );
+        let text = result.injected_text();
+        assert!(text.starts_with("[Central temporal ground]"));
+        assert!(text.contains("6 commits ahead of origin/main, unpushed since 2026-10-08"));
+        assert!(text.contains("does not grant authority"));
+        assert!(!text.contains("project:"), "the root is no Project");
+        assert!(result.warnings.is_empty());
+        assert!(
+            runner
+                .call_lines()
+                .iter()
+                .all(|line| line.starts_with("git -C /home/me/Central/Control ")),
+            "no Central Action is invoked for a non-Project"
+        );
+    }
+
+    #[test]
+    fn control_itself_is_no_project_but_hears_it_too() {
+        let central = Path::new("/home/me/Central");
+        let start = HookEvent::new("codex", HookEventKind::SessionStart, json!({}));
+        let mut result = decision(HookEventKind::SessionStart);
+        reground(
+            &mut result,
+            &start,
+            Some(Path::new("/home/me/Central/Control")),
+            Some(central),
+            &control_ahead(),
+            None,
+        );
+        assert!(result.injected_text().contains("6 commits ahead"));
+    }
+
+    #[test]
+    fn a_root_session_in_step_with_its_remote_gets_nothing_at_all() {
+        let central = Path::new("/home/me/Central");
+        let runner = ScriptedRunner::new().on("rev-list --count origin/main..HEAD", "0\n");
+        let start = HookEvent::new("claude", HookEventKind::SessionStart, json!({}));
+        let mut result = decision(HookEventKind::SessionStart);
+        reground(
+            &mut result,
+            &start,
+            Some(central),
+            Some(central),
+            &runner,
+            None,
+        );
+        assert!(result.injected.is_empty());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_control_never_costs_a_turn_or_a_warning() {
+        // Nothing scripted: git answers with an error, which reads as silence.
+        let central = Path::new("/home/me/Central");
+        let prompt = HookEvent::new("claude", HookEventKind::UserPromptSubmit, json!({}));
+        let mut result = decision(HookEventKind::UserPromptSubmit);
+        reground(
+            &mut result,
+            &prompt,
+            Some(central),
+            Some(central),
+            &ScriptedRunner::new(),
+            None,
+        );
+        assert!(result.allowed);
+        assert!(result.injected.is_empty());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn the_root_warning_is_said_once_per_session_until_it_changes() {
+        let state = tempfile::tempdir().unwrap();
+        let ledger = FloorLedger::in_state(state.path());
+        let central = Path::new("/home/me/Central");
+        let session = json!({"session_id": "sess-root"});
+
+        let start = HookEvent::new("claude", HookEventKind::SessionStart, session.clone());
+        let mut first = decision(HookEventKind::SessionStart);
+        reground(
+            &mut first,
+            &start,
+            Some(central),
+            Some(central),
+            &control_ahead(),
+            Some(&ledger),
+        );
+        assert!(first.injected_text().contains("6 commits ahead"));
+
+        let prompt = HookEvent::new("claude", HookEventKind::UserPromptSubmit, session.clone());
+        let mut same = decision(HookEventKind::UserPromptSubmit);
+        reground(
+            &mut same,
+            &prompt,
+            Some(central),
+            Some(central),
+            &control_ahead(),
+            Some(&ledger),
+        );
+        assert!(
+            same.injected.is_empty(),
+            "an unchanged warning is not re-sent"
+        );
+
+        // Another commit lands: the warning changed, so it is said again.
+        let more = ScriptedRunner::new()
+            .on("rev-list --count origin/main..HEAD", "7\n")
+            .on("--skip=", "2026-10-08 14194ff\n");
+        let mut changed = decision(HookEventKind::UserPromptSubmit);
+        reground(
+            &mut changed,
+            &prompt,
+            Some(central),
+            Some(central),
+            &more,
+            Some(&ledger),
+        );
+        assert!(changed.injected_text().contains("7 commits ahead"));
+    }
+
+    #[test]
+    fn a_session_outside_any_central_world_is_untouched() {
+        let runner = control_ahead();
+        let start = HookEvent::new("claude", HookEventKind::SessionStart, json!({}));
+        let mut result = decision(HookEventKind::SessionStart);
+        reground(
+            &mut result,
+            &start,
+            Some(Path::new("/nonexistent-elsewhere/project")),
+            None,
+            &runner,
+            None,
+        );
+        assert!(result.injected.is_empty());
+        assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    fn a_failed_now_read_does_not_hide_that_control_is_unpushed() {
+        // The NOW read errors; the owner's ground being unpushed is a separate
+        // fact and still reaches the session beside the "unavailable" notice.
+        let central = Path::new("/home/me/Central");
+        let project = Path::new("/home/me/Central/Work/example");
+        let runner = control_ahead().failing("projectcentral.now.inspect", 9, "owner unavailable");
+        let start = HookEvent::new("claude", HookEventKind::SessionStart, json!({}));
+        let mut result = decision(HookEventKind::SessionStart);
+        reground(
+            &mut result,
+            &start,
+            Some(project),
+            Some(central),
+            &runner,
+            None,
+        );
+        assert!(result.allowed);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Central temporal")));
+        assert!(result.injected_text().contains("6 commits ahead"));
+    }
+
+    #[test]
+    fn a_project_session_carries_the_warning_inside_its_ground() {
+        let central = Path::new("/home/me/Central");
+        let project = Path::new("/home/me/Central/Work/example");
+        let runner = control_ahead()
+            .on("projectcentral.now.inspect", &now_with("state A"))
+            .on("central.day.read", &day());
+        let start = HookEvent::new("claude", HookEventKind::SessionStart, json!({}));
+        let mut result = decision(HookEventKind::SessionStart);
+        reground(
+            &mut result,
+            &start,
+            Some(project),
+            Some(central),
+            &runner,
+            None,
+        );
+        let text = result.injected_text();
+        assert!(text.contains("project: example"));
+        assert!(text.contains("state A"));
+        assert!(text.contains("6 commits ahead of origin/main"));
+        assert_eq!(
+            text.matches("[Central temporal ground]").count(),
+            1,
+            "one block, not a block and a second warning"
         );
     }
 }
