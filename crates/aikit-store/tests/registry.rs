@@ -255,6 +255,103 @@ fn one_unparseable_manifest_does_not_blind_the_rest_of_the_registry() {
     assert!(load.problems[0].path.ends_with("manifest.toml"));
 }
 
+/// Capsules are read at once; what loads, what is a problem and the order of the problems are those of reading them in turn.
+#[test]
+fn a_registry_read_at_once_loads_what_reading_in_turn_loads_with_the_problems_in_the_order_found() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = RegistryFixture::at(tmp.path());
+    let mut good = Vec::new();
+    for index in 0..30 {
+        let id = format!("script/group{}/item{index:02}", index % 4);
+        let dir = fixture.script(&id);
+        // A payload of a few files, so the revisions differ and take real reading.
+        for file in 0..5 {
+            std::fs::write(
+                dir.join(format!("payload/extra{file}.txt")),
+                format!("{index}-{file}"),
+            )
+            .unwrap();
+        }
+        good.push(id);
+    }
+    // Bad ones among the good, found before, between and after them.
+    for (id, manifest) in [
+        (
+            "script/aaa/first-broken",
+            "schema = 1\nid = \"script/aaa/first-broken\"\nthis is not toml".to_owned(),
+        ),
+        (
+            "script/group2/mismatch",
+            "schema = 1\nid = \"script/group2/elsewhere\"\nkind = \"script\"\nname = \"x\"\n\
+             description = \"Mismatched.\"\n\n[script]\nentry = \"payload/run.sh\"\n"
+                .to_owned(),
+        ),
+        (
+            "script/zzz/last-broken",
+            "schema = 1\nid = \"script/zzz/last-broken\"\nnot toml either".to_owned(),
+        ),
+    ] {
+        fixture.raw_capsule(id, &manifest);
+    }
+
+    let at_once = load_registry(fixture.root(), RegistrySource::personal()).unwrap();
+    let again = load_registry(fixture.root(), RegistrySource::personal()).unwrap();
+
+    let problems = |load: &aikit_store::registry::RegistryLoad| -> Vec<(String, String)> {
+        load.problems
+            .iter()
+            .map(|problem| {
+                (
+                    problem
+                        .path
+                        .strip_prefix(fixture.root())
+                        .unwrap()
+                        .display()
+                        .to_string(),
+                    problem.error.code().to_owned(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        problems(&at_once),
+        vec![
+            (
+                "capsules/script/aaa/first-broken/manifest.toml".to_owned(),
+                "manifest.parse_error".to_owned()
+            ),
+            (
+                "capsules/script/group2/mismatch/manifest.toml".to_owned(),
+                "registry.id_path_mismatch".to_owned()
+            ),
+            (
+                "capsules/script/zzz/last-broken/manifest.toml".to_owned(),
+                "manifest.parse_error".to_owned()
+            ),
+        ],
+        "the problems, in the order the capsules were found"
+    );
+    assert_eq!(problems(&at_once), problems(&again));
+
+    // Each loaded capsule carries the revision of its own files, as computing it alone gives.
+    for id in &good {
+        let capsule = at_once
+            .catalog
+            .get(&cid(id))
+            .unwrap_or_else(|| panic!("{id} loads"));
+        let dir = fixture.capsule_dir(id);
+        let manifest = std::fs::read(dir.join("manifest.toml")).unwrap();
+        let alone = aikit_store::registry::compute_revision(&dir, &manifest).unwrap();
+        assert_eq!(capsule.revision.as_ref(), Some(&alone), "{id}");
+        assert_eq!(capsule.root.as_deref(), Some(dir.as_path()), "{id}");
+    }
+    assert_eq!(
+        at_once.catalog.len(),
+        good.len(),
+        "every good capsule and nothing else"
+    );
+}
+
 #[test]
 fn a_manifest_whose_id_disagrees_with_its_directory_is_a_problem_not_a_silent_rename() {
     let tmp = tempfile::tempdir().unwrap();
