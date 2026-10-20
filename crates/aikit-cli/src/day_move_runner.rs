@@ -2085,7 +2085,7 @@ mod tests {
             text.contains("p0_quick_thoughts: Ring the printer"),
             "{text}"
         );
-        assert!(text.contains("p0_adjacencies") == false, "{text}");
+        assert!(!text.contains("p0_adjacencies"), "{text}");
         let empty = face_text(&document(&[]), 3);
         assert!(empty.contains("nothing written on this face"), "{empty}");
     }
