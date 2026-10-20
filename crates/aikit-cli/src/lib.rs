@@ -30,6 +30,7 @@ pub mod continuity_disclosure;
 pub mod control_ground;
 pub mod credential;
 pub(crate) mod credential_delivery;
+pub mod day_move_runner;
 pub mod decide;
 pub mod decide_service;
 pub mod development_entry;

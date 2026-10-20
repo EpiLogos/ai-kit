@@ -369,6 +369,10 @@ pub enum WorkGroupCommand {
     Harness(HarnessCmd),
     /// Start developmental work through Factory's native Commission boundary.
     Factory(FactoryCmd),
+    /// Run a move of the Day through the Day's agent, or the moves a saved
+    /// schedule has made due. Every entry lands on the Day's faces as a proposal.
+    #[command(name = "day-move")]
+    DayMove(DayMoveCmd),
 }
 
 #[derive(Debug, Subcommand)]
@@ -397,6 +401,7 @@ impl WorkGroupCommand {
             Self::Jobs(_) => "cmd_jobs",
             Self::Harness(c) => harness_route(c),
             Self::Factory(c) => factory_route(c),
+            Self::DayMove(c) => day_move_route(c),
         }
     }
 }
@@ -1166,6 +1171,13 @@ fn session_route(command: &SessionCmd) -> &'static str {
                 }
             },
         },
+    }
+}
+
+fn day_move_route(command: &DayMoveCmd) -> &'static str {
+    match &command.command {
+        DayMoveSub::Run(_) => "cmd_day_move_run",
+        DayMoveSub::Due(_) => "cmd_day_move_due",
     }
 }
 
@@ -5319,6 +5331,83 @@ pub struct SessionDownArgs {
 // ---------------------------------------------------------------------------
 // task
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// aikit work day-move — the Day's agent runs a move
+// ---------------------------------------------------------------------------
+
+/// `aikit work day-move` — the Day's agent runs a move (manual 18.2). Nothing
+/// here runs by itself: the person's pad calls `run`, and the native host's
+/// visible runner calls `due`.
+#[derive(Debug, Args)]
+pub struct DayMoveCmd {
+    #[command(subcommand)]
+    pub command: DayMoveSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DayMoveSub {
+    /// Run one move once: a pad pressed now, or one scheduled occurrence.
+    Run(DayMoveRunArgs),
+    /// Run each occurrence a saved schedule made due in a window that has not
+    /// begun, once, in time order.
+    Due(DayMoveDueArgs),
+}
+
+/// What both verbs need to reach Central and the Day's agent.
+#[derive(Debug, Args)]
+pub struct DayMoveSharedArgs {
+    /// The Central root (default: `AIKIT_CENTRAL_ROOT`, else `~/Central`).
+    #[arg(long = "central-root", value_name = "DIR")]
+    pub central_root: Option<std::path::PathBuf>,
+    /// The `ctrl` binary (default: `CENTRAL_CTRL_BIN`, else `ctrl`). The
+    /// authenticated Actions read their credential from `CENTRAL_NATIVE_TOKEN`.
+    #[arg(long = "ctrl-bin", value_name = "PATH")]
+    pub ctrl_bin: Option<std::path::PathBuf>,
+    /// A Project's Day instead of the root's.
+    #[arg(long, value_name = "NAME")]
+    pub project: Option<String>,
+    /// The encounter provider the Day's turn is taken on (default: the one
+    /// configured, or `AIKIT_DAY_PROVIDER`).
+    #[arg(long, value_name = "ID")]
+    pub provider: Option<String>,
+    /// The ref the Day's agent authors proposals under.
+    #[arg(long = "agent-ref", value_name = "REF")]
+    pub agent_ref: Option<String>,
+    /// Seconds one turn may take before it is cancelled (default 600).
+    #[arg(long = "timeout-secs", value_name = "N")]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub struct DayMoveRunArgs {
+    /// tasks, patterns, context, synthesis or close.
+    #[arg(long = "move", value_name = "MOVE")]
+    pub mv: String,
+    /// The Day to run on (default: today's).
+    #[arg(long = "day-ref", value_name = "REF")]
+    pub day_ref: Option<String>,
+    /// press (a pad pressed now) or schedule (a saved schedule's occurrence).
+    #[arg(long, value_name = "press|schedule", default_value = "press")]
+    pub trigger: String,
+    /// The scheduled occurrence this run is (with `--trigger schedule`).
+    #[arg(long = "occurrence-ref", value_name = "REF")]
+    pub occurrence_ref: Option<String>,
+    #[command(flatten)]
+    pub shared: DayMoveSharedArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct DayMoveDueArgs {
+    /// The window's start, in unix milliseconds (exclusive): the last poll.
+    #[arg(long, value_name = "MS")]
+    pub since: i64,
+    /// The window's end, in unix milliseconds (inclusive): now.
+    #[arg(long, value_name = "MS")]
+    pub now: i64,
+    #[command(flatten)]
+    pub shared: DayMoveSharedArgs,
+}
 
 #[derive(Debug, Args)]
 pub struct TaskCmd {

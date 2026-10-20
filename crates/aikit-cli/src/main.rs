@@ -280,6 +280,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
             WorkGroupCommand::Jobs(_) => cmd_jobs(cwd),
             WorkGroupCommand::Harness(c) => cmd_harness(cwd, c, json_mode),
             WorkGroupCommand::Factory(c) => cmd_factory(c),
+            WorkGroupCommand::DayMove(c) => cmd_day_move(cwd, c),
         },
         Some(Command::Knowledge(c)) => cmd_knowledge(cwd, c),
         Some(Command::Praxis(a)) => cmd_praxis(cwd, a),
@@ -5947,6 +5948,35 @@ fn cmd_context(cwd: &std::path::Path, c: ContextCmd) -> Result<Reply> {
             Ok(reply(&service, data, vec![]))
         }
     }
+}
+
+/// `aikit work day-move run|due`: the Day's agent runs a move. A run that was
+/// begun comes back as its recorded outcome (done, refused or stalled); an error
+/// means the run could not be recorded at all.
+fn cmd_day_move(cwd: &std::path::Path, c: DayMoveCmd) -> Result<Reply> {
+    use aikit_cli::day_move_runner as runner;
+    let service = Service::discover(cwd)?;
+    let settings = |shared: DayMoveSharedArgs| runner::Settings {
+        central_root: shared.central_root,
+        ctrl_bin: shared.ctrl_bin,
+        project: shared.project,
+        provider: shared.provider,
+        agent_ref: shared.agent_ref,
+        timeout_secs: shared.timeout_secs,
+    };
+    let data = match c.command {
+        DayMoveSub::Run(a) => {
+            let request = runner::RunRequest {
+                mv: runner::Move::parse(&a.mv)?,
+                day_ref: a.day_ref,
+                trigger: runner::Trigger::parse(&a.trigger)?,
+                occurrence_ref: a.occurrence_ref,
+            };
+            runner::run(service.home(), &settings(a.shared), &request)?
+        }
+        DayMoveSub::Due(a) => runner::due(service.home(), &settings(a.shared), a.since, a.now)?,
+    };
+    Ok(reply(&service, data, vec![]))
 }
 
 fn cmd_task(cwd: &std::path::Path, c: TaskCmd) -> Result<Reply> {
