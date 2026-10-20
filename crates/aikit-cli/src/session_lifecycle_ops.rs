@@ -1,7 +1,10 @@
 //! Session lifecycle operation family on the canonical CLI/TUI `Service`.
 //!
-//! The Service already owns the injected `AikitHome`; this extension uses
-//! that exact home rather than rediscovering process-global state. All
+//! The family reads and writes through the `AikitHome` alone, so it is
+//! implemented on the home; the Service delegates to the home it owns, using
+//! that exact home rather than rediscovering process-global state, and a verb
+//! that needs nothing else of the Service (the CLI's `session lifecycle …`)
+//! works from the home without building one. All
 //! durability, validation and read-model derivation stay in
 //! `aikit_store::SessionLifecycleStore`; this layer only shapes owner
 //! intents into fully-formed events, minting identities the caller did not
@@ -13,6 +16,7 @@ use aikit_core::session_lifecycle::{
     SessionLifecycleRecord,
 };
 use aikit_core::{PermissionRequestId, Result, SessionActivityId, SessionId};
+use aikit_store::home::AikitHome;
 use aikit_store::SessionLifecycleStore;
 
 use crate::app::Service;
@@ -37,6 +41,34 @@ pub trait SessionLifecycleServiceOps {
 }
 
 impl SessionLifecycleServiceOps for Service {
+    fn session_lifecycle_list(&self) -> Result<Vec<SessionId>> {
+        self.home().session_lifecycle_list()
+    }
+
+    fn session_lifecycle_history(&self, session: &SessionId) -> Result<Vec<SessionLifecycleEvent>> {
+        self.home().session_lifecycle_history(session)
+    }
+
+    fn session_lifecycle_read_model(
+        &self,
+        session: &SessionId,
+    ) -> Result<SessionLifecycleReadModel> {
+        self.home().session_lifecycle_read_model(session)
+    }
+
+    fn session_lifecycle_record(
+        &self,
+        session: SessionId,
+        record: SessionLifecycleRecord,
+        activity: Option<SessionActivityId>,
+        origin: impl Into<String>,
+    ) -> Result<SessionLifecycleEvent> {
+        self.home()
+            .session_lifecycle_record(session, record, activity, origin)
+    }
+}
+
+impl SessionLifecycleServiceOps for AikitHome {
     fn session_lifecycle_list(&self) -> Result<Vec<SessionId>> {
         store(self).list()
     }
@@ -154,6 +186,6 @@ fn permission_request_activity(
     Ok((issued.activity, issued.tool.unwrap_or_default()))
 }
 
-fn store(service: &Service) -> SessionLifecycleStore {
-    SessionLifecycleStore::new(service.home().clone())
+fn store(home: &AikitHome) -> SessionLifecycleStore {
+    SessionLifecycleStore::new(home.clone())
 }
