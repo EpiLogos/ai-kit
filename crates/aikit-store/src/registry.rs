@@ -164,20 +164,25 @@ fn load_capsules(root: &Path, source: &RegistrySource, load: &mut RegistryLoad) 
         return Ok(());
     }
 
-    for entry in walkdir::WalkDir::new(&capsules_root)
+    // The capsules are found in order, then each read - its manifest parsed and its files hashed
+    // for the revision - at once with the others; what is loaded, and what is a problem, is
+    // applied in the order they were found.
+    let manifests: Vec<PathBuf> = walkdir::WalkDir::new(&capsules_root)
         .sort_by_file_name()
         .into_iter()
         .filter_map(std::result::Result::ok)
-    {
-        if !entry.file_type().is_file() || entry.file_name() != MANIFEST_FILE {
-            continue;
-        }
-        let manifest_path = entry.path().to_path_buf();
-        let dir = match manifest_path.parent() {
-            Some(dir) => dir.to_path_buf(),
-            None => continue,
-        };
-        match load_capsule(&capsules_root, &dir, &manifest_path, source) {
+        .filter(|entry| entry.file_type().is_file() && entry.file_name() == MANIFEST_FILE)
+        .map(|entry| entry.path().to_path_buf())
+        .filter(|manifest_path| manifest_path.parent().is_some())
+        .collect();
+    let loaded = crate::parallel::in_parallel(&manifests, |manifest_path| {
+        let dir = manifest_path
+            .parent()
+            .expect("a manifest path with no parent was filtered out");
+        load_capsule(&capsules_root, dir, manifest_path, source)
+    });
+    for (manifest_path, loaded) in manifests.into_iter().zip(loaded) {
+        match loaded {
             Ok(capsule) => {
                 load.catalog.insert(capsule);
             }

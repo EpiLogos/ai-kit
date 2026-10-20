@@ -5,8 +5,9 @@
 //! SessionSpace receipts remain part of the canonical SessionSpace document. This
 //! module only projects those owners into the common `aikit-core` History grammar.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use aikit_core::resource::{ResourceRef, SourceAuthority};
 use aikit_core::session_space::SessionSpaceRef;
@@ -16,11 +17,152 @@ use aikit_core::{
     EXPLAIN_HISTORY_VERSION,
 };
 
-use crate::generation::{is_generation, read_lock, read_metadata, GENERATIONS};
+use crate::derived_cache::{self, FileSignature};
+use crate::generation::{
+    is_generation, read_lock, read_metadata, GenerationMetadata, GENERATIONS, LOCK_FILE,
+};
 use crate::{
     AikitHome, KnowledgeApplicationReceipt, KnowledgeHistoryOperation,
     SessionSpaceApplicationStore, SessionSpaceReceipt,
 };
+
+/// Where the lock summaries are kept: derived data under the home's cache, never an authority.
+const LOCK_SUMMARIES_FILE: &str = "history/generation-locks.v1.json";
+const LOCK_SUMMARIES_VERSION: u32 = 1;
+
+/// What the history reading takes from a generation's lock: the capsules it carried and its
+/// Project. A lock lists a registry's worth of capsules with all their detail (hundreds of KB of
+/// TOML), a generation is immutable, and a person's `aikit history` reads every one of them —
+/// parsing 287 locks was 80% of a one-second reading — so what the reading needs is derived from
+/// a lock once and kept, keyed by the lock file it came from (its length and modification time)
+/// and the resolution it names. A lock that was rewritten, or a cache that is missing, unreadable
+/// or of another version, derives again; nothing is ever read *from* the cache that the lock
+/// would not say.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct LockSummary {
+    lock: FileSignature,
+    resolution_hash: String,
+    project: Option<String>,
+    /// Indexes into the cache's capsule table, in the lock's order.
+    active: Vec<u32>,
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct LockSummaries {
+    version: u32,
+    /// Every capsule id any summary names, once.
+    capsules: Vec<String>,
+    generations: BTreeMap<String, LockSummary>,
+}
+
+/// The lock summaries of a run of reads: loaded once, added to as locks are derived, written once.
+struct LockSummaryStore {
+    path: PathBuf,
+    kept: LockSummaries,
+    index: HashMap<String, u32>,
+    seen: BTreeSet<String>,
+    dirty: bool,
+}
+
+/// A generation's lock as the history reading takes it.
+struct LockFacts {
+    project: Option<String>,
+    active: Vec<String>,
+}
+
+impl LockSummaryStore {
+    fn open(home: &AikitHome) -> Self {
+        let path = derived_cache::path_in(home, LOCK_SUMMARIES_FILE);
+        let kept = derived_cache::load::<LockSummaries>(&path)
+            .filter(|kept| kept.version == LOCK_SUMMARIES_VERSION)
+            .unwrap_or_else(|| LockSummaries {
+                version: LOCK_SUMMARIES_VERSION,
+                ..LockSummaries::default()
+            });
+        let index = kept
+            .capsules
+            .iter()
+            .enumerate()
+            .map(|(position, capsule)| (capsule.clone(), position as u32))
+            .collect();
+        Self {
+            path,
+            kept,
+            index,
+            seen: BTreeSet::new(),
+            dirty: false,
+        }
+    }
+
+    /// The facts of `generation_dir`'s lock: from the summary kept for it when the lock file and
+    /// resolution are the ones it was derived from, else from the lock, which is then kept.
+    fn facts(&mut self, generation_dir: &Path, metadata: &GenerationMetadata) -> Result<LockFacts> {
+        let id = metadata.generation_id.to_string();
+        self.seen.insert(id.clone());
+        let lock = FileSignature::of(&generation_dir.join(LOCK_FILE));
+        if let Some(summary) = self.kept.generations.get(&id) {
+            if summary.lock == lock
+                && summary.resolution_hash == metadata.resolution_hash
+                && summary
+                    .active
+                    .iter()
+                    .all(|&position| (position as usize) < self.kept.capsules.len())
+            {
+                return Ok(LockFacts {
+                    project: summary.project.clone(),
+                    active: summary
+                        .active
+                        .iter()
+                        .map(|&position| self.kept.capsules[position as usize].clone())
+                        .collect(),
+                });
+            }
+        }
+        let resolved = read_lock(generation_dir)?;
+        let active: Vec<String> = resolved.active.keys().map(ToString::to_string).collect();
+        let project = resolved
+            .context
+            .project_id
+            .as_ref()
+            .map(ToString::to_string);
+        let positions = active
+            .iter()
+            .map(|capsule| {
+                *self.index.entry(capsule.clone()).or_insert_with(|| {
+                    self.kept.capsules.push(capsule.clone());
+                    (self.kept.capsules.len() - 1) as u32
+                })
+            })
+            .collect();
+        self.kept.generations.insert(
+            id,
+            LockSummary {
+                lock,
+                resolution_hash: metadata.resolution_hash.clone(),
+                project: project.clone(),
+                active: positions,
+            },
+        );
+        self.dirty = true;
+        Ok(LockFacts { project, active })
+    }
+
+    /// Keep what was derived. A sweep of every context (`prune`) also lets go of the summaries of
+    /// generations that are gone. A cache that cannot be written is a cache not kept: the reading
+    /// it would have saved is simply made again.
+    fn save(mut self, prune: bool) {
+        if prune {
+            let before = self.kept.generations.len();
+            let seen = &self.seen;
+            self.kept.generations.retain(|id, _| seen.contains(id));
+            self.dirty |= self.kept.generations.len() != before;
+        }
+        if !self.dirty {
+            return;
+        }
+        derived_cache::save(&self.path, &self.kept);
+    }
+}
 
 /// Read immutable generation evidence for one canonical Context. A previous
 /// Generation is inspectable historical ground; this function does not invent a
@@ -28,6 +170,17 @@ use crate::{
 pub fn generation_history_evidence(
     home: &AikitHome,
     context: &ContextId,
+) -> Result<Vec<HistoryEvidence>> {
+    let mut locks = LockSummaryStore::open(home);
+    let entries = generation_history_evidence_with(home, context, &mut locks);
+    locks.save(false);
+    entries
+}
+
+fn generation_history_evidence_with(
+    home: &AikitHome,
+    context: &ContextId,
+    locks: &mut LockSummaryStore,
 ) -> Result<Vec<HistoryEvidence>> {
     let root = home.context_dir(context).join(GENERATIONS);
     if !root.exists() {
@@ -52,19 +205,19 @@ pub fn generation_history_evidence(
             continue;
         }
         let metadata = read_metadata(&path)?;
-        let resolved = read_lock(&path)?;
+        let lock = locks.facts(&path, &metadata)?;
         let subject = ResourceRef::parse(&format!("generation/{}", metadata.generation_id))?;
         let mut canonical_refs = BTreeSet::new();
         canonical_refs.insert(subject.clone());
         // The lock names every capsule this generation actually carried, so a
         // skill's history answers through the generations that enabled it —
         // `history --resource skill/…` was empty before this joined them.
-        for capsule in resolved.active.keys() {
-            if let Ok(reference) = ResourceRef::parse(&capsule.to_string()) {
+        for capsule in &lock.active {
+            if let Ok(reference) = ResourceRef::parse(capsule) {
                 canonical_refs.insert(reference);
             }
         }
-        if let Some(project) = resolved.context.project_id.as_ref() {
+        if let Some(project) = lock.project.as_ref() {
             canonical_refs.insert(ResourceRef::parse(&format!("project/{project}"))?);
         }
 
@@ -77,8 +230,8 @@ pub fn generation_history_evidence(
             "materialization".into(),
             format!("{:?}", metadata.materialization),
         );
-        if let Some(project) = resolved.context.project_id.as_ref() {
-            details.insert("project".into(), project.to_string());
+        if let Some(project) = lock.project.as_ref() {
+            details.insert("project".into(), project.clone());
         }
         if let Some(base) = &metadata.base_generation {
             details.insert("baseGeneration".into(), base.to_string());
@@ -139,6 +292,7 @@ pub fn all_contexts_generation_history_evidence(home: &AikitHome) -> Result<Vec<
     let Ok(contexts) = fs::read_dir(home.contexts()) else {
         return Ok(entries);
     };
+    let mut locks = LockSummaryStore::open(home);
     let mut names: Vec<String> = contexts
         .filter_map(std::result::Result::ok)
         .filter(|entry| entry.path().is_dir())
@@ -149,7 +303,7 @@ pub fn all_contexts_generation_history_evidence(home: &AikitHome) -> Result<Vec<
         let Ok(context) = ContextId::parse(&name) else {
             continue;
         };
-        for mut entry in generation_history_evidence(home, &context)? {
+        for mut entry in generation_history_evidence_with(home, &context, &mut locks)? {
             if seen.insert(entry.id.clone()) {
                 // Name the context DIRECTORY that holds this generation: it
                 // is the location identity the sweep adds over a single-
@@ -159,6 +313,7 @@ pub fn all_contexts_generation_history_evidence(home: &AikitHome) -> Result<Vec<
             }
         }
     }
+    locks.save(true);
     entries.sort_by(|left, right| {
         right
             .occurred_at_unix_ms
