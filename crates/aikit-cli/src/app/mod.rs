@@ -420,7 +420,23 @@ impl Service {
 
     /// The injectable form: an explicit home and environment lookup, so tests run
     /// against a real temp home without touching the process environment.
-    pub fn open<F>(home: AikitHome, cwd: &Path, env: F) -> Result<Self>
+    /// The part of `open` that says where the call stands: the home's layout, the
+    /// project the working directory belongs to, the Central roots it sees and the
+    /// context descriptor every reply carries. It reads no catalogue, trust, index
+    /// or layer, so a verb that needs only the home and the descriptor (the
+    /// session lifecycle) pays for this and not for the rest of `open`. `open`
+    /// runs exactly this first.
+    #[allow(clippy::type_complexity)]
+    fn open_context<F>(
+        home: &AikitHome,
+        cwd: &Path,
+        env: &F,
+    ) -> Result<(
+        Option<DiscoveredProject>,
+        Option<PathBuf>,
+        Option<PathBuf>,
+        ContextDescriptor,
+    )>
     where
         F: Fn(&str) -> Option<String>,
     {
@@ -428,15 +444,37 @@ impl Service {
         let default_store = env("HOME").map(|path| PathBuf::from(path).join(".aikit"));
         let additional_stores: Vec<&Path> = default_store.as_deref().into_iter().collect();
         let project =
-            discover::discover_project_with_home_excluding(&home, cwd, &additional_stores)?;
+            discover::discover_project_with_home_excluding(home, cwd, &additional_stores)?;
         let (project, central_meta_root, knowledge_central_root) =
-            root_context::discover(cwd, &env, project)?;
-        let project_root = project.as_ref().map(|p| p.root.clone());
-
-        let descriptor = match &project_root {
-            Some(root) => discover::descriptor_from(root, &env),
-            None => discover::global_descriptor(&env),
+            root_context::discover(cwd, env, project)?;
+        let descriptor = match project.as_ref().map(|p| &p.root) {
+            Some(root) => discover::descriptor_from(root, env),
+            None => discover::global_descriptor(env),
         };
+        Ok((
+            project,
+            central_meta_root,
+            knowledge_central_root,
+            descriptor,
+        ))
+    }
+
+    /// The context descriptor a call from `cwd` carries, without building the
+    /// Service: for the verbs that read and write through the home alone and
+    /// only need to say, in their reply, where they stood.
+    pub fn context_descriptor(cwd: &Path) -> Result<(AikitHome, ContextDescriptor)> {
+        let home = AikitHome::discover()?;
+        let (_, _, _, descriptor) = Self::open_context(&home, cwd, &|k| std::env::var(k).ok())?;
+        Ok((home, descriptor))
+    }
+
+    pub fn open<F>(home: AikitHome, cwd: &Path, env: F) -> Result<Self>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let (project, central_meta_root, knowledge_central_root, descriptor) =
+            Self::open_context(&home, cwd, &env)?;
+        let project_root = project.as_ref().map(|p| p.root.clone());
 
         let load = load_catalog(&home, project_root.as_deref())?;
         let catalog = load.catalog;

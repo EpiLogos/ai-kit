@@ -16,6 +16,8 @@ use aikit_store::{
     SessionSpaceHistoryComparison, SessionSpaceReceipt,
 };
 
+use aikit_store::home::AikitHome;
+
 use crate::app::Service;
 
 pub trait SessionSpaceServiceOps {
@@ -66,6 +68,93 @@ pub trait SessionSpaceServiceOps {
 }
 
 impl SessionSpaceServiceOps for Service {
+    fn session_space_list(&self) -> Result<Vec<SessionSpaceAuthoredState>> {
+        self.home().session_space_list()
+    }
+
+    fn session_space_show(&self, space: &SessionSpaceRef) -> Result<SessionSpaceAuthoredState> {
+        self.home().session_space_show(space)
+    }
+
+    fn session_space_open(&self, space: &SessionSpaceRef) -> Result<SessionSpaceAuthoredState> {
+        self.home().session_space_open(space)
+    }
+
+    fn session_space_discover(
+        &self,
+        project: Option<&ProjectRef>,
+    ) -> Result<Vec<SessionSpaceAuthoredState>> {
+        self.home().session_space_discover(project)
+    }
+
+    fn session_space_stage(
+        &self,
+        space: Option<&SessionSpaceRef>,
+        intent: SessionSpaceMutation,
+    ) -> Result<SessionSpacePreview> {
+        self.home().session_space_stage(space, intent)
+    }
+
+    fn session_space_apply(&self, preview: &SessionSpacePreview) -> Result<SessionSpaceReceipt> {
+        self.home().session_space_apply(preview)
+    }
+
+    fn session_space_history(&self, space: &SessionSpaceRef) -> Result<Vec<SessionSpaceReceipt>> {
+        self.home().session_space_history(space)
+    }
+
+    fn session_space_compare_history(
+        &self,
+        space: &SessionSpaceRef,
+        from_sequence: u64,
+        to_sequence: u64,
+    ) -> Result<SessionSpaceHistoryComparison> {
+        self.home()
+            .session_space_compare_history(space, from_sequence, to_sequence)
+    }
+
+    fn session_space_stage_restore(
+        &self,
+        space: &SessionSpaceRef,
+        sequence: u64,
+    ) -> Result<SessionSpacePreview> {
+        self.home().session_space_stage_restore(space, sequence)
+    }
+
+    fn session_space_reconstruct(
+        &self,
+        space: &SessionSpaceRef,
+        runtime: Option<&SessionSpaceReadModel>,
+        native_observations: &[SessionSpaceNativeObservation],
+        continuity: &[AgentSessionContinuityEvidence],
+    ) -> Result<SessionSpaceReconstructionReport> {
+        self.home()
+            .session_space_reconstruct(space, runtime, native_observations, continuity)
+    }
+
+    fn session_space_reconcile(
+        &self,
+        space: &SessionSpaceRef,
+        runtime: Option<&SessionSpaceReadModel>,
+        native_observations: &[SessionSpaceNativeObservation],
+        continuity: &[AgentSessionContinuityEvidence],
+    ) -> Result<SessionSpaceReconstructionReport> {
+        self.home()
+            .session_space_reconcile(space, runtime, native_observations, continuity)
+    }
+
+    fn session_space_explain(
+        &self,
+        space: &SessionSpaceRef,
+        reconstruction: Option<SessionSpaceReconstructionReport>,
+    ) -> Result<SessionSpaceExplainEvidence> {
+        self.home().session_space_explain(space, reconstruction)
+    }
+}
+
+/// The whole family needs only the AIKit home: every operation goes through the store built from it. So it is implemented on the
+/// home, and a caller that has no `Service` — and does not need to pay for one — runs it as well as one that has.
+impl SessionSpaceServiceOps for AikitHome {
     fn session_space_list(&self) -> Result<Vec<SessionSpaceAuthoredState>> {
         store(self).list()
     }
@@ -148,6 +237,6 @@ impl SessionSpaceServiceOps for Service {
     }
 }
 
-fn store(service: &Service) -> SessionSpaceApplicationStore {
-    SessionSpaceApplicationStore::new(service.home().clone())
+fn store(home: &AikitHome) -> SessionSpaceApplicationStore {
+    SessionSpaceApplicationStore::new(home.clone())
 }

@@ -129,8 +129,18 @@ enum Reply {
 }
 
 fn reply(service: &Service, data: Value, warnings: Vec<String>) -> Reply {
+    reply_in(service.descriptor(), data, warnings)
+}
+
+/// A reply that says where the call stood, from the descriptor alone: for the verbs that
+/// work from the home and never build the Service.
+fn reply_in(
+    descriptor: &aikit_core::context::ContextDescriptor,
+    data: Value,
+    warnings: Vec<String>,
+) -> Reply {
     Reply::Data {
-        context: EnvelopeContext::from_descriptor(service.descriptor()),
+        context: EnvelopeContext::from_descriptor(descriptor),
         data,
         warnings,
         exit_code: json::EXIT_OK,
@@ -6222,6 +6232,13 @@ fn cmd_capabilities(cwd: &std::path::Path, c: CapabilitiesCmd) -> Result<Reply> 
 }
 
 fn cmd_session(cwd: &std::path::Path, c: SessionCmd) -> Result<Reply> {
+    // The lifecycle records and reads its events through the home; it needs the Service's
+    // catalogue, trust, index and layers for nothing, and is run often (a hook per turn, a
+    // history read per session on start-up), so it does not build them.
+    if let SessionSub::Lifecycle(c) = c.command {
+        let (home, descriptor) = Service::context_descriptor(cwd)?;
+        return cmd_session_lifecycle(&home, &descriptor, c);
+    }
     let mut service = Service::discover(cwd)?;
     match c.command {
         SessionSub::Up(a) => {
@@ -6312,86 +6329,92 @@ fn cmd_session(cwd: &std::path::Path, c: SessionCmd) -> Result<Reply> {
             });
             Ok(reply(&service, data, vec![]))
         }
-        SessionSub::Lifecycle(c) => cmd_session_lifecycle(&service, c),
+        SessionSub::Lifecycle(_) => {
+            unreachable!("the lifecycle is run before the Service is built")
+        }
     }
 }
 
-fn cmd_session_lifecycle(service: &Service, c: SessionLifecycleCmd) -> Result<Reply> {
+fn cmd_session_lifecycle(
+    home: &AikitHome,
+    descriptor: &aikit_core::context::ContextDescriptor,
+    c: SessionLifecycleCmd,
+) -> Result<Reply> {
     use aikit_core::session_lifecycle::SessionLifecycleRecord;
     let event_json = |event: &aikit_core::session_lifecycle::SessionLifecycleEvent| {
         serde_json::to_value(event).expect("lifecycle events are always serializable")
     };
     match c.command {
         SessionLifecycleSub::List(_) => {
-            let sessions: Vec<String> = service
+            let sessions: Vec<String> = home
                 .session_lifecycle_list()?
                 .into_iter()
                 .map(|session| session.to_string())
                 .collect();
-            Ok(reply(
-                service,
+            Ok(reply_in(
+                descriptor,
                 jval!({ "sessions": sessions, "count": sessions.len() }),
                 vec![],
             ))
         }
         SessionLifecycleSub::History(a) => {
-            let events = service.session_lifecycle_history(&a.session)?;
+            let events = home.session_lifecycle_history(&a.session)?;
             let events: Vec<Value> = events.iter().map(event_json).collect();
-            Ok(reply(
-                service,
+            Ok(reply_in(
+                descriptor,
                 jval!({ "session": a.session.to_string(), "events": events, "count": events.len() }),
                 vec![],
             ))
         }
         SessionLifecycleSub::Show(a) => {
-            let model = service.session_lifecycle_read_model(&a.session)?;
+            let model = home.session_lifecycle_read_model(&a.session)?;
             let data = serde_json::to_value(&model).map_err(|error| {
                 aikit_core::AikitError::new(
                     "session_lifecycle.cli_projection_unserializable",
                     format!("could not project the session lifecycle read model: {error}"),
                 )
             })?;
-            Ok(reply(service, data, vec![]))
+            Ok(reply_in(descriptor, data, vec![]))
         }
         SessionLifecycleSub::Start(a) => {
-            let event = service.session_lifecycle_record(
+            let event = home.session_lifecycle_record(
                 a.session,
                 SessionLifecycleRecord::Start,
                 a.activity,
                 a.origin,
             )?;
-            Ok(reply(service, event_json(&event), vec![]))
+            Ok(reply_in(descriptor, event_json(&event), vec![]))
         }
         SessionLifecycleSub::End(a) => {
-            let event = service.session_lifecycle_record(
+            let event = home.session_lifecycle_record(
                 a.session,
                 SessionLifecycleRecord::End,
                 a.activity,
                 a.origin,
             )?;
-            Ok(reply(service, event_json(&event), vec![]))
+            Ok(reply_in(descriptor, event_json(&event), vec![]))
         }
         SessionLifecycleSub::Thinking(a) => {
-            let event = service.session_lifecycle_record(
+            let event = home.session_lifecycle_record(
                 a.session,
                 SessionLifecycleRecord::Thinking { state: a.state },
                 a.activity,
                 a.origin,
             )?;
-            Ok(reply(service, event_json(&event), vec![]))
+            Ok(reply_in(descriptor, event_json(&event), vec![]))
         }
         SessionLifecycleSub::Cancel(a) => {
-            let event = service.session_lifecycle_record(
+            let event = home.session_lifecycle_record(
                 a.session,
                 SessionLifecycleRecord::Cancel { reason: a.reason },
                 a.activity,
                 a.origin,
             )?;
-            Ok(reply(service, event_json(&event), vec![]))
+            Ok(reply_in(descriptor, event_json(&event), vec![]))
         }
         SessionLifecycleSub::Permission(p) => match p.command {
             SessionLifecyclePermissionSub::Request(a) => {
-                let event = service.session_lifecycle_record(
+                let event = home.session_lifecycle_record(
                     a.session,
                     SessionLifecycleRecord::PermissionRequest {
                         tool: a.tool,
@@ -6403,19 +6426,19 @@ fn cmd_session_lifecycle(service: &Service, c: SessionLifecycleCmd) -> Result<Re
                     None,
                     a.origin,
                 )?;
-                Ok(reply(service, event_json(&event), vec![]))
+                Ok(reply_in(descriptor, event_json(&event), vec![]))
             }
             SessionLifecyclePermissionSub::Grant(a) => {
-                let event = service.session_lifecycle_record(
+                let event = home.session_lifecycle_record(
                     a.session,
                     SessionLifecycleRecord::PermissionGrant { request: a.request },
                     None,
                     a.origin,
                 )?;
-                Ok(reply(service, event_json(&event), vec![]))
+                Ok(reply_in(descriptor, event_json(&event), vec![]))
             }
             SessionLifecyclePermissionSub::Refuse(a) => {
-                let event = service.session_lifecycle_record(
+                let event = home.session_lifecycle_record(
                     a.session,
                     SessionLifecycleRecord::PermissionRefuse {
                         request: a.request,
@@ -6424,7 +6447,7 @@ fn cmd_session_lifecycle(service: &Service, c: SessionLifecycleCmd) -> Result<Re
                     None,
                     a.origin,
                 )?;
-                Ok(reply(service, event_json(&event), vec![]))
+                Ok(reply_in(descriptor, event_json(&event), vec![]))
             }
         },
     }

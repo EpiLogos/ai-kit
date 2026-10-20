@@ -13,6 +13,8 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use aikit_store::home::AikitHome;
+
 use crate::app::Service;
 use crate::SessionSpaceServiceOps;
 use aikit_adapters::place_technology::PlaceTechnologyRegistry;
@@ -463,28 +465,59 @@ fn run(cli: Cli) -> Result<()> {
             )
         })?,
     };
-    let service = Service::discover(&cwd)?;
+    // Most of this family reads and writes the AIKit home alone: the store behind every `session_space_*` verb is built from the home,
+    // and the encounter verbs take the home and nothing else. Building the whole Service for them — hashing every capsule of the
+    // registry, resolving trust and the view, discovering the project through two `git` processes — was 60 of the 63 ms of an
+    // `encounter-task-read`, and the same floor under every read the kernel makes at start-up (20 Oct profile). Only the verbs that
+    // plan a Direct session or resolve a project context need it.
+    let needs_service = matches!(
+        cli.command,
+        Command::AgentSessionSkills
+            | Command::AgentSessionScope
+            | Command::AgentSessionPrepare { .. }
+            | Command::ProjectContext
+    );
+    let service = if needs_service {
+        Some(Service::discover(&cwd)?)
+    } else {
+        None
+    };
+    let discovered_home;
+    let home: &AikitHome = match &service {
+        Some(service) => service.home(),
+        None => {
+            // What `Service::open` did first: the layout a home must have.
+            let home = AikitHome::discover()?;
+            home.ensure_layout()?;
+            discovered_home = home;
+            &discovered_home
+        }
+    };
+    let serviced = || {
+        service
+            .as_ref()
+            .expect("a verb that needs the Service builds it first")
+    };
 
     match cli.command {
-        Command::AgentSessionSkills => emit(&crate::direct_agent_session::skills(&service)?),
-        Command::AgentSessionScope => emit(&crate::direct_agent_session::scope(&service)?),
+        Command::AgentSessionSkills => emit(&crate::direct_agent_session::skills(serviced())?),
+        Command::AgentSessionScope => emit(&crate::direct_agent_session::scope(serviced())?),
         Command::AgentSessionPrepare { request_json } => emit(
-            &crate::direct_agent_session::prepare(&service, parse_json_arg(&request_json)?)?,
+            &crate::direct_agent_session::prepare(serviced(), parse_json_arg(&request_json)?)?,
         ),
         Command::AgentSessionRead { agent_session } => emit(&crate::direct_agent_session::reading(
-            service.home(),
+            home,
             &aikit_core::ResourceRef::parse(agent_session)?,
         )?),
-        Command::AgentSessionFind { request_id } => emit(&crate::direct_agent_session::find(
-            service.home(),
-            &request_id,
-        )?),
+        Command::AgentSessionFind { request_id } => {
+            emit(&crate::direct_agent_session::find(home, &request_id)?)
+        }
         Command::EncounterModelExec {
             agent_session,
             provider,
             expected_model_basis,
         } => crate::encounter_service::EncounterService::exec_model(
-            service.home(),
+            home,
             &aikit_core::ResourceRef::parse(agent_session)?,
             &provider,
             &expected_model_basis,
@@ -499,7 +532,7 @@ fn run(cli: Cli) -> Result<()> {
                 .map(aikit_core::SourceRevision::parse)
                 .transpose()?;
             emit(&crate::encounter_service::EncounterService::configure_task(
-                service.home(),
+                home,
                 &aikit_core::ResourceRef::parse(agent_session)?,
                 parse_json_arg(&request_json)?,
                 expected.as_ref(),
@@ -507,7 +540,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::EncounterTaskRead { agent_session } => {
             emit(&crate::encounter_service::EncounterService::read_task(
-                service.home(),
+                home,
                 &aikit_core::ResourceRef::parse(agent_session)?,
             )?)
         }
@@ -526,15 +559,11 @@ fn run(cli: Cli) -> Result<()> {
                     "--expected-revision goes with a record (--request-json)",
                 )),
                 (None, [session]) => emit(
-                    &crate::encounter_service::EncounterService::read_task_attempts(
-                        service.home(),
-                        session,
-                    )?,
+                    &crate::encounter_service::EncounterService::read_task_attempts(home, session)?,
                 ),
                 (None, sessions) => emit(
                     &crate::encounter_service::EncounterService::read_sessions_task_attempts(
-                        service.home(),
-                        sessions,
+                        home, sessions,
                     )?,
                 ),
                 (Some(_), [_, _, ..]) => Err(aikit_core::AikitError::new(
@@ -549,7 +578,7 @@ fn run(cli: Cli) -> Result<()> {
                         .transpose()?;
                     emit(
                         &crate::encounter_service::EncounterService::write_task_attempts(
-                            service.home(),
+                            home,
                             session,
                             parse_json_arg(&request_json)?,
                             expected.as_ref(),
@@ -574,14 +603,12 @@ fn run(cli: Cli) -> Result<()> {
                 )),
                 (None, [session]) => emit(
                     &crate::encounter_service::EncounterService::read_session_settings(
-                        service.home(),
-                        session,
+                        home, session,
                     )?,
                 ),
                 (None, sessions) => emit(
                     &crate::encounter_service::EncounterService::read_sessions_settings(
-                        service.home(),
-                        sessions,
+                        home, sessions,
                     )?,
                 ),
                 (Some(_), [_, _, ..]) => Err(aikit_core::AikitError::new(
@@ -596,7 +623,7 @@ fn run(cli: Cli) -> Result<()> {
                         .transpose()?;
                     emit(
                         &crate::encounter_service::EncounterService::write_session_settings(
-                            service.home(),
+                            home,
                             session,
                             parse_json_arg(&request_json)?,
                             expected.as_ref(),
@@ -611,7 +638,7 @@ fn run(cli: Cli) -> Result<()> {
             restore_revision,
         } => emit(
             &crate::encounter_service::EncounterService::abort_task_preparation(
-                service.home(),
+                home,
                 &aikit_core::ResourceRef::parse(agent_session)?,
                 &aikit_core::SourceRevision::parse(expected_revision)?,
                 &aikit_core::SourceRevision::parse(restore_revision)?,
@@ -621,20 +648,20 @@ fn run(cli: Cli) -> Result<()> {
             agent_session,
             expected_revision,
         } => crate::encounter_service::EncounterService::exec_task(
-            service.home(),
+            home,
             &aikit_core::ResourceRef::parse(agent_session)?,
             &aikit_core::SourceRevision::parse(expected_revision)?,
         ),
         #[cfg(unix)]
-        Command::EncounterStart => emit(&crate::encounter_service::start(service.home(), &cwd)?),
+        Command::EncounterStart => emit(&crate::encounter_service::start(home, &cwd)?),
         #[cfg(unix)]
         Command::EncounterServe { socket } => crate::encounter_service::serve(
-            service.home().clone(),
-            &socket.unwrap_or_else(|| crate::encounter_service::socket_path(service.home())),
+            home.clone(),
+            &socket.unwrap_or_else(|| crate::encounter_service::socket_path(home)),
         ),
         Command::EncounterConfigure { provider_json } => {
             crate::encounter_service::EncounterService::configure(
-                service.home(),
+                home,
                 parse_json_arg(&provider_json)?,
             )?;
             emit(&serde_json::json!({"configured":true}))
@@ -704,7 +731,7 @@ fn run(cli: Cli) -> Result<()> {
                 }
             };
             let provider = crate::encounter_service::EncounterService::configure_now_context(
-                service.home(),
+                home,
                 &provider_id,
                 now,
             )?;
@@ -745,7 +772,7 @@ fn run(cli: Cli) -> Result<()> {
                 (None, None) => None,
             };
             emit(&crate::encounter_use::read(
-                service.home(),
+                home,
                 &crate::encounter_use::UseRequest {
                     agent_session: ResourceRef::parse(agent_session)?,
                     turn: match (turn, cursor) {
@@ -759,18 +786,15 @@ fn run(cli: Cli) -> Result<()> {
             )?)
         }
         Command::EncounterDeconfigure { provider_id } => {
-            crate::encounter_service::EncounterService::deconfigure(service.home(), &provider_id)?;
+            crate::encounter_service::EncounterService::deconfigure(home, &provider_id)?;
             emit(&serde_json::json!({"withdrawn":provider_id}))
         }
-        Command::EncounterSpeechConfigure { config_json } => {
-            emit(&crate::encounter_service::configure_local_speech(
-                service.home(),
-                parse_json_arg(&config_json)?,
-            )?)
-        }
+        Command::EncounterSpeechConfigure { config_json } => emit(
+            &crate::encounter_service::configure_local_speech(home, parse_json_arg(&config_json)?)?,
+        ),
         Command::EncounterSpeechRead { agent_session } => {
             emit(&crate::encounter_service::disclose_local_speech(
-                service.home(),
+                home,
                 &ResourceRef::parse(agent_session)?,
             )?)
         }
@@ -908,7 +932,7 @@ fn run(cli: Cli) -> Result<()> {
                 argv.extend(["--central-project".into(), project]);
             }
             crate::encounter_service::EncounterService::configure(
-                service.home(),
+                home,
                 crate::encounter_service::EncounterProvider {
                     protocol: crate::encounter_service::EncounterProtocol::PrimeRpc,
                     id: provider_id.clone(),
@@ -957,16 +981,14 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::EncounterAgencyRead { agent_session } => {
             let session = aikit_core::ResourceRef::parse(agent_session)?;
-            let binding = crate::encounter_service::EncounterService::read_agency_binding(
-                service.home(),
-                &session,
-            )?
-            .ok_or_else(|| {
-                aikit_core::AikitError::new(
-                    "encounter.agency_required",
-                    "No native Agency binding is retained for this session",
-                )
-            })?;
+            let binding =
+                crate::encounter_service::EncounterService::read_agency_binding(home, &session)?
+                    .ok_or_else(|| {
+                        aikit_core::AikitError::new(
+                            "encounter.agency_required",
+                            "No native Agency binding is retained for this session",
+                        )
+                    })?;
             // Source observation is valid even when an execution policy has
             // expired; it neither re-admits nor widens that expired authority.
             binding.agency_source.read()?;
@@ -986,7 +1008,7 @@ fn run(cli: Cli) -> Result<()> {
                 .map(aikit_core::SourceRevision::parse)
                 .transpose()?;
             crate::encounter_service::EncounterService::configure_agency(
-                service.home(),
+                home,
                 &aikit_core::ResourceRef::parse(agent_session)?,
                 &parse_json_arg(&binding_json)?,
                 expected.as_ref(),
@@ -1001,7 +1023,7 @@ fn run(cli: Cli) -> Result<()> {
             source_ref,
         } => emit(
             &crate::encounter_service::EncounterService::admit_agency_disclosure(
-                service.home(),
+                home,
                 &aikit_core::ResourceRef::parse(agent_session)?,
                 &aikit_core::ResourceRef::parse(sender)?,
                 &aikit_core::ResourceRef::parse(source_ref)?,
@@ -1023,7 +1045,7 @@ fn run(cli: Cli) -> Result<()> {
                 crate::encounter_service::mint_from_cli
             };
             emit(&mint(
-                service.home(),
+                home,
                 &project_cwd,
                 &aikit_core::ResourceRef::parse(agent_session)?,
                 agent_ref,
@@ -1035,7 +1057,7 @@ fn run(cli: Cli) -> Result<()> {
             evidence_ref,
             expected_phase,
         } => emit(
-            &aikit_store::encounter::EncounterStore::open(service.home())?.reconcile_delivery(
+            &aikit_store::encounter::EncounterStore::open(home)?.reconcile_delivery(
                 &aikit_core::ResourceRef::parse(agent_session)?,
                 &aikit_core::ResourceRef::parse(delivery_ref)?,
                 &aikit_core::ResourceRef::parse(evidence_ref)?,
@@ -1047,26 +1069,26 @@ fn run(cli: Cli) -> Result<()> {
             request_json,
             socket,
         } => emit(&crate::encounter_service::request(
-            &socket.unwrap_or_else(|| crate::encounter_service::socket_path(service.home())),
+            &socket.unwrap_or_else(|| crate::encounter_service::socket_path(home)),
             &parse_json_arg(&request_json)?,
         )?),
         Command::ProjectContext => {
-            let resolution = aikit_tui::project_world_service::context_resolution(&service)?;
+            let resolution = aikit_tui::project_world_service::context_resolution(serviced())?;
             let context = ContextResolutionEvidence::from_resolution(&resolution)?;
             let binding =
                 SessionSpaceProjectContextBinding::new(context.project().clone(), context)?;
             emit(&binding)
         }
-        Command::List => emit(&service.session_space_list()?),
-        Command::Show { space } => emit(&service.session_space_show(&space_ref(&space)?)?),
-        Command::Open { space } => emit(&service.session_space_open(&space_ref(&space)?)?),
+        Command::List => emit(&home.session_space_list()?),
+        Command::Show { space } => emit(&home.session_space_show(&space_ref(&space)?)?),
+        Command::Open { space } => emit(&home.session_space_open(&space_ref(&space)?)?),
         Command::WorkingSurface { command } => match command {
             WorkingSurfaceCommand::Capture {
                 space,
                 binding,
                 lines,
             } => {
-                let state = service.session_space_show(&space_ref(&space)?)?;
+                let state = home.session_space_show(&space_ref(&space)?)?;
                 emit(&crate::session_space_working_surface::capture(
                     &state,
                     &aikit_core::ResourceRef::parse(binding)?,
@@ -1074,21 +1096,21 @@ fn run(cli: Cli) -> Result<()> {
                 )?)
             }
             WorkingSurfaceCommand::Attachment { space, binding } => {
-                let state = service.session_space_show(&space_ref(&space)?)?;
+                let state = home.session_space_show(&space_ref(&space)?)?;
                 emit(&crate::session_space_working_surface::terminal_attachment(
                     &state,
                     &aikit_core::ResourceRef::parse(binding)?,
                 )?)
             }
             WorkingSurfaceCommand::Observe { space, binding } => {
-                let state = service.session_space_show(&space_ref(&space)?)?;
+                let state = home.session_space_show(&space_ref(&space)?)?;
                 emit(&crate::session_space_working_surface::observe(
                     &state,
                     &aikit_core::ResourceRef::parse(binding)?,
                 )?)
             }
             WorkingSurfaceCommand::Open { space, binding } => {
-                let state = service.session_space_show(&space_ref(&space)?)?;
+                let state = home.session_space_show(&space_ref(&space)?)?;
                 let result = crate::session_space_working_surface::open(
                     &state,
                     &aikit_core::ResourceRef::parse(binding)?,
@@ -1099,25 +1121,25 @@ fn run(cli: Cli) -> Result<()> {
                 // write, through the same staged mutation path as every
                 // other SessionSpace change.
                 if let Some(updated) = result.refreshed_binding.clone() {
-                    let preview = service.session_space_stage(
+                    let preview = home.session_space_stage(
                         Some(&space_ref(&space)?),
                         SessionSpaceMutation::BindWorkingSurface {
                             binding: Box::new(updated),
                         },
                     )?;
-                    service.session_space_apply(&preview)?;
+                    home.session_space_apply(&preview)?;
                 }
                 emit(&result)
             }
             WorkingSurfaceCommand::Focus { space, binding } => {
-                let state = service.session_space_show(&space_ref(&space)?)?;
+                let state = home.session_space_show(&space_ref(&space)?)?;
                 emit(&crate::session_space_working_surface::focus(
                     &state,
                     &aikit_core::ResourceRef::parse(binding)?,
                 )?)
             }
             WorkingSurfaceCommand::Attach { space, binding } => {
-                let state = service.session_space_show(&space_ref(&space)?)?;
+                let state = home.session_space_show(&space_ref(&space)?)?;
                 match crate::session_space_working_surface::terminal_attachment(
                     &state,
                     &aikit_core::ResourceRef::parse(binding)?,
@@ -1138,10 +1160,10 @@ fn run(cli: Cli) -> Result<()> {
         },
         Command::Discover { project } => {
             let project = project.as_deref().map(ProjectRef::parse).transpose()?;
-            emit(&service.session_space_discover(project.as_ref())?)
+            emit(&home.session_space_discover(project.as_ref())?)
         }
         Command::Create { id, label } => {
-            let preview = service.session_space_stage(
+            let preview = home.session_space_stage(
                 None,
                 SessionSpaceMutation::Create {
                     id: space_ref(&id)?,
@@ -1196,34 +1218,32 @@ fn run(cli: Cli) -> Result<()> {
                 None => intent,
             };
             let space = space.as_deref().map(space_ref).transpose()?;
-            emit(&service.session_space_stage(space.as_ref(), intent)?)
+            emit(&home.session_space_stage(space.as_ref(), intent)?)
         }
         Command::Apply { preview_json } => {
             let preview: SessionSpacePreview = parse_json_arg(&preview_json)?;
-            emit(&service.session_space_apply(&preview)?)
+            emit(&home.session_space_apply(&preview)?)
         }
-        Command::History { space } => emit(&service.session_space_history(&space_ref(&space)?)?),
+        Command::History { space } => emit(&home.session_space_history(&space_ref(&space)?)?),
         Command::Compare {
             space,
             from_sequence,
             to_sequence,
-        } => emit(&service.session_space_compare_history(
+        } => emit(&home.session_space_compare_history(
             &space_ref(&space)?,
             from_sequence,
             to_sequence,
         )?),
         Command::RestorePreview { space, sequence } => {
-            emit(&service.session_space_stage_restore(&space_ref(&space)?, sequence)?)
+            emit(&home.session_space_stage_restore(&space_ref(&space)?, sequence)?)
         }
         Command::Reconstruct { space } => {
-            emit(&service.session_space_reconstruct(&space_ref(&space)?, None, &[], &[])?)
+            emit(&home.session_space_reconstruct(&space_ref(&space)?, None, &[], &[])?)
         }
         Command::Reconcile { space } => {
-            emit(&service.session_space_reconcile(&space_ref(&space)?, None, &[], &[])?)
+            emit(&home.session_space_reconcile(&space_ref(&space)?, None, &[], &[])?)
         }
-        Command::Explain { space } => {
-            emit(&service.session_space_explain(&space_ref(&space)?, None)?)
-        }
+        Command::Explain { space } => emit(&home.session_space_explain(&space_ref(&space)?, None)?),
     }
 }
 
