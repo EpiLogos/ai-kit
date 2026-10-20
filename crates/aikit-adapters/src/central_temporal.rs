@@ -37,11 +37,125 @@ pub struct CentralDayPointer {
     pub revision: Option<String>,
 }
 
+/// What Control is compared against. The remote-tracking ref as last fetched:
+/// a session start never waits on the network, so the reading can lag the
+/// remote but cannot stall a turn.
+const CONTROL_UPSTREAM: &str = "origin/main";
+
+/// The oldest of the commits Control holds that its remote does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnpushedCommit {
+    /// Commit date, `YYYY-MM-DD`.
+    pub date: String,
+    pub short_hash: String,
+}
+
+/// Control's checked-out branch is ahead of `origin/main`. Control is the
+/// owner's own ground and not a Project repository, so nothing else carries it
+/// to its remote: commits that stay unpushed exist on this machine alone, and
+/// a push that cannot succeed (it once died on size for twelve days) fails
+/// silently unless a session is told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlUnpushed {
+    pub ahead: usize,
+    /// `None` when the date read failed; the count alone is still a warning.
+    pub oldest: Option<UnpushedCommit>,
+}
+
+impl ControlUnpushed {
+    pub fn warning(&self) -> String {
+        let plural = if self.ahead == 1 { "" } else { "s" };
+        let since = self
+            .oldest
+            .as_ref()
+            .map(|oldest| {
+                format!(
+                    ", unpushed since {} (oldest {})",
+                    oldest.date, oldest.short_hash
+                )
+            })
+            .unwrap_or_default();
+        format!(
+            "WARNING: Control is {} commit{plural} ahead of {CONTROL_UPSTREAM}{since}. Until they are pushed the owner's ground exists only on this machine. Say so to the owner in your first reply.",
+            self.ahead
+        )
+    }
+
+    /// The whole fragment for a session in the Central world that is no
+    /// Project (the Central root, Control itself): it has no NOW to report, so
+    /// the warning is all the ground there is.
+    pub fn render_standalone(&self) -> String {
+        [
+            "[Central temporal ground]".to_owned(),
+            owner_line(),
+            STANDING_LINE.to_owned(),
+            self.warning(),
+        ]
+        .join("\n")
+    }
+}
+
+const STANDING_LINE: &str = "standing: current orientation only; this does not grant authority, invoke an Agent/model, or activate a capability.";
+
+fn owner_line() -> String {
+    format!("owner: Central ({CENTRAL_TEMPORAL_PROVIDER_VERSION})")
+}
+
+/// Ask git, locally, whether Control holds commits `origin/main` does not.
+///
+/// Fail-soft in every direction: no git, no `Control` checkout, no remote-
+/// tracking ref, an unreadable count — all read as silence, never as a guess
+/// and never as an error that could cost a turn. In step with the remote also
+/// reads as silence.
+pub fn read_control_unpushed<R: CommandRunner>(
+    runner: &R,
+    central_root: &Path,
+) -> Option<ControlUnpushed> {
+    let control = central_root.join("Control");
+    let range = format!("{CONTROL_UPSTREAM}..HEAD");
+    let git = |args: &[&str]| -> Option<String> {
+        let mut argv = vec![
+            "git".to_owned(),
+            "-C".to_owned(),
+            control.display().to_string(),
+        ];
+        argv.extend(args.iter().map(|arg| (*arg).to_owned()));
+        let output = runner.run(&argv).ok()?;
+        output.ok().then(|| output.stdout.trim().to_owned())
+    };
+
+    let ahead: usize = git(&["rev-list", "--count", &range])?.parse().ok()?;
+    if ahead == 0 {
+        return None;
+    }
+    // The walk lists newest first, so the oldest unpushed commit is the last.
+    let skip = format!("--skip={}", ahead - 1);
+    let oldest = git(&[
+        "log",
+        "--no-show-signature",
+        "--format=%cs %h",
+        &skip,
+        "-n",
+        "1",
+        &range,
+    ])
+    .and_then(|line| {
+        let (date, short_hash) = line.split_once(' ')?;
+        Some(UnpushedCommit {
+            date: date.to_owned(),
+            short_hash: short_hash.to_owned(),
+        })
+    });
+    Some(ControlUnpushed { ahead, oldest })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CentralTemporalGround {
     pub project: String,
     pub now: Value,
     pub day: Option<CentralDayPointer>,
+    /// Control is ahead of its remote. `None` when it is in step or unreadable.
+    pub control_unpushed: Option<ControlUnpushed>,
 }
 
 impl CentralTemporalGround {
@@ -49,10 +163,14 @@ impl CentralTemporalGround {
     pub fn render(&self) -> String {
         let mut lines = vec![
             "[Central temporal ground]".to_owned(),
-            format!("owner: Central ({CENTRAL_TEMPORAL_PROVIDER_VERSION})"),
+            owner_line(),
             format!("project: {}", self.project),
-            "standing: current orientation only; this does not grant authority, invoke an Agent/model, or activate a capability.".to_owned(),
+            STANDING_LINE.to_owned(),
         ];
+        // First, after the standing line: the bound below cuts from the end.
+        if let Some(unpushed) = &self.control_unpushed {
+            lines.push(unpushed.warning());
+        }
 
         let exists = self
             .now
@@ -162,7 +280,14 @@ pub fn read_central_temporal_ground<R: CommandRunner>(
             })
         });
 
-    Ok(Some(CentralTemporalGround { project, now, day }))
+    let control_unpushed = read_control_unpushed(runner, central_root);
+
+    Ok(Some(CentralTemporalGround {
+        project,
+        now,
+        day,
+        control_unpushed,
+    }))
 }
 
 fn action<R: CommandRunner>(
@@ -364,10 +489,12 @@ mod tests {
                 .any(|line| line.contains("projectcentral.flow.")),
             "the retired Flow store is never called"
         );
-        assert!(runner
-            .call_lines()
-            .iter()
-            .all(|line| line.contains("--json --root /home/me/Central action run")));
+        // Every Central read goes through the public Action surface; the only
+        // other process is the read-only `git` question about Control's remote.
+        assert!(runner.call_lines().iter().all(|line| {
+            line.contains("--json --root /home/me/Central action run")
+                || line.starts_with("git -C /home/me/Central/Control ")
+        }));
     }
 
     #[test]
@@ -423,10 +550,237 @@ mod tests {
                 "subject": "s", "result": "x".repeat(2_000)
             })).collect::<Vec<_>>()}),
             day: None,
+            control_unpushed: None,
         };
         let rendered = ground.render();
         assert!(rendered.chars().count() <= MAX_RENDERED_CHARS);
         assert!(rendered.contains("does not grant authority"));
+    }
+
+    fn control_runner(ahead: &str, oldest: &str) -> ScriptedRunner {
+        ScriptedRunner::new()
+            .on("rev-list --count origin/main..HEAD", ahead)
+            .on("--skip=", oldest)
+    }
+
+    #[test]
+    fn control_ahead_of_its_remote_is_counted_and_dated_from_the_oldest_commit() {
+        // Six commits ahead: the oldest is the sixth in the default walk (skip 5).
+        let runner = control_runner("6\n", "2026-10-08 14194ff\n");
+        let found = read_control_unpushed(&runner, Path::new("/home/me/Central")).unwrap();
+        assert_eq!(found.ahead, 6);
+        assert_eq!(
+            found.oldest,
+            Some(UnpushedCommit {
+                date: "2026-10-08".into(),
+                short_hash: "14194ff".into()
+            })
+        );
+        let lines = runner.call_lines();
+        assert!(lines
+            .iter()
+            .all(|line| line.starts_with("git -C /home/me/Central/Control ")));
+        assert!(lines.iter().any(|line| line.contains("--skip=5")));
+        // Local refs only: a session start never waits on the network.
+        assert!(!lines
+            .iter()
+            .any(|line| line.contains("fetch") || line.contains("push")));
+    }
+
+    #[test]
+    fn control_in_step_with_its_remote_says_nothing() {
+        let runner = control_runner("0\n", "");
+        assert!(read_control_unpushed(&runner, Path::new("/home/me/Central")).is_none());
+        // A count of zero never asks for a date.
+        assert!(!runner.call_lines().iter().any(|l| l.contains("--skip=")));
+    }
+
+    #[test]
+    fn control_without_git_or_a_remote_ref_says_nothing_rather_than_guessing() {
+        let central = Path::new("/home/me/Central");
+        let failing = ScriptedRunner::new().failing(
+            "rev-list",
+            128,
+            "fatal: ambiguous argument 'origin/main..HEAD'",
+        );
+        assert!(read_control_unpushed(&failing, central).is_none());
+        // Nothing scripted at all: the runner errors, and that is silence too.
+        assert!(read_control_unpushed(&ScriptedRunner::new(), central).is_none());
+        let garbled = ScriptedRunner::new().on("rev-list", "not a number\n");
+        assert!(read_control_unpushed(&garbled, central).is_none());
+    }
+
+    #[test]
+    fn a_failed_date_read_still_reports_the_count() {
+        let runner = ScriptedRunner::new().on("rev-list --count", "3\n").failing(
+            "--skip=",
+            128,
+            "fatal: bad revision",
+        );
+        let found = read_control_unpushed(&runner, Path::new("/home/me/Central")).unwrap();
+        assert_eq!(found.ahead, 3);
+        assert!(found.oldest.is_none());
+        let warning = found.warning();
+        assert!(warning.contains("3 commits ahead of origin/main"));
+        assert!(!warning.contains("since"));
+    }
+
+    #[test]
+    fn the_warning_names_count_date_and_oldest_commit_in_plain_words() {
+        let many = ControlUnpushed {
+            ahead: 6,
+            oldest: Some(UnpushedCommit {
+                date: "2026-10-08".into(),
+                short_hash: "14194ff".into(),
+            }),
+        };
+        let warning = many.warning();
+        assert!(warning.starts_with("WARNING: Control is 6 commits ahead of origin/main"));
+        assert!(warning.contains("unpushed since 2026-10-08 (oldest 14194ff)"));
+        assert!(warning.contains("only on this machine"));
+        let one = ControlUnpushed {
+            ahead: 1,
+            oldest: None,
+        };
+        assert!(one.warning().contains("1 commit ahead of origin/main"));
+        assert!(!one.warning().contains("1 commits"));
+    }
+
+    #[test]
+    fn the_unpushed_warning_leads_the_ground_and_survives_its_bound() {
+        let mut ground = CentralTemporalGround {
+            project: "example".into(),
+            now: json!({"exists": true, "active_items": (0..20).map(|i| json!({
+                "id": format!("h{i}"), "kind": "handoff", "actor": "agent", "status": "active",
+                "subject": "s", "result": "x".repeat(2_000)
+            })).collect::<Vec<_>>()}),
+            day: None,
+            control_unpushed: Some(ControlUnpushed {
+                ahead: 6,
+                oldest: Some(UnpushedCommit {
+                    date: "2026-10-08".into(),
+                    short_hash: "14194ff".into(),
+                }),
+            }),
+        };
+        let rendered = ground.render();
+        assert!(rendered.chars().count() <= MAX_RENDERED_CHARS);
+        let warning_at = rendered.find("WARNING: Control is 6 commits").unwrap();
+        assert!(warning_at < rendered.find("NOW: present").unwrap());
+        assert!(rendered.contains("does not grant authority"));
+
+        ground.control_unpushed = None;
+        assert!(!ground.render().contains("WARNING"));
+    }
+
+    #[test]
+    fn the_read_ground_carries_the_unpushed_warning_when_control_is_ahead() {
+        let now = success(json!({"exists": true}));
+        let day = success(json!({"day_ref": "central:day:control:root:2026-10-20"}));
+        let runner = control_runner("6\n", "2026-10-08 14194ff\n")
+            .on(NOW_INSPECT_ACTION, &now)
+            .on(DAY_READ_ACTION, &day);
+        let ground = read_central_temporal_ground(
+            &runner,
+            Path::new("/home/me/Central"),
+            Path::new("/home/me/Central/Work/example"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(ground.control_unpushed.as_ref().map(|c| c.ahead), Some(6));
+        assert!(ground
+            .render()
+            .contains("6 commits ahead of origin/main, unpushed since 2026-10-08"));
+    }
+
+    /// Real git, a real bare remote: the count and the oldest date must be what
+    /// git itself says, not what the scripted argv assumes.
+    #[test]
+    fn real_git_reports_what_control_holds_that_its_remote_does_not() {
+        use std::process::Command;
+
+        fn git(dir: &Path, date: &str, args: &[&str]) {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .env("GIT_AUTHOR_DATE", date)
+                .env("GIT_COMMITTER_DATE", date)
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let central = temp.path();
+        let remote = temp.path().join("remote.git");
+        let control = central.join("Control");
+        std::fs::create_dir_all(&control).unwrap();
+        git(
+            central,
+            "2026-10-01T12:00:00+00:00",
+            &["init", "--bare", "-b", "main", remote.to_str().unwrap()],
+        );
+        git(
+            &control,
+            "2026-10-01T12:00:00+00:00",
+            &["init", "-b", "master"],
+        );
+        git(
+            &control,
+            "2026-10-01T12:00:00+00:00",
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        std::fs::write(control.join("a"), "a").unwrap();
+        git(&control, "2026-10-01T12:00:00+00:00", &["add", "a"]);
+        git(
+            &control,
+            "2026-10-01T12:00:00+00:00",
+            &["commit", "-m", "pushed"],
+        );
+        git(
+            &control,
+            "2026-10-01T12:00:00+00:00",
+            &["push", "origin", "master:main"],
+        );
+
+        // In step: silent.
+        let runner = crate::runner::SystemRunner::new();
+        assert!(read_control_unpushed(&runner, central).is_none());
+
+        for (day, name) in [
+            ("2026-10-08", "b"),
+            ("2026-10-12", "c"),
+            ("2026-10-19", "d"),
+        ] {
+            std::fs::write(control.join(name), name).unwrap();
+            git(&control, &format!("{day}T12:00:00+00:00"), &["add", name]);
+            git(
+                &control,
+                &format!("{day}T12:00:00+00:00"),
+                &["commit", "-m", name],
+            );
+        }
+        let found = read_control_unpushed(&runner, central).unwrap();
+        assert_eq!(found.ahead, 3);
+        assert_eq!(found.oldest.as_ref().unwrap().date, "2026-10-08");
+        assert!(found
+            .warning()
+            .contains("3 commits ahead of origin/main, unpushed since 2026-10-08"));
+
+        // Pushing it clears the warning.
+        git(
+            &control,
+            "2026-10-20T12:00:00+00:00",
+            &["push", "origin", "master:main"],
+        );
+        assert!(read_control_unpushed(&runner, central).is_none());
     }
 
     #[test]

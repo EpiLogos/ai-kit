@@ -262,6 +262,7 @@ mod tests {
             project: "example".to_owned(),
             now,
             day: None,
+            control_unpushed: None,
         }
     }
 
