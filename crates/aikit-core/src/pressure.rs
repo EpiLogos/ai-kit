@@ -342,11 +342,27 @@ impl Block {
     }
 }
 
+/// What the bound did to one block: its heading, how many standing lines
+/// arrived (always all of them), how many ordinary lines it kept and
+/// withheld, and whether it was suppressed outright. The rendered text says
+/// the same in words; this is the count a reader can draw.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockAccount {
+    pub title: String,
+    pub standing: usize,
+    pub kept: usize,
+    pub withheld: usize,
+    pub suppressed: bool,
+}
+
 /// What pressure did to a turn's blocks.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bounded {
     /// The rendered blocks, in the order they were produced.
     pub blocks: Vec<String>,
+    /// One account per non-empty block, in the order the blocks came,
+    /// suppressed blocks included.
+    pub accounts: Vec<BlockAccount>,
     /// How many ordinary lines were withheld in total.
     pub withheld_lines: usize,
     /// How many blocks were suppressed outright — they carried ordinary
@@ -367,6 +383,7 @@ pub struct Bounded {
 pub fn bound(blocks: &[Block], pressure: Pressure) -> Bounded {
     let allowance = pressure.allowance();
     let mut rendered = Vec::new();
+    let mut accounts = Vec::new();
     let mut withheld_lines = 0usize;
     let mut withheld_blocks = 0usize;
     let mut ordinary_blocks_used = 0usize;
@@ -391,7 +408,15 @@ pub fn bound(blocks: &[Block], pressure: Pressure) -> Bounded {
         // A block that carried nothing but ordinary payload, and kept none of
         // it, does not arrive as a bare heading: it is suppressed, and the
         // turn's notice says how many went that way.
-        if block.standing.is_empty() && kept.is_empty() && !block.ordinary.is_empty() {
+        let suppressed = block.standing.is_empty() && kept.is_empty() && !block.ordinary.is_empty();
+        accounts.push(BlockAccount {
+            title: block.header.clone(),
+            standing: block.standing.len(),
+            kept: kept.len(),
+            withheld,
+            suppressed,
+        });
+        if suppressed {
             withheld_blocks += 1;
             continue;
         }
@@ -417,8 +442,31 @@ pub fn bound(blocks: &[Block], pressure: Pressure) -> Bounded {
 
     Bounded {
         blocks: rendered,
+        accounts,
         withheld_lines,
         withheld_blocks,
         notice,
+    }
+}
+
+/// The turn's blocks rendered whole, where no pressure capability is
+/// composed: every ordinary line kept, nothing withheld, and the same
+/// per-block accounts a bound gives.
+pub fn whole(blocks: &[Block]) -> Bounded {
+    let present = blocks.iter().filter(|block| !block.is_empty());
+    Bounded {
+        blocks: present.clone().map(Block::render).collect(),
+        accounts: present
+            .map(|block| BlockAccount {
+                title: block.header.clone(),
+                standing: block.standing.len(),
+                kept: block.ordinary.len(),
+                withheld: 0,
+                suppressed: false,
+            })
+            .collect(),
+        withheld_lines: 0,
+        withheld_blocks: 0,
+        notice: None,
     }
 }
