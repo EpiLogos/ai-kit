@@ -3901,6 +3901,26 @@ fn executable_path(name: &str) -> Option<String> {
         })
 }
 
+/// An owner seam a caller supplies as a JSON file, or on stdin as `-`.
+fn read_seam<T: serde::de::DeserializeOwned>(
+    path: &std::path::Path,
+    code: &'static str,
+) -> Result<T> {
+    let body = if path.as_os_str() == "-" {
+        let mut body = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut body)
+            .map_err(|error| AikitError::new(code, format!("cannot read stdin: {error}")))?;
+        body
+    } else {
+        std::fs::read_to_string(path).map_err(|error| {
+            AikitError::new(code, format!("cannot read {}: {error}", path.display()))
+        })?
+    };
+    serde_json::from_str(&body).map_err(|error| {
+        AikitError::new(code, format!("invalid JSON in {}: {error}", path.display()))
+    })
+}
+
 fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
     use aikit_core::resource::ResourceRef;
     use aikit_core::ForgetScope;
@@ -4035,6 +4055,33 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
             warnings.extend(status.absences.clone());
             jval!(status)
         }
+        KnowledgeSub::Impact(a) => {
+            use aikit_core::knowledge_living::KnowledgeChangeHorizon;
+            use aikit_core::knowledge_living_relations::{
+                DEFAULT_LIVING_IMPACT_DEPTH, DEFAULT_LIVING_IMPACT_RESOURCES,
+            };
+            let horizon: KnowledgeChangeHorizon =
+                read_seam(&a.horizon, "knowledge.horizon_unreadable")?;
+            let readings = a
+                .readings
+                .iter()
+                .map(String::as_str)
+                .map(ResourceRef::parse)
+                .collect::<Result<Vec<_>>>()?;
+            jval!(service.knowledge_impact(
+                &horizon,
+                &readings,
+                a.max_depth.unwrap_or(DEFAULT_LIVING_IMPACT_DEPTH),
+                a.max_affected.unwrap_or(DEFAULT_LIVING_IMPACT_RESOURCES),
+            )?)
+        }
+        KnowledgeSub::Reflection(c) => match c.command {
+            KnowledgeReflectionSub::Verify(a) => {
+                let law: aikit_core::project_reflection::ReflectionLaw =
+                    read_seam(&a.law, "knowledge.reflection_law_unreadable")?;
+                jval!(service.reflection_verdict(&law)?)
+            }
+        },
         KnowledgeSub::Forget(a) => {
             let scope = match a.command {
                 KnowledgeForgetSub::Destination(a) => {
