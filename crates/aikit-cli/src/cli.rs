@@ -1232,6 +1232,7 @@ fn gateway_route(command: &GatewaySub) -> &'static str {
         GatewaySub::Status(_) => "cmd_gateway_status",
         GatewaySub::Ecology(_) => "cmd_gateway_ecology",
         GatewaySub::Snapshot(_) => "cmd_gateway_snapshot",
+        GatewaySub::Replay(_) => "cmd_gateway_replay",
         GatewaySub::NativeOwner(_) => "cmd_gateway_native_owner",
         GatewaySub::Upgrade(c) => match &c.command {
             GatewayUpgradeSub::Plan(_) => "cmd_gateway_upgrade_plan",
@@ -2309,6 +2310,11 @@ pub enum GatewaySub {
     Ecology(GatewayQueryArgs),
     /// Read the serialisable semantic snapshot of a running gateway.
     Snapshot(GatewayQueryArgs),
+    /// Read one Stream's frames from a running gateway's journal, in order:
+    /// every event the gateway appended for a conversation (inbound messages,
+    /// the harness's replies and turn records) after a sequence, bounded by a
+    /// limit. Read only; the same replay a subscribing surface receives.
+    Replay(GatewayReplayArgs),
     /// Who is here: every Position of the Project World with its occupancy,
     /// current work and undelivered Communiques (`aikit.population-reading/v1`).
     Who(GatewayWhoArgs),
@@ -2670,6 +2676,24 @@ pub struct GatewayInboxArgs {
     /// occupant generation.
     #[arg(long)]
     pub ack: bool,
+    #[command(flatten)]
+    pub carrier: GatewayQueryArgs,
+}
+
+/// `aikit gateway replay`.
+#[derive(Debug, Args)]
+pub struct GatewayReplayArgs {
+    /// The Stream to read (`actuation-stream/…`, as `aikit gateway ecology`
+    /// names a conversation's Stream).
+    #[arg(long, value_name = "STREAM_REF")]
+    pub stream: String,
+    /// Read the events after this sequence (0 reads from the first).
+    #[arg(long, value_name = "SEQUENCE", default_value_t = 0)]
+    pub after: u64,
+    /// At most this many events, 1 to 4096; `has_more` says whether more
+    /// follow.
+    #[arg(long, value_name = "N", default_value_t = 256)]
+    pub limit: usize,
     #[command(flatten)]
     pub carrier: GatewayQueryArgs,
 }

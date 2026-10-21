@@ -2094,12 +2094,28 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
             })
         }
         query => {
-            let command = match query {
+            let command = match &query {
                 GatewaySub::Protocol(_) => aikit_adapters::GatewayCommand::Protocol,
                 GatewaySub::Discover(_) => aikit_adapters::GatewayCommand::Discover,
                 GatewaySub::Status(_) => aikit_adapters::GatewayCommand::Status,
                 GatewaySub::Ecology(_) => aikit_adapters::GatewayCommand::Ecology,
                 GatewaySub::Snapshot(_) => aikit_adapters::GatewayCommand::Snapshot,
+                GatewaySub::Replay(replay) => {
+                    if !(1..=4096).contains(&replay.limit) {
+                        return Err(AikitError::new(
+                            "cli.usage",
+                            format!(
+                                "--limit {} is outside 1..=4096; nothing was read",
+                                replay.limit
+                            ),
+                        ));
+                    }
+                    aikit_adapters::GatewayCommand::Replay {
+                        stream_ref: aikit_core::ResourceRef::parse(&replay.stream)?,
+                        after_sequence: replay.after,
+                        limit: replay.limit,
+                    }
+                }
                 GatewaySub::Serve(_)
                 | GatewaySub::Tick
                 | GatewaySub::InstallService(_)
@@ -2131,6 +2147,7 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 | GatewaySub::Status(a)
                 | GatewaySub::Ecology(a)
                 | GatewaySub::Snapshot(a) => a,
+                GatewaySub::Replay(replay) => replay.carrier,
                 GatewaySub::Serve(_)
                 | GatewaySub::Tick
                 | GatewaySub::InstallService(_)
